@@ -4,11 +4,10 @@ body:
   - type: textarea
     id: problem
     attributes:
-      label: Problem
       description: What is wrong or missing, for whom, and what happens if nothing is done.
     validations:
       required: true
-  - type: textarea
+  - type: textbox
     id: outcome
     attributes:
       label: Desired outcome
