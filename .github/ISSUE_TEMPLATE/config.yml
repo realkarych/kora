@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Rules for issues and pull requests
+    url: https://github.com/realkarych/kora/blob/master/AGENTS.md#issues-and-pull-requests
+    about: How an issue and a pull request are written in this repository.

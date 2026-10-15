@@ -8,7 +8,7 @@ kora is an open-source (Apache-2.0) control plane that runs graphs of coding-age
 
 ## Issues and pull requests
 
-The repository holds what is durably true about kora; a GitHub issue holds why and how one change happens. A future session reads only the repository, so everything it will need must land there.
+The repository holds what is durably true about kora; a GitHub issue holds why and how one change happens. A future session reads only the repository, so everything it will need must land there. The issue form in `.github/ISSUE_TEMPLATE/` and the pull request template in `.github/pull_request_template.md` carry the structure below; a change to these rules updates them in the same pull request.
 
 - **Every change goes through an issue and a pull request**, code and documentation alike. No direct commits to `master`. Each pull request closes exactly one issue (`Closes #N` in its description); an issue too large for one reviewable pull request is split into sub-issues.
 - **The issue body** states the problem, the desired outcome, what is affected (users, components, specifications), constraints and open questions. It links the requirements, decision records and specifications involved instead of restating them.

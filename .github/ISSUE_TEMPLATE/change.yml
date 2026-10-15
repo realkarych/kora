@@ -1,0 +1,45 @@
+name: Change
+description: Any change to kora, code or documentation.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing, for whom, and what happens if nothing is done.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: What is true once this issue is closed.
+    validations:
+      required: true
+  - type: textarea
+    id: affected
+    attributes:
+      label: Affected
+      description: Users, components and specifications; link the requirements, decision records and specifications involved instead of restating them.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Limits the solution must respect, such as budgets, compatibility or rules from AGENTS.md.
+    validations:
+      required: false
+  - type: textarea
+    id: open-questions
+    attributes:
+      label: Open questions
+      description: What is not yet decided and has to be settled in this issue.
+    validations:
+      required: false
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkable without asking a person, such as a named test passing, a command printing a given result, or an endpoint returning a given field.
+    validations:
+      required: true
