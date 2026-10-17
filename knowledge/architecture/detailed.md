@@ -95,7 +95,7 @@ flowchart TB
     SCHED <-->|SQL, row claims| DB
     API -->|store uploads, serve downloads,<br/>through the artifact storage protocol| ART
 
-    W1 & W2 & W3 -->|claim with lease epoch, heartbeat,<br/>upload segments and artifacts: HTTPS only| API
+    W1 & W2 & W3 -->|claim with domain and incarnation,<br/>lease epoch, heartbeat,<br/>upload segments and artifacts: HTTPS only| API
 
     W1 & W2 & W3 --> P_RT & P_HA & P_VCS & P_SEC & P_POL
     P_HA --> HARN
@@ -112,10 +112,10 @@ Responsibilities, in one line each:
 | `kora api` | the only implementation of every operation; authentication (user and service principals); webhook ingestion to `inbound_event`; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | scheduling decisions; running sessions; UI logic |
 | `kora web` | the production web console, full in MVP (FR-7.3) and held to the user-experience bar of NFR-13.1: approvals, runs, the live graph with node states and timeline, attempts with artifacts and the diff between them, live session logs, cost per run, node and attempt, graphs and their versions; graph editing post-MVP; a thin client of the API through a TypeScript client generated with `@hey-api/openapi-ts`; opaque server-side session cookie, CSRF protection, CSP | logic of its own; direct database access; designed in [docs/console.md](../../docs/console.md) before it is built ([ADR-0015](../../docs/decisions/0015-web-console-design.md)) |
 | `kora scheduler` | the passes in scheduler.md section 2 under a per-run lock; approval request creation with the run's cost sum; clear-downstream; the batched retention task | calling runtimes or harnesses |
-| `kora worker` | claiming `created` attempts of its runtime through the API; asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
+| `kora worker` | claiming `created` attempts and original-domain recovery of unresolved attempts through the API, including cancelled/superseded attempts of terminal runs; asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; closing all earlier dispatcher grants/operations before new platform writes, obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
 | Metadata DB | every entity in data-model.md; the only run state; row claims with `SELECT … FOR UPDATE SKIP LOCKED` and the run lock (an advisory lock per run) on Postgres | payload bytes |
 | Artifact storage | payload bytes by digest: artifacts, transcripts, live session segments | metadata |
-| `kora mcp` | the authoring and operating MCP servers for the user's own harness: 13 curated, task-shaped tools, long operations as MCP Tasks; forwards with the user's token, whose default has no `approve` flag | any logic of its own; serving skills (they are files in the harness's own format) |
+| `kora mcp` | the authoring and operating MCP servers for the user's own harness: 14 curated, task-shaped tools, long operations as MCP Tasks; forwards with the user's token, whose default has no `approve` flag | any logic of its own; serving skills (they are files in the harness's own format) |
 | `kora standalone` | api, scheduler and a local worker as coroutines in one process on SQLite; the worker uses the same API client over an in-process ASGI transport | production use |
 
 Workers talk to the API and only to the API (DD-13, design review finding [workers through the API only](../reviews/review-2026-10-15.md#workers-through-api-only)): an adopter's worker inside a closed network needs one outbound HTTPS route and no database credentials, which is the enterprise-runtime placement the acceptance test requires.
@@ -163,7 +163,7 @@ flowchart LR
     classDef plugin fill:#f3e5f5,stroke:#7b1fa2,color:#111
     classDef ext fill:#eeeeee,stroke:#888,color:#222,stroke-dasharray: 4 3
 
-    CL[Claim loop<br/>created attempts of this runtime via the API,<br/>lease epoch, adopt by attempt id after restart]:::c
+    CL[Claim loop<br/>execution and recovery claims via the API,<br/>domain, incarnation, persisted dispatcher grant,<br/>lease epoch, observe/adopt the original attempt]:::c
     WS[Plan requester<br/>asks runtime for the workspace target,<br/>VCS for the checkout and publish plans]:::c
     CFG[Session spec builder<br/>resolved node config to SDK options:<br/>agents, MCP, skills, schema, prompt render]:::c
     SUB[Submitter<br/>runtime.submit keyed by attempt id,<br/>constructed env, secrets as env vars in MVP]:::c
@@ -206,7 +206,7 @@ sequenceDiagram
 
     S->>DB: node ready → attempt(created)
     W->>API: claim created attempts for runtime=docker
-    API->>DB: attempt → claimed(worker, lease_epoch+1, lease 120 s)
+    API->>DB: persist original domain and incarnation/dispatcher grant, claimed, epoch+1, lease 120 s
     W->>R: workspace target? → root /workspace, no host path
     W->>V: checkout_plan(repo, rev, root) → CheckoutPlan and publish_plan(…) → PublishPlan
     W->>R: submit(workload with both plans, keyed by attempt id) → handle (runner starts)
@@ -224,12 +224,15 @@ sequenceDiagram
     end
     alt limit exceeded, stalled, or desired_state = cancel
         W->>R: cancel(handle, grace)
-        W->>API: attempt → failed(class=events_exhausted | budget_exhausted | stalled) or cancelled [epoch]
+        W->>R: retire attempt, close local gate and settle all operations
+        W->>R: record_dispatcher_quiescence
+        W->>API: relay runtime/dispatcher closure, then terminal outcome [epoch]
     else result received
         H->>H: export, stop candidate domain, seal private input
         H->>H: prepare exact revision in fresh metadata, inspect history
         H-->>R: checkpoint PreparedPublication, awaiting_authorization
         R-->>W: prepared revision and destination digests
+        W->>R: verify every earlier dispatcher/operation closed
         W->>API: fenced heartbeat → desired_state
         W->>V: obtain late publication authorization
         W->>R: finalize(handle, authorization)
@@ -238,10 +241,14 @@ sequenceDiagram
         R-->>W: same VcsRef on repetition/adoption
         W->>API: upload transcript, structured output, files [epoch]
         API->>AS: put by digest
-        W->>API: artifact versions, usage records, attempt → finishing [epoch]
+        W->>R: confirm runtime quiescence, close local gate and settle all operations
+        W->>R: record_dispatcher_quiescence
+        W->>API: closure evidence, artifact versions, usage, attempt → finishing [epoch]
     end
     S->>DB: completion pass under the run lock: instance succeeded/failed, retry policy,<br/>fan-out collection, next sub-graph attempt with clear downstream
 ```
+
+Lease expiry records `execution_state=unknown` and retains every original reservation; it does not terminalize the attempt after any delay (ADR-0017). Recovery observes/adopts the same original domain, and earlier dispatcher grants remain barriers to platform writes. `retire` serializes with delayed submit/finalize, while independent worker-host/code-host calls require their own closure evidence. The affected run admits no new attempt until all execution/publication recovery settles. A previously acquired target hold survives terminal run status until the ordinary release condition and this barrier are both satisfied. Operator reconciliation persists observe/stop intent or records evidenced human attestation through the API, CLI and existing `kora_admin`; no scheduler runtime call or new coordination service is introduced.
 
 ## 6. Deployment shapes
 
@@ -299,7 +306,7 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | Worker ↔ control plane | workers call the HTTP API only (register, claim, heartbeat with lease epoch, segment and artifact upload, state transitions) over outbound HTTPS with a service token; standalone uses the same client over an in-process ASGI transport | decided (design review finding [workers through the API only](../reviews/review-2026-10-15.md#workers-through-api-only)) | workers write SQL directly |
 | API client | one hand-written `httpx` client that shares the Pydantic request and response models with FastAPI; used by the Typer CLI, the MCP tools and the worker; a contract test checks it against the OpenAPI document | decided (design review finding [one shared API client](../reviews/review-2026-10-15.md#one-shared-api-client)) | generated `openapi-python-client` |
 | CLI | Typer (Click-based) over the shared client; `rich` for tables | decided | Click directly; argparse |
-| MCP server | official `mcp` Python SDK (FastMCP), two curated servers (`kora-authoring`, `kora-operating`, 13 task-shaped tools incl. `kora_admin` for `platform`-flag operations) over the shared client; long operations as MCP Tasks (2026-07 spec); skills stay files in the harness's own format; stdio process `kora mcp` and the same servers mounted on the API under `/mcp` (DD-18, DD-28) | decided | one generated tool per API operation |
+| MCP server | official `mcp` Python SDK (FastMCP), two curated servers (`kora-authoring`, `kora-operating`, 14 task-shaped tools incl. `kora_admin` for `platform`-flag operations) over the shared client; long operations as MCP Tasks (2026-07 spec); skills stay files in the harness's own format; stdio process `kora mcp` and the same servers mounted on the API under `/mcp` (DD-18, DD-28) | decided | one generated tool per API operation |
 | Policy | `allow_deny` reference implementation of the policy protocol, invoked by the session runner from harness pre-tool-call hooks (DD-29); Cedar (`cedar-python`) and OPA as plugins later | decided | harness-native allowlists only |
 | Harness adapters | programmatic interfaces instead of CLI output (DD-27): Claude Agent SDK for Python (`claude-agent-sdk`) and a small kora client speaking the `codex app-server` JSON-RPC protocol directly over stdio (the Codex SDK exists only for TypeScript) in MVP; after MVP an ACP adapter (`agent-client-protocol` JSON-RPC over stdio) for OpenCode, Pi, Gemini and others, through the same protocol and conformance suite (ADR-0004); hosted entirely by the session runner inside the runtime, which is the sole enforcer of `max_events`, soft budget and `stall_after` from the SDK event stream; harness binaries fixed per installation image with the auto-updater off and a tested version range checked at worker start (DD-14) | decided | CLI JSONL parsing (`claude -p --output-format stream-json`, `codex exec --json`) |
 | Local runtime | subprocess on the worker host with a per-attempt temp workspace | decided | — |
@@ -331,6 +338,9 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | **run** | one instance of a graph version being carried out, from trigger to a terminal state; the API resource `run_…` | "execution" (not used) |
 | **target** | the business object a run works on (a query, a dependency, a flaky test), named by the optional `run.target_key` with namespace scope (ADR-0014); several runs work on one target over time, and under `defer` one holds it at a time | the delivery key (`run.idempotency_key`), the attempt, a fan-out element |
 | **attempt** | one runtime submission of a node instance; the unit of cost and of the `attempt` table | a sub-graph attempt |
+| **execution domain** | non-reused identity of the runtime control-registry lineage; persisted before dispatch authority, retained through recovery and never reused by a replacement host/registry (ADR-0017) | a stable worker host name or process incarnation |
+| **execution uncertainty** | old execution, dispatcher or publication may still act; original reservations/hold remain, last observation and evidence provenance are exposed | terminal `lost` or permission to retry |
+| **dispatcher** | durable grant for one worker incarnation and attempt lease generation; closure atomically gates new dispatch and settles/fences in-flight operations | an API epoch alone or runtime termination receipt |
 | **sub-graph attempt** | one pass over a sub-graph body under FR-2.7a; the `subgraph_attempt` integer on node instances; `max_attempts` on a subgraph counts these; `previous_attempt` is the input the next one receives | a runtime attempt |
 | **node kinds** | `agent`, `command`, `human_input`, `wait_event`, `timer`, `branch`, `fan_out`, `subgraph`; always spelled this way | "fan-in", "approval node", "sensor node" |
 | **SDK event stream** | the raw messages the harness emits inside the runtime: Claude Agent SDK messages, Codex app-server notifications or, after MVP, ACP agent updates | the normalised event stream |

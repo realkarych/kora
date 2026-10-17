@@ -2,6 +2,7 @@
 
 - Status: accepted, 2026-10-15; amended 2026-10-16 (reclaim on lease expiry alone, adoption within the execution domain; [architecture critique of 2026-10-16, finding A07](../../knowledge/reviews/architecture-critique-2026-10-16.md#a07-execution-domain), issue #13)
 - Reviewed: by the project owner, 2026-10-16
+- Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (execution uncertainty, dispatch closure and retained reservations); wording pending owner review
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-13, DD-15, requirements decision 18 (the worker part), DD-36 (claim response, lease and polling defaults)
 - Related: ADR-0001, ADR-0004, ADR-0007, ADR-0011, ADR-0013
@@ -21,9 +22,9 @@ The first drafts let workers write to the metadata database directly as well as 
 **Claim, lease and fencing** (defaults from DD-36):
 
 - The scheduler inserts an `attempt` row in status `created`. A worker polls `POST /workers/{id}/claims {runtime, max: 1}` every 1 s and receives one self-contained claim or none: attempt, lease `{epoch, until}`, run parameters, node config, limits, inputs and outputs, secret aliases.
-- Every claim increments `lease_epoch`. Every heartbeat, upload and transition carries it; the API rejects a stale epoch with `API008`, and a worker whose renewal is rejected stops relaying and abandons the attempt locally. The epoch travels in API calls only, never inside the `Workload` handed to the runtime.
+- Every claim increments `lease_epoch`. Every heartbeat, upload and transition carries it; the API rejects a stale epoch with `API008`, and a worker whose renewal is rejected stops relaying, closes its dispatch gate, settles in-flight operations and records a monotonic closure acknowledgement in the original runtime registry. The epoch travels in API calls only, never inside the `Workload` handed to the runtime.
 - The lease is 120 s, renewed every 15 s by `POST /attempts/{att}/heartbeat {lease_epoch, counters}`, whose response carries `desired_state` and `lease_until`; cancellation reaches the worker through it. Heartbeats also refresh `worker.last_seen_at`; there is no separate worker heartbeat route.
-- An expired lease alone makes an attempt reclaimable; the new epoch fences the previous holder. The scheduler never calls a runtime or a worker: the worker that claims the reclaimed row looks the attempt up, adopts the live session or reports it lost. A runtime declares whether its handles are portable; the `local` and `docker` runtimes keep handles on one host, so only a restarted worker with the same stable id adopts their attempts, and an attempt whose host is gone becomes `lost` and follows the infrastructure retry policy. A runtime that cannot answer a lookup is not an absence: the attempt stays claimed and is never resubmitted on that answer.
+- An expired lease makes an attempt reclaimable for recovery in its original, non-reused execution domain. It sets `execution_state=unknown`, never terminal `lost` by time alone (ADR-0017). The API records every dispatcher incarnation and lease grant before returning authority. A fresh worker may observe/adopt the same live attempt; earlier dispatchers must close their gates and settle in-flight operations before platform writes resume. Cancelled/superseded attempts remain recoverable without submission or publication rights, including after run cancellation. Missing or unreachable registry state cannot prove absence; replacement requires affirmative runtime termination and closure of every dispatcher and platform publication operation.
 - Cancellation and clear-downstream revoke the attempt's result authority in the same transaction that orders the cancel ([ADR-0007](0007-attempt-model-and-retries.md)): its later uploads are historical, never current.
 
 **Stall detection** (DD-15). Agent-loop liveness is `last_event_at`, advanced by every normalised event. After `stall_after` of silence the session runner terminates the session; the attempt fails with class `stalled`, which the node's retry policy may retry. `stall_after` resolves from the node's `limits.stall_after`, else the graph's `runtime.stall_after`, else the runtime's `default_stall_after` (15 minutes in the reference runtimes). The window is extended while the last event is an unanswered tool call, up to the node timeout, so a long dev-run inside one `Bash` call is not a stall.
@@ -40,7 +41,7 @@ The first drafts let workers write to the metadata database directly as well as 
 
 - Enterprise runtimes need one outbound HTTPS route, the placement the acceptance test requires.
 - Cancellation is delivered at heartbeat granularity (15 s); the attempt's right to publish a current result ends at the cancel's commit, not at its delivery.
-- Recovery after the loss of a `local` or `docker` host is a resubmission, not an adoption; only runtimes with portable handles adopt across hosts.
+- A lost `local` or `docker` host blocks replacement until termination and all prior dispatch/publication authority are established as closed. Only portable runtimes adopt a live handle across hosts; a stable worker name alone cannot prove old-domain absence.
 - Admission latency is bounded by one scheduler pass plus the 1 s claim interval, under 5 s at MVP scale (NFR-3.1).
 
 ## Where it is applied

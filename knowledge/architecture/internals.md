@@ -52,7 +52,7 @@ flowchart TB
   upgrade -->|"change: VcsRef"| merged
 ```
 
-Boxes are nodes with their kind; arrows are edges, labelled with the artifact that flows along them, or with "runs after" for an ordering edge that carries none. The triggers are manual, a cron at 09:00 UTC every Tuesday and a webhook named `upgrade_requested`. `tests` reads the `VcsRef` that `upgrade` produced, so it checks out exactly the commit the agent pushed. `approve` binds that commit and the digest of the test result, so an approval can never cover a later push. The graph declares the `package` parameter as its target key with the policy `defer`, and `overlap: allow`: two runs of the graph may exist at once, but two runs for the same package never work at the same time, because the second waits at admission until the first leaves `running` ([ADR-0014](../../docs/decisions/0014-target-identity.md); [chapter 2](#2-the-domain-model)). The full document is [examples/dependency-upgrade.ir.yaml](../specs/examples/dependency-upgrade.ir.yaml).
+Boxes are nodes with their kind; arrows are edges, labelled with the artifact that flows along them, or with "runs after" for an ordering edge that carries none. The triggers are manual, a cron at 09:00 UTC every Tuesday and a webhook named `upgrade_requested`. `tests` reads the `VcsRef` that `upgrade` produced, so it checks out exactly the commit the agent pushed. `approve` binds that commit and the digest of the test result, so an approval can never cover a later push. The graph declares the `package` parameter as its target key with the policy `defer`, and `overlap: allow`: two runs of the graph may exist at once, but two runs for the same package never work at the same time, because the second waits at admission until the first leaves `running` and its execution/publication recovery is settled ([ADR-0014](../../docs/decisions/0014-target-identity.md); [chapter 2](#2-the-domain-model)). The full document is [examples/dependency-upgrade.ir.yaml](../specs/examples/dependency-upgrade.ir.yaml).
 
 Three kinds of process do the work, and [chapter 3](#3-processes-and-where-they-run) draws them. The control plane, `kora api` and `kora scheduler`, shares one Metadata DB and decides what runs next. Workers run next to the execution infrastructure, claim work through the API and submit it. The lifecycle supervisor launches a candidate session or command through the runtime, enforces its limits and owns private control state. Protected publication uses a separate authority; local is a trusted development/test environment (ADR-0016).
 
@@ -137,7 +137,7 @@ The words below are used everywhere else; [appendix B](#b-glossary) has the full
 - **Artifact and artifact version.** An artifact is a node path and an output name. Each new output is a version: `current`, `superseded` by a newer one, or `invalid`.
 - **Wait.** The row that a waiting node is: a timer, an approval, an event, a poll, a retry back-off or admission back-pressure. No process or worker is held while a node waits.
 - **Approval request.** What a `human_input` node asks, bound to one commit SHA and a set of digests, so a response can approve only that content.
-- **Target key, `overlap` and `on_active`.** A target key is the optional business identity of a run, such as a package name, scoped to the namespace. A run holds its target from the first attempt admitted under its key until it leaves `running`. `graph.overlap` decides first, at trigger time and per graph, whether a new run may start while another run of the graph is running: `allow`, `skip` or `queue`. `graph.target.on_active` decides second, at admission and per key: `allow` proceeds, `defer` waits while another run holds the key. A graph that declares `defer` therefore sets `overlap: allow`, or `skip` and `queue` act first.
+- **Target key, `overlap` and `on_active`.** A target key is the optional business identity of a run, such as a package name, scoped to the namespace. A run holds its target from the first attempt admitted under its key until it leaves `running` and blocking execution/publication recovery is settled (ADR-0017). `graph.overlap` decides first, at trigger time and per graph, whether a new run may start while another run of the graph is running: `allow`, `skip` or `queue`. `graph.target.on_active` decides second, at admission and per key: `allow` proceeds, `defer` waits while another run holds the key. A graph that declares `defer` therefore sets `overlap: allow`, or `skip` and `queue` act first.
 
 The canonical graph of the specifications shows the structural kinds at work. A fan-out runs one body instance per list element; the body is a sub-graph retried as a unit, and a `branch` inside it can end the current sub-graph attempt with `$fail_attempt`.
 
@@ -435,11 +435,11 @@ The runtime protocol is the one most of Part II depends on. A worker calls it th
 
 - `workspace_target(attempt_id)` names the workspace root before submission;
 - `submit(workload)` is idempotent on the attempt id and returns the handle;
-- `lookup(attempt_id)` recovers a handle after a crash; it returns `None` only when the runtime confirms that nothing was submitted, and raises a retryable error when it cannot answer;
+- `lookup(attempt_id)` recovers a handle after a crash; `None` is handle absence in the original registry, not proof that a paused dispatcher cannot submit; unknown registry/reachability is a retryable error;
 - `adopt(handle)` re-attaches to a running session and its event file after a worker restart;
 - `status`, `events(handle, from_offset)` and `heartbeat` observe the logical lifecycle: `events` tails the supervisor-owned private control journal from a stored offset;
 - `finalize(handle, authorization)` publishes only the stored inspected revision after late authorization;
-- `cancel(handle, grace)` and `release(handle)` stop the lifecycle and free candidate/control/publication storage.
+- `cancel(handle, grace)` requests a stop; `retire(attempt_id, grace)` durably fences delayed submit/finalize and returns affirmative runtime termination evidence; `recovery` and `record_dispatcher_quiescence` retain domain-bound evidence for all grants; `release(handle)` frees bulky storage after recovery is settled but keeps fences/receipts (ADR-0017).
 
 Its capabilities say what a runtime can promise: `portable_handles` when any worker of the runtime can find and adopt a submission, `plan_executors` for where VCS plans may run, `supports_resume`, `enforces_network_policy`, `credential_proxy`, `protected_execution`, `max_concurrent` and `default_stall_after`. `local` and `docker` declare `portable_handles = False` and `supports_resume = False` in the MVP. Local declares `protected_execution = False`; deployments requiring it reject local without adding an extra local opt-in.
 
@@ -594,7 +594,7 @@ sequenceDiagram
 | 13 to 16 | the CLI, the run operations router, the deliver-signal entry point | 13 |
 | 17 to 19 | pass 6, the wake-up pass, with the re-check before downstream | 12, 9 |
 | 20, 22 | pass 6 polling the `change_request_status` sensor | 12 |
-| 23 | pass 6 completing `merged`, then pass 8 completing the run; leaving `running` releases the target | 12, 9 |
+| 23 | pass 6 completing `merged`, then pass 8 completing the run; leaving `running` releases the target only after execution/publication recovery is settled | 12, 9 |
 
 Three things in this sequence are easy to miss.
 
@@ -612,7 +612,7 @@ title: State diagram - attempt
 ---
 stateDiagram-v2
   accTitle: Attempt states
-  accDescr: An attempt is inserted created by admission. A claim gives it a lease and a new epoch. While it holds a lease it moves from claimed to submitted when its handle is stored, to running at the first heartbeat and to finishing when the session ended. Lookup returning nothing returns a claimed attempt to created. The completion pass makes a finishing attempt succeeded or failed; a reported failure or the timeout pass fails a leased attempt; a cancel makes it cancelled; a confirmed absence or a second lease period without a claim makes it lost. A created attempt whose desired state is cancel becomes cancelled.
+  accDescr: Admission inserts a created attempt and reserves capacity. A claim durably records the original execution domain and dispatcher grant before returning authority. Lease expiry records unknown execution and enables recovery without a terminal transition or reservation release. Missing lookup is not termination proof. Normal completion, failure, cancellation or confirmed loss becomes terminal only after runtime quiescence and every dispatcher and platform publication are closed. A never-dispatched created attempt can be cancelled from metadata alone.
   [*] --> created
   created --> leased: claim / lease_epoch + 1
   state "Holding a lease" as leased {
@@ -621,24 +621,23 @@ stateDiagram-v2
     submitted --> running: first heartbeat
     running --> finishing: transition [runtime lifecycle completed]
   }
-  claimed --> created: lookup [returns None]
-  created --> cancelled: [desired_state = cancel]
-  leased --> failed: transition with an error class, or timeout pass [deadline passed]
+  created --> cancelled: [cancel and no dispatch grant]
+  leased --> failed: error or timeout [execution and dispatch closure established]
   finishing --> succeeded: completion pass [all outputs current]
   finishing --> failed: completion pass [an output invalid]
-  leased --> cancelled: heartbeat returns cancel / runtime.cancel
-  leased --> lost: [runtime confirms absence, or non-portable and unclaimed for a second lease period]
+  leased --> cancelled: cancel [runtime and every dispatcher closed]
+  leased --> lost: [original-domain retirement and all dispatch/publication closed, result unavailable]
   succeeded --> [*]
   failed --> [*]
   cancelled --> [*]
   lost --> [*]
 ```
 
-- **An expired lease is reclaimed in place.** The scheduler's timeout pass marks it reclaimable; the next claim adds 1 to the epoch and the attempt keeps its state.
+- **An expired lease is recovered in place.** Record `execution_state=unknown` with last observation, retain all reservations and acquired target holds, and grant recovery in the original domain with a fresh epoch/incarnation. All earlier grants remain recorded. Observation/adoption cannot restore platform writes while any earlier dispatcher remains unresolved (ADR-0017).
 - **`lost` is classified `infrastructure`** and spends none of the node's agent attempts. An unreachable runtime never yields `lost`.
 - **The error classes** a failed attempt can carry, and what decides after each, are in [chapter 9](#9-waits-approvals-and-retries).
 
-**Open:** [#48](https://github.com/realkarych/kora/issues/48), which code moves an attempt whose `desired_state` is `cancel` to `cancelled` when no worker will read the cancel: a `created` attempt, or a leased one whose worker died. The claim query skips both, so neither frees its admission slot.
+**Resolved recovery constraint (ADR-0017):** cancelled/superseded attempts remain claimable for recovery-only observation, retirement and historical reporting even after terminal run status; no new submission/publication is allowed. A never-dispatched created attempt may cancel from durable metadata alone. Other transition-ownership questions remain in [#48](https://github.com/realkarych/kora/issues/48).
 
 ```mermaid
 ---
@@ -662,7 +661,7 @@ sequenceDiagram
   participant C as Code host
   S->>D: admission inserts the attempt, created, reserving a slot
   W->>A: POST claims
-  A->>D: claimed, epoch e, lease 120 s
+  A->>D: persist original domain, incarnation and dispatcher grant, epoch e, lease 120 s
   A-->>W: the attempt, epoch e, config, inputs
   Note over W: in-process calls - workspace target, VCS plans, session spec
   W->>RT: runtime.submit with the workload, keyed by the attempt id
@@ -690,19 +689,21 @@ sequenceDiagram
     W->>C: open_change_request, idempotent on head and base
   end
   W->>A: artifacts and usage, epoch e
-  W->>A: transition to finishing, epoch e
+  W->>RT: confirm normal runtime quiescence, close local gate and settle all operations
+  W->>RT: record_dispatcher_quiescence
+  W->>A: closure evidence, then transition to finishing, epoch e
   alt the attempt is current and desired_state is run
     A-->>W: status finishing
   else cleared or cancelled meanwhile
     A-->>W: desired_state cancel, the artifacts were stored superseded
   end
-  W->>RT: runtime.release
-  S->>D: completion pass, outputs current, instance succeeded
+  S->>D: completion pass with closure evidence, outputs current, instance succeeded
+  W->>RT: runtime.release after API recovery settled, keep fence/evidence
 ```
 
 Calls written `runtime.x` go through the worker's runtime implementation to the execution infrastructure. On `local` and `docker` the session runner executes both plans, because the runtime and the git VCS both declare the `runner` executor; the worker learns the resulting `WorkspaceRef` and `VcsRef` from `phase` events in the event file.
 
-The lease epoch is what makes a dead worker harmless. When a worker stops heartbeating, the session keeps running and the runner keeps enforcing its limits; the attempt waits for the next claim. A worker's id is its configured name, stable per host across process restarts. On `local` and `docker` handles live on one host, so the next claimer can only be the worker with the same id, after a restart; a runtime that declares `portable_handles` lets any of its workers adopt.
+The lease epoch fences API writes, while the original domain, retirement fence and every dispatcher's closed gate govern recovery of physical execution and platform effects (ADR-0017). A worker's stable host name is a routing hint; each process has a fresh incarnation, and a replaced/lost runtime registry has a different domain. Non-portable handles require access to the original host/domain. Portable runtimes allow another worker to observe the same service/domain and its recovery state; neither case authorizes replacement from an empty lookup.
 
 ```mermaid
 ---
@@ -716,7 +717,7 @@ config:
 ---
 sequenceDiagram
   accTitle: A worker loses its lease
-  accDescr: Worker A stops heartbeating while the session keeps running. The scheduler's timeout pass marks the expired lease reclaimable. Worker B, the same worker after a restart or any worker of a runtime with portable handles, claims the attempt with epoch e plus one, adopts the session by its handle or looks it up by the attempt id, and resumes the event tail from the stored offset. When the old process writes with epoch e, the API rejects it with API008 and the old process stops writing.
+  accDescr: Worker A stops heartbeating while execution may continue. Lease expiry records unknown execution without releasing reservations. Worker B receives a fresh recovery claim in the original domain and observes or adopts the same handle. Old API writes fail API008. Worker A must close its local dispatch gate and settle in-flight operations before appending a closure acknowledgement to the runtime registry. Worker B relays that evidence under its fresh lease, until every earlier grant is closed its adoption remains observational. If old authority cannot be reached the attempt remains unresolved until evidenced termination and closure, never lost by time alone.
   autonumber
   participant A as kora api
   participant S as kora scheduler
@@ -725,9 +726,9 @@ sequenceDiagram
   participant WB as Worker B, next claimer
   participant RT as Execution infrastructure
   Note over WA: crashes or is cut off, the session keeps running
-  S->>D: timeout pass marks the expired lease reclaimable
+  S->>D: mark execution unknown, retain reservations and original domain
   WB->>A: POST claims
-  A->>D: lease_epoch e+1
+  A->>D: persist new incarnation/dispatcher grant, lease_epoch e+1
   A-->>WB: the same attempt, epoch e+1
   alt a handle is stored
     WB->>RT: runtime.adopt with the handle
@@ -737,22 +738,28 @@ sequenceDiagram
   RT-->>WB: session found, the tail resumes from the stored offset
   break stale epoch
     WA->>A: heartbeat or upload with epoch e
-    A-->>WA: API008, the old process stops writing
+    A-->>WA: API008
+    WA->>WA: atomically close dispatch gate, settle or fence in-flight calls
+    WA->>RT: record_dispatcher_quiescence for old grant
+    WB->>RT: recovery(attempt_id)
+    RT-->>WB: original-domain receipt and all available acknowledgements
+    WB->>A: relay evidence under current recovery lease
+    Note over WB: no new platform writes until every earlier grant is closed
   end
 ```
 
 | what fails | what happens next | specified in |
 |---|---|---|
-| a worker after the claim, before the handle is stored | the next claimer calls `lookup(attempt_id)`: a handle is stored; `None` returns the attempt to `created`; no answer keeps it `claimed` | scheduler.md section 3 |
+| a worker after the claim, before the handle is stored | recover the same original domain; a found handle is adopted; `None`, unreachable or a replacement registry cannot permit new submission. Retirement and all dispatcher closure are required before confirmed loss/replacement | scheduler.md section 3 |
 | a worker after `submitted` | the next claimer adopts the handle and tails from `counters.stream_offset` | scheduler.md section 3 |
-| a worker after the push, before the `VcsRef` upload | the next claimer adopts the private prepared-result checkpoint and reconciles the exact revision/destination through late `finalize`; unexpected remote content conflicts; `open_change_request` searches head/base before create; no mutable-workspace recollection | scheduler.md section 3, protocols.md section 4 |
-| required sealed input or prepared publication checkpoint is missing/corrupt | the attempt fails with class `infrastructure`; a branch the push created stays on the code host | scheduler.md section 3 |
-| a host that never returns, non-portable handles | after a second lease period without a claim the attempt is `lost`; the `infrastructure_retry` policy of the graph's `runtime` section decides, without spending the node's attempts | scheduler.md section 3, ir.md section 6 |
-| the runtime cannot answer | never treated as absence; the attempt stays `claimed` and is looked up again | scheduler.md section 3 |
-| the control plane is unreachable | the runner still stops the session at its limits and its deadline; the timeout pass stays the authority for the state | scheduler.md section 4 |
-| a cancel or a clear downstream while the attempt runs | `desired_state = cancel` reaches the worker that holds the lease in the next heartbeat response, and it calls `runtime.cancel`; later uploads are stored `superseded`; usage is kept | data-model.md sections 3 and 6 |
+| a worker after the push, before the `VcsRef` upload | the next claimer adopts the private prepared-result checkpoint and closes every earlier dispatcher and pending operation before new effects, then reconciles the exact revision/destination through late `finalize`; unexpected remote content conflicts; `open_change_request` searches head/base before create; no mutable-workspace recollection | scheduler.md section 3, protocols.md section 4 |
+| required sealed input or prepared publication checkpoint is missing/corrupt | record infrastructure error, but retain the unresolved attempt/reservations until runtime termination and every dispatcher/publication closure are established; any existing branch remains discoverable | scheduler.md section 3 |
+| a host that never returns, non-portable handles | unknown execution holds capacity and acquired target indefinitely until an operator establishes and attests actual termination/decommissioning and closure of every old dispatcher/publication operation; no second lease-period loss or force retry | ADR-0017, scheduler.md section 3 |
+| the runtime cannot answer | unknown execution stays non-terminal with its reservations; observe/retire again in the original domain | scheduler.md section 3 |
+| the control plane is unreachable | the runner still stops the session at its limits and its deadline; the timeout pass records intent; terminal status and release wait for affirmative closure evidence | scheduler.md section 4 |
+| a cancel or a clear downstream while the attempt runs | `desired_state = cancel` reaches the worker that holds the lease in the next heartbeat response, and recovery-only claims remain available after terminal run status; `retire` and dispatcher evidence establish closure before release; later uploads are stored `superseded`; usage is kept | data-model.md sections 3 and 6 |
 
-Two fences keep late writes out of current state. The lease epoch fences a previous lease holder. **Result authority** fences the attempt's own late writes: an attempt may create current artifact versions or move to `finishing` only while its `desired_state` is `run` and it is its instance's `current_attempt_id`. A cancel or a clear downstream revokes both in the transaction that orders it, and usage, segments and events are still accepted under a valid epoch, so the cost of a cancelled attempt is never lost ([data-model.md](../specs/data-model.md) section 3). `test_cleared_attempt_cannot_publish_current` holds the second fence; the specifications name no test for the epoch rule yet.
+Two fences keep late writes out of current state. The lease epoch fences a previous lease holder. **Result authority** fences the attempt's own late writes: an attempt may create current artifact versions or move to `finishing` only while its `desired_state` is `run` and it is its instance's `current_attempt_id`. A cancel or a clear downstream revokes both in the transaction that orders it, and usage, segments and events are still accepted under a valid epoch, so the cost of a cancelled attempt is never lost ([data-model.md](../specs/data-model.md) section 3). `test_cleared_attempt_cannot_publish_current` holds the second fence; execution-recovery conformance cases in protocols.md section 13 also cover stale epochs, old dispatcher closure and retained reservations. API/result fences do not stop an external effect already dispatched.
 
 ### 9. Waits, approvals and retries
 
@@ -913,7 +920,7 @@ A retry strategy says where the next attempt of an agent node starts.
 - **`fresh_with_feedback`**: a new workspace checked out from the branch of the previous attempt's `VcsRef`, at that branch's current head, with a `Feedback` carrying the review comments. It works on every runtime and is the documented default where the next attempt needs the previous attempt's work.
 - **`resume`**: continue the previous harness session from its stored handle. On the MVP runtimes it always falls back to `fresh_with_feedback` and records `strategy_fallback`, because `release` frees the workspace that holds the harness checkpoint ([scheduler.md](../specs/scheduler.md) section 7).
 
-Below the four sits the `infrastructure_retry` policy of the graph's `runtime` section: an attempt that failed with class `infrastructure`, such as a `lost` one, is resubmitted under it without spending the node's attempts.
+Below the four sits the `infrastructure_retry` policy of the graph's `runtime` section: an attempt that failed with class `infrastructure`, such as a `lost` one, is resubmitted under it only after runtime termination and all dispatcher/publication closure are proven, without spending the node's attempts. Lease expiry is unknown execution and consumes no retry count. Manual retry records intent while the whole run waits for recovery; linked rerun is refused for any replacement-blocking condition (ADR-0017).
 
 A manual retry is the transaction that changes most at once. It runs through the deliver-signal entry point, under the run lock ([data-model.md](../specs/data-model.md) section 6).
 
@@ -947,7 +954,9 @@ sequenceDiagram
   W->>A: heartbeat, epoch e
   A-->>W: desired_state cancel
   W->>RT: runtime.cancel with grace
-  S->>S: readiness makes X ready, admission inserts attempt n+1
+  W->>RT: retire old attempt and record dispatcher closure
+  W->>A: relay complete closure evidence under fresh lease
+  S->>S: only after all run barriers settle, admit attempt n+1
 ```
 
 When the retried node produces the output that `graph.target.key` names, the run's target key is bound again from the new current version. A run moves through its own states around all of this.
@@ -958,7 +967,7 @@ title: State diagram - run, with its target hold
 ---
 stateDiagram-v2
   accTitle: Run states with the target hold
-  accDescr: A run is created pending when a trigger is accepted, with its target key bound if it comes from a parameter. The first pass makes it running, unless queue overlap keeps it pending. While running it does not hold its target until admission admits an attempt under a bound key, which sets target_held_since; under defer, while another run holds the key, it waits at admission first. When nothing is left that is not terminal the completion pass ends the run as succeeded or failed; a cancel cancels it. Leaving running releases the hold. A manual retry moves a failed run back to running without the hold. A failed run can also be cancelled.
+  accDescr: A run is created pending when a trigger is accepted, with its target key bound if it comes from a parameter. The first pass makes it running, unless queue overlap keeps it pending. While running it does not hold its target until admission admits an attempt under a bound key, which sets target_held_since, under defer, while another run holds the key, it waits at admission first. When nothing is left that is not terminal the completion pass ends the run as succeeded or failed, a cancel cancels it. Leaving running releases the hold only after execution and publication recovery is settled. A cancelled run may retain an acquired hold. Manual retry retains an unresolved hold, after a settled release it takes the hold at next admission. A failed run can also be cancelled.
   [*] --> pending: trigger accepted / bind the key from a parameter
   pending --> running: first pass [overlap allows]
   state running {
@@ -968,18 +977,18 @@ stateDiagram-v2
     [*] --> unheld
     unheld --> holding: admission [key bound] / set target_held_since
     unheld --> deferred: admission [on_active defer and another run holds the key] / admission wait
-    deferred --> holding: admission [the holder left running]
+    deferred --> holding: admission [holder released after recovery settled]
   }
   running --> succeeded: completion [nothing left that is not terminal]
   running --> failed: completion [nothing left that is not terminal]
   running --> cancelled: cancel
-  failed --> running: manual retry / the hold is not restored
+  failed --> running: manual retry / retain unresolved hold, reacquire if released
   failed --> cancelled: cancel
   succeeded --> [*]
   cancelled --> [*]
 ```
 
-- **Leaving `running`** for `succeeded`, `failed` or `cancelled` clears `target_held_since`. A retried run takes the hold again at its next admission, behind any run that took the target meanwhile.
+- **Leaving `running`** clears `target_held_since` only after every blocking execution/publication recovery is settled. Until then a terminal run keeps the hold. A retried run retains an unresolved hold; after settled release it takes the hold again at its next admission behind any new holder (ADR-0017). No key/hold is invented for an unbound run; target rebinding stays issue #54.
 - **The hold is set whatever the policy.** A run of an `allow` graph never waits, but it holds its target for the benefit of another graph's `defer` on the same namespace key.
 - **`run.target_deferred`** is written once per run and holder, for the first admission wait behind that holder. A key bound from an output is bound by the completion pass, with a `run.target_bound` event, and a run never loses its key.
 - **A run without a key** never holds a target and never waits on this scope ([ADR-0014](../../docs/decisions/0014-target-identity.md), scheduler.md section 6).
@@ -1188,7 +1197,7 @@ flowchart TB
 | Clear downstream | one transaction for a manual retry or sub-graph attempt N+1 | data-model.md section 6 |
 | Retention task | marks versions `expiring`, deletes a blob only when no other `present` or `expiring` version references it, then marks them `expired` | scheduler.md section 13 |
 | Exporter feed | a bounded queue over event rows in order; reads an attempt's session segments from artifact storage when the attempt reaches `finishing`; drops are counted; replay from any row | protocols.md section 9 |
-| Metrics | queue depth, latencies, stalled and lost counts, spend; `/readyz` fails until the recovery pass completes | scheduler.md section 11 |
+| Metrics | queue depth, latencies, stalled/confirmed-lost counts, unknown execution count/age, retained scopes/target holds, pending dispatcher/publication recovery, last-known partial spend; `/readyz` fails until the recovery pass completes | scheduler.md section 11 |
 
 **From a trigger to a run.** Every trigger kind ends in a `run` row whose `idempotency_key` is unique per graph, so a duplicate returns the existing run. A manual trigger or a rerun arrives through the API, keyed by the caller's `Idempotency-Key` or a fresh ULID, and enters the trigger pass like any run (scheduler.md section 7). A cron binding is keyed by its graph version and fire time; a graph trigger by the parent run and the event. A webhook is authenticated by the API, with an HMAC signature or a bearer token inside a replay window, and recorded as an `inbound_event` row deduplicated by its delivery key; the trigger pass turns those addressed to a trigger into runs. The target key is bound when the run is created, from a parameter, or later from an output.
 
@@ -1202,7 +1211,7 @@ title: Activity diagram - admission of one ready instance
 ---
 flowchart TB
   accTitle: Admission of one ready instance
-  accDescr: Admission takes a ready instance under the run lock. A waiting kind gets a wait row; a human_input node also gets an approval request with the run's cost, and its channel is asked after the commit. An agent or command instance fails with budget_exhausted when its run or sub-graph budget is exhausted and gets an admission wait while its namespace is over its daily budget. Otherwise six scopes are locked and counted in a fixed order: global, namespace, graph, runtime, fan-out instance and target. A full scope gives an admission wait, oldest instance first; the first wait behind a target holder writes run.target_deferred. When every scope has room, the attempt is inserted created, which reserves the slot, the target hold is set when the key is bound, and the instance becomes queued. The commit releases the scope locks.
+  accDescr: Admission takes a ready instance under the run lock. A waiting kind gets a wait row, a human_input node also gets an approval request with the run's cost, and its channel is asked after the commit. An agent or command instance waits with execution_recovery while any old attempt in the run has unresolved execution/publication. Otherwise it fails with budget_exhausted when its run or sub-graph budget is exhausted and gets an admission wait while its namespace is over its daily budget. Otherwise six scopes are locked and counted in a fixed order: global, namespace, graph, runtime, fan-out instance and target. A full scope gives an admission wait, oldest instance first, the first wait behind a target holder writes run.target_deferred. When every scope has room, the attempt is inserted created, which reserves the slot, the target hold is set when the key is bound, and the instance becomes queued. The commit releases the scope locks.
   classDef step fill:#EEF4FB,stroke:#2E6295,color:#000000
   classDef stop fill:#F2F2F2,stroke:#6B6B6B,color:#000000
 
@@ -1220,7 +1229,11 @@ flowchart TB
   start --> kind
   kind -->|"human_input, wait_event, timer"| waitrow
   waitrow -->|"human_input only"| ask
-  kind -->|"agent, command"| budgets
+  recovery{"Any execution or publication<br/>recovery barrier in this run?"}:::step
+  recoverywait(["Admission wait:<br/>execution_recovery with blocking attempt ids"]):::stop
+  kind -->|"agent, command"| recovery
+  recovery -->|"yes"| recoverywait
+  recovery -->|"no"| budgets
   budgets -->|"run or sub-graph budget"| fail
   budgets -->|"daily budget"| admwait
   budgets -->|"neither"| scopes
@@ -1229,7 +1242,7 @@ flowchart TB
   insert --> commit
 ```
 
-- **A slot is reserved from `created`.** Every non-terminal attempt, from `created` to `finishing`, counts in every scope that applies to it, and it frees its slot exactly once, at its terminal transition.
+- **A slot is reserved from `created`.** Every non-terminal attempt, from `created` to `finishing`, counts in every scope that applies to it, and it frees its slot exactly once at its terminal transition after closure; cancellation, clear-downstream and unknown execution retain its original scopes.
 - **The target scope** counts every run that holds a key, whatever its graph's policy, but makes only runs of `on_active: defer` graphs wait. The first admission wait a run receives behind a given holder writes `run.target_deferred` once.
 - **On SQLite** the single writer replaces every scope lock.
 - **Limits live in rows and configuration** reloaded every pass, so they change without a restart.
@@ -1371,7 +1384,7 @@ Every integration test that touches the database runs on PostgreSQL and on SQLit
 
 Zone: Execution. Code: `src/kora/worker`.
 
-A worker carries out the scheduler's decisions for the attempts it claims, one claim per poll up to its capacity, and reports through the API only. It neither decides nor enforces: deciding belongs to the scheduler and enforcing to the session runner, while the worker relays counters between them. The VCS protocol returns plans and never touches the workspace, because the workspace may sit in a sandbox the worker cannot reach. The worker picks `runner` when both protocols declare it, otherwise `worker_host` if both support it; absence of a compatible executor is an error. Host preparation uses an exposed target; after sealing, host publication receives immutable bytes into private storage before prepare/inspect and consumes that prepared state at late finalize ([protocols.md](../specs/protocols.md) section 4). Every report carries the lease epoch, so a worker that lost its lease cannot write.
+A worker carries out the scheduler's decisions for the attempts it claims, one claim per poll up to its capacity, and reports through the API only. It neither decides nor enforces: deciding belongs to the scheduler and enforcing to the session runner, while the worker relays counters between them. The VCS protocol returns plans and never touches the workspace, because the workspace may sit in a sandbox the worker cannot reach. The worker picks `runner` when both protocols declare it, otherwise `worker_host` if both support it; absence of a compatible executor is an error. Host preparation uses an exposed target; after sealing, host publication receives immutable bytes into private storage before prepare/inspect and consumes that prepared state at late finalize ([protocols.md](../specs/protocols.md) section 4). Every report carries the lease epoch, so a worker that lost its lease cannot write to the API. Every effect also passes its local dispatch gate; replacement requires original-domain runtime retirement plus closure of all grants/operations; same-attempt live adoption can restore permitted platform writes after earlier grants/operations are closed without retiring that live execution. Recovery-only claims remain available for cancelled/superseded attempts and terminal runs (ADR-0017).
 
 ```mermaid
 ---
@@ -1557,12 +1570,12 @@ All of them are specified in [api-and-agent-surface.md](../specs/api-and-agent-s
 
 - **Scope first.** A runtime outside the MVP set is new scope: it starts as an issue, and as a proposal in `docs/proposals/` when it is large or uncertain.
 - **Where it lives.** kora's own implementations live under `src/kora/plugins/runtime/`; an adopter's runtime ships as a distribution of its own. Either registers `ProviderMetadata` under the `kora.provider` entry point with a `config_schema` ([protocols.md](../specs/protocols.md) section 1). A new client library is a dependency and goes into the stack table with its reason.
-- **The protocol** is listed in [chapter 4](#4-the-plug-in-seam). The error contract matters most: `lookup` returns `None` only when the cluster confirms that nothing was submitted, and raises `KoraProtocolError(retryable=True)` when it cannot answer. `events` reads the supervisor-owned private control journal, outside candidate storage, resumably from an offset; `finalize` publishes only the immutable inspected result after late authorization.
+- **The protocol** is listed in [chapter 4](#4-the-plug-in-seam). The error contract matters most: `lookup` returning `None` is original-domain handle absence, never proof against delayed submission; unreachable or missing registry state raises `KoraProtocolError(retryable=True)`. Domain-bound `retire` and all dispatcher/publication closure are required for confirmed loss (ADR-0017). `events` reads the supervisor-owned private control journal, outside candidate storage, resumably from an offset; `finalize` publishes only the immutable inspected result after late authorization.
 - **The workload** carries the resolved configuration, the workspace target, the checkout plan or the `WorkspaceRef`, the publish plan, a constructed minimal environment, session/preparation secret references resolved before execution (publication authorization arrives only after inspection), the harness credentials, the artifact inputs, the limits with the absolute deadline, and the session spec (protocols.md section 2).
 - **Capabilities.** `portable_handles` is true when any worker can find a submission by its attempt id; `plan_executors` is usually `runner` when pods reach the code host; `enforces_network_policy` is what a namespace with `require_network_enforcement` needs for nodes that receive secrets (`IR015`); `supports_resume` only when the harness checkpoint outlives `release`; `credential_proxy`, `protected_execution`, `max_concurrent` and `default_stall_after` as the platform allows. `require_protected_execution` rejects an incapable runtime; local declares false and is intended for trusted development/tests.
 - **The image** carries `kora-runner` and the harness binaries, with the harness auto-updater disabled; the image digest is recorded on every attempt.
 - **Workers.** Run one or more workers for the runtime name, inside the cluster's network if needed.
-- **Proof.** `kora conformance runtime <name>` checks one handle for two submits, `lookup` after a restart and while unreachable, adoption as `portable_handles` promises, the event file resumed without duplicate or lost lines, the deadline enforced with the control plane unreachable, `cancel` within grace, the constructed environment, the declared capabilities and a `release` that leaves no workspace behind. `test_vcs_runtime_cross_product` then runs the VCS you pair it with on it (protocols.md section 13). How kora's own CI would run a cluster within its ten-minute budget is not decided.
+- **Proof.** `kora conformance runtime <name>` checks one handle for two submits, `lookup` after a restart and while unreachable, adoption as `portable_handles` promises, the event file resumed without duplicate or lost lines, the deadline enforced with the control plane unreachable, `cancel` within grace, the constructed environment, the declared capabilities and a `release` that removes bulky workspace state while retaining retirement fences and dispatcher evidence. ADR-0017 adds the future delayed-submit/finalize, registry-loss, multi-incarnation, partition/cancel/hold, operator evidence and surface-parity cases in protocols.md section 13. `test_vcs_runtime_cross_product` then runs the VCS you pair it with on it (protocols.md section 13). How kora's own CI would run a cluster within its ten-minute budget is not decided.
 
 **Add an API operation.**
 
@@ -1670,6 +1683,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | hard limit, soft limit | a hard limit stops the session at the limit; a soft limit may be overshot by a set headroom and by what is already running | [10](#10-limits-cost-and-safe-retries) |
 | inbound event | a row for an authenticated webhook delivery or a graph-to-graph event, deduplicated before matching | 12 |
 | IR | the YAML document the compiler emits and the control plane reads | [11](#11-graph-definition) |
+| execution uncertainty | expired ownership or unavailable evidence while old execution/dispatch/publication may continue; retain reservations, original domain and every dispatcher grant until closure (ADR-0017) | 8 |
 | lease, lease epoch | a worker's 120-second claim on an attempt; the epoch grows on every claim and fences earlier holders | 8 |
 | node instance, node path | one node inside one run, addressed by a path such as `candidates[2]@3.review` | 2 |
 | normalised event stream | the session runner's `{i, at, kind, data}` lines in `private control journal` | [16](#16-session-runner) |
@@ -1688,7 +1702,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | skills | two things: files installed in the engineer's own agent, and skills attached to an agent node, whose digests deploy pins | [17](#17-thin-clients-and-the-console) |
 | strategy | where the next attempt of an agent node starts: `fresh`, `fresh_with_feedback` or `resume` | 9 |
 | sub-graph attempt | one pass over a retried sub-graph body; an integer on node instances, never an attempt row | 2 |
-| target key, target hold | the optional business identity of a run; a run holds it from the first attempt admitted under its key until it leaves `running` | 9 |
+| target key, target hold | the optional business identity of a run; a run holds it from the first attempt admitted under its key until it leaves `running` and all blocking execution/publication recovery is settled (ADR-0017) | 9 |
 | `VcsRef` | the artifact of a published change: repository, branch, commit, base commit, diff summary and the change request's URL | 1 |
 | wait | the row that is a waiting node: timer, approval, event, poll, retry back-off or admission back-pressure | 9 |
 | worker id | a worker's configured name, stable per host across restarts | 8 |

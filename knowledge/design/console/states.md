@@ -25,7 +25,7 @@ Shape says what colour says. The glyph is drawn in the node's corner opposite th
 | `waiting`, wait kind `timer` | blue | `running` | "timer · <remaining>" |
 | `waiting`, wait kind `event` or `poll` | blue | `running` | "waiting for <event name or sensor>" |
 | `waiting`, wait kind `retry_backoff` | blue | `running` | "retry in <remaining> · attempt n of m" |
-| `waiting`, wait kind `admission` | blue | `running` | "admission · concurrency limit", "admission · daily budget" or "target held · <since>"; the scope, the budget and the holding run in the panel |
+| `waiting`, wait kind `admission` | blue | `running` | "admission · concurrency limit", "admission · daily budget", "target held · <since>" or "execution recovery · <attempt>"; the scope, the budget and the holding run in the panel |
 | `succeeded` | green | `succeeded` | "in <duration>" |
 | `failed` | red | `failed` | the error class in one word (table below) |
 | `skipped` | gray, marked | `skipped` | "branch not taken" or "trigger rule" |
@@ -62,7 +62,7 @@ A node carries two lines and nothing else. The first line is the node's name, tr
 | `cancelled` | cancelled |
 | `config_error` | configuration error |
 
-A node under the runtime's infrastructure retry policy is blue with "worker lost · retry n of m" until the policy is exhausted, then red with "infrastructure".
+A node enters the runtime's infrastructure retry policy only after affirmative runtime termination and closure of every dispatcher/platform publication (ADR-0017). Then it is blue with "confirmed worker loss · retry n of m" until the policy is exhausted, then red with "infrastructure". An expired lease alone is blue "execution unknown · last observed <time>" and retains capacity; it is not a retry or a new attempt.
 
 ## Attempts (in the node panel)
 
@@ -72,11 +72,12 @@ A node under the runtime's infrastructure retry policy is blue with "worker lost
 | `submitted`, `running` | running on <worker>; last heartbeat; `desired_state` when `cancel` |
 | `finishing` | collecting: final artifacts being validated and stored after reconciled runtime publication; prior reconciliation remains visible in the timeline |
 | `succeeded`, `failed`, `cancelled` | the terminal word with the error class |
-| `lost` | lost: the runtime no longer knows the attempt; the infrastructure retry that followed |
+| `lost` | confirmed loss: original-domain retirement and every dispatcher/publication closure established; evidence provenance and the infrastructure retry that followed |
+| any non-terminal status with `execution_state=unknown` | original domain, recovery version/reason, last observation/time, every dispatcher grant, publication uncertainty, retained scopes and permitted actions; no replacement by time alone |
 
 ## Runs
 
-The run's colour and word in the header, on the runs list and in the traffic light are derived: red `failed`; green `succeeded`; gray `cancelled`; amber `waiting for you` when the run is `running` and its only live node instances wait for a person; otherwise blue `running` (`pending` is shown as `running` with "scheduling").
+The run's colour and word in the header, on the runs list and in the traffic light are derived: red `failed`; green `succeeded`; gray `cancelled`; amber `waiting for you` when the run is `running` and its only live node instances wait for a person; otherwise blue `running`; a recovery overlay always names retained holds on a terminal run and unknown/blocked execution on a live run without changing the API state word (`pending` is shown as `running` with "scheduling").
 
 ## Approval requests
 
@@ -98,6 +99,6 @@ The six states the architecture critique asked the console to keep apart ([archi
 | pending review | amber node and run; the Approvals waiting block; the review page | the bound commit, the facts and their provenance, the cost, the deadline | whether a reviewer on the code host has started | approve or reject on the review page; cancel |
 | stale evidence | red node "candidate moved"; the review page banner; the Approvals history | the bound commit, the observed head, the producing node to retry | what the new push contains | retry the producing node with feedback |
 | exhausted budget | red node "budget exhausted"; for a sub-graph, the element's segment | the budget, the spend, the attempt that crossed it | whether a larger budget would have succeeded | retry on a new graph version by a rerun; cancel |
-| unknown publish outcome | the attempt in `running`, runtime phase `publication`, with an event of reconciliation against the stored prepared revision; after an infrastructure failure, the red node naming the branch | the deterministic branch name, the commit when captured, which worker reconciles the exact prepared revision | whether the change request exists until the search before create answers | wait; after an infrastructure failure, retry the node; cleanup of the branch is the graph author's command node |
-| lost runtime | blue node "worker lost · retry n of m"; the timeline `attempt.lost` and `attempt.claimed`; the worker in System highlighted | the worker, when its lease expired, when the attempt became lost, how many infrastructure retries remain | whether the session is still running on an unreachable host | wait for the policy; cancel; restart the worker outside kora |
+| unknown publish outcome | runtime phase `publication` with a recovery reason and retained reservations | stored prepared revision/destination, operation, every pending dispatcher and reconciliation evidence | whether an earlier call can still take effect until authoritative closure | observe/stop via the operator command; wait for closure before retry or new publication; branch cleanup remains the graph author's command node |
+| unknown execution | blue recovery reason on the node or admission wait; System backlog and Targets include terminal runs with retained holds | original domain/version, last observation, earlier dispatcher grants, retained scopes, evidence provenance and operator command | whether old execution or an in-flight publication can still take effect | observe or stop through `kora reconcile`; attest actual termination and closure with evidence if the authority is permanently inaccessible; cancel does not release unresolved holds |
 | incompatible resume | the attempt's `strategy_fallback` in the panel and in the comparison | that `resume` fell back to `fresh_with_feedback` and why (runtime capability, missing handle, changed harness version) | what the lost session state held | nothing; the fallback is the designed behaviour |

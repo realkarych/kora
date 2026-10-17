@@ -2,6 +2,7 @@
 
 - Status: accepted, 2026-10-15; amended 2026-10-16 (compilation is client-side and never an API operation; [architecture critique of 2026-10-16, finding A02](../../knowledge/reviews/architecture-critique-2026-10-16.md#a02-compile-isolation), issue #15)
 - Reviewed: by the project owner, 2026-10-16
+- Clarified: 2026-10-17, the existing fourteen-tool count from ADR-0014 is preserved by ADR-0017; wording pending owner review
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-5, DD-16, DD-18, DD-28, requirements decision 16, FR section 0 (FR-0.0 to FR-0.4)
 - Related: [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md), [0013-implementation-stack.md](0013-implementation-stack.md)
@@ -19,7 +20,7 @@ The HTTP API (`/api/v1`) is the only implementation of every operation. Its Open
 Every other surface is a thin client with no logic of its own:
 
 - the Typer CLI over the shared Python client, returning the API response or error envelope verbatim under `--json`;
-- two curated MCP servers, `kora-authoring` and `kora-operating`, with 13 task-shaped tools in total; long operations (`kora_plan`, `kora_trigger`, `kora_retry`) are MCP Tasks, so an agent starts them and polls or awaits completion; both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
+- two curated MCP servers, `kora-authoring` and `kora-operating`, with fourteen task-shaped tools in total (ADR-0014); execution reconciliation uses existing `kora_admin` (ADR-0017); long operations (`kora_plan`, `kora_trigger`, `kora_retry`) are MCP Tasks, so an agent starts them and polls or awaits completion; both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
 - one skill package per harness (a Claude Code plugin, Codex skills), generated from the same reference material as the `kora_reference` tool and kept as files in each harness's own format;
 - the `kora web` console, whose only HTTP dependency is the generated TypeScript client.
 

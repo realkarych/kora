@@ -2,6 +2,7 @@
 
 - Status: accepted, 2026-10-15; amended 2026-10-16 (run and sub-graph budgets enforced by the scheduler on aggregate usage; [architecture critique of 2026-10-16, finding A11](../../knowledge/reviews/architecture-critique-2026-10-16.md#a11-aggregate-budget), issue #13)
 - Reviewed: by the project owner, 2026-10-16
+- Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (observation-gap completeness); wording pending owner review
 - Deciders: project owner, after the design review of 2026-10-15 (first cycle, production-readiness lens; second cycle, simplicity pass), see [review-2026-10-15.md](../../knowledge/reviews/review-2026-10-15.md)
 - Absorbs: DD-31, the cost-model requirements in FR section 9 and NFR section 8, the usage-completeness part of requirements decision 11, the `reasoning_tokens` item of DD-37
 - Related: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0008](0008-content-bound-approvals.md), [ADR-0011](0011-namespaces-and-personal-tokens.md), [ADR-0012](0012-no-transform-node.md)
@@ -30,7 +31,7 @@ A run of a kora graph can hold many agent sessions, retries and fan-out losers, 
 
 - Cost per accepted change, including failed attempts, retries and fan-out losers, is derivable offline from `artifact_lineage` and `usage_record` (NFR-8.3); usage records are retained forever by default.
 - Run and node views (CLI, API, the `kora_cost` MCP tool) show tokens, estimated cost and completeness per attempt; fan-out views aggregate across instances (FR-9.5).
-- A session can overshoot a soft budget by the headroom plus whatever the harness spends before the stream reports it; a run or sub-graph can overshoot by that amount per running session plus one heartbeat interval; the documentation must say so (NFR-8.2).
+- A session can overshoot a soft budget by the headroom plus whatever the harness spends before the stream reports it; with healthy reporting a run or sub-graph can overshoot by that amount per running session plus one heartbeat interval. During a partition, reporting staleness is unbounded and displayed spend is last-known/partial with its observation time (ADR-0017); the documentation must say so (NFR-8.2).
 - The cost formula and the limit arithmetic are among the few places where unit tests are warranted in this project.
 
 ## Where it is applied

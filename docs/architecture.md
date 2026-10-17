@@ -2,6 +2,8 @@
 
 Status: decided by the project owner on 2026-10-15 and 2026-10-16; reviewed by the project owner on 2026-10-16; the reasons behind each choice are in the [decision records](decisions/README.md). This page is the two-page map. The detailed diagrams (components inside the scheduler and the worker, one attempt end to end, deployment shapes), the full stack table with alternatives, and the glossary are in [knowledge/architecture/detailed.md](../knowledge/architecture/detailed.md); the normative specifications are in [knowledge/specs/](../knowledge/README.md).
 
+Execution-recovery amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; document wording pending line-by-line owner review. See [ADR-0017](decisions/0017-execution-uncertainty-and-safe-replacement.md).
+
 Publication-boundary amendment dated 2026-10-17: pending owner review; architectural direction recorded in [ADR-0016](decisions/0016-trusted-execution-and-publication.md).
 
 ## What kora is
@@ -112,7 +114,7 @@ Python 3.11+ with asyncio in one package `kora` (uv, hatchling) plus a `web/` fr
 - The API is the only implementation of operations; clients never contain logic, and a coverage test proves parity.
 - Agent sessions never reach kora; the tool-policy decision point runs inside the session runner, not in the control plane.
 - The scheduler never imports user Python; it reads the compiled graph document.
-- Workers never decide; they execute one attempt and report through the API, fenced by their lease epoch.
+- Workers execute one attempt and report through the API, fenced by their lease epoch. Lease expiry preserves unknown execution and its reservations; recovery observes the original domain and closes every old dispatcher before restoring platform writes. Replacement requires runtime termination plus dispatch/publication closure, and acquired target holds survive terminal run status until recovery is settled (ADR-0017).
 - Protocol implementations are loaded by entry points and never imported by name from core modules.
 - Standalone mode is the same code as a full deployment wired into one process: no feature, code path or table exists only in standalone mode, so what works there works in production.
 - The lifecycle supervisor owns a journal outside the candidate tree, seals the result after execution, and prepares publication in fresh metadata. The worker obtains late authorization and calls `finalize`; existing candidate commits are preserved, with an additional commit for uncommitted changes. Protected runtimes enforce these authority boundaries; local follows the lifecycle without hostile-code isolation (ADR-0016).

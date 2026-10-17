@@ -2,6 +2,8 @@
 
 Status: Reviewed by the project owner on 2026-10-16. Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
+Execution-recovery amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; document wording pending line-by-line owner review. See [ADR-0017](../decisions/0017-execution-uncertainty-and-safe-replacement.md).
+
 Publication-boundary amendment dated 2026-10-17: pending owner review; architectural direction recorded in [ADR-0016](../decisions/0016-trusted-execution-and-publication.md).
 
 ## 0. Design centre
@@ -19,10 +21,10 @@ Publication-boundary amendment dated 2026-10-17: pending owner review; architect
 
 ## 2. Reliability and durability
 
-- **NFR-2.1 [MVP]** All run, node, attempt and artifact state is durable in the metadata DB before any side effect is started; every runtime submission is keyed by the persisted attempt id and runtimes dedupe on it, so a crash between submit and handle persistence cannot double-start an attempt (FR-6.1a); after a crash of any kora component, in-flight sessions are recovered by attempt id and adopted through the runtime protocol. Adoption is fenced: every attempt carries a lease epoch, worker writes with a stale epoch are rejected, and a running attempt is reclaimed only after the runtime confirms the original worker is gone.
+- **NFR-2.1 [MVP]** All run, node, attempt and artifact state is durable in the metadata DB before any side effect starts; the original runtime domain and every worker incarnation/lease-generation grant are persisted before dispatch authority returns. Every runtime submission is keyed by the persisted attempt id and deduplicated. A fresh claim can observe/adopt the same original-domain execution; stale API writes are rejected. Lease expiry is execution uncertainty, never termination proof. Replacement requires affirmative runtime quiescence and closure of every old dispatcher and unresolved platform publication; durable runtime retirement serializes with delayed submit/finalize and survives release (FR-6.1a, ADR-0017).
 - **NFR-2.2 [MVP]** Every scheduler action is idempotent on (run id, node id, attempt id); triggers carry an idempotency key so that duplicate webhooks do not start duplicate runs.
-- **NFR-2.3 [MVP]** Liveness: each running attempt has a heartbeat; a stalled session (no heartbeat, or a healthy container with a stalled agent loop) is detected within a configurable interval and classified as `stalled`, retryable by policy.
-- **NFR-2.4 [MVP]** Preemption/infrastructure failure of a runtime is distinguished from agent failure (separate error classes), so that infrastructure loss does not consume agent retry attempts.
+- **NFR-2.3 [MVP]** Keep worker lease liveness and agent-loop liveness separate: lease expiry records unknown execution and enables recovery, while a stalled agent loop is detected and terminated by the supervisor within the configured interval. Neither heartbeat silence nor elapsed recovery time proves physical termination. A stalled failure is retryable by policy only after execution/dispatch/publication closure (ADR-0017).
+- **NFR-2.4 [MVP]** Preemption/infrastructure failure of a runtime is distinguished from agent failure (separate error classes), so that confirmed infrastructure loss does not consume agent retry attempts. Unknown execution remains non-terminal with unchanged retry counts and reservations; no replacement starts until termination and dispatch/publication closure is established (ADR-0017).
 - **NFR-2.5 [MVP]** Approval and sensor waits survive restarts and have an explicit timeout with a defined expiry behaviour; no wait is unbounded.
 
 ## 3. Performance
@@ -62,11 +64,11 @@ Publication-boundary amendment dated 2026-10-17: pending owner review; architect
 - **NFR-7.1 [MVP]** Single-command local start (`kora standalone`, SQLite) and single-command small deployment (`docker-compose up`: Postgres, an S3-compatible object store, scheduler, API, runtime). Helm chart is post-MVP.
 - **NFR-7.2 [MVP]** Database migrations are versioned and run by `kora db upgrade`; upgrades do not require draining running runs: migrations within a minor version are additive only, indexes are built concurrently, scheduler and API tolerate the previous schema version, and the documented upgrade order is database, scheduler, API, workers.
 - **NFR-7.3 [MVP]** Every component exposes health and readiness endpoints and structured logs; the scheduler exposes basic metrics (queue depth, running attempts, scheduling latency) in Prometheus format.
-- **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit) and limits are configurable without restart; workers register with the control plane and their liveness, the age of the oldest unclaimed attempt, webhook authentication failures, retention success and approval age are exported as metrics; a backup and restore procedure covering the database and the artifact store together is documented.
+- **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit, unknown execution count and oldest age, retained reservations/target holds and unresolved dispatcher/publication recovery) and limits are configurable without restart; workers register with the control plane and their liveness, the age of the oldest unclaimed attempt, webhook authentication failures, retention success and approval age are exported as metrics; a backup and restore procedure covering the database and the artifact store together is documented.
 
 ## 8. Cost governance
 
-- **NFR-8.1 [MVP]** Token counts per model per attempt are recorded with a completeness state (`complete`, `partial`, `unavailable`) and, for resumed sessions, as a delta of whole-session totals; USD-equivalent is always labelled as an estimate with its basis (harness-reported, price table, gateway) and the billing class of the credential used.
+- **NFR-8.1 [MVP]** Token counts per model per attempt are recorded with a completeness state (`complete`, `partial`, `unavailable`) and, for resumed sessions, as a delta of whole-session totals; USD-equivalent is always labelled as an estimate with its basis (harness-reported, price table, gateway) and the billing class of the credential used. An execution observation gap exposes last-known figures with `observed_at` and at most `partial` completeness, never fabricated zero or complete cost; late usage remains historical under fresh recovery claims (ADR-0017).
 - **NFR-8.2 [MVP]** Hard limits (timeouts, event counts) are enforced by kora from the event stream regardless of harness; soft USD limits are best-effort and documented as such; overshoot headroom is a configurable percentage.
 - **NFR-8.3 [target]** Cost-per-accepted-change (including failed attempts, retries and fan-out losers) is derivable from stored data without external systems.
 
