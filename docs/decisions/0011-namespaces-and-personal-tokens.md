@@ -5,6 +5,7 @@
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: requirements decision 15 (its "single token" part is superseded by requirements decision 20), DD-32, DD-19, DD-6
 - Related: [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0009-target-repository-trust-boundary.md](0009-target-repository-trust-boundary.md)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -46,5 +47,5 @@ There are no per-token rate limits in the MVP. The built-in authenticator is `st
 - [api-and-agent-surface.md §1, §2, §4, §6, §8](../../knowledge/specs/api-and-agent-surface.md)
 - [protocols.md §10](../../knowledge/specs/protocols.md); [data-model.md `api_token`, `approval_request`](../../knowledge/specs/data-model.md)
 - [scheduler.md §10](../../knowledge/specs/scheduler.md); [dsl.md §2](../../knowledge/specs/dsl.md)
-- [detailed.md §2, §7 (Authentication and Frontend rows)](../../knowledge/architecture/detailed.md)
+- [stack reference](../../knowledge/architecture/detailed.md#stack-per-component) (Authentication and Frontend rows)
 - [design-decisions-2026-10-15.md, DD-6, DD-19, DD-32](../../knowledge/reviews/design-decisions-2026-10-15.md)

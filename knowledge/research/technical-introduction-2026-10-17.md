@@ -2,17 +2,19 @@
 
 Checked: 2026-10-17. Baseline: `bd817fbf8d42643d639e3beccb67646a12183c9c`. Status: editorial research, not an architecture decision. Approved scope and plan: [issue #67](https://github.com/realkarych/kora/issues/67). The [technical introduction](../../docs/technical-introduction.md) requires line-by-line owner review.
 
+Historical source note, 2026-10-17: the audit and editorial choice below describe the stated baseline. The overview and internals links resolve to that immutable snapshot; the later consolidation in [issue #76](https://github.com/realkarych/kora/issues/76) does not change this research record.
+
 ## Reader and outcome
 
 The intended readers are the framework author, external contributors and adopters who study internals before using a system. They need a model of the core: its components, responsibilities, inputs and outputs, stored state and interactions. A user guide depends on later implementation and real examples.
 
 ## Source audit
 
-At the baseline, [internals.md](../architecture/internals.md) contains 1,733 lines, 21,190 whitespace-separated source words, 20 numbered chapters, three appendices and 24 Mermaid diagrams. Excluding fenced blocks leaves approximately 14,598 words. These are source measurements, not page counts. The knowledge index directs new contributors to read it front to back, and its first reading path is estimated at an hour.
+At the baseline, [internals.md](https://github.com/realkarych/kora/blob/bd817fbf8d42643d639e3beccb67646a12183c9c/knowledge/architecture/internals.md) contains 1,733 lines, 21,190 whitespace-separated source words, 20 numbered chapters, three appendices and 24 Mermaid diagrams. Excluding fenced blocks leaves approximately 14,598 words. These are source measurements, not page counts. The knowledge index directs new contributors to read it front to back, and its first reading path is estimated at an hour.
 
 The book prepares readers for implementation: it combines concepts with database entities, state transitions, invariants, provider contracts, future tests and contribution workflows. Shortening each chapter would retain that reference-oriented structure. Its dependency-upgrade example does provide a usable execution narrative.
 
-The [architecture overview](../../docs/architecture.md) contains 1,348 source words and two Mermaid diagrams. It is a two-page map of context, processes, stack and boundaries. The missing layer is an explanation connecting that map to graph execution. Both existing documents can keep their purposes.
+The [architecture overview](https://github.com/realkarych/kora/blob/bd817fbf8d42643d639e3beccb67646a12183c9c/docs/architecture.md) contains 1,348 source words and two Mermaid diagrams. It is a two-page map of context, processes, stack and boundaries. The missing layer is an explanation connecting that map to graph execution. Both existing documents can keep their purposes.
 
 There is no framework implementation or runtime test suite. [README.md](../../README.md), the [roadmap](../../docs/roadmap.md) and the internals status all say so. The introduction must explain design contracts without claiming successful runtime or isolation testing.
 
@@ -44,10 +46,10 @@ Decision records govern specifications. The introduction explains those contract
 | Scheduler and worker | Persisted intent and API-mediated workers: [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md), [scheduler](../specs/scheduler.md). Unlocked observations: [ADR-0021](../../docs/decisions/0021-external-observations-outside-transactions.md). |
 | Runtime, supervisor and harness | Authority, adapter placement, lifecycle and Docker/local boundaries: [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md), [runtime and harness protocols](../specs/protocols.md#2-runtime-fr-81). |
 | Persistence | Metadata, inline values, payloads, API-proxied transfer and private checkpoints: [data model](../specs/data-model.md), [storage protocol](../specs/protocols.md#7-artifact-storage-fr-44), ADR-0016. |
-| Run walkthrough | [Existing sequence](../architecture/internals.md#7-one-run-end-to-end), example IR and [ADR-0008](../../docs/decisions/0008-content-bound-approvals.md). Targets, acceptance and observations: [ADR-0019](../../docs/decisions/0019-immutable-run-target-identity.md), [ADR-0020](../../docs/decisions/0020-execution-capacity-and-bounded-run-acceptance.md), ADR-0021. |
+| Run walkthrough | [Existing sequence](https://github.com/realkarych/kora/blob/bd817fbf8d42643d639e3beccb67646a12183c9c/knowledge/architecture/internals.md#7-one-run-end-to-end), example IR and [ADR-0008](../../docs/decisions/0008-content-bound-approvals.md). Targets, acceptance and observations: [ADR-0019](../../docs/decisions/0019-immutable-run-target-identity.md), [ADR-0020](../../docs/decisions/0020-execution-capacity-and-bounded-run-acceptance.md), ADR-0021. |
 | Recovery, trust and limits | [ADR-0017](../../docs/decisions/0017-execution-uncertainty-and-safe-replacement.md), ADR-0016, ADR-0008, ADR-0020 and [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlines.md). |
 | Deployment and extensions | [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md), [ADR-0013](../../docs/decisions/0013-implementation-stack.md), [scheduler process layouts](../specs/scheduler.md#1-components-and-processes). |
-| Open mechanics | The internals book's [scheduler](../architecture/internals.md#12-scheduler), [persistence](../architecture/internals.md#14-data-model-and-persistence) and [wait/retry](../architecture/internals.md#9-waits-approvals-and-retries) chapters; [issue #48](https://github.com/realkarych/kora/issues/48). |
+| Open mechanics | The internals book's [scheduler](https://github.com/realkarych/kora/blob/bd817fbf8d42643d639e3beccb67646a12183c9c/knowledge/architecture/internals.md#12-scheduler), [persistence](https://github.com/realkarych/kora/blob/bd817fbf8d42643d639e3beccb67646a12183c9c/knowledge/architecture/internals.md#14-data-model-and-persistence) and [wait/retry](https://github.com/realkarych/kora/blob/bd817fbf8d42643d639e3beccb67646a12183c9c/knowledge/architecture/internals.md#9-waits-approvals-and-retries) chapters; [issue #48](https://github.com/realkarych/kora/issues/48). |
 
 The introduction preserves the documented uncertainty about API-to-scheduler entry points, some attempt transition writers and terminal run-failure aggregation. It explains scheduling policy and API mediation without choosing a new call mechanism. Later accepted ADR directions retain their pending wording-review status.
 

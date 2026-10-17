@@ -6,6 +6,7 @@
 - Deciders: project owner, after review of the first design drafts (DD-2, DD-21, DD-22), after the design review of 2026-10-15 (first cycle: DD-29) and after its second cycle (one exporter in MVP)
 - Absorbs: DD-2, DD-21, DD-22, the protocol part of DD-29; NFR section 5; requirements decision 14, the "policy protocol in MVP" part of requirements decision 19 and the "OTel as the only MVP exporter" part of requirements decision 20
 - Related: [ADR-0001](0001-own-control-plane.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0011](0011-namespaces-and-personal-tokens.md)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -59,5 +60,5 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 - [NFR-0.2, NFR-4.5, NFR-5.1, NFR-5.2, NFR-5.4, NFR-10.1, NFR-10.2, NFR-12.1](../requirements/non-functional.md)
 - [protocols.md §1 to §13](../../knowledge/specs/protocols.md)
 - [ir.md §4.1, §10 (`IR009`, `IR015`)](../../knowledge/specs/ir.md)
-- [detailed.md §4, §5 (the preparation and collection phases), §7 (plugins, observability), §8](../../knowledge/architecture/detailed.md)
+- [worker components](../../knowledge/architecture/detailed.md#components-inside-a-worker), [protected execution boundary](../../knowledge/architecture/detailed.md#protected-execution-boundary), [stack](../../knowledge/architecture/detailed.md#stack-per-component) and [extension seams](../technical-introduction.md#6-deployment-and-extension-seams)
 - [DD-2, DD-21, DD-22, DD-29](../../knowledge/reviews/design-decisions-2026-10-15.md)

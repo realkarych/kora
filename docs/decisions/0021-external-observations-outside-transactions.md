@@ -6,6 +6,7 @@
 - Resolves: issue #56
 - Amends: [ADR-0008](0008-content-bound-approvals.md) (observation and channel-delivery lifecycle)
 - Related: ADR-0002, ADR-0003, ADR-0005, ADR-0011, ADR-0013, ADR-0017, ADR-0018, ADR-0019, ADR-0020
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -48,6 +49,6 @@ This records a design, not an implementation or runtime test result. PostgreSQL/
 - [Data model section 14](../../knowledge/specs/data-model.md#14-external-observation-and-delivery-ownership-adr-0021): identities, lifecycles and future acceptance contracts
 - [Scheduler section 16](../../knowledge/specs/scheduler.md#16-external-observation-dispatch-adr-0021): phases, locks, limits, errors and recovery
 - [Protocol common rules and approval channel](../../knowledge/specs/protocols.md): cooperative calls, lookup, closure and conformance
-- [API and agent surface](../../knowledge/specs/api-and-agent-surface.md), [console](../console.md), [architecture reference](../../knowledge/architecture/detailed.md)
+- [API and agent surface](../../knowledge/specs/api-and-agent-surface.md), [console](../console.md), [scheduler components](../../knowledge/architecture/detailed.md#components-inside-the-scheduler)
 - [NFR-1.2, NFR-2.5, NFR-5.1 and NFR-7.3](../requirements/non-functional.md)
 - [Design review](../../knowledge/reviews/external-observation-design-review-2026-10-17.md)

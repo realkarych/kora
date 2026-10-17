@@ -6,6 +6,7 @@
 - Deciders: project owner
 - Related: [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0009](0009-target-repository-trust-boundary.md)
 - Resolves: [issue #51](https://github.com/realkarych/kora/issues/51); credential acquisition and principal identity remain [issue #43](https://github.com/realkarych/kora/issues/43)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -56,4 +57,4 @@ Docker uses separate candidate and publisher containers under one logical attemp
 - [Non-functional requirements](../requirements/non-functional.md): NFR-4.1 and NFR-4.7.
 - [Runtime/VCS contracts and conformance](../../knowledge/specs/protocols.md): sections 2, 4 and 13.
 - [Recovery](../../knowledge/specs/scheduler.md), [publication provenance](../../knowledge/specs/data-model.md), [public progress/error reporting](../../knowledge/specs/api-and-agent-surface.md).
-- [Detailed architecture](../../knowledge/architecture/detailed.md), [contributor introduction](../../knowledge/architecture/internals.md) and [console](../console.md).
+- [Protected execution boundary](../../knowledge/architecture/detailed.md#protected-execution-boundary), [run walkthrough](../technical-introduction.md#4-one-run-through-the-core) and [console](../console.md).

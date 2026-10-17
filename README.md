@@ -9,6 +9,6 @@ The project is in the design stage; there is no code yet.
 ## Documentation
 
 - [Technical introduction](docs/technical-introduction.md): start here to understand the core components, their connections and one complete run.
-- [docs/](docs/README.md): positioning, requirements, architecture overview, decision records, proposals and the roadmap, written for people.
+- [docs/](docs/README.md): positioning, technical introduction, requirements, decision records, proposals and the roadmap, written for people.
 - [knowledge/](knowledge/README.md): normative specifications, detailed diagrams, research, analyses and review records, loaded section by section by engineers and coding agents.
 - [AGENTS.md](AGENTS.md): rules for contributors, human or agent.

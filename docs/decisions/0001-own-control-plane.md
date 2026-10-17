@@ -5,6 +5,7 @@
 - Deciders: project owner, after the desk analysis of existing engines and the design review of 2026-10-15
 - Absorbs: DD-7, requirements decisions 6 and 12, NFR-5.5
 - Related: ADR-0003, ADR-0007, ADR-0008, ADR-0013
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -50,4 +51,4 @@ Kestra and Airflow become integration targets only: they start kora runs through
 - [NFR-5.5, NFR-1.2, NFR-0.1](../requirements/non-functional.md)
 - [FR-6.1](../requirements/functional.md) and [functional.md §13, decisions 6 and 12](../requirements/functional.md)
 - [positioning.md, "Evidence, hypotheses and open risks"](../positioning.md)
-- [architecture detailed.md §2](../../knowledge/architecture/detailed.md)
+- [component map](../technical-introduction.md#3-the-component-map)

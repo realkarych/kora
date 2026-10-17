@@ -6,6 +6,7 @@
 - Resolves: issue #55
 - Amends: [ADR-0014](0014-target-identity.md) (deferred-run occupancy and independent progress), [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md) (overlap before materialisation)
 - Related: ADR-0002, ADR-0003, ADR-0007, ADR-0017, ADR-0018, ADR-0019
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -58,4 +59,4 @@ The unreleased IR remains 1.0. This is a design change with future database/runt
 - [Scheduler](../../knowledge/specs/scheduler.md): start, promotion, admission, release, locks, retry, metrics and both databases
 - [IR](../../knowledge/specs/ir.md), [IR schema](../../knowledge/specs/ir.schema.json): existing concurrency fields and live cap source
 - [API and agent surface](../../knowledge/specs/api-and-agent-surface.md): counters, refusals, replay, diagnostics and client parity
-- [Internals](../../knowledge/architecture/internals.md), [architecture reference](../../knowledge/architecture/detailed.md), [console pages](../../knowledge/design/console/pages.md), [console states](../../knowledge/design/console/states.md)
+- [Scheduler components](../../knowledge/architecture/detailed.md#components-inside-the-scheduler), [console pages](../../knowledge/design/console/pages.md), [console states](../../knowledge/design/console/states.md)

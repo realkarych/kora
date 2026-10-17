@@ -1,267 +1,95 @@
-# kora MVP architecture: components, boundaries and stack
+# kora architecture reference
 
-Status: decided by the owner on 2026-10-15, revised after the design review ([review-2026-10-15.md](../reviews/review-2026-10-15.md)). This is the detailed companion of the two-page overview in [docs/architecture.md](../../docs/architecture.md), which repeats sections 1 and 2; the reasons behind the choices are in [docs/decisions/](../../docs/decisions/README.md). For a first reading in order, from one example run to each component, start with [internals.md](internals.md). This document is the map; the specifications in `knowledge/specs/` are the territory: [ir.md](../specs/ir.md) (what a graph is), [data-model.md](../specs/data-model.md) (what the control plane stores), [scheduler.md](../specs/scheduler.md) (who decides what and when), [protocols.md](../specs/protocols.md) (where adopters plug in), [api-and-agent-surface.md](../specs/api-and-agent-surface.md) (how humans and their agents operate it), [dsl.md](../specs/dsl.md) (how graphs are written). Diagrams follow the C4 levels (context, containers, components) in Mermaid so they render on GitHub.
+Status: non-normative reference, consolidated against the specifications and ADRs through ADR-0022 on 2026-10-17. The editorial consolidation is pending owner review in [issue #76](https://github.com/realkarych/kora/issues/76). These are planned components; diagrams and named conformance gates are not implementation evidence.
 
-## 1. System context (C4 level 1)
+Start with the [technical introduction](../../docs/technical-introduction.md). This reference keeps component and deployment views, the module/contract map, the stack inventory, canonical terms and unresolved implementation mechanics. For a change, use the [specification task index](../README.md#which-file-to-load-for-which-task), then the ADRs it cites. ADRs take precedence over specifications; neither is superseded by this reference.
+
+## Components inside the scheduler
 
 ```mermaid
 flowchart LR
-    classDef person fill:#f4f1ea,stroke:#8a7a5a,color:#222
-    classDef system fill:#dfe9f5,stroke:#3b6ea5,color:#111
-    classDef ext fill:#eeeeee,stroke:#888,color:#222,stroke-dasharray: 4 3
-
-    PT[Platform team<br/>installs kora, implements protocols,<br/>publishes presets, operates it]:::person
-    ENG[Engineer in a product or data team<br/>authors graphs in Python,<br/>owns outcomes]:::person
-    UA[Engineer's own coding agent<br/>Claude Code or Codex session<br/>using kora's MCP server and skills]:::person
-
-    KORA((kora<br/>control plane for graphs<br/>of coding-agent sessions)):::system
-
-    HARN[Coding-agent harnesses<br/>claude, codex binaries<br/>+ model APIs or gateway]:::ext
-    VCS[VCS and code host<br/>git + GitHub/GitLab, or a non-git VCS + an in-house code host]:::ext
-    RT[Execution infrastructure<br/>host, Docker, sandbox provider,<br/>Kubernetes, enterprise CI]:::ext
-    SEC[Secrets backend<br/>env/file, Vault, enterprise]:::ext
-    OBS[Observability backends<br/>OTel collector, Langfuse, Datadog, custom]:::ext
-    SRC[Event sources<br/>webhooks from code host, monitoring, other graphs]:::ext
-
-    PT -->|deploys, configures, publishes presets| KORA
-    ENG -->|compile, deploy, trigger, inspect, approve<br/>via CLI, API, web console| KORA
-    UA -->|same operations via MCP tools| KORA
-    KORA -->|submits sessions, streams events| RT
-    RT -->|runs| HARN
-    KORA -->|checkout, publish branch,<br/>open and watch change requests| VCS
-    KORA -->|resolves secret references| SEC
-    KORA -->|exports spans, metrics, events| OBS
-    SRC -->|webhooks, polled conditions| KORA
+    subgraph phases [Short database phases]
+        START[Start acceptance and pending promotion]
+        READY[Materialisation, readiness and CEL evaluation]
+        ADMIT[Admission and capacity]
+        WAIT[Wait handling and approval intent]
+        LIFE[Liveness, deadlines, completion and retry]
+        RET[Retention]
+    end
+    DB[(Metadata DB)]
+    DISPATCH[Bounded external dispatcher]
+    PROVIDERS[Sensor, approval-channel and VCS providers]
+    START & READY & ADMIT & WAIT & LIFE & RET <-->|read and mutate durable state| DB
+    START & WAIT -->|schedule observations and delivery| DISPATCH
+    DISPATCH <-->|claim and apply in short transactions| DB
+    DISPATCH -->|bounded calls outside transactions| PROVIDERS
 ```
 
-Agent sessions inside a graph never call kora. They receive typed inputs through the workspace and the prompt and leave typed outputs for the worker to collect (FR-0.0).
+The diagram identifies responsibilities, not a prescribed pass schedule or lock implementation. The [loop](../specs/scheduler.md#2-the-scheduling-loop), [admission](../specs/scheduler.md#6-concurrency-limits-fr-610), [external dispatcher](../specs/scheduler.md#16-external-observation-dispatch-adr-0021) and [deadline guards](../specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022) own the rules.
 
-## 2. Containers (C4 level 2)
+## Components inside a worker
+
+```mermaid
+flowchart LR
+    API[HTTP API]
+    subgraph worker [Worker orchestration]
+        CLAIM[Claim and recovery loop]
+        SEAL[Seal logical request and deadline binding]
+        PLAN[Request workspace target and VCS plans]
+        SUBMIT[Submit by attempt id]
+        RELAY[Relay events and counters]
+        COLLECT[Collect outputs and usage]
+        FINAL[Coordinate late publication authorization]
+    end
+    RT[Runtime protocol]
+    VCS[VCS protocol]
+    RUN[Runtime-managed lifecycle supervisor]
+    CLAIM -->|claim, heartbeat, recovery reports| API
+    CLAIM --> SEAL --> PLAN --> SUBMIT
+    SEAL -->|persist before preparation effects| API
+    PLAN -->|workspace target| RT
+    PLAN -->|checkout and publish plans| VCS
+    SUBMIT --> RT
+    RT -->|launch and supervise| RUN
+    RUN -->|private journal through runtime| RELAY
+    RELAY --> COLLECT -->|artifacts, transitions, usage| API
+    RELAY -->|sealed result and inspection| FINAL
+    FINAL -->|request current authority| API
+    FINAL -->|finalize when publication is required| RT
+```
+
+The worker reports through the API; runtime-managed supervision enforces session limits. This collaboration view does not assign the unresolved price-table writer. [Runtime lifecycle](../specs/protocols.md#2-runtime-fr-81), [VCS plans](../specs/protocols.md#4-vcs-fr-52) and [immutable records](../specs/data-model.md#11-immutable-contracts-and-execution-records-adr-0018) define the handoffs. For interruptions, use [original-domain recovery](../specs/scheduler.md#3-submission-execution-uncertainty-and-recovery): lease expiry, cancellation and deadline expiry do not themselves prove closure or release reservations.
+
+## Protected execution boundary
 
 ```mermaid
 flowchart TB
-    classDef proc fill:#dfe9f5,stroke:#3b6ea5,color:#111
-    classDef store fill:#fff4d6,stroke:#b8860b,color:#111
-    classDef client fill:#e8f5e9,stroke:#2e7d32,color:#111
-    classDef plugin fill:#f3e5f5,stroke:#7b1fa2,color:#111
-    classDef ext fill:#eeeeee,stroke:#888,color:#222,stroke-dasharray: 4 3
-
-    subgraph clients [Clients of the API, thin by principle]
-        CLI[kora CLI]:::client
-        MCP[kora mcp<br/>two curated servers: authoring, operating;<br/>stdio per user session or /mcp on the API]:::client
-        SKILLS[Harness skills<br/>teach the user's agent the API]:::client
-        WEB[kora web<br/>React SPA, full console in MVP:<br/>approvals, runs, live graph, attempts,<br/>logs, cost, graphs; served by kora api]:::client
+    W[Worker]
+    API[HTTP API]
+    subgraph trusted [Runtime-managed trusted control]
+        S[Lifecycle supervisor and harness adapter]
+        J[Private control journal and checkpoint]
+        E[Common plan executor]
+        P[Publication environment: sealed input and fresh metadata]
     end
-
-    subgraph cp [Control plane]
-        API[kora api<br/>HTTP API /api/v1, OpenAPI,<br/>webhook and worker endpoints, MCP over HTTP,<br/>serves kora web static files, auth]:::proc
-        SCHED[kora scheduler<br/>stateless passes: triggers, readiness,<br/>admission, waits, timeouts, completion,<br/>clear downstream; retention and<br/>bounded observation dispatcher]:::proc
-        DB[(Metadata DB<br/>PostgreSQL; SQLite in standalone)]:::store
-        ART[(Artifact storage<br/>payloads and transcripts by digest;<br/>local FS or S3-compatible in MVP)]:::store
+    subgraph candidate [Candidate domain]
+        C[Harness or command, tools and descendants]
     end
-
-    subgraph workers [Workers, one per runtime name, outbound-only]
-        W1[kora worker --runtime local]:::proc
-        W2[kora worker --runtime docker]:::proc
-        W3[kora worker --runtime inhouse_ci<br/>adopter's, inside their network]:::proc
-    end
-
-    subgraph plugins [Protocol implementations, loaded by entry points]
-        P_RT[runtime]:::plugin
-        P_HA[harness adapter<br/>claude: Agent SDK, codex: app-server;<br/>acp after MVP]:::plugin
-        P_VCS[vcs<br/>git; inhouse_vcs by adopter]:::plugin
-        P_APR[approval channel<br/>cli/api, vcs change request]:::plugin
-        P_SEC[secrets]:::plugin
-        P_AST[artifact storage<br/>local, s3]:::plugin
-        P_ATY[artifact type]:::plugin
-        P_OBS[observability exporter]:::plugin
-        P_AUTH[authentication]:::plugin
-        P_SEN[sensor]:::plugin
-        P_POL[policy<br/>allow_deny; Cedar, OPA later]:::plugin
-    end
-
-    HARN[claude / codex binaries<br/>fixed per installation]:::ext
-    EXT_VCS[Code host]:::ext
-    EXT_OBS[Observability backends]:::ext
-    EXT_SRC[Webhook sources]:::ext
-
-    CLI -->|HTTPS, bearer token| API
-    MCP -->|HTTPS, user's token| API
-    SKILLS -.->|used by the user's agent through| MCP
-    WEB -->|HTTPS, user's token, generated TS client| API
-    EXT_SRC -->|HMAC or bearer| API
-
-    API <-->|SQL| DB
-    SCHED <-->|SQL, row claims| DB
-    API -->|store uploads, serve downloads,<br/>through the artifact storage protocol| ART
-
-    W1 & W2 & W3 -->|claim with domain and incarnation,<br/>lease epoch, heartbeat,<br/>upload segments and artifacts: HTTPS only| API
-
-    W1 & W2 & W3 --> P_RT & P_HA & P_VCS & P_SEC & P_POL
-    P_HA --> HARN
-    P_VCS --> EXT_VCS
-    SCHED --> P_SEN & P_APR
-    API --> P_AUTH & P_APR & P_ATY & P_AST
-    API & SCHED & W1 & W2 & W3 --> P_OBS --> EXT_OBS
+    HOST[Code host]
+    W -->|submit workload through runtime| S
+    S -->|narrow launch and SDK channel| C
+    S -->|authoritative phase results| J
+    W -->|tail through runtime| J
+    S -->|prepare, seal and inspect| E
+    E --> P
+    W -->|obtain late authorization| API
+    W -->|finalize through runtime| E
+    P -->|publish fixed revision after authorization| HOST
 ```
 
-Responsibilities, in one line each:
+This is an authority view, not a fixed process layout. Protected runtimes keep control journals and publication credentials outside candidate authority; negotiated worker-host placement must preserve that boundary. The supervisor has no control-plane API credential. Local follows the lifecycle for trusted development without hostile-code isolation. The saved inherited deadline reaches every managed preparation/execution/publication placement. [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md), [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlines.md) and the [runtime conformance gates](../specs/protocols.md#13-conformance-suites-nfr-102) define and test the guarantees.
 
-| container | owns | never does |
-|---|---|---|
-| `kora api` | the only implementation of every operation; authentication (user and service principals); canonical bounded start acceptance with durable run/skip receipts before webhook acknowledgement; wait-directed inbound signals; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | physical admission or pass decisions in routers (they delegate to shared scheduler entry points); running sessions; UI logic |
-| `kora web` | the production web console, full in MVP (FR-7.3) and held to the user-experience bar of NFR-13.1: approvals, runs, the live graph with node states and timeline, attempts with artifacts and the diff between them, live session logs, cost per run, node and attempt, graphs and their versions; graph editing post-MVP; a thin client of the API through a TypeScript client generated with `@hey-api/openapi-ts`; opaque server-side session cookie, CSRF protection, CSP | logic of its own; direct database access; designed in [docs/console.md](../../docs/console.md) before it is built ([ADR-0015](../../docs/decisions/0015-web-console-design.md)) |
-| `kora scheduler` | short locked database phases; bounded cooperative observation/delivery calls outside all transactions and locks; approval intent with run cost; clear-downstream; batched retention | calling runtimes or harnesses |
-| `kora worker` | claiming `created` attempts and original-domain recovery of unresolved attempts through the API, including cancelled/superseded attempts of terminal runs; sealing its nonsecret logical request and execution policy through the API before allocation/preparation, then asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; closing all earlier dispatcher grants/operations before new platform writes, obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
-| Metadata DB | every entity in data-model.md; the only run state; row claims with `SELECT … FOR UPDATE SKIP LOCKED` and the run lock (an advisory lock per run) on Postgres | payload bytes |
-| Artifact storage | payload bytes by digest: artifacts, transcripts, live segments, saved request content and content-bearing derived results; explicit availability and active/recovery holds (ADR-0018) | metadata |
-| `kora mcp` | the authoring and operating MCP servers for the user's own harness: 14 curated, task-shaped tools, long operations as MCP Tasks; forwards with the user's token, whose default has no `approve` flag | any logic of its own; serving skills (they are files in the harness's own format) |
-| `kora standalone` | api, scheduler and a local worker as coroutines in one process on SQLite; the worker uses the same API client over an in-process ASGI transport | production use |
-
-Workers talk to the API and only to the API (DD-13, design review finding [workers through the API only](../reviews/review-2026-10-15.md#workers-through-api-only)): an adopter's worker inside a closed network needs one outbound HTTPS route and no database credentials, which is the enterprise-runtime placement the acceptance test requires.
-
-## 3. Components inside the scheduler (C4 level 3)
-
-```mermaid
-flowchart LR
-    classDef c fill:#dfe9f5,stroke:#3b6ea5,color:#111
-    classDef store fill:#fff4d6,stroke:#b8860b,color:#111
-
-    DB[(Metadata DB)]:::store
-    T[Trigger pass<br/>canonical cron/sensor/graph starts,<br/>bounded acceptance and overlap]:::c
-    M[Pending promotion each tick, then materialise<br/>IR to node instances,<br/>lazy subgraph and fan-out bodies]:::c
-    R[Readiness evaluator<br/>query: pending instances with terminal upstreams,<br/>input resolution, consumed_versions]:::c
-    B[Branch and collection<br/>CEL over artifacts, fan-out list collection]:::c
-    A[Admission<br/>concurrency and daily budget per namespace,<br/>graph, runtime; distinct executing runs;<br/>independent target hold; attempt row]:::c
-    W[Wait manager<br/>timers, approvals, events, polls,<br/>retry back-off; no worker held]:::c
-    L[Liveness and timeouts<br/>heartbeats, stall_after, inherited node/subgraph/run timeouts]:::c
-    C[Completion and retry<br/>policies, strategies, sub-graph attempts,<br/>previous_attempt wiring]:::c
-    I[Clear downstream<br/>one transaction on manual retry<br/>or a new sub-graph attempt]:::c
-    RET[Retention task<br/>batched, low priority, refcounted blobs]:::c
-    CEL[CEL evaluator]:::c
-    OBS[Bounded async dispatcher<br/>claim, unlocked call, compare and apply;<br/>durable observation and delivery owners]:::c
-    SEN[Sensor protocol]:::c
-    APR[Approval channel protocol]:::c
-    VREAD[VCS reads]:::c
-
-    T --> M --> R --> B --> A
-    A --> W
-    W --> R
-    L --> C --> I --> R
-    T & W --> OBS
-    OBS --> SEN & APR & VREAD
-    OBS <-->|claim and apply only| DB
-    B --> CEL
-    C --> CEL
-    T & M & R & B & A & W & L & C & I & RET <--> DB
-```
-
-Canonical start is shared with the API; accepted webhook receipts are never converted into a second run. Outstanding usage, physical execution-run usage and target holds have separate predicates (ADR-0020, data-model section 13). Pending promotion is revisited each tick independently of touched-run filtering. Fan-out retains its unfinished-body cap through waits. Passes use short transactions with run-first and ordered scope locks; graph caps are live across versions, while execution semantics stay pinned; only disposable bounded call tasks/credits are in memory; authoritative owner tokens, due work and delivery intent stay in rows (NFR-1.2, ADR-0021). Due observation/delivery discovery is independent of touched runs. A future scheduler replica must explicitly budget aggregate integration concurrency; claims preserve state safety but do not create a fleet-wide semaphore. Calls and credential/content resolution hold no DB transaction/connection/lock. Installed providers have a bounded cooperative lifecycle, including standalone; arbitrary blocking Python has no hard containment. See [scheduler section 16](../specs/scheduler.md#16-external-observation-dispatch-adr-0021).
-
-## 4. Components inside a worker (C4 level 3)
-
-```mermaid
-flowchart LR
-    classDef c fill:#dfe9f5,stroke:#3b6ea5,color:#111
-    classDef plugin fill:#f3e5f5,stroke:#7b1fa2,color:#111
-    classDef ext fill:#eeeeee,stroke:#888,color:#222,stroke-dasharray: 4 3
-
-    CL[Claim loop<br/>execution and recovery claims via the API,<br/>domain, incarnation, persisted dispatcher grant,<br/>lease epoch, observe/adopt the original attempt]:::c
-    WS[Plan requester<br/>asks runtime for the workspace target,<br/>VCS for the checkout and publish plans]:::c
-    CFG[Session spec builder<br/>resolved node config to SDK options:<br/>agents, MCP, skills, schema, prompt render]:::c
-    SUB[Submitter<br/>runtime.submit keyed by attempt id,<br/>constructed env, secrets as env vars in MVP]:::c
-    RUN[Lifecycle supervisor<br/>prepares, launches candidate, seals, inspects,<br/>publishes only after late finalize,<br/>hosts the harness adapter: Claude Agent SDK,<br/>Codex app-server client, ACP after MVP,<br/>sole enforcer of max_events, budget, stall_after,<br/>answers tool-policy hooks, writes private control journal]:::c
-    STR[Event tailer<br/>reads the normalised stream from the stored offset,<br/>relays counters, bounded queue spilling to disk]:::c
-    COL[Output collector<br/>VcsRef from reconciled publication,<br/>structured output, CommandResult, AgentSession]:::c
-    USG[Usage recorder<br/>tokens per model, completeness state,<br/>price table snapshot]:::c
-    UP[Uploader<br/>event segments, artifacts, heartbeats<br/>with lease epoch, to the API]:::c
-
-    P_RT[runtime protocol]:::plugin
-    P_HA[harness adapter]:::plugin
-    P_POL[policy protocol]:::plugin
-    P_VCS[vcs protocol]:::plugin
-    P_SEC[secrets protocol]:::plugin
-    HARN[claude / codex process<br/>ACP agents after MVP<br/>inside the runtime]:::ext
-
-    CL --> WS --> CFG --> SUB --> RUN --> STR --> COL --> UP
-    STR --> USG --> UP
-    WS --> P_VCS
-    WS & SUB --> P_RT
-    CFG --> P_HA
-    RUN --> P_HA & P_POL
-    SUB --> P_SEC
-    RUN --> HARN
-```
-
-The deployment stores the used type closure by value and binds deployment identity to the canonical IR plus resolved contract (ADR-0018). Each attempt stores exact input bindings even without outputs. The API-sealed request is immutable logical content; current authority/credentials are separate, while actual checkout, image, harness and fallback are later observations through the existing journal/events. Saved contracts govern API validation and scheduler-only branch/collection/approval consumers too. See [data-model section 11](../specs/data-model.md#11-immutable-contracts-and-execution-records-adr-0018) for expiry, access and upgrade compatibility.
-
-## 5. One attempt, end to end
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant S as kora scheduler
-    participant DB as Metadata DB
-    participant W as kora worker (docker)
-    participant API as kora api
-    participant V as vcs (git)
-    participant R as runtime (docker)
-    participant H as lifecycle supervisor + harness adapter
-    participant AS as artifact storage
-
-    S->>DB: node ready → attempt(created) with immutable exact input bindings
-    W->>API: claim created attempts for runtime=docker
-    API->>DB: persist original domain and incarnation/dispatcher grant, claimed, epoch+1, lease 120 s
-    W->>API: seal nonsecret request, check expected policy revision
-    API->>AS: persist request payload
-    API->>DB: save request descriptor, semantic digest and policy once
-    API-->>W: sealed request identity
-    W->>R: workspace target? → root /workspace, no host path
-    W->>V: checkout_plan(repo, rev, root) → CheckoutPlan and publish_plan(…) → PublishPlan
-    W->>R: submit binds saved request and derived plans, authority separate → handle
-    W->>API: attempt → submitted(handle) [epoch]
-    H->>H: preparation phase: execute CheckoutPlan in the root → WorkspaceRef
-    H-->>R: phase event (preparation succeeded, WorkspaceRef) to private control journal
-    loop session
-        H->>H: SDK message → normalised event, policy hook before each tool call
-        H->>H: enforce max_events, budget, stall timer (paused during a tool call)
-        H-->>R: append to private control journal
-        R-->>W: tail from offset
-        W->>API: upload segment (bounded queue, spill to disk) [epoch]
-        API->>AS: put by digest
-        W->>API: heartbeat every 15 s [epoch] → desired_state
-    end
-    alt limit exceeded, stalled, or desired_state = cancel
-        W->>R: cancel(handle, grace)
-        W->>R: retire attempt, close local gate and settle all operations
-        W->>R: record_dispatcher_quiescence
-        W->>API: relay runtime/dispatcher closure, then terminal outcome [epoch]
-    else result received
-        H->>H: export, stop candidate domain, seal private input
-        H->>H: prepare exact revision in fresh metadata, inspect history
-        H-->>R: checkpoint PreparedPublication, awaiting_authorization
-        R-->>W: prepared revision and destination digests
-        W->>R: verify every earlier dispatcher/operation closed
-        W->>API: fenced heartbeat → desired_state
-        W->>V: obtain late publication authorization
-        W->>R: finalize(handle, authorization)
-        R->>H: trusted control channel: publish fixed revision/destination
-        H-->>R: persist reconciled VcsRef
-        R-->>W: same VcsRef on repetition/adoption
-        W->>API: upload transcript, structured output, files [epoch]
-        API->>AS: put by digest
-        W->>R: confirm runtime quiescence, close local gate and settle all operations
-        W->>R: record_dispatcher_quiescence
-        W->>API: closure evidence, artifact versions, usage, attempt → finishing [epoch]
-    end
-    S->>DB: completion under run lock: full result accepted,<br/>target-source staging promoted with immutable key, retry/collection
-```
-
-Lease expiry records `execution_state=unknown` and retains every original reservation; it does not terminalize the attempt after any delay (ADR-0017). Recovery observes/adopts the same original domain, and earlier dispatcher grants remain barriers to platform writes. `retire` serializes with delayed submit/finalize, while independent worker-host/code-host calls require their own closure evidence. The affected run admits no new attempt until all execution/publication recovery settles. A previously acquired target hold survives terminal run status until the ordinary release condition and this barrier are both satisfied. Operator reconciliation persists observe/stop intent or records evidenced human attestation through the API, CLI and existing `kora_admin`; no scheduler runtime call or new coordination service is introduced.
-
-A declared target source stages all its outputs until complete-result acceptance binds or compares its immutable run key and succeeds in one transaction (ADR-0019). A changed valid key fails with config_error and leaves no current exported result; wrapper/collector exports own rows without changing child history. Read-only replay uses full payload identity, not a selected-field digest. Initial binding acquires no hold, and releasing a hold never releases identity. Pre-binding/body work and prior external effects remain outside that barrier. See [data-model section 12](../specs/data-model.md#12-immutable-run-target-identity-adr-0019).
-
-## 6. Deployment shapes
+## Deployment shapes
 
 ```mermaid
 flowchart TB
@@ -287,7 +115,7 @@ flowchart TB
 
     subgraph enterprise [organisation: control plane + workers in other networks]
         EA[kora api x n behind a load balancer]:::box
-        ES[kora scheduler x 1..n]:::box
+        ES[kora scheduler x1 in MVP]:::box
         EDB[(PostgreSQL HA)]:::box
         EFS[(S3-compatible artifact storage)]:::box
         EW1[worker: docker pool]:::box
@@ -298,17 +126,33 @@ flowchart TB
     end
 ```
 
-The three shapes run the same code; only process layout, database driver and artifact storage implementation change (NFR-0.1, NFR-7.1): standalone uses `local`, docker-compose ships an S3-compatible object store next to PostgreSQL and uses `s3` (FR-12.3), and an organisation points `s3` at its own S3-compatible service. `s3` is in MVP because session segments at the target scale do not fit local disk ([load estimate](../analysis/control-plane-load-estimate.md)).
+These layouts use the same scheduling code and schema. [Standalone](../specs/scheduler.md#10-standalone-sqlite-versus-postgres) changes process layout, database driver and storage provider. The MVP uses one scheduler; [replication](../specs/scheduler.md#8-restart-and-multi-scheduler-safety) and aggregate external-call budgets require the stated future constraints.
 
-## 7. Stack per component
+## Module and contract map
 
-Rows marked *decided* were settled by the owner on 2026-10-15 or follow from earlier decisions; rows marked *proposed* are defaults the owner has not objected to and can change without affecting the architecture.
+Paths below are planned package locations from the stack decision, not a claim that implementation exists. Shared-component placement remains [open](#open-implementation-questions).
+
+| Planned area | Contract to read before changing it |
+|---|---|
+| `src/kora/ir`, `src/kora/dsl` | [IR and validation](../specs/ir.md), [author-side compilation](../specs/dsl.md); the compiled schema is the API/scheduler boundary. |
+| `src/kora/api` | [HTTP resources and errors](../specs/api-and-agent-surface.md#2-resources-and-operations); [scheduler entry points](../specs/scheduler.md#12-execution-backend-boundary-nfr-55); [persistence and state machines](../specs/data-model.md). |
+| `src/kora/scheduler` | [Passes](../specs/scheduler.md), [capacity and locks](../specs/data-model.md#13-run-acceptance-and-execution-capacity-adr-0020), [waits and approvals](../specs/scheduler.md#5-waits-hold-no-worker-nfr-13). |
+| `src/kora/worker` | [API-mediated claims/recovery](../specs/scheduler.md#3-submission-execution-uncertainty-and-recovery), [runtime workload](../specs/protocols.md#2-runtime-fr-81), [VCS plans](../specs/protocols.md#4-vcs-fr-52). |
+| `src/kora/protocols`, `src/kora/plugins/<protocol>/` | [Provider metadata and loading](../specs/protocols.md#1-common-rules); core depends on protocols, implementations register through `kora.provider`. |
+| `src/kora/cli`, `src/kora/mcp`, `web/` | [Shared API surface and parity](../specs/api-and-agent-surface.md); [console design](../../docs/console.md). |
+| `conformance/`, `tests/` | [Provider conformance](../specs/protocols.md#13-conformance-suites-nfr-102), [testing rules](../../AGENTS.md#testing); [standalone parity](../specs/scheduler.md#10-standalone-sqlite-versus-postgres). |
+
+Cross-component changes also consult the owners of [content-bound approvals](../../docs/decisions/0008-content-bound-approvals.md), [cost accounting](../../docs/decisions/0010-cost-accounting-and-limits.md), [redaction and secrets](../specs/protocols.md#6-secrets-fr-101), [metrics](../specs/scheduler.md#11-metrics-and-health-nfr-73) and [inherited deadlines](../../docs/decisions/0022-inherited-execution-deadlines.md). These links replace a second catalog of rules and future test names.
+
+## Stack per component
+
+The inventory is maintained under [AGENTS.md](../../AGENTS.md#code). *Decided* entries follow [ADR-0013](../../docs/decisions/0013-implementation-stack.md) and the cited decisions; *proposed* entries remain implementation candidates.
 
 | component | stack | status | alternatives considered |
 |---|---|---|---|
 | Language and runtime | Python 3.11+ (NFR-11.1), `asyncio` throughout | decided | — |
 | Packaging | monorepo: one distribution `kora` with extras (`kora[postgres]`, `kora[docker]`, `kora[otel]`); `uv` for dependency management and `hatchling` as build backend (kept over `uv_build` because the embedded web build needs a custom build hook); `src/` layout; the frontend lives in `web/` (pnpm) and its production build is embedded into the Python package at build time, so one `pip install` and one image carry everything | decided | Poetry; `uv_build`; multi-package workspace; separate frontend repository |
-| IR models and JSON Schema | Pydantic v2 models as the single definition; `model_json_schema()` publishes `ir.schema.json`; YAML read/write with `ruamel.yaml` (keeps comments for lock-file style output) | decided (Pydantic), proposed (ruamel) | PyYAML (no round-trip) |
+| IR models and JSON Schema | Pydantic v2 models as the single definition; `model_json_schema()` publishes `ir.schema.json`; YAML read/write with `ruamel.yaml` (keeps comments for lock-file style output) | decided (ADR-0013) | PyYAML (no round-trip) |
 | Expression language | CEL (DD-3) through the Rust-backed `common-expression-language` Python binding, plus kora's own schema-driven checker for the `inputs.*` environment and the CEL conformance suite in CI (`cel-python` has no static checking) | decided | `cel-python` |
 | Prompt templates | Jinja2 `SandboxedEnvironment` (DD-11) | decided | — |
 | HTTP API | FastAPI + Pydantic v2; OpenAPI published for the web client generator and the parity coverage test; NDJSON streaming for logs and events; segment and transcript uploads exempt from the 4 MB body limit; `uvicorn` | decided | Litestar; Django REST |
@@ -322,28 +166,18 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | Policy | `allow_deny` reference implementation of the policy protocol, invoked by the session runner from harness pre-tool-call hooks (DD-29); Cedar (`cedar-python`) and OPA as plugins later | decided | harness-native allowlists only |
 | Harness adapters | programmatic interfaces instead of CLI output (DD-27): Claude Agent SDK for Python (`claude-agent-sdk`) and a small kora client speaking the `codex app-server` JSON-RPC protocol directly over stdio (the Codex SDK exists only for TypeScript) in MVP; after MVP an ACP adapter (`agent-client-protocol` JSON-RPC over stdio) for OpenCode, Pi, Gemini and others, through the same protocol and conformance suite (ADR-0004); hosted entirely by the session runner inside the runtime, which is the sole enforcer of `max_events`, soft budget and `stall_after` from the SDK event stream; harness binaries fixed per installation image with the auto-updater off and a tested version range checked at worker start (DD-14) | decided | CLI JSONL parsing (`claude -p --output-format stream-json`, `codex exec --json`) |
 | Local runtime | subprocess on the worker host with a per-attempt temp workspace | decided | — |
-| Docker runtime | Docker Engine API through `aiodocker` (async) or `docker` SDK; one logical attempt handle, candidate container and separate publisher container, host-side supervisor/control state, private sealed workspace transfer, egress rules via container network config; credential proxy as a sidecar when enabled | proposed | shelling out to the `docker` CLI (simpler, harder to test) |
+| Docker runtime | Docker Engine API through `aiodocker` (async); one logical attempt handle, candidate container and separate publisher container, host-side supervisor/control state, private sealed workspace transfer, egress rules via container network config; credential proxy as a sidecar after MVP (ADR-0004) | decided (ADR-0013, ADR-0016); proxy deferred | shelling out to the `docker` CLI (simpler, harder to test) |
 | VCS (git) | `git` CLI via subprocess for trusted checkout, sealed object import/raw-tree preparation and fixed-revision push; code-host APIs via `httpx` (GitHub, GitLab) for change requests and status | proposed | dulwich/pygit2 (no benefit over the CLI for MVP) |
 | Artifact storage | two implementations in MVP (FR-4.4, ADR-0005): `local`, a filesystem tree by digest, for standalone and development, and `s3` for any S3-compatible service through `obstore` (Rust-backed, async; GCS and Azure reachable through the same library), because session segments at the target scale do not fit local disk; docker-compose ships an S3-compatible object store | decided (2026-10-16) | `aiobotocore` (heavier, pins `botocore` versions); MinIO-only client |
 | Secrets | env and file providers in MVP; Vault via `hvac` post-MVP | decided | — |
 | Frontend (`kora web`) | React + TypeScript + Vite, built from a locked pnpm lockfile; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for the live graph view, laid out left to right by the ELK layered algorithm through its JavaScript build (`elkjs`), chosen because it lays out the fan-out and sub-graph frames as compound nodes (ADR-0015); TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, design review finding [server-side session cookie](../reviews/review-2026-10-15.md#server-side-session-cookie)). MVP ships the full console of FR-7.3 (approvals, runs, live graph, attempts and their diff, live logs, cost, graphs and versions; [api-and-agent-surface.md](../specs/api-and-agent-surface.md) section 6), held to the user-experience bar of NFR-13.1; live views read the NDJSON `?follow=true` streams; graph editing is post-MVP; the console's design, its four actions and the data the API exposes for it are [docs/console.md](../../docs/console.md) and [ADR-0015](../../docs/decisions/0015-web-console-design.md) | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
-| Observability | OpenTelemetry Python SDK with OTLP exporter as the reference exporter, loaded in the control plane only and replaying the append-only event table (`invoke_workflow` per run, `invoke_agent` per attempt built from the session segments at finish, `gen_ai.conversation.id` = harness session id); `prometheus-client` for scheduler and worker metrics; `structlog` JSON logs | proposed | vendor SDKs only (Langfuse, Datadog) without OTel |
+| Observability | OpenTelemetry Python SDK with OTLP exporter as the reference exporter, loaded in the control plane only and replaying the append-only event table (`invoke_workflow` per run, `invoke_agent` per attempt built from the session segments at finish, `gen_ai.conversation.id` = harness session id); `prometheus-client` for scheduler and worker metrics; `structlog` JSON logs | decided (ADR-0013) | vendor SDKs only (Langfuse, Datadog) without OTel |
 | Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (design review finding [single provider entry point](../reviews/review-2026-10-15.md#single-provider-entry-point)) | one entry-point group per protocol; pluggy |
 | Authentication | `static_token` authenticator in MVP issuing personal bearer tokens: a user principal is bound to a person and a namespace list with the two flags `approve` and `platform` and a per-namespace `transcripts` capability; a service principal per worker is bound to a runtime and a namespace list; no roles or groups (DD-32, [protocols.md](../specs/protocols.md) §10); OIDC via `authlib` post-MVP behind the same `Principal` | decided | single shared API token; RBAC in MVP |
-| Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL and an S3-compatible server on the Linux CI job, which has Docker (macOS CI runs the artifact storage suite on `local`); fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | proposed | — |
+| Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL and an S3-compatible server on the Linux CI job, which has Docker (macOS CI runs the artifact storage suite on `local`); fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | decided (ADR-0013) | — |
 | Repo layout | `src/kora/{ir,dsl,api,scheduler,worker,protocols,plugins/{runtime,harness,vcs,…},cli,mcp}`; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
 
-## 8. Boundaries that the stack must not blur
-
-- The API is the only writer of operations; CLI, MCP and the web console never contain logic (FR-0.3). Parity is enforced by a coverage test that every API operation is reachable through at least one CLI command and one MCP tool, plus schema-coverage checks on the shared client (DD-28).
-- Agent sessions never reach kora; the policy decision point runs inside the session runner, not in the control plane (DD-29).
-- No control-plane process imports graph authors' Python: the scheduler reads IR rows (FR-1.2), and the API accepts only compiled documents, because compilation runs in the author's own process (ADR-0002, amended 2026-10-16).
-- Workers never decide; they execute one attempt and report through the API, fenced by their lease epoch (DD-13).
-- Protocol implementations are loaded by entry points and never imported by name from core modules (NFR-5.2).
-- Nothing in standalone mode may exist only there (NFR-0.1).
-- The session runner inside the runtime is the only enforcer of session limits; the worker relays, the scheduler decides (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)).
-
-## 9. Glossary (canonical terms)
+## Glossary
 
 | term | meaning | not to be confused with |
 |---|---|---|
@@ -364,4 +198,38 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | **session runner** | kora's lifecycle supervisor: protected journal and phase checkpoint, harness adapter and candidate launcher, session limits, sealing/inspection and late authorized publication (ADR-0016); local follows the lifecycle in a trusted environment | the worker, which claims, requests plans, submits, relays and uploads |
 | **plan executor** | kora's code that executes a `CheckoutPlan` or a `PublishPlan`: in a trusted runtime or private worker-host publication environment, as negotiated; never credentialed in candidate metadata | the VCS, which only returns plans |
 
-Execution deadline ownership is defined by [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlines.md): the API/scheduler guard durable authority, and runtime/common executors apply the saved inherited cutoff in every managed placement, including pre-submit worker-host preparation. Nominal grace and a timer do not prove termination or release ADR-0017/ADR-0020 reservations. [Scheduler section 17](../specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022) gives the clock/failure contract.
+| **graph version** | immutable deployed IR plus its resolved contract, identified as a version of a graph ([records](../specs/data-model.md#11-immutable-contracts-and-execution-records-adr-0018)) | the author's informational version string |
+| **node instance** | one node occurrence in one run, including its fan-out/subgraph context ([identifiers](../specs/data-model.md#3-identifiers-and-keys)) | the reusable node definition |
+| **artifact version** | one stored output version with availability and lineage ([entities](../specs/data-model.md#2-entities)) | a payload blob, which may be shared by digest |
+| **wait** | durable waiting state for a timer, approval, event, poll, retry or admission ([waits](../specs/scheduler.md#5-waits-hold-no-worker-nfr-13)) | a worker occupied while waiting |
+| **lease epoch** | monotonically advancing ownership generation fencing earlier worker reports ([recovery](../specs/scheduler.md#3-submission-execution-uncertainty-and-recovery)) | proof that old physical execution has stopped |
+| **result authority** | permission to accept a current result, including current-attempt, desired-state and deadline guards ([authority](../specs/data-model.md#152-sticky-expiry-and-current-result-authority)) | permission to append bounded historical diagnostics |
+| **inherited deadline** | saved minimum cutoff of the applicable node, subgraph and run clocks ([deadlines](../specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022)) | evidence of termination at the nominal cutoff |
+| **target hold** | independently acquired exclusion for a bound target, released only under its settlement rules ([capacity](../specs/data-model.md#13-run-acceptance-and-execution-capacity-adr-0020)) | immutable target identity |
+| **provider** | an installed implementation of a kora protocol, discovered by entry point ([loading](../specs/protocols.md#1-common-rules)) | a graph node or scheduling policy |
+| **workload** | the runtime submission containing plans, agent/command configuration, limits and inputs ([runtime](../specs/protocols.md#2-runtime-fr-81)) | the mutable candidate workspace |
+| **WorkspaceRef** | the prepared workspace reference used by trusted executors ([VCS](../specs/protocols.md#4-vcs-fr-52)) | a published result |
+| **VcsRef** | the typed published revision/change-request output ([VCS](../specs/protocols.md#4-vcs-fr-52)) | an unverified candidate branch |
+| **ReviewBundle** | review facts and narrative whose bound digests identify approval evidence ([approval](../../docs/decisions/0008-content-bound-approvals.md)) | an approval automatically valid for later commits |
+| **clear downstream** | invalidation/reset of the affected downstream dependency closure on retry ([lineage](../specs/data-model.md#6-clear-downstream-fr-68a)) | deletion of historical attempts and artifacts |
+| **fake** | a real protocol implementation selected through configuration or injection and checked by conformance ([testing](../../AGENTS.md#testing)) | a mock or runtime patch |
+
+## Open implementation questions
+
+These are unresolved aspects of the repository design at the consolidation baseline, inherited from [issue #48](https://github.com/realkarych/kora/issues/48); they do not assert that the issue itself is open. The [dated audit](../research/architecture-documentation-consolidation-2026-10-17.md) preserves their original sources. Established constraints below remain binding while these mechanics are specified.
+
+| Topic | Remaining question and established constraint |
+|---|---|
+| Shared packages | Where do the runner, plan executor, shared API client, persistence and shared validator live? The [stack layout](#stack-per-component) names only the main packages. |
+| Run outcome | What complete predicate selects `succeeded` versus `failed` when work is settled? Compare [node/run terminality](../specs/data-model.md#4-state-machines) with the [completion pass](../specs/scheduler.md#2-the-scheduling-loop). |
+| Price ownership | Which process writes `price_table_id`, derives `usd_estimate` and distributes the snapshot? [Snapshotting and derivation](../../docs/decisions/0010-cost-accounting-and-limits.md) are decided; [harness mappings](../specs/protocols.md#14-harness-mapping-tables-fr-33-dd-27) do not settle the handoff. |
+| Timeout discovery and locking | How does per-row timeout discovery enter per-run mutation? [Deadline guards](../specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022) already require run locking; broader pass ordering remains unspecified. |
+| Budget ordering | Where do daily/run/subgraph budget checks sit relative to admission checks? [Scope lock order](../specs/scheduler.md#6-concurrency-limits-fr-610) and no reservation before all checks pass are fixed. |
+| API/scheduler invocation | How does the API invoke shared transition entry points, and when does it call tick? The [three entry points](../specs/scheduler.md#12-execution-backend-boundary-nfr-55) and canonical start implementation are already decided. |
+| Dry-run placement | Which process executes `trigger --dry-run` and how is it requested? [Fake execution](../specs/api-and-agent-surface.md#3-cli-fr-122) is specified; author-side compilation is a separate operation. |
+| Health serving | How do scheduler and worker serve health/readiness/metrics? [NFR-7.3](../../docs/requirements/non-functional.md) requires them and [scheduler health](../specs/scheduler.md#11-metrics-and-health-nfr-73) specifies content, not serving placement. |
+| Transition code ownership | How is the passes-only wording reconciled with [API-mediated worker reports](../specs/scheduler.md#3-submission-execution-uncertainty-and-recovery) and [finishing transitions](../specs/data-model.md#4-state-machines)? Reporting behavior is specified; internal delegation must be consistent. |
+| Command inputs | Who materializes `.kora/inputs/*.json` for a runner executor? [IR command inputs](../specs/ir.md#4-node-kinds-and-their-config) name the worker; [executor placement](../specs/protocols.md#4-vcs-fr-52) must still respect workspace authority. |
+| Digest mismatch errors | Which [error class](../specs/ir.md#6-retry-policy-and-strategy-fr-63-fr-64) represents a skill/MCP digest mismatch? Pinning and verification are required; this mapping is unspecified. |
+| Skill delivery | Where is skill content read at deploy time and obtained at execution time? [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md) preserves identity/availability while deferring resource/skill transport. |
+| Secret prefix ownership | Are allowed prefixes owned by [namespace policy](../specs/data-model.md#2-entities) or [provider configuration](../specs/protocols.md#6-secrets-fr-101)? Validation-time and resolution-time enforcement remain required. |

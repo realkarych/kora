@@ -6,6 +6,7 @@
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-5, DD-16, DD-18, DD-28, requirements decision 16, FR section 0 (FR-0.0 to FR-0.4)
 - Related: [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md), [0013-implementation-stack.md](0013-implementation-stack.md)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -53,6 +54,6 @@ Agent nodes inside a graph have no access to kora's MCP server or API. They rece
 
 - [FR-0.0 to FR-0.4, FR-12.2](../requirements/functional.md); [NFR-0.3, NFR-5.1](../requirements/non-functional.md); [positioning.md, "AI-first"](../positioning.md)
 - [api-and-agent-surface.md introduction, §1 to §7](../../knowledge/specs/api-and-agent-surface.md) (§2 and §7: compilation is not an API operation, client-side operations in the parity checklist)
-- [detailed.md §1, §2, §8](../../knowledge/architecture/detailed.md) (§8: no control-plane process imports graph authors' Python)
+- [component map](../technical-introduction.md#3-the-component-map) and [core boundaries](../technical-introduction.md#5-why-the-boundaries-matter), including compilation in the author's process
 - [protocols.md §10](../../knowledge/specs/protocols.md), [dsl.md §2 (compilation runs in the author's process), §5](../../knowledge/specs/dsl.md), [ir.md §4.1](../../knowledge/specs/ir.md)
 - [design-decisions-2026-10-15.md, DD-5, DD-16, DD-18, DD-28](../../knowledge/reviews/design-decisions-2026-10-15.md)

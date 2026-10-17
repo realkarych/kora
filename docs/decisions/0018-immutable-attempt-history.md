@@ -6,6 +6,7 @@
 - Amends: [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md) (compiled type contracts), [ADR-0007](0007-attempt-model-and-retries.md) (historical configuration, lineage and retention)
 - Related: ADR-0002, ADR-0008, ADR-0011, ADR-0016, ADR-0017
 - Resolves: issue #53
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -45,4 +46,4 @@ Historical attribution and the authority to perform another effect are different
 - [Functional requirements](../requirements/functional.md): FR-1.7, FR-4.3, FR-4.5, FR-6.8, FR-11.5, FR-12.5; [non-functional requirements](../requirements/non-functional.md): NFR-2.1, NFR-4.2–4.3, NFR-7.2.
 - [IR](../../knowledge/specs/ir.md), [schema](../../knowledge/specs/ir.schema.json), [DSL](../../knowledge/specs/dsl.md) and both [example documents](../../knowledge/specs/examples/).
 - [Data model](../../knowledge/specs/data-model.md), [protocols](../../knowledge/specs/protocols.md), [scheduler](../../knowledge/specs/scheduler.md), [API and thin clients](../../knowledge/specs/api-and-agent-surface.md).
-- [Detailed architecture](../../knowledge/architecture/detailed.md), [contributor introduction](../../knowledge/architecture/internals.md) and [console pages](../../knowledge/design/console/pages.md).
+- [core objects](../technical-introduction.md#2-the-objects-that-move-through-it), [worker components](../../knowledge/architecture/detailed.md#components-inside-a-worker) and [console pages](../../knowledge/design/console/pages.md).

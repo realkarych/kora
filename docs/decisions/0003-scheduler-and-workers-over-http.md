@@ -7,6 +7,7 @@
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-13, DD-15, requirements decision 18 (the worker part), DD-36 (claim response, lease and polling defaults)
 - Related: ADR-0001, ADR-0004, ADR-0007, ADR-0011, ADR-0013
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -54,5 +55,5 @@ The first drafts let workers write to the metadata database directly as well as 
 - [protocols.md §2](../../knowledge/specs/protocols.md) (`RuntimeCapabilities.default_stall_after`, the session runner)
 - [api-and-agent-surface.md §2](../../knowledge/specs/api-and-agent-surface.md) (worker and attempt-reporting routes)
 - [ir.md §2 and §9](../../knowledge/specs/ir.md) (`runtime.stall_after`, `limits.stall_after`)
-- [architecture detailed.md §2, §7 and §8](../../knowledge/architecture/detailed.md)
+- [component map](../technical-introduction.md#3-the-component-map), [deployment shapes](../../knowledge/architecture/detailed.md#deployment-shapes) and [stack](../../knowledge/architecture/detailed.md#stack-per-component)
 - [FR-6.1, FR-6.1a, FR-8.9](../requirements/functional.md); [NFR-1.2, NFR-1.3, NFR-2.1, NFR-2.3](../requirements/non-functional.md)

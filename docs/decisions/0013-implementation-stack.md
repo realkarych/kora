@@ -5,8 +5,9 @@
 - Superseded in part by: [ADR-0016](0016-trusted-execution-and-publication.md) (publication placement and phases)
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
 - Deciders: project owner, after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md), which replaced three generated clients with [one shared API client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) and settled the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details)
-- Absorbs: requirements decision 18 (stack part; its "harness CLI + JSONL" part was replaced by requirements decision 19, see ADR-0004), the stack table in `knowledge/architecture/detailed.md` section 7
+- Absorbs: requirements decision 18 (stack part; its "harness CLI + JSONL" part was replaced by requirements decision 19, see ADR-0004), the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component)
 - Related: [0001-own-control-plane.md](0001-own-control-plane.md), [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0004-harness-adapters-over-vendor-sdks.md](0004-harness-adapters-over-vendor-sdks.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -31,7 +32,7 @@ The architecture fixes a control plane, outbound-only workers per runtime, proto
 
 ## Alternatives considered
 
-Per row, as recorded in the architecture: Poetry, `uv_build`; Litestar, Django REST; raw SQL with `psycopg` 3, SQLModel; a generated `openapi-python-client`; Click, argparse; `cel-python`; PyYAML; server-rendered Jinja2 + HTMX, Next.js, SvelteKit; vendor observability SDKs only; CLI JSONL parsing for harnesses (replaced, ADR-0004).
+Per row, as recorded in the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component): Poetry, `uv_build`; Litestar, Django REST; raw SQL with `psycopg` 3, SQLModel; a generated `openapi-python-client`; Click, argparse; `cel-python`; PyYAML; server-rendered Jinja2 + HTMX, Next.js, SvelteKit; vendor observability SDKs only; CLI JSONL parsing for harnesses (replaced, ADR-0004).
 
 ## Consequences
 
@@ -43,7 +44,7 @@ Practical effects: a pnpm toolchain is needed to build the package; CEL depends 
 
 ## Where it is applied
 
-- [detailed.md §2, §7, §8](../../knowledge/architecture/detailed.md)
+- [stack reference](../../knowledge/architecture/detailed.md#stack-per-component), [core boundaries](../technical-introduction.md#5-why-the-boundaries-matter) and [deployment shapes](../../knowledge/architecture/detailed.md#deployment-shapes)
 - [FR-1.2, FR-12.1 to FR-12.3](../requirements/functional.md); [NFR-0.1, NFR-1.2, NFR-5.2, NFR-10.1, NFR-11.1](../requirements/non-functional.md)
 - [api-and-agent-surface.md §1, §3, §4](../../knowledge/specs/api-and-agent-surface.md); [scheduler.md §3, §10](../../knowledge/specs/scheduler.md)
 - [ir.md §7](../../knowledge/specs/ir.md); [protocols.md §1, §9](../../knowledge/specs/protocols.md)

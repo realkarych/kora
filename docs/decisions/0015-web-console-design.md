@@ -6,6 +6,7 @@
 - Deciders: project owner, after the console design dialogue of roadmap step 2 (issue #23)
 - Absorbs: requirements decision 27
 - Related: [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0007-attempt-model-and-retries.md](0007-attempt-model-and-retries.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0010-cost-accounting-and-limits.md](0010-cost-accounting-and-limits.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md), [0014-target-identity.md](0014-target-identity.md)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -55,7 +56,7 @@ The design itself, page by page, is recorded in [docs/console.md](../console.md)
 
 - `api-and-agent-surface.md` section 6 describes the sections, pages and four actions; sections 2, 3 and 4 gain the summary, the wait, the attempt fields and the approvals status filter; the parity checklist is unchanged because no operation is added, only fields and a filter.
 - `data-model.md` gains `wait.reason`, `attempt.infrastructure_retries` and the event `vcs.publish_repeated`; `scheduler.md` records the admission reason and writes the repeated-publish event.
-- The graph is laid out left to right by the ELK layered algorithm through its JavaScript build, with fan-out and sub-graph frames as compound nodes; the dependency and its reason are recorded in the stack table of `detailed.md`.
+- The graph is laid out left to right by the ELK layered algorithm through its JavaScript build, with fan-out and sub-graph frames as compound nodes; the dependency and its reason are recorded in the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component).
 - The per-graph summary and the runs list with node states are one query each; the implementation measures them at hundreds of runs per graph (NFR-1).
 - The console's pages are reviewed against NFR-13.1 in both themes before release; the design review covers the five colours in light and dark.
 - `knowledge/design/` is a new folder for the detailed design of a user-facing surface behind a page in `docs/`; it holds element lists and scenarios, never decisions.
@@ -66,5 +67,5 @@ The design itself, page by page, is recorded in [docs/console.md](../console.md)
 - [api-and-agent-surface.md §2](../../knowledge/specs/api-and-agent-surface.md) (graphs summary, node wait, attempt fields, approvals status filter), [§3](../../knowledge/specs/api-and-agent-surface.md) (`kora approvals --status`), [§4](../../knowledge/specs/api-and-agent-surface.md) (`kora_approvals`), [§6](../../knowledge/specs/api-and-agent-surface.md) (the console)
 - [data-model.md §2](../../knowledge/specs/data-model.md) (`wait.reason`, `attempt.infrastructure_retries`, `vcs.publish_repeated`)
 - [scheduler.md §3](../../knowledge/specs/scheduler.md) (the repeated publish event, the branch named on an infrastructure failure), [scheduler.md §2](../../knowledge/specs/scheduler.md) (the admission reason)
-- [detailed.md §4 and §7](../../knowledge/architecture/detailed.md), [internals.md §17](../../knowledge/architecture/internals.md)
+- [stack reference](../../knowledge/architecture/detailed.md#stack-per-component) (Frontend row)
 - [FR-7.3](../requirements/functional.md); [functional.md §13, decision 27](../requirements/functional.md); [NFR-13.1](../requirements/non-functional.md); [roadmap.md](../roadmap.md) step 2

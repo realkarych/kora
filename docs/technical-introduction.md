@@ -2,6 +2,8 @@
 
 Status: scope and implementation plan approved on 2026-10-17; document wording pending line-by-line owner review. kora is in the design stage: the components below describe the intended implementation. This introduction explains existing decisions; the [decision records](decisions/README.md) govern the [specifications](../knowledge/README.md), which provide the exact contracts.
 
+Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
+
 ## 1. What the core does
 
 kora coordinates work that spans several coding-agent sessions. An agent edits code; a command tests it; a person reviews the result; an external system signals that the change has landed. The core turns these steps into a durable graph execution, keeping their dependencies, results, costs and recovery state together.
@@ -148,7 +150,7 @@ sequenceDiagram
     S->>D: Complete and advance
 ```
 
-This is a successful execution, with heartbeats and recovery calls omitted. Runtime events also reach the API through the worker while execution is in progress. The [detailed attempt sequence](../knowledge/architecture/internals.md#8-one-attempt-and-when-a-process-dies) covers interruptions.
+This is a successful execution, with heartbeats and recovery calls omitted. Runtime events also reach the API through the worker while execution is in progress. The [scheduler recovery specification](../knowledge/specs/scheduler.md#3-submission-execution-uncertainty-and-recovery) covers interruptions.
 
 ## 5. Why the boundaries matter
 
@@ -179,9 +181,8 @@ A provider declares capabilities and must satisfy the relevant conformance suite
 
 ## 7. What remains open, and where to read next
 
-Some implementation mechanics remain unresolved: how the API reaches scheduler transition entry points, who applies certain attempt transitions, and the full rule for aggregating terminal run failures. The [internals book](../knowledge/architecture/internals.md) identifies these as open questions; [issue #48](https://github.com/realkarych/kora/issues/48) records them. The successful path above does not choose answers.
+Some implementation mechanics remain unresolved: how the API reaches scheduler transition entry points, who applies certain attempt transitions, and the full rule for aggregating terminal run failures. The [architecture reference](../knowledge/architecture/detailed.md#open-implementation-questions) records these questions; [issue #48](https://github.com/realkarych/kora/issues/48) tracks their resolution. The successful path above does not choose answers.
 
-- For the compact reference map: [architecture overview](architecture.md).
-- For detailed execution, recovery and component chapters: [internals](../knowledge/architecture/internals.md).
+- For component views, deployment, the stack and terminology: [architecture reference](../knowledge/architecture/detailed.md).
 - For a specific change: the [specification task index](../knowledge/README.md#which-file-to-load-for-which-task), then the decision records cited there.
 - For current implementation status: [roadmap](roadmap.md).

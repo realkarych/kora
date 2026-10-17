@@ -5,6 +5,7 @@
 - Deciders: project owner, after review of the first design drafts (DD-14, DD-20, DD-23) and after the design review of 2026-10-15 (first cycle: DD-27, DD-30)
 - Absorbs: DD-27, DD-14, DD-20, DD-23, DD-30; requirements decision 11; the harness part of requirements decisions 18 and 19
 - Related: [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0010](0010-cost-accounting-and-limits.md)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -44,7 +45,7 @@ An agent node runs one full coding-agent session on a harness, Claude Code or Co
 - [FR-2.1, FR-3.1, FR-3.3, FR-6.4, FR-6.6, FR-8.8, FR-9.1, FR-12.2](../requirements/functional.md)
 - [NFR-5.3, NFR-8.1, NFR-8.2, NFR-11.2](../requirements/non-functional.md)
 - [protocols.md §2 (session runner, `credential_proxy`), §3, §13, §14](../../knowledge/specs/protocols.md)
-- [detailed.md §4, §5, §7, §8](../../knowledge/architecture/detailed.md)
+- [worker components](../../knowledge/architecture/detailed.md#components-inside-a-worker), [protected execution boundary](../../knowledge/architecture/detailed.md#protected-execution-boundary), [stack](../../knowledge/architecture/detailed.md#stack-per-component) and [run walkthrough](../technical-introduction.md#4-one-run-through-the-core)
 - [ir.md §4.1, §9](../../knowledge/specs/ir.md)
 - [scheduler.md §7](../../knowledge/specs/scheduler.md)
 - [data-model.md `attempt`, §7](../../knowledge/specs/data-model.md)

@@ -6,6 +6,7 @@
 - Resolves: issue #54
 - Amends: [ADR-0014](0014-target-identity.md) (binding and historical attribution)
 - Related: ADR-0002, ADR-0006, ADR-0007, ADR-0008, ADR-0017, ADR-0018
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -54,4 +55,4 @@ The conflict is an asynchronous source failure visible through existing node/att
 - [scheduler.md](../../knowledge/specs/scheduler.md): completion, wakes/collection, locks, target admission and retry
 - [ir.md](../../knowledge/specs/ir.md), [dsl.md](../../knowledge/specs/dsl.md), [IR schema](../../knowledge/specs/ir.schema.json): source resolution and first successful acceptance
 - [api-and-agent-surface.md](../../knowledge/specs/api-and-agent-surface.md), [protocols.md](../../knowledge/specs/protocols.md): reporting, asynchronous errors, inspection and recovery
-- [architecture reference](../../knowledge/architecture/detailed.md), [internals](../../knowledge/architecture/internals.md), [console pages](../../knowledge/design/console/pages.md), [console states](../../knowledge/design/console/states.md)
+- [core objects](../technical-introduction.md#2-the-objects-that-move-through-it), [scheduler components](../../knowledge/architecture/detailed.md#components-inside-the-scheduler), [console pages](../../knowledge/design/console/pages.md), [console states](../../knowledge/design/console/states.md)

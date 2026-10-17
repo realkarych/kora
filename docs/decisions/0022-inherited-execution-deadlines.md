@@ -5,6 +5,7 @@
 - Deciders: project owner
 - Absorbs: issue #57
 - Supersedes in part: [ADR-0003](0003-scheduler-and-workers-over-http.md) and [ADR-0010](0010-cost-accounting-and-limits.md) (node-only local deadline), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0016](0016-trusted-execution-and-publication.md) and [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md) (publication recovery subject to expiry)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -53,6 +54,6 @@ The existing attempt/claim/read projections carry the binding and observed expir
 ## Where it is applied
 
 - [IR limits](../../knowledge/specs/ir.md), [data model section 15](../../knowledge/specs/data-model.md#15-inherited-execution-deadlines-adr-0022) and [scheduler section 17](../../knowledge/specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022)
-- [Runtime lifecycle and conformance](../../knowledge/specs/protocols.md), [API and agent surface](../../knowledge/specs/api-and-agent-surface.md), [architecture](../architecture.md) and its [internals](../../knowledge/architecture/internals.md)
+- [Runtime lifecycle and conformance](../../knowledge/specs/protocols.md), [API and agent surface](../../knowledge/specs/api-and-agent-surface.md), [protected execution boundary](../../knowledge/architecture/detailed.md#protected-execution-boundary)
 - FR-6.5, FR-6.8 and FR-9.4 in [functional requirements](../requirements/functional.md); NFR-8.2 in [non-functional requirements](../requirements/non-functional.md)
 - [Design/review evidence](../../knowledge/reviews/inherited-execution-deadline-review-2026-10-17.md)

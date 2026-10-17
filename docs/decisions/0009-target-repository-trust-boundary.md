@@ -6,6 +6,7 @@
 - Deciders: project owner, during requirements elicitation (requirements decision 4), after the design review of 2026-10-15 (first cycle: DD-29) and after its second cycle (DD-34)
 - Absorbs: requirements decision 4; DD-34; the tool-policy part of DD-29
 - Related: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0008](0008-content-bound-approvals.md), [ADR-0011](0011-namespaces-and-personal-tokens.md)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -56,5 +57,5 @@ An agent node checks out a repository and lets a coding agent work in it. Left t
 - [research/harness-policy-hooks.md](../../knowledge/research/harness-policy-hooks.md) (the vendor facts behind the coverage matrix, checked 2026-10-16)
 - [dsl.md §1, §2 (`DSL013`), §3, §5](../../knowledge/specs/dsl.md)
 - [data-model.md `namespace` (`tool_policy`, `allow_trust_repo_config`)](../../knowledge/specs/data-model.md)
-- [detailed.md §7 (policy), §8](../../knowledge/architecture/detailed.md)
+- [stack](../../knowledge/architecture/detailed.md#stack-per-component) (policy) and [protected execution boundary](../../knowledge/architecture/detailed.md#protected-execution-boundary)
 - [DD-29, DD-34](../../knowledge/reviews/design-decisions-2026-10-15.md)

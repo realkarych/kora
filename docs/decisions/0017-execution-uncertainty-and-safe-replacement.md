@@ -6,6 +6,7 @@
 - Deciders: project owner
 - Absorbs: issue #52
 - Supersedes in part: [ADR-0003](0003-scheduler-and-workers-over-http.md) (lease recovery), [ADR-0007](0007-attempt-model-and-retries.md) (replacement eligibility), [ADR-0014](0014-target-identity.md) (hold release), [ADR-0016](0016-trusted-execution-and-publication.md) (recovery authority)
+- Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
 
@@ -54,4 +55,4 @@ This is a design change. Runtime conformance scenarios are implementation gates,
 - [Runtime and VCS protocols](../../knowledge/specs/protocols.md), including termination evidence, dispatcher acknowledgements and future conformance cases.
 - [Data model](../../knowledge/specs/data-model.md) and [scheduler](../../knowledge/specs/scheduler.md), including recovery-only claims, reservations, retry and hold release.
 - [API and agent surface](../../knowledge/specs/api-and-agent-surface.md) and [IR retry contract](../../knowledge/specs/ir.md).
-- [Functional requirements](../requirements/functional.md), [non-functional requirements](../requirements/non-functional.md), [architecture](../architecture.md), [console](../console.md) and [roadmap](../roadmap.md).
+- [Functional requirements](../requirements/functional.md), [non-functional requirements](../requirements/non-functional.md), [core boundaries](../technical-introduction.md#5-why-the-boundaries-matter), [console](../console.md) and [roadmap](../roadmap.md).
