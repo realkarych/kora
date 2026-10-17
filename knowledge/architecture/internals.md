@@ -764,11 +764,11 @@ sequenceDiagram
 |---|---|---|
 | a worker after the claim, before the handle is stored | recover the same original domain; a found handle is adopted; `None`, unreachable or a replacement registry cannot permit new submission. Retirement and all dispatcher closure are required before confirmed loss/replacement | scheduler.md section 3 |
 | a worker after `submitted` | the next claimer adopts the handle and tails from `counters.stream_offset` | scheduler.md section 3 |
-| a worker after the push, before the `VcsRef` upload | the next claimer adopts the private prepared-result checkpoint and closes every earlier dispatcher and pending operation before new effects, then reconciles the exact revision/destination through late `finalize`; unexpected remote content conflicts; `open_change_request` searches head/base before create; no mutable-workspace recollection | scheduler.md section 3, protocols.md section 4 |
+| a worker after the push, before the `VcsRef` upload | the next claimer adopts the private prepared-result checkpoint and closes every earlier dispatcher and pending operation before new effects, then reconciles the exact revision/destination through late `finalize`; unexpected remote content conflicts; `open_change_request` searches head/base before create only while the unchanged deadline/expiry guard remains eligible; expired checkpoint recovery is read-only/stop-only with no new push/change request; no mutable-workspace recollection | scheduler.md section 3, protocols.md section 4 |
 | required sealed input or prepared publication checkpoint is missing/corrupt | record infrastructure error, but retain the unresolved attempt/reservations until runtime termination and every dispatcher/publication closure are established; any existing branch remains discoverable | scheduler.md section 3 |
 | a host that never returns, non-portable handles | unknown execution holds capacity and acquired target indefinitely until an operator establishes and attests actual termination/decommissioning and closure of every old dispatcher/publication operation; no second lease-period loss or force retry | ADR-0017, scheduler.md section 3 |
 | the runtime cannot answer | unknown execution stays non-terminal with its reservations; observe/retire again in the original domain | scheduler.md section 3 |
-| the control plane is unreachable | the runner still stops the session at its limits and its deadline; the timeout pass records intent; terminal status and release wait for affirmative closure evidence | scheduler.md section 4 |
+| the control plane is unreachable | the local executor applies its saved inherited interruption/escalation policy under the supported clock/control model; the timeout pass records intent without an exact physical-stop promise; terminal status and release wait for affirmative closure evidence | scheduler.md section 4 |
 | a cancel or a clear downstream while the attempt runs | `desired_state = cancel` reaches the worker that holds the lease in the next heartbeat response, and recovery-only claims remain available after terminal run status; `retire` and dispatcher evidence establish closure before release; later uploads are stored `superseded`; usage is kept | data-model.md sections 3 and 6 |
 
 Two fences keep late writes out of current state. The lease epoch fences a previous lease holder. **Result authority** fences the attempt's own late writes: an attempt may create current artifact versions or move to `finishing` only while its `desired_state` is `run` and it is its instance's `current_attempt_id`. A cancel or a clear downstream revokes both in the transaction that orders it, and usage, segments and events are still accepted under a valid epoch, so the cost of a cancelled attempt is never lost ([data-model.md](../specs/data-model.md) section 3). `test_cleared_attempt_cannot_publish_current` holds the second fence; execution-recovery conformance cases in protocols.md section 13 also cover stale epochs, old dispatcher closure and retained reservations. API/result fences do not stop an external effect already dispatched.
@@ -1010,7 +1010,7 @@ stateDiagram-v2
 
 ### 10. Limits, cost and safe retries
 
-Limits live at four levels: node, sub-graph, run and namespace. A hard limit stops the session at the limit; a soft limit tolerates an overshoot of `budget_headroom_pct` and of what is already running, and the namespace's daily budget only the latter.
+Limits live at four levels: node, sub-graph, run and namespace. A hard limit initiates the defined local interruption/escalation policy; actual physical closure is separately evidenced; a soft limit tolerates an overshoot of `budget_headroom_pct` and of what is already running, and the namespace's daily budget only the latter.
 
 | limit | level | kind | enforced by | at the limit |
 |---|---|---|---|---|
@@ -1703,7 +1703,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | fake | a real implementation of a protocol, used in tests and validated by the same conformance suite | [4](#4-the-plug-in-seam) |
 | graph, graph version | stable graph identity; an immutable deployed IR and resolved contract; identical complete deployments return the same version | 2 |
 | handle | the runtime's identifier of one submission, stored on the attempt | 2 |
-| hard limit, soft limit | a hard limit stops the session at the limit; a soft limit may be overshot by a set headroom and by what is already running | [10](#10-limits-cost-and-safe-retries) |
+| hard limit, soft limit | a hard limit initiates its defined local interruption/escalation policy, with physical closure separately evidenced; a soft limit may be overshot by a set headroom and by what is already running | [10](#10-limits-cost-and-safe-retries) |
 | inbound event | a deduplicated signal or a compact durable accepted/skip start receipt; receipt rows are never matched to waits or queued for run conversion | 12 |
 | IR | the YAML document the compiler emits and the control plane reads | [11](#11-graph-definition) |
 | execution uncertainty | expired ownership or unavailable evidence while old execution/dispatch/publication may continue; retain reservations, original domain and every dispatcher grant until closure (ADR-0017) | 8 |
