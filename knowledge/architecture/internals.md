@@ -1147,7 +1147,7 @@ Decisions: ADR-0002, ADR-0006, ADR-0012. Tests: `test_control_plane_never_import
 
 Zone: Scheduler. Code: `src/kora/scheduler`.
 
-The scheduler decides and persists; it never calls a runtime, a harness or a worker. Every pass is a short transaction from rows to rows and keeps nothing in memory, so a restarted scheduler runs one recovery pass and continues. The trigger pass claims rows one by one with `SKIP LOCKED` on PostgreSQL. Passes 2 to 8 work per run under the run lock, an advisory lock on `run.id` on PostgreSQL and the single writer on SQLite, so two replicas never evaluate one run at once. The tick driver runs the passes every second and right after a transition, woken by `LISTEN/NOTIFY` on PostgreSQL; for each run touched since the last tick it repeats passes 2 to 8 until no row changes, at most ten rounds.
+The scheduler decides and persists; it never calls a runtime, a harness or a worker. Every pass is a short transaction from rows to rows and keeps nothing in memory, so a restarted scheduler runs one recovery pass and continues. The trigger pass claims rows one by one with `SKIP LOCKED` on PostgreSQL. Passes 2 to 8 work per run under the run lock, an advisory lock on `run.id` on PostgreSQL and the single writer on SQLite, so two replicas never evaluate one run at once. The tick driver runs the passes every second and right after a transition, woken by `LISTEN/NOTIFY` on PostgreSQL; every tick also queries oldest-pending promotion candidates independently of touched-run filtering, so blocked queues are revisited after predecessor completion/restart; for touched runs it repeats passes 2 to 8 until no row changes, at most ten rounds.
 
 **Open:** [#48](https://github.com/realkarych/kora/issues/48), whether the timeout pass takes the run lock. scheduler.md section 2 counts pass 7 among the per-run passes and also calls timeouts per row.
 
@@ -1157,7 +1157,7 @@ title: Component diagram for kora scheduler
 ---
 flowchart TB
   accTitle: Component diagram for kora scheduler
-  accDescr: The tick driver runs the trigger pass and the timeout pass each tick and, for every touched run, the per-run passes under the run lock until no row changes. The per-run passes start a sub-graph attempt through clear downstream. All of them read and write the Metadata DB and call sensor, approval channel and VCS implementations, which reach the code host. The retention task marks versions in the Metadata DB and deletes expired payloads from artifact storage. The exporter feed reads event rows and hands them to the otel exporter, which exports spans.
+  accDescr: The tick driver runs the trigger/timeout passes and revisits oldest pending promotion candidates each tick independently of touched-run filtering; for every touched run, the per-run passes under the run lock until no row changes. The per-run passes start a sub-graph attempt through clear downstream. All of them read and write the Metadata DB and call sensor, approval channel and VCS implementations, which reach the code host. The retention task marks versions in the Metadata DB and deletes expired payloads from artifact storage. The exporter feed reads event rows and hands them to the otel exporter, which exports spans.
   classDef component fill:#85BBF0,stroke:#5D82A8,color:#000000
   classDef plugin fill:#C7B3DA,stroke:#5B3F86,stroke-width:4px,color:#000000
   classDef container fill:#438DD5,stroke:#2E6295,color:#000000
@@ -1199,7 +1199,7 @@ flowchart TB
 | component | responsibility | specified in |
 |---|---|---|
 | 1 Triggers | due cron/start-sensor/graph occurrences use shared canonical start: bounded pending run or durable skip, explicit saturation rejection and cursor advance; webhook acceptance already committed its outcome and is never converted again | scheduler.md section 2, ir.md section 8 |
-| 2 Materialise | graph-locked promotion, with oldest pending queue run only when no graph run is running; creates pinned-IR instances; body materialisation stays lazy | scheduler.md section 2 |
+| 2 Materialise | every-tick pending candidates independent of touched-run filtering; graph-locked promotion, with oldest pending queue run only when no graph run is running; creates pinned-IR instances; body materialisation stays lazy | scheduler.md section 2 |
 | 3 Readiness | a query over pending instances; resolves inputs to current versions and records `consumed_versions` | scheduler.md section 2 |
 | 4 Branch and collection | uses the saved graph contract/results for branch CEL and fan-out collection, without adding physical attempts | scheduler.md section 2 |
 | 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows with immutable exact input bindings, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
@@ -1254,7 +1254,7 @@ flowchart TB
   insert --> commit
 ```
 
-- **Physical reservations start at `created`.** Every non-terminal attempt, including history after clear/cancel, retains its applicable attempt scopes until closure. Graph execution-run usage counts distinct run IDs: first attempt acquires one, another parallel attempt adds none, last terminalization releases once. Waits without physical attempts reserve no execution-run slot; acquired target holds and outstanding acceptance remain. Namespace `max_pending_runs` bounds the separate outstanding predicate (default 1000), not pending status.
+- **Physical reservations start at `created`.** Every non-terminal attempt, including history after clear/cancel, retains its applicable attempt scopes until closure. Fan-out max_parallel retains its separate unfinished-body unit through no-attempt waits; parallel nodes in one body add no second body unit. Graph execution-run usage counts distinct run IDs: first attempt acquires one, another parallel attempt adds none, last terminalization releases once. Waits without physical attempts reserve no execution-run slot; acquired target holds and outstanding acceptance remain. Namespace `max_pending_runs` bounds the separate outstanding predicate (default 1000), not pending status.
 - **The target scope** counts every run that holds a key, whatever its graph's policy, but makes only runs of `on_active: defer` graphs wait. The first admission wait a run receives behind a given holder writes `run.target_deferred` once.
 - **On SQLite** the single writer replaces every scope lock.
 - **Limits are live policy.** Graph counts span versions; newest active (or newest deployed when none is active) supplies the cap. Deploy/retire/policy changes serialize with admission, effective reads name the source, and lowering a cap preserves existing occupancy. Run execution semantics stay pinned. The full state table and future race/parity tests are data-model section 13.

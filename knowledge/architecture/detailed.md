@@ -129,7 +129,7 @@ flowchart LR
 
     DB[(Metadata DB)]:::store
     T[Trigger pass<br/>canonical cron/sensor/graph starts,<br/>bounded acceptance and overlap]:::c
-    M[Materialiser<br/>IR to node instances,<br/>lazy subgraph and fan-out bodies]:::c
+    M[Pending promotion each tick, then materialise<br/>IR to node instances,<br/>lazy subgraph and fan-out bodies]:::c
     R[Readiness evaluator<br/>query: pending instances with terminal upstreams,<br/>input resolution, consumed_versions]:::c
     B[Branch and collection<br/>CEL over artifacts, fan-out list collection]:::c
     A[Admission<br/>concurrency and daily budget per namespace,<br/>graph, runtime; distinct executing runs;<br/>independent target hold; attempt row]:::c
@@ -153,7 +153,7 @@ flowchart LR
     T & M & R & B & A & W & L & C & I & RET <--> DB
 ```
 
-Canonical start is shared with the API; accepted webhook receipts are never converted into a second run. Outstanding usage, physical execution-run usage and target holds have separate predicates (ADR-0020, data-model section 13). Passes use short transactions with run-first and ordered scope locks; graph caps are live across versions, while execution semantics stay pinned; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
+Canonical start is shared with the API; accepted webhook receipts are never converted into a second run. Outstanding usage, physical execution-run usage and target holds have separate predicates (ADR-0020, data-model section 13). Pending promotion is revisited each tick independently of touched-run filtering. Fan-out retains its unfinished-body cap through waits. Passes use short transactions with run-first and ordered scope locks; graph caps are live across versions, while execution semantics stay pinned; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
 
 ## 4. Components inside a worker (C4 level 3)
 
