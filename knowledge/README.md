@@ -34,3 +34,5 @@ For external-call ownership and cooperative-provider limits, read [ADR-0021](../
 - `reviews/`: dated review records and the flat register of design decisions (`DD-n`) that the specifications cite. The register is historical; its decisions are grouped and explained in `docs/decisions/`.
 - `analysis/`: desk analyses that answered a specific question; each states its method and date.
 - `research/`: competitor and market research with sources; dated, not maintained after the fact.
+
+For inherited execution deadlines, read [ADR-0022](../docs/decisions/0022-inherited-execution-deadlines.md), [data-model section 15](specs/data-model.md#15-inherited-execution-deadlines-adr-0022), [scheduler section 17](specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022), runtime lifecycle/conformance in [protocols](specs/protocols.md), the [dated clock evidence](research/execution-deadline-clock-model.md) and [design/review record](reviews/inherited-execution-deadline-review-2026-10-17.md).

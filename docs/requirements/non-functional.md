@@ -75,7 +75,7 @@ External-observation amendment dated 2026-10-17: direction and implementation pl
 ## 8. Cost governance
 
 - **NFR-8.1 [MVP]** Token counts per model per attempt are recorded with a completeness state (`complete`, `partial`, `unavailable`) and, for resumed sessions, as a delta of whole-session totals; USD-equivalent is always labelled as an estimate with its basis (harness-reported, price table, gateway) and the billing class of the credential used. An execution observation gap exposes last-known figures with `observed_at` and at most `partial` completeness, never fabricated zero or complete cost; late usage remains historical under fresh recovery claims (ADR-0017).
-- **NFR-8.2 [MVP]** Hard limits (timeouts, event counts) are enforced by kora from the event stream regardless of harness; soft USD limits are best-effort and documented as such; overshoot headroom is a configurable percentage.
+- **NFR-8.2 [MVP]** Hard limits are enforced by kora regardless of harness: event counts from the normalized stream, inherited timeout policy from saved UTC deadlines and local monotonic timers. Managed phases share the earliest node/subgraph/run deadline; nominal interruption and forced-stop thresholds are `D` and `D + 30s`, under explicit clock/runtime-control assumptions, without an exact physical-stop guarantee (ADR-0022). Expiry never supplies termination evidence or releases capacity; late reports cannot restore current-result authority. Soft USD limits remain best-effort; overshoot headroom is a configurable percentage.
 - **NFR-8.3 [target]** Cost-per-accepted-change (including failed attempts, retries and fan-out losers) is derivable from stored data without external systems.
 
 ## 9. Observability

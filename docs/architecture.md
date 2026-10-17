@@ -118,7 +118,7 @@ Python 3.11+ with asyncio in one package `kora` (uv, hatchling) plus a `web/` fr
 - Protocol implementations are loaded by entry points and never imported by name from core modules.
 - Standalone mode is the same code as a full deployment wired into one process: no feature, code path or table exists only in standalone mode, so what works there works in production.
 - The lifecycle supervisor owns a journal outside the candidate tree, seals the result after execution, and prepares publication in fresh metadata. The worker obtains late authorization and calls `finalize`; existing candidate commits are preserved, with an additional commit for uncommitted changes. Protected runtimes enforce these authority boundaries; local follows the lifecycle without hostile-code isolation (ADR-0016).
-- The session runner inside the runtime is the only enforcer of session limits: event count, soft budget, stall timeout.
+- The session runner inside the runtime is the only enforcer of harness session limits: event count, soft budget and stall timeout. The runtime/common executor also enforces one inherited node/subgraph/run deadline across preparation, execution and publication in its actual placement, including the worker host; fixed nominal grace does not establish physical termination or release capacity ([ADR-0022](decisions/0022-inherited-execution-deadlines.md)).
 
 ## Where to go next
 

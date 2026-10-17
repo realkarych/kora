@@ -3,6 +3,7 @@
 - Status: accepted, 2026-10-15
 - Reviewed: by the project owner, 2026-10-16; publication-boundary amendment dated 2026-10-17 pending owner review
 - Superseded in part by: [ADR-0016](0016-trusted-execution-and-publication.md) (publication placement and phases)
+- Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
 - Deciders: project owner, after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md), which replaced three generated clients with [one shared API client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) and settled the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details)
 - Absorbs: requirements decision 18 (stack part; its "harness CLI + JSONL" part was replaced by requirements decision 19, see ADR-0004), the stack table in `knowledge/architecture/detailed.md` section 7
 - Related: [0001-own-control-plane.md](0001-own-control-plane.md), [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0004-harness-adapters-over-vendor-sdks.md](0004-harness-adapters-over-vendor-sdks.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md)
@@ -34,7 +35,7 @@ Per row, as recorded in the architecture: Poetry, `uv_build`; Litestar, Django R
 
 ## Consequences
 
-The stack must preserve the boundaries of the architecture: the API is the only writer of operations and the clients hold no logic; agent sessions never reach kora and the policy decision point runs in the session runner; the scheduler never imports user Python, only IR rows; workers execute one attempt and report through the API under their lease epoch; protocol implementations are loaded by entry points, never imported by name; nothing may exist only in standalone mode; the session runner inside the runtime is the only enforcer of session limits.
+The stack must preserve the boundaries of the architecture: the API is the only writer of operations and the clients hold no logic; agent sessions never reach kora and the policy decision point runs in the session runner; the scheduler never imports user Python, only IR rows; workers execute one attempt and report through the API under their lease epoch; protocol implementations are loaded by entry points, never imported by name; nothing may exist only in standalone mode; the session runner inside the runtime is the only enforcer of harness event-count, soft-budget and stall limits. Inherited lifecycle deadlines also govern the runtime/common executor wherever preparation or publication runs, including the worker host (ADR-0022); this changes no stack choice.
 
 Load: at the target scale of NFR-1.1 the implementation language is not the bottleneck; the database, artifact storage volume and the model providers are, and the session runner is the only candidate for a rewrite if its memory becomes a measured problem ([load estimate](../../knowledge/analysis/control-plane-load-estimate.md)).
 

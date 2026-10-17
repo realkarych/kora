@@ -259,13 +259,13 @@ Every accepted start produces a pinned pending run or a durable no-run overlap-s
 
 | field | level | kind | enforced by |
 |---|---|---|---|
-| `timeout` | node, subgraph, run | hard | scheduler (wall clock) decides the state; the node deadline also travels to the session runner, which stops the session at it even when the control plane is unreachable |
+| `timeout` | physical node attempt, subgraph instance, run | hard policy | earliest configured inherited UTC deadline; API/scheduler guard authority and runtime/common executors interrupt/escalate locally through all managed phases without API connectivity; nominal grace/fault model in ADR-0022 |
 | `max_events` | agent node | hard | session runner, counting turns, tool calls and tool results in the SDK event stream; class `events_exhausted` |
 | `budget_usd` | agent node, subgraph, run | soft | agent node: session runner from streamed usage, also passed to the harness where supported; subgraph and run: the scheduler from the sum of usage records and live counters, admitting no further attempt in the scope while running ones finish ([scheduler.md](scheduler.md) section 4); class `budget_exhausted` |
 | `budget_headroom_pct` | `runtime` section | – | tolerated overshoot before termination (NFR-8.2) |
 | `stall_after` | agent node; runtime default `15m` | hard | session runner, from silence in the SDK event stream; class `stalled` (DD-15) |
 
-The session runner inside the runtime is the only enforcer of the attempt-level limits `max_events`, `budget_usd` and `stall_after` (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)); the worker relays its counters to the control plane and never enforces; the scheduler owns the run and subgraph levels, which no single session can see. Termination is interrupt, 30 s grace, kill (DD-36).
+The session runner inside the runtime is the only enforcer of the attempt-level limits `max_events`, `budget_usd` and `stall_after` (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)); the worker relays its counters to the control plane and never enforces; the scheduler owns aggregate run/subgraph budget decisions, which no single session can calculate. Timeouts instead propagate the earliest already-known scope deadline into every managed phase (ADR-0022). Run time starts at promotion, subgraph time at first ready activation, node-attempt time at first executing claim before preparation. Existing parent clocks survive retries/clear/adoption. Missing optional limits add no deadline. Interruption and forced-stop escalation have nominal thresholds at `D` and `D + 30s`; grace never restarts on recovery, and actual stopping/remote effects are not a hard-real-time promise. See [scheduler section 17](scheduler.md#17-inherited-deadline-enforcement-adr-0022).
 
 ## 10. Validation rules (`kora validate`)
 

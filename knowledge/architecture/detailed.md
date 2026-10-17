@@ -134,7 +134,7 @@ flowchart LR
     B[Branch and collection<br/>CEL over artifacts, fan-out list collection]:::c
     A[Admission<br/>concurrency and daily budget per namespace,<br/>graph, runtime; distinct executing runs;<br/>independent target hold; attempt row]:::c
     W[Wait manager<br/>timers, approvals, events, polls,<br/>retry back-off; no worker held]:::c
-    L[Liveness and timeouts<br/>heartbeats, stall_after, node and run timeouts]:::c
+    L[Liveness and timeouts<br/>heartbeats, stall_after, inherited node/subgraph/run timeouts]:::c
     C[Completion and retry<br/>policies, strategies, sub-graph attempts,<br/>previous_attempt wiring]:::c
     I[Clear downstream<br/>one transaction on manual retry<br/>or a new sub-graph attempt]:::c
     RET[Retention task<br/>batched, low priority, refcounted blobs]:::c
@@ -363,3 +363,5 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | **ir_version** | the IR format version (`1.0`), semver | `graph.version`, the author's own informational version string of a graph; `graph_version.number`, the control plane's sequence number assigned at deploy |
 | **session runner** | kora's lifecycle supervisor: protected journal and phase checkpoint, harness adapter and candidate launcher, session limits, sealing/inspection and late authorized publication (ADR-0016); local follows the lifecycle in a trusted environment | the worker, which claims, requests plans, submits, relays and uploads |
 | **plan executor** | kora's code that executes a `CheckoutPlan` or a `PublishPlan`: in a trusted runtime or private worker-host publication environment, as negotiated; never credentialed in candidate metadata | the VCS, which only returns plans |
+
+Execution deadline ownership is defined by [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlines.md): the API/scheduler guard durable authority, and runtime/common executors apply the saved inherited cutoff in every managed placement, including pre-submit worker-host preparation. Nominal grace and a timer do not prove termination or release ADR-0017/ADR-0020 reservations. [Scheduler section 17](../specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022) gives the clock/failure contract.

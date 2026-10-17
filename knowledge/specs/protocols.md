@@ -16,7 +16,7 @@ inhouse_vcs = "kora_inhouse:vcs_provider"
 ```
 
 - I/O methods are `async` and cancellable; every failure is a `KoraProtocolError(code, message, retryable, details)`, and `retryable=True` maps to error class `infrastructure`. Observation/delivery failures use scheduler-owned integration backoff, not runtime/agent-attempt retries ([scheduler section 16](scheduler.md#16-external-observation-dispatch-adr-0021)).
-- Implementations receive a `ProtocolContext` (namespace, run id, attempt id, logger, secrets resolver) and never import the scheduler.
+- Implementations receive a `ProtocolContext` (namespace, run id, attempt id, logger, secrets resolver) and never import the scheduler. For managed execution effects it also binds the API-saved request identity and inherited execution deadline/clock assumption before any workspace allocation/preparation, including host execution (ADR-0022). It grants no authority beyond the authenticated current dispatcher gate.
 
 ### Control-plane observation lifecycle (ADR-0021)
 
@@ -45,6 +45,14 @@ class RuntimeCapabilities:
     default_stall_after: timedelta
 
 @dataclass(frozen=True)
+class ExecutionDeadline:
+    at: datetime
+    scope_kind: Literal["run", "subgraph", "attempt"]
+    scope_id: str
+    clock_uncertainty: timedelta
+    grace: timedelta
+
+@dataclass(frozen=True)
 class Workload:
     attempt_id: str
     execution_domain_id: str
@@ -62,6 +70,7 @@ class Workload:
     harness_credentials: dict[str, str]
     artifact_inputs: dict[str, ArtifactRef]
     limits: dict
+    deadline: ExecutionDeadline | None
     session_spec: SessionSpec | None
 
 @dataclass(frozen=True)
@@ -123,6 +132,10 @@ class Runtime(Protocol):
     async def retire(self, attempt_id: str, grace: timedelta) -> TerminationReceipt: ...
     async def release(self, handle: Handle) -> None: ...
 ```
+
+**Inherited lifecycle deadline (ADR-0022).** `ExecutionDeadline.grace` is 30 seconds; the nullable binding is fixed by the first executing claim and sealed in the saved request. The authenticated control context registers it in the original runtime checkpoint before `workspace_target` or pre-submit preparation; submission verifies the same binding. Every runtime/common executor applies it in its actual placement, including `worker_host` preparation and publication. Clip each plan/network/input/credential/inspection operation to its own finite bound and remaining deadline. A runtime unable to supply local cancellation in a declared placement is not conforming; no new provider protocol or Runtime method is added.
+
+At locally observed expiry, persist the closed execution gate, interrupt active managed work and authorize no new useful phase. Escalation derives from the original absolute deadline plus 30 seconds, never from delivery/adoption time. Earlier cancel schedules stay earlier. Candidate code may still run during grace, and an already-authorized remote call can send/settle later; there is no generic external-effect fence. After expiry, completed-operation replay and bounded historical collection/reconciliation/retirement/cleanup remain allowed; remote absence or an unfinished checkpoint cannot authorize another push or change request. Their finite operation/output bounds never delay escalation. [Scheduler section 17](scheduler.md#17-inherited-deadline-enforcement-adr-0022) defines nominal UTC-to-monotonic thresholds, saved clock assumptions, sticky expiry and the functioning-supervisor partition model; neither threshold is physical termination evidence.
 
 **Lifecycle and authority.** `kora-runner` is the lifecycle supervisor shipped with the runtime installation. It executes trusted preparation, hosts the adapter and policy client, enforces event/budget/stall limits, records observations, stops candidate execution, seals inputs and prepares publication. The candidate domain contains the harness binary, command workloads, tools, MCP servers, managed helper processes and all descendants. The adapter uses a runtime-supplied process launcher for argv, cwd, constructed environment, stdio and signals; the SDK/client and policy decision remain on the supervisor side. Merely setting a subprocess UID is not a complete protected launcher. The first slice must verify the full Claude SDK launch, hook, interrupt and subagent flow; the Codex app-server path must meet the same contract before it is supported.
 
@@ -197,7 +210,7 @@ class HarnessAdapter(Protocol):
 
 A fake adapter (`fake`) replays recorded SDK event streams for CI (NFR-10.1). Adapters are importable in supervisor installations; their harness subprocesses launch through the runtime boundary (section 2).
 
-**First-slice defaults** (DD-36). The normalised event is `{i, at, kind, data}`; `max_events` counts `turn`, `tool_call` and `tool_result` events; termination is interrupt, 30 s grace, then kill. The `claude` adapter opens a `ClaudeSDKClient` with `cwd` set to the workspace, `CLAUDE_CONFIG_DIR=<workspace>/.kora/claude` and `setting_sources=[]`, so the harness state the SDK writes there has the workspace's lifetime and is released with it: on the MVP runtimes a stored `resume` handle points at a checkpoint that no longer exists once the previous attempt was released (section 2); harness credentials come from the adapter's deployment configuration (`credentials`, secret references resolved at submit) and reach the session as environment variables (DD-30). Structured output is taken from `ResultMessage.structured_output`, else from the final text parsed as JSON, else the attempt fails `artifact_invalid`. Usage maps per model from the result message into `usage_record` rows with completeness; the `AgentSession` payload fields are listed in [ir.md](ir.md) section 3.
+**First-slice defaults** (DD-36). The normalised event is `{i, at, kind, data}`; `max_events` counts `turn`, `tool_call` and `tool_result` events; termination is interrupt, 30 s grace, then kill; for timeout the nominal thresholds derive from the immutable inherited deadline and its fixed `D + 30s` escalation, not a delayed observation (ADR-0022). The `claude` adapter opens a `ClaudeSDKClient` with `cwd` set to the workspace, `CLAUDE_CONFIG_DIR=<workspace>/.kora/claude` and `setting_sources=[]`, so the harness state the SDK writes there has the workspace's lifetime and is released with it: on the MVP runtimes a stored `resume` handle points at a checkpoint that no longer exists once the previous attempt was released (section 2); harness credentials come from the adapter's deployment configuration (`credentials`, secret references resolved at submit) and reach the session as environment variables (DD-30). Structured output is taken from `ResultMessage.structured_output`, else from the final text parsed as JSON, else the attempt fails `artifact_invalid`. Usage maps per model from the result message into `usage_record` rows with completeness; the `AgentSession` payload fields are listed in [ir.md](ir.md) section 3.
 
 ## 4. VCS (FR-5.2)
 
@@ -356,7 +369,7 @@ After sealing, the publisher imports validated, size-bounded objects into a fres
 
 Checks read raw blobs and newly reachable commits between the trusted base and prepared HEAD, including intermediate content; diff is presentation only. `git archive` is not an exact raw-tree transfer because repository export attributes can omit or transform files. Push the explicit prepared object id to `refs/heads/kora/<graph>/<run_id>/<node_path>/<n>` at the configured remote, with create-only compare-and-set semantics. A candidate branch name or remote cannot redirect it. Remote equality with the prepared object is success; another value is `publication_conflict` (`artifact_invalid`) and is never force-overwritten. Candidate commits or explicitly granted code-host credentials cannot redirect this platform operation, but candidate code given its own publication credential can make independent side effects (FR-6.1b).
 
-**Idempotency and failure.** Store the `PreparedPublication` and native bytes before accepting late authorization. Concurrent `finalize` calls for an operation serialize; identical repetitions return one `VcsRef`, different bindings fail. After a lost response, query the trusted destination with safe provider configuration: the same revision is success, authoritative absence permits retry of the same prepared revision only after earlier dispatchers and in-flight calls are closed and the attempt is not retired, unexpected content is conflict, and unreachable is still unknown (`infrastructure`, retryable). Do not recreate commits, repeat collection against mutable candidate files, or claim success from a missing response. Record each reconciliation as `vcs.publish_repeated`. Lost sealed/prepared state fails `infrastructure` and leaves any existing remote branch discoverable under its deterministic name; another attempt has another branch and never adopts it. There is no database outbox: the persisted attempt and the runtime's private phase checkpoint retain the operation identity. Lease/result fencing still governs API uploads; it cannot revoke an external push already in flight. A point-in-time absence while an older call remains possible is not a settled outcome. Unknown kora publication retains the execution-recovery barrier and reservations; after retirement only recorded results can be returned, with no new push or change-request creation (ADR-0017).
+**Idempotency and failure.** Store the `PreparedPublication` and native bytes before accepting late authorization. Concurrent `finalize` calls for an operation serialize; identical repetitions return one `VcsRef`, different bindings fail. After a lost response, query the trusted destination with safe provider configuration: the same revision is success, authoritative absence permits retry of the same prepared revision only before the inherited deadline, after earlier dispatchers and in-flight calls are closed and while the attempt is not retired, unexpected content is conflict, and unreachable is still unknown (`infrastructure`, retryable). Do not recreate commits, repeat collection against mutable candidate files, or claim success from a missing response. Record each reconciliation as `vcs.publish_repeated`. Lost sealed/prepared state fails `infrastructure` and leaves any existing remote branch discoverable under its deterministic name; another attempt has another branch and never adopts it. There is no database outbox: the persisted attempt and the runtime's private phase checkpoint retain the operation identity. Lease/result fencing still governs API uploads; it cannot revoke an external push already in flight. A point-in-time absence while an older call remains possible is not a settled outcome. Unknown kora publication retains the execution-recovery barrier and reservations; after retirement or deadline expiry only recorded results/read-only reconciliation can be returned, with no new push or change-request creation (ADR-0017/ADR-0022). A reconciled operation outcome after expiry is historical evidence, not current-result/success authority.
 
 Target identity validation occurs at API/scheduler source-result acceptance, after physical closure, not before every external effect. A rejected exported source result cannot become current, but already produced branches and arbitrary candidate/MCP effects are not rolled back. All target-source output reports, including the final session/result artifact, retain immutable full-payload identity for exact read-only replay; selected digest fields alone cannot establish equality. See [data-model section 12](data-model.md#12-immutable-run-target-identity-adr-0019).
 
@@ -629,7 +642,7 @@ Resolved node-config field → harness option. The Claude Agent SDK and Codex ap
 | `output_schema` | `output_format={type: json_schema, schema}` → `ResultMessage.structured_output` | `turn/start outputSchema` → final message | warn; the runner validates the final text as JSON, else `artifact_invalid` |
 | installed version (recorded only, DD-14) | SDK `init` message | `initialize` response | `initialize` response `agentInfo` |
 | `limits.stall_after` | runner, from message timestamps, extended during an open tool call | runner | runner |
-| `limits.timeout` | scheduler decides the state; the runner also holds the deadline and performs `interrupt()`, 30 s grace, kill at it, even when the control plane is unreachable | `turn/interrupt`, grace, kill | `session/cancel`, grace, kill |
+| `limits.timeout` | API/scheduler guard authority; runtime/common executors use the saved earliest node/subgraph/run deadline through every managed phase, nominal interrupt at D and escalation at D+30s, without API connectivity (ADR-0022) | `turn/interrupt`, grace, kill | `session/cancel`, grace, kill |
 | `limits.max_events` | runner, counting `turn`, `tool_call` and `tool_result` events; `max_turns` is also set as an additional native limit | runner, counting `item/completed` notifications | runner, counting `session/update` tool calls and agent messages |
 | `limits.budget_usd` | `max_budget_usd` **and** runner from per-model usage on the result | runner from `turn/completed.usage` × price table | runner from usage in `session/update` when present |
 | usage source | `ResultMessage` per-model usage with cost basis (includes subagents) | `turn/completed.usage` summed per turn; `partial` if killed mid-turn | agent-dependent; `unavailable` when absent |
@@ -640,3 +653,11 @@ Resolved node-config field → harness option. The Claude Agent SDK and Codex ap
 | stop reason / error class | `ResultMessage.subtype` (`success`, `error_max_budget_usd` → `budget_exhausted`, `error_during_execution` → `harness_error`) | `turn/failed`, `error` → `harness_error` | `stopReason` (`end_turn`, `max_tokens`, `cancelled`, `refusal` → `harness_error`) |
 
 Fields with the same semantics on every harness are the kora vocabulary; fields that only one harness has are mapped on that harness and warned on the others, never silently dropped (FR-3.3).
+
+## 15. Inherited-deadline conformance gates (ADR-0022)
+
+The named future release contracts and all case variations are [data-model section 15.3](data-model.md#153-recovery-and-future-acceptance-contracts). No runtime or tests are implemented in this documentation change; actual documentation CI does not execute these cases.
+
+Separate three evidence layers: configured fake runtime/common executors prove clock/authority decisions at injected phase barriers; PostgreSQL/SQLite integration proves scope/attempt persistence and atomic transitions; real trusted Linux/macOS local processes and Linux Docker demonstrate supported interruption/escalation and domain stop behavior. A metadata timeout/latch or fake receipt proves no OS behavior. Independent runtimes must demonstrate their declared local deadline placement and clock assumptions before shipping; no same-user hostile containment is required of local.
+
+The suite covers node/run/nested-wrapper precedence and ties, no-limit binding, pre-submit/queued-expired work, both plan placements, preparation/input/credential/inspection/finalization phases, scope retry and rematerialization, exact expiry boundaries, late result rejection before timeout pass, and read-only replay/reconciliation after expiry. Delayed cancel and adoption during/after grace must preserve the original escalation threshold. Clock adjustment, changed installation configuration and sticky expiry cannot restore authority or extend installed timers. Control failure/suspension/registry loss retains ADR-0017 uncertainty and ADR-0020 reservations; the suite cannot infer closure from elapsed time. Use injected clocks/randomness, explicit synchronization and conforming protocol fakes, never patched transports, mocks or sleeps.

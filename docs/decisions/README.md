@@ -27,6 +27,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0019](0019-immutable-run-target-identity.md) | One immutable target per run; atomic acceptance of the complete target-source result; separate history and hold lifecycle | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md) | Bounded outstanding run acceptance, physical execution-run occupancy and independent target holds; canonical start/replay and eligible ordering | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0021](0021-external-observations-outside-transactions.md) | Unlocked bounded external calls, exact current-owner application and recoverable approval delivery with cooperative providers | direction and plan accepted 2026-10-17; document pending owner review |
+| [ADR-0022](0022-inherited-execution-deadlines.md) | Immutable inherited node/subgraph/run deadlines across managed phases; fixed nominal grace and evidence-based recovery | direction and plan accepted 2026-10-17; document pending owner review |
 
 ## Writing a new record
 
@@ -47,3 +48,5 @@ Copy the skeleton below into `NNNN-short-title.md` with the next free number, fi
 ## Consequences
 ## Where it is applied
 ```
+
+[ADR-0022](0022-inherited-execution-deadlines.md) defines one inherited node/subgraph/run deadline across managed phases, fixed nominal grace and unchanged termination-evidence barriers. Direction and implementation plan accepted on 2026-10-17; document wording pending owner review.

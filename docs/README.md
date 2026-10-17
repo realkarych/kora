@@ -22,3 +22,5 @@ External observations and approval-channel recovery are governed by [ADR-0021](d
 - Every statement in this folder has been reviewed and accepted by the project owner; each file says when. A change lands only through a pull request the owner reviews line by line. Material produced by agents without that review (research, analyses, review records, drafts) belongs in [`knowledge/`](../knowledge/README.md).
 - Volatile external facts (versions, popularity, prices, release dates) live in `knowledge/research/` with the date they were checked; this folder states them qualitatively and links there.
 - Research and analyses are evidence, not decisions. They are cited from a decision record or from positioning, never the other way round.
+
+Inherited execution deadlines are governed by [ADR-0022](decisions/0022-inherited-execution-deadlines.md). Direction and implementation plan were accepted on 2026-10-17; the changed document wording remains pending line-by-line owner review.
