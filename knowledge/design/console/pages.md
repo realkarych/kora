@@ -91,6 +91,8 @@ System: no outgoing links
 | retry dialog | "retry <node> as <strategy from the node's policy>"; the list of node instances that clear-downstream will reset (the downstream closure of the run view); any execution/publication barrier and the statement that replacement admission waits for closure; the strategy under a details disclosure, `resume` labelled as falling back on runtimes without `supports_resume` | `POST …/nodes/{node_path}/retry` |
 | cancel | in the run header (the run) and in the node panel (the node); the confirmation names the attempts requested to stop and explains retained reservations/holds until closure; the grace period comes from configuration | `POST …/runs/{run}/cancel`, `…/nodes/{node_path}/cancel` |
 
+Target-source results (ADR-0019): the node panel labels each tentative artifact `staged`, with its normal access/availability, and does not show it as accepted success. A target identity conflict uses the existing failed/configuration-error state and shows bound/proposed keys, source artifact and recovery guidance. Scheduler-only sources expose the same node failure without an attempt row. The panel can show the fully bound existing `kora rerun <run>` command; there is no new console action. Retry preserves the key, while rerun discovers independently and cannot guarantee a requested target without graph-defined selection.
+
 ## Review page
 
 Opens from a human-input node and from Approvals; one approval request.
@@ -115,7 +117,7 @@ Opens from a human-input node and from Approvals; one approval request.
 | list row | the key; the strip of the holding run's top-level node states (the newest holder under `allow`; "idle" in gray without active work); the accepted change (date and commit, or a dash); the number of deferred runs when any; the list shows active targets by default with a switch to all | `GET /namespaces/{ns}/targets?active=true`, the runs' node states |
 | target page: now | the holding run and `target_held_since`, including terminal runs with unsettled recovery, its state word and the link to the review page when it waits for a person; the deferred runs with `run.target_deferred` times | `GET /namespaces/{ns}/targets/{key}` |
 | target page: accepted | the latest `approved` request: commit, change-request link, `approver`, time; the three facts "accepted · merged · verified" with their sources (the request; the `change_request_status` observation of a named run; a run-level artifact such as a confirmation metrics report) or "unknown"; the cost of the search: the sum of cost totals over the key's runs since the previous accepted change, failed and cancelled included, tokens first, USD beside, with completeness | the target view's runs, their approval requests and cost totals |
-| target page: history | the key's runs newest first in the graph page's row style, each with its cost | the target view |
+| target page: history | the key's permanently bound runs newest first in the graph page's row style, each with its cost, including failed/rejected proposals and late usage; payload expiry preserves binding origin | the target view |
 
 ## Approvals
 

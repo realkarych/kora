@@ -143,10 +143,10 @@ The words below are used everywhere else; [appendix B](#b-glossary) has the full
 - **Run.** One execution of a graph version with its parameters. A run pins its version for its whole life.
 - **Node instance and node path.** One node inside one run, one per fan-out element and per sub-graph attempt, addressed by a node path such as `candidates[2]@3.review`.
 - **Attempt and handle.** An attempt is exactly one runtime submission of an `agent` or `command` node instance, and the unit of cost. The handle is the runtime's own identifier of that submission, stored on the attempt once the runtime returns it. Each attempt owns immutable exact input bindings and a saved nonsecret request sealed before preparation effects; later node clearing cannot erase them (ADR-0018).
-- **Artifact and artifact version.** An artifact is a node path and an output name. Each new output is a version: `current`, `superseded` by a newer one, or `invalid`.
+- **Artifact and artifact version.** An artifact is a node path and an output name. Each new output is a version: `current`, `superseded` by a newer one, or `invalid`; all outputs of a declared target source start `staged` until its complete result is atomically accepted (ADR-0019).
 - **Wait.** The row that a waiting node is: a timer, an approval, an event, a poll, a retry back-off or admission back-pressure. No process or worker is held while a node waits.
 - **Approval request.** What a `human_input` node asks, bound to one commit SHA and a set of digests, so a response can approve only that content.
-- **Target key, `overlap` and `on_active`.** A target key is the optional business identity of a run, such as a package name, scoped to the namespace. A run holds its target from the first attempt admitted under its key until it leaves `running` and blocking execution/publication recovery is settled (ADR-0017). `graph.overlap` decides first, at trigger time and per graph, whether a new run may start while another run of the graph is running: `allow`, `skip` or `queue`. `graph.target.on_active` decides second, at admission and per key: `allow` proceeds, `defer` waits while another run holds the key. A graph that declares `defer` therefore sets `overlap: allow`, or `skip` and `queue` act first.
+- **Target key, `overlap` and `on_active`.** A target key is the optional business identity of a run, such as a package name, scoped to the namespace. It binds once at parameter creation or successful acceptance of the complete declared source result and never changes or clears; releasing the hold does not unfreeze identity (ADR-0019). A run holds its target from the first attempt admitted under its key until it leaves `running` and blocking execution/publication recovery is settled (ADR-0017). `graph.overlap` decides first, at trigger time and per graph, whether a new run may start while another run of the graph is running: `allow`, `skip` or `queue`. `graph.target.on_active` decides second, at admission and per key: `allow` proceeds, `defer` waits while another run holds the key. A graph that declares `defer` therefore sets `overlap: allow`, or `skip` and `queue` act first.
 
 The canonical graph of the specifications shows the structural kinds at work. A fan-out runs one body instance per list element; the body is a sub-graph retried as a unit, and a `branch` inside it can end the current sub-graph attempt with `$fail_attempt`.
 
@@ -632,7 +632,7 @@ stateDiagram-v2
   }
   created --> cancelled: [cancel and no dispatch grant]
   leased --> failed: error or timeout [execution and dispatch closure established]
-  finishing --> succeeded: completion pass [all outputs current]
+  finishing --> succeeded: completion pass [complete outputs accepted]
   finishing --> failed: completion pass [an output invalid]
   leased --> cancelled: cancel [runtime and every dispatcher closed]
   leased --> lost: [original-domain retirement and all dispatch/publication closed, result unavailable]
@@ -709,7 +709,7 @@ sequenceDiagram
   else cleared or cancelled meanwhile
     A-->>W: desired_state cancel, the artifacts were stored superseded
   end
-  S->>D: completion pass with closure evidence, outputs current, instance succeeded
+  S->>D: completion with closure evidence: accept complete outputs and source key atomically
   W->>RT: runtime.release after API recovery settled, keep fence/evidence
 ```
 
@@ -815,7 +815,7 @@ stateDiagram-v2
 | `ready` to `waiting` | admission | a waiting kind gets its wait row, or a full scope gives an admission wait |
 | `ready` to `failed` | admission | the run or sub-graph budget is exhausted; class `budget_exhausted` |
 | `queued` to `running` | the attempt's `submitted` transition | |
-| `running` to `succeeded` | completion | every declared output has a current version |
+| `running` to `succeeded` | completion | complete outputs accepted; a declared target source promotes its whole staged result and checks/binds its key atomically |
 | `running` to `waiting` | completion | the attempt failed and the retry policy allows another: a retry back-off wait |
 | `running` to `failed` | completion | no retry is left |
 | `waiting` to `ready` | wake-up | a retry back-off or an admission wait is over |
@@ -971,7 +971,7 @@ sequenceDiagram
   S->>S: only after all run barriers settle, admit attempt n+1
 ```
 
-When the retried node produces the output that `graph.target.key` names, the run's target key is bound again from the new current version. A run moves through its own states around all of this.
+Retry never rebinds a target: the complete source result must return the original key, otherwise it fails with non-retryable `config_error` / `target_identity_conflict` and none of its staged outputs becomes current (ADR-0019). Same-key results may refresh normally; a different target requires a separate run. A run moves through its own states around all of this.
 
 ```mermaid
 ---
@@ -1000,7 +1000,7 @@ stateDiagram-v2
   cancelled --> [*]
 ```
 
-- **Leaving `running`** clears `target_held_since` only after every blocking execution/publication recovery is settled. Until then a terminal run keeps the hold. A retried run retains an unresolved hold; after settled release it takes the hold again at its next admission behind any new holder (ADR-0017). No key/hold is invented for an unbound run; target rebinding stays issue #54.
+- **Leaving `running`** clears `target_held_since` only after every blocking execution/publication recovery is settled. Until then a terminal run keeps the hold. A retried run retains an unresolved hold; after settled release it takes the hold again at its next admission behind any new holder (ADR-0017). No key/hold is invented for an unbound run. The first key and its durable origin survive clear/retry/release/expiry; binding itself acquires no hold (ADR-0019).
 - **The hold is set whatever the policy.** A run of an `allow` graph never waits, but it holds its target for the benefit of another graph's `defer` on the same namespace key.
 - **`run.target_deferred`** is written once per run and holder, for the first admission wait behind that holder. A key bound from an output is bound by the completion pass, with a `run.target_bound` event, and a run never loses its key.
 - **A run without a key** never holds a target and never waits on this scope ([ADR-0014](../../docs/decisions/0014-target-identity.md), scheduler.md section 6).
@@ -1205,7 +1205,7 @@ flowchart TB
 | 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows with immutable exact input bindings, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
 | 6 Wake-ups | timers, inbound events matched against wait subscriptions, sensor and approval polls; head observation, invalidation and the re-check before downstream | scheduler.md section 5 |
 | 7 Timeouts and liveness | marks expired leases reclaimable; fails wall-clock timeouts; sums run and sub-graph budgets | scheduler.md section 4 |
-| 8 Completion and retry | marks instances done; applies retry policies; starts sub-graph attempt N+1; completes the run; binds a target key from an output | scheduler.md sections 2 and 7 |
+| 8 Completion and retry | marks instances done; applies retry policies; starts sub-graph attempt N+1; completes the run; accepts a target source's whole staged result and immutable key atomically | scheduler.md sections 2 and 7 |
 | Clear downstream | one transaction for a manual retry or sub-graph attempt N+1 | data-model.md section 6 |
 | Retention task | expires blobs and inline content only after all unexpired artifact/segment/request/derived owners and required active/recovery holds permit deletion; marks explicit availability | scheduler.md section 13 |
 | Exporter feed | a bounded queue over event rows in order; reads an attempt's session segments from artifact storage when the attempt reaches `finishing`; drops are counted; replay from any row | protocols.md section 9 |
@@ -1336,7 +1336,7 @@ flowchart TB
 | Worker endpoints | register and claim; heartbeat, segments, artifacts, usage and transitions, each carrying the lease epoch; artifact uploads and the transition to `finishing` also need result authority | api-and-agent-surface.md section 2, scheduler.md section 3 |
 | IR validator and planner | the shared validator; `/plan` materialises a document on the fake runtime | api-and-agent-surface.md section 2 |
 | Scheduling entry points | start a run; deliver a signal; tick | scheduler.md section 12 |
-| Upload processing | validates artifacts against saved contracts, stores actual summary/digest-selection results and payloads by digest; promotes `vcs.*` and `permission_denied` facts to event rows | api-and-agent-surface.md section 2, data-model.md section 2 |
+| Upload processing | validates artifacts against saved contracts, stores actual summary/digest-selection results and payloads by digest; stages every output of the declared target source with full-payload identity for read-only replay; promotes `vcs.*` and `permission_denied` facts to event rows | api-and-agent-surface.md section 2, data-model.md section 2 |
 | Persistence | the SQLAlchemy models and transitions, an event row per mutation, two dialect-specific statements | scheduler.md section 10, data-model.md section 4 |
 
 Not drawn: the frontend session routes behind `kora open` and the console's cookie, the static console build, the MCP servers mounted under `/mcp`, and `/healthz`, `/readyz` and `/metrics` (api-and-agent-surface.md sections 2 and 6). The validator's calls to installed harness adapters, sensors and policy are drawn in [chapter 11](#11-graph-definition).
@@ -1368,7 +1368,7 @@ The table names the main writer of each table.
 | `attempt` | admission inserts the row and immutable input bindings; API reporting seals the nonsecret request/policy once before effects (ADR-0018); transition ownership remains the open question below |
 | `wait` | created by admission and by completion for a retry back-off; resolved by the wake-up pass; cancelled by clear downstream, a run cancel or a timeout |
 | `approval_request` | created by admission with `run_cost`; a response applied through the deliver-signal entry point; a head observation applied by the wake-up pass; invalidated by clear downstream |
-| `artifact_version` | upload processing for an attempt's outputs; the scheduler for `PreviousAttempt` and fan-out lists; `status` changed by clear downstream, `payload_state` by retention |
+| `artifact_version` | upload processing for physical outputs; the scheduler for PreviousAttempt, collections and wrapper exports with their own logical rows; target-source staging/promotion by atomic acceptance; clear supersedes current/staged rows; retention changes payload availability |
 | `usage_record`, `session_segment` | the API, when a worker uploads them |
 | `event` | the API and the scheduler, insert only, in the transaction of the change it records |
 
@@ -1393,6 +1393,8 @@ The persistence rules are few and strict.
 Every integration test that touches the database runs on PostgreSQL and on SQLite through one parametrised fixture and must behave the same on both ([AGENTS.md](../../AGENTS.md)).
 
 The historical execution contract is [data-model section 11](../specs/data-model.md#11-immutable-contracts-and-execution-records-adr-0018). A graph version pins schemas, parents/references and behavior for every consumer; each physical attempt owns exact bindings and a once-sealed nonsecret request/policy. Recovery uses saved values and original checkpoints, never current aliases, input pointers or branch heads. Actual checkout/image/harness/fallback observations arrive later through existing records/events. Content-bearing request and derived values expire under the run's retention; inspect/diff show explicit availability and enforce transcript access. Historical reads use saved summary/digest/validation results, with no replacement-plugin execution. A compatible upgrade preserves active semantics. These records do not authorize effects or clear ADR-0017 uncertainty.
+
+Target-source acceptance is [data-model section 12](../specs/data-model.md#12-immutable-run-target-identity-adr-0019). Stage the declared source's entire output set, including session/result artifacts, until complete-result/key acceptance and success commit together. Wrappers own exported artifact rows without mutating child history. Conflicting proposals remain historical with a non-retryable structured error; all_done handlers may run without consuming them. Exact source-output replay is read-only, compares full payload identity rather than selected digest fields, and cannot resurrect expiry or repair a settled attempt. Pre-binding/body work and external effects are not retroactively gated; a rerun rediscovers independently rather than transferring a rejected target.
 
 ### 15. Worker
 
@@ -1682,7 +1684,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | admission | pass 5: decides whether a ready instance gets an attempt now, waits or fails | [12](#12-scheduler) |
 | `AgentSession` | the artifact of an agent attempt; its payload is the harness transcript | 7 |
 | approval request | what a `human_input` node asks; bound to one commit SHA and a set of digests | [9](#9-waits-approvals-and-retries) |
-| artifact, artifact version | an artifact is a node path and an output name; each new output is a version, `current`, `superseded` or `invalid` | [2](#2-the-domain-model) |
+| artifact, artifact version | an artifact is a node path and an output name; a version is `staged` for a tentative target-source result, or `current`, `superseded`, `invalid` | [2](#2-the-domain-model) |
 | attempt | exactly one runtime submission of a node instance, and the unit of cost | [8](#8-one-attempt-and-when-a-process-dies) |
 | change request | the code host's review object, such as a GitHub pull request or a GitLab merge request | 7 |
 | clear downstream | the one transaction that resets a node and its downstream closure to `pending` on a manual retry or a new sub-graph attempt | 9 |
@@ -1716,7 +1718,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | skills | two things: files installed in the engineer's own agent, and skills attached to an agent node, whose digests deploy pins | [17](#17-thin-clients-and-the-console) |
 | strategy | where the next attempt of an agent node starts: `fresh`, `fresh_with_feedback` or `resume` | 9 |
 | sub-graph attempt | one pass over a retried sub-graph body; an integer on node instances, never an attempt row | 2 |
-| target key, target hold | the optional business identity of a run; a run holds it from the first attempt admitted under its key until it leaves `running` and all blocking execution/publication recovery is settled (ADR-0017) | 9 |
+| target key, target hold | the optional identity binds once for the run's lifetime, independent of its reacquirable hold (ADR-0019); a run holds it from the first attempt admitted under its key until it leaves `running` and all blocking execution/publication recovery is settled (ADR-0017) | 9 |
 | `VcsRef` | the artifact of a published change: repository, branch, commit, base commit, diff summary and the change request's URL | 1 |
 | wait | the row that is a waiting node: timer, approval, event, poll, retry back-off or admission back-pressure | 9 |
 | worker id | a worker's configured name, stable per host across restarts | 8 |

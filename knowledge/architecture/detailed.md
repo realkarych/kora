@@ -251,10 +251,12 @@ sequenceDiagram
         W->>R: record_dispatcher_quiescence
         W->>API: closure evidence, artifact versions, usage, attempt → finishing [epoch]
     end
-    S->>DB: completion pass under the run lock: instance succeeded/failed, retry policy,<br/>fan-out collection, next sub-graph attempt with clear downstream
+    S->>DB: completion under run lock: full result accepted,<br/>target-source staging promoted with immutable key, retry/collection
 ```
 
 Lease expiry records `execution_state=unknown` and retains every original reservation; it does not terminalize the attempt after any delay (ADR-0017). Recovery observes/adopts the same original domain, and earlier dispatcher grants remain barriers to platform writes. `retire` serializes with delayed submit/finalize, while independent worker-host/code-host calls require their own closure evidence. The affected run admits no new attempt until all execution/publication recovery settles. A previously acquired target hold survives terminal run status until the ordinary release condition and this barrier are both satisfied. Operator reconciliation persists observe/stop intent or records evidenced human attestation through the API, CLI and existing `kora_admin`; no scheduler runtime call or new coordination service is introduced.
+
+A declared target source stages all its outputs until complete-result acceptance binds or compares its immutable run key and succeeds in one transaction (ADR-0019). A changed valid key fails with config_error and leaves no current exported result; wrapper/collector exports own rows without changing child history. Read-only replay uses full payload identity, not a selected-field digest. Initial binding acquires no hold, and releasing a hold never releases identity. Pre-binding/body work and prior external effects remain outside that barrier. See [data-model section 12](../specs/data-model.md#12-immutable-run-target-identity-adr-0019).
 
 ## 6. Deployment shapes
 
@@ -342,7 +344,7 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | term | meaning | not to be confused with |
 |---|---|---|
 | **run** | one instance of a graph version being carried out, from trigger to a terminal state; the API resource `run_…` | "execution" (not used) |
-| **target** | the business object a run works on (a query, a dependency, a flaky test), named by the optional `run.target_key` with namespace scope (ADR-0014); several runs work on one target over time, and under `defer` one holds it at a time | the delivery key (`run.idempotency_key`), the attempt, a fan-out element |
+| **target** | the business object a run works on (a query, a dependency, a flaky test), named by the optional run-lifetime immutable `run.target_key` with namespace scope (ADR-0014/ADR-0019); several runs work on one target over time, and under `defer` one holds it at a time | the delivery key (`run.idempotency_key`), the attempt, a fan-out element |
 | **attempt** | one runtime submission of a node instance; the unit of cost and of the `attempt` table | a sub-graph attempt |
 | **execution domain** | non-reused identity of the runtime control-registry lineage; persisted before dispatch authority, retained through recovery and never reused by a replacement host/registry (ADR-0017) | a stable worker host name or process incarnation |
 | **execution uncertainty** | old execution, dispatcher or publication may still act; original reservations/hold remain, last observation and evidence provenance are exposed | terminal `lost` or permission to retry |

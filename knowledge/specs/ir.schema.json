@@ -455,7 +455,7 @@
         "key": {
           "oneOf": [
             { "type": "object", "required": ["param"], "properties": { "param": { "type": "string", "minLength": 1, "description": "a run parameter of graph.params; bound when the run is created" } }, "additionalProperties": false },
-            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "description": "a field of the output payload; bound when a version of the output becomes current" } }, "additionalProperties": false }
+            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "description": "one scalar string in a top-level node output; key binds once when the complete source result is atomically accepted (ADR-0019)" } }, "additionalProperties": false }
           ]
         },
         "on_active": { "type": "string", "enum": ["allow", "defer"], "description": "what a new run does while another run of the namespace holds the same target; when absent: allow (FR-6.11, ADR-0014)" }

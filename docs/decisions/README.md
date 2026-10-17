@@ -1,6 +1,6 @@
 # Architecture decision records
 
-One record per significant decision, in the MADR shape: context, decision, alternatives considered, consequences, where it is applied. Records are numbered in the order they were written and never renumbered; a record that changes an earlier one says so in its header (`Supersedes` / `Superseded by`) and the earlier record is kept with its status updated. Reviewed by the project owner on 2026-10-16; the ADR-0016, ADR-0017 and ADR-0018 additions and amendments dated 2026-10-17 are pending owner review.
+One record per significant decision, in the MADR shape: context, decision, alternatives considered, consequences, where it is applied. Records are numbered in the order they were written and never renumbered; a record that changes an earlier one says so in its header (`Supersedes` / `Superseded by`) and the earlier record is kept with its status updated. Reviewed by the project owner on 2026-10-16; the ADR-0016, ADR-0017, ADR-0018 and ADR-0019 additions and amendments dated 2026-10-17 are pending owner review.
 
 Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (first-slice implementation defaults) and `DD-37` (small mechanisms kept or dropped) are implementation-level and stay only in the register.
 
@@ -24,6 +24,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0016](0016-trusted-execution-and-publication.md) | Trusted lifecycle control and separate late publication; candidate commit history preserved; local trusted for development/tests | direction accepted 2026-10-17; document pending owner review |
 | [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md) | Preserve execution uncertainty; require runtime termination and dispatcher closure before replacement; explicit operator reconciliation | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0018](0018-immutable-attempt-history.md) | Immutable deployment contracts and attempt-owned inputs/requests; explicit compatibility, retention and access boundaries | direction and plan accepted 2026-10-17; document pending owner review |
+| [ADR-0019](0019-immutable-run-target-identity.md) | One immutable target per run; atomic acceptance of the complete target-source result; separate history and hold lifecycle | direction and plan accepted 2026-10-17; document pending owner review |
 
 ## Writing a new record
 

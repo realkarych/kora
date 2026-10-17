@@ -75,6 +75,19 @@ A node enters the runtime's infrastructure retry policy only after affirmative r
 | `lost` | confirmed loss: original-domain retirement and every dispatcher/publication closure established; evidence provenance and the infrastructure retry that followed |
 | any non-terminal status with `execution_state=unknown` | original domain, recovery version/reason, last observation/time, every dispatcher grant, publication uncertainty, retained scopes and permitted actions; no replacement by time alone |
 
+## Artifact result states
+
+These labels are separate from node state and payload availability (ADR-0019). The declared target source stages its complete output set; ordinary nodes retain existing upload behavior.
+
+| artifact status | label and meaning |
+|---|---|
+| `staged` | tentative source result; not available to graph consumers and not accepted success |
+| `current` | accepted result available to graph consumers |
+| `superseded` | historical result, including valid companions of a rejected/cleared source |
+| `invalid` | rejected/invalid output, with its structured reason |
+
+A target identity conflict stays red `failed` with class `config_error`; its panel shows `target_identity_conflict`, bound/proposed keys and the source artifact. No automatic retry is shown. For a scheduler-only source the node error comes from its durable failure event, not an invented attempt. Source results must be accepted together, and replay cannot change the state back to staged/current. Content expiry/forbidden access remains independently visible.
+
 ## Runs
 
 The run's colour and word in the header, on the runs list and in the traffic light are derived: red `failed`; green `succeeded`; gray `cancelled`; amber `waiting for you` when the run is `running` and its only live node instances wait for a person; otherwise blue `running`; a recovery overlay always names retained holds on a terminal run and unknown/blocked execution on a live run without changing the API state word (`pending` is shown as `running` with "scheduling").
