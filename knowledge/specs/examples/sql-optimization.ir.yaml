@@ -24,6 +24,122 @@ meta:
     trust_repo_config: false
     permission_mode: dont_ask
     tool_policy: { deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
+type_contracts:
+  AgentSession:
+    builtin_revision: '1'
+  CommandResult:
+    builtin_revision: '1'
+  PreviousAttempt:
+    builtin_revision: '1'
+  ReviewBundle:
+    builtin_revision: '1'
+  StructuredOutput:
+    builtin_revision: '1'
+  VcsRef:
+    builtin_revision: '1'
+  dwh_core/Candidate:
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      $id: urn:kora:artifact:dwh_core:Candidate
+      type: object
+      properties:
+        change:
+          $ref: urn:kora:artifact:VcsRef
+        metrics:
+          $ref: urn:kora:artifact:dwh_core:MetricsReport
+        hypothesis:
+          $ref: urn:kora:artifact:dwh_core:Hypothesis
+        gain_pct:
+          type:
+            - number
+            - 'null'
+          default:
+      required:
+        - change
+        - metrics
+        - hypothesis
+    parent: StructuredOutput
+    behavior:
+      validation: kora.json-schema-2020-12.v1
+      digest_fields: kora.json-payload.v1
+      summary: kora.json-payload.v1
+  dwh_core/Hypothesis:
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      $id: urn:kora:artifact:dwh_core:Hypothesis
+      type: object
+      properties:
+        title:
+          type: string
+        rationale:
+          type: string
+          default: ''
+        task_id:
+          type: string
+      required:
+        - title
+        - task_id
+    parent: StructuredOutput
+    behavior:
+      validation: kora.json-schema-2020-12.v1
+      digest_fields: kora.json-payload.v1
+      summary: kora.json-payload.v1
+  dwh_core/MetricsReport:
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      $id: urn:kora:artifact:dwh_core:MetricsReport
+      type: object
+      properties:
+        cpu_seconds:
+          type: number
+        output_path:
+          type: string
+      required:
+        - cpu_seconds
+        - output_path
+    parent: StructuredOutput
+    behavior:
+      validation: kora.json-schema-2020-12.v1
+      digest_fields: kora.json-payload.v1
+      summary: kora.json-payload.v1
+  dwh_core/ReviewVerdict:
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      $id: urn:kora:artifact:dwh_core:ReviewVerdict
+      type: object
+      properties:
+        approved:
+          type: boolean
+        comments:
+          type: string
+      required:
+        - approved
+        - comments
+    parent: StructuredOutput
+    behavior:
+      validation: kora.json-schema-2020-12.v1
+      digest_fields: kora.json-payload.v1
+      summary: kora.json-payload.v1
+  dwh_core/Target:
+    schema:
+      $schema: https://json-schema.org/draft/2020-12/schema
+      $id: urn:kora:artifact:dwh_core:Target
+      type: object
+      properties:
+        task_id:
+          type: string
+        query_path:
+          type: string
+        reason:
+          type: string
+      required:
+        - task_id
+        - query_path
+    parent: StructuredOutput
+    behavior:
+      validation: kora.json-schema-2020-12.v1
+      digest_fields: kora.json-payload.v1
+      summary: kora.json-payload.v1
 graph:
   id: sql_optimization
   version: "3"

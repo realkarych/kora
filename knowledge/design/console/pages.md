@@ -150,12 +150,12 @@ Opens from the node panel; two attempts of one node, the counterpart as the rout
 
 | section | left and right | route |
 |---|---|---|
-| outcome | status and error class; `strategy` and `strategy_fallback`; the `Feedback` passed in with author and association | `GET …/attempts/{att}/diff?against=` |
+| outcome | status and error class; intended and observed `strategy`/`strategy_fallback`; retained `Feedback` with author and association when authorized, otherwise explicit content access/availability | `GET …/attempts/{att}/diff?against=` |
 | outputs | per declared output: structured outputs as the changed fields from the JSON Patch; `VcsRef` as branch, commit, diff statistics, change-request link | the same |
 | cost and events | usage per model with completeness; event counts | the same |
-| configuration and versions | changed config paths from the resolved config digests; `harness_version`, `image_digest`, `price_table_id` | the same |
+| configuration and versions | saved exact input IDs/selectors and request/config digests; permitted retained config differences and saved effective policy; observed `harness_version`, `image_digest`, checkout commit and `price_table_id`, with unknown facts explicit | the same |
 
-Identical rows are muted.
+Identical available rows are muted. Missing/expired/not-recorded/unknown values are labelled explicitly, never treated as equal empty values. Diff reads immutable attempt records and stored artifact projections, never current pointers or replacement plugins (ADR-0018). Prompt/feedback and equivalent config/diff projections require namespace `transcripts` access; a forbidden value is distinct from an expired one. A retry requiring unavailable inputs displays the API's structured conflict and source IDs, without adding a console action.
 
 ## Logs
 

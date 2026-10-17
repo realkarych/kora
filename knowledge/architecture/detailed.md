@@ -112,9 +112,9 @@ Responsibilities, in one line each:
 | `kora api` | the only implementation of every operation; authentication (user and service principals); webhook ingestion to `inbound_event`; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | scheduling decisions; running sessions; UI logic |
 | `kora web` | the production web console, full in MVP (FR-7.3) and held to the user-experience bar of NFR-13.1: approvals, runs, the live graph with node states and timeline, attempts with artifacts and the diff between them, live session logs, cost per run, node and attempt, graphs and their versions; graph editing post-MVP; a thin client of the API through a TypeScript client generated with `@hey-api/openapi-ts`; opaque server-side session cookie, CSRF protection, CSP | logic of its own; direct database access; designed in [docs/console.md](../../docs/console.md) before it is built ([ADR-0015](../../docs/decisions/0015-web-console-design.md)) |
 | `kora scheduler` | the passes in scheduler.md section 2 under a per-run lock; approval request creation with the run's cost sum; clear-downstream; the batched retention task | calling runtimes or harnesses |
-| `kora worker` | claiming `created` attempts and original-domain recovery of unresolved attempts through the API, including cancelled/superseded attempts of terminal runs; asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; closing all earlier dispatcher grants/operations before new platform writes, obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
+| `kora worker` | claiming `created` attempts and original-domain recovery of unresolved attempts through the API, including cancelled/superseded attempts of terminal runs; sealing its nonsecret logical request and execution policy through the API before allocation/preparation, then asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; closing all earlier dispatcher grants/operations before new platform writes, obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
 | Metadata DB | every entity in data-model.md; the only run state; row claims with `SELECT … FOR UPDATE SKIP LOCKED` and the run lock (an advisory lock per run) on Postgres | payload bytes |
-| Artifact storage | payload bytes by digest: artifacts, transcripts, live session segments | metadata |
+| Artifact storage | payload bytes by digest: artifacts, transcripts, live segments, saved request content and content-bearing derived results; explicit availability and active/recovery holds (ADR-0018) | metadata |
 | `kora mcp` | the authoring and operating MCP servers for the user's own harness: 14 curated, task-shaped tools, long operations as MCP Tasks; forwards with the user's token, whose default has no `approve` flag | any logic of its own; serving skills (they are files in the harness's own format) |
 | `kora standalone` | api, scheduler and a local worker as coroutines in one process on SQLite; the worker uses the same API client over an in-process ASGI transport | production use |
 
@@ -190,6 +190,8 @@ flowchart LR
     RUN --> HARN
 ```
 
+The deployment stores the used type closure by value and binds deployment identity to the canonical IR plus resolved contract (ADR-0018). Each attempt stores exact input bindings even without outputs. The API-sealed request is immutable logical content; current authority/credentials are separate, while actual checkout, image, harness and fallback are later observations through the existing journal/events. Saved contracts govern API validation and scheduler-only branch/collection/approval consumers too. See [data-model section 11](../specs/data-model.md#11-immutable-contracts-and-execution-records-adr-0018) for expiry, access and upgrade compatibility.
+
 ## 5. One attempt, end to end
 
 ```mermaid
@@ -204,12 +206,16 @@ sequenceDiagram
     participant H as lifecycle supervisor + harness adapter
     participant AS as artifact storage
 
-    S->>DB: node ready → attempt(created)
+    S->>DB: node ready → attempt(created) with immutable exact input bindings
     W->>API: claim created attempts for runtime=docker
     API->>DB: persist original domain and incarnation/dispatcher grant, claimed, epoch+1, lease 120 s
+    W->>API: seal nonsecret request, check expected policy revision
+    API->>AS: persist request payload
+    API->>DB: save request descriptor, semantic digest and policy once
+    API-->>W: sealed request identity
     W->>R: workspace target? → root /workspace, no host path
     W->>V: checkout_plan(repo, rev, root) → CheckoutPlan and publish_plan(…) → PublishPlan
-    W->>R: submit(workload with both plans, keyed by attempt id) → handle (runner starts)
+    W->>R: submit binds saved request and derived plans, authority separate → handle
     W->>API: attempt → submitted(handle) [epoch]
     H->>H: preparation phase: execute CheckoutPlan in the root → WorkspaceRef
     H-->>R: phase event (preparation succeeded, WorkspaceRef) to private control journal

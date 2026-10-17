@@ -7,6 +7,15 @@ meta:
   source_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
   defaults:
     trust_repo_config: false
+type_contracts:
+  StructuredOutput:
+    builtin_revision: '1'
+  VcsRef:
+    builtin_revision: '1'
+  AgentSession:
+    builtin_revision: '1'
+  CommandResult:
+    builtin_revision: '1'
 graph:
   id: dependency_upgrade
   version: "1"

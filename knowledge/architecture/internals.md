@@ -89,9 +89,14 @@ erDiagram
   NODE_INSTANCE ||..o{ ARTIFACT_VERSION : owns
   ATTEMPT |o..o{ ARTIFACT_VERSION : produces
   ATTEMPT ||..o{ USAGE_RECORD : "is costed by"
+  ATTEMPT }o..o{ ARTIFACT_VERSION : "binds exact inputs"
   NODE_INSTANCE }o..o{ ARTIFACT_VERSION : consumes
   NODE_INSTANCE ||..o{ WAIT : "waits on"
   WAIT ||..o| APPROVAL_REQUEST : carries
+  GRAPH_VERSION {
+    string deployment_digest
+    string execution_contract_digest
+  }
   RUN {
     string status
     string target_key
@@ -108,9 +113,13 @@ erDiagram
     string status
     int lease_epoch
     string desired_state
+    json input_bindings
+    json execution_request
+    json execution_policy
   }
   ARTIFACT_VERSION {
     string output_name
+    string contract_digest
     string digest
     string status
     string payload_state
@@ -130,10 +139,10 @@ Lines are dashed because every entity drawn has its own ULID key, so no relation
 
 The words below are used everywhere else; [appendix B](#b-glossary) has the full glossary.
 
-- **Graph, graph version, IR.** A graph is a directed acyclic graph of typed nodes with a stable identity. Deploying a new compiled document creates an immutable graph version, and deploying the same document again returns the same version. The document is the IR; the control plane never sees Python.
+- **Graph, graph version, IR.** A graph is a directed acyclic graph of typed nodes with a stable identity. Deployment saves an immutable compiled document plus its resolved execution/type contract; an identical complete deployment returns the same graph version (ADR-0018). The document is the IR; the control plane never sees Python.
 - **Run.** One execution of a graph version with its parameters. A run pins its version for its whole life.
 - **Node instance and node path.** One node inside one run, one per fan-out element and per sub-graph attempt, addressed by a node path such as `candidates[2]@3.review`.
-- **Attempt and handle.** An attempt is exactly one runtime submission of an `agent` or `command` node instance, and the unit of cost. The handle is the runtime's own identifier of that submission, stored on the attempt once the runtime returns it.
+- **Attempt and handle.** An attempt is exactly one runtime submission of an `agent` or `command` node instance, and the unit of cost. The handle is the runtime's own identifier of that submission, stored on the attempt once the runtime returns it. Each attempt owns immutable exact input bindings and a saved nonsecret request sealed before preparation effects; later node clearing cannot erase them (ADR-0018).
 - **Artifact and artifact version.** An artifact is a node path and an output name. Each new output is a version: `current`, `superseded` by a newer one, or `invalid`.
 - **Wait.** The row that a waiting node is: a timer, an approval, an event, a poll, a retry back-off or admission back-pressure. No process or worker is held while a node waits.
 - **Approval request.** What a `human_input` node asks, bound to one commit SHA and a set of digests, so a response can approve only that content.
@@ -554,7 +563,7 @@ sequenceDiagram
   participant C as Code host
   E->>CLI: kora compile, then kora deploy
   CLI->>A: deploy the IR document
-  A->>D: validate, resolve skill digests, insert the graph version
+  A->>D: validate type closure, resolve declared digests, save immutable deployment contract
   E->>CLI: kora trigger with package typescript
   CLI->>A: trigger the graph
   A->>D: start-run entry point, bind target key typescript
@@ -659,12 +668,15 @@ sequenceDiagram
   participant W as kora worker
   participant RT as Execution infrastructure
   participant C as Code host
-  S->>D: admission inserts the attempt, created, reserving a slot
+  S->>D: admission inserts the attempt and exact input bindings, reserving a slot
   W->>A: POST claims
   A->>D: persist original domain, incarnation and dispatcher grant, epoch e, lease 120 s
   A-->>W: the attempt, epoch e, config, inputs
-  Note over W: in-process calls - workspace target, VCS plans, session spec
-  W->>RT: runtime.submit with the workload, keyed by the attempt id
+  W->>A: seal_request with rendered config and expected policy revision
+  A->>D: save nonsecret request descriptor and policy once before effects
+  A-->>W: saved request digest
+  Note over W: derive workspace target, plans and session spec from the saved logical request
+  W->>RT: runtime.submit binds saved request, authority and credentials separate
   RT-->>W: handle
   W->>A: transition to submitted with the handle, epoch e
   create participant R as Session runner
@@ -1059,7 +1071,7 @@ The exporter feed also reads an attempt's session segments from artifact storage
 | attempt id | start a second runtime submission; `lookup` recovers the handle | scheduler.md section 3 |
 | `approval_request.id` | post a second request on the channel after a crash | data-model.md section 3 |
 | repository and branch; head and base | create a second commit or push; open a second change request | protocols.md section 4 |
-| graph version digest | create a second version from the same document | api-and-agent-surface.md section 2 |
+| deployment digest | create a second version from the same canonical IR and resolved execution contract | api-and-agent-surface.md section 2 |
 
 The target key is not one of them and deduplicates nothing. Under `defer` it orders the runs of one target; under `allow` it still takes the hold, which a `defer` graph of the same namespace waits on (scheduler.md section 6).
 
@@ -1126,7 +1138,7 @@ flowchart TB
 | Lowering | turns expressions, edges, sub-graphs and fan-outs into IR; records `source_digest` and the preset snapshot | dsl.md section 2 |
 | IR models | one Pydantic definition of the document, imported by the API; it generates `ir.schema.json` | detailed.md section 7, ADR-0013 |
 | IR validator | the rules `IR001` to `IR020`; the same code answers `POST /validate`; its checkers type-check CEL against the declared artifact schemas and parse Jinja2 templates in the sandbox | ir.md sections 7 and 10 |
-| YAML emitter | deterministic output, so the same sources give the same digest and the same graph version | dsl.md section 2 |
+| YAML emitter | deterministic output for identical source/SDK/cache inputs; deployed identity also binds the resolved execution contract | dsl.md section 2 |
 | Shared API client | hand-written `httpx`, sharing the Pydantic models with the API; used by the CLI, the MCP servers and the worker | api-and-agent-surface.md section 3 |
 
 Decisions: ADR-0002, ADR-0006, ADR-0012. Tests: `test_control_plane_never_imports_compiler`, `test_parity_client_side_operations`, `test_required_policy_is_enforced_or_rejected`. Unsettled before code: the CEL binding has not been prototyped (the roadmap item "The CEL binding").
@@ -1189,13 +1201,13 @@ flowchart TB
 | 1 Triggers | fires due cron and sensor bindings from `trigger_binding` (`next_fire_at`, `last_fired_key`; cron fires forward only); turns inbound events addressed to a trigger into runs; checks `max_pending_runs`; applies `overlap`, which defaults to `queue` for webhook-fired runs and `allow` for the others; derives idempotency keys | scheduler.md section 2, ir.md section 8 |
 | 2 Materialise | creates node instances from the pinned IR; fan-out and sub-graph bodies only when their node becomes ready | scheduler.md section 2 |
 | 3 Readiness | a query over pending instances; resolves inputs to current versions and records `consumed_versions` | scheduler.md section 2 |
-| 4 Branch and collection | evaluates branch CEL; collects fan-out body outputs into `List` versions | scheduler.md section 2 |
-| 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
+| 4 Branch and collection | uses the saved graph contract/results for branch CEL and fan-out collection, without adding physical attempts | scheduler.md section 2 |
+| 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows with immutable exact input bindings, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
 | 6 Wake-ups | timers, inbound events matched against wait subscriptions, sensor and approval polls; head observation, invalidation and the re-check before downstream | scheduler.md section 5 |
 | 7 Timeouts and liveness | marks expired leases reclaimable; fails wall-clock timeouts; sums run and sub-graph budgets | scheduler.md section 4 |
 | 8 Completion and retry | marks instances done; applies retry policies; starts sub-graph attempt N+1; completes the run; binds a target key from an output | scheduler.md sections 2 and 7 |
 | Clear downstream | one transaction for a manual retry or sub-graph attempt N+1 | data-model.md section 6 |
-| Retention task | marks versions `expiring`, deletes a blob only when no other `present` or `expiring` version references it, then marks them `expired` | scheduler.md section 13 |
+| Retention task | expires blobs and inline content only after all unexpired artifact/segment/request/derived owners and required active/recovery holds permit deletion; marks explicit availability | scheduler.md section 13 |
 | Exporter feed | a bounded queue over event rows in order; reads an attempt's session segments from artifact storage when the attempt reaches `finishing`; drops are counted; replay from any row | protocols.md section 9 |
 | Metrics | queue depth, latencies, stalled/confirmed-lost counts, unknown execution count/age, retained scopes/target holds, pending dispatcher/publication recovery, last-known partial spend; `/readyz` fails until the recovery pass completes | scheduler.md section 11 |
 
@@ -1324,7 +1336,7 @@ flowchart TB
 | Worker endpoints | register and claim; heartbeat, segments, artifacts, usage and transitions, each carrying the lease epoch; artifact uploads and the transition to `finishing` also need result authority | api-and-agent-surface.md section 2, scheduler.md section 3 |
 | IR validator and planner | the shared validator; `/plan` materialises a document on the fake runtime | api-and-agent-surface.md section 2 |
 | Scheduling entry points | start a run; deliver a signal; tick | scheduler.md section 12 |
-| Upload processing | validates artifacts against their types; stores payloads by digest; promotes `vcs.*` and `permission_denied` facts to event rows | api-and-agent-surface.md section 2, data-model.md section 2 |
+| Upload processing | validates artifacts against saved contracts, stores actual summary/digest-selection results and payloads by digest; promotes `vcs.*` and `permission_denied` facts to event rows | api-and-agent-surface.md section 2, data-model.md section 2 |
 | Persistence | the SQLAlchemy models and transitions, an event row per mutation, two dialect-specific statements | scheduler.md section 10, data-model.md section 4 |
 
 Not drawn: the frontend session routes behind `kora open` and the console's cookie, the static console build, the MCP servers mounted under `/mcp`, and `/healthz`, `/readyz` and `/metrics` (api-and-agent-surface.md sections 2 and 6). The validator's calls to installed harness adapters, sensors and policy are drawn in [chapter 11](#11-graph-definition).
@@ -1346,14 +1358,14 @@ The table names the main writer of each table.
 | table | written by |
 |---|---|
 | `namespace`, `preset`, `artifact_type` | the API's registry routes; namespace policy and preset writes need the `platform` flag |
-| `graph`, `graph_version` | the API's deploy route; the same digest returns the same version |
+| `graph`, `graph_version` | the API's deploy route; the same canonical IR plus resolved execution contract returns the same version |
 | `worker` | the API at registration; `last_seen_at` on every claim and attempt heartbeat |
 | `idempotency_record` | the API's request handling |
 | `trigger_binding` | read and advanced by the trigger pass (`next_fire_at`, `last_fired_key`) |
 | `inbound_event` | the API's webhooks router |
 | `run` | created by the start-run entry point or the trigger pass; moved by the passes |
 | `node_instance` | the passes and clear downstream |
-| `attempt` | inserted by admission; afterwards see the open question below |
+| `attempt` | admission inserts the row and immutable input bindings; API reporting seals the nonsecret request/policy once before effects (ADR-0018); transition ownership remains the open question below |
 | `wait` | created by admission and by completion for a retry back-off; resolved by the wake-up pass; cancelled by clear downstream, a run cancel or a timeout |
 | `approval_request` | created by admission with `run_cost`; a response applied through the deliver-signal entry point; a head observation applied by the wake-up pass; invalidated by clear downstream |
 | `artifact_version` | upload processing for an attempt's outputs; the scheduler for `PreviousAttempt` and fan-out lists; `status` changed by clear downstream, `payload_state` by retention |
@@ -1368,7 +1380,7 @@ The persistence rules are few and strict.
 - **Append, do not overwrite.** Superseded results stay as rows with a status, and every transition writes an `event` row in the same transaction (data-model.md sections 1 and 4).
 - **Migrations are additive within a minor version.** Columns are added nullable or with defaults, nothing is dropped or renamed until the next minor, and every release runs against the previous schema; the upgrade order is database, scheduler, API, workers (scheduler.md section 14).
 - **Payloads up to 64 KiB are stored inline**; larger ones go to artifact storage by digest (data-model.md section 3).
-- **Retention never runs inside a pass.** It marks versions `expiring`, deletes a blob only when no other live version references it, then marks them `expired`; a crash between the steps is harmless (data-model.md section 10).
+- **Retention never runs inside a pass.** It uses `expiring`/`expired` for blobs and inline content, checking all artifact, segment, request and derived-result owners plus required active/recovery holds. Possible future retry does not pin terminal-run payloads; missing required retry inputs produce an explicit conflict before effects (data-model.md sections 10 and 11, ADR-0018).
 
 | concern | PostgreSQL | SQLite, in `kora standalone` |
 |---|---|---|
@@ -1379,6 +1391,8 @@ The persistence rules are few and strict.
 | wake-up | `LISTEN/NOTIFY` plus a 1 s poll | an in-process event plus a 1 s poll |
 
 Every integration test that touches the database runs on PostgreSQL and on SQLite through one parametrised fixture and must behave the same on both ([AGENTS.md](../../AGENTS.md)).
+
+The historical execution contract is [data-model section 11](../specs/data-model.md#11-immutable-contracts-and-execution-records-adr-0018). A graph version pins schemas, parents/references and behavior for every consumer; each physical attempt owns exact bindings and a once-sealed nonsecret request/policy. Recovery uses saved values and original checkpoints, never current aliases, input pointers or branch heads. Actual checkout/image/harness/fallback observations arrive later through existing records/events. Content-bearing request and derived values expire under the run's retention; inspect/diff show explicit availability and enforce transcript access. Historical reads use saved summary/digest/validation results, with no replacement-plugin execution. A compatible upgrade preserves active semantics. These records do not authorize effects or clear ADR-0017 uncertainty.
 
 ### 15. Worker
 
@@ -1571,7 +1585,7 @@ All of them are specified in [api-and-agent-surface.md](../specs/api-and-agent-s
 - **Scope first.** A runtime outside the MVP set is new scope: it starts as an issue, and as a proposal in `docs/proposals/` when it is large or uncertain.
 - **Where it lives.** kora's own implementations live under `src/kora/plugins/runtime/`; an adopter's runtime ships as a distribution of its own. Either registers `ProviderMetadata` under the `kora.provider` entry point with a `config_schema` ([protocols.md](../specs/protocols.md) section 1). A new client library is a dependency and goes into the stack table with its reason.
 - **The protocol** is listed in [chapter 4](#4-the-plug-in-seam). The error contract matters most: `lookup` returning `None` is original-domain handle absence, never proof against delayed submission; unreachable or missing registry state raises `KoraProtocolError(retryable=True)`. Domain-bound `retire` and all dispatcher/publication closure are required for confirmed loss (ADR-0017). `events` reads the supervisor-owned private control journal, outside candidate storage, resumably from an offset; `finalize` publishes only the immutable inspected result after late authorization.
-- **The workload** carries the resolved configuration, the workspace target, the checkout plan or the `WorkspaceRef`, the publish plan, a constructed minimal environment, session/preparation secret references resolved before execution (publication authorization arrives only after inspection), the harness credentials, the artifact inputs, the limits with the absolute deadline, and the session spec (protocols.md section 2).
+- **The workload** binds the API-saved nonsecret request and digest; changing dispatcher/lease authority and credential values are outside semantic hashing (ADR-0018). It carries the resolved configuration, the workspace target, the checkout plan or the `WorkspaceRef`, the publish plan, a constructed minimal environment, session/preparation secret references resolved before execution (publication authorization arrives only after inspection), the harness credentials, the artifact inputs, the limits with the absolute deadline, and the session spec (protocols.md section 2).
 - **Capabilities.** `portable_handles` is true when any worker can find a submission by its attempt id; `plan_executors` is usually `runner` when pods reach the code host; `enforces_network_policy` is what a namespace with `require_network_enforcement` needs for nodes that receive secrets (`IR015`); `supports_resume` only when the harness checkpoint outlives `release`; `credential_proxy`, `protected_execution`, `max_concurrent` and `default_stall_after` as the platform allows. `require_protected_execution` rejects an incapable runtime; local declares false and is intended for trusted development/tests.
 - **The image** carries `kora-runner` and the harness binaries, with the harness auto-updater disabled; the image digest is recorded on every attempt.
 - **Workers.** Run one or more workers for the runtime name, inside the cluster's network if needed.
@@ -1678,7 +1692,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | error class | the closed list of failure kinds that retry policies match on | 9 |
 | event row | the append-only timeline in the Metadata DB; not the session's event stream | [14](#14-data-model-and-persistence) |
 | fake | a real implementation of a protocol, used in tests and validated by the same conformance suite | [4](#4-the-plug-in-seam) |
-| graph, graph version | a graph has a stable identity; deploying a new compiled document creates an immutable version, and the same document returns the same version | 2 |
+| graph, graph version | stable graph identity; an immutable deployed IR and resolved contract; identical complete deployments return the same version | 2 |
 | handle | the runtime's identifier of one submission, stored on the attempt | 2 |
 | hard limit, soft limit | a hard limit stops the session at the limit; a soft limit may be overshot by a set headroom and by what is already running | [10](#10-limits-cost-and-safe-retries) |
 | inbound event | a row for an authenticated webhook delivery or a graph-to-graph event, deduplicated before matching | 12 |

@@ -4,7 +4,7 @@
   "title": "kora graph IR",
   "description": "Draft JSON Schema for kora IR version 1.x. Root is lenient on unknown keys; typed sub-objects are strict. Keys prefixed with x- are allowed everywhere.",
   "type": "object",
-  "required": ["ir_version", "graph", "runtime"],
+  "required": ["ir_version", "type_contracts", "graph", "runtime"],
   "properties": {
     "$schema": { "type": "string", "format": "uri" },
     "ir_version": { "type": "string", "pattern": "^1\\.[0-9]+$", "description": "IR format version (semver major.minor)" },
@@ -16,6 +16,17 @@
         "source_digest": { "$ref": "#/$defs/digest" },
         "presets": { "type": "object", "additionalProperties": { "type": "object" } },
         "defaults": { "type": "object" }
+      }
+    },
+    "type_contracts": {
+      "type": "object",
+      "description": "Authoritative used type closure. List[T] is derived from T. No runtime registry alias lookup.",
+      "minProperties": 1,
+      "propertyNames": {
+        "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/typeContract"
       }
     },
     "graph": { "$ref": "#/$defs/graph" },
@@ -33,6 +44,82 @@
     }
   },
   "$defs": {
+    "typeBehavior": {
+      "type": "object",
+      "required": [
+        "validation",
+        "digest_fields",
+        "summary"
+      ],
+      "properties": {
+        "validation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest_fields": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "typeContract": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "builtin_revision"
+          ],
+          "properties": {
+            "builtin_revision": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "schema",
+            "parent",
+            "behavior"
+          ],
+          "properties": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "$schema"
+              ],
+              "properties": {
+                "$schema": {
+                  "const": "https://json-schema.org/draft/2020-12/schema"
+                }
+              }
+            },
+            "parent": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*$"
+                }
+              ]
+            },
+            "behavior": {
+              "$ref": "#/$defs/typeBehavior"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
     "envName": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
