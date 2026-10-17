@@ -13,6 +13,8 @@ This folder is written for people. It holds what kora is for, what it must do, h
 6. [proposals/](proposals/README.md): changes that are designed but deferred, in a fixed template with a status.
 7. [roadmap.md](roadmap.md): where the project stands, what only code can settle, and the next steps in order.
 
+External observations and approval-channel recovery are governed by [ADR-0021](decisions/0021-external-observations-outside-transactions.md). Its direction and plan were accepted on 2026-10-17; the changed document wording remains pending line-by-line owner review.
+
 ## Conventions
 
 - Everything in the repository is in English and must be understandable without the conversation that produced it; identifiers that resolve inside the repository (`FR-6.3`, `NFR-5.5`, `ADR-0007`, `DD-12`) are fine, labels that exist only in a session are not.

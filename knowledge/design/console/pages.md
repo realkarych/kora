@@ -108,6 +108,8 @@ Opens from a human-input node and from Approvals; one approval request.
 | form | rendered from the request's JSON Schema with the same subset as the Run form; the decision field and the submit button, which names the bound commit, in a bar pinned to the bottom of the window; the other fields at the end of the page; without the `approve` flag the bar says beside the button, before any press, that the token lacks the approve right and how it is granted (FR-12.4), and the button, still pressable, repeats it when pressed | `POST …/approvals/{apr}/respond` with `commit_sha` and `digests` as shown |
 | stale response | on `API006` the page reloads the request | |
 | invalidated request | a banner with `bound_commit_sha` and `observed_head_sha`, the statement that nothing can be approved on this evidence, no form, the facts and narrative kept as history, the retry button for the producing node (named by the API's `API002` hint) with `fresh_with_feedback`, a link to that node | `GET …/approvals/{apr}`, `POST …/nodes/{node_path}/retry` |
+| observation and delivery | integration identity/purpose, last successful observation/time, active deadline, structured error and next retry; desired open/closed delivery, pending/unknown closure even after terminal state; no new action | existing approval/node read projections |
+| approved awaiting verification | no decision form; recorded approver and immutable revision, blue current gate with verification/backoff reason; only current node success completes the gate | existing request and node views |
 | approved then moved | both commits, the request kept `approved`, the node failed with `candidate_moved` | the request view and the node view |
 
 ## Targets
@@ -124,7 +126,7 @@ Opens from a human-input node and from Approvals; one approval request.
 | element | content | route |
 |---|---|---|
 | waiting | rows: target, graph, how long it waits and the deadline, the bound commit, `run_cost`; click opens the review page | `GET /namespaces/{ns}/approvals?status=pending`; the deadline from the node's wait (ADR-0015) |
-| history | rows: target, decision and approver, time, commit; `invalidated` and `expired` with their reason | `GET /namespaces/{ns}/approvals?status=` (ADR-0015) |
+| history | rows: target, decision and approver, time, commit; `invalidated` and `expired` with their reason; pending/unknown channel delivery stays visible on approved/rejected/terminal records | `GET /namespaces/{ns}/approvals?status=` (ADR-0015) |
 
 ## Cost
 
@@ -142,8 +144,9 @@ Read-only in MVP; one health line on top from `GET /readyz`.
 | block | content | route |
 |---|---|---|
 | Workers | id, incarnation, runtime domain, version, capacity, `last_seen_at`; recovery backlog including historical grants and terminal runs with retained reservations/target holds; highlighted when silent longer than the lease period; "holds": the attempts the worker holds, each linking to the node panel of its run (ADR-0015) | `GET /workers` |
-| Schedules | per graph: trigger kind, spec, `next_fire_at`, paused; last accepted/skipped/rejected occurrence, reason, quota snapshot and time | `GET …/graphs/{graph}/triggers` |
+| Schedules | per graph: trigger kind, spec, `next_fire_at`, paused; last accepted/skipped/rejected occurrence, reason, quota snapshot and time; sensor observation/degradation, last success and next retry, including same-reference credential repair | `GET …/graphs/{graph}/triggers` |
 | Presets and artifact types | the lists; a body on click | `GET /namespaces/{ns}/presets`, `GET /namespaces/{ns}/artifact-types/{name}` |
+| Integrations | namespace-visible observation in-flight/limit/degradation, last success/next retry and pending/unknown delivery count/age with links to approval/node detail; external outage separate from core readiness | `GET /namespaces/{ns}` integration-health projection, existing node/approval/trigger reads |
 | Policy | namespace policy read-only, including outstanding accepted-run usage/limit (default 1000), observed time and explicit over-limit state after lowering | `GET /namespaces/{ns}` |
 
 ## Attempt comparison

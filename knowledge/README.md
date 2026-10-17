@@ -9,7 +9,7 @@ Reference material for engineers and coding agents working on kora. Apart from t
 | Implement or change the graph document format, its schema or the compiler | [specs/ir.md](specs/ir.md), [specs/ir.schema.json](specs/ir.schema.json), [specs/examples/](specs/examples/), [specs/dsl.md](specs/dsl.md) |
 | Write or change Python graph code, presets, the compile step | [specs/dsl.md](specs/dsl.md), then [specs/ir.md](specs/ir.md) for what it compiles to |
 | Add or change a table, a state machine, retention, lineage | [specs/data-model.md](specs/data-model.md) |
-| Scheduling passes, leases, waits, timeouts, retries, concurrency, standalone mode, migrations, the operability runbook | [specs/scheduler.md](specs/scheduler.md) |
+| Scheduling passes, leases, waits, timeouts, retries, concurrency, unlocked external observation/delivery, standalone mode, migrations, the operability runbook | [specs/scheduler.md](specs/scheduler.md) |
 | Implement a provider (runtime, harness adapter, VCS, approval channel, secrets, artifact storage, artifact type, observability exporter, authentication, sensor, policy) or its conformance suite; the harness mapping tables | [specs/protocols.md](specs/protocols.md) |
 | Any HTTP endpoint, CLI command, MCP tool, harness skill or web console view, and the parity rules between them | [specs/api-and-agent-surface.md](specs/api-and-agent-surface.md) |
 | Build or change a web console page: the elements of every page and the routes behind them, the state-to-colour mapping, the two pilot scenarios | [design/console/pages.md](design/console/pages.md), [design/console/states.md](design/console/states.md), [design/console/tokens.md](design/console/tokens.md), [design/console/pilot-scenarios.md](design/console/pilot-scenarios.md); the decisions are [docs/console.md](../docs/console.md) and [ADR-0015](../docs/decisions/0015-web-console-design.md) |
@@ -23,6 +23,8 @@ Reference material for engineers and coding agents working on kora. Apart from t
 | Archon compared with kora aspect by aspect, with the Archon file and the kora requirement or decision behind every row | [research/agentic-pipeline-orchestrators/archon-vs-kora.md](research/agentic-pipeline-orchestrators/archon-vs-kora.md) |
 | What other orchestrators' consoles show first, how they colour states, how approval forms and agent trace viewers are laid out; dated | [research/orchestrator-consoles.md](research/orchestrator-consoles.md) |
 | Through which mechanism each harness lets the session runner intercept and deny a tool call, with the vendor sources and the date checked | [research/harness-policy-hooks.md](research/harness-policy-hooks.md) |
+
+For external-call ownership and cooperative-provider limits, read [ADR-0021](../docs/decisions/0021-external-observations-outside-transactions.md), [data-model section 14](specs/data-model.md#14-external-observation-and-delivery-ownership-adr-0021), [scheduler section 16](specs/scheduler.md#16-external-observation-dispatch-adr-0021), the [design review](reviews/external-observation-design-review-2026-10-17.md) and [dated failure-model evidence](research/cooperative-provider-failure-model.md).
 
 ## Folders
 

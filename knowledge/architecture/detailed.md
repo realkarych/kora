@@ -55,7 +55,7 @@ flowchart TB
 
     subgraph cp [Control plane]
         API[kora api<br/>HTTP API /api/v1, OpenAPI,<br/>webhook and worker endpoints, MCP over HTTP,<br/>serves kora web static files, auth]:::proc
-        SCHED[kora scheduler<br/>stateless passes: triggers, readiness,<br/>admission, waits, timeouts, completion,<br/>clear downstream; retention task]:::proc
+        SCHED[kora scheduler<br/>stateless passes: triggers, readiness,<br/>admission, waits, timeouts, completion,<br/>clear downstream; retention and<br/>bounded observation dispatcher]:::proc
         DB[(Metadata DB<br/>PostgreSQL; SQLite in standalone)]:::store
         ART[(Artifact storage<br/>payloads and transcripts by digest;<br/>local FS or S3-compatible in MVP)]:::store
     end
@@ -111,7 +111,7 @@ Responsibilities, in one line each:
 |---|---|---|
 | `kora api` | the only implementation of every operation; authentication (user and service principals); canonical bounded start acceptance with durable run/skip receipts before webhook acknowledgement; wait-directed inbound signals; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | physical admission or pass decisions in routers (they delegate to shared scheduler entry points); running sessions; UI logic |
 | `kora web` | the production web console, full in MVP (FR-7.3) and held to the user-experience bar of NFR-13.1: approvals, runs, the live graph with node states and timeline, attempts with artifacts and the diff between them, live session logs, cost per run, node and attempt, graphs and their versions; graph editing post-MVP; a thin client of the API through a TypeScript client generated with `@hey-api/openapi-ts`; opaque server-side session cookie, CSRF protection, CSP | logic of its own; direct database access; designed in [docs/console.md](../../docs/console.md) before it is built ([ADR-0015](../../docs/decisions/0015-web-console-design.md)) |
-| `kora scheduler` | the passes in scheduler.md section 2 under a per-run lock; approval request creation with the run's cost sum; clear-downstream; the batched retention task | calling runtimes or harnesses |
+| `kora scheduler` | short locked database phases; bounded cooperative observation/delivery calls outside all transactions and locks; approval intent with run cost; clear-downstream; batched retention | calling runtimes or harnesses |
 | `kora worker` | claiming `created` attempts and original-domain recovery of unresolved attempts through the API, including cancelled/superseded attempts of terminal runs; sealing its nonsecret logical request and execution policy through the API before allocation/preparation, then asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; closing all earlier dispatcher grants/operations before new platform writes, obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
 | Metadata DB | every entity in data-model.md; the only run state; row claims with `SELECT … FOR UPDATE SKIP LOCKED` and the run lock (an advisory lock per run) on Postgres | payload bytes |
 | Artifact storage | payload bytes by digest: artifacts, transcripts, live segments, saved request content and content-bearing derived results; explicit availability and active/recovery holds (ADR-0018) | metadata |
@@ -139,21 +139,24 @@ flowchart LR
     I[Clear downstream<br/>one transaction on manual retry<br/>or a new sub-graph attempt]:::c
     RET[Retention task<br/>batched, low priority, refcounted blobs]:::c
     CEL[CEL evaluator]:::c
+    OBS[Bounded async dispatcher<br/>claim, unlocked call, compare and apply;<br/>durable observation and delivery owners]:::c
     SEN[Sensor protocol]:::c
     APR[Approval channel protocol]:::c
+    VREAD[VCS reads]:::c
 
     T --> M --> R --> B --> A
     A --> W
     W --> R
     L --> C --> I --> R
-    T --> SEN
-    W --> APR
+    T & W --> OBS
+    OBS --> SEN & APR & VREAD
+    OBS <-->|claim and apply only| DB
     B --> CEL
     C --> CEL
     T & M & R & B & A & W & L & C & I & RET <--> DB
 ```
 
-Canonical start is shared with the API; accepted webhook receipts are never converted into a second run. Outstanding usage, physical execution-run usage and target holds have separate predicates (ADR-0020, data-model section 13). Pending promotion is revisited each tick independently of touched-run filtering. Fan-out retains its unfinished-body cap through waits. Passes use short transactions with run-first and ordered scope locks; graph caps are live across versions, while execution semantics stay pinned; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
+Canonical start is shared with the API; accepted webhook receipts are never converted into a second run. Outstanding usage, physical execution-run usage and target holds have separate predicates (ADR-0020, data-model section 13). Pending promotion is revisited each tick independently of touched-run filtering. Fan-out retains its unfinished-body cap through waits. Passes use short transactions with run-first and ordered scope locks; graph caps are live across versions, while execution semantics stay pinned; only disposable bounded call tasks/credits are in memory; authoritative owner tokens, due work and delivery intent stay in rows (NFR-1.2, ADR-0021). Due observation/delivery discovery is independent of touched runs. A future scheduler replica must explicitly budget aggregate integration concurrency; claims preserve state safety but do not create a fleet-wide semaphore. Calls and credential/content resolution hold no DB transaction/connection/lock. Installed providers have a bounded cooperative lifecycle, including standalone; arbitrary blocking Python has no hard containment. See [scheduler section 16](../specs/scheduler.md#16-external-observation-dispatch-adr-0021).
 
 ## 4. Components inside a worker (C4 level 3)
 
@@ -310,6 +313,7 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | Prompt templates | Jinja2 `SandboxedEnvironment` (DD-11) | decided | — |
 | HTTP API | FastAPI + Pydantic v2; OpenAPI published for the web client generator and the parity coverage test; NDJSON streaming for logs and events; segment and transcript uploads exempt from the 4 MB body limit; `uvicorn` | decided | Litestar; Django REST |
 | Metadata DB access | SQLAlchemy 2.0 (Core + typed ORM) with `asyncpg` for PostgreSQL and `aiosqlite` for SQLite; Alembic migrations (`kora db upgrade`) | decided | raw SQL with `psycopg` 3; SQLModel |
+| External observations | Existing scheduler async dispatcher; durable owner tokens and approval delivery metadata; unlocked calls with finite installation/resource/namespace budgets and current-owner apply | decided direction (ADR-0021); wording pending owner review | cooperative installed providers; process isolation deferred, no broker or worker-token expansion |
 | Row claims and scheduler loop | PostgreSQL `SELECT … FOR UPDATE SKIP LOCKED` inside short transactions; SQLite: single-writer process with the same statements minus `SKIP LOCKED` | decided (scheduler.md §3, §10) | advisory locks; external queue (Redis) rejected: run state must live only in the DB (NFR-1.2) |
 | Worker ↔ control plane | workers call the HTTP API only (register, claim, heartbeat with lease epoch, segment and artifact upload, state transitions) over outbound HTTPS with a service token; standalone uses the same client over an in-process ASGI transport | decided (design review finding [workers through the API only](../reviews/review-2026-10-15.md#workers-through-api-only)) | workers write SQL directly |
 | API client | one hand-written `httpx` client that shares the Pydantic request and response models with FastAPI; used by the Typer CLI, the MCP tools and the worker; a contract test checks it against the OpenAPI document | decided (design review finding [one shared API client](../reviews/review-2026-10-15.md#one-shared-api-client)) | generated `openapi-python-client` |

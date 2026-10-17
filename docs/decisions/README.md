@@ -26,6 +26,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0018](0018-immutable-attempt-history.md) | Immutable deployment contracts and attempt-owned inputs/requests; explicit compatibility, retention and access boundaries | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0019](0019-immutable-run-target-identity.md) | One immutable target per run; atomic acceptance of the complete target-source result; separate history and hold lifecycle | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md) | Bounded outstanding run acceptance, physical execution-run occupancy and independent target holds; canonical start/replay and eligible ordering | direction and plan accepted 2026-10-17; document pending owner review |
+| [ADR-0021](0021-external-observations-outside-transactions.md) | Unlocked bounded external calls, exact current-owner application and recoverable approval delivery with cooperative providers | direction and plan accepted 2026-10-17; document pending owner review |
 
 ## Writing a new record
 

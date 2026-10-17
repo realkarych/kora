@@ -21,7 +21,8 @@ Shape says what colour says. The glyph is drawn in the node's corner opposite th
 | `pending`, `ready` | gray | `pending` | nothing |
 | `queued` | blue | `running` | "in queue · <since the attempt was created>" |
 | `running` | blue | `running` | "<elapsed since the attempt started>" |
-| `waiting`, wait kind `approval` | amber | `waiting for you` | "approval · <waiting for> of <deadline>" |
+| `waiting`, wait kind `approval`, request pending | amber | `waiting for you` | "approval · <waiting for> of <deadline>"; integration/delivery gap visible in panel |
+| `waiting`, VCS-bound request approved, current wait open | blue | `running` | "verifying approved commit" or integration retry/backoff; approval audit stays separate |
 | `waiting`, wait kind `timer` | blue | `running` | "timer · <remaining>" |
 | `waiting`, wait kind `event` or `poll` | blue | `running` | "waiting for <event name or sensor>" |
 | `waiting`, wait kind `retry_backoff` | blue | `running` | "retry in <remaining> · attempt n of m" |
@@ -97,11 +98,13 @@ The run's colour and word in the header, on the runs list and in the traffic lig
 | `approval_request.status` | on the review page and in Approvals |
 |---|---|
 | `pending` | amber; the deadline from the wait |
-| `approved` | green; approver, channel, time |
+| `approved` | approved audit badge, approver/channel/time; current node is blue during verification, green after success, red on gate failure, or its current state after clear; audit alone does not set node colour |
 | `rejected` | the node is red "rejected"; the response and its comments |
 | `expired` | the node is red "approval expired" or gray `skipped` per `on_expiry` |
 | `invalidated` | the banner with the bound commit and the observed head; the node is red "candidate moved" |
 | `cancelled` | gray; the run or node was cancelled |
+
+Observation/delivery errors are read-only reasons beside the existing lifecycle state (ADR-0021). Show last success/time, current deadline, next poll/retry and structured hint; unknown delivery can persist on terminal history without keeping a run active or retaining execution capacity. Never label an outage solely as waiting for a person, an empty lookup as successful cleanup, or recorded approval as verified gate success.
 
 ## Attention states
 

@@ -15,8 +15,18 @@ inhouse_ci  = "kora_inhouse:runtime_provider"      # returns ProviderMetadata(pr
 inhouse_vcs = "kora_inhouse:vcs_provider"
 ```
 
-- All methods are `async` and cancellable; every failure is a `KoraProtocolError(code, message, retryable, details)`, and `retryable=True` maps to error class `infrastructure`.
+- I/O methods are `async` and cancellable; every failure is a `KoraProtocolError(code, message, retryable, details)`, and `retryable=True` maps to error class `infrastructure`. Observation/delivery failures use scheduler-owned integration backoff, not runtime/agent-attempt retries ([scheduler section 16](scheduler.md#16-external-observation-dispatch-adr-0021)).
 - Implementations receive a `ProtocolContext` (namespace, run id, attempt id, logger, secrets resolver) and never import the scheduler.
+
+### Control-plane observation lifecycle (ADR-0021)
+
+Control-plane providers are installed trusted cooperative code. Import, initialization, capabilities/configuration hooks and synchronous decoding must be bounded; I/O uses nonblocking clients and propagates cancellation. No provider hook, secret resolution or external storage/network call occurs in a database transaction or under run/scope locks. Capabilities/contracts needed there are previously validated immutable local data. This contract covers conforming slow-service failures; it supplies no hard isolation from blocking or cancellation-resistant Python, including standalone. Conformance checks representative behavior, not arbitrary code safety.
+
+Deployment bindings identify a stable trusted endpoint/account/resource, installed implementation/build identity and configuration revision, credential references, namespace permissions and finite limits. Alias equality is not implementation or resource equality; aliases sharing a backend quota share its resource key. Missing/incompatible saved semantics fail explicitly rather than loading today's alias. A call uses authorized current credentials for its original resource, never a changed alias destination.
+
+A bounded composite invocation declares its full external dependency-resource set before dispatch, including nested VCS, external secret and external artifact-storage backends. Local environment/file providers have bounded cooperative I/O but no remote backend quota. Acquire invocation/namespace/resource credits together before task creation. Nested calls, redirects and pagination are serial: at most one outbound request is active per invocation, with no hidden parallel calls, nested credit acquisition or undeclared backend. Credits bound local conforming work, not remotely accepted effects after timeout. HTTP body/result limits apply to both received and decoded bytes; bound pagination, redirects, strings, collections, nesting and diagnostic output too. Reject excess rather than accepting a truncated value. Call/dependency work fits one finite deadline and returns one result/error; the dispatcher owns retries and shared rate-limit cooldown.
+
+On deadline the caller rejects late evidence and initiates cancellation without blocking scheduling. Credits remain held until actual task settlement; grace expiry is degradation, not termination proof. Read-only repetition can produce stale duplicate observations, consumed only through exact current-owner token checks. Mutating operations instead retain durable authorization/intent and reconcile uncertain outcomes; neither cancellation nor process exit rolls back an accepted remote request. [Data model section 14](data-model.md#14-external-observation-and-delivery-ownership-adr-0021) defines those records.
 
 ## 2. Runtime (FR-8.1)
 
@@ -353,22 +363,42 @@ Target identity validation occurs at API/scheduler source-result acceptance, aft
 ## 5. Approval channel (FR-7.1, FR-7.2a)
 
 ```python
+@dataclass(frozen=True)
+class ApprovalLookupPage:
+    request_ids: tuple[str, ...]
+    next_cursor: str | None
+
 class ApprovalChannel(Protocol):
     name: str
-    def capabilities(self) -> ApprovalCapabilities: ...   # push_notifications, carries_identity, observes_head_sha
+    def capabilities(self) -> ApprovalCapabilities: ...
     async def request(self, req: ApprovalRequestDto) -> str: ...
-        # req: approval_request_id (idempotency key), form schema, context artifact (ReviewBundle facts and narrative apart), bound commit SHA and digests
+    async def lookup(self, approval_request_id: str, cursor: str | None) -> ApprovalLookupPage: ...
     async def poll(self, channel_request_id: str) -> ApprovalResponseDto | None: ...
-        # response carries: payload, approver login and permission level, is_author, is_bot, timestamp, observed head SHA and digests (DD-35)
     async def feedback(self, channel_request_id: str) -> list[FeedbackComment]: ...
-        # review comments with author, association and body; the vcs channel returns collaborators with write access by default (`feedback_from`)
-    async def notify(self, channel_request_id: str, event: Literal["invalidated", "expired", "cancelled"]) -> None: ...
+    async def notify(self, channel_request_id: str, event: Literal["invalidated", "expired", "cancelled", "resolved"]) -> None: ...
     async def cancel(self, channel_request_id: str) -> None: ...
 ```
 
 Built-in: `cli` (the API itself is the channel; `poll` reads the row) and `vcs` (publishes the `ReviewBundle` as a change-request comment with facts and narrative apart, maps review states to decisions, returns the head SHA and the approver's login and permission level with every response). The channel never decides validity: the scheduler compares SHA and digests and applies the DD-35 rules (approver is not the author and not kora's bot; on the namespace's `approver_allowlist` when set; "merged" counts only when the channel configuration sets `accept_merged_as_approval`).
 
 A push to the candidate branch during review is not the channel's business either: the scheduler observes the head of the bound `VcsRef`'s branch through the VCS protocol's `head_sha`, moves the request to `invalidated` and fails the node with class `candidate_moved` (scheduler.md section 5); the channel learns of it through `notify("invalidated")`, and a response it reports afterwards is recorded and ignored.
+
+`ApprovalCapabilities` retains `push_notifications`, `carries_identity` and `observes_head_sha`. The request DTO binds the stable approval id, saved form/context and immutable SHA/digests. Response DTOs carry payload, reviewer identity/permission, author/bot flags, timestamp and observed SHA/digests; feedback retains author/association/body and the existing collaborator filter. Only shared scheduler/API transitions decide validity.
+
+`lookup` is strictly read-only on the configured original channel resource: enumerate every request/comment carrying the approval marker, including duplicates, through bounded pages and resumable cursor. Default at most 100 ids per page, within installation byte limits. Persist progress between calls and repeat scans with backoff to find late creation. Empty/complete pagination means none observed in that scan, not proof an earlier authorized write cannot appear. A provider with affirmative operation-closure evidence may expose that evidence through its delivery reconciliation metadata; lookup absence cannot invent it. `request` reconciles the same marker before creation while its local intent remains open; search-before-create does not establish generic exactly-once publication.
+
+| request/gate state | durable desired state and channel delivery |
+|---|---|
+| Current pending request/open wait | `open`: reconcile/create under its stable marker and poll |
+| Approved awaiting fresh VCS head verification | `closed`: no new create/poll authorization, `notify(resolved)` and transport `cancel`; local gate still waits |
+| Approved and gate succeeded | Remains closed; canonical status shows approved revision and completed gate |
+| Approved and gate failed/superseded | Remains closed; canonical status separates immutable approval from failed/current gate |
+| Rejected | `closed`: notify resolved and cancel transport |
+| Invalidated, expired, cancelled or historical owner | `closed`: corresponding terminal notification and transport cancel; never create during lookup |
+
+`cancel` closes the channel interaction, not the immutable approval audit decision. If native code-host reviews cannot be disabled, mark the kora interaction closed; subsequent responses have no local authority. `notify(resolved)` says the request is no longer actionable and links canonical status; it never claims pending head verification succeeded. All terminal messages remain compatible with closure, even if remote delivery is delayed, duplicated or reordered. The API, not channel text, is authoritative.
+
+Persist dispatch authorization before calling. A terminal revision prevents new create authorizations/retries; a preterminal authorized invocation may still send after cancellation. Record learned ids from all late results on the original approval even if their revision is obsolete, then close each id. Do not discard an effect result by applying the stale-read rule. Retain compact terminal reconciliation identity/progress without form/context payload holds, runtime reservations or an abandonment shortcut. Original-resource authorization failures are visible, not retargeted. The exact postcommit lifecycle is [data-model section 14.3](data-model.md#143-approval-delivery-intent-and-uncertain-effects).
 
 ## 6. Secrets (FR-10.1)
 
@@ -510,15 +540,19 @@ Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over th
 - **Runtime**: idempotent submit and workload-digest conflict; authoritative absence versus unreachable lookup; original-domain adoption and protected journal offset; declared portable recovery state; constructed candidate environment; local deadlines and cancellation; one logical handle/capacity reservation through publication; late `finalize` only after inspection, binding checks and serialization; no candidate-visible publication credential; preparation crash recovery through the supervisor checkpoint; release removes bulky candidate/control/publication roots but retains the retirement/dispatcher registry. ADR-0017 adds the execution-recovery gates below. `test_workspace_preparation_recovers_after_worker_crash` uses the configured fake runtime with no shared host filesystem, crashes at phase barriers and recovers the same trusted `WorkspaceRef`. OS isolation is verified only on actual protected runtimes (table below).
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call, installed version recorded and checked against `tested_versions`.
 - **VCS**: checkout captures the requested base and protected paths; all private files stay outside the candidate tree; native sealed transfer, fresh metadata, fixed inspected revision and trusted destination; no runtime name in requests; same prepared revision on repeat/concurrent finalization; change-request search before create. `test_publish_and_open_change_request_are_idempotent` repeats finalization and creation concurrently using the same operation/head/base and asserts one published revision and one change request. `test_publish_reconciles_after_response_loss` loses the push/create response through an injected provider implementing the real protocol, then compares the same remote revision and reuses the existing request; conflicting remote content fails without overwrite. `test_vcs_runtime_cross_product` runs git and a directory-backed independent non-Git VCS through preparation, execution, sealing, inspection, authorization, publication and release on local and Docker in Linux CI, and on local and the configured fake runtime in macOS CI. The fake runtime exposes no worker-host root. Adopters run the same contract on their runtime/VCS pair; unsupported executor/protection combinations fail validation, with the limitation in the report.
-- **Approval channel**: request → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent.
+- **Approval channel**: request → read-only paginated marker lookup → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent, including `resolved`; response loss, late/multiple external ids and every desired-state row above. Terminal reconciliation never creates or rewrites approval audit status.
 - **Secrets**: resolution, missing-reference error shape, redaction in a captured stream.
 - **Artifact storage**: content-addressed dedupe, streaming beyond memory, `get` of a reference written by an earlier instance of the implementation, `delete` after which `exists` returns nothing and `get` fails, and a repeated `delete` that succeeds. The suite runs against `local` on every CI job and against `s3` with an S3-compatible server started through `testcontainers` on the Linux job, which has Docker.
 - **Artifact type**: validation errors carry JSON paths; `digest_fields` stable across key order.
 - **Observability**: a slow exporter does not delay a run; drops are counted.
 - **Authentication**: scope enforcement per operation; revoked tokens are refused.
-- **Sensor**: `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
+- **Sensor**: cooperative cancellation, declared serial dependency calls and bounded decoded results; `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
 - **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every call kind the adapter declares in `policy_coverage`, under every permission mode**, through the adapter's `PreToolUse` hook (Claude: the SDK callback; Codex: the managed command hook; after MVP ACP `session/request_permission` for the kinds the agent declares), and the denied call never reaches the tool (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)); a pattern on a kind outside the coverage is rejected by validation (`IR019`) or warned (`IR008`), never left unenforced; chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited. `test_required_policy_is_enforced_or_rejected` runs the matrix of section 12 against the real harness interface with a deterministic driver (recorded streams where the interface allows no driver): for every covered kind and permission mode an allowed and a denied shell command, file edit and MCP tool call, judged by whether the side effect happened, not by the presence of a `permission_denied` event; for every uncovered kind, validation of a node carrying a namespace pattern on it returns `IR019`. A live smoke test against a model is a manual experiment outside CI, recorded with the harness version; the fake adapter proves the runner's handling of a decision, never a real hook.
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2).
+
+### External observation conformance gates
+
+The future database/race contracts are [data-model section 14.4](data-model.md#144-future-acceptance-contracts). Reference VCS, channel, sensor and external secret/storage implementations exercise real local service stalls, deadlines/cancellation, bounded parsing/streams/pagination, shared-alias cooldown, dependency-credit accounting and same-reference credential repair. Use configured protocol fakes with the same conformance suite, explicit conditions/barriers and injected time/randomness; no mocks or patched transports. DB cases run on PostgreSQL and SQLite. No runtime implementation exists yet; documentation CI does not execute these gates. Blocking/noncooperative installed Python is outside the chosen fault model and must not be advertised as contained by these tests.
 
 ### Publication authority and recovery contracts
 
