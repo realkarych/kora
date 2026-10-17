@@ -6,12 +6,15 @@ This folder is written for people. It holds what kora is for, what it must do, h
 
 1. [positioning.md](positioning.md): the one-liner, the problem, who kora is for, the primary contrast (Archon), the canonical use case, non-goals, evidence and hypotheses.
    [archon-comparison.md](archon-comparison.md): kora and Archon, the closest open-source system, compared point by point with the stronger side named on each.
-2. [requirements/functional.md](requirements/functional.md) and [requirements/non-functional.md](requirements/non-functional.md): what the product must do and under which constraints; every requirement has a stable identifier (`FR-n.m`, `NFR-n.m`) and an MVP or post-MVP tag.
-3. [architecture.md](architecture.md): the two-page map of the system: context, containers, stack and the boundaries that must not blur.
-4. [console.md](console.md): the design of the web console: who it is for, the entry, the graph page, the sections, states and colours, the actions and the visual rules.
-5. [decisions/](decisions/README.md): the architecture decision records, one per significant decision, with context, alternatives and consequences.
-6. [proposals/](proposals/README.md): changes that are designed but deferred, in a fixed template with a status.
-7. [roadmap.md](roadmap.md): where the project stands, what only code can settle, and the next steps in order.
+2. [technical-introduction.md](technical-introduction.md): the core components, what they exchange, one run through the system, and the reasons for its boundaries. Start here for a technical orientation.
+3. [requirements/functional.md](requirements/functional.md) and [requirements/non-functional.md](requirements/non-functional.md): what the product must do and under which constraints; every requirement has a stable identifier (`FR-n.m`, `NFR-n.m`) and an MVP or post-MVP tag.
+4. [architecture.md](architecture.md): the two-page reference map of the system: context, containers, stack and the boundaries that must not blur.
+5. [console.md](console.md): the design of the web console: who it is for, the entry, the graph page, the sections, states and colours, the actions and the visual rules.
+6. [decisions/](decisions/README.md): the architecture decision records, one per significant decision, with context, alternatives and consequences.
+7. [proposals/](proposals/README.md): changes that are designed but deferred, in a fixed template with a status.
+8. [roadmap.md](roadmap.md): where the project stands, what only code can settle, and the next steps in order.
+
+Technical-introduction amendment dated 2026-10-17: scope and implementation plan approved; the introduction and navigation wording remain pending line-by-line owner review under [issue #67](https://github.com/realkarych/kora/issues/67).
 
 External observations and approval-channel recovery are governed by [ADR-0021](decisions/0021-external-observations-outside-transactions.md). Its direction and plan were accepted on 2026-10-17; the changed document wording remains pending line-by-line owner review.
 

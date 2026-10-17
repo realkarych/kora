@@ -4,13 +4,15 @@ Status: non-normative orientation for contributors, reconciled with the specific
 
 ## About this book
 
+For a first orientation, read the shorter [technical introduction](../../docs/technical-introduction.md). This book adds the execution details, invariants and component contracts needed to prepare an implementation change.
+
 This book is for engineers who will change kora's code, not for people who use kora. It describes the design of the MVP as the specifications state it: the domain kora models, the processes it runs, how one run moves through them, and which component owns which decision. After reading it you can place a task on the map, name the process, component and specification it touches, say which invariants your change must not break, and find the specified tests for the behaviour.
 
 **Implementation status.** This is a design-stage repository: no kora implementation or runtime test suite exists yet. Package paths, commands and named tests below describe the intended implementation and its acceptance gates. The initial human-reviewed design baseline is 2026-10-16; ADR-0016–0022 record later accepted direction, with implementation plans accepted for ADR-0017–0022 and document wording still pending owner review. See the [roadmap](../../docs/roadmap.md) and each record's status.
 
 | reading path | chapters | time |
 |---|---|---|
-| Day one, everyone | this page, Part I (chapters 1 to 6) and chapter 7 | about an hour |
+| Deeper contributor orientation | this page, Part I (chapters 1 to 6) and chapter 7 | about an hour |
 | Before a first change to the scheduler, the API, the worker or the data model | Part II (chapters 8 to 10), then the chapter of your component in Part III | about 40 minutes, plus 10 per component |
 | On demand | the rest of Part III, Part IV and the appendices | when a task needs it |
 
