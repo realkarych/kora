@@ -140,13 +140,13 @@ Lines are dashed because every entity drawn has its own ULID key, so no relation
 The words below are used everywhere else; [appendix B](#b-glossary) has the full glossary.
 
 - **Graph, graph version, IR.** A graph is a directed acyclic graph of typed nodes with a stable identity. Deployment saves an immutable compiled document plus its resolved execution/type contract; an identical complete deployment returns the same graph version (ADR-0018). The document is the IR; the control plane never sees Python.
-- **Run.** One execution of a graph version with its parameters. A run pins its version for its whole life.
+- **Run.** One execution of a graph version with its parameters. A run pins its execution version for its whole life; live graph concurrency caps are operational policy from the newest active version, or newest deployed when none is active (ADR-0020). Lifecycle status, outstanding acceptance, physical execution occupancy and target ownership are separate.
 - **Node instance and node path.** One node inside one run, one per fan-out element and per sub-graph attempt, addressed by a node path such as `candidates[2]@3.review`.
 - **Attempt and handle.** An attempt is exactly one runtime submission of an `agent` or `command` node instance, and the unit of cost. The handle is the runtime's own identifier of that submission, stored on the attempt once the runtime returns it. Each attempt owns immutable exact input bindings and a saved nonsecret request sealed before preparation effects; later node clearing cannot erase them (ADR-0018).
 - **Artifact and artifact version.** An artifact is a node path and an output name. Each new output is a version: `current`, `superseded` by a newer one, or `invalid`; all outputs of a declared target source start `staged` until its complete result is atomically accepted (ADR-0019).
-- **Wait.** The row that a waiting node is: a timer, an approval, an event, a poll, a retry back-off or admission back-pressure. No process or worker is held while a node waits.
+- **Wait.** The row that a waiting node is: a timer, an approval, an event, a poll, a retry back-off or admission back-pressure. No process or worker is held while a node waits. A run reserves one execution-run slot only while any physical attempt remains non-terminal; outstanding acceptance and acquired target holds can persist without it (ADR-0020).
 - **Approval request.** What a `human_input` node asks, bound to one commit SHA and a set of digests, so a response can approve only that content.
-- **Target key, `overlap` and `on_active`.** A target key is the optional business identity of a run, such as a package name, scoped to the namespace. It binds once at parameter creation or successful acceptance of the complete declared source result and never changes or clears; releasing the hold does not unfreeze identity (ADR-0019). A run holds its target from the first attempt admitted under its key until it leaves `running` and blocking execution/publication recovery is settled (ADR-0017). `graph.overlap` decides first, at trigger time and per graph, whether a new run may start while another run of the graph is running: `allow`, `skip` or `queue`. `graph.target.on_active` decides second, at admission and per key: `allow` proceeds, `defer` waits while another run holds the key. A graph that declares `defer` therefore sets `overlap: allow`, or `skip` and `queue` act first.
+- **Target key, `overlap` and `on_active`.** A target key is the optional business identity of a run, such as a package name, scoped to the namespace. It binds once at parameter creation or successful acceptance of the complete declared source result and never changes or clears; releasing the hold does not unfreeze identity (ADR-0019). A run holds its target from the first attempt admitted under its key until it leaves `running` and blocking execution/publication recovery is settled (ADR-0017). `graph.overlap` decides first, at canonical start acceptance/promotion and per graph, using accepted pending/running lifecycle runs: `allow`, `skip` or `queue`. `graph.target.on_active` decides second, at admission and per key: `allow` proceeds, `defer` waits while another run holds the key. A graph that declares `defer` therefore sets `overlap: allow`, or `skip` and `queue` act first.
 
 The canonical graph of the specifications shows the structural kinds at work. A fan-out runs one body instance per list element; the body is a sub-graph retried as a unit, and a `branch` inside it can end the current sub-graph attempt with `$fail_attempt`.
 
@@ -979,9 +979,9 @@ title: State diagram - run, with its target hold
 ---
 stateDiagram-v2
   accTitle: Run states with the target hold
-  accDescr: A run is created pending when a trigger is accepted, with its target key bound if it comes from a parameter. The first pass makes it running, unless queue overlap keeps it pending. While running it does not hold its target until admission admits an attempt under a bound key, which sets target_held_since, under defer, while another run holds the key, it waits at admission first. When nothing is left that is not terminal the completion pass ends the run as succeeded or failed, a cancel cancels it. Leaving running releases the hold only after execution and publication recovery is settled. A cancelled run may retain an acquired hold. Manual retry retains an unresolved hold, after a settled release it takes the hold at next admission. A failed run can also be cancelled.
+  accDescr: A run is created pending when a trigger is accepted, with its target key bound if it comes from a parameter. Graph-serialized promotion makes it running; queue waits for no running graph run and chooses the oldest pending run. Pending and running contribute to outstanding acceptance but only non-terminal physical attempts reserve execution capacity. While running it does not hold its target until admission admits an attempt under a bound key, which sets target_held_since, under defer, while another run holds the key, it waits at admission first. When nothing is left that is not terminal the completion pass ends the run as succeeded or failed, a cancel cancels it. Leaving running releases the hold only after execution and publication recovery is settled. A cancelled run may retain an acquired hold. Manual retry retains an unresolved hold; after settled release it first reacquires outstanding acceptance before clear effects and takes the hold at next physical admission. A failed run can also be cancelled.
   [*] --> pending: trigger accepted / bind the key from a parameter
-  pending --> running: first pass [overlap allows]
+  pending --> running: graph-locked promotion [saved overlap permits]
   state running {
     state "not holding" as unheld
     state "deferred" as deferred
@@ -994,7 +994,7 @@ stateDiagram-v2
   running --> succeeded: completion [nothing left that is not terminal]
   running --> failed: completion [nothing left that is not terminal]
   running --> cancelled: cancel
-  failed --> running: manual retry / retain unresolved hold, reacquire if released
+  failed --> running: manual retry [outstanding quota permits] / clear, retain or reacquire hold
   failed --> cancelled: cancel
   succeeded --> [*]
   cancelled --> [*]
@@ -1165,7 +1165,7 @@ flowchart TB
 
   subgraph s ["kora scheduler [Container]"]
     tick["<b>Tick driver</b><br/>[Component: asyncio loop]<br/>Every 1 s and on notify,<br/>recovery pass at start"]:::component
-    trig["<b>1 Triggers</b><br/>[Component: per-row pass]<br/>Runs from bindings<br/>and inbound events"]:::component
+    trig["<b>1 Triggers</b><br/>[Component: per-row pass]<br/>Canonical starts from bindings<br/>and graph occurrences"]:::component
     perrun["<b>Passes 2 to 6 and 8</b><br/>[Component: per-run passes]<br/>Materialise, readiness, branch,<br/>admission, wake-ups, completion"]:::component
     timeouts["<b>7 Timeouts and liveness</b><br/>[Component: pass]<br/>Leases, deadlines,<br/>aggregate budgets"]:::component
     clear["<b>Clear downstream</b><br/>[Component: transaction]<br/>Resets a closure,<br/>revokes result authority"]:::component
@@ -1198,8 +1198,8 @@ flowchart TB
 
 | component | responsibility | specified in |
 |---|---|---|
-| 1 Triggers | fires due cron and sensor bindings from `trigger_binding` (`next_fire_at`, `last_fired_key`; cron fires forward only); turns inbound events addressed to a trigger into runs; checks `max_pending_runs`; applies `overlap`, which defaults to `queue` for webhook-fired runs and `allow` for the others; derives idempotency keys | scheduler.md section 2, ir.md section 8 |
-| 2 Materialise | creates node instances from the pinned IR; fan-out and sub-graph bodies only when their node becomes ready | scheduler.md section 2 |
+| 1 Triggers | due cron/start-sensor/graph occurrences use shared canonical start: bounded pending run or durable skip, explicit saturation rejection and cursor advance; webhook acceptance already committed its outcome and is never converted again | scheduler.md section 2, ir.md section 8 |
+| 2 Materialise | graph-locked promotion, with oldest pending queue run only when no graph run is running; creates pinned-IR instances; body materialisation stays lazy | scheduler.md section 2 |
 | 3 Readiness | a query over pending instances; resolves inputs to current versions and records `consumed_versions` | scheduler.md section 2 |
 | 4 Branch and collection | uses the saved graph contract/results for branch CEL and fan-out collection, without adding physical attempts | scheduler.md section 2 |
 | 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows with immutable exact input bindings, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
@@ -1211,9 +1211,9 @@ flowchart TB
 | Exporter feed | a bounded queue over event rows in order; reads an attempt's session segments from artifact storage when the attempt reaches `finishing`; drops are counted; replay from any row | protocols.md section 9 |
 | Metrics | queue depth, latencies, stalled/confirmed-lost counts, unknown execution count/age, retained scopes/target holds, pending dispatcher/publication recovery, last-known partial spend; `/readyz` fails until the recovery pass completes | scheduler.md section 11 |
 
-**From a trigger to a run.** Every trigger kind ends in a `run` row whose `idempotency_key` is unique per graph, so a duplicate returns the existing run. A manual trigger or a rerun arrives through the API, keyed by the caller's `Idempotency-Key` or a fresh ULID, and enters the trigger pass like any run (scheduler.md section 7). A cron binding is keyed by its graph version and fire time; a graph trigger by the parent run and the event. A webhook is authenticated by the API, with an HMAC signature or a bearer token inside a replay window, and recorded as an `inbound_event` row deduplicated by its delivery key; the trigger pass turns those addressed to a trigger into runs. The target key is bound when the run is created, from a parameter, or later from an output.
+**From a start to a run or skip.** Every source uses shared canonical acceptance (ADR-0020, data-model section 13): authenticate/envelope, accepted receipt/digest replay, new-version validation, overlap, outstanding quota, then one commit of the pinned pending run and receipt or a durable no-run skip. API webhook acceptance calls that entry before acknowledgement; a receipt is not an unconverted work queue or a signal subscription. Matching accepted replay precedes current schema and quotas. A full quota refuses client starts without consuming the key; internal occurrences record rejection and advance their cursor without catch-up. A settled-failed retry reacquires outstanding capacity before clearing; existing recovery/rerun barriers remain. The immutable target binds at valid parameter creation or complete output-source acceptance.
 
-**Open:** [#48](https://github.com/realkarych/kora/issues/48), which pass matches inbound events to waits. scheduler.md section 2 gives it to the trigger pass, while section 2 pass 6 and section 5 give it to the wake-up pass.
+Wait-directed events remain the wake-up pass's input; canonical start receipts are excluded from signal matching (ADR-0020).
 
 **Admission.** Pass 5 decides whether a ready instance gets an attempt now. The order of the six scope locks is fixed, so two scheduler replicas holding different run locks serialise on a shared scope and never admit over a limit.
 
@@ -1223,7 +1223,7 @@ title: Activity diagram - admission of one ready instance
 ---
 flowchart TB
   accTitle: Admission of one ready instance
-  accDescr: Admission takes a ready instance under the run lock. A waiting kind gets a wait row, a human_input node also gets an approval request with the run's cost, and its channel is asked after the commit. An agent or command instance waits with execution_recovery while any old attempt in the run has unresolved execution/publication. Otherwise it fails with budget_exhausted when its run or sub-graph budget is exhausted and gets an admission wait while its namespace is over its daily budget. Otherwise six scopes are locked and counted in a fixed order: global, namespace, graph, runtime, fan-out instance and target. A full scope gives an admission wait, oldest instance first, the first wait behind a target holder writes run.target_deferred. When every scope has room, the attempt is inserted created, which reserves the slot, the target hold is set when the key is bound, and the instance becomes queued. The commit releases the scope locks.
+  accDescr: Admission takes a ready instance under the run lock. A waiting kind gets a wait row, a human_input node also gets an approval request with the run's cost, and its channel is asked after the commit. An agent or command instance waits with execution_recovery while any old attempt in the run has unresolved execution/publication. Otherwise it fails with budget_exhausted when its run or sub-graph budget is exhausted and gets an admission wait while its namespace is over its daily budget. Otherwise six scopes are locked and counted in a fixed order: global, namespace, graph, runtime, fan-out instance and target. Target/recovery blockers take priority over generic concurrency reasons. A blocked candidate gets an admission wait and the scan continues to later eligible instances in stable node ID order; the first wait behind a target holder writes run.target_deferred. When every scope has room, the attempt is inserted created, which reserves attempt capacity and one distinct-run slot if it is the first physical attempt, the target hold is set when the key is bound, and the instance becomes queued. The commit releases the scope locks.
   classDef step fill:#EEF4FB,stroke:#2E6295,color:#000000
   classDef stop fill:#F2F2F2,stroke:#6B6B6B,color:#000000
 
@@ -1233,8 +1233,8 @@ flowchart TB
   ask(["After the commit:<br/>channel.request"]):::stop
   budgets{"Budget checks: run or sub-graph<br/>budget exhausted? namespace over<br/>its daily budget?"}:::step
   fail(["Instance failed,<br/>class budget_exhausted"]):::stop
-  scopes["Lock and count, in this order:<br/>global, namespace, graph, runtime,<br/>fan-out instance, target under defer"]:::step
-  admwait(["Admission wait row,<br/>wake_at = now + admission_interval,<br/>oldest ready instance first"]):::stop
+  scopes["Acquire scopes, then read counts:<br/>global, namespace, graph, runtime,<br/>fan-out instance, bound target"]:::step
+  admwait(["Admission wait row,<br/>wake_at = now + admission_interval,<br/>continue scanning other eligible nodes"]):::stop
   insert["Insert the attempt, created,<br/>which reserves the slot; set<br/>target_held_since if the key is bound<br/>and the field is null; instance queued"]:::step
   commit(["Commit releases<br/>the scope locks"]):::stop
 
@@ -1249,15 +1249,15 @@ flowchart TB
   budgets -->|"run or sub-graph budget"| fail
   budgets -->|"daily budget"| admwait
   budgets -->|"neither"| scopes
-  scopes -->|"a scope is full"| admwait
-  scopes -->|"every scope has room"| insert
+  scopes -->|"target blocked or capacity full"| admwait
+  scopes -->|"all checks pass"| insert
   insert --> commit
 ```
 
-- **A slot is reserved from `created`.** Every non-terminal attempt, from `created` to `finishing`, counts in every scope that applies to it, and it frees its slot exactly once at its terminal transition after closure; cancellation, clear-downstream and unknown execution retain its original scopes.
+- **Physical reservations start at `created`.** Every non-terminal attempt, including history after clear/cancel, retains its applicable attempt scopes until closure. Graph execution-run usage counts distinct run IDs: first attempt acquires one, another parallel attempt adds none, last terminalization releases once. Waits without physical attempts reserve no execution-run slot; acquired target holds and outstanding acceptance remain. Namespace `max_pending_runs` bounds the separate outstanding predicate (default 1000), not pending status.
 - **The target scope** counts every run that holds a key, whatever its graph's policy, but makes only runs of `on_active: defer` graphs wait. The first admission wait a run receives behind a given holder writes `run.target_deferred` once.
 - **On SQLite** the single writer replaces every scope lock.
-- **Limits live in rows and configuration** reloaded every pass, so they change without a restart.
+- **Limits are live policy.** Graph counts span versions; newest active (or newest deployed when none is active) supplies the cap. Deploy/retire/policy changes serialize with admission, effective reads name the source, and lowering a cap preserves existing occupancy. Run execution semantics stay pinned. The full state table and future race/parity tests are data-model section 13.
 
 **Open:** [#48](https://github.com/realkarych/kora/issues/48), where the run, sub-graph and daily budget checks sit relative to the six scopes. scheduler.md section 6 lists only the six scopes in order; section 2 gives an instance held back by the daily budget an admission wait, and section 4 fails an instance whose run or sub-graph budget is exhausted.
 
@@ -1279,7 +1279,7 @@ title: Component diagram for kora api
 ---
 flowchart TB
   accTitle: Component diagram for kora api
-  accDescr: Clients call operations, the worker claims and reports, and event sources send webhooks; request handling authenticates every request and dispatches it to the operation routers, the webhooks router or the worker endpoints. The operation routers validate documents with the IR validator and send run signals to the scheduling entry points; the webhooks router delivers inbound events to them. The worker endpoints hand uploads to upload processing, which validates artifacts against their types and stores payloads in artifact storage. Every writer goes through persistence to the Metadata DB.
+  accDescr: Clients call operations, the worker claims and reports, and event sources send webhooks; request handling authenticates every request and dispatches it to the operation routers, the webhooks router or the worker endpoints. The operation routers validate documents with the IR validator and send run signals to the scheduling entry points; the webhooks router invokes canonical start acceptance for run-directed deliveries or delivers wait signals. Accepted start receipts cannot be converted into a second run. The worker endpoints hand uploads to upload processing, which validates artifacts against their types and stores payloads in artifact storage. Every writer goes through persistence to the Metadata DB.
   classDef component fill:#85BBF0,stroke:#5D82A8,color:#000000
   classDef plugin fill:#C7B3DA,stroke:#5B3F86,stroke-width:4px,color:#000000
   classDef container fill:#438DD5,stroke:#2E6295,color:#000000
@@ -1332,7 +1332,7 @@ flowchart TB
 | Operation routers: registry | validate, plan, deploy; graphs and versions; presets, artifact types, namespaces; deploy resolves skill and MCP server digests | api-and-agent-surface.md section 2 |
 | Operation routers: run operations | trigger, rerun, retry, cancel, approvals and respond; respond checks the bound SHA and digests (`API006`) | api-and-agent-surface.md section 2 |
 | Operation routers: inspection | runs, timeline, nodes, attempts and their diff, logs, artifacts and lineage, cost; the target projection, computed from runs and approval requests and writing nothing; `?follow=true` streams | api-and-agent-surface.md section 2 |
-| Webhooks router | an HMAC or bearer check with a secret from the secrets provider, a replay window, one `inbound_event` row per delivery | api-and-agent-surface.md section 2 |
+| Webhooks router | HMAC/bearer authentication and replay window; canonical bounded start/skip commit before acknowledgement, or ordinary wait signal delivery; accepted replay before current version/quotas | api-and-agent-surface.md section 2 |
 | Worker endpoints | register and claim; heartbeat, segments, artifacts, usage and transitions, each carrying the lease epoch; artifact uploads and the transition to `finishing` also need result authority | api-and-agent-surface.md section 2, scheduler.md section 3 |
 | IR validator and planner | the shared validator; `/plan` materialises a document on the fake runtime | api-and-agent-surface.md section 2 |
 | Scheduling entry points | start a run; deliver a signal; tick | scheduler.md section 12 |
@@ -1362,8 +1362,8 @@ The table names the main writer of each table.
 | `worker` | the API at registration; `last_seen_at` on every claim and attempt heartbeat |
 | `idempotency_record` | the API's request handling |
 | `trigger_binding` | read and advanced by the trigger pass (`next_fire_at`, `last_fired_key`) |
-| `inbound_event` | the API's webhooks router |
-| `run` | created by the start-run entry point or the trigger pass; moved by the passes |
+| `inbound_event` | canonical start writes durable accepted/skip receipts from API or scheduler entry; wait-directed delivery writes ordinary signal rows |
+| `run` | only canonical start creates a bounded pending run; graph-locked promotion and ordinary passes move it; status alone is not a capacity reservation |
 | `node_instance` | the passes and clear downstream |
 | `attempt` | admission inserts the row and immutable input bindings; API reporting seals the nonsecret request/policy once before effects (ADR-0018); transition ownership remains the open question below |
 | `wait` | created by admission and by completion for a retry back-off; resolved by the wake-up pass; cancelled by clear downstream, a run cancel or a timeout |
@@ -1697,14 +1697,14 @@ For each pair of zones that touch, the table names the artifact both owners must
 | graph, graph version | stable graph identity; an immutable deployed IR and resolved contract; identical complete deployments return the same version | 2 |
 | handle | the runtime's identifier of one submission, stored on the attempt | 2 |
 | hard limit, soft limit | a hard limit stops the session at the limit; a soft limit may be overshot by a set headroom and by what is already running | [10](#10-limits-cost-and-safe-retries) |
-| inbound event | a row for an authenticated webhook delivery or a graph-to-graph event, deduplicated before matching | 12 |
+| inbound event | a deduplicated signal or a compact durable accepted/skip start receipt; receipt rows are never matched to waits or queued for run conversion | 12 |
 | IR | the YAML document the compiler emits and the control plane reads | [11](#11-graph-definition) |
 | execution uncertainty | expired ownership or unavailable evidence while old execution/dispatch/publication may continue; retain reservations, original domain and every dispatcher grant until closure (ADR-0017) | 8 |
 | lease, lease epoch | a worker's 120-second claim on an attempt; the epoch grows on every claim and fences earlier holders | 8 |
 | node instance, node path | one node inside one run, addressed by a path such as `candidates[2]@3.review` | 2 |
 | normalised event stream | the session runner's `{i, at, kind, data}` lines in `private control journal` | [16](#16-session-runner) |
 | `on_active` | the graph's per-target policy at admission: `allow` or `defer` | 2 |
-| `overlap` | the graph's rule at trigger time for a new run while another is running: `allow`, `skip` or `queue` | 2 |
+| `overlap` | graph lifecycle policy at canonical acceptance/promotion: allow, skip behind accepted pending/running work, or oldest-pending queue promotion when no run is running | 2 |
 | pass | one step of the scheduler's loop, a short transaction from rows to rows: 1 triggers, 2 materialise, 3 readiness, 4 branch and collection, 5 admission, 6 wake-ups, 7 timeouts and liveness, 8 completion and retry | 12 |
 | plan, plan executor | the VCS returns typed plans; a common executor prepares the workspace, then prepares/inspects/publishes sealed input using fresh trusted metadata and late authorization | [15](#15-worker) |
 | preset | a versioned block of node configuration, from the registry or from graph code; a snapshot is copied into the IR at compile time | 11 |
@@ -1733,7 +1733,7 @@ A namespace's policy is set by the platform team and enforced at the points belo
 
 | field | enforced by |
 |---|---|
-| concurrency limits | the admission pass; `max_pending_runs` at trigger time |
+| concurrency limits | physical admission counts attempts and distinct executing runs; canonical start/settled-failed retry check outstanding `max_pending_runs`; target holds are independent |
 | `daily_budget_usd` | the admission pass |
 | `tool_policy` | the session runner at every tool call, prepended to the node's; `IR019` at validation |
 | allowed secret prefixes | `IR007` at validation; the secrets provider at resolution |

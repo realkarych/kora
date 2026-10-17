@@ -504,7 +504,7 @@
         "nodes": {},
         "params": { "type": "object", "description": "JSON Schema for run parameters" },
         "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
-        "overlap": { "type": "string", "enum": ["allow", "skip", "queue"], "description": "when absent: queue for runs fired by a webhook trigger, allow for every other trigger kind (FR-6.2, DD-12)" },
+        "overlap": { "type": "string", "enum": ["allow", "skip", "queue"], "description": "When absent: queue for webhook starts, allow for other triggers. Skip considers accepted pending/running runs; queue promotion selects the oldest pending run under the graph lock when none is running. Canonical accepted/skip outcomes are durable (FR-6.2, ADR-0020)." },
         "target": { "$ref": "#/$defs/targetConfig" },
         "subgraphs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/subgraph" } },
         "source": { "$ref": "#/$defs/sourceLocation" }
@@ -523,8 +523,8 @@
         "concurrency": {
           "type": "object",
           "properties": {
-            "max_running_nodes": { "type": "integer", "minimum": 1 },
-            "max_running_runs": { "type": "integer", "minimum": 1 }
+            "max_running_nodes": { "type": "integer", "minimum": 1, "description": "Live graph-wide cap on all non-terminal physical attempts across graph versions; cap source is the newest active graph version, or newest deployed when none is active (ADR-0020)." },
+            "max_running_runs": { "type": "integer", "minimum": 1, "description": "Live graph-wide cap on distinct runs with any non-terminal physical attempt, including historical or unknown work; no-attempt waits reserve no execution-run slot. Counts span versions and caps use the newest active graph version, or newest deployed when none is active (ADR-0020)." }
           },
           "additionalProperties": false
         },

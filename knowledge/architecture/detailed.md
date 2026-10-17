@@ -109,7 +109,7 @@ Responsibilities, in one line each:
 
 | container | owns | never does |
 |---|---|---|
-| `kora api` | the only implementation of every operation; authentication (user and service principals); webhook ingestion to `inbound_event`; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | scheduling decisions; running sessions; UI logic |
+| `kora api` | the only implementation of every operation; authentication (user and service principals); canonical bounded start acceptance with durable run/skip receipts before webhook acknowledgement; wait-directed inbound signals; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | physical admission or pass decisions in routers (they delegate to shared scheduler entry points); running sessions; UI logic |
 | `kora web` | the production web console, full in MVP (FR-7.3) and held to the user-experience bar of NFR-13.1: approvals, runs, the live graph with node states and timeline, attempts with artifacts and the diff between them, live session logs, cost per run, node and attempt, graphs and their versions; graph editing post-MVP; a thin client of the API through a TypeScript client generated with `@hey-api/openapi-ts`; opaque server-side session cookie, CSRF protection, CSP | logic of its own; direct database access; designed in [docs/console.md](../../docs/console.md) before it is built ([ADR-0015](../../docs/decisions/0015-web-console-design.md)) |
 | `kora scheduler` | the passes in scheduler.md section 2 under a per-run lock; approval request creation with the run's cost sum; clear-downstream; the batched retention task | calling runtimes or harnesses |
 | `kora worker` | claiming `created` attempts and original-domain recovery of unresolved attempts through the API, including cancelled/superseded attempts of terminal runs; sealing its nonsecret logical request and execution policy through the API before allocation/preparation, then asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; closing all earlier dispatcher grants/operations before new platform writes, obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
@@ -128,11 +128,11 @@ flowchart LR
     classDef store fill:#fff4d6,stroke:#b8860b,color:#111
 
     DB[(Metadata DB)]:::store
-    T[Trigger pass<br/>cron, inbound events, sensor polls,<br/>overlap policy]:::c
+    T[Trigger pass<br/>canonical cron/sensor/graph starts,<br/>bounded acceptance and overlap]:::c
     M[Materialiser<br/>IR to node instances,<br/>lazy subgraph and fan-out bodies]:::c
     R[Readiness evaluator<br/>query: pending instances with terminal upstreams,<br/>input resolution, consumed_versions]:::c
     B[Branch and collection<br/>CEL over artifacts, fan-out list collection]:::c
-    A[Admission<br/>concurrency and daily budget per namespace,<br/>graph, runtime; target hold; attempt row]:::c
+    A[Admission<br/>concurrency and daily budget per namespace,<br/>graph, runtime; distinct executing runs;<br/>independent target hold; attempt row]:::c
     W[Wait manager<br/>timers, approvals, events, polls,<br/>retry back-off; no worker held]:::c
     L[Liveness and timeouts<br/>heartbeats, stall_after, node and run timeouts]:::c
     C[Completion and retry<br/>policies, strategies, sub-graph attempts,<br/>previous_attempt wiring]:::c
@@ -153,7 +153,7 @@ flowchart LR
     T & M & R & B & A & W & L & C & I & RET <--> DB
 ```
 
-Every box is a pure function of database rows to database rows inside one short transaction under the run's advisory lock; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
+Canonical start is shared with the API; accepted webhook receipts are never converted into a second run. Outstanding usage, physical execution-run usage and target holds have separate predicates (ADR-0020, data-model section 13). Passes use short transactions with run-first and ordered scope locks; graph caps are live across versions, while execution semantics stay pinned; nothing is held in memory between passes, so a second scheduler replica is only a throughput change (NFR-1.2, scheduler.md section 8).
 
 ## 4. Components inside a worker (C4 level 3)
 

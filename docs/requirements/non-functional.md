@@ -2,6 +2,8 @@
 
 Status: Reviewed by the project owner on 2026-10-16. Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
+Run-admission amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0020](../decisions/0020-execution-capacity-and-bounded-run-acceptance.md).
+
 Immutable-history amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0018](../decisions/0018-immutable-attempt-history.md).
 
 Execution-recovery amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; document wording pending line-by-line owner review. See [ADR-0017](../decisions/0017-execution-uncertainty-and-safe-replacement.md).
@@ -18,7 +20,7 @@ Publication-boundary amendment dated 2026-10-17: pending owner review; architect
 
 - **NFR-1.1 [target]** Organisation scale, calibrated on the owner's data platform: the existing Airflow-like ETL framework has ~300 graph authors per week, ~400 graphs and tens of thousands of scheduled processes; several dozen DWH teams of ~5 engineers each are the intended first users. kora must sustain **hundreds of agent nodes running concurrently**, hundreds of graphs, tens of thousands of runs per month, runs lasting hours to days (including human waits). MVP is validated at tens of concurrent nodes; the data model and scheduler must not need redesign to reach the target.
 - **NFR-1.2 [MVP]** The control plane holds no in-memory run state; the scheduler is stateless over the metadata DB so that it can be scaled or replaced without losing runs. HA (multiple schedulers with leader election or partitioning) is a target, not an MVP deliverable, but the data model must allow it (row-level claims, heartbeats, lease expiry).
-- **NFR-1.3 [MVP]** Waiting nodes (approval, sensor, timer) consume no runtime capacity: they are rows with a wake-up time or an event subscription, not held workers.
+- **NFR-1.3 [MVP]** Waiting nodes (approval, sensor, timer) consume no runtime capacity: they are rows with a wake-up time or an event subscription, not held workers. A run without a non-terminal physical attempt occupies no execution-run slot, including retry/admission waits, while outstanding acceptance and an acquired target hold remain separate. Any live parallel or historical unresolved attempt retains capacity until closure (ADR-0020).
 - **NFR-1.4 [target]** Fan-out of 100 instances in one run and nested fan-out inside sub-graphs are supported without special casing.
 
 ## 2. Reliability and durability
@@ -66,7 +68,7 @@ Publication-boundary amendment dated 2026-10-17: pending owner review; architect
 - **NFR-7.1 [MVP]** Single-command local start (`kora standalone`, SQLite) and single-command small deployment (`docker-compose up`: Postgres, an S3-compatible object store, scheduler, API, runtime). Helm chart is post-MVP.
 - **NFR-7.2 [MVP]** Database migrations are versioned and run by `kora db upgrade`; upgrades do not require draining running runs: migrations within a minor version are additive only, indexes are built concurrently, scheduler and API tolerate the previous schema version, and the documented upgrade order is database, scheduler, API, workers. A compatible upgrade also retains the execution/type behavior needed by active contracts. Readers preserve saved historical results without invoking replacement plugins; unavailable required semantics cause an explicit incompatibility failure before affected execution effects, never silent reinterpretation. IR, record-format and execution-semantics compatibility are distinct from SQL compatibility (ADR-0018).
 - **NFR-7.3 [MVP]** Every component exposes health and readiness endpoints and structured logs; the scheduler exposes basic metrics (queue depth, running attempts, scheduling latency) in Prometheus format.
-- **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit, unknown execution count and oldest age, retained reservations/target holds and unresolved dispatcher/publication recovery) and limits are configurable without restart; workers register with the control plane and their liveness, the age of the oldest unclaimed attempt, webhook authentication failures, retention success and approval age are exported as metrics; a backup and restore procedure covering the database and the artifact store together is documented.
+- **NFR-7.4 [MVP]** Runtime capacity is observable per runtime (running, queued, failed-to-submit, unknown execution count and oldest age, retained reservations/target holds and unresolved dispatcher/publication recovery) and limits are configurable without restart; outstanding accepted-run usage, distinct execution-run usage, effective cap source, target/recovery blockers and rejected trigger occurrences are visible through existing surfaces (ADR-0020). Workers register with the control plane and their liveness, the age of the oldest unclaimed attempt, webhook authentication failures, retention success and approval age are exported as metrics; a backup and restore procedure covering the database and the artifact store together is documented.
 
 ## 8. Cost governance
 

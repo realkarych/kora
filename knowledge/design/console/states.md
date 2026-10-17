@@ -25,14 +25,14 @@ Shape says what colour says. The glyph is drawn in the node's corner opposite th
 | `waiting`, wait kind `timer` | blue | `running` | "timer · <remaining>" |
 | `waiting`, wait kind `event` or `poll` | blue | `running` | "waiting for <event name or sensor>" |
 | `waiting`, wait kind `retry_backoff` | blue | `running` | "retry in <remaining> · attempt n of m" |
-| `waiting`, wait kind `admission` | blue | `running` | "admission · concurrency limit", "admission · daily budget", "target held · <since>" or "execution recovery · <attempt>"; the scope, the budget and the holding run in the panel |
+| `waiting`, wait kind `admission` | blue | `running` | "admission · concurrency limit", "admission · daily budget", "target held · <since>" or "execution recovery · <attempt>"; effective scope/name/used/limit and observed/recheck time, or all target holders/recovery blockers in the panel; sampled blocker lists explicitly incomplete |
 | `succeeded` | green | `succeeded` | "in <duration>" |
 | `failed` | red | `failed` | the error class in one word (table below) |
 | `skipped` | gray, marked | `skipped` | "branch not taken" or "trigger rule" |
 | `upstream_failed` | gray, marked | `upstream failed` | "<upstream node> failed" |
 | `cancelled` | gray, marked | `cancelled` | "by <actor>" |
 
-The wait kind, the deadline, the subscription and the admission reason come from the node's current wait as [ADR-0015](../../../docs/decisions/0015-web-console-design.md) exposes it.
+The wait kind, deadline, subscription and admission reason come from the API (ADR-0015/ADR-0020). Lifecycle colour does not imply execution occupancy: no-attempt waits reserve no execution-run slot, while outstanding acceptance and acquired target holds persist separately. A live parallel or historical unresolved attempt still reserves capacity. Approval success opens readiness, not immediate execution; retry saturation leaves the old state untouched. Scope counts/cap-source version and next action are observations, not a promised start time.
 
 A node whose declared definition is materialised per fan-out element is one rectangle: its colour is the worst state among its instances in the order red, amber, blue, green, gray, and the strip inside it carries one segment per element in that element's colour; the counts of elements per state are always words beside the strip, whatever the colour, so that a group with two elements done and two not started never reads as finished.
 

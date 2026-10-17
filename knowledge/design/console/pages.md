@@ -78,8 +78,8 @@ System: no outgoing links
 | element | content | route |
 |---|---|---|
 | runs list (left) | the graph's runs newest first; per row a strip of the top-level node instances' states (colour and glyph), `target_key` (or the run's parameters in brief when the graph declares no target), `started_at` relative, the trigger kind and actor; the newest run selected by default, or the newest run in the state of the traffic-light segment that opened the page; 50 rows at a time, with "earlier runs" at the bottom loading the next 50 without moving the scroll | `GET /namespaces/{ns}/runs?graph=` with the top-level node states of each run |
-| graph header | always present: `graph.name`, the latest active version number, the Run button | `GET …/graphs/{graph}` |
-| run line | under the graph header, only when a run is selected: target, state word and elapsed time, trigger and actor, tokens and USD so far, the run's graph version number, `rerun_of` and the run's reruns | `GET …/runs/{run}`, `GET …/runs?rerun_of=`, `GET …/runs/{run}/cost` |
+| graph header | always present: `graph.name`, the latest active version number, the Run button; read-only execution-run usage/cap and cap-source version from the API | `GET …/graphs/{graph}` |
+| run line | under the graph header, only when a run is selected: target, state word and elapsed time, trigger and actor, tokens and USD so far, the run's execution version, `rerun_of` and its reruns; separate outstanding/execution-reserved/target-hold facts, with observed time and scope detail under disclosure | `GET …/runs/{run}`, `GET …/runs?rerun_of=`, `GET …/runs/{run}/cost` |
 | graph | the topology of the selected run's pinned version, or of the latest active version when the graph has no run (drawn in gray), laid out once from the IR, left to right, by the ELK layered algorithm through its JavaScript build, with fan-out and sub-graph frames as compound nodes; expanding or collapsing a frame re-runs the layout and animates the moves over 200 ms; a state change never re-runs it; nodes as same-size rectangles; edges from `inputs.from` and `depends_on` | `GET …/graphs/{graph}/versions/{gv}`, `GET …/runs/{run}` for instance states, `GET …/runs/{run}/events?follow=true` for live changes |
 | node, zoomed out | the kind icon in one corner and the state glyph ([states.md](states.md)) in the opposite corner; the rectangle's colour is the state | |
 | node, zoomed in | the icon in a corner; the node name; the time-by-state line ([states.md](states.md)); "attempt n" when the instance has more than one attempt | the node instances of the run view; the wait of a waiting node (ADR-0015) |
@@ -115,7 +115,7 @@ Opens from a human-input node and from Approvals; one approval request.
 | element | content | route |
 |---|---|---|
 | list row | the key; the strip of the holding run's top-level node states (the newest holder under `allow`; "idle" in gray without active work); the accepted change (date and commit, or a dash); the number of deferred runs when any; the list shows active targets by default with a switch to all | `GET /namespaces/{ns}/targets?active=true`, the runs' node states |
-| target page: now | the holding run and `target_held_since`, including terminal runs with unsettled recovery, its state word and the link to the review page when it waits for a person; the deferred runs with `run.target_deferred` times | `GET /namespaces/{ns}/targets/{key}` |
+| target page: now | all holding runs and their `target_held_since`, including terminal runs with unsettled recovery, each state word and review link; execution occupancy is separate from the hold; the deferred runs with `run.target_deferred` times | `GET /namespaces/{ns}/targets/{key}` |
 | target page: accepted | the latest `approved` request: commit, change-request link, `approver`, time; the three facts "accepted · merged · verified" with their sources (the request; the `change_request_status` observation of a named run; a run-level artifact such as a confirmation metrics report) or "unknown"; the cost of the search: the sum of cost totals over the key's runs since the previous accepted change, failed and cancelled included, tokens first, USD beside, with completeness | the target view's runs, their approval requests and cost totals |
 | target page: history | the key's permanently bound runs newest first in the graph page's row style, each with its cost, including failed/rejected proposals and late usage; payload expiry preserves binding origin | the target view |
 
@@ -142,9 +142,9 @@ Read-only in MVP; one health line on top from `GET /readyz`.
 | block | content | route |
 |---|---|---|
 | Workers | id, incarnation, runtime domain, version, capacity, `last_seen_at`; recovery backlog including historical grants and terminal runs with retained reservations/target holds; highlighted when silent longer than the lease period; "holds": the attempts the worker holds, each linking to the node panel of its run (ADR-0015) | `GET /workers` |
-| Schedules | per graph: trigger kind, spec, `next_fire_at`, paused | `GET …/graphs/{graph}/triggers` |
+| Schedules | per graph: trigger kind, spec, `next_fire_at`, paused; last accepted/skipped/rejected occurrence, reason, quota snapshot and time | `GET …/graphs/{graph}/triggers` |
 | Presets and artifact types | the lists; a body on click | `GET /namespaces/{ns}/presets`, `GET /namespaces/{ns}/artifact-types/{name}` |
-| Policy | the namespace policy as a read-only form | `GET /namespaces/{ns}` |
+| Policy | namespace policy read-only, including outstanding accepted-run usage/limit (default 1000), observed time and explicit over-limit state after lowering | `GET /namespaces/{ns}` |
 
 ## Attempt comparison
 
@@ -203,8 +203,8 @@ Every action answers in the place where it was taken: no toasts, no modal dialog
 | action | on success | on refusal |
 |---|---|---|
 | approve or reject | the pinned bar becomes one line, "approved by you at <time> · commit <sha>" (or "rejected …"), the form goes, the facts and the narrative stay as history, and the line links the node that continues; the page stays | the structured error under the bar with its code and message; `API006` (already answered, or the request moved) reloads the request and shows its current state |
-| run | the dialog closes; the new run appears first in the runs list and is selected; its run line shows the version it runs | validation errors under each field of the form, the form stays filled; a refusal from the API under the submit button with its code and message |
-| retry | the dialog closes; the node panel stays open and shows the new attempt as current in `created` after recovery settles, or the blocking old attempts and deferred admission while it remains unresolved; the nodes that clear-downstream reset turn gray | the error under the retry button; a node that is no longer failed reloads the node view |
+| run | accepted: select the new pending run and its pinned version; skipped: show "not started · graph overlap" with no invented run | validation errors under each field; full quota keeps the form filled and shows API002/run_backlog_full with scope, used/limit and retry guidance; no run was accepted |
+| retry | the dialog closes; the node panel stays open and shows the new attempt as current in `created` after recovery settles, or recovery/capacity/target blockers and next recheck while admission waits; the nodes that clear-downstream reset turn gray | the error under the retry button; full outstanding quota states that nothing was cleared and shows used/limit; a node that is no longer failed reloads the node view |
 | cancel | the run line (or the node's second line) reads "cancelling" until the API reports the terminal state, then `cancelled` with retained scopes/recovery reason when physical closure remains unknown; the panel stays open | the error under the cancel control; a run or node already finished reloads the view |
 
 A network failure is shown like a refusal, with the words "no connection", and the control becomes active again.
