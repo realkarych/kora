@@ -421,7 +421,7 @@ flowchart TB
 Everything an adopter's infrastructure plugs into is one of eleven protocols: where sessions run, which harness drives them, which VCS and code host hold the code, and how approvals, secrets, storage, telemetry, authentication, sensors and tool policy work. Core code calls the interface and never names an implementation ([invariant 11](#6-invariants)).
 
 - **Discovery.** Implementations are found through one entry-point group, `kora.provider`. Each entry point returns `ProviderMetadata` with the protocol, the name, the implementation, a `config_schema` validated at start-up and a version; `kora plugins list` prints what is installed ([protocols.md](../specs/protocols.md) section 1, [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md)).
-- **Shape.** Every protocol has a `name`, a `capabilities()` method returning frozen flags and a `config_schema`. All methods are `async` and cancellable. Implementations receive a `ProtocolContext` with the namespace, run, attempt, a logger and a secrets resolver, and never import the scheduler.
+- **Shape.** Every protocol has a `name`, a `capabilities()` method returning frozen flags and a `config_schema`. I/O methods are `async` and cancellable; control-plane provider hooks/decoding have a bounded cooperative lifecycle (ADR-0021). Implementations receive a `ProtocolContext` with the namespace, run, attempt, a logger and a secrets resolver, and never import the scheduler.
 - **Errors.** Every failure is a `KoraProtocolError(code, message, retryable, details)`. `retryable=True` maps to the error class `infrastructure`, and an implementation that cannot answer raises it rather than guessing.
 - **Proof.** Each protocol has a conformance suite, `kora.conformance.<protocol>`, that production implementations and kora's fakes both pass; an adopter runs it as `kora conformance <protocol> <name>` (protocols.md section 13).
 - **Fakes.** The fake harness and the fake runtime ship as test fixtures (NFR-10.1). The fake VCS is a directory-backed implementation validated by the VCS suite, and tests also use a fake approval channel. The testing rules forbid mocks, so almost every integration test runs on fakes.
@@ -431,7 +431,7 @@ Everything an adopter's infrastructure plugs into is one of eleven protocols: wh
 | runtime | `local`, `docker` | worker | 2 |
 | harness adapter | `claude`, `codex`; `acp` after the MVP | runner (`run`); worker (`build_session_spec`); the graph-definition library in the CLI and the API (`check_config`, `policy_coverage`) | 3, 14 |
 | vcs | `git` with GitHub and GitLab | worker (plans, `open_change_request`); scheduler (`head_sha`, sensors) | 4 |
-| approval channel | `cli`, `vcs` | scheduler (`request`, `poll`, `notify`); API (`notify` when a manual retry invalidates a request) | 5 |
+| approval channel | `cli`, `vcs` | scheduler dispatcher outside transactions (`request`, read-only `lookup`, `poll`, `notify`, transport `cancel`); API transitions persist delivery intent only | 5 |
 | secrets | `env`, `file` | worker at submit; API for webhook secrets; scheduler for sensor headers | 6 |
 | artifact storage | `local`, `s3` | API (put, get); scheduler (retention delete, exporter reads) | 7 |
 | artifact type | built-in types and the registry | API (validate on upload); scheduler (summaries for CEL); the graph-definition library | 8 |
@@ -579,11 +579,11 @@ sequenceDiagram
   CLI->>A: respond with the bound SHA and digests it fetched
   A->>D: deliver-signal entry point under the run lock, request approved
   A-->>CLI: response applied
-  S->>C: wake-up pass, head_sha of the branch
+  S->>C: unlocked dispatcher head_sha after durable claim
   C-->>S: equals the bound SHA
   S->>D: approve succeeded
   loop every 10 minutes
-    S->>C: poll the change request status
+    S->>C: unlocked dispatcher polls change request status
   end
   E->>C: merges the change request
   S->>C: the next poll sees merged
@@ -819,7 +819,7 @@ stateDiagram-v2
 | `running` to `waiting` | completion | the attempt failed and the retry policy allows another: a retry back-off wait |
 | `running` to `failed` | completion | no retry is left |
 | `waiting` to `ready` | wake-up | a retry back-off or an admission wait is over |
-| `waiting` to `running` | wake-up | a sensor poll is due |
+| `waiting` to `running` | wake-up | an authoritative current sensor result satisfies its saved condition |
 | `waiting` to `succeeded` | wake-up | a timer is due, an event matched, an approved request passed the re-check, or a wait expired with `on_expiry: default_value` |
 | `waiting` to `failed` | wake-up | rejected, expired with `on_expiry: fail`, or the head moved |
 | `waiting` to `skipped` | wake-up | expired with `on_expiry: skip` |
@@ -853,7 +853,7 @@ stateDiagram-v2
   cancelled --> [*]
 ```
 
-An approved request does not complete its node by itself: the wake-up pass checks the head once more before downstream starts, and a moved head fails the node with `candidate_moved` while the request stays `approved` as the audit record. An approval response from any channel is applied through one function under the run lock: load the request, check that it is still `pending`, compare the commit SHA and digests with the bound values, then transition. The channel is only a transport. A token without the `approve` flag gets `API005`, and a VCS response from the change request's author, from kora's own bot identity or from a login outside the namespace's `approver_allowlist` is refused and logged. `rejected` fails the node with class `approval_rejected`.
+An approved VCS-bound request does not complete its node by itself: the original current wait remains open and a freshly claimed unlocked observation checks the head once more before downstream starts, and a moved head fails the node with `candidate_moved` while the request stays `approved` as the audit record. An approval response from any channel is applied through one function under the run lock: load the request, check that it is still `pending`, compare the commit SHA and digests with the bound values, then transition. The channel is only a transport. A token without the `approve` flag gets `API005`, and a VCS response from the change request's author, from kora's own bot identity or from a login outside the namespace's `approver_allowlist` is refused and logged. `rejected` fails the node with class `approval_rejected`.
 
 A push during review is applied through a second function next to the response one, also under the run lock, so a push and a response that race are serialised and the one applied second finds the request no longer `pending` ([scheduler.md](../specs/scheduler.md) section 5).
 
@@ -878,15 +878,16 @@ sequenceDiagram
   Note over S: request R is pending and binds commit A
   Note over C: commit B is pushed to the bound branch
   alt the push is observed first
-    S->>C: wake-up pass, head_sha of the branch
+    S->>C: unlocked dispatcher head_sha after durable claim
     C-->>S: B
-    S->>S: under the run lock, R invalidated with observed head B, wait cancelled, node failed with candidate_moved, channel notified
+    S->>S: under run lock, R invalidated, wait cancelled, node failed, closure intent saved
+    S->>C: after commit, dispatcher notifies and closes channel
     E->>A: kora approve R, bound to commit A
     A-->>E: API006, recorded as approval.responded with applied false
   else the response is applied first
     E->>A: kora approve R, bound to commit A
     A-->>E: applied under the run lock, R approved
-    S->>C: re-check before downstream, head_sha
+    S->>C: unlocked fresh post-approval head_sha
     C-->>S: B
     S->>S: node failed with candidate_moved, R stays approved
   end
@@ -1147,7 +1148,7 @@ Decisions: ADR-0002, ADR-0006, ADR-0012. Tests: `test_control_plane_never_import
 
 Zone: Scheduler. Code: `src/kora/scheduler`.
 
-The scheduler decides and persists; it never calls a runtime, a harness or a worker. Every pass is a short transaction from rows to rows and keeps nothing in memory, so a restarted scheduler runs one recovery pass and continues. The trigger pass claims rows one by one with `SKIP LOCKED` on PostgreSQL. Passes 2 to 8 work per run under the run lock, an advisory lock on `run.id` on PostgreSQL and the single writer on SQLite, so two replicas never evaluate one run at once. The tick driver runs the passes every second and right after a transition, woken by `LISTEN/NOTIFY` on PostgreSQL; every tick also queries oldest-pending promotion candidates independently of touched-run filtering, so blocked queues are revisited after predecessor completion/restart; for touched runs it repeats passes 2 to 8 until no row changes, at most ten rounds.
+The scheduler decides and persists; it never calls a runtime, a harness or a worker. Every database phase is a short transaction from rows to rows. External observations and approval delivery use a bounded async dispatcher: durable claim, unlocked call, locked current-owner apply (ADR-0021). Only disposable tasks/credits are in memory; authoritative tokens/due work/delivery intent survive restart in rows. No provider hook, content/credential resolution or network/storage call spans a DB transaction/connection or run/scope lock. The trigger pass claims rows one by one with `SKIP LOCKED` on PostgreSQL. Passes 2 to 8 work per run under the run lock, an advisory lock on `run.id` on PostgreSQL and the single writer on SQLite, so two replicas never evaluate one run at once. The tick driver runs the passes every second and right after a transition, woken by `LISTEN/NOTIFY` on PostgreSQL; every tick also discovers due observations, expired tokens and pending delivery alongside oldest-pending promotion candidates independently of touched-run filtering, so blocked queues are revisited after predecessor completion/restart; for touched runs it repeats passes 2 to 8 until no row changes, at most ten rounds.
 
 **Open:** [#48](https://github.com/realkarych/kora/issues/48), whether the timeout pass takes the run lock. scheduler.md section 2 counts pass 7 among the per-run passes and also calls timeouts per row.
 
@@ -1157,7 +1158,7 @@ title: Component diagram for kora scheduler
 ---
 flowchart TB
   accTitle: Component diagram for kora scheduler
-  accDescr: The tick driver runs the trigger/timeout passes and revisits oldest pending promotion candidates each tick independently of touched-run filtering; for every touched run, the per-run passes under the run lock until no row changes. The per-run passes start a sub-graph attempt through clear downstream. All of them read and write the Metadata DB and call sensor, approval channel and VCS implementations, which reach the code host. The retention task marks versions in the Metadata DB and deletes expired payloads from artifact storage. The exporter feed reads event rows and hands them to the otel exporter, which exports spans.
+  accDescr: The tick driver runs the trigger/timeout passes and revisits oldest pending promotion candidates each tick independently of touched-run filtering; for every touched run, the per-run passes under the run lock until no row changes. The per-run passes start a sub-graph attempt through clear downstream. Their database phases read/write Metadata DB; an external-call dispatcher claims durable owners, commits before invoking sensor/channel/VCS implementations, and compares current identity under locks before applying results. API retry handling commits channel-closure intent rather than calling a provider. The retention task marks versions in the Metadata DB and deletes expired payloads from artifact storage. The exporter feed reads event rows and hands them to the otel exporter, which exports spans.
   classDef component fill:#85BBF0,stroke:#5D82A8,color:#000000
   classDef plugin fill:#C7B3DA,stroke:#5B3F86,stroke-width:4px,color:#000000
   classDef container fill:#438DD5,stroke:#2E6295,color:#000000
@@ -1169,6 +1170,7 @@ flowchart TB
     perrun["<b>Passes 2 to 6 and 8</b><br/>[Component: per-run passes]<br/>Materialise, readiness, branch,<br/>admission, wake-ups, completion"]:::component
     timeouts["<b>7 Timeouts and liveness</b><br/>[Component: pass]<br/>Leases, deadlines,<br/>aggregate budgets"]:::component
     clear["<b>Clear downstream</b><br/>[Component: transaction]<br/>Resets a closure,<br/>revokes result authority"]:::component
+    dispatch["<b>External-call dispatcher</b><br/>[Component: bounded async tasks]<br/>Claim, commit, unlocked call,<br/>compare and apply"]:::component
     ret["<b>Retention task</b><br/>[Component: coroutine]<br/>Batched, never in a pass"]:::component
     feed["<b>Exporter feed</b><br/>[Component: bounded queue]<br/>Event rows in order"]:::component
     prov["<b>Protocol implementations</b><br/>[Protocol implementation]<br/>sensor, approval channel,<br/>vcs, otel exporter"]:::plugin
@@ -1180,12 +1182,15 @@ flowchart TB
 
   tick -->|"Runs each tick"| trig
   tick -->|"Runs each tick"| timeouts
+  tick -->|"Discovers due owners<br/>each tick"| dispatch
   tick -->|"Per touched run,<br/>to a fixpoint"| perrun
   perrun -->|"Starts sub-graph<br/>attempt N+1 through"| clear
   trig -->|"Claims rows<br/>[SQL]"| db
   perrun -->|"Writes under<br/>the run lock [SQL]"| db
   timeouts -->|"Marks and sums<br/>[SQL]"| db
-  perrun -.->|"request, poll,<br/>head_sha"| prov
+  trig & perrun -->|"Durable observation<br/>and delivery owners"| dispatch
+  dispatch -->|"Claim and apply only<br/>[SQL]"| db
+  dispatch -.->|"Unlocked request, lookup,<br/>poll, head_sha, notify, cancel"| prov
   ret -->|"Marks versions<br/>[SQL]"| db
   ret -->|"Deletes payloads<br/>[FS or S3 API]"| blobs
   feed -->|"Reads event rows<br/>[SQL]"| db
@@ -1203,13 +1208,16 @@ flowchart TB
 | 3 Readiness | a query over pending instances; resolves inputs to current versions and records `consumed_versions` | scheduler.md section 2 |
 | 4 Branch and collection | uses the saved graph contract/results for branch CEL and fan-out collection, without adding physical attempts | scheduler.md section 2 |
 | 5 Admission | six limit scopes in a fixed lock order, drawn below; creates attempt rows with immutable exact input bindings, or wait and approval request rows with `run_cost` | scheduler.md section 6 |
-| 6 Wake-ups | timers, inbound events matched against wait subscriptions, sensor and approval polls; head observation, invalidation and the re-check before downstream | scheduler.md section 5 |
+| 6 Wake-ups | timers, existing inbound-event matching and current prepared observations; exact wait/request apply, invalidation and fresh approved-head verification; touches run atomically | scheduler.md section 5 |
 | 7 Timeouts and liveness | marks expired leases reclaimable; fails wall-clock timeouts; sums run and sub-graph budgets | scheduler.md section 4 |
 | 8 Completion and retry | marks instances done; applies retry policies; starts sub-graph attempt N+1; completes the run; accepts a target source's whole staged result and immutable key atomically | scheduler.md sections 2 and 7 |
 | Clear downstream | one transaction for a manual retry or sub-graph attempt N+1 | data-model.md section 6 |
+| External-call dispatcher | direct due discovery, finite cooperative calls outside all transactions/locks, exact owner/token apply, durable delivery/late-id reconciliation; a state-changing apply touches run.updated_at | scheduler.md section 16, data-model.md section 14 |
 | Retention task | expires blobs and inline content only after all unexpired artifact/segment/request/derived owners and required active/recovery holds permit deletion; marks explicit availability | scheduler.md section 13 |
 | Exporter feed | a bounded queue over event rows in order; reads an attempt's session segments from artifact storage when the attempt reaches `finishing`; drops are counted; replay from any row | protocols.md section 9 |
 | Metrics | queue depth, latencies, stalled/confirmed-lost counts, unknown execution count/age, retained scopes/target holds, pending dispatcher/publication recovery, last-known partial spend; `/readyz` fails until the recovery pass completes | scheduler.md section 11 |
+
+The current approval wait remains open through post-approval verification when VCS-bound; old approved audit rows cannot authorize replacement waits. Generic forms need no VCS read. The dispatcher retains credits until task settlement and cannot contain arbitrary blocking/cancellation-resistant Python; standalone shares that cooperative-provider limit. Uncertain terminal delivery retains compact identity/progress, not ReviewBundle/form payloads or execution reservations. Future HA needs explicit aggregate budgets. See [ADR-0021](../../docs/decisions/0021-external-observations-outside-transactions.md), [data-model section 14](../specs/data-model.md#14-external-observation-and-delivery-ownership-adr-0021) and [scheduler section 16](../specs/scheduler.md#16-external-observation-dispatch-adr-0021).
 
 **From a start to a run or skip.** Every source uses shared canonical acceptance (ADR-0020, data-model section 13): authenticate/envelope, accepted receipt/digest replay, new-version validation, overlap, outstanding quota, then one commit of the pinned pending run and receipt or a durable no-run skip. API webhook acceptance calls that entry before acknowledgement; a receipt is not an unconverted work queue or a signal subscription. Matching accepted replay precedes current schema and quotas. A full quota refuses client starts without consuming the key; internal occurrences record rejection and advance their cursor without catch-up. A settled-failed retry reacquires outstanding capacity before clearing; existing recovery/rerun barriers remain. The immutable target binds at valid parameter creation or complete output-source acceptance.
 
@@ -1230,7 +1238,7 @@ flowchart TB
   start(["Ready instance,<br/>under the run lock"]):::stop
   kind{"Node kind?"}:::step
   waitrow["Insert a wait row; for human_input<br/>also an approval request with run_cost;<br/>the instance is waiting"]:::step
-  ask(["After the commit:<br/>channel.request"]):::stop
+  ask(["After the commit:<br/>dispatcher reconciles durable<br/>request-delivery intent"]):::stop
   budgets{"Budget checks: run or sub-graph<br/>budget exhausted? namespace over<br/>its daily budget?"}:::step
   fail(["Instance failed,<br/>class budget_exhausted"]):::stop
   scopes["Acquire scopes, then read counts:<br/>global, namespace, graph, runtime,<br/>fan-out instance, bound target"]:::step
@@ -1271,7 +1279,7 @@ Decisions: ADR-0001, ADR-0003, ADR-0007, ADR-0010, ADR-0014. Tests: `test_last_s
 
 Zone: API. Code: `src/kora/api`.
 
-The API is the only door into kora: for people, for agents through MCP, for webhooks and for workers, which never hold database credentials. Operations that change run state do not schedule anything themselves: the routers call the scheduler's entry points, so a signal and the transition it causes commit in one transaction under the run lock. Every mutation writes an event row with the actor taken from the token, and every error is the one structured error envelope with a stable code.
+The API is the only door into kora: for people, for agents through MCP, for webhooks and for workers, which never hold database credentials. Operations that change run state do not schedule anything themselves: the routers call the scheduler's entry points, so a signal, local transition and required delivery intent commit in one transaction under the run lock. External channel notification/closure runs later in the scheduler dispatcher and is rediscovered after a crash. Every mutation writes an event row with the actor taken from the token, and every error is the one structured error envelope with a stable code.
 
 ```mermaid
 ---
@@ -1279,7 +1287,7 @@ title: Component diagram for kora api
 ---
 flowchart TB
   accTitle: Component diagram for kora api
-  accDescr: Clients call operations, the worker claims and reports, and event sources send webhooks; request handling authenticates every request and dispatches it to the operation routers, the webhooks router or the worker endpoints. The operation routers validate documents with the IR validator and send run signals to the scheduling entry points; the webhooks router invokes canonical start acceptance for run-directed deliveries or delivers wait signals. Accepted start receipts cannot be converted into a second run. The worker endpoints hand uploads to upload processing, which validates artifacts against their types and stores payloads in artifact storage. Every writer goes through persistence to the Metadata DB.
+  accDescr: Clients call operations, the worker claims and reports, and event sources send webhooks; request handling authenticates every request and dispatches it to the operation routers, the webhooks router or the worker endpoints. The operation routers validate documents with the IR validator and send run signals to the scheduling entry points; the webhooks router invokes canonical start acceptance for run-directed deliveries or delivers wait signals. Accepted start receipts cannot be converted into a second run. The worker endpoints hand uploads to upload processing, which validates artifacts against their types and stores payloads in artifact storage. Every writer goes through persistence to the Metadata DB. Scheduling entry points commit channel intent; the scheduler dispatcher delivers it after commit, never the API transaction.
   classDef component fill:#85BBF0,stroke:#5D82A8,color:#000000
   classDef plugin fill:#C7B3DA,stroke:#5B3F86,stroke-width:4px,color:#000000
   classDef container fill:#438DD5,stroke:#2E6295,color:#000000
@@ -1298,7 +1306,7 @@ flowchart TB
     entry["<b>Scheduling entry points</b><br/>[Component: scheduler code]<br/>Start a run, deliver<br/>a signal, tick"]:::component
     uploads["<b>Upload processing</b><br/>[Component: Python]<br/>Validates artifacts,<br/>stores payloads"]:::component
     persistence["<b>Persistence</b><br/>[Component: SQLAlchemy 2.0]<br/>Models, transitions,<br/>event rows"]:::component
-    prov["<b>Protocol implementations</b><br/>[Protocol implementation]<br/>authentication, secrets,<br/>approval channel, artifact type"]:::plugin
+    prov["<b>Protocol implementations</b><br/>[Protocol implementation]<br/>authentication, secrets,<br/>artifact type"]:::plugin
   end
   db[("<b>Metadata DB</b><br/>[Container: PostgreSQL or SQLite]")]:::container
   blobs[("<b>Artifact storage</b><br/>[Container: file system or S3]")]:::container
@@ -1315,11 +1323,10 @@ flowchart TB
   hooks -->|"Delivers inbound<br/>events to"| entry
   wk -->|"Hands uploads to"| uploads
   ops -->|"Reads, writes<br/>registry rows"| persistence
-  entry -->|"Applies<br/>transitions"| persistence
+  entry -->|"Applies transitions<br/>and delivery intent"| persistence
   wk -->|"Records claims,<br/>reports"| persistence
   uploads -->|"Records versions,<br/>usage"| persistence
   uploads -.->|"validate"| prov
-  entry -.->|"notify"| prov
   persistence -->|"Reads, writes<br/>[SQL]"| db
   uploads -->|"Stores payloads<br/>[FS or S3 API]"| blobs
 
@@ -1705,7 +1712,7 @@ For each pair of zones that touch, the table names the artifact both owners must
 | normalised event stream | the session runner's `{i, at, kind, data}` lines in `private control journal` | [16](#16-session-runner) |
 | `on_active` | the graph's per-target policy at admission: `allow` or `defer` | 2 |
 | `overlap` | graph lifecycle policy at canonical acceptance/promotion: allow, skip behind accepted pending/running work, or oldest-pending queue promotion when no run is running | 2 |
-| pass | one step of the scheduler's loop, a short transaction from rows to rows: 1 triggers, 2 materialise, 3 readiness, 4 branch and collection, 5 admission, 6 wake-ups, 7 timeouts and liveness, 8 completion and retry | 12 |
+| pass | one step of the scheduler's loop, a sequence of short database phases over rows; external calls use the separate unlocked dispatcher (ADR-0021): 1 triggers, 2 materialise, 3 readiness, 4 branch and collection, 5 admission, 6 wake-ups, 7 timeouts and liveness, 8 completion and retry | 12 |
 | plan, plan executor | the VCS returns typed plans; a common executor prepares the workspace, then prepares/inspects/publishes sealed input using fresh trusted metadata and late authorization | [15](#15-worker) |
 | preset | a versioned block of node configuration, from the registry or from graph code; a snapshot is copied into the IR at compile time | 11 |
 | protocol, provider | one of eleven pluggable interfaces; an implementation is a provider found through the `kora.provider` entry point | 4 |
