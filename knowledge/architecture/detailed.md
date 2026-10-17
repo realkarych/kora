@@ -25,7 +25,7 @@ flowchart LR
     DISPATCH -->|bounded calls outside transactions| PROVIDERS
 ```
 
-The diagram identifies responsibilities, not a prescribed pass schedule or lock implementation. The [loop](../specs/scheduler.md#2-the-scheduling-loop), [admission](../specs/scheduler.md#6-concurrency-limits-fr-610), [external dispatcher](../specs/scheduler.md#16-external-observation-dispatch-adr-0021) and [deadline guards](../specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022) own the rules.
+The diagram identifies responsibilities, not a prescribed pass schedule or lock implementation. [Durable discovery](../specs/scheduler.md#8-restart-and-multi-scheduler-safety) uses `needs_scheduling`; independent due-work scans remain active. [Branch selection](../specs/ir.md#45-branch-ownership-and-selection) gates direct targets, and [retry invalidation](../specs/data-model.md#6-clear-downstream-fr-68a) follows declared dependencies and composition ownership. The [loop](../specs/scheduler.md#2-the-scheduling-loop), [admission](../specs/scheduler.md#6-concurrency-limits-fr-610), [external dispatcher](../specs/scheduler.md#16-external-observation-dispatch-adr-0021) and [deadline guards](../specs/scheduler.md#17-inherited-deadline-enforcement-adr-0022) own the rules.
 
 ## Components inside a worker
 
@@ -197,7 +197,6 @@ The inventory is maintained under [AGENTS.md](../../AGENTS.md#code). *Decided* e
 | **ir_version** | the IR format version (`1.0`), semver | `graph.version`, the author's own informational version string of a graph; `graph_version.number`, the control plane's sequence number assigned at deploy |
 | **session runner** | kora's lifecycle supervisor: protected journal and phase checkpoint, harness adapter and candidate launcher, session limits, sealing/inspection and late authorized publication (ADR-0016); local follows the lifecycle in a trusted environment | the worker, which claims, requests plans, submits, relays and uploads |
 | **plan executor** | kora's code that executes a `CheckoutPlan` or a `PublishPlan`: in a trusted runtime or private worker-host publication environment, as negotiated; never credentialed in candidate metadata | the VCS, which only returns plans |
-
 | **graph version** | immutable deployed IR plus its resolved contract, identified as a version of a graph ([records](../specs/data-model.md#11-immutable-contracts-and-execution-records-adr-0018)) | the author's informational version string |
 | **node instance** | one node occurrence in one run, including its fan-out/subgraph context ([identifiers](../specs/data-model.md#3-identifiers-and-keys)) | the reusable node definition |
 | **artifact version** | one stored output version with availability and lineage ([entities](../specs/data-model.md#2-entities)) | a payload blob, which may be shared by digest |
@@ -211,7 +210,7 @@ The inventory is maintained under [AGENTS.md](../../AGENTS.md#code). *Decided* e
 | **WorkspaceRef** | the prepared workspace reference used by trusted executors ([VCS](../specs/protocols.md#4-vcs-fr-52)) | a published result |
 | **VcsRef** | the typed published revision/change-request output ([VCS](../specs/protocols.md#4-vcs-fr-52)) | an unverified candidate branch |
 | **ReviewBundle** | review facts and narrative whose bound digests identify approval evidence ([approval](../../docs/decisions/0008-content-bound-approvals.md)) | an approval automatically valid for later commits |
-| **clear downstream** | invalidation/reset of the affected downstream dependency closure on retry ([lineage](../specs/data-model.md#6-clear-downstream-fr-68a)) | deletion of historical attempts and artifacts |
+| **clear downstream** | transactional invalidation of declared data/control and composition dependencies; full clears become `pending`, child-only wrapper recollection becomes `running` ([lineage](../specs/data-model.md#6-clear-downstream-fr-68a)) | deletion of historical attempts and artifacts |
 | **fake** | a real protocol implementation selected through configuration or injection and checked by conformance ([testing](../../AGENTS.md#testing)) | a mock or runtime patch |
 
 ## Open implementation questions

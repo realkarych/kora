@@ -4,6 +4,7 @@
 - Reviewed: by the project owner, 2026-10-16
 - Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (execution uncertainty, dispatch closure and retained reservations); wording pending owner review
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
+- Amendment: durable readiness discovery, 2026-10-17, issue #70; direction, implementation plan and final wording accepted by the project owner on 2026-10-17. Evidence: [discovery review](../../knowledge/reviews/durable-readiness-discovery-review-2026-10-17.md).
 - Deciders: project owner, after the design review of 2026-10-15 (both cycles)
 - Absorbs: DD-13, DD-15, requirements decision 18 (the worker part), DD-36 (claim response, lease and polling defaults)
 - Related: ADR-0001, ADR-0004, ADR-0007, ADR-0011, ADR-0013
@@ -23,6 +24,10 @@ The first drafts let workers write to the metadata database directly as well as 
 
 **One path to the control plane.** A worker talks to the HTTP API and only to the API, outbound, with a service token bound to a runtime and a namespace list (FR-8.9). There is no direct-SQL path and no database credential on a worker. `kora standalone` runs api, scheduler and a local worker as coroutines in one process on SQLite; its worker uses the same API client over an in-process ASGI transport, so nothing exists only in standalone mode (NFR-0.1).
 
+**Durable scheduling discovery.** Each run has one durable boolean `needs_scheduling`. Every graph-relevant transition sets it in the same transaction, under the run lock; creation initializes it true. Ordinary discovery queries marked runs without a timestamp cutoff and revisits them in finite rotating batches. `updated_at` and notifications are diagnostic/latency aids, not correctness cursors. Under the same run lock, the scheduler clears the marker only after a fresh check that no local pass can currently progress; checking and acknowledgement share a transaction. Work remaining at the ten-round cap retains the marker. Restart uses the same durable predicate.
+
+Timed waits/admission rechecks, pending promotion, observations/delivery, deadlines and execution recovery remain independently discoverable, including terminal-run recovery. Applying their graph-relevant changes marks the run. An unresolved external call or future timer may coexist with a cleared marker only because its own durable discovery remains active. The marker does not authorize an effect or replace transactional clear-downstream/result authority; ADR-0007's rejection of a dirty set for invalidation is a different concern. Full discovery, local processing and worker claiming must meet NFR-3.1 at MVP scale without notifications, while queries remain incremental under NFR-3.3.
+
 **Claim, lease and fencing** (defaults from DD-36):
 
 - The scheduler inserts an `attempt` row in status `created`. A worker polls `POST /workers/{id}/claims {runtime, max: 1}` every 1 s and receives one self-contained claim or none: attempt, lease `{epoch, until}`, run parameters, node config, limits, inputs and outputs, secret aliases.
@@ -39,6 +44,8 @@ The first drafts let workers write to the metadata database directly as well as 
 
 - **Workers with direct database access.** Rejected: an adopter's worker in a closed network would need database credentials and an inbound route, and two write paths double the fencing surface.
 - **A single process.** Rejected for the platform: the scheduler must be stateless and replaceable (NFR-1.2) and workers must scale per runtime and sit in other networks. It survives only as `kora standalone`.
+- **Timestamp or sequence watermarks as the sole discovery mechanism.** Rejected: a transaction may commit after a scan with a timestamp or allocated sequence behind its cursor. A notification is not durable continuation.
+- **Recurring sweeps of all active runs.** Not selected: a durable marker avoids repeated evaluation of unchanged waiting runs; its complete transactional marking and acknowledgement obligations are explicit in the specifications.
 - **Leases without an epoch.** Rejected: a worker that lost its lease could still write.
 
 ## Consequences
@@ -46,7 +53,7 @@ The first drafts let workers write to the metadata database directly as well as 
 - Enterprise runtimes need one outbound HTTPS route, the placement the acceptance test requires.
 - Cancellation is delivered at heartbeat granularity (15 s); the attempt's right to publish a current result ends at the cancel's commit, not at its delivery.
 - A lost `local` or `docker` host blocks replacement until termination and all prior dispatch/publication authority are established as closed. Only portable runtimes adopt a live handle across hosts; a stable worker name alone cannot prove old-domain absence.
-- Admission latency is bounded by one scheduler pass plus the 1 s claim interval, under 5 s at MVP scale (NFR-3.1).
+- Admission latency includes complete candidate discovery, bounded local processing and the 1 s worker claim interval, under 5 s at MVP scale even without notifications (NFR-3.1).
 
 ## Where it is applied
 
