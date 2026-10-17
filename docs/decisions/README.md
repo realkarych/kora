@@ -23,7 +23,6 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0015](0015-web-console-design.md) | The web console's design: the graph as the primary view, four actions in MVP, one state vocabulary, and the data the API exposes for it | accepted |
 | [ADR-0016](0016-trusted-execution-and-publication.md) | Trusted lifecycle control and separate late publication; candidate commit history preserved; local trusted for development/tests | direction accepted 2026-10-17; document pending owner review |
 | [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md) | Preserve execution uncertainty; require runtime termination and dispatcher closure before replacement; explicit operator reconciliation | direction and plan accepted 2026-10-17; document pending owner review |
-
 | [ADR-0018](0018-immutable-attempt-history.md) | Immutable deployment contracts and attempt-owned inputs/requests; explicit compatibility, retention and access boundaries | direction and plan accepted 2026-10-17; document pending owner review |
 
 ## Writing a new record
