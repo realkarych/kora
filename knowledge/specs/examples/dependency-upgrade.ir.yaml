@@ -39,7 +39,7 @@ graph:
       config:
         harness: codex
         model: gpt-5-codex
-        prompt: "Upgrade {{ inputs.package }} to the latest minor version, fix compilation errors, commit on a new branch and push it."
+        prompt: "Upgrade {{ inputs.package }} to the latest minor version, fix compilation errors, commit the changes locally. kora publishes the inspected revision."
         tool_policy: { allow: [], deny: ["Bash(rm -rf *)"] }
         permission_mode: dont_ask
         sandbox: workspace_write
@@ -50,7 +50,6 @@ graph:
           type: object
           properties: { branch: { type: string }, notes: { type: string } }
           required: [branch]
-        secret_env: { GITHUB_TOKEN: GITHUB_TOKEN }
     tests:
       kind: command
       inputs:
@@ -101,5 +100,4 @@ runtime:
   limits: { timeout: "6d", budget_usd: 20 }
 secrets:
   aliases:
-    GITHUB_TOKEN: "secret://env/GITHUB_TOKEN"
     WEBHOOK_SECRET: "secret://env/KORA_WEBHOOK_SECRET"

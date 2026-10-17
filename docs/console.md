@@ -2,6 +2,8 @@
 
 Status: Reviewed by the project owner on 2026-10-16 and, after the design review of the console, on 2026-10-17. This page records the design of `kora web` (FR-7.3, NFR-13.1, requirements decision 21), settled before any console code exists; it is roadmap step 2. The element-by-element detail of every page, the mapping of every internal state to what a person sees, and the two pilot scenarios are in [knowledge/design/console/](../knowledge/design/console/pages.md). The decisions that change the API or the console's scope are recorded in [ADR-0015](decisions/0015-web-console-design.md). Facts about other orchestrators' consoles that informed the design are dated in [knowledge/research/orchestrator-consoles.md](../knowledge/research/orchestrator-consoles.md).
 
+Publication-boundary amendment dated 2026-10-17: pending owner review; architectural direction recorded in [ADR-0016](decisions/0016-trusted-execution-and-publication.md).
+
 ## Who it is for
 
 The console is designed for the engineer who owns targets: the person who triggers a run, waits for it, approves the change it produces and handles the errors on the way. Those are the three human touchpoints of the canonical use case in [positioning.md](positioning.md), and they are the three things the console lets a person do. The platform team has its own section, System, which is never the entry screen.
@@ -91,3 +93,5 @@ The console performs the three human touchpoints and nothing else: approve, on t
 ## What the console needs from the API
 
 The console is a composition of public routes and adds no route of its own. The design found data the routes did not yet expose; [ADR-0015](decisions/0015-web-console-design.md) records what they expose now: a per-graph summary on the graphs list, the node's current wait, the attempt's worker and lease, a status filter on the approvals list, and the collection phase after a session ends. The two pilot scenarios in [knowledge/design/console/pilot-scenarios.md](../knowledge/design/console/pilot-scenarios.md) walk through the console step by step and name, for each step, the view and the route that answer it.
+
+Publication progress follows [ADR-0016](decisions/0016-trusted-execution-and-publication.md): the running attempt exposes supervisor phases for sealing, inspection, awaiting authorization and publication, with the inspected revision and trusted destination. `finishing` follows the reconciled runtime outcome and describes final output validation/storage. Unknown push outcomes reconcile the original prepared revision; another attempt publishes to its own branch. These phases add no console action.

@@ -2,9 +2,11 @@
 
 Status: decided by the project owner on 2026-10-15 and 2026-10-16; reviewed by the project owner on 2026-10-16; the reasons behind each choice are in the [decision records](decisions/README.md). This page is the two-page map. The detailed diagrams (components inside the scheduler and the worker, one attempt end to end, deployment shapes), the full stack table with alternatives, and the glossary are in [knowledge/architecture/detailed.md](../knowledge/architecture/detailed.md); the normative specifications are in [knowledge/specs/](../knowledge/README.md).
 
+Publication-boundary amendment dated 2026-10-17: pending owner review; architectural direction recorded in [ADR-0016](decisions/0016-trusted-execution-and-publication.md).
+
 ## What kora is
 
-kora is a control plane that runs graphs whose nodes are full coding-agent sessions (Claude Code and Codex in MVP; agents speaking the Agent Client Protocol after MVP). A graph is written in Python, compiled to a versioned YAML document, deployed to the control plane and triggered manually, on a schedule, by a webhook or by a sensor. Each agent node runs as one session inside a runtime (local process, Docker container, an adopter's own execution infrastructure) on an isolated checkout; the graph adds the deterministic outer loop: trigger rules, retries of nodes and sub-graphs, typed artifacts, approvals bound to the exact content under review, cost accounting, and the protocols through which an organisation plugs in its runtime, version control, secrets and observability.
+kora is a control plane that runs graphs whose nodes are full coding-agent sessions (Claude Code and Codex in MVP; agents speaking the Agent Client Protocol after MVP). A graph is written in Python, compiled to a versioned YAML document, deployed to the control plane and triggered manually, on a schedule, by a webhook or by a sensor. Each agent node runs as one session inside a runtime (local process, Docker container, an adopter's own execution infrastructure) on its own checkout (local is a trusted development/test environment); the graph adds the deterministic outer loop: trigger rules, retries of nodes and sub-graphs, typed artifacts, approvals bound to the exact content under review, cost accounting, and the protocols through which an organisation plugs in its runtime, version control, secrets and observability.
 
 ## System context
 
@@ -92,7 +94,7 @@ flowchart TB
 |---|---|---|
 | `kora api` | every operation, authentication, webhook ingestion, worker endpoints fenced by a lease epoch, OpenAPI, the static web build, the MCP servers over HTTP | scheduling decisions, running sessions, UI logic |
 | `kora scheduler` | the scheduling passes under a per-run lock: triggers, readiness, admission, waits, timeouts, completion and retries, clearing downstream, retention | calling runtimes or harnesses |
-| `kora worker` | claiming attempts of its runtime through the API, checkout through the VCS protocol, submission keyed by attempt id, relaying the session's event stream, collecting outputs and usage | deciding what runs next, enforcing session limits (the session runner inside the runtime does), touching the database |
+| `kora worker` | claiming attempts through the API, requesting VCS plans, idempotent submission, relaying the supervisor journal, late publication authorization/finalization, collecting outputs and usage | deciding what runs next, enforcing session limits (the session runner inside the runtime does), touching the database |
 | `kora web` | the React console: approvals, runs, graph view, attempts, logs and cost in MVP | logic of its own, database access |
 | `kora mcp` | two curated MCP servers for the user's own coding agent, acting with the user's token | any logic of its own |
 | Metadata DB | every entity of the data model; the only run state | payload bytes |
@@ -113,6 +115,7 @@ Python 3.11+ with asyncio in one package `kora` (uv, hatchling) plus a `web/` fr
 - Workers never decide; they execute one attempt and report through the API, fenced by their lease epoch.
 - Protocol implementations are loaded by entry points and never imported by name from core modules.
 - Standalone mode is the same code as a full deployment wired into one process: no feature, code path or table exists only in standalone mode, so what works there works in production.
+- The lifecycle supervisor owns a journal outside the candidate tree, seals the result after execution, and prepares publication in fresh metadata. The worker obtains late authorization and calls `finalize`; existing candidate commits are preserved, with an additional commit for uncommitted changes. Protected runtimes enforce these authority boundaries; local follows the lifecycle without hostile-code isolation (ADR-0016).
 - The session runner inside the runtime is the only enforcer of session limits: event count, soft budget, stall timeout.
 
 ## Where to go next

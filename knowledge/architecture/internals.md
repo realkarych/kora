@@ -39,7 +39,7 @@ flowchart TB
   classDef trig fill:#F2F2F2,stroke:#6B6B6B,color:#000000
 
   trig["<b>Triggers</b><br/>manual, cron, webhook<br/>parameter: package"]:::trig
-  upgrade["<b>upgrade</b><br/>[agent node, codex]<br/>upgrades, commits, pushes"]:::gnode
+  upgrade["<b>upgrade</b><br/>[agent node, codex]<br/>upgrades, commits locally<br/>kora publishes"]:::gnode
   tests["<b>tests</b><br/>[command node]<br/>npm ci, npm test"]:::gnode
   approve["<b>approve</b><br/>[human_input node, cli]<br/>binds commit and test digests"]:::gnode
   merged["<b>merged</b><br/>[wait_event node]<br/>polls until merged"]:::gnode
@@ -54,7 +54,7 @@ flowchart TB
 
 Boxes are nodes with their kind; arrows are edges, labelled with the artifact that flows along them, or with "runs after" for an ordering edge that carries none. The triggers are manual, a cron at 09:00 UTC every Tuesday and a webhook named `upgrade_requested`. `tests` reads the `VcsRef` that `upgrade` produced, so it checks out exactly the commit the agent pushed. `approve` binds that commit and the digest of the test result, so an approval can never cover a later push. The graph declares the `package` parameter as its target key with the policy `defer`, and `overlap: allow`: two runs of the graph may exist at once, but two runs for the same package never work at the same time, because the second waits at admission until the first leaves `running` ([ADR-0014](../../docs/decisions/0014-target-identity.md); [chapter 2](#2-the-domain-model)). The full document is [examples/dependency-upgrade.ir.yaml](../specs/examples/dependency-upgrade.ir.yaml).
 
-Three kinds of process do the work, and [chapter 3](#3-processes-and-where-they-run) draws them. The control plane, `kora api` and `kora scheduler`, shares one Metadata DB and decides what runs next. Workers run next to the execution infrastructure, claim work through the API and submit it. Inside each sandbox the session runner drives one session or command and enforces its limits.
+Three kinds of process do the work, and [chapter 3](#3-processes-and-where-they-run) draws them. The control plane, `kora api` and `kora scheduler`, shares one Metadata DB and decides what runs next. Workers run next to the execution infrastructure, claim work through the API and submit it. The lifecycle supervisor launches a candidate session or command through the runtime, enforces its limits and owns private control state. Protected publication uses a separate authority; local is a trusted development/test environment (ADR-0016).
 
 The kind of a node decides who executes it.
 
@@ -437,10 +437,11 @@ The runtime protocol is the one most of Part II depends on. A worker calls it th
 - `submit(workload)` is idempotent on the attempt id and returns the handle;
 - `lookup(attempt_id)` recovers a handle after a crash; it returns `None` only when the runtime confirms that nothing was submitted, and raises a retryable error when it cannot answer;
 - `adopt(handle)` re-attaches to a running session and its event file after a worker restart;
-- `status`, `events(handle, from_offset)` and `heartbeat` observe the session: `events` tails `.kora/events.jsonl` from a stored offset;
-- `cancel(handle, grace)` and `release(handle)` stop the session and free the workspace.
+- `status`, `events(handle, from_offset)` and `heartbeat` observe the logical lifecycle: `events` tails the supervisor-owned private control journal from a stored offset;
+- `finalize(handle, authorization)` publishes only the stored inspected revision after late authorization;
+- `cancel(handle, grace)` and `release(handle)` stop the lifecycle and free candidate/control/publication storage.
 
-Its capabilities say what a runtime can promise: `portable_handles` when any worker of the runtime can find and adopt a submission, `plan_executors` for where VCS plans may run, `supports_resume`, `enforces_network_policy`, `credential_proxy`, `max_concurrent` and `default_stall_after`. `local` and `docker` declare `portable_handles = False` and `supports_resume = False` in the MVP.
+Its capabilities say what a runtime can promise: `portable_handles` when any worker of the runtime can find and adopt a submission, `plan_executors` for where VCS plans may run, `supports_resume`, `enforces_network_policy`, `credential_proxy`, `protected_execution`, `max_concurrent` and `default_stall_after`. `local` and `docker` declare `portable_handles = False` and `supports_resume = False` in the MVP. Local declares `protected_execution = False`; deployments requiring it reject local without adding an extra local opt-in.
 
 ### 5. Code map
 
@@ -618,7 +619,7 @@ stateDiagram-v2
     [*] --> claimed
     claimed --> submitted: transition [handle stored]
     submitted --> running: first heartbeat
-    running --> finishing: transition [session ended]
+    running --> finishing: transition [runtime lifecycle completed]
   }
   claimed --> created: lookup [returns None]
   created --> cancelled: [desired_state = cancel]
@@ -651,7 +652,7 @@ config:
 ---
 sequenceDiagram
   accTitle: One attempt from admission to completion
-  accDescr: The scheduler inserts the attempt row. The worker claims it through the API with lease epoch e, prepares the plans and the session spec, submits the workload keyed by the attempt id and reports the handle. The execution infrastructure starts the session runner, which runs the checkout plan, the session and the publish plan while the worker tails events and heartbeats with epoch e. The worker opens the change request, uploads artifacts and usage and asks to move the attempt to finishing, which the API applies only while the attempt has result authority. The worker releases the workspace and the scheduler completes the attempt.
+  accDescr: The scheduler inserts the attempt row. The worker claims it through the API with lease epoch e, prepares the plans and the session spec, submits the workload keyed by the attempt id and reports the handle. The execution infrastructure starts the session runner, which prepares the workspace, launches candidate execution, stops and seals its result, and inspects an immutable revision while the worker tails events and heartbeats with epoch e. The worker obtains late authorization and calls finalize for publication in a separate trusted environment. The worker opens the change request, uploads artifacts and usage and asks to move the attempt to finishing, which the API applies only while the attempt has result authority. The worker releases the workspace and the scheduler completes the attempt.
   autonumber
   participant A as kora api
   participant S as kora scheduler
@@ -671,12 +672,20 @@ sequenceDiagram
   RT-)R: start kora-runner with the workload
   R->>C: preparation phase, the checkout plan fetches the revision
   loop while the session runs
-    Note over R: events to .kora/events.jsonl, limits checked on each event
+    Note over R: events to private control journal, limits checked on each event
     W->>RT: runtime.events from the stored offset
     W->>A: segments, then a heartbeat every 15 s with counters, epoch e
     A-->>W: desired_state run, lease extended
   end
-  R->>C: collection phase, secret scan, the publish plan pushes the branch
+  R->>R: export, stop candidate domain, seal private input
+  R->>R: prepare exact revision, inspect newly published history
+  R-->>W: PreparedPublication, awaiting_authorization
+  W->>A: fenced heartbeat, check desired_state
+  W->>C: obtain late authorization through VCS integration
+  W->>RT: runtime.finalize(handle, authorization)
+  RT->>R: trusted publication control channel
+  R->>C: push inspected revision to trusted destination
+  R-->>W: reconciled VcsRef, persisted in private checkpoint
   opt a VcsRef was published
     W->>C: open_change_request, idempotent on head and base
   end
@@ -736,8 +745,8 @@ sequenceDiagram
 |---|---|---|
 | a worker after the claim, before the handle is stored | the next claimer calls `lookup(attempt_id)`: a handle is stored; `None` returns the attempt to `created`; no answer keeps it `claimed` | scheduler.md section 3 |
 | a worker after `submitted` | the next claimer adopts the handle and tails from `counters.stream_offset` | scheduler.md section 3 |
-| a worker after the push, before the `VcsRef` upload | the next claimer finalises again: it reads the `VcsRef` from the event file, or repeats the idempotent publish plan when the worker published on its host; `open_change_request` is idempotent on head and base | scheduler.md section 3, protocols.md section 4 |
-| the workspace is gone before a publish could be repeated | the attempt fails with class `infrastructure`; a branch the push created stays on the code host | scheduler.md section 3 |
+| a worker after the push, before the `VcsRef` upload | the next claimer adopts the private prepared-result checkpoint and reconciles the exact revision/destination through late `finalize`; unexpected remote content conflicts; `open_change_request` searches head/base before create; no mutable-workspace recollection | scheduler.md section 3, protocols.md section 4 |
+| required sealed input or prepared publication checkpoint is missing/corrupt | the attempt fails with class `infrastructure`; a branch the push created stays on the code host | scheduler.md section 3 |
 | a host that never returns, non-portable handles | after a second lease period without a claim the attempt is `lost`; the `infrastructure_retry` policy of the graph's `runtime` section decides, without spending the node's attempts | scheduler.md section 3, ir.md section 6 |
 | the runtime cannot answer | never treated as absence; the attempt stays `claimed` and is looked up again | scheduler.md section 3 |
 | the control plane is unreachable | the runner still stops the session at its limits and its deadline; the timeout pass stays the authority for the state | scheduler.md section 4 |
@@ -1005,7 +1014,7 @@ flowchart TB
 
   subgraph kora ["kora [Software System]"]
     runner["<b>Session runner</b><br/>[Container: kora-runner]<br/>Checks attempt limits<br/>on each event"]:::container
-    file["<b>Event stream</b><br/>[File: .kora/events.jsonl]"]:::file
+    file["<b>Event stream</b><br/>[File: private control journal]"]:::file
     worker["<b>kora worker</b><br/>[Container: Python, asyncio]"]:::container
     api["<b>kora api</b><br/>[Container: Python, FastAPI]"]:::container
     db[("<b>Metadata DB</b><br/>[Container: PostgreSQL or SQLite]<br/>session_segment, attempt.counters,<br/>usage_record, event")]:::container
@@ -1362,7 +1371,7 @@ Every integration test that touches the database runs on PostgreSQL and on SQLit
 
 Zone: Execution. Code: `src/kora/worker`.
 
-A worker carries out the scheduler's decisions for the attempts it claims, one claim per poll up to its capacity, and reports through the API only. It neither decides nor enforces: deciding belongs to the scheduler and enforcing to the session runner, while the worker relays counters between them. The VCS protocol returns plans and never touches the workspace, because the workspace may sit in a sandbox the worker cannot reach. The worker picks the `runner` executor when both the runtime and the VCS declare it, else `worker_host`, where it runs the plans on its own host; a runtime must expose the workspace on the host to declare `worker_host` ([protocols.md](../specs/protocols.md) section 4). Every report carries the lease epoch, so a worker that lost its lease cannot write.
+A worker carries out the scheduler's decisions for the attempts it claims, one claim per poll up to its capacity, and reports through the API only. It neither decides nor enforces: deciding belongs to the scheduler and enforcing to the session runner, while the worker relays counters between them. The VCS protocol returns plans and never touches the workspace, because the workspace may sit in a sandbox the worker cannot reach. The worker picks `runner` when both protocols declare it, otherwise `worker_host` if both support it; absence of a compatible executor is an error. Host preparation uses an exposed target; after sealing, host publication receives immutable bytes into private storage before prepare/inspect and consumes that prepared state at late finalize ([protocols.md](../specs/protocols.md) section 4). Every report carries the lease epoch, so a worker that lost its lease cannot write.
 
 ```mermaid
 ---
@@ -1370,7 +1379,7 @@ title: Component diagram for kora worker
 ---
 flowchart TB
   accTitle: Component diagram for kora worker
-  accDescr: The claim loop claims an attempt through kora api. The plan requester gets the workspace target and the checkout and publish plans, the session spec builder gets the session spec from the harness adapter, and the submitter submits the workload through the runtime implementation, which resolves secrets and starts the session runner in the execution infrastructure. The event tailer reads events and passes cancels and the release through the runtime implementation, and hands the session result to the output collector, which opens the change request through the VCS implementation. The uploader reports segments, counters, artifacts and usage to kora api.
+  accDescr: The claim loop claims an attempt through kora api. The plan requester gets the workspace target and the checkout and publish plans, the session spec builder gets the session spec from the harness adapter, and the submitter submits the workload through the runtime implementation, which resolves session/preparation secrets and starts the lifecycle supervisor and candidate domain in the execution infrastructure. After immutable inspection the worker obtains a publication grant and calls finalize through the trusted runtime channel. The event tailer reads events and passes cancels and the release through the runtime implementation, and hands the session result to the output collector, which opens the change request through the VCS implementation. The uploader reports segments, counters, artifacts and usage to kora api.
   classDef component fill:#85BBF0,stroke:#5D82A8,color:#000000
   classDef plugin fill:#C7B3DA,stroke:#5B3F86,stroke-width:4px,color:#000000
   classDef container fill:#438DD5,stroke:#2E6295,color:#000000
@@ -1418,7 +1427,7 @@ flowchart TB
 | component | responsibility | specified in |
 |---|---|---|
 | Claim loop | registers, and refuses to start when the installed harness is outside the adapter's tested versions; one self-contained claim per poll; adopts its own attempts after a restart | scheduler.md sections 3 and 15 |
-| Plan requester | the workspace target from the runtime, the checkout and publish plans from the VCS; `runner` when both declare it, else `worker_host`, where it runs the plans itself | protocols.md section 4 |
+| Plan requester | the workspace target from the runtime, the checkout and publish plans from the VCS; `runner` when both declare it, else `worker_host`, which selects a private host publisher fed by sealed input through `finalize` | protocols.md section 4 |
 | Session spec builder | the resolved configuration to SDK options and files to materialise through `build_session_spec`, before the checkout plan runs | protocols.md section 3 |
 | Submitter | `runtime.submit` keyed by the attempt id; the runtime adapter resolves secrets into the child environment | protocols.md section 2 |
 | Event tailer | `events(handle, from_offset)`; relays the runner's counters; a `cancel` in the heartbeat response becomes `runtime.cancel` | scheduler.md sections 3 and 4 |
@@ -1431,7 +1440,7 @@ Tests: `test_publish_and_open_change_request_are_idempotent`, `test_workspace_pr
 
 Zone: Execution. Code: see the open question in [chapter 5](#5-code-map).
 
-The session runner, `kora-runner`, is kora code shipped in every runtime image or host install. It sits next to the workspace and the harness, which is why it is the one place that can enforce `max_events`, the attempt's `budget_usd` and `stall_after` from the live event stream, and why it can stop the session at its deadline while the control plane is unreachable. It has no path to the API: it writes `.kora/events.jsonl`, and the worker tails that file through the runtime. The agent therefore never meets a kora endpoint, and the policy decision for every tool call the harness routes through its pre-tool-call hook is made here, before the call runs.
+The session runner, `kora-runner`, is the lifecycle supervisor shipped with the runtime installation. It hosts the harness adapter and policy client, launches candidate processes through a runtime-supplied launcher and enforces `max_events`, the attempt budget, stall and deadline. Its private control journal and phase checkpoint are outside the candidate workspace; the worker tails them through the runtime. Only the supervisor emits authoritative phase results. The candidate harness/tools/commands and descendants do not hold the supervisor or publisher authority on a protected runtime. The supervisor has no API credential; the worker obtains late VCS authorization and calls `Runtime.finalize` after sealing and immutable inspection. Local deliberately provides the same lifecycle for trusted development/tests without OS isolation, administrator permission or an extra trust switch. [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md) and protocols.md sections 2 and 4 define the authority, launcher, transfer, idempotency and placement contracts.
 
 ```mermaid
 ---
@@ -1439,7 +1448,7 @@ title: Component diagram for the session runner
 ---
 flowchart TB
   accTitle: Component diagram for the session runner
-  accDescr: The workload reaches the phase driver through the runtime. The phase driver has the plan executor run the checkout plan before the session and the publish plan after it, verifies skill and MCP server digests, and starts either the harness adapter or the command executor. The harness adapter drives the harness and asks the policy decision point before every tool call. Events go to the limit enforcer, which can stop the session or the command, and then to the event writer, which appends to the event file that the worker tails.
+  accDescr: The workload reaches the phase driver through the runtime. The phase driver runs trusted checkout before candidate execution, stops and seals the candidate, and prepares and inspects a fixed publication; late authorization permits its publisher to push that revision. It verifies skill and MCP server digests, and starts either the harness adapter or the command executor. The harness adapter drives the harness and asks the policy decision point before every tool call. Events go to the limit enforcer, which can stop the session or the command, and then to the event writer, which appends to the event file that the worker tails.
   classDef component fill:#85BBF0,stroke:#5D82A8,color:#000000
   classDef plugin fill:#C7B3DA,stroke:#5B3F86,stroke-width:4px,color:#000000
   classDef container fill:#438DD5,stroke:#2E6295,color:#000000
@@ -1456,12 +1465,12 @@ flowchart TB
     limits["<b>Limit enforcer</b><br/>[Component: Python]<br/>Events, budget,<br/>stall, deadline"]:::component
     writer["<b>Event writer</b><br/>[Component: Python]<br/>The normalised stream"]:::component
   end
-  file["<b>Event stream</b><br/>[File: .kora/events.jsonl]"]:::file
+  file["<b>Event stream</b><br/>[File: private control journal]"]:::file
   codehost["<b>Code host</b><br/>[External system]"]:::ext
   harness["<b>Coding-agent harness</b><br/>[External system]"]:::ext
 
   worker -->|"Hands over the workload<br/>[Docker API or subprocess]"| driver
-  driver -->|"Runs checkout, then publish"| plan_exec
+  driver -->|"Prepares, seals, inspects;<br/>publishes after finalize"| plan_exec
   plan_exec -->|"Fetches, pushes<br/>[git]"| codehost
   driver -.->|"run, for an agent node"| adapter
   driver -->|"Runs a command node with"| cmd
@@ -1480,8 +1489,8 @@ flowchart TB
 
 | component | responsibility | specified in |
 |---|---|---|
-| Phase driver | creates `.kora/`; runs the preparation phase, then the session or the command, then the collection phase; verifies skill and MCP server digests before the session; reports each phase as a `phase` event | protocols.md sections 2 and 4 |
-| Plan executor | preparation: empties the root, materialises files, checks the required tools, runs the checkout steps, rejects changed protected paths; collection: inspect steps, the secret scan, the publish steps, the `VcsRef` | protocols.md section 4 |
+| Phase driver | owns private journal/checkpoint; prepares, launches candidate, stops/seals, inspects and waits for late finalization; verifies installed skill/MCP digests; only this driver emits authoritative phase results | protocols.md sections 2 and 4 |
+| Plan executor | preparation: empties the root, materialises files, checks the required tools, runs the checkout steps, rejects changed protected paths; after sealing: fresh metadata, inspect complete newly published content, late authorized publication of the stored revision | protocols.md section 4 |
 | Harness adapter | `claude` over the Agent SDK, `codex` over app-server JSON-RPC; maps SDK messages to normalised events; routes the pre-tool-call hook | protocols.md section 3 |
 | Command executor | runs a command workload's argv list; records the exit code in `CommandResult` | ir.md section 4, protocols.md section 2 |
 | Policy decision point | the namespace `tool_policy` prepended to the node's; rejects shell chaining and indirection; denies edits of protected paths | protocols.md section 12 |
@@ -1502,12 +1511,13 @@ Each phase ends a failed attempt with its own error class, and the class decides
 | session | `max_events`, the attempt budget, `stall_after` | `events_exhausted`, `budget_exhausted`, `stalled` |
 | session | the node deadline | the runner stops the session; the timeout pass sets `timeout` |
 | session | a command exits outside `success_exit_codes` | `command_failed` |
-| collection | a secret found in the diff | `secret_leak` |
-| collection | no changed paths, or the publish steps fail | `artifact_invalid` |
+| inspection | a secret found anywhere in newly published content/history | `secret_leak` |
+| inspection/publication | no changed paths, malformed/incomplete native content or an unexpected remote revision | `artifact_invalid` |
+| sealing/recovery | required private input or checkpoint unavailable | `infrastructure`; no regenerated publication under the same identity |
 
 **Open:** [#48](https://github.com/realkarych/kora/issues/48), which error class a skill or MCP server digest mismatch gets.
 
-Decisions: ADR-0004, ADR-0009, ADR-0010. Tests: `test_required_policy_is_enforced_or_rejected`, `test_runtime_enforces_deadline_during_control_plane_partition`. Unsettled before code: the Claude Agent SDK with `setting_sources=[]` and the Codex app-server hook are documented but untested (the roadmap item "Harness SDK behaviour").
+Decisions: ADR-0004, ADR-0009, ADR-0010, ADR-0016. Tests: `test_required_policy_is_enforced_or_rejected`, `test_runtime_enforces_deadline_during_control_plane_partition`. Unsettled before code: the Claude Agent SDK with `setting_sources=[]` and the Codex app-server hook are documented but untested (the roadmap item "Harness SDK behaviour").
 
 ### 17. Thin clients and the console
 
@@ -1547,9 +1557,9 @@ All of them are specified in [api-and-agent-surface.md](../specs/api-and-agent-s
 
 - **Scope first.** A runtime outside the MVP set is new scope: it starts as an issue, and as a proposal in `docs/proposals/` when it is large or uncertain.
 - **Where it lives.** kora's own implementations live under `src/kora/plugins/runtime/`; an adopter's runtime ships as a distribution of its own. Either registers `ProviderMetadata` under the `kora.provider` entry point with a `config_schema` ([protocols.md](../specs/protocols.md) section 1). A new client library is a dependency and goes into the stack table with its reason.
-- **The protocol** is listed in [chapter 4](#4-the-plug-in-seam). The error contract matters most: `lookup` returns `None` only when the cluster confirms that nothing was submitted, and raises `KoraProtocolError(retryable=True)` when it cannot answer. `events` reads `.kora/events.jsonl` from the workspace, resumably from an offset.
-- **The workload** carries the resolved configuration, the workspace target, the checkout plan or the `WorkspaceRef`, the publish plan, a constructed minimal environment, the secret references the runtime adapter resolves at submit, the harness credentials, the artifact inputs, the limits with the absolute deadline, and the session spec (protocols.md section 2).
-- **Capabilities.** `portable_handles` is true when any worker can find a submission by its attempt id; `plan_executors` is usually `runner` when pods reach the code host; `enforces_network_policy` is what a namespace with `require_network_enforcement` needs for nodes that receive secrets (`IR015`); `supports_resume` only when the harness checkpoint outlives `release`; `credential_proxy`, `max_concurrent` and `default_stall_after` as the platform allows.
+- **The protocol** is listed in [chapter 4](#4-the-plug-in-seam). The error contract matters most: `lookup` returns `None` only when the cluster confirms that nothing was submitted, and raises `KoraProtocolError(retryable=True)` when it cannot answer. `events` reads the supervisor-owned private control journal, outside candidate storage, resumably from an offset; `finalize` publishes only the immutable inspected result after late authorization.
+- **The workload** carries the resolved configuration, the workspace target, the checkout plan or the `WorkspaceRef`, the publish plan, a constructed minimal environment, session/preparation secret references resolved before execution (publication authorization arrives only after inspection), the harness credentials, the artifact inputs, the limits with the absolute deadline, and the session spec (protocols.md section 2).
+- **Capabilities.** `portable_handles` is true when any worker can find a submission by its attempt id; `plan_executors` is usually `runner` when pods reach the code host; `enforces_network_policy` is what a namespace with `require_network_enforcement` needs for nodes that receive secrets (`IR015`); `supports_resume` only when the harness checkpoint outlives `release`; `credential_proxy`, `protected_execution`, `max_concurrent` and `default_stall_after` as the platform allows. `require_protected_execution` rejects an incapable runtime; local declares false and is intended for trusted development/tests.
 - **The image** carries `kora-runner` and the harness binaries, with the harness auto-updater disabled; the image digest is recorded on every attempt.
 - **Workers.** Run one or more workers for the runtime name, inside the cluster's network if needed.
 - **Proof.** `kora conformance runtime <name>` checks one handle for two submits, `lookup` after a restart and while unreachable, adoption as `portable_handles` promises, the event file resumed without duplicate or lost lines, the deadline enforced with the control plane unreachable, `cancel` within grace, the constructed environment, the declared capabilities and a `release` that leaves no workspace behind. `test_vcs_runtime_cross_product` then runs the VCS you pair it with on it (protocols.md section 13). How kora's own CI would run a cluster within its ten-minute budget is not decided.
@@ -1662,11 +1672,11 @@ For each pair of zones that touch, the table names the artifact both owners must
 | IR | the YAML document the compiler emits and the control plane reads | [11](#11-graph-definition) |
 | lease, lease epoch | a worker's 120-second claim on an attempt; the epoch grows on every claim and fences earlier holders | 8 |
 | node instance, node path | one node inside one run, addressed by a path such as `candidates[2]@3.review` | 2 |
-| normalised event stream | the session runner's `{i, at, kind, data}` lines in `.kora/events.jsonl` | [16](#16-session-runner) |
+| normalised event stream | the session runner's `{i, at, kind, data}` lines in `private control journal` | [16](#16-session-runner) |
 | `on_active` | the graph's per-target policy at admission: `allow` or `defer` | 2 |
 | `overlap` | the graph's rule at trigger time for a new run while another is running: `allow`, `skip` or `queue` | 2 |
 | pass | one step of the scheduler's loop, a short transaction from rows to rows: 1 triggers, 2 materialise, 3 readiness, 4 branch and collection, 5 admission, 6 wake-ups, 7 timeouts and liveness, 8 completion and retry | 12 |
-| plan, plan executor | the checkout and publish plans are typed step lists the VCS returns; the plan executor runs them where the workspace lives | [15](#15-worker) |
+| plan, plan executor | the VCS returns typed plans; a common executor prepares the workspace, then prepares/inspects/publishes sealed input using fresh trusted metadata and late authorization | [15](#15-worker) |
 | preset | a versioned block of node configuration, from the registry or from graph code; a snapshot is copied into the IR at compile time | 11 |
 | protocol, provider | one of eleven pluggable interfaces; an implementation is a provider found through the `kora.provider` entry point | 4 |
 | result authority | an attempt may create current versions or move to `finishing` only while it is its instance's current attempt and its `desired_state` is `run` | 8 |

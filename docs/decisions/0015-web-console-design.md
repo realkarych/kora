@@ -1,7 +1,8 @@
 # ADR-0015: The web console's design: the graph as the primary view, four actions in MVP, one state vocabulary, and the data the API exposes for it
 
 - Status: accepted, 2026-10-16
-- Reviewed: by the project owner, 2026-10-16; amended and reviewed again after the design review of 2026-10-17
+- Reviewed: by the project owner, 2026-10-16; publication-boundary amendment dated 2026-10-17 pending owner review
+- Superseded in part by: [ADR-0016](0016-trusted-execution-and-publication.md) (publication placement and phases); amended and reviewed again after the design review of 2026-10-17
 - Deciders: project owner, after the console design dialogue of roadmap step 2 (issue #23)
 - Absorbs: requirements decision 27
 - Related: [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0007-attempt-model-and-retries.md](0007-attempt-model-and-retries.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0010-cost-accounting-and-limits.md](0010-cost-accounting-and-limits.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md), [0014-target-identity.md](0014-target-identity.md)
@@ -30,7 +31,7 @@ The design itself, page by page, is recorded in [docs/console.md](../console.md)
 - the approvals list accepts `status=` with any request status, `pending` by default, so that the history of responses can be listed; its rows carry the run's `target_key` and the wait's `wake_at` as the deadline;
 - `VcsRef` carries `commit_url` and, where the host has one, `compare_url` beside `url`, added by `open_change_request` ([protocols.md](../../knowledge/specs/protocols.md) section 4), so that the review page links the revision the facts cover;
 - the workers list carries, per worker, the attempts it holds (`run_id`, `node_path`, `attempt_id`, `lease_until`), a read projection over `attempt.worker_id`, so that System links a silent worker to the runs it affects;
-- the collection phase after a session ends is visible: the `attempt.finishing` event already marks it, a repeated publish plan on an unknown outcome writes the event `vcs.publish_repeated` with the branch, and an attempt that fails with class `infrastructure` after a push names in its `error` the branch left on the code host.
+- runtime publication progress is visible while the attempt is `running`: supervisor phases identify sealing, inspection, awaiting authorization and publication (ADR-0016). Reconciliation of an unknown outcome emits `vcs.publish_repeated` with the branch and exact prepared revision. `attempt.finishing` follows the reconciled runtime outcome and marks final artifact validation/storage. Infrastructure failure after a push names the branch left on the code host.
 
 **The target page builds on ADR-0014.** It reads the target projection and claims only what the projection claims: *accepted* from the latest approved request, *merged* from the change-request-status sensor of a run that waits for it, *verified* from a run-level artifact; where no node of the graph reports a fact the page says "unknown". The cost it shows beside the accepted change is the cost of the whole search: the sum over every run of the key since the previous accepted change, failed and cancelled runs included, summed by the console from the projection's per-run totals.
 

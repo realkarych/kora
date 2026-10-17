@@ -1,6 +1,6 @@
 # Architecture decision records
 
-One record per significant decision, in the MADR shape: context, decision, alternatives considered, consequences, where it is applied. Records are numbered in the order they were written and never renumbered; a record that changes an earlier one says so in its header (`Supersedes` / `Superseded by`) and the earlier record is kept with its status updated. Reviewed by the project owner on 2026-10-16.
+One record per significant decision, in the MADR shape: context, decision, alternatives considered, consequences, where it is applied. Records are numbered in the order they were written and never renumbered; a record that changes an earlier one says so in its header (`Supersedes` / `Superseded by`) and the earlier record is kept with its status updated. Reviewed by the project owner on 2026-10-16; the ADR-0016 addition dated 2026-10-17 is pending owner review.
 
 Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (first-slice implementation defaults) and `DD-37` (small mechanisms kept or dropped) are implementation-level and stay only in the register.
 
@@ -21,6 +21,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0013](0013-implementation-stack.md) | Implementation stack | accepted |
 | [ADR-0014](0014-target-identity.md) | Target identity above runs: an optional `target_key` with namespace scope, a per-target admission policy `allow` or `defer`, the target's history as a projection over runs | accepted |
 | [ADR-0015](0015-web-console-design.md) | The web console's design: the graph as the primary view, four actions in MVP, one state vocabulary, and the data the API exposes for it | accepted |
+| [ADR-0016](0016-trusted-execution-and-publication.md) | Trusted lifecycle control and separate late publication; candidate commit history preserved; local trusted for development/tests | direction accepted 2026-10-17; document pending owner review |
 
 ## Writing a new record
 

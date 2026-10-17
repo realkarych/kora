@@ -1,7 +1,8 @@
 # ADR-0005: Eleven provider protocols, each with a conformance suite, registered through one entry point
 
 - Status: accepted, 2026-10-15; amended 2026-10-16 (the VCS protocol answers the branch head, [ADR-0008](0008-content-bound-approvals.md), issue #16); amended 2026-10-16 (the VCS returns typed checkout and publish plans that the session runner executes; [architecture critique of 2026-10-16, finding A13](../../knowledge/reviews/architecture-critique-2026-10-16.md#a13-remote-composition), issue #20)
-- Reviewed: by the project owner, 2026-10-16
+- Reviewed: by the project owner, 2026-10-16; publication-boundary amendment dated 2026-10-17 pending owner review
+- Superseded in part by: [ADR-0016](0016-trusted-execution-and-publication.md) (control state, publication and recovery)
 - Deciders: project owner, after review of the first design drafts (DD-2, DD-21, DD-22), after the design review of 2026-10-15 (first cycle: DD-29) and after its second cycle (one exporter in MVP)
 - Absorbs: DD-2, DD-21, DD-22, the protocol part of DD-29; NFR section 5; requirements decision 14, the "policy protocol in MVP" part of requirements decision 19 and the "OTel as the only MVP exporter" part of requirements decision 20
 - Related: [ADR-0001](0001-own-control-plane.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0011](0011-namespaces-and-personal-tokens.md)
@@ -14,7 +15,7 @@ kora is designed for an instance shared by many teams on an organisation's own i
 
 Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and a `conformance` marker.
 
-1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, `cancel`). MVP: `local`, `docker`.
+1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, late `finalize`, `cancel`). MVP: `local`, `docker`.
 2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude`, `codex`, plus `fake` for CI; `acp` after MVP (ADR-0004).
 3. **VCS**: typed checkout and publish plans (`checkout_plan`, `publish_plan`) that the session runner executes inside the runtime, change requests, the branch head, CI status. MVP: `git` with the GitHub and GitLab APIs.
 4. **approval channel**: request, poll, feedback, cancel; never decides validity. MVP: `cli`, `vcs`.
@@ -28,9 +29,9 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 
 **One entry point.** Implementations are discovered through the entry-point group `kora.provider`; each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`. `kora plugins list` prints what is installed; the names are then used in the intermediate representation (IR, for example `runtime.runtime: docker`) or in deployment configuration.
 
-**Capability flags instead of promises.** A runtime declares, among others, `supports_resume`, `enforces_network_policy`, `credential_proxy` and `plan_executors`; `kora validate` emits warning `IR009` when a node requests a capability its runtime lacks. Network policy is enforced by the runtime with the harness sandbox as a second layer (DD-21); when a namespace sets `require_network_enforcement`, a secret-bearing node on a non-enforcing runtime becomes error `IR015`.
+**Capability flags instead of promises.** A runtime declares, among others, `supports_resume`, `enforces_network_policy`, `credential_proxy`, `protected_execution` and `plan_executors`; `kora validate` emits warning `IR009` when a node requests a capability its runtime lacks. Network policy is enforced by the runtime with the harness sandbox as a second layer (DD-21); when a namespace sets `require_network_enforcement`, a secret-bearing node on a non-enforcing runtime becomes error `IR015`.
 
-**The VCS plans, the runner executes** (amended 2026-10-16). The VCS never touches the workspace: `checkout_plan` and `publish_plan` return typed plans (files to materialise, commands as argv without a shell, credentials as secret references, named captures such as `commit`, `changed_paths` and `diff`), and the session runner executes them inside the runtime, the `CheckoutPlan` as the preparation phase before the harness starts and the `PublishPlan` as the collection phase after the session ends, building the `WorkspaceRef` and the `VcsRef` from the captures and reporting them through the normalised event stream. The runtime names only a `WorkspaceTarget`: the workspace root inside its execution environment and, when it exposes that directory on the worker's host, the host path. Runtime and VCS each declare `plan_executors` (`runner`, `worker_host`); the worker prefers `runner`, and a VCS whose client cannot run inside a sandbox declares `worker_host`, so that the worker executes its plans on its own host where the runtime exposes the workspace there (FR-8.8). `kora validate` emits `IR009` when a node's runtime and VCS declare no common executor; the composition itself is proven by `test_vcs_runtime_cross_product`, which runs one VCS, given no runtime identity, on two runtimes. git declares both executors; `local` declares both, `docker` declares `runner` in MVP.
+**The VCS plans, the trusted supervisor executes** (amended 2026-10-17 by [ADR-0016](0016-trusted-execution-and-publication.md)). Typed plans remain the composition mechanism, without a runtime name in VCS requests. Preparation precedes candidate execution; export is untrusted candidate work; sealing stops the candidate domain; prepare/inspect execute in fresh trusted publisher metadata. Only then does the worker obtain late publication authorization and call `Runtime.finalize`. Runtime/VCS placement is still negotiated through `plan_executors`, preferring `runner`; `worker_host` uses a private publisher fed by sealed input, never credentialed operations in the candidate workspace. No common executor is an error. The common executor builds trusted `WorkspaceRef` and prepared publication results, recorded in the supervisor journal outside the candidate tree. `test_vcs_runtime_cross_product` proves composition without a shared worker filesystem; the security suite proves the declared boundary separately. Local is trusted development/testing; protected runtimes must establish the complete authority boundary.
 
 **Conformance suites.** Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
 
@@ -47,9 +48,9 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 
 - Every protocol carries conformance cost, so the surface stays minimal: unread capability flags were dropped in the two review cycles.
 - Enterprise implementations run as kora workers inside the adopter's network, connecting outbound only ([ADR-0003](0003-scheduler-and-workers-over-http.md)); all protocols and reference implementations live in the open-source core (NFR-12.1).
-- A missing capability is a compile-time warning unless the namespace turns it into an error.
+- A missing optional capability warns. A required protection or missing compatible plan executor is an error; `require_protected_execution` rejects local (ADR-0016).
 - The MCP server is not a protocol but a mandatory client of the API ([ADR-0002](0002-ai-first-api-and-thin-clients.md)).
-- When the runner executes a plan, the VCS credentials are inside the sandbox for the attempt, in the plan steps' environment only, the position harness API keys hold in MVP (DD-30); a VCS that cannot accept it declares `worker_host` and runs in MVP only on `local`, the runtime that exposes the workspace on the worker's host.
+- Checkout credentials belong to trusted preparation and publication credentials arrive only at late finalization. They are never delivered to candidate execution; local does not claim protection against hostile same-user code. `worker_host` describes trusted executor placement, not access to candidate metadata.
 - A runtime image must carry the tools the plans require (`git`); a missing tool fails the attempt with `config_error` before anything runs.
 
 ## Where it is applied

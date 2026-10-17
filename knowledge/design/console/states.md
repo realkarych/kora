@@ -70,7 +70,7 @@ A node under the runtime's infrastructure retry policy is blue with "worker lost
 |---|---|
 | `created`, `claimed` | waiting for a worker; the worker when claimed; the lease expiry |
 | `submitted`, `running` | running on <worker>; last heartbeat; `desired_state` when `cancel` |
-| `finishing` | collecting: artifacts being validated, the publish plan running; a repeated publish on an unknown outcome is listed from its event |
+| `finishing` | collecting: final artifacts being validated and stored after reconciled runtime publication; prior reconciliation remains visible in the timeline |
 | `succeeded`, `failed`, `cancelled` | the terminal word with the error class |
 | `lost` | lost: the runtime no longer knows the attempt; the infrastructure retry that followed |
 
@@ -98,6 +98,6 @@ The six states the architecture critique asked the console to keep apart ([archi
 | pending review | amber node and run; the Approvals waiting block; the review page | the bound commit, the facts and their provenance, the cost, the deadline | whether a reviewer on the code host has started | approve or reject on the review page; cancel |
 | stale evidence | red node "candidate moved"; the review page banner; the Approvals history | the bound commit, the observed head, the producing node to retry | what the new push contains | retry the producing node with feedback |
 | exhausted budget | red node "budget exhausted"; for a sub-graph, the element's segment | the budget, the spend, the attempt that crossed it | whether a larger budget would have succeeded | retry on a new graph version by a rerun; cancel |
-| unknown publish outcome | the attempt in `finishing` with the event of a repeated publish; after an infrastructure failure, the red node naming the branch | the deterministic branch name, the commit when captured, which worker repeats the plan | whether the change request exists until the search before create answers | wait; after an infrastructure failure, retry the node; cleanup of the branch is the graph author's command node |
+| unknown publish outcome | the attempt in `running`, runtime phase `publication`, with an event of reconciliation against the stored prepared revision; after an infrastructure failure, the red node naming the branch | the deterministic branch name, the commit when captured, which worker reconciles the exact prepared revision | whether the change request exists until the search before create answers | wait; after an infrastructure failure, retry the node; cleanup of the branch is the graph author's command node |
 | lost runtime | blue node "worker lost · retry n of m"; the timeline `attempt.lost` and `attempt.claimed`; the worker in System highlighted | the worker, when its lease expired, when the attempt became lost, how many infrastructure retries remain | whether the session is still running on an unreachable host | wait for the policy; cancel; restart the worker outside kora |
 | incompatible resume | the attempt's `strategy_fallback` in the panel and in the comparison | that `resume` fell back to `fresh_with_feedback` and why (runtime capability, missing handle, changed harness version) | what the lost session state held | nothing; the fallback is the designed behaviour |

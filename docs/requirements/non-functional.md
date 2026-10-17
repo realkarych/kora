@@ -2,6 +2,8 @@
 
 Status: Reviewed by the project owner on 2026-10-16. Targets marked **[MVP]** apply to the first usable release; **[target]** are design constraints the MVP must not block.
 
+Publication-boundary amendment dated 2026-10-17: pending owner review; architectural direction recorded in [ADR-0016](../decisions/0016-trusted-execution-and-publication.md).
+
 ## 0. Design centre
 
 - **NFR-0.1** The platform persona is the design centre: every requirement below is written for an instance shared by many teams on an organisation's own infrastructure. Standalone mode (NFR-7.1) is a development convenience and must never constrain the platform design (no feature may exist only in standalone mode; nothing in the data model may assume a single tenant).
@@ -31,12 +33,14 @@ Status: Reviewed by the project owner on 2026-10-16. Targets marked **[MVP]** ap
 
 ## 4. Security
 
-- **NFR-4.1 [MVP]** Secrets are referenced, never stored, in the IR, artifacts, logs and transcripts; secret references are bound to a namespace and rejected elsewhere; the secrets protocol resolves them at submission time inside the runtime adapter; sessions receive a constructed minimal environment, never the worker's; captured output, error details and VCS results are redacted against resolved values.
+- **NFR-4.1 [MVP]** Secrets are references in IR, artifacts, logs and transcripts, namespace-bound and resolved through the secrets protocol. Sessions receive constructed minimal environments. Checkout credentials exist only during trusted preparation; publication credentials are acquired after immutable inspection and supplied through late finalization, including after recovery. Parent code-host credentials never enter candidate execution. Protected runtimes enforce control-state and publisher isolation; local is explicitly trusted development/testing without that hostile-code guarantee (ADR-0016). Captured output, errors and VCS results are redacted against resolved values.
 - **NFR-4.2 [MVP]** Agent sessions run hermetically by default: the target repository's harness configuration (instruction files, hooks, MCP servers, settings) is not loaded unless `trust_repo_config` is set on the node config; the flag's resolved value, the node's permission mode and tool policy are part of the resolved config and are auditable.
 - **NFR-4.3 [MVP]** Persisted state is plain data (JSON); no pickled or otherwise executable payloads in the metadata DB, IR or approval responses.
 - **NFR-4.4 [MVP]** Webhook triggers and the HTTP API require authentication (personal tokens bound to a person, a namespace list and the `approve`/`platform` flags; service principals for workers bound to a runtime and a namespace list); the frontend uses an opaque server-side session cookie with CSRF protection and a content security policy; the authentication/authorisation layer is a protocol so that OIDC/RBAC can replace it without changing the API.
 - **NFR-4.5 [target]** Per-node network egress policy is a first-class field; runtimes declare whether they enforce it, and the compile step warns when a node requests a policy its runtime cannot honour.
 - **NFR-4.6 [target]** Every attempt is attributable: harness name and version, resolved config digest, MCP server list, skills digest, approver identity, VCS refs produced. This forms the basis for later provenance attestations (in-toto shape).
+
+- **NFR-4.7 [MVP]** A runtime declaring `protected_execution` prevents candidate control-state forgery, contains all descendants, seals publication input without writable aliases and isolates publication credentials. Namespace `require_protected_execution` rejects a runtime without this capability. Local declares false and requires no additional opt-in in a trusted installation; Docker and adopter runtimes must provide actual conformance evidence before claiming true (ADR-0016).
 
 ## 5. Extensibility and protocols
 

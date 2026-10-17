@@ -20,53 +20,85 @@ inhouse_vcs = "kora_inhouse:vcs_provider"
 
 ## 2. Runtime (FR-8.1)
 
+[ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md) separates the lifecycle supervisor from candidate execution and introduces late finalization. These interfaces are design contracts; no implementation or isolation experiment has run.
+
 ```python
 @dataclass(frozen=True)
 class RuntimeCapabilities:
-    supports_resume: bool           # a later attempt can continue the previous attempt's harness session from its stored handle after that attempt's release;
-                                    # True only when the harness checkpoint outlives release and is readable from wherever the next attempt runs; local and docker: False in MVP
-    portable_handles: bool          # can any worker of this runtime look up and adopt a handle another worker submitted
-                                    # (shared task service: True; handles bound to one host, as in local and docker: False); scheduler.md section 3
-    enforces_network_policy: bool   # DD-21: the runtime is the enforcement point; the harness sandbox is a second layer
-    credential_proxy: bool          # DD-23, DD-30: a per-attempt proxy serves harness API keys; MVP runtimes declare False and inject env vars
-    plan_executors: frozenset[Literal["runner", "worker_host"]]   # where VCS plans may execute for this runtime (section 4; ADR-0005 amended 2026-10-16)
-    max_concurrent: int | None      # advisory capacity
-    default_stall_after: timedelta  # DD-15: 15 min unless the runtime says otherwise; nodes override in limits
+    supports_resume: bool
+    portable_handles: bool
+    enforces_network_policy: bool
+    credential_proxy: bool
+    protected_execution: bool
+    plan_executors: frozenset[Literal["runner", "worker_host"]]
+    max_concurrent: int | None
+    default_stall_after: timedelta
 
 @dataclass(frozen=True)
 class Workload:
-    attempt_id: str                 # the submission key: runtimes dedupe on it (design review finding: redundant liveness and keys)
+    attempt_id: str
     kind: Literal["agent", "command"]
-    resolved_config: dict           # the IR node config, templates rendered
-    workspace: WorkspaceTarget      # the workspace root named by the runtime (section 4); the harness's cwd
-    checkout: CheckoutPlan | WorkspaceRef   # the plan the runner executes as the preparation phase, or the result when the worker executed it on its host (section 4)
-    publish: PublishPlan | None     # the plan the runner executes as the collection phase; None when the node declares no VcsRef output or the worker publishes on its host
-    env: dict[str, str]             # the constructed minimal environment for the child process (never the worker's own)
-    secret_refs: dict[str, str]     # env var -> secret reference, resolved by the runtime adapter at submit
-    harness_credentials: dict[str, str]   # credential name -> secret reference; env var in MVP, proxy when credential_proxy is true (DD-30)
+    resolved_config: dict
+    workspace: WorkspaceTarget
+    checkout: CheckoutPlan | WorkspaceRef
+    publish: PublishPlan | None
+    plan_executor: Literal["runner", "worker_host"]
+    env: dict[str, str]
+    secret_refs: dict[str, str]
+    harness_credentials: dict[str, str]
     artifact_inputs: dict[str, ArtifactRef]
-    limits: dict                    # deadline (absolute, from timeout; the runner enforces it locally), max_events, budget_usd (this attempt's), stall_after
-    session_spec: SessionSpec | None   # built by the harness adapter for agent workloads (section 3)
+    limits: dict
+    session_spec: SessionSpec | None
+
+@dataclass(frozen=True)
+class PublicationAuthorization:
+    attempt_id: str
+    operation_id: str
+    prepared_digest: str
+    destination_digest: str
+    principal_id: str
+    credential: SecretValue
 
 class Runtime(Protocol):
     name: str
     config_schema: dict
     def capabilities(self) -> RuntimeCapabilities: ...
-    async def workspace_target(self, attempt_id: str) -> WorkspaceTarget: ...   # the workspace root inside the runtime and, when exposed, on the worker's host (section 4)
-    async def submit(self, workload: Workload) -> Handle: ...          # idempotent on workload.attempt_id
-    async def lookup(self, attempt_id: str) -> Handle | None: ...      # recovery after crash (FR-6.1a): None only when the runtime confirms no submission;
-                                                                       # raises KoraProtocolError(retryable=True) when it cannot answer, which is never treated as absence
-    async def adopt(self, handle: Handle) -> AdoptedSession: ...       # re-attach to the event file and heartbeat after restart
-    async def status(self, handle: Handle) -> RuntimeStatus: ...       # queued | starting | running | exited(code) | lost
-    def events(self, handle: Handle, from_offset: int) -> AsyncIterator[RawEvent]: ...   # tail of the session's .kora/events.jsonl, resumable
-    async def heartbeat(self, handle: Handle) -> Liveness: ...         # runtime-level liveness, distinct from the agent loop
+    async def workspace_target(self, attempt_id: str) -> WorkspaceTarget: ...
+    async def submit(self, workload: Workload) -> Handle: ...
+    async def lookup(self, attempt_id: str) -> Handle | None: ...
+    async def adopt(self, handle: Handle) -> AdoptedSession: ...
+    async def status(self, handle: Handle) -> RuntimeStatus: ...
+    def events(self, handle: Handle, from_offset: int) -> AsyncIterator[RawEvent]: ...
+    async def heartbeat(self, handle: Handle) -> Liveness: ...
+    async def finalize(self, handle: Handle, authorization: PublicationAuthorization) -> VcsRef: ...
     async def cancel(self, handle: Handle, grace: timedelta) -> None: ...
-    async def release(self, handle: Handle) -> None: ...               # free workspace and container after artifacts were collected; on the reference runtimes the harness checkpoint goes with them
+    async def release(self, handle: Handle) -> None: ...
 ```
 
-An agent workload is executed inside the runtime by the **session runner**, a small kora entry point (`kora-runner`) present in every runtime image or host install: it executes the VCS's `CheckoutPlan` as the **preparation phase** before the harness starts and its `PublishPlan` as the **collection phase** after the session ends (section 4), hosts the whole harness adapter named in `session_spec`, drives the harness through the adapter's SDK or protocol client (section 3), is the **only enforcer** of `max_events`, the soft budget and `stall_after` from the SDK event stream (design review finding [one enforcement point](../reviews/review-2026-10-15.md#one-enforcement-point)), answers tool-policy hooks (section 12), verifies skill and MCP server digests before the session starts (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)) and appends the normalised event stream to `.kora/events.jsonl` in the workspace, the resumable source the worker tails and relays. The worker only claims, requests the workspace target and the plans, submits, relays counters, uploads and finalises; it executes a plan itself only on its own host (section 4). The runner is kora code, not user code (FR-2.8 still holds). Image digests are recorded on the attempt; images ship with the harness auto-updater disabled (design review finding [transcript access, audit and supply chain](../reviews/review-2026-10-15.md#transcripts-audit-supply-chain)).
+**Lifecycle and authority.** `kora-runner` is the lifecycle supervisor shipped with the runtime installation. It executes trusted preparation, hosts the adapter and policy client, enforces event/budget/stall limits, records observations, stops candidate execution, seals inputs and prepares publication. The candidate domain contains the harness binary, command workloads, tools, MCP servers, managed helper processes and all descendants. The adapter uses a runtime-supplied process launcher for argv, cwd, constructed environment, stdio and signals; the SDK/client and policy decision remain on the supervisor side. Merely setting a subprocess UID is not a complete protected launcher. The first slice must verify the full Claude SDK launch, hook, interrupt and subagent flow; the Codex app-server path must meet the same contract before it is supported.
 
-Reference implementations: `local` (subprocess in its own process group tagged with the attempt id; orphaned groups are killed when a worker claims work) and `docker` (one container per attempt, workspace volume, harness binaries and the runner installed in the image). Both declare `portable_handles = False`: their handles exist on the worker's host, so after a crash only a worker with the same stable id (the same host) adopts them, and an attempt whose host is gone becomes `lost` and is resubmitted by the infrastructure retry policy ([scheduler.md](scheduler.md) section 3); an enterprise runtime whose handle is a task id in a shared service declares `True`. Both declare `supports_resume = False` ([architecture critique of 2026-10-16, finding A10](../reviews/architecture-critique-2026-10-16.md#a10-session-checkpoint)): the harness checkpoint lives in the workspace (section 3), `release` frees the workspace and the container once the artifacts are collected, and the handle is bound to the host, so no later attempt can reach the previous session; a `resume` retry on them always falls back to `fresh_with_feedback` with `strategy_fallback` recorded ([scheduler.md](scheduler.md) section 7). Three lifecycles are distinct: the **execution handle** (the runtime job, which ends at `release`), the **harness checkpoint** (what the installed harness version needs to continue the conversation: the session state under `CLAUDE_CONFIG_DIR` for `claude`, the app-server's thread state for `codex`; released with the workspace on the reference runtimes) and the **workspace snapshot** (the revision and the changes the attempt published as its `VcsRef`, which outlive `release` because they are in the VCS). A runtime declares `supports_resume = True` only when its harness checkpoint outlives `release` and is readable from wherever the next attempt runs. Exporting the checkpoint before `release` as an artifact version, with its own retention and the compatible harness version recorded, is the post-MVP design ([ADR-0007](../../docs/decisions/0007-attempt-model-and-retries.md)). Both declare `credential_proxy = False` in MVP; the per-attempt proxy sidecar (never shared between attempts) is the first post-MVP runtime item together with the cloud-sandbox runtime (DD-30). Enterprise runtimes (an in-house enterprise CI and execution platform) implement `submit` as a task submission, `events` as log polling, `status` from the task API, and run as a kora worker inside the adopter's network connecting outbound to the API (DD-13). Harness binaries and their versions are part of the runtime installation, not of the node (DD-14). Plan executors (section 4): `local` declares `{runner, worker_host}`, since the session and the worker share one host; `docker` declares `{runner}` in MVP; the fake runtime (NFR-10.1) declares `{runner}` and exposes nothing on the worker's host, which is how CI covers a runtime without a shared filesystem.
+The supervisor appends `{i, at, kind, data}` events to its **control journal**, outside the candidate root. On protected runtimes the candidate cannot read/write the control directory, replace a parent path, access its descriptors or impersonate its control channel. Plans, helpers, resolved checkout credentials and publisher metadata live there or in a separate private publication root, never under candidate `.kora/plan/`. Only the supervisor emits authoritative `phase` results; this kind is reserved, so the normalizer never forwards a harness payload as a phase result or platform VCS reference. Harness-derived events remain observations: protected journalling does not establish their honesty, completeness or tool-hook coverage. Candidate `.kora/` may hold harness configuration and checkpoints, but is never a lifecycle source of truth. Images disable harness auto-updates and record their digests on the attempt.
+
+**One logical handle.** `submit` is idempotent on `attempt_id` and binds the canonical workload digest; the same id with different content is `workload_conflict` (`config_error`). `lookup` returns `None` only on authoritative confirmed absence and raises retryable `KoraProtocolError` while unreachable. `adopt` returns the phase, prepared result if any, and journal position. `RuntimeStatus` retains `queued | starting | running | exited(code) | lost` and includes `phase`: `preparation | execution | sealing | inspection | awaiting_authorization | publication | complete | failed`. A harness exit alone does not make a publication-producing workload `exited`: it remains live through finalization. These phases do not add attempt states or consume another attempt/capacity slot. Workloads without a `VcsRef` output collect their ordinary outputs and complete without `finalize`.
+
+Before a protected runtime begins inspection it confirms that the entire candidate domain stopped, including detached descendants, then seals a private handoff. Unconfirmed termination or sealing prevents authorization and fails with `publication_input_unavailable` (`infrastructure`); it does not authorize another concurrent execution. Local follows the lifecycle with ordinary process management in its trusted environment, without this adversarial guarantee.
+
+**Late authorization.** After the supervisor reports `inspection` succeeded and `awaiting_authorization` with a `PreparedPublication`, the worker checks its current lease and desired state through the API heartbeat and obtains a fresh publication credential through the VCS integration. The parent credential remains on the worker/provider side; no publish credential is resolved at `submit`. Issuance, expiry, principal identity and effective backend rights are owned by issue #43; a static credential stays static and is never advertised as scoped or short-lived. The worker calls `finalize` through an authenticated runtime control channel, not candidate stdio, files or environment. The authorization binds attempt, operation, prepared digest and destination digest; mismatches fail `publication_authorization_mismatch` (`config_error`). Values are redacted and never persisted. Expired/rejected credentials can be reacquired for the same operation; no retry reruns the agent or inspection against mutable files.
+
+`finalize` coordinates the selected common plan executor. With `runner`, publication runs in the runtime's trusted publication environment; with `worker_host`, the runtime adapter transfers sealed input to the private worker-host executor immediately after sealing, before prepare/inspect. That executor produces the stored `PreparedPublication`; `finalize` subsequently delivers authorization to it and consumes that existing checkpoint. VCS tools may exist only on that host. It never points a credentialed publisher at the exposed candidate directory. Placement is a runtime transport responsibility, not VCS-specific logic. A runtime declaring portable handles must also make sealed input, journal and publication checkpoint accessible to an adopting worker; host-local storage cannot support that claim. An active finalization is serialized per operation, and repetitions reconcile the same prepared revision (section 4). The worker opens the change request through the VCS API, uploads outputs/usage and requests `finishing`; it keeps heartbeating through authorization and publication. An API fence is not an atomic fence against an external push already in flight.
+
+**Recovery state.** Before acknowledging each completed phase the supervisor durably records attempt/workload digest, immutable plans and their digests, trusted `WorkspaceRef`, journal sequence, phase, sealed input location/digest, `PreparedPublication`, inspection verdict and publication outcome. The checkpoint contains credential references/identities only, never values. A crash after sealing or preparation resumes from those bytes; no new commit is made. Loss/corruption of required private state is an infrastructure failure. `release` removes candidate, control and publisher storage only after final output collection and terminal publication outcome; partial usage/logs may still be collected on cancellation, but cancellation never initiates publication.
+
+**Capabilities and reference runtimes.** `protected_execution` covers control-state integrity, whole-domain containment, immutable transfer and publisher credential isolation together. It is independent of `enforces_network_policy` and `credential_proxy`. Namespace policy `require_protected_execution` rejects a runtime declaring false (`IR021`); worker startup rejects a configured protected runtime whose installation cannot enforce its declaration. A missing executor is an error, not a warning that permits execution.
+
+| runtime | lifecycle placement | protected execution | recovery and executors |
+|---|---|---|---|
+| `local`, Linux/macOS | host supervisor, candidate subprocess group, private directories for ordinary lifecycle structure | false; trusted development/tests, no sandbox, VM, administrator permission or extra trust switch | host-bound handles; `runner` and `worker_host` |
+| `docker`, Linux engine (including a Linux VM on a macOS host) | host supervisor; separate candidate and publisher containers under one attempt handle | required supported configuration: candidate without control mounts, Docker socket, privileged mode or host PID namespace; confirm whole container stopped; private sealed transfer; publisher sees only sealed input and trusted metadata | host-bound handles; `runner`; Docker-dependent tests run on Linux CI |
+| independent runtime | protected supervisor/control channel and isolated candidate/publisher environments supplied by the provider | declare true only with containment, transfer and OS/service evidence; otherwise rejected when required | no shared worker filesystem required; handles portable only when all recovery state is portable |
+| configured fake runtime | real protocol implementation with injected deterministic events and phase barriers | proves protocol decisions, never OS isolation; security claims require real process tests | `runner`, nothing exposed on worker host |
+
+Local process groups provide cleanup, not a hostile-code boundary. The same capability rules apply in standalone and shared installations. Neither reference runtime supports cross-attempt harness resume in MVP: `supports_resume = False`, because `release` destroys its harness checkpoint. `portable_handles = False` binds adoption to a restarted worker with the same stable host id; partition/loss policy is in scheduler.md section 3. `credential_proxy = False` remains the MVP default. Harness checkpoints and VCS revisions are separate from the lifecycle checkpoint: the VCS revision outlives release, the reference harness checkpoint does not. A future runtime declares `supports_resume` only if that harness state survives release and is reachable by the next attempt. Enterprise workers still connect outbound to the API, and default `stall_after` remains 15 minutes.
 
 ## 3. Harness adapter (FR-2.1, FR-3.3, FR-6.6, FR-9.1, DD-27)
 
@@ -93,20 +125,20 @@ class HarnessAdapter(Protocol):
     async def run(self, spec: SessionSpec, policy: PolicyClient, sink: EventSink) -> SessionResult: ...
         # executed by the runner inside the runtime: opens the SDK session, forwards every SDK message as a NormalisedEvent
         # (session_started | turn | tool_call | tool_result | permission_denied | usage | result | error) to the sink;
-        # the runner itself writes the `phase` events of the preparation and collection phases (section 4)
+        # the supervisor alone writes lifecycle `phase` results (sections 2 and 4)
         # routes pre-tool-call hooks to `policy`, honours sink.enforcement() (terminate on max_events / budget / stall)
     def finalise(self, events: list[NormalisedEvent], outcome: RunnerOutcome) -> SessionResult: ...
         # AgentSession fields, StructuredOutput payload, usage records with completeness, stop reason, error class
     def installed_version(self) -> str: ...     # from the SDK's init message; recorded on AgentSession, never enforced (DD-14)
 ```
 
-A fake adapter (`fake`) replays recorded SDK event streams for CI (NFR-10.1). Adapters are importable inside runtime images because the runner executes them there.
+A fake adapter (`fake`) replays recorded SDK event streams for CI (NFR-10.1). Adapters are importable in supervisor installations; their harness subprocesses launch through the runtime boundary (section 2).
 
 **First-slice defaults** (DD-36). The normalised event is `{i, at, kind, data}`; `max_events` counts `turn`, `tool_call` and `tool_result` events; termination is interrupt, 30 s grace, then kill. The `claude` adapter opens a `ClaudeSDKClient` with `cwd` set to the workspace, `CLAUDE_CONFIG_DIR=<workspace>/.kora/claude` and `setting_sources=[]`, so the harness state the SDK writes there has the workspace's lifetime and is released with it: on the MVP runtimes a stored `resume` handle points at a checkpoint that no longer exists once the previous attempt was released (section 2); harness credentials come from the adapter's deployment configuration (`credentials`, secret references resolved at submit) and reach the session as environment variables (DD-30). Structured output is taken from `ResultMessage.structured_output`, else from the final text parsed as JSON, else the attempt fails `artifact_invalid`. Usage maps per model from the result message into `usage_record` rows with completeness; the `AgentSession` payload fields are listed in [ir.md](ir.md) section 3.
 
 ## 4. VCS (FR-5.2)
 
-The VCS **plans** and never touches the workspace. It returns two typed plans that kora executes where the workspace lives: the session runner inside the runtime executes the `CheckoutPlan` as the **preparation phase** before the harness starts and the `PublishPlan` as the **collection phase** after the session ends, and the worker executes a plan on its own host only where the runtime exposes the workspace there (FR-8.8). The requests carry no runtime identity, so a VCS cannot branch on the runtime, and the composition of a runtime and a VCS is proven by `test_vcs_runtime_cross_product` (section 13), not by a shared label ([ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md), amended 2026-10-16; [architecture critique of 2026-10-16, finding A13](../reviews/architecture-critique-2026-10-16.md#a13-remote-composition)).
+The VCS plans; kora's common executor runs its typed plans. [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md) supersedes collection in the candidate working copy. Requests carry no runtime identity. A VCS can supply Git or an independent native representation without changing the core.
 
 ```python
 @dataclass(frozen=True)
@@ -115,20 +147,20 @@ class VcsCapabilities:
     review_comments: bool
     ci_status: bool
     head_sha_watch: bool
-    plan_executors: frozenset[Literal["runner", "worker_host"]]   # where this VCS's plans may run (table below)
+    plan_executors: frozenset[Literal["runner", "worker_host"]]
 
 @dataclass(frozen=True)
-class WorkspaceTarget:              # named by the runtime before submit
-    root: str                       # absolute path of the workspace inside the runtime's execution environment; the harness's cwd
-    host_path: str | None           # the same directory on the worker's host when the runtime declares worker_host; None otherwise
+class WorkspaceTarget:
+    root: str
+    host_path: str | None
 
 @dataclass(frozen=True)
 class CheckoutRequest:
     repo: str
-    rev: str | VcsRef               # a VcsRef when the node's workspace.from_ref resolves (fresh_with_feedback, command gates)
-    root: str                       # WorkspaceTarget.root, so that the plan can name absolute paths
+    rev: str | VcsRef
+    root: str
     attempt_id: str
-    branch: str                     # the working branch to create: kora/<graph>/<run_id>/<node_path>/<n>
+    branch: str
 
 @dataclass(frozen=True)
 class PublishRequest:
@@ -136,75 +168,132 @@ class PublishRequest:
     root: str
     attempt_id: str
     branch: str
-    commit_message: str             # kora: <node_path> #<n>
+    commit_message: str
 
 @dataclass(frozen=True)
 class PlanFile:
-    path: str                       # relative to the workspace root, under .kora/plan/
+    area: Literal["control", "publication"]
+    path: str
     content: bytes
     mode: int
 
 @dataclass(frozen=True)
 class PlanStep:
-    argv: tuple[str, ...]           # no shell; the first element is resolved on PATH
-    cwd: str | None                 # relative to the workspace root; None is the root
-    env: dict[str, str]             # literal values, never secret values
+    argv: tuple[str, ...]
+    cwd: Literal["candidate", "control", "publication"]
+    env: dict[str, str]
     stdin: bytes | None
     timeout: timedelta
-    capture: str | None             # name under which the executor records the step's stdout
+    capture: str | None
 
 @dataclass(frozen=True)
 class CheckoutPlan:
-    required_tools: tuple[str, ...]        # executables that must be on PATH; checked before anything runs
-    credentials: dict[str, str]            # env var -> secret reference, present only in the steps' environment
-    files: tuple[PlanFile, ...]            # materialised before the steps
-    steps: tuple[PlanStep, ...]            # must capture `commit`; `changed_paths` when rev is a VcsRef; may capture `branch`
+    required_tools: tuple[str, ...]
+    credentials: dict[str, str]
+    files: tuple[PlanFile, ...]
+    steps: tuple[PlanStep, ...]
 
 @dataclass(frozen=True)
 class PublishPlan:
     required_tools: tuple[str, ...]
-    credentials: dict[str, str]
     files: tuple[PlanFile, ...]
-    inspect: tuple[PlanStep, ...]          # must capture `changed_paths` and `diff`; run first, then kora's checks
-    publish: tuple[PlanStep, ...]          # must capture `commit` and `branch`; may capture `diff_stat`; run only when the checks pass
+    export: tuple[PlanStep, ...]
+    prepare: tuple[PlanStep, ...]
+    inspect: tuple[PlanStep, ...]
+    publish: tuple[PlanStep, ...]
 
 @dataclass(frozen=True)
-class WorkspaceRef:                 # the result of the preparation phase, built by the executor
+class WorkspaceRef:
     attempt_id: str
     root: str
     repo: str
-    commit: str                     # capture `commit`
-    base_commit: str                # VcsRef.base_commit when rev was a VcsRef, else commit
-    branch: str | None              # capture `branch`
+    commit: str
+    base_commit: str
+    branch: str | None
+
+@dataclass(frozen=True)
+class PublicationInput:
+    attempt_id: str
+    format: str
+    location: str
+    digest: str
+
+@dataclass(frozen=True)
+class InspectionContent:
+    revision: str
+    path: str | None
+    kind: Literal["file", "symlink", "revision_metadata"]
+    content_location: str
+    content_digest: str
+    size_bytes: int
+
+@dataclass(frozen=True)
+class InspectionManifest:
+    prepared_digest: str
+    revision: str
+    content_index_location: str
+    content_index_digest: str
+    complete: bool
+
+@dataclass(frozen=True)
+class PreparedPublication:
+    attempt_id: str
+    operation_id: str
+    input_digest: str
+    prepared_digest: str
+    inspection_digest: str
+    repo: str
+    branch: str
+    commit: str
+    base_commit: str
+    destination_digest: str
+    changed_paths: tuple[str, ...]
+    diff_stat: str
 
 class Vcs(Protocol):
     name: str
     def capabilities(self) -> VcsCapabilities: ...
     async def checkout_plan(self, request: CheckoutRequest) -> CheckoutPlan: ...
     async def publish_plan(self, request: PublishRequest) -> PublishPlan: ...
-    async def open_change_request(self, ref: VcsRef, title: str, body: str) -> VcsRef: ...  # adds url, commit_url and compare_url; idempotent on (head, base): search before create; a code-host API call the worker makes from its host
-    async def change_request_status(self, ref: VcsRef) -> ChangeRequestStatus: ...          # open | approved | changes_requested | merged | closed, head_sha, reviews[]
-    async def head_sha(self, ref: VcsRef) -> str: ...                                     # current head of ref.branch in ref.repo; the scheduler's push observation during review (scheduler.md section 5)
-    async def post_comment(self, ref: VcsRef, body: str) -> str: ...                        # used by the VCS approval channel to publish a ReviewBundle
+    async def open_change_request(self, ref: VcsRef, title: str, body: str) -> VcsRef: ...
+    async def change_request_status(self, ref: VcsRef) -> ChangeRequestStatus: ...
+    async def head_sha(self, ref: VcsRef) -> str: ...
+    async def post_comment(self, ref: VcsRef, body: str) -> str: ...
     async def ci_status(self, ref: VcsRef) -> CiStatus: ...
 ```
 
-**Captures** are named step outputs with a fixed meaning: `commit` one line, the commit id checked out or created; `changed_paths` one path per line, relative to the root; `diff` a unified patch against the base; `branch` one line; `diff_stat` free text. The executor fails the phase when a required capture is missing or malformed. From the checkout captures and the request it builds the `WorkspaceRef`; from the publish captures it builds the `VcsRef` payload (`repo`, `branch`, `commit`, `base_commit`, `diff_stat`; `url`, `commit_url` and, where the host has one, `compare_url` are added by `open_change_request`: the change request, the host's page for `commit`, and the host's comparison of `base_commit` to `commit`, so that a reviewer opens the exact revision the facts cover, [ADR-0015](../../docs/decisions/0015-web-console-design.md)), taking `repo` and `base_commit` from the `WorkspaceRef` it holds in memory, so a session cannot forge the base commit by editing the workspace. Publish steps may refer to that result through the placeholders `{base_commit}`, `{commit}` and `{branch}` in `argv`, `env` and `stdin`, which the executor replaces with the values it holds; nothing else in a plan is templated.
+**Trusted roots and captures.** The runtime privately allocates `control_root` and `publication_root` outside `WorkspaceTarget.root`; `host_path` exposes only the candidate workspace for compatible preparation, never permission to publish there. `PlanFile.path` is relative to its named private area, rejects traversal/absolute paths, and is created with descriptor-relative no-follow operations. Parent replacement, symlinks and writable hard-link aliases cannot redirect private writes. Plans are immutable trusted provider output, not files loaded from the repository. Allowed placeholders in argv/env/stdin are `{candidate_root}`, `{control_root}`, `{publication_root}`, `{input_location}`, `{base_commit}`, `{commit}` and `{branch}`; all values come from supervisor state. There is no shell interpolation.
 
-**The plan executor** is one piece of kora code, used by the session runner and by the worker. For a checkout plan it empties the workspace root, materialises the files, checks `required_tools` (a missing tool fails the attempt with class `config_error`), runs the steps as subprocesses without a shell in the root with a minimal environment plus the step's `env` and the resolved credentials, and records the captures; a failing step fails the attempt with class `infrastructure`, retried under `infrastructure_retry` and consuming no agent attempt. The credentials are secret references resolved like `harness_credentials`, by the runtime adapter at `submit` when the runner executes and by the worker when it executes; they exist only in the steps' environment, never in the harness process's, and step output is redacted of them. Preparation runs for agent and command workloads alike. For a `VcsRef` checkout (a command gate, or `fresh_with_feedback`) the executor compares `changed_paths` with the protected paths and fails the attempt with class `protected_path_modified` when one is among them (DD-34). Collection runs only after the session ended with a result and only when the node declares a `VcsRef` output: the inspect steps; then kora's checks, the secret scan over `diff` against the resolved secret values and common key patterns, failing with class `secret_leak` on a hit (design review finding [secret publication and egress control](../reviews/review-2026-10-15.md#secret-publication-and-egress)), and `artifact_invalid` when `changed_paths` is empty ([ir.md](ir.md) section 3); then the publish steps, whose failure is `artifact_invalid` too, decided by the node's retry policy. The runner reports both phases through the normalised event stream as `phase` events (`preparation` or `collection`; `started`, `succeeded` with the `WorkspaceRef` or `VcsRef`, `failed` with the error class, the step index and a stderr tail), which is how the worker learns the typed results on every runtime, shared filesystem or not; `max_events` does not count them. The runner creates `<root>/.kora/` before the preparation phase, so a checkout plan must work in a non-empty root. Recovery: with the runner executing, preparation is part of the submitted work, so a worker crash before `submit` re-submits (idempotent on the attempt id) and a crash after it is covered by `lookup` and `adopt` with the event file as the source of truth ([scheduler.md](scheduler.md) section 3); with the worker executing, the reclaiming worker re-runs the checkout plan into an emptied root. Plans are re-executable: a publish plan run twice yields the same `VcsRef`.
+Captures are bounded typed outputs: `commit` and `branch` are validated single identifiers; `changed_paths` is a JSON array of relative paths, not newline-split text; `diff` is display text, not an executable validation source; `diff_stat` is display text. The provider-owned native decoder additionally emits the common `InspectionManifest` and `InspectionContent` index defined below; an opaque native manifest alone is not sufficient. Missing/malformed captures fail the phase. Core treats `PublicationInput.format` and revision strings as opaque; only the provider understands them. Locations name immutable bytes reachable through the runtime's transfer channel, not a worker-local filesystem assumption.
 
-**Where the executor runs.** Both sides declare `plan_executors`; the worker picks `runner` when both declare it, else `worker_host`; `kora validate` emits `IR009` when a node's runtime and VCS declare no common executor ([ir.md](ir.md) section 10).
+**Preparation.** The selected executor creates an empty candidate root, materializes plan helpers only in control storage, checks required tools and executes the checkout plan with a minimal environment and checkout credentials. It captures `commit`, optional `branch`, and `changed_paths` for a `VcsRef` checkout. The supervisor constructs `WorkspaceRef` using the trusted request and persists it before starting the harness. For a `VcsRef`, `base_commit` comes from that input and protected-path checks run before a command gate. Checkout secrets/helpers and credential stores must not be inherited by candidate code. Reclaiming an attempt adopts a completed preparation rather than deleting a live workspace; a confirmed pre-submit absence permits preparation anew under the same idempotent submission contract.
 
-| executor | who runs the plan | a runtime declares it when | a VCS declares it when |
+**Export and sealing.** `PublishPlan.export` runs, if needed, in the candidate domain after the session, with no checkout, publication or code-host API credential. Its output is untrusted data until validated. The supervisor then terminates that entire domain and copies the export and selected workspace content into a private `PublicationInput`. Reads must resist path replacement, traversal, symlink dereference and hard-link aliases; symlinks that are legitimate VCS data remain data, not paths the publisher follows. Reject special files or unsupported encodings rather than guessing. Copied bytes have no writable alias in candidate storage. The supervisor fixes their digest before acknowledging sealing. Local uses the same copy/validation path without claiming that a hostile same-user process cannot interfere.
+
+**Prepare and inspect publication.** `prepare` and `inspect` execute only in fresh publication storage, without VCS credentials, candidate configuration, executable attributes, helpers, plugins or live candidate processes. `prepare` yields one exact native revision; it is persisted once with the input and plan digests. `inspect` derives changed paths, review diff and the complete newly published content/history from that revision. kora checks protected paths, scans all newly published content for resolved secret values and common key patterns, and verifies a nonempty change against the trusted base. A hit is `secret_leak`; malformed/empty/unsupported content is `artifact_invalid`. Relevant secret values are available only to the trusted scanner and redactor, not the provider's subprocess environment; the publish credential acquired later is also checked against prepared content before it is delivered to a publish step. Success emits `PreparedPublication` and `awaiting_authorization` from the supervisor. `prepared_digest` binds the native prepared data and its metadata; `destination_digest` binds provider identity, trusted remote, repository, branch, base and transport settings, not just candidate display strings. `operation_id` is deterministic per attempt/publication output. The existing per-attempt publication plan produces the workspace revision; declared outputs referring to that workspace use the same prepared operation rather than allowing different destinations under one identity.
+
+**Inspection handoff to the scanner.** The provider-owned decoder runs as an inspect step in private publication storage, with no scan secret values in its environment. Its required `inspection` capture is an `InspectionManifest`: the exact native revision and prepared digest, a content-index location/digest, and `complete=true`. The content index is a bounded JSON-lines stream of `InspectionContent` records. Each record identifies an opaque native revision, a relative path (or no path for revision metadata), kind, immutable content location, digest and byte length. It enumerates every file/symlink version and revision metadata newly reachable from the trusted base through the prepared revision, including intermediate versions later removed. A non-Git system with snapshot-only publication enumerates that complete new snapshot and its metadata. Native decoding/reachability stays provider-owned; core reads only this common interchange.
+
+The trusted scanner pulls raw bytes through the authenticated private transfer channel, with backpressure, checks index/content digests and sizes against the manifest and binds its verdict to both prepared and inspection digests. It does not run the decoder with secret values or scan a display diff. Provider configuration supplies finite index/count/content-byte and inspect-time bounds, checked at startup; exceeding them is failure, not truncation. Malformed records, missing blobs, changed digests, unsupported kinds, a missing terminal completeness assertion or an incomplete enumeration fail `artifact_invalid` before authorization. Transfer unavailability is infrastructure failure, never successful inspection. Provider conformance verifies native reachability/completeness against real published history, not just a boolean assertion. The checkpoint retains this immutable index/content and verdict for recovery and for checking a newly acquired publication secret before delivering it to the publishing process.
+
+**Finalize.** Publication steps execute only against the prepared revision and trusted destination, with a late credential supplied through section 2's authorization. No inspect/publish step may have `cwd=candidate`; only export and initial checkout may execute there. The authorization is kept out of argv, URLs, journal and persisted plan files; an ephemeral private helper or descriptor passes it only to the publication process. Output is redacted. The resulting `VcsRef` is assembled from trusted request/base, the prepared revision and verified remote result, not mutable workspace captures. `open_change_request` adds `url`, `commit_url` and `compare_url`; this remains a code-host API call made by the worker and idempotent on head/base by search before create. Issuance backend design remains #43.
+
+**Placement.** Both protocols declare `plan_executors`; prefer `runner`, otherwise `worker_host`. No common executor fails validation with `IR009` and fails execution with `config_error`. The names describe trusted executor placement, not permission to run a publisher inside the candidate domain.
+
+| executor | preparation | publication | capability requirement |
 |---|---|---|---|
-| `runner` | the session runner inside the runtime, before the harness starts and after the session ends | its execution environment runs the runner with the plans' tools on PATH and reaches the code host | its plans need only tools an image can carry (`git`) and it accepts its credentials inside the sandbox for the attempt |
-| `worker_host` | the worker on its own host, before `submit` and after the session ends; `Workload.checkout` then carries the `WorkspaceRef` and `Workload.publish` is `None` | the attempt's workspace root is a directory on the worker's host, exposed as `WorkspaceTarget.host_path` (`local`; `docker` with a bind mount, after MVP) | its client cannot run inside a sandbox, or its credentials must not enter one (FR-8.8: an enterprise VCS client outside the sandbox) |
+| `runner` | supervisor in the runtime's execution infrastructure | separate trusted publication environment coordinated by `Runtime.finalize` | installed plan tools and code-host connectivity in the corresponding trusted phases; protected authority when required |
+| `worker_host` | common host executor before candidate launch where `host_path` is exposed | runtime adapter transfers sealed bytes to a private worker-host publisher; same `finalize` contract | host client/tools and durable private checkpoint; no credentialed access to the candidate root |
 
-`Runtime.workspace_target(attempt_id)` names the target before `submit`; `Runtime.release(handle)` frees the workspace after collection. The git reference implementation declares both executors; `inhouse_vcs` is the adopter's and declares what its client allows. VCS results written to events and logs are redacted of tokens; pushes use credential helpers, never secrets embedded in URLs (design review finding [polling back-off, webhook replay and idempotency](../reviews/review-2026-10-15.md#polling-webhooks-and-idempotency)).
+Git declares both placements; local declares both, Docker and the configured fake runtime declare `runner` in MVP. An independent provider may expose no host path and still support complete preparation, sealed transfer, inspection and publication. The VCS sees no runtime name. The runtime adapter coordinates the common executor; it does not implement Git or another VCS.
 
-**First-slice defaults for git** (DD-36). Repositories are resolved through the provider configuration's `remotes`: a prefix maps to a URL template (`dwh/` → `https://git.example/dwh/{name}.git`). Both plans require `git` and carry one credential, a secret reference from the provider configuration, which a `GIT_ASKPASS` helper materialised as a plan file under `.kora/plan/` hands to git; every git step runs with `core.hooksPath` pointing at an empty directory under `.kora/plan/`, so a hook planted in the workspace never runs; the plans contain no runtime name. The checkout plan runs `init`, `fetch` of the revision and `checkout -b <branch>` instead of `clone`, because the root already holds `.kora/`, excludes `.kora/` through `.git/info/exclude` and captures `commit` (and `changed_paths` between `base_commit` and `commit` for a `VcsRef` checkout). The publish plan's inspect steps stage everything and capture `changed_paths` and `diff` against `{base_commit}`; its publish steps run a materialised script that commits when the index is dirty with message `kora: <node_path> #<n>` and pushes the current branch to `origin` (the agent's own branch when it differs from the base, else the kora branch), then capture `commit`, `branch` and `diff_stat`; the same branch and commit push as a no-op, so the plan is re-executable. The `VcsRef` payload carries `repo`, `branch`, `commit`, `base_commit`, `url` (when a change request exists) and `diff_stat`. The head of a candidate branch under review is observed by the scheduler through `head_sha` at the VCS polling interval of scheduler.md section 15, which is the MVP path; a VCS that declares `head_sha_watch` additionally turns the code host's push deliveries, received on the webhook route under a name set in the provider configuration, into the same head observation `{repo, branch, head_sha}`, which the scheduler applies through the same function without waiting for the next poll ([architecture critique of 2026-10-16, finding A03](../reviews/architecture-critique-2026-10-16.md#a03-review-revision)).
+**Git reference behaviour.** Provider `remotes` map logical repositories to trusted transport settings. Checkout uses a new repository and an explicit requested revision/branch; helpers and an empty hooks directory are private control files, never `.kora/plan/`. The agent may commit locally; kora performs publication. A candidate-side export produces a Git object bundle for the selected HEAD plus a raw selected worktree manifest: all tracked paths and untracked non-ignored paths, excluding candidate `.kora/` and `.git/`. Submodule gitlinks are data; no submodule command is executed. LFS publication is rejected as unsupported in MVP rather than executing a candidate filter or silently omitting required objects.
 
-**Idempotent publication** ([architecture critique of 2026-10-16, finding A08](../reviews/architecture-critique-2026-10-16.md#a08-durable-intent); ADR-0007 as amended on 2026-10-16). The publish plan is idempotent on `(repository, branch)`: the branch name is deterministic, so a second execution on the same workspace finds the tree clean and the branch at the commit and yields the same `VcsRef` without a second commit or push. `open_change_request` is idempotent on `(head, base)`: it searches for an existing change request from the head branch into the base before creating one and returns its URL. A `KoraProtocolError(retryable=True)` raised after `open_change_request` was sent, or a lost outcome of a publish plan the worker executed on its own host, is an unknown outcome: the worker records nothing and repeats the same call or plan under its lease, and what the repeat returns is what it uploads as the `VcsRef`; when the runner executed the plan, its `VcsRef` is in the event file, so a worker that adopts the attempt after a crash between the push and the `VcsRef` upload reads it from there and uploads the same `VcsRef` (scheduler.md section 3). There is no outbox and no operation log: the attempt row committed before the session and the lease are the durable intent, and the natural keys are the durable identity. A workspace that is gone cannot repeat the publish plan: the attempt fails with class `infrastructure`, and a branch that the push did create stays on the code host under its deterministic name, findable and never adopted by attempt n+1, which publishes under its own name (ADR-0007: side effects are never rolled back).
+After sealing, the publisher imports validated, size-bounded objects into a fresh bare repository using strict object checks, with no inherited Git config/environment, alternates, object directories, hooks, fsmonitor, external diff, textconv, credential helper or candidate attributes. Validate that the selected HEAD descends from the recorded checkout commit and that the trusted base is present; never fetch candidate-selected prerequisites. Imported existing commit objects are retained unchanged. A separate trusted index uses raw bytes (`hash-object --no-filters` and index entries), modes and symlink blobs from the manifest to create the final tree, without `git add` or checkout in the candidate repository. If the final tree differs from HEAD, prepare exactly one additional commit with that HEAD as parent and message `kora: <node_path> #<n>`; persist its complete bytes and object id before inspection. Clean HEAD needs no extra commit. The trusted commit identity for that additional commit comes from provider configuration; existing candidate author fields are preserved and do not substitute for the authenticated publishing principal.
+
+Checks read raw blobs and newly reachable commits between the trusted base and prepared HEAD, including intermediate content; diff is presentation only. `git archive` is not an exact raw-tree transfer because repository export attributes can omit or transform files. Push the explicit prepared object id to `refs/heads/kora/<graph>/<run_id>/<node_path>/<n>` at the configured remote, with create-only compare-and-set semantics. A candidate branch name or remote cannot redirect it. Remote equality with the prepared object is success; another value is `publication_conflict` (`artifact_invalid`) and is never force-overwritten. Candidate commits or explicitly granted code-host credentials cannot redirect this platform operation, but candidate code given its own publication credential can make independent side effects (FR-6.1b).
+
+**Idempotency and failure.** Store the `PreparedPublication` and native bytes before accepting late authorization. Concurrent `finalize` calls for an operation serialize; identical repetitions return one `VcsRef`, different bindings fail. After a lost response, query the trusted destination with safe provider configuration: the same revision is success, authoritative absence permits retry of the same prepared revision, unexpected content is conflict, and unreachable is still unknown (`infrastructure`, retryable). Do not recreate commits, repeat collection against mutable candidate files, or claim success from a missing response. Record each reconciliation as `vcs.publish_repeated`. Lost sealed/prepared state fails `infrastructure` and leaves any existing remote branch discoverable under its deterministic name; another attempt has another branch and never adopts it. There is no database outbox: the persisted attempt and the runtime's private phase checkpoint retain the operation identity. Lease/result fencing still governs API uploads; it cannot revoke an external push already in flight.
 
 ## 5. Approval channel (FR-7.1, FR-7.2a)
 
@@ -359,9 +448,9 @@ One policy applies to every call (design review finding [one tool-policy field](
 
 Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`). Outline:
 
-- **Runtime**: one handle for two submits with one key; `lookup` after restart returns the handle, returns `None` only after a confirmed absence and raises `KoraProtocolError(retryable=True)` while the runtime is unreachable; a runtime declaring `portable_handles` adopts from a second worker instance, one declaring it false is adopted by a restarted worker with the same id; `adopt` resumes the event file from the stored offset without duplicate or lost lines; the runner terminates the session at the workload deadline with the control plane unreachable; `cancel` within grace; `status` reaches `exited`; the child process sees only the constructed environment; declared capabilities hold (`enforces_network_policy` blocks a disallowed host, `credential_proxy` keeps the key out of the session environment, a runtime declaring `supports_resume` continues the previous attempt's session from its stored handle after that attempt's `release`, and one declaring it false is never asked to; with `runner` in `plan_executors` the runner executes a checkout plan and a publish plan from the reference git VCS as the preparation and collection phases, the plan credentials are present in the steps' environment and absent from the harness process's, and the typed results arrive as `phase` events; with `worker_host` the workspace root is readable and writable at `WorkspaceTarget.host_path`); `release` leaves no workspace root behind; `test_workspace_preparation_recovers_after_worker_crash`: a worker crash before `submit` leads to one re-submission that starts from an empty root, and a crash during the preparation phase is adopted with the `WorkspaceRef` read from the event file, on the fake runtime with nothing exposed on the host.
+- **Runtime**: idempotent submit and workload-digest conflict; authoritative absence versus unreachable lookup; original-domain adoption and protected journal offset; declared portable recovery state; constructed candidate environment; local deadlines and cancellation; one logical handle/capacity reservation through publication; late `finalize` only after inspection, binding checks and serialization; no candidate-visible publication credential; preparation crash recovery through the supervisor checkpoint; release removes candidate/control/publication roots. `test_workspace_preparation_recovers_after_worker_crash` uses the configured fake runtime with no shared host filesystem, crashes at phase barriers and recovers the same trusted `WorkspaceRef`. OS isolation is verified only on actual protected runtimes (table below).
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call, installed version recorded and checked against `tested_versions`.
-- **VCS**: the checkout plan, executed by the reference executor, leaves `commit` checked out with `.kora/` ignored, and `changed_paths` lists a changed protected path when `rev` is a `VcsRef`; the publish plan's `commit` is the SHA that `change_request_status` and `head_sha` report as head, and `head_sha` follows the latest publication on the branch; a hook planted in the workspace does not run during either plan; plans carry secret references and no secret values, and no runtime name; two attempts' plans never share a root; comment round-trip; feedback carries author association; `test_publish_and_open_change_request_are_idempotent` (the publish plan executed twice on the same workspace and `open_change_request` called twice with the same keys return the same `VcsRef` and URL, and one branch, one commit and one change request exist) and `test_publish_reconciles_after_response_loss` (the VCS under test accepts the push and the creation and the outcome is lost; the repeated execution or call returns the same `VcsRef` and URL and nothing was created twice), each also with a concurrent second worker running the same plan or calling the same operation for the same keys, after which exactly one effect exists and both callers hold it. **`test_vcs_runtime_cross_product`**: one VCS instance, which receives no runtime identity, prepares, inspects, publishes and is released on two runtimes; kora's CI runs `git` and the `fake` VCS (a directory-backed implementation validated by this suite) on `local` and `docker` on the Linux job and on `local` and the fake runtime on the macOS job; an adopter runs it against their own runtime and VCS pair, and a VCS that declares `worker_host` only passes with that limitation stated in the report.
+- **VCS**: checkout captures the requested base and protected paths; all private files stay outside the candidate tree; native sealed transfer, fresh metadata, fixed inspected revision and trusted destination; no runtime name in requests; same prepared revision on repeat/concurrent finalization; change-request search before create. `test_publish_and_open_change_request_are_idempotent` repeats finalization and creation concurrently using the same operation/head/base and asserts one published revision and one change request. `test_publish_reconciles_after_response_loss` loses the push/create response through an injected provider implementing the real protocol, then compares the same remote revision and reuses the existing request; conflicting remote content fails without overwrite. `test_vcs_runtime_cross_product` runs git and a directory-backed independent non-Git VCS through preparation, execution, sealing, inspection, authorization, publication and release on local and Docker in Linux CI, and on local and the configured fake runtime in macOS CI. The fake runtime exposes no worker-host root. Adopters run the same contract on their runtime/VCS pair; unsupported executor/protection combinations fail validation, with the limitation in the report.
 - **Approval channel**: request → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent.
 - **Secrets**: resolution, missing-reference error shape, redaction in a captured stream.
 - **Artifact storage**: content-addressed dedupe, streaming beyond memory, `get` of a reference written by an earlier instance of the implementation, `delete` after which `exists` returns nothing and `get` fails, and a repeated `delete` that succeeds. The suite runs against `local` on every CI job and against `s3` with an S3-compatible server started through `testcontainers` on the Linux job, which has Docker.
@@ -371,6 +460,32 @@ Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over th
 - **Sensor**: `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
 - **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every call kind the adapter declares in `policy_coverage`, under every permission mode**, through the adapter's `PreToolUse` hook (Claude: the SDK callback; Codex: the managed command hook; after MVP ACP `session/request_permission` for the kinds the agent declares), and the denied call never reaches the tool (design review finding [tool deny coverage](../reviews/review-2026-10-15.md#tool-deny-coverage)); a pattern on a kind outside the coverage is rejected by validation (`IR019`) or warned (`IR008`), never left unenforced; chaining metacharacters and `-c`/`--exec` indirection are denied inside allow-listed commands; a protected path cannot be edited. `test_required_policy_is_enforced_or_rejected` runs the matrix of section 12 against the real harness interface with a deterministic driver (recorded streams where the interface allows no driver): for every covered kind and permission mode an allowed and a denied shell command, file edit and MCP tool call, judged by whether the side effect happened, not by the presence of a `permission_denied` event; for every uncovered kind, validation of a node carrying a namespace pattern on it returns `IR019`. A live smoke test against a model is a manual experiment outside CI, recorded with the harness version; the fake adapter proves the runner's handling of a decision, never a real hook.
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2).
+
+### Publication authority and recovery contracts
+
+These are **future executable test contracts**, specified for issue #51; this repository has no application implementation. Documentation CI does not run them. Use actual local Git and processes, local bare repositories and in-process code-host providers, plus configured protocol fakes. No model calls, external code hosts, patched transports or mocks. Synchronize through explicit phase/process conditions with deadlines, and inject clock/randomness sources. Every case touching metadata storage is parametrized over PostgreSQL and SQLite; Docker/PostgreSQL container cases run on Linux CI only.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_candidate_cannot_forge_runner_journal` | On a protected runtime, candidate code tries replacement, truncation, parent-path swaps and symlinks to control journal/checkpoint files, then the worker restarts. Adoption reads the original monotonic journal and trusted base/phase; planted completion/reference records never become authoritative. |
+| `test_candidate_git_configuration_cannot_execute_in_publisher` | A real candidate repository plants a clean/process filter, hook, fsmonitor, helper and external-diff/textconv configuration. Run full export and publication. Candidate-side export may execute candidate code without VCS credentials, but no planted program runs in publisher authority, accesses its private marker or obtains the publication secret. The publisher uses fresh config, raw object/blob inspection and a raw trusted index. |
+| `test_agent_descendants_cannot_access_publication_credentials` | A real descendant detaches and survives the harness parent. A protected runtime terminates the entire domain before sealing; no process remains able to modify input or read the late secret. With termination unconfirmed, no authorization/push occurs and the attempt reports `publication_input_unavailable`. |
+| `test_publication_destination_is_trusted` | Change candidate remotes, branch, config includes and symlink paths; request publication. The only push is the inspected object id to the provider-configured repository and deterministic attempt branch. Record base, operation id and input/prepared/destination digests. A mismatched authorization is rejected; a different remote head produces conflict, never overwrite. |
+| `test_publication_preserves_candidate_commits` | Create two commits, executable modes, binary blobs and a symlink blob. Sealed import retains exact commit ids/parents and blob contents. Trusted publication does not invoke candidate attributes or execute a gitlink. A secret added then deleted in newly published history fails `secret_leak`; required unsupported LFS objects fail `artifact_invalid`. |
+| `test_publication_records_uncommitted_changes_once` | Start with committed HEAD plus tracked edits/deletions and non-ignored untracked files. Preparation creates one additional commit with that HEAD as parent and the selected raw tree. Repeated and concurrent finalization, including after worker restart, returns that exact commit, without a second commit or new timestamp. |
+| `test_publication_sealing_rejects_mutable_aliases` | Export contains a path swap, escaping symlink, external hard link or special file; reject unsafe input or copy safe data without following aliases. Modify the old candidate storage after sealing; prepared bytes/digest remain unchanged on protected runtimes. Legitimate symlinks remain VCS blob data. |
+| `test_finalize_recovers_prepared_revision` | Crash at sealing, prepared-result persistence, authorization and accepted-push-before-response barriers. Adopt from private checkpoint and use identical prepared revision/destination. Remote absent permits the same publication, equal succeeds, different conflicts, unreachable stays unknown. Missing/corrupt prepared state fails infrastructure rather than regenerating content. A changed workload under the attempt id fails `workload_conflict`. |
+| `test_non_git_inspection_stream_scans_intermediate_history` | The independent directory-backed VCS emits a native revision chain whose intermediate version contains a secret removed from the final snapshot. Its provider-owned decoder emits the common complete content index; the generic trusted scanner rejects with `secret_leak`, while the decoder sees no scan secrets. A truncated index, missing intermediate version, corrupt blob/digest or false completeness fails before authorization. The same scanner works on Git without native-format branches in core. |
+| `test_publication_authorization_is_late` | A session outlives the provider's first credential. No publish credential/parent enters the workload, candidate environment or journal. The worker acquires a fresh grant after inspection and after adoption; expired/rejected authorization can be replaced only for the same prepared binding. Static-provider mode asserts no invented TTL/scope guarantee. The grant's secret value is checked against prepared content before delivery to publication subprocesses. Coordinate issuance assertions with #43. |
+| `test_required_execution_protection_rejects_local` | Local declares `protected_execution=False` and runs trusted lifecycle/publication tests on Linux/macOS with no additional flag or administrator permission. Setting namespace `require_protected_execution` rejects it with `IR021`; bypassed validation still produces `execution_protection_unsupported` before submission. This test does not pretend that same-user local code is contained. |
+| `test_harness_launcher_preserves_control_boundary` | Through each real harness interface's deterministic driver, prove launcher argv/env/cwd, SDK configuration, policy callback, interruption and nested tool/subagent launches cross the selected candidate boundary. No control directory/channel or parent credential becomes candidate authority. The fake adapter proves supervisor behaviour only; a manual model smoke experiment records harness version separately. |
+
+| implementation | common lifecycle/publication suite | hostile-code authority evidence |
+|---|---|---|
+| local on Linux/macOS | required, including real Git, repeated finalization and adoption | unsupported by design; required-protection rejection must pass |
+| Docker on Linux CI | required, including worker restart and private-volume handoff | real container/descendant, journal, alias and secret-boundary cases required; default container presence alone proves nothing |
+| independent runtime/provider | required without a shared worker filesystem, with native non-Git revision/input data | provider's actual process/service isolation and transfer tests required before it declares true; otherwise required-protection rejection |
+| configured fake runtime/VCS | required, deterministic phase/recovery barriers | protocol evidence only; cannot certify OS isolation |
 
 ## 14. Harness mapping tables (FR-3.3, DD-27)
 

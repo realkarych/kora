@@ -112,7 +112,7 @@ Responsibilities, in one line each:
 | `kora api` | the only implementation of every operation; authentication (user and service principals); webhook ingestion to `inbound_event`; worker endpoints (claim, heartbeat, segment and artifact upload, transitions, fenced by lease epoch); OpenAPI, from which the web client is generated and against which the hand-written Python client is tested; serving the `kora web` static build; the two MCP servers over HTTP | scheduling decisions; running sessions; UI logic |
 | `kora web` | the production web console, full in MVP (FR-7.3) and held to the user-experience bar of NFR-13.1: approvals, runs, the live graph with node states and timeline, attempts with artifacts and the diff between them, live session logs, cost per run, node and attempt, graphs and their versions; graph editing post-MVP; a thin client of the API through a TypeScript client generated with `@hey-api/openapi-ts`; opaque server-side session cookie, CSRF protection, CSP | logic of its own; direct database access; designed in [docs/console.md](../../docs/console.md) before it is built ([ADR-0015](../../docs/decisions/0015-web-console-design.md)) |
 | `kora scheduler` | the passes in scheduler.md section 2 under a per-run lock; approval request creation with the run's cost sum; clear-downstream; the batched retention task | calling runtimes or harnesses |
-| `kora worker` | claiming `created` attempts of its runtime through the API; asking the runtime for the workspace target and the VCS for the checkout and publish plans, which it executes itself only on its own host; submission keyed by attempt id with the plans in the workload; launching the session runner that executes the plans and hosts the harness adapter inside the runtime; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the `VcsRef` of the collection phase among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
+| `kora worker` | claiming `created` attempts of its runtime through the API; asking the runtime for the workspace target and the VCS for plans; negotiating trusted executor placement; submission keyed by attempt id with the plans in the workload; launching the supervisor and candidate domain; obtaining late authorization and calling runtime.finalize after immutable inspection; tailing the normalised event stream and relaying the runner's counters; uploading event segments; collecting outputs, the reconciled prepared `VcsRef` among them, into artifact versions; usage records | deciding what runs next; enforcing limits (the runner does); touching the database |
 | Metadata DB | every entity in data-model.md; the only run state; row claims with `SELECT … FOR UPDATE SKIP LOCKED` and the run lock (an advisory lock per run) on Postgres | payload bytes |
 | Artifact storage | payload bytes by digest: artifacts, transcripts, live session segments | metadata |
 | `kora mcp` | the authoring and operating MCP servers for the user's own harness: 13 curated, task-shaped tools, long operations as MCP Tasks; forwards with the user's token, whose default has no `approve` flag | any logic of its own; serving skills (they are files in the harness's own format) |
@@ -167,9 +167,9 @@ flowchart LR
     WS[Plan requester<br/>asks runtime for the workspace target,<br/>VCS for the checkout and publish plans]:::c
     CFG[Session spec builder<br/>resolved node config to SDK options:<br/>agents, MCP, skills, schema, prompt render]:::c
     SUB[Submitter<br/>runtime.submit keyed by attempt id,<br/>constructed env, secrets as env vars in MVP]:::c
-    RUN[Session runner inside the runtime<br/>executes the checkout plan before and the publish plan after,<br/>hosts the harness adapter: Claude Agent SDK,<br/>Codex app-server client, ACP after MVP,<br/>sole enforcer of max_events, budget, stall_after,<br/>answers tool-policy hooks, writes .kora/events.jsonl]:::c
+    RUN[Lifecycle supervisor<br/>prepares, launches candidate, seals, inspects,<br/>publishes only after late finalize,<br/>hosts the harness adapter: Claude Agent SDK,<br/>Codex app-server client, ACP after MVP,<br/>sole enforcer of max_events, budget, stall_after,<br/>answers tool-policy hooks, writes private control journal]:::c
     STR[Event tailer<br/>reads the normalised stream from the stored offset,<br/>relays counters, bounded queue spilling to disk]:::c
-    COL[Output collector<br/>VcsRef from the collection phase,<br/>structured output, CommandResult, AgentSession]:::c
+    COL[Output collector<br/>VcsRef from reconciled publication,<br/>structured output, CommandResult, AgentSession]:::c
     USG[Usage recorder<br/>tokens per model, completeness state,<br/>price table snapshot]:::c
     UP[Uploader<br/>event segments, artifacts, heartbeats<br/>with lease epoch, to the API]:::c
 
@@ -201,7 +201,7 @@ sequenceDiagram
     participant API as kora api
     participant V as vcs (git)
     participant R as runtime (docker)
-    participant H as session runner + Claude Agent SDK (in container)
+    participant H as lifecycle supervisor + harness adapter
     participant AS as artifact storage
 
     S->>DB: node ready → attempt(created)
@@ -212,11 +212,11 @@ sequenceDiagram
     W->>R: submit(workload with both plans, keyed by attempt id) → handle (runner starts)
     W->>API: attempt → submitted(handle) [epoch]
     H->>H: preparation phase: execute CheckoutPlan in the root → WorkspaceRef
-    H-->>R: phase event (preparation succeeded, WorkspaceRef) to .kora/events.jsonl
+    H-->>R: phase event (preparation succeeded, WorkspaceRef) to private control journal
     loop session
         H->>H: SDK message → normalised event, policy hook before each tool call
         H->>H: enforce max_events, budget, stall timer (paused during a tool call)
-        H-->>R: append to .kora/events.jsonl
+        H-->>R: append to private control journal
         R-->>W: tail from offset
         W->>API: upload segment (bounded queue, spill to disk) [epoch]
         API->>AS: put by digest
@@ -226,9 +226,16 @@ sequenceDiagram
         W->>R: cancel(handle, grace)
         W->>API: attempt → failed(class=events_exhausted | budget_exhausted | stalled) or cancelled [epoch]
     else result received
-        H->>H: collection phase: inspect steps, secret scan, publish steps → VcsRef
-        H-->>R: phase event (collection succeeded, VcsRef)
-        R-->>W: tail: VcsRef
+        H->>H: export, stop candidate domain, seal private input
+        H->>H: prepare exact revision in fresh metadata, inspect history
+        H-->>R: checkpoint PreparedPublication, awaiting_authorization
+        R-->>W: prepared revision and destination digests
+        W->>API: fenced heartbeat → desired_state
+        W->>V: obtain late publication authorization
+        W->>R: finalize(handle, authorization)
+        R->>H: trusted control channel: publish fixed revision/destination
+        H-->>R: persist reconciled VcsRef
+        R-->>W: same VcsRef on repetition/adoption
         W->>API: upload transcript, structured output, files [epoch]
         API->>AS: put by digest
         W->>API: artifact versions, usage records, attempt → finishing [epoch]
@@ -296,8 +303,8 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | Policy | `allow_deny` reference implementation of the policy protocol, invoked by the session runner from harness pre-tool-call hooks (DD-29); Cedar (`cedar-python`) and OPA as plugins later | decided | harness-native allowlists only |
 | Harness adapters | programmatic interfaces instead of CLI output (DD-27): Claude Agent SDK for Python (`claude-agent-sdk`) and a small kora client speaking the `codex app-server` JSON-RPC protocol directly over stdio (the Codex SDK exists only for TypeScript) in MVP; after MVP an ACP adapter (`agent-client-protocol` JSON-RPC over stdio) for OpenCode, Pi, Gemini and others, through the same protocol and conformance suite (ADR-0004); hosted entirely by the session runner inside the runtime, which is the sole enforcer of `max_events`, soft budget and `stall_after` from the SDK event stream; harness binaries fixed per installation image with the auto-updater off and a tested version range checked at worker start (DD-14) | decided | CLI JSONL parsing (`claude -p --output-format stream-json`, `codex exec --json`) |
 | Local runtime | subprocess on the worker host with a per-attempt temp workspace | decided | — |
-| Docker runtime | Docker Engine API through `aiodocker` (async) or `docker` SDK; one container per attempt, workspace as a volume, egress rules via container network config; credential proxy as a sidecar when enabled | proposed | shelling out to the `docker` CLI (simpler, harder to test) |
-| VCS (git) | `git` CLI via subprocess for clone/worktree/push; code-host APIs via `httpx` (GitHub, GitLab) for change requests and status | proposed | dulwich/pygit2 (no benefit over the CLI for MVP) |
+| Docker runtime | Docker Engine API through `aiodocker` (async) or `docker` SDK; one logical attempt handle, candidate container and separate publisher container, host-side supervisor/control state, private sealed workspace transfer, egress rules via container network config; credential proxy as a sidecar when enabled | proposed | shelling out to the `docker` CLI (simpler, harder to test) |
+| VCS (git) | `git` CLI via subprocess for trusted checkout, sealed object import/raw-tree preparation and fixed-revision push; code-host APIs via `httpx` (GitHub, GitLab) for change requests and status | proposed | dulwich/pygit2 (no benefit over the CLI for MVP) |
 | Artifact storage | two implementations in MVP (FR-4.4, ADR-0005): `local`, a filesystem tree by digest, for standalone and development, and `s3` for any S3-compatible service through `obstore` (Rust-backed, async; GCS and Azure reachable through the same library), because session segments at the target scale do not fit local disk; docker-compose ships an S3-compatible object store | decided (2026-10-16) | `aiobotocore` (heavier, pins `botocore` versions); MinIO-only client |
 | Secrets | env and file providers in MVP; Vault via `hvac` post-MVP | decided | — |
 | Frontend (`kora web`) | React + TypeScript + Vite, built from a locked pnpm lockfile; TanStack Query for data; shadcn/ui (Tailwind) components; React Flow for the live graph view, laid out left to right by the ELK layered algorithm through its JavaScript build (`elkjs`), chosen because it lays out the fan-out and sub-graph frames as compound nodes (ADR-0015); TypeScript API client generated with `@hey-api/openapi-ts`; static SPA served by `kora api`; login exchanges the API token for an opaque server-side session cookie (`SameSite=Strict`, `Secure`), CSRF protection on cookie-authenticated mutations, CSP, and cookies never accepted on Bearer-only API paths (DD-19, design review finding [server-side session cookie](../reviews/review-2026-10-15.md#server-side-session-cookie)). MVP ships the full console of FR-7.3 (approvals, runs, live graph, attempts and their diff, live logs, cost, graphs and versions; [api-and-agent-surface.md](../specs/api-and-agent-surface.md) section 6), held to the user-experience bar of NFR-13.1; live views read the NDJSON `?follow=true` streams; graph editing is post-MVP; the console's design, its four actions and the data the API exposes for it are [docs/console.md](../../docs/console.md) and [ADR-0015](../../docs/decisions/0015-web-console-design.md) | decided | server-rendered Jinja2 + HTMX; Next.js; SvelteKit |
@@ -327,10 +334,10 @@ Rows marked *decided* were settled by the owner on 2026-10-15 or follow from ear
 | **sub-graph attempt** | one pass over a sub-graph body under FR-2.7a; the `subgraph_attempt` integer on node instances; `max_attempts` on a subgraph counts these; `previous_attempt` is the input the next one receives | a runtime attempt |
 | **node kinds** | `agent`, `command`, `human_input`, `wait_event`, `timer`, `branch`, `fan_out`, `subgraph`; always spelled this way | "fan-in", "approval node", "sensor node" |
 | **SDK event stream** | the raw messages the harness emits inside the runtime: Claude Agent SDK messages, Codex app-server notifications or, after MVP, ACP agent updates | the normalised event stream |
-| **normalised event stream** | kora's `{i, at, kind, data}` events written by the session runner to `.kora/events.jsonl`, uploaded as session segments | the opaque transcript |
+| **normalised event stream** | kora's `{i, at, kind, data}` events written by the session runner to `private control journal`, uploaded as session segments | the opaque transcript |
 | **tool_policy** | the single tool-call policy of a node (allow and deny patterns) with the namespace policy prepended, evaluated by the policy protocol | harness permission modes, `allowed_tools` (DSL sugar only) |
 | **change request** | the code host's review object (GitHub pull request, GitLab merge request, the review object of an in-house code host); protocol-level text uses this term only | "PR" |
 | **kora web** | the React web console served by `kora api`; "web console" in requirements | "approvals page", "UI", "dashboard" |
 | **ir_version** | the IR format version (`1.0`), semver | `graph.version`, the author's own informational version string of a graph; `graph_version.number`, the control plane's sequence number assigned at deploy |
-| **session runner** | kora's `kora-runner` process inside the runtime that executes the VCS plans as the preparation and collection phases, hosts the harness adapter and enforces session limits | the worker, which claims, requests plans, submits, relays and uploads |
-| **plan executor** | kora's code that executes a `CheckoutPlan` or a `PublishPlan`: inside the session runner by default, inside the worker when the VCS's plans run on the worker's host | the VCS, which only returns plans |
+| **session runner** | kora's lifecycle supervisor: protected journal and phase checkpoint, harness adapter and candidate launcher, session limits, sealing/inspection and late authorized publication (ADR-0016); local follows the lifecycle in a trusted environment | the worker, which claims, requests plans, submits, relays and uploads |
+| **plan executor** | kora's code that executes a `CheckoutPlan` or a `PublishPlan`: in a trusted runtime or private worker-host publication environment, as negotiated; never credentialed in candidate metadata | the VCS, which only returns plans |

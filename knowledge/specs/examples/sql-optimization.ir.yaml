@@ -377,4 +377,3 @@ runtime:
 secrets:
   aliases:
     YT_TOKEN: "secret://env/YT_TOKEN"
-    GITHUB_TOKEN: "secret://file/github/dwh-bot"
