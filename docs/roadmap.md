@@ -21,7 +21,8 @@ These are the assumptions that only code can confirm, in the order they should b
 2. **The CEL binding.** The Rust-backed `common-expression-language` binding with kora's own schema checker ([ADR-0006](decisions/0006-graph-definition-dsl-and-yaml-representation.md)) has not been prototyped; the fallback is `cel-python` without static checking. Settle this in the first days of the first slice.
 3. **The fake harness and the fake runtime.** The testing rules in [AGENTS.md](../AGENTS.md) forbid mocks, so almost every test depends on these two fakes (`NFR-10.1`) passing the same conformance suites as real implementations. Their contract is not written separately from the protocols; the first slice writes them before the real adapters.
 4. **Scale.** The scheduler is designed for hundreds of concurrent attempts (`NFR-1`), which is unverified until a load test on PostgreSQL after the scheduler and worker exist as separate processes.
-5. **Product hypotheses.** "External demand", "multi-harness value" and "outer-loop value" in [positioning.md](positioning.md) are tested by the pilot on the canonical SQL optimisation graph, not by code.
+5. **Code-host backend behaviour.** ADR-0023 takes token lifetimes, rotation semantics and principal stability from provider documentation. The first slice confirms them for the GitHub App and the static backend through the code-host identity contracts of `protocols.md` §13; receiving GitHub App webhooks instead of polling follows after MVP.
+6. **Product hypotheses.** "External demand", "multi-harness value" and "outer-loop value" in [positioning.md](positioning.md) are tested by the pilot on the canonical SQL optimisation graph, not by code.
 
 ## Next steps, in order
 
