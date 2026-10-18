@@ -39,7 +39,7 @@ Three things are not confirmed:
 
 The scheduler contains no vendor-specific code. Credits or billing exhaustion and account holds are `config_error`, never retried, because waiting does not help. Authentication failures stay `config_error`. Overload and server errors stay `harness_error` under the node's retry policy.
 
-**It does not consume agent attempts.** As with `infrastructure` (NFR-2.4), a separate policy decides: `runtime.provider_retry`, with a namespace default. The policy is bounded by a persisted deadline, `max_wait` (default 6 hours, which covers a five-hour subscription window) after the node's first provider limit, not by a count. Every wake is capped at that deadline, quota-caused admission waits count towards it, and at the deadline the node fails with `provider_limited` even when the reset is days away.
+**It does not consume agent attempts.** As with `infrastructure` (NFR-2.4), a separate policy decides: `runtime.provider_retry`, with a namespace default. The policy is bounded by a persisted deadline, `max_wait` (default 6 hours, which covers a five-hour subscription window) after the node's first provider limit or its first admission refusal by a provider pause, whichever comes first, not by a count. The second case covers a node that has never executed and is held back by a limit another node observed on a shared quota. Every wake is capped at that deadline, quota-caused admission waits count towards it, and at the deadline the node fails with `provider_limited` even when the reset is days away.
 
 **The wait holds nothing.** The node gets an ordinary `wait` row:
 
