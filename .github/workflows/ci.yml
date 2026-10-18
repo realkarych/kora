@@ -81,8 +81,6 @@ jobs:
             --python "$PWD/.venv/bin/python" \
             --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
             --require-hashes --clear
-      - name: Inspect archives and isolated wheel installation
-        run: uv run --no-sync pytest -q tests/packaging
       - name: Check editable setup and unchanged dependency files
         run: |
           uv sync --locked --group build

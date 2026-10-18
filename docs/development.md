@@ -2,7 +2,9 @@
 
 Scope and implementation plan approved by the project owner under [issue #86](https://github.com/realkarych/kora/issues/86) on 2026-10-18; wording pending line-by-line owner review.
 
-The repository contains an importable typed Python package, a minimal React shell, distribution builds and packaging integration tests. The execution engine, HTTP API, CLI and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
+Packaging-test removal amendment dated 2026-10-19: removal decided by the project owner under [issue #112](https://github.com/realkarych/kora/issues/112); wording pending line-by-line owner review.
+
+The repository contains an importable typed Python package, a minimal React shell and distribution builds. The execution engine, HTTP API, CLI and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup
 
@@ -58,16 +60,15 @@ KORA_BUILD_OFFLINE=1 uv build --offline \
   --python "$PWD/.venv/bin/python" \
   --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
   --require-hashes --clear
-uv run --no-sync pytest -q tests/packaging
 
 uv sync --locked --group build
 git diff --exit-code -- pyproject.toml uv.lock web/package.json \
   web/pnpm-lock.yaml web/pnpm-workspace.yaml
 ```
 
-The packaging suite inspects both archives and installs the real wheel into a new environment. Its inspection runs outside the checkout with isolated Python so source imports cannot hide missing files. A missing distribution or absent tests is a failure. Generated archives are under `dist/`.
+The build writes both archives to `dist/`. No test inspects the archives or installs the wheel. The wheel build hook described below checks that the built `index.html` references only existing assets; nothing checks that those assets reach the wheel.
 
-Vite generates `src/kora/api/static/THIRD_PARTY_LICENSES.md` from the bundled frontend dependencies. The wheel includes this inventory and their license text alongside the generated assets. The installed-wheel inspection requires notices for React, React DOM and the bundled scheduler, and checks each dependency entry for substantive copyright, permission, notice-retention and warranty text. The project's Apache-2.0 metadata and license remain separate. The [dated packaging record](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#packaging-implementation-record) links the generation and upstream license references.
+Vite generates `src/kora/api/static/THIRD_PARTY_LICENSES.md` from the bundled frontend dependencies. The wheel includes this inventory and their license text alongside the generated assets. The project's Apache-2.0 metadata and license remain separate. The [dated packaging record](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#packaging-implementation-record) links the generation and upstream license references.
 
 The final sync installs kora as editable for Python development. Editable setup requires Python and uv, skips the frontend hook and does not package production assets. For frontend development, use `pnpm --dir web run dev`. A normal wheel build requires Node and pnpm: its hook performs a frozen install, type-checks and builds the frontend, then embeds `src/kora/api/static/`. The sdist carries those source inputs and toolchain files, so building a wheel from an sdist has the same Node and pnpm requirements. Installing an already-built wheel requires only supported Python; it does not invoke frontend tools.
 
@@ -116,7 +117,7 @@ On GitHub, native automatic review or a PR comment containing `@codex review` us
 
 ## CI and contributions
 
-[CI](../.github/workflows/ci.yml) runs every source, build and packaging check in three lanes: the supported Python floor on Linux and macOS, and the upper tested Python release on Linux. Exact interpreters and runner images are in the workflow and dated research. An explicitly selected interpreter takes precedence over the repository default; local alternate-interpreter checks can set `UV_PYTHON` before the initial sync. Each lane exports hashed constraints and primes registry metadata online, then builds offline from the sdist using the same constraints, checks a real wheel installation, and verifies editable setup and unchanged dependency files. Documentation, links, Mermaid diagrams, graph examples and GitHub templates remain separate required jobs.
+[CI](../.github/workflows/ci.yml) runs every source and build check in three lanes: the supported Python floor on Linux and macOS, and the upper tested Python release on Linux. Exact interpreters and runner images are in the workflow and dated research. An explicitly selected interpreter takes precedence over the repository default; local alternate-interpreter checks can set `UV_PYTHON` before the initial sync. Each lane exports hashed constraints and primes registry metadata online, then builds offline from the sdist using the same constraints, and verifies editable setup and unchanged dependency files. Documentation, links, Mermaid diagrams, graph examples and GitHub templates remain separate required jobs.
 
 CI caches dependency stores using lockfile-derived keys, with separate uv cache suffixes for each Python lane and documentation job. It does not cache virtual environments; the pnpm setup action owns the sole pnpm store cache. Check actual restore/save logs when comparing a cold run with a warm repeat. The complete workflow must finish in under ten minutes, measured from the earliest job start to the latest job completion; individual job timeouts do not prove that budget.
 
