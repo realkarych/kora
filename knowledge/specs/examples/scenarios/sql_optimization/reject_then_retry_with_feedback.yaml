@@ -1,13 +1,14 @@
 graph: sql_optimization
 description: The final approval is rejected with a comment; the scenario retries the producing node through the public retry operation, and the new attempt receives the comment.
 params: { target_task: daily_revenue }
+secrets: { YT_TOKEN: dummy-warehouse-token }
 overrides:
   - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
   - { select: "candidates[0]/dev_run", exit_code: 0, output: { cpu_seconds: 70.0, output_path: out.json }, reason: needs the warehouse }
   - { select: "candidates[0]/equivalence", exit_code: 0, reason: needs the warehouse }
   - { select: "candidates[0]/dev_run@2", exit_code: 0, output: { cpu_seconds: 60.0, output_path: out.json }, reason: needs the warehouse }
   - { select: "candidates[0]/equivalence@2", exit_code: 0, reason: needs the warehouse }
-  - { select: confirm_gain, exit_code: 0, output: { confirmed: true }, reason: needs the warehouse }
+  - { select: confirm_gain, exit_code: 0, output: { cpu_seconds: 68.0, output_path: out.json }, reason: needs the warehouse }
 outcomes:
   - { select: find_target, outputs: { target: { task_id: daily_revenue, query_path: q/daily_revenue.sql } } }
   - { select: hypotheses, outputs: { result: [ { title: push filter down, task_id: daily_revenue } ] } }
@@ -21,7 +22,7 @@ actions:
   - { when: { waiting: final_pr }, do: { respond: { decision: rejected, comment: add an index instead of rewriting the join, reviewer: reviewer-1 } } }
   - { when: { settled: true }, do: { retry: { node: "candidates[0]/implement", strategy: fresh_with_feedback } } }
   - { when: { waiting: final_pr }, do: { respond: { decision: approved, reviewer: reviewer-1 } } }
-  - { when: { waiting: prestable_rollout }, do: { event: { name: deploy.finished, payload: { commit: "$from: bundle.bundle.facts.change.commit" } } } }
+  - { when: { waiting: prestable_rollout }, do: { event: { name: deploy.finished, payload: { commit: "$from: bundle@2.bundle.facts.change.commit" } } } }
 expect:
   run: succeeded
   feedback_contains: { "candidates[0]/implement@2": add an index instead of rewriting the join }

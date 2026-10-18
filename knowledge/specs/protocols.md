@@ -603,7 +603,9 @@ These are **future executable test contracts** for [dsl.md](dsl.md) section 4; d
 | `test_scenario_retry_then_success` | `implement@1` fails with `stalled` and `implement@2` succeeds; back-off passes on virtual time; two attempts are recorded |
 | `test_virtual_time_waits_for_real_commands` | A timer due while a real command runs fires only after the command exits |
 | `test_watchdog_releases_processes` | A hanging command is terminated at the limit; the result is `error: watchdog_expired` and no child process survives |
-| `test_scenario_isolation_is_enforced` | A command that opens a network connection or reads an undeclared secret fails; on a host that cannot enforce it the record says `network: unenforced` and strict mode fails |
+| `test_scenario_isolation_is_enforced` | A command that opens a network connection fails, and resolving an alias the scenario does not declare is an execution error; on a host that cannot enforce the network the record says `network: unenforced` and strict mode fails. On `docker` a command cannot read a credential file planted on the host (`filesystem: isolated`); on `local` the record says `filesystem: shared` |
+| `test_scenario_actions_are_ordered` | Reject, then a public retry on `settled`, then approve on the new activation: each action fires once in file order, the approval responds to the second activation, and an action left armed is reported unused |
+| `test_empty_fan_out_succeeds` | An empty `over` list gives a succeeded fan-out with empty outputs on both `skip_failures` values; a non-empty list whose instances all fail still fails |
 | `test_scenarios_run_on_both_fake_vcs` | A Git-independent scenario passes on the directory-backed VCS and on the local Git backend |
 | canonical scenarios | Each file in [examples/scenarios/sql_optimization/](examples/scenarios/sql_optimization/) passes with the status its `expect` states |
 

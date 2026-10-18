@@ -1,6 +1,7 @@
 graph: sql_optimization
-description: The hypotheses node returns an empty list, so the fan-out has no items; selection runs over an empty input and fails on it, which is a different failure from every item failing.
+description: The hypotheses node returns an empty list, so the fan-out has no items and succeeds with an empty candidate list (ir.md section 4.4); selection runs over that empty input and fails on it, which is a different failure from every item failing.
 params: { target_task: daily_revenue }
+secrets: { YT_TOKEN: dummy-warehouse-token }
 overrides:
   - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
 outcomes:

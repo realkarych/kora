@@ -1,13 +1,14 @@
 graph: sql_optimization
 description: Two hypotheses; one passes review and the gates, is approved, rolls out and confirms its gain.
 params: { target_task: daily_revenue }
+secrets: { YT_TOKEN: dummy-warehouse-token }
 overrides:
   - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
   - { select: "candidates[0]/dev_run", exit_code: 0, output: { cpu_seconds: 70.0, output_path: out.json }, reason: needs the warehouse }
   - { select: "candidates[0]/equivalence", exit_code: 0, reason: needs the warehouse }
   - { select: "candidates[1]/dev_run", exit_code: 0, output: { cpu_seconds: 95.0, output_path: out.json }, reason: needs the warehouse }
   - { select: "candidates[1]/equivalence", exit_code: 0, reason: needs the warehouse }
-  - { select: confirm_gain, exit_code: 0, output: { confirmed: true }, reason: needs the warehouse }
+  - { select: confirm_gain, exit_code: 0, output: { cpu_seconds: 68.0, output_path: out.json }, reason: needs the warehouse }
 outcomes:
   - { select: find_target, outputs: { target: { task_id: daily_revenue, query_path: q/daily_revenue.sql } } }
   - select: hypotheses

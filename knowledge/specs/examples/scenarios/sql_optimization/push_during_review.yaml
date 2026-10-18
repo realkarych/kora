@@ -1,6 +1,7 @@
 graph: sql_optimization
 description: A push to the candidate branch while the final approval is open invalidates the request and fails the approval node; no downstream node runs.
 params: { target_task: daily_revenue }
+secrets: { YT_TOKEN: dummy-warehouse-token }
 overrides:
   - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
   - { select: "candidates[0]/dev_run", exit_code: 0, output: { cpu_seconds: 70.0, output_path: out.json }, reason: needs the warehouse }

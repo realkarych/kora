@@ -1,6 +1,7 @@
 graph: sql_optimization
 description: The agent's change touches a protected path; the gate that follows fails before it runs, and the change never reaches review.
 params: { target_task: daily_revenue }
+secrets: { YT_TOKEN: dummy-warehouse-token }
 overrides:
   - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
 outcomes:
