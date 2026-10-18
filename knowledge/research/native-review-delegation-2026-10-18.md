@@ -2,7 +2,7 @@
 
 Checked: 2026-10-18. Scope: native GitHub Codex review for kora, not local CLI/app delegation or product harness compatibility.
 
-Status: procedure recorded; the diagnostic has not started. No native delegation capability is claimed by this revision.
+Result: native review completed on the requested revision; separate fresh profile-agent execution remains **unverified**. The service did not explicitly reject delegation, so this is not an unsupported-capability finding.
 
 ## Requirement and authorization
 
@@ -66,4 +66,52 @@ The evidence boundary maps to TM-03 (untrusted repository content), TM-06/TM-07 
 
 ## Execution record
 
-The trigger, service-reviewed revision, response links, observed delegation evidence and verdict will be recorded after the single diagnostic run. This procedure-only state must not be interpreted as a successful capability test.
+One diagnostic request was submitted to the draft [PR #96](https://github.com/realkarych/kora/pull/96). All timestamps below are UTC on 2026-10-18.
+
+| Evidence | Observation |
+|---|---|
+| Approved base | `1b69b09a215243e1169f15ff28c06df2a088f14b` |
+| Requested and service-reviewed head | `d889a755010caca8100a4de6f0336c13d1e0b1c2` |
+| Exact request and trigger time | [Comment 6252074306](https://github.com/realkarych/kora/pull/96#issuecomment-6252074306), 16:06:52 |
+| Service acceptance | Bot eye reaction at 16:07:04; summary recorded running since 16:07:06.754424 |
+| Completed summary | [Comment 6252077283](https://github.com/realkarych/kora/pull/96#issuecomment-6252077283), service completion 16:10:34.669990 |
+| Separate completion receipt | [Comment 6252112056](https://github.com/realkarych/kora/pull/96#issuecomment-6252112056), created 16:10:33; short reviewed SHA `d889a75501` |
+| Authenticated provenance | GitHub API author `chatgpt-codex-connector[bot]`, user ID `199175422`; `performed_via_github_app.id` = `1144995`, slug `chatgpt-codex-connector` |
+| Reported finding state | `has_any_findings: false`, `has_unresolved_findings: false`; no separate GitHub review submissions or inline review comments were present |
+| Latency | Approximately 223 seconds from trigger to the service completion timestamp, within the ten-minute observation budget |
+| Native check runs | None observed; the eight checks on the probe SHA belong to GitHub Actions, App ID `15368` |
+| Child execution/profile/freshness evidence | No child identities, tool-dispatch events, fresh-context metadata or profile-level results exposed by the inspected GitHub responses |
+| Internal task activity | Not inspected: the ChatGPT browser interface stopped at a Cloudflare human-verification challenge. No challenge bypass or alternate authenticated interface was used. |
+
+The summary's observed `codex-review-state:v1` data was:
+
+```json
+{
+  "code_review": {
+    "commit_sha": "d889a755010caca8100a4de6f0336c13d1e0b1c2",
+    "has_any_findings": false,
+    "has_unresolved_findings": false,
+    "status": "completed"
+  },
+  "security_review": {
+    "commit_sha": null,
+    "has_any_findings": null,
+    "has_unresolved_findings": null,
+    "status": null
+  }
+}
+```
+
+This is an observed comment format, not a documented stable API. The separate `security_review` field describes the service's distinct Security Review feature; its null value says nothing about whether a security-profile child ran inside Code Review. The completion summary can be updated by later reviews, so its captured values above remain tied to the diagnostic head and timestamp. The separate receipt and request retain their own links.
+
+**Verdict: unverified.** The experiment confirms admission of this manual request and native review completion on a draft PR at the expected head. It does not establish that the service applied the delegation exception, loaded either profile, spawned any child, or used fresh contexts. The absence of those observations does not establish that the native service lacks those capabilities.
+
+The native result cannot satisfy the required independent-profile evidence. Executor selection remains open. Inspecting an accessible service-origin trace for this existing run is the next way to resolve the uncertainty without another model request; any alternative executor needs its own implementation plan. A new runner, key, dependency, routing catalog or required status check has not been adopted.
+
+## Verification of the research change
+
+At the probe revision, independent correctness and security reviews found no actionable defects in the complete three-file diff. Local CI-equivalent checks passed: strict Python format/lint/types, frontend typecheck/lint/production build, offline hash-constrained sdist/wheel builds, both packaging tests, editable installation and unchanged dependency files, Markdown, offline links/anchors, Mermaid, IR examples and GitHub templates. The toolchain was uv 0.13.1, Python 3.11.17, Node 24.22.0, pnpm 12.14.0 and lychee 0.24.2.
+
+[All eight CI jobs passed on the probe SHA](https://github.com/realkarych/kora/actions/runs/39143414655), including Linux Python 3.11/3.15 and macOS Python 3.11. Elapsed workflow time was 66 seconds, from earliest job start at 16:05:25 to latest completion at 16:06:31. These checks validate the research/scaffold change, not hidden service behavior or resource-leak absence.
+
+The evidence additions change the report revision after the diagnostic. Final-report independent reviews and CI must cover that later revision and are linked in [PR #96](https://github.com/realkarych/kora/pull/96); the historical probe result must not be promoted to a native review of the later report.
