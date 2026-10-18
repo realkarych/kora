@@ -273,7 +273,7 @@
       "properties": {
         "cmd": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
         "output_file": { "type": "string" },
-        "resources": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["name", "sha256", "size", "executable"], "properties": { "name": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.{1,2}(/|$))[^\\u0000]+$" }, "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0, "maximum": 262144 }, "executable": { "type": "boolean" } }, "additionalProperties": false } },
+        "resources": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["name", "sha256", "size", "executable"], "properties": { "name": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+$" }, "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0, "maximum": 262144 }, "executable": { "type": "boolean" } }, "additionalProperties": false } },
         "resource_set_digest": { "$ref": "#/$defs/digest" },
         "workspace": { "$ref": "#/$defs/workspace" },
         "env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "type": "string" } },

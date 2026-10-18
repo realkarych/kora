@@ -602,6 +602,8 @@ These are **future executable test contracts**; documentation CI does not run th
 
 | test | setup and observable assertion |
 |---|---|
+| `test_compile_exit_then_deploy` | Compile a graph with resources, delete the graph module and the original resource files, then deploy from the IR and its resource bundle alone; the version deploys and runs. A bundle file edited after compilation is refused before any request |
+| `test_resource_set_digest_vector` | The compiler, the API and the runtime each compute the documented test vector of `ir.md` section 4, including the name with a quote and a non-ASCII letter, and reject names with control characters or backslashes |
 | `test_resources_run_without_graph_package` | A worker host without the graph package or the author's files runs a command node from fetched resources and records their digests |
 | `test_graph_runs_on_repository_without_gates` | The canonical graph runs against a target repository that has no `tools/gates/` directory |
 | `test_changed_content_same_name_is_new_version` | Editing a resource without renaming it changes its digest and deploys a new graph version; runs of the old version keep executing the old bytes |
