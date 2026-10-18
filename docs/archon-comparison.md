@@ -36,7 +36,7 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 | Isolation | git worktree per run, not a sandbox | fresh checkout per node, container per attempt | kora |
 | Work without a VCS | yes | no | Archon |
 | VCS | git only | protocol; a non-git VCS is part of MVP acceptance | kora |
-| GitHub integration | GitHub App, bot identity, label and check events with a queue | generic webhook and sensors | Archon |
+| GitHub integration | GitHub App, bot identity, label and check events with a queue | GitHub App issuance with purpose-scoped credentials and a stable bot principal (ADR-0023); App webhooks after MVP, generic webhook and sensors until then | Archon |
 | Runtime | host process only | protocol: local, Docker, adopter runtimes | kora |
 | Cron and sensors | macOS launchd interval, no sensors | cron with time zones, sensors | kora |
 | Observability | logs, event stream, product telemetry | OpenTelemetry, Prometheus, audit log | kora |
