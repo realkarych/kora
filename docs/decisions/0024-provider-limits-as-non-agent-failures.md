@@ -39,7 +39,7 @@ Three things are not confirmed:
 
 The scheduler contains no vendor-specific code. Credits or billing exhaustion and account holds are `config_error`, never retried, because waiting does not help. Authentication failures stay `config_error`. Overload and server errors stay `harness_error` under the node's retry policy.
 
-**It does not consume agent attempts.** As with `infrastructure` (NFR-2.4), a separate policy decides: `runtime.provider_retry`, with a namespace default. The policy is bounded by the total time spent waiting (`max_wait`, default 6 hours, which covers a five-hour subscription window), not by a count. Past `max_wait` the node fails with `provider_limited`.
+**It does not consume agent attempts.** As with `infrastructure` (NFR-2.4), a separate policy decides: `runtime.provider_retry`, with a namespace default. The policy is bounded by a persisted deadline, `max_wait` (default 6 hours, which covers a five-hour subscription window) after the node's first provider limit, not by a count. Every wake is capped at that deadline, quota-caused admission waits count towards it, and at the deadline the node fails with `provider_limited` even when the reset is days away.
 
 **The wait holds nothing.** The node gets an ordinary `wait` row:
 
@@ -48,12 +48,13 @@ The scheduler contains no vendor-specific code. Credits or billing exhaustion an
 
 Neither case holds a worker or a runtime slot.
 
-**One pause per quota, not per alias.** Each harness adapter's deployment binding declares a **quota resource key** naming the provider account or organisation whose limits apply. Under ADR-0021's rule for deployment bindings, aliases on one account declare the same key; a binding without a key is its own resource. The pause is keyed by `(quota resource key, limit group)`:
+**One pause per quota, not per alias.** Each harness adapter's deployment binding declares its `quota`: a **quota resource** naming the provider account or organisation whose limits apply, the **quota groups** with the model patterns each covers, and the mapping from vendor limit-group names to those groups, with defaults shipped by the adapter. The scheduler decides only on these declared ids and patterns. Under ADR-0021's rule for deployment bindings, aliases on one account declare the same quota resource; a binding without one is its own resource. The pause is keyed by `(quota resource, quota group)`:
 
-- the limit group is the one the signal names: Claude's `rateLimitType` (`seven_day_opus` and `seven_day_sonnet` are model-specific, `five_hour` and `seven_day` account-wide), or Codex's `limitId`;
-- when the signal names no group, the pause covers the whole resource.
+- the quota group is the binding's mapping of the vendor group the signal names: Claude's `rateLimitType` (by default `seven_day_opus` and `seven_day_sonnet` map to model groups, `five_hour` and `seven_day` to an account-wide group), or Codex's `limitId`;
+- a model may fall in several groups, and an attempt is held when any paused group covers its model;
+- when the signal names no group, or a group the binding does not map, the pause covers the whole resource.
 
-The admission pass admits no attempt whose binding and model fall under an active pause.
+The pause is applied when the limit is observed, monotonically, without waiting for the attempt to terminate. The admission pass admits no attempt whose model a paused group of its quota resource covers, and after a pause expires it releases waiting attempts paced, a few per interval, so overdue waiters after a restart do not all start at once.
 
 **Internal retries are bounded liveness.** Signals that the harness is retrying internally count as liveness, so `stall_after` does not fire while the harness visibly retries. The adapter sets the harness's own retry ceiling. The session runner stops a session that reports a rejected limit whose reset lies beyond `stall_after`: it interrupts the session, which ends through the normal collection and publication lifecycle so partial work is kept, and the attempt fails with `provider_limited`. A harness that retries silently, with no event, is indistinguishable from a stall and is classified `stalled`.
 
@@ -63,14 +64,16 @@ The admission pass admits no attempt whose binding and model fall under an activ
 
 - **Count provider limits against the node's attempts.** Rejected: a limit says nothing about the agent's work, and a multi-hour quota would always exhaust a policy sized in minutes.
 - **Wait without a ceiling.** Rejected: a revoked or exhausted account would hold runs indefinitely.
-- **Pause by namespace, alias and model.** Rejected: two aliases on one account share a limit, and several models can share one quota; the quota resource key and limit group follow the provider's actual limit.
+- **Pause by namespace, alias and model.** Rejected: two aliases on one account share a limit, and several models can share one quota; the declared quota resource and groups follow the provider's actual limit.
+- **Pause at terminal completion.** Rejected: an attempt whose publication or closure stays unresolved would leave other runs on the same quota unpaused.
+- **Rely on jittered wake times alone.** Rejected: after a restart every overdue waiter would be admitted in one pass; release is paced at admission instead.
 - **A fallback model in MVP.** Deferred: a silent model change alters quality and cost. If it returns, it will be explicit and recorded.
 - **A provider quota pool with token-rate accounting.** Deferred with finding A12 of the architecture critique of 2026-10-16; the pause covers the retry storm without counting tokens.
 - **A `wait` row as the pause.** Rejected: a pause belongs to no node instance; it is a small table of its own.
 
 ## Consequences
 
-- One error class, one retry policy field, one table (`provider_pause`) and one binding field (`quota_resource`) are added.
+- One error class, one retry policy field, one table (`provider_pause`), one persisted node deadline (`provider_wait_deadline`) and one binding block (`quota`) are added.
 - The adapter mapping is a hypothesis until the first slice records a trace per harness, as `docs/roadmap.md` states.
 - Code-host credentials (issue #43) are a different identity and are not involved.
 
