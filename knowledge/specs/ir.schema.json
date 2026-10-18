@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kora.dev/schemas/ir/1.0.json",
   "title": "kora graph IR",
-  "description": "Draft JSON Schema for kora IR version 1.x. Root is lenient on unknown keys; typed sub-objects are strict. Keys prefixed with x- are allowed everywhere.",
+  "description": "Draft JSON Schema for kora IR version 1.x. Root is lenient on unknown keys; typed sub-objects are strict. Keys prefixed with x- are allowed on IR record objects, including nested records. Named maps and embedded schemas retain their own rules.",
   "type": "object",
   "required": ["ir_version", "type_contracts", "graph", "runtime"],
   "properties": {
@@ -39,6 +39,7 @@
           "additionalProperties": { "$ref": "#/$defs/secretRef" }
         }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     }
   },
@@ -64,6 +65,7 @@
           "minLength": 1
         }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "typeContract": {
@@ -79,6 +81,7 @@
               "minLength": 1
             }
           },
+          "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
         {
@@ -115,6 +118,7 @@
               "$ref": "#/$defs/typeBehavior"
             }
           },
+          "patternProperties": { "^x-": {} },
           "additionalProperties": false
         }
       ]
@@ -131,16 +135,17 @@
         "transcripts": { "$ref": "#/$defs/retentionPeriod" },
         "artifact_payloads": { "$ref": "#/$defs/retentionPeriod" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "expression": { "type": "string", "minLength": 1, "description": "CEL expression" },
     "secretRef": { "type": "string", "pattern": "^secret://[a-z][a-z0-9_-]*/[A-Za-z0-9_./-]+$" },
-    "artifactType": { "type": "string", "pattern": "^(List\\[)?([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*(\\])?$" },
+    "artifactType": {"type": "string", "pattern": "^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\\[(List\\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\\]+)$", "description": "Structural spelling only. Semantic validation parses recursive List[T] and rejects unbalanced nesting without imposing a depth limit."},
     "errorClass": {
       "type": "string",
       "enum": ["harness_error", "command_failed", "timeout", "events_exhausted", "budget_exhausted",
                "artifact_invalid", "attempt_failed", "approval_rejected", "approval_expired", "candidate_moved", "wait_expired",
-               "stalled", "provider_limited", "integrity_error", "infrastructure", "cancelled", "config_error"]
+               "stalled", "provider_limited", "protected_path_modified", "secret_leak", "integrity_error", "infrastructure", "cancelled", "config_error"]
     },
     "triggerRule": {
       "type": "string",
@@ -150,6 +155,7 @@
       "type": "object",
       "required": ["file", "line"],
       "properties": { "file": { "type": "string" }, "line": { "type": "integer", "minimum": 1 } },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "retry": {
@@ -209,6 +215,7 @@
         "allow": { "type": "array", "items": { "type": "string" } },
         "deny": { "type": "array", "items": { "type": "string" } }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "mcpServer": {
@@ -221,10 +228,11 @@
         "url": { "type": "string" },
         "env": { "type": "object", "additionalProperties": { "type": "string" } },
         "secret_env": { "type": "object", "additionalProperties": { "$ref": "#/$defs/envName" } },
-        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false },
+        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "patternProperties": {"^x-": {}}, "additionalProperties": false },
         "headers": { "type": "object", "additionalProperties": { "type": "string" } },
         "digest": { "$ref": "#/$defs/digest", "description": "package or image digest the server is pinned to; filled at deploy when absent" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "workspace": {
@@ -235,6 +243,7 @@
         "rev": { "type": "string", "description": "revision or template expression" },
         "from_ref": { "type": "string", "description": "input path of a VcsRef to check out instead of rev" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "agentConfig": {
@@ -256,6 +265,7 @@
         "network_policy": {
           "type": "object",
           "properties": { "egress": { "type": "array", "items": { "type": "string" } } },
+          "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
         "workspace": { "$ref": "#/$defs/workspace" },
@@ -274,12 +284,12 @@
       "properties": {
         "cmd": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
         "output_file": { "type": "string" },
-        "resources": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["name", "sha256", "size", "executable"], "properties": { "name": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+$" }, "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0, "maximum": 262144 }, "executable": { "type": "boolean" } }, "additionalProperties": false } },
+        "resources": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["name", "sha256", "size", "executable"], "properties": { "name": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+$" }, "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0, "maximum": 262144 }, "executable": { "type": "boolean" } }, "patternProperties": {"^x-": {}}, "additionalProperties": false } },
         "resource_set_digest": { "$ref": "#/$defs/digest" },
         "workspace": { "$ref": "#/$defs/workspace" },
         "env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "type": "string" } },
         "secret_env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "$ref": "#/$defs/envName" } },
-        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false },
+        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "patternProperties": {"^x-": {}}, "additionalProperties": false },
         "success_exit_codes": { "type": "array", "items": { "type": "integer" } },
         "runtime": { "type": "string" },
         "vcs": { "type": "string" }
@@ -302,6 +312,7 @@
             "vcs_ref": { "type": "string" },
             "gate_digests": { "type": "array", "items": { "type": "string" } }
           },
+          "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
         "approve_when": { "$ref": "#/$defs/expression" },
@@ -323,6 +334,7 @@
             "name": { "type": "string" },
             "match": { "$ref": "#/$defs/expression" }
           },
+          "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
         "poll": { "$ref": "#/$defs/sensorPoll" },
@@ -341,6 +353,7 @@
         "config": { "type": "object", "description": "sensor-specific configuration, validated by the implementation" },
         "until": { "$ref": "#/$defs/expression" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "timerConfig": {
@@ -350,6 +363,7 @@
         "duration": { "$ref": "#/$defs/duration" },
         "at": { "type": "string", "format": "date-time", "description": "absolute wake time; no expressions" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "branchConfig": {
@@ -367,12 +381,14 @@
               "to": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})$" }, "minItems": 1 },
               "reason": { "$ref": "#/$defs/expression" }
             },
+            "patternProperties": { "^x-": {} },
             "additionalProperties": false
           }
         },
         "else": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})$" } },
         "else_reason": { "$ref": "#/$defs/expression" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "fanOutConfig": {
@@ -384,6 +400,7 @@
         "max_parallel": { "type": "integer", "minimum": 1 },
         "skip_failures": { "type": "boolean" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "subgraphNodeConfig": {
@@ -392,6 +409,7 @@
       "properties": {
         "body": { "$ref": "#/$defs/id" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "node": {
@@ -429,6 +447,13 @@
     "trigger": {
       "type": "object",
       "required": ["kind"],
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "manual"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params"]}, {"pattern": "^x-"}]}}},
+        {"if": {"properties": {"kind": {"const": "cron"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "expr", "timezone"]}, {"pattern": "^x-"}]}, "required": ["expr"]}},
+        {"if": {"properties": {"kind": {"const": "webhook"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "name", "auth", "params_from"]}, {"pattern": "^x-"}]}, "required": ["name", "auth"]}},
+        {"if": {"properties": {"kind": {"const": "sensor"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "poll", "interval"]}, {"pattern": "^x-"}]}, "required": ["poll", "interval"]}},
+        {"if": {"properties": {"kind": {"const": "graph"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "graph", "on"]}, {"pattern": "^x-"}]}, "required": ["graph", "on"]}}
+      ],
       "properties": {
         "kind": { "type": "string", "enum": ["manual", "cron", "webhook", "sensor", "graph"] },
         "expr": { "type": "string" },
@@ -441,6 +466,7 @@
             "kind": { "type": "string", "enum": ["hmac", "bearer"] },
             "secret": { "$ref": "#/$defs/envName" }
           },
+          "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
         "params_from": { "type": "string", "enum": ["payload", "none"] },
@@ -450,6 +476,7 @@
         "graph": { "type": "string" },
         "on": { "type": "string", "enum": ["run_succeeded", "run_failed", "run_finished"] }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "targetConfig": {
@@ -458,12 +485,13 @@
       "properties": {
         "key": {
           "oneOf": [
-            { "type": "object", "required": ["param"], "properties": { "param": { "type": "string", "minLength": 1, "description": "a run parameter of graph.params; bound when the run is created" } }, "additionalProperties": false },
-            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "description": "one scalar string in a top-level node output; key binds once when the complete source result is atomically accepted (ADR-0019)" } }, "additionalProperties": false }
+            { "type": "object", "required": ["param"], "properties": { "param": { "type": "string", "minLength": 1, "description": "a run parameter of graph.params; bound when the run is created" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false },
+            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "description": "one scalar string in a top-level node output; key binds once when the complete source result is atomically accepted (ADR-0019)" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false }
           ]
         },
         "on_active": { "type": "string", "enum": ["allow", "defer"], "description": "what a new run does while another run of the namespace holds the same target; when absent: allow (FR-6.11, ADR-0014)" }
       },
+      "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
     "graphBody": {
@@ -487,6 +515,7 @@
             "type": "object",
             "required": ["type", "from", "output"],
             "properties": { "type": { "$ref": "#/$defs/artifactType" }, "from": { "$ref": "#/$defs/id" }, "output": { "$ref": "#/$defs/id" } },
+            "patternProperties": { "^x-": {} },
             "additionalProperties": false
           }
         },
@@ -530,6 +559,7 @@
             "max_running_nodes": { "type": "integer", "minimum": 1, "description": "Live graph-wide cap on all non-terminal physical attempts across graph versions; cap source is the newest active graph version, or newest deployed when none is active (ADR-0020)." },
             "max_running_runs": { "type": "integer", "minimum": 1, "description": "Live graph-wide cap on distinct runs with any non-terminal physical attempt, including historical or unknown work; no-attempt waits reserve no execution-run slot. Counts span versions and caps use the newest active graph version, or newest deployed when none is active (ADR-0020)." }
           },
+          "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
         "limits": { "$ref": "#/$defs/limits" },

@@ -9,6 +9,8 @@
 - Related: [0001-own-control-plane.md](0001-own-control-plane.md), [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0004-harness-adapters-over-vendor-sdks.md](0004-harness-adapters-over-vendor-sdks.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
+Evidence wording amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
+
 ## Context
 
 The architecture fixes a control plane, outbound-only workers per runtime, protocol implementations loaded by entry points, and four thin clients of the API. The stack had to serve all of these from one repository and keep standalone mode (one process on SQLite) identical in behaviour to the platform deployment on PostgreSQL (NFR-0.1). The design review of 2026-10-15 refined two rows: [one shared client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) instead of three generated ones, and the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details).
@@ -38,7 +40,7 @@ Per row, as recorded in the [stack reference](../../knowledge/architecture/detai
 
 The stack must preserve the boundaries of the architecture: the API is the only writer of operations and the clients hold no logic; agent sessions never reach kora and the policy decision point runs in the session runner; the scheduler never imports user Python, only IR rows; workers execute one attempt and report through the API under their lease epoch; protocol implementations are loaded by entry points, never imported by name; nothing may exist only in standalone mode; the session runner inside the runtime is the only enforcer of harness event-count, soft-budget and stall limits. Inherited lifecycle deadlines also govern the runtime/common executor wherever preparation or publication runs, including the worker host (ADR-0022); this changes no stack choice.
 
-Load: at the target scale of NFR-1.1 the implementation language is not the bottleneck; the database, artifact storage volume and the model providers are, and the session runner is the only candidate for a rewrite if its memory becomes a measured problem ([load estimate](../../knowledge/analysis/control-plane-load-estimate.md)).
+Load: the [planning estimate](../../knowledge/analysis/control-plane-load-estimate.md) is unmeasured and does not establish a bottleneck or capacity headroom. Keep the accepted stack; measure the NFR-1.1 workload before proposing a change, including runner memory, database contention, storage and event-loop latency.
 
 Practical effects: a pnpm toolchain is needed to build the package; CEL depends on a compiled binding; Docker-dependent tests run on the Linux CI job only; protocol implementations are written against async interfaces.
 

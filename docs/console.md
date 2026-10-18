@@ -8,6 +8,8 @@ Publication-boundary amendment dated 2026-10-17: pending owner review; architect
 
 External-observation amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0021](decisions/0021-external-observations-outside-transactions.md).
 
+Consistency amendment dated 2026-10-18: scope approved under [issue #95](https://github.com/realkarych/kora/issues/95); wording pending line-by-line owner review.
+
 ## Who it is for
 
 The console is designed for the engineer who owns targets: the person who triggers a run, waits for it, approves the change it produces and handles the errors on the way. Those are the three human touchpoints of the canonical use case in [positioning.md](positioning.md), and they are the three things the console lets a person do. The platform team has its own section, System, which is never the entry screen.
@@ -91,7 +93,7 @@ The console performs the three human touchpoints and nothing else: approve, on t
 - Quiet transitions: a colour changes with a short transition and nothing pulses, spins or blinks; running is shown by the colour and a time line refreshed once a minute; the graph layout never moves with states; new rows appear at the top of lists without shifting the scroll position. A page with live data says how live it is in one quiet word at the end of its header line: live, reconnecting, or stale with the time of the last update; a lost session returns the person to the same address after they log in again.
 - One primary task per screen: the graph page shows a graph, the review page lets a person decide, the target page says where a target stands; detail opens on click, never in a dense panel.
 - Every empty place says what is missing and the one way to fill it: a copyable command when the way is the CLI, a button when it is the console; the sentences are in [pages.md](../knowledge/design/console/pages.md).
-- Nothing is drawn half-ready: a region holds a gray placeholder of its own size until its data arrive, the graph is drawn only when both the topology and the run are present and in its final colours, a run stays on the canvas until the next one is ready, and a quiet "loading" word appears only after a second.
+- Nothing is drawn half-ready: a region holds a gray placeholder of its own size until its data arrive, a selected run is drawn only when both its topology and state are present and in its final colours; after a confirmed empty run list, the latest active topology is drawn in gray, a run stays on the canvas until the next one is ready, and a quiet "loading" word appears only after a second.
 - Times shorter than a day are relative, timestamps are absolute in the browser's timezone, and "today" on a cost figure is the namespace's day, named on the Cost page; an amount with incomplete accounting carries the word `partial`.
 - The console is laid out for a window of 1280 px or wider; between 768 and 1279 px the runs list starts collapsed and the node panel slides over the canvas; every page but the graph canvas works down to a phone, where the review page and the lists answer "did it go through"; the graph on a phone is deferred.
 - The whole console works from the keyboard: the arrow keys walk the graph, Enter opens a node, Esc returns to it, and every node, strip and row has a name a screen reader can say; the rules are in [pages.md](../knowledge/design/console/pages.md).
