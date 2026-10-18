@@ -1,9 +1,10 @@
-# Canonical SQL optimisation graph from docs/positioning.md, compiled from the DSL sketch in
-# docs/requirements/functional.md Appendix A. Machine-generated file class (NFR-6.4); never hand-edited.
+# Canonical SQL optimisation design fixture; corresponds to the sketch in knowledge/specs/dsl.md.
+# Hand-maintained until the compiler exists. Compiler identity and source digest below are illustrative,
+# not evidence of compilation. CI checks structural schema validity only.
 $schema: "https://kora.dev/schemas/ir/1.0.json"
 ir_version: "1.0"
 meta:
-  compiler: "kora 0.1.0"
+  compiler: "design-fixture (compiler not implemented)"
   source_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000001"
   presets:
     optimizer:

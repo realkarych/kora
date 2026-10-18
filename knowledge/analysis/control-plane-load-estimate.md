@@ -1,50 +1,30 @@
-# Control-plane load estimate and the choice of Python
+# Control-plane load assumptions
 
-Date: 2026-10-16. Method: back-of-the-envelope estimate from the scale targets in NFR-1.1 and the protocol and API design in `knowledge/specs/`; nothing was measured. The load test listed in [docs/roadmap.md](../../docs/roadmap.md) replaces these numbers once code exists.
+Estimated on 2026-10-16; arithmetic and evidence limits corrected on 2026-10-18 under issue #95. Nothing was measured. These are planning inputs, not capacity claims. [ADR-0013](../../docs/decisions/0013-implementation-stack.md) owns the stack choice; [NFRs](../../docs/requirements/non-functional.md) and the [roadmap](../../docs/roadmap.md) own validation targets.
 
-## Question
+## Assumed workload
 
-At the target scale, does Python become the bottleneck of any kora component, and where would Go or Rust be materially better?
+- 500 concurrent sessions at peak, 150 on average.
+- A session lasts 20 minutes and emits 300 normalized events: 0.25 events/s, assumed 2,000 bytes/event.
+- Example upload interval 5 seconds and lease-renewal interval 15 seconds. These are estimate inputs, not new protocol defaults.
+- An independent volume scenario has 50,000 runs/month and 20 node instances/run. It implies roughly 0.386 node instances/s over 30 days; not every node is an agent session. It must be reconciled with the concurrency/duration assumptions in a real pilot.
 
-## Assumptions
+## Conditional arithmetic
 
-- 500 agent sessions running concurrently at peak, about 150 on average (NFR-1.1: hundreds of concurrent agent nodes).
-- 50,000 runs per month with about 20 node instances each, so about one million node instances per month.
-- A session lasts about 20 minutes and produces about 300 normalised events (turns, tool calls, tool results): about 0.25 events per second per session, 2 KB per event on average.
-- Workers upload session events in segments every 5 seconds and renew leases every 15 seconds ([ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md)); workers poll for claims once per second.
-- Tens of people and their own coding agents use the console, the CLI and the MCP servers at the same time.
+| Quantity | Derived value |
+|---|---|
+| Peak renewals | 500 / 15 ≈ 33 requests/s |
+| Peak segment uploads | 500 / 5 = 100 requests/s |
+| Event rate | 125 events/s at peak; 37.5 at average concurrency |
+| Uncompressed event bytes/day | 21.6 GB at sustained peak; 6.48 GB at assumed average |
+| Thirty days of those bytes | 648 GB at sustained peak; 194.4 GB at assumed average |
+| JSON CPU if parsing takes 10–50 microseconds/event | 0.125–0.625% of one core at 125 events/s; 0.6–3% at a hypothetical 600-event/s burst |
+| Runner memory if each process takes 50–80 MB | 25–40 GB for 500 processes |
 
-## Estimated load at peak
+Decimal units are used. Parsing time and memory per process are unmeasured assumptions. Storage excludes artifact payloads, indexes, replication and overhead, and does not account for compression. Transcripts may overlap event content; do not count the same bytes twice. Claims, transitions, reads, SSE connections, policy checks and external-observation work require separate measurements.
 
-| component | load | capacity of the chosen stack | headroom |
-|---|---|---|---|
-| API: heartbeats | 500 / 15 s ≈ 33 requests/s | | |
-| API: segment uploads | 500 / 5 s ≈ 100 requests/s | | |
-| API: claims, state transitions, webhooks | ≈ 25 requests/s | | |
-| API: console, CLI, MCP | ≈ 10–50 requests/s | | |
-| API total | ≈ 200 requests/s, bursts to ≈ 500 | FastAPI with async SQLAlchemy: roughly 500–1,500 database-backed requests/s per process | 3–10× on one process, then horizontal |
-| PostgreSQL writes | ≈ 150/s | thousands per second on modest hardware | more than 10× |
-| Scheduler | tens of changed rows per pass, one pass per second; about one node start per second on average | the work is SQL, not Python | very large |
-| Worker event relay | ≈ 125 events/s, peak ≈ 600 | JSON parsing at 10–50 µs per event is 1–3 % of one core | very large |
-| Session runner | ≈ 0.25 events/s per session | negligible | |
-| CEL evaluation | single-digit evaluations per second | Rust-backed binding ([ADR-0013](../../docs/decisions/0013-implementation-stack.md)) | not a concern |
+## Conclusions and measurements
 
-## Findings
+The former FastAPI/PostgreSQL capacities, headroom ratios and “CPU cannot be the constraint” conclusion had no benchmark evidence and are withdrawn. These calculations neither prove the scale target nor justify a language rewrite. Local-disk suitability depends on capacity, retention and operations; the calculated volume does not prove that it cannot fit. S3-compatible storage remains an accepted MVP deployment choice under FR-4.4.
 
-- **CPU is not the constraint.** kora's throughput is three to four orders of magnitude below the level where the implementation language decides; Temporal is written in Go because it runs millions of workflow steps per second, while a kora unit of work is a session lasting minutes to hours. Python orchestrators (Airflow, Prefect, Dagster) run far larger task volumes.
-- **Storage volume is.** 125 events/s at 2 KB is about 20 GB per day at peak concurrency and about 6 GB per day at average concurrency; with the 30-day retention of FR-4.5 that is about 200 GB of segments and transcripts. Local-disk artifact storage does not fit an organisation deployment, which is why S3-compatible storage is in MVP (FR-4.4).
-- **Event-loop blocking by large responses** (a large run page or artifact) is the realistic Python-specific risk. Several Uvicorn processes and a fast JSON encoder are the standard mitigation.
-
-## Where Go or Rust would be better
-
-| place | better in Go or Rust | why the stack stays |
-|---|---|---|
-| Session runner, one process per session | memory: about 50–80 MB per Python process against about 10 MB for Go, so 25–35 GB against 5 GB at 500 sessions | the harness itself (Claude Code on Node.js) takes 300 MB or more per session, so the saving is 10–15 % of a session's memory; the Claude Agent SDK exists for Python and TypeScript only and the Codex SDK for TypeScript only, so a Go runner would lose the Claude SDK and return to parsing CLI output, which [ADR-0004](../../docs/decisions/0004-harness-adapters-over-vendor-sdks.md) rejected |
-| CLI | start-up: instant against 0.3–0.5 s of imports | noticeable but tolerable; lazy imports reduce it |
-| Worker inside an adopter's network | one static binary is easier to distribute | the Python runner has to be in the runtime image next to the harness anyway |
-| API and scheduler | no, at this scale | the database and the model providers are the limits |
-| CEL | already Rust through the binding | |
-
-## Recommendation
-
-Keep the stack. The scale target is reached by running more API processes and workers and by batching segments, not by changing language. The session runner is the only candidate for a rewrite, and only if runner memory becomes a measured problem in the pilot and an agent SDK exists in the target language (TypeScript today).
+Measure real request mixes, DB contention, scheduling delay, event-loop latency, segment serialization, storage growth and runner/harness memory. Include both metadata databases, the large-run projection and notification-disabled scheduling case required by the NFRs. Reconsider a component only after identifying a measured bottleneck. The [original estimate](https://github.com/realkarych/kora/blob/a29bfa6a78adac97584a048a4ef4402969e8a100/knowledge/analysis/control-plane-load-estimate.md) preserves the assumptions and withdrawn conclusions for audit.

@@ -72,7 +72,7 @@ Targets --row--> target page --now block--> review page
                       +--history row--> graph page (that run selected)
 Approvals --waiting row--> review page --link--> graph page (the node open)
 Cost --by graph--> graph page
-System: no outgoing links
+System → affected approval, run or node detail from integration degradation and recovery backlog
 ```
 
 | element | content | route |
@@ -197,11 +197,11 @@ Every place that can be empty says what is missing and offers the one way to fil
 
 ## Loading
 
-Nothing is drawn half-ready. The frame renders at once; each region of a page holds a gray placeholder of its own size until its data arrive, so the page never jumps. The graph is drawn only when both the version's IR and the run are present, in its final colours and with no transition; the colour transition applies to state changes after the first paint only. When a person selects another run, the canvas keeps the current run until the next one is ready, then swaps. A region whose data take longer than one second shows the quiet word "loading"; nothing spins.
+Nothing is drawn half-ready. The frame renders at once; each region of a page holds a gray placeholder of its own size until its data arrive, so the page never jumps. For a selected run, the graph is drawn only when its pinned version's IR and run state are both present, in its final colours and with no transition. After the runs query confirms zero runs, draw the latest active version's topology in gray without waiting for a nonexistent run; the colour transition applies to state changes after the first paint only. When a person selects another run, the canvas keeps the current run until the next one is ready, then swaps. A region whose data take longer than one second shows the quiet word "loading"; nothing spins.
 
 ## After an action
 
-Every action answers in the place where it was taken: no toasts, no modal dialogs for results or errors. While a request is in flight its control is disabled and shows the verb in progress ("approving…", "starting…", "retrying…", "cancelling…"); one request at a time per control; a mutation carries a fresh idempotency key, so a repeated click or a retried request cannot act twice.
+Every action answers in the place where it was taken: no toasts, no modal dialogs for results or errors. While a request is in flight its control is disabled and shows the verb in progress ("approving…", "starting…", "retrying…", "cancelling…"); one request at a time per control; each new logical mutation gets one fresh idempotency key. A repeated click or transport retry of that same action reuses the same key and request body; a different body is a new action. Recovery of an unresolved action across reload or reauthentication remains an [open question](../../architecture/detailed.md#open-implementation-questions).
 
 | action | on success | on refusal |
 |---|---|---|
@@ -230,4 +230,4 @@ Two tiers. From 1280 px the graph page is laid out as drawn above. From 768 to 1
 
 ## Keyboard and screen readers
 
-Every page works from the keyboard. On the graph page the canvas is one tab stop; inside it the arrow keys move between nodes in layout order (left to right, then top to bottom), Enter opens the node's panel, Esc closes the panel and returns the focus to the node, and the strip's segments are reached with the arrow keys inside a node. Each node is a button whose accessible name reads "<name>, <state word>, <second line>"; a strip's accessible name reads its counts per state; the runs list is a listbox whose rows read the target, the state word and the age. The focus ring is 2 px in the accent colour and visible on every colour in both themes. The node panel's element list is the textual equivalent of a strip.
+Every page works from the keyboard. On the graph page the canvas is one tab stop; inside it the arrow keys move between nodes in layout order (left to right, then top to bottom), Enter opens the node's panel, Esc closes the panel and returns the focus to the node, and the strip's segments are reached with the arrow keys inside a node. Each node is a button whose accessible name reads "<name>, <state word>, <second line>"; a strip's accessible name reads its counts per state; the runs list is a listbox whose rows read the target, the state word and the age. Focus and selection must remain distinguishable, including when both are on the same node; their geometry and colours are owned by [tokens.md](tokens.md#node-geometry-and-zoom). The node panel's element list is the textual equivalent of a strip.
