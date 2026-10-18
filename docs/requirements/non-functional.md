@@ -12,6 +12,8 @@ Publication-boundary amendment dated 2026-10-17: pending owner review; architect
 
 External-observation amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line review. See [ADR-0021](../decisions/0021-external-observations-outside-transactions.md).
 
+Component-logging amendment dated 2026-10-18: direction and implementation plan approved by the project owner under [issue #91](https://github.com/realkarych/kora/issues/91); NFR-9.4 wording accepted for merge by the project owner in [PR #93](https://github.com/realkarych/kora/pull/93) on 2026-10-18. The [dated research](../../knowledge/research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](../../knowledge/reviews/structured-logging-plan-review-2026-10-18.md) are evidence, not runtime verification.
+
 ## 0. Design centre
 
 - **NFR-0.1** The platform persona is the design centre: every requirement below is written for an instance shared by many teams on an organisation's own infrastructure. Standalone mode (NFR-7.1) is a development convenience and must never constrain the platform design (no feature may exist only in standalone mode; nothing in the data model may assume a single tenant).
@@ -83,6 +85,7 @@ External-observation amendment dated 2026-10-17: direction and implementation pl
 - **NFR-9.1 [MVP]** Every run has a complete timeline: node state transitions, attempts, artifacts, approvals, cost, with run/node/attempt/session ids usable as join keys in external tools.
 - **NFR-9.2 [MVP]** Observability export is opt-in and must not affect scheduling if the exporter is slow or down (asynchronous, bounded buffers, drop-with-metric).
 - **NFR-9.3 [MVP]** Transcripts are stored as opaque harness output (version-tagged) plus a normalised event summary; kora never depends on parsing a harness's transcript file format to function.
+- **NFR-9.4 [MVP]** Every executable component provides structured, leveled diagnostics from its first implementation, with INFO as the default and component-specific configuration. Authorized request/run/node/attempt/session context connects records where available; diagnostic identity grants no authority. Operational logs remain separate from durable events and session content, exclude sensitive payloads and secrets, and use bounded work/output with visible loss and bounded shutdown. Diagnostic-sink failure must not block scheduling, alter durable outcomes or delay execution-stop escalation. The [component logging contract](../../knowledge/specs/observability.md) defines levels, safe fields, context, failure behavior and the tests that activate with each component.
 
 ## 10. Testability and developer experience
 
