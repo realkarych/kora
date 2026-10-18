@@ -37,7 +37,7 @@ Timing follows the purpose:
 - `publish` is acquired only at late authorization, after the supervisor has confirmed that the whole candidate domain has stopped and the handoff is sealed.
 - `api` is acquired per call by the worker, and by the scheduler's approval-channel and observation providers.
 
-A credential that expires or is rejected is reacquired for the same operation. An adopting worker always reacquires instead of reusing anything an earlier worker held. Values are redacted and never persisted.
+A credential that expires or is rejected is reacquired for the same operation. An adopting worker always reacquires instead of reusing anything an earlier worker held. Values are redacted and never persisted: the issuance route is exempt from the API's idempotency replay, so a repeated request re-checks authorisation and acquires a fresh credential.
 
 **The reference GitHub App backend issues in the control plane.** The App signing key stays with `kora api`. A worker obtains each credential through a worker-facing route bound to:
 
@@ -59,7 +59,7 @@ The key therefore exists in one trusted place, issuance is fenced by the lease, 
 | `revocation` | `native`, `expiry_only` or `manual` |
 | `principal` | the principal reference below |
 
-A deployment binding declares the minimum it requires for each purpose. A backend that cannot meet it fails acquisition with `config_error`. kora never falls back silently to a broader credential. A static credential reports `replacement: static` and `expires_at: null` and is never described as scoped or short-lived. Reports describe residual authority honestly: a repository-scoped write token is not a single-push grant.
+A deployment binding declares the minimum it requires for each purpose. A backend that cannot meet it fails acquisition with `config_error`. kora never falls back silently to a broader credential. A static credential reports `replacement: static`; its `expires_at` is the configured or discovered expiry, null only when it has none, and it is never described as scoped or short-lived. Reports describe residual authority honestly: a repository-scoped write token is not a single-push grant.
 
 **Principals are stable host identifiers.** A principal reference has four fields:
 
