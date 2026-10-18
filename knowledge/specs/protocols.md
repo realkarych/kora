@@ -620,7 +620,6 @@ These are **future executable test contracts**; documentation CI does not run th
 | `test_candidate_cannot_alter_resources` | On a `protected_execution` runtime, agent and command code cannot write, rename, replace or symlink-redirect a resource or any parent of `resource_root`; the executed digest is the pinned one |
 | `test_unprotected_runtime_reports_protection_none` | On `local` the `CommandResult` says `resource_protection: none`; with `require_protected_resources` validation fails with `IR024` |
 
-
 ### Agent-secret contracts (ADR-0009, amended 2026-10-18)
 
 These are **future executable test contracts** for issue #42; documentation CI does not run them. Runtime cases run on the Linux CI job, where Docker is available; validation cases run everywhere. Metadata cases run on PostgreSQL and SQLite.
