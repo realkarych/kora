@@ -76,7 +76,7 @@
           "maxProperties": 1,
           "properties": {
             "waiting": { "$ref": "#/$defs/selector", "description": "the addressed human-input or wait node is open" },
-            "settled": { "type": "boolean", "const": true, "description": "the run has no claimable work and only waits remain, or it is terminal" }
+            "settled": { "type": "boolean", "const": true, "description": "the run is execution-quiescent with no claimable work and no open approval or wait, or it is terminal" }
           }
         },
         "do": {
@@ -87,12 +87,11 @@
           "properties": {
             "respond": {
               "type": "object",
-              "required": ["decision"],
+              "required": ["response"],
               "additionalProperties": false,
               "properties": {
-                "decision": { "enum": ["approved", "rejected"] },
-                "comment": { "type": "string" },
-                "reviewer": { "type": "string", "description": "a provider-neutral reviewer reference of the fake VCS" }
+                "response": { "type": "object", "description": "forwarded unchanged as the response of the ordinary approval API and validated there against the form of the addressed human-input node" },
+                "reviewer": { "type": "string", "description": "a provider-neutral reviewer reference of the fake VCS, kept outside the response" }
               }
             },
             "retry": {

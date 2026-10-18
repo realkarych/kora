@@ -19,9 +19,9 @@ outcomes:
   - { select: bundle, outputs: { bundle: { narrative: { summary: filter push-down, rationale: only candidate } } } }
   - { select: bundle@2, outputs: { bundle: { narrative: { summary: filter push-down with index, rationale: addresses review } } } }
 actions:
-  - { when: { waiting: final_pr }, do: { respond: { decision: rejected, comment: add an index instead of rewriting the join, reviewer: reviewer-1 } } }
+  - { when: { waiting: final_pr }, do: { respond: { response: { decision: reject, comments: add an index instead of rewriting the join }, reviewer: reviewer-1 } } }
   - { when: { settled: true }, do: { retry: { node: "candidates[0]/implement", strategy: fresh_with_feedback } } }
-  - { when: { waiting: final_pr }, do: { respond: { decision: approved, reviewer: reviewer-1 } } }
+  - { when: { waiting: final_pr }, do: { respond: { response: { decision: approve }, reviewer: reviewer-1 } } }
   - { when: { waiting: prestable_rollout }, do: { event: { name: deploy.finished, payload: { commit: "$from: bundle@2.bundle.facts.change.commit" } } } }
 expect:
   run: succeeded

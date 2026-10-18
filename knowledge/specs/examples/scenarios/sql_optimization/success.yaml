@@ -19,7 +19,7 @@ outcomes:
   - { select: "candidates[1]/review", outputs: { verdict: { approved: true, comments: "" } } }
   - { select: bundle, outputs: { bundle: { narrative: { summary: filter push-down saves 30 percent, rationale: largest gain over the 15 percent threshold } } } }
 actions:
-  - { when: { waiting: final_pr }, do: { respond: { decision: approved, reviewer: reviewer-1 } } }
+  - { when: { waiting: final_pr }, do: { respond: { response: { decision: approve }, reviewer: reviewer-1 } } }
   - { when: { waiting: prestable_rollout }, do: { event: { name: deploy.finished, payload: { commit: "$from: bundle.bundle.facts.change.commit" } } } }
 expect:
   run: succeeded
