@@ -223,7 +223,14 @@ class VcsCapabilities:
     review_comments: bool
     ci_status: bool
     head_sha_watch: bool
+    reviewer_requests: bool
     plan_executors: frozenset[Literal["runner", "worker_host"]]
+
+@dataclass(frozen=True)
+class ReviewerRequestOutcome:
+    requested: tuple[str, ...]
+    rejected: tuple[str, ...]
+    reason: str | None
 
 @dataclass(frozen=True)
 class WorkspaceTarget:
@@ -336,6 +343,7 @@ class Vcs(Protocol):
     async def head_sha(self, ref: VcsRef) -> str: ...
     async def post_comment(self, ref: VcsRef, body: str) -> str: ...
     async def ci_status(self, ref: VcsRef) -> CiStatus: ...
+    async def request_reviewers(self, ref: VcsRef, recipients: tuple[str, ...]) -> ReviewerRequestOutcome: ...
 ```
 
 **Trusted roots and captures.** The runtime privately allocates `control_root` and `publication_root` outside `WorkspaceTarget.root`; `host_path` exposes only the candidate workspace for compatible preparation, never permission to publish there. `PlanFile.path` is relative to its named private area, rejects traversal/absolute paths, and is created with descriptor-relative no-follow operations. Parent replacement, symlinks and writable hard-link aliases cannot redirect private writes. Plans are immutable trusted provider output, not files loaded from the repository. Allowed placeholders in argv/env/stdin are `{candidate_root}`, `{control_root}`, `{publication_root}`, `{input_location}`, `{base_commit}`, `{commit}` and `{branch}`; all values come from supervisor state. There is no shell interpolation.
@@ -412,6 +420,8 @@ A push to the candidate branch during review is not the channel's business eithe
 `cancel` closes the channel interaction, not the immutable approval audit decision. If native code-host reviews cannot be disabled, mark the kora interaction closed; subsequent responses have no local authority. `notify(resolved)` says the request is no longer actionable and links canonical status; it never claims pending head verification succeeded. All terminal messages remain compatible with closure, even if remote delivery is delayed, duplicated or reordered. The API, not channel text, is authoritative.
 
 Persist dispatch authorization before calling. A terminal revision prevents new create authorizations/retries; a preterminal authorized invocation may still send after cancellation. Record learned ids from all late results on the original approval even if their revision is obsolete, then close each id. Do not discard an effect result by applying the stale-read rule. Retain compact terminal reconciliation identity/progress without form/context payload holds, runtime reservations or an abandonment shortcut. Original-resource authorization failures are visible, not retargeted. The exact postcommit lifecycle is [data-model section 14.3](data-model.md#143-approval-delivery-intent-and-uncertain-effects).
+
+**Requested reviewers** ([ADR-0025](../../docs/decisions/0025-notifications.md)). After opening the change request, the `vcs` channel calls `request_reviewers` with the channel configuration's `request_reviewers` list: provider-specific opaque identifiers, such as a GitHub login or team slug, that the provider validates and reports as `requested` or `rejected`. An empty list sends no request and leaves the host's own routing unchanged. A provider declaring `reviewer_requests: false`, or a failed request, writes `vcs.reviewers_request_failed` and never fails the node; success writes `vcs.reviewers_requested`. The call uses a code-host `api` credential. Requested reviewers grant nothing: ADR-0008, the approver allowlist and the principal checks decide what counts.
 
 ## 6. Secrets (FR-10.1)
 
@@ -592,6 +602,21 @@ These are **future executable test contracts**, specified for issue #51; this re
 | Docker on Linux CI | required, including worker restart and private-volume handoff | real container/descendant, journal, alias and secret-boundary cases required; default container presence alone proves nothing |
 | independent runtime/provider | required without a shared worker filesystem, with native non-Git revision/input data | provider's actual process/service isolation and transfer tests required before it declares true; otherwise required-protection rejection |
 | configured fake runtime/VCS | required, deterministic phase/recovery barriers | protocol evidence only; cannot certify OS isolation |
+
+### Notification contracts (ADR-0025)
+
+These are **future executable test contracts**; documentation CI does not run them. Receivers are in-process HTTP servers, time comes from an injected clock, and metadata cases run on PostgreSQL and SQLite.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_vcs_channel_requests_reviewers` | Against the in-process code-host fake, a published change request has the configured reviewers requested; an unknown recipient is reported `rejected` and the node continues |
+| `test_delivery_survives_restart_and_retry` | The receiver fails twice and the scheduler restarts; one delivery succeeds with the same `webhook-id` |
+| `test_late_committing_event_is_delivered` | An event created before and committed after another event is delivered |
+| `test_slow_receiver_holds_no_lock` | A receiver that never answers holds no transaction, connection or lock; scheduling and SQLite writes continue; backlog is visible in metrics |
+| `test_sender_crash_and_two_replicas` | A crash after the send and before the acknowledgement redelivers; two replicas never send under one claim; a stale acknowledgement changes nothing |
+| `test_destination_checked_at_send` | A resolved secret that now names a host outside the allow-list, and a redirect, block delivery and mark the subscription `failing` |
+| `test_subscription_lifecycle` | Start point, selection change, destination change, disable, enable and delete behave as `scheduler.md` section 18 states |
+| `test_notification_carries_no_payloads` | A `slack` and a `telegram` message for `approval.requested` contain the console and change-request links and no secret value, transcript or artifact payload |
 
 ### Execution-recovery implementation gates (ADR-0017)
 

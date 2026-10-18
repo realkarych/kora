@@ -27,7 +27,7 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 | Retry | node only; every attempt is recorded, but a retry re-runs the node with the same inputs and cannot read an earlier attempt | node and sub-graph; attempts are objects with lineage | kora |
 | Loops with feedback | explicit loop nodes, exit by script or output field, retry on rejection; each iteration's outputs are recorded and a node can read the previous one | sub-graph retry with the previous attempt as input | tie: Archon is simpler to write, kora is easier to audit |
 | Approval semantics | no timeout, no default, not bound to content | typed form, timeout and default, bound to the commit and the facts | kora |
-| Approval channels | CLI, web, Slack, chat adapters, REST | CLI and API, change request, web; chat later | Archon |
+| Approval channels | CLI, web, Slack, chat adapters, REST | CLI and API, change request, web; requested reviewers and one-way Slack, Telegram and JSON notifications (ADR-0025); chat approvals later | Archon |
 | Artifacts | JSON output validated by a schema | domain types with versions and lineage, review bundle | kora |
 | Deterministic gates | bash and script nodes, check that the tree is unchanged | command nodes, gate scripts protected from agent edits | tie, kora slightly ahead |
 | Cost | as reported by the provider; none for Codex | token ledger, price table, completeness, budgets at every level | kora |
@@ -44,7 +44,7 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 | Ready-made pipelines and their distribution | software-development pack, workflow packs from GitHub | one example, no distribution mechanism | Archon |
 | Testing a workflow | dry run with pauses at gates, fixtures | dry run on the fake runtime | Archon |
 | Web UI | full console | full console in MVP with a reference-grade user-experience bar | Archon, because it exists |
-| Chat interfaces | Slack, Telegram, Discord, GitHub mentions | later | Archon |
+| Chat interfaces | Slack, Telegram, Discord, GitHub mentions | one-way Slack and Telegram notifications in MVP; interactive chat later | Archon |
 | Provider credentials per user | own keys and provider subscriptions per user | keys in the environment of the adapter | Archon |
 
 ## Technology and architecture
