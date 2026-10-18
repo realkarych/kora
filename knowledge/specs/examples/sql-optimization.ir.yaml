@@ -296,7 +296,9 @@ graph:
             candidate: { type: dwh_core/Candidate }
           limits: { timeout: "5m" }
           config:
-            cmd: ["python3", "tools/gates/pack_candidate.py", "--change=.kora/inputs/change.json", "--metrics=.kora/inputs/metrics.json", "--hypothesis=.kora/inputs/hypothesis.json", "--out=candidate.json"]
+            cmd: ["python3", "{resource_root}/pack_candidate.py", "--change=.kora/inputs/change.json", "--metrics=.kora/inputs/metrics.json", "--hypothesis=.kora/inputs/hypothesis.json", "--out=candidate.json"]
+            resources: [{ name: pack_candidate.py, sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000002", size: 2048, executable: false }]
+            resource_set_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000003"
             output_file: candidate.json
             workspace: { repo: "dwh/etl", rev: "main" }
   nodes:
@@ -395,7 +397,9 @@ graph:
         best: { type: dwh_core/Candidate }
       limits: { timeout: "5m" }
       config:
-        cmd: ["python3", "tools/gates/select_best.py", "--candidates=.kora/inputs/candidates.json", "--baseline=.kora/inputs/baseline.json", "--min-gain-pct=15", "--out=best.json"]
+        cmd: ["python3", "{resource_root}/select_best.py", "--candidates=.kora/inputs/candidates.json", "--baseline=.kora/inputs/baseline.json", "--min-gain-pct=15", "--out=best.json"]
+        resources: [{ name: select_best.py, sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000004", size: 3072, executable: false }]
+        resource_set_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000005"
         output_file: best.json
         workspace: { repo: "dwh/etl", rev: "main" }
     bundle:
@@ -488,7 +492,7 @@ runtime:
   budget_headroom_pct: 10
   stall_after: "15m"
   retention: { transcripts: "30d", artifact_payloads: "30d" }
-  protected_paths: ["Makefile", "tests/**", "tools/gates/**"]
+  protected_paths: ["Makefile", "tests/**"]
   infrastructure_retry: { max_attempts: 5, initial_interval: "1m", backoff_coefficient: 2.0, max_interval: "15m" }
 secrets:
   aliases:

@@ -6,6 +6,9 @@ Reference material for engineers and coding agents working on kora. Start with t
 
 | task | load |
 |---|---|
+| Assess a security boundary, authority/data-flow change or evidence for a protection claim | [Threat model](../docs/threat-model.md), then its cited contracts; [dated source/evidence research](research/threat-model-document-structure-2026-10-18.md) for unresolved questions |
+| Select contributor reviews/checks or activate verification for a new component in Codex or Claude Code | [AI development verification](reviews/ai-development-setup.md), then the affected contracts below |
+| Add or change any component's logging, levels, correlation, capture, redaction, sinks or observability evidence | [Structured component diagnostics](specs/observability.md), its [component activation matrix](specs/observability.md#7-component-coverage-and-activation), then the component's specification; background: [dated orchestrator research](research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](reviews/structured-logging-plan-review-2026-10-18.md) |
 | Implement or change the graph document format, its schema or the compiler | [specs/ir.md](specs/ir.md), [specs/ir.schema.json](specs/ir.schema.json), [specs/examples/](specs/examples/), [specs/dsl.md](specs/dsl.md) |
 | Write or change Python graph code, presets, the compile step | [specs/dsl.md](specs/dsl.md), then [specs/ir.md](specs/ir.md) for what it compiles to |
 | Add or change a table, a state machine, retention, lineage | [specs/data-model.md](specs/data-model.md) |
@@ -17,6 +20,8 @@ Reference material for engineers and coding agents working on kora. Start with t
 | Locate a component and its contracts before a contribution | [Module and contract map](architecture/detailed.md#module-and-contract-map), then the component specification and its decision records |
 | Component views, protected execution, deployment shapes, the stack, canonical terms and unresolved implementation questions | [architecture/detailed.md](architecture/detailed.md); [open implementation questions](architecture/detailed.md#open-implementation-questions) |
 | Why a decision was taken, what was rejected | [docs/decisions/](../docs/decisions/README.md) first; the flat register of design decisions with "where applied" pointers is [reviews/design-decisions-2026-10-15.md](reviews/design-decisions-2026-10-15.md) |
+| Set up a contribution, run the same commands as CI, build/install distributions or develop the frontend | [docs/development.md](../docs/development.md), [CI workflow](../.github/workflows/ci.yml), then the dated [scaffold research](research/repository-scaffold-and-ci-2026-10-18.md) |
+| Python package metadata, build/development toolchain choices and dated scaffold evidence | [research/repository-scaffold-and-ci-2026-10-18.md](research/repository-scaffold-and-ci-2026-10-18.md) |
 | What the design reviews found and how each finding was dispositioned | [reviews/review-2026-10-15.md](reviews/review-2026-10-15.md) |
 | The architecture critique before implementation (execution authority, evidence, trust boundaries, versioning, cost, competitors, engine choice) with the owner's disposition and the issue for each finding | [reviews/architecture-critique-2026-10-16.md](reviews/architecture-critique-2026-10-16.md) |
 | Retry invalidation of unbound dependents, input independence and wrapper recollection | [reviews/retry-dependency-invalidation-review-2026-10-17.md](reviews/retry-dependency-invalidation-review-2026-10-17.md), then [specs/data-model.md](specs/data-model.md#6-clear-downstream-fr-68a) |
