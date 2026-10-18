@@ -41,7 +41,7 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 | Cron and sensors | macOS launchd interval, no sensors | cron with time zones, sensors | kora |
 | Observability | logs, event stream, product telemetry | OpenTelemetry, Prometheus, audit log | kora |
 | Operation by agents | skill that also writes workflows, REST API with OpenAPI | MCP servers, skills, parity enforced by a test | kora, Archon close |
-| Ready-made pipelines and their distribution | software-development pack, workflow packs from GitHub | one example, no distribution mechanism | Archon |
+| Ready-made pipelines and their distribution | software-development pack, workflow packs from GitHub | one example; graphs reuse ordinary Python imports and carry their command resources by digest, so a graph runs against another repository without copied scripts; no catalogue | Archon |
 | Testing a workflow | dry run with pauses at gates, fixtures | dry run on the fake runtime | Archon |
 | Web UI | full console | full console in MVP with a reference-grade user-experience bar | Archon, because it exists |
 | Chat interfaces | Slack, Telegram, Discord, GitHub mentions | one-way Slack and Telegram notifications in MVP; interactive chat later | Archon |

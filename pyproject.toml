@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kora"
+version = "0.1.0.dev0"
+description = "A control plane for graphs of coding-agent sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/realkarych/kora"
+Repository = "https://github.com/realkarych/kora"
+Issues = "https://github.com/realkarych/kora/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kora"]
+artifacts = ["src/kora/api/static/**"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/web",
+    "/hatch_build.py",
+    "/pyproject.toml",
+    "/uv.lock",
+    "/README.md",
+    "/LICENSE",
+    "/.python-version",
+]
+exclude = [
+    "/src/kora/api/static",
+    "/web/node_modules",
+    "/web/.vite",
+    "/web/.venv",
+    "/web/dist",
+    "/web/build",
+]
+
+[tool.pyright]
+include = ["src", "hatch_build.py", "tests"]
+typeCheckingMode = "strict"
+pythonVersion = "3.11"
+venvPath = "."
+venv = ".venv"
+
+[tool.ruff]
+target-version = "py311"
+include = ["*.py", "*.pyi", "*.ipynb", "**/pyproject.toml", "**/ruff.toml", "**/.ruff.toml"]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+filterwarnings = ["error"]
+
+[dependency-groups]
+build = [
+    "hatchling==1.32.4",
+]
+dev = [
+    "pyright==1.1.414",
+    "pytest==9.1.1",
+    "ruff==0.17.1",
+]
