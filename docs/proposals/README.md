@@ -21,3 +21,4 @@ Copy [template.md](template.md) to `NNNN-short-title.md` with the next free numb
 | proposal | status | trigger |
 |---|---|---|
 | [0001 Temporal-backed execution backend](0001-temporal-execution-backend.md) | deferred | demand from an adopter at a scale or reliability level the own scheduler does not meet, after MVP |
+| [0002 Scoped credential broker for agent sessions](0002-scoped-credential-broker.md) | deferred | the first adopter that needs per-attempt downstream credentials beyond MCP-held secrets, after MVP |
