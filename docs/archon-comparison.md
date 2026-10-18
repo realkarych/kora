@@ -42,7 +42,7 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 | Observability | logs, event stream, product telemetry | OpenTelemetry, Prometheus, audit log | kora |
 | Operation by agents | skill that also writes workflows, REST API with OpenAPI | MCP servers, skills, parity enforced by a test | kora, Archon close |
 | Ready-made pipelines and their distribution | software-development pack, workflow packs from GitHub | one example, no distribution mechanism | Archon |
-| Testing a workflow | dry run with pauses at gates, fixtures | dry run on the fake runtime | Archon |
+| Testing a workflow | dry run with pauses at gates, fixtures | behavioural scenarios with supplied agent outcomes, real command nodes, injected approvals, events and time, and machine-readable results (dsl.md section 4); no interactive pause at gates | tie |
 | Web UI | full console | full console in MVP with a reference-grade user-experience bar | Archon, because it exists |
 | Chat interfaces | Slack, Telegram, Discord, GitHub mentions | later | Archon |
 | Provider credentials per user | own keys and provider subscriptions per user | keys in the environment of the adapter | Archon |
@@ -64,4 +64,4 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 
 ## Summary
 
-kora is stronger on 22 points, Archon on 14, and 7 are a tie; every kora point is a design claim and every Archon point is shipped. kora wins the platform layer: attempts, approvals, artifacts, cost, runtime and VCS protocols, recovery, security, multi-tenancy. Archon wins everything a user touches today: readiness, UI, chat, GitHub integration, ready-made pipelines, provider rate limits and workflow testing. That matches the positioning split (Archon is a workflow engine for a repository, kora is the orchestration platform for an organisation) and shows that kora has to close a large user-experience gap with its MVP console.
+kora is stronger on 22 points, Archon on 13, and 8 are a tie; every kora point is a design claim and every Archon point is shipped. kora wins the platform layer: attempts, approvals, artifacts, cost, runtime and VCS protocols, recovery, security, multi-tenancy. Archon wins everything a user touches today: readiness, UI, chat, GitHub integration, ready-made pipelines, provider rate limits and workflow testing. That matches the positioning split (Archon is a workflow engine for a repository, kora is the orchestration platform for an organisation) and shows that kora has to close a large user-experience gap with its MVP console.

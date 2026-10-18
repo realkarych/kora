@@ -1,0 +1,20 @@
+graph: sql_optimization
+description: A push to the candidate branch while the final approval is open invalidates the request and fails the approval node; no downstream node runs.
+params: { target_task: daily_revenue }
+overrides:
+  - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]/dev_run", exit_code: 0, output: { cpu_seconds: 70.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]/equivalence", exit_code: 0, reason: needs the warehouse }
+outcomes:
+  - { select: find_target, outputs: { target: { task_id: daily_revenue, query_path: q/daily_revenue.sql } } }
+  - { select: hypotheses, outputs: { result: [ { title: push filter down, task_id: daily_revenue } ] } }
+  - { select: "candidates[0]/implement", change: { files: { q/daily_revenue.sql: "select 1 -- filtered\n" } }, outputs: { change: { branch: kora/daily-revenue-0 } } }
+  - { select: "candidates[0]/review", outputs: { verdict: { approved: true, comments: "" } } }
+  - { select: bundle, outputs: { bundle: { narrative: { summary: filter push-down, rationale: only candidate } } } }
+actions:
+  - { when: { waiting: final_pr }, do: { push: { to: candidate, files: { q/daily_revenue.sql: "select 1 -- edited by hand\n" } } } }
+expect:
+  run: failed
+  nodes: { final_pr: failed, prestable_rollout: not_run, soak: not_run, confirm_gain: not_run }
+  error_classes: { final_pr: candidate_moved }
+  approvals: { final_pr: invalidated }
