@@ -69,6 +69,7 @@ class Workload:
     secret_refs: dict[str, str]
     harness_credentials: dict[str, str]
     artifact_inputs: dict[str, ArtifactRef]
+    resources: tuple[ResourceRef, ...]   # command resources of the node: name, sha256, size, executable, storage_ref (issue #45)
     limits: dict
     deadline: ExecutionDeadline | None
     session_spec: SessionSpec | None
@@ -164,6 +165,8 @@ Each trusted worker serializes its final lease/desired-state check and every eff
 A receipt binds the original attempt/domain and attests only to work controlled by that runtime. It does not certify independent worker-host publication or a worker's code-host call. The API's replacement barrier clears only after runtime quiescence **and** every recorded dispatcher and kora-managed publication is closed. Provider evidence or an operator's explicit attestation may establish closure of an inaccessible old authority, with provenance kept distinct. Already-issued agent/MCP effects are not rolled back and are not promised exactly-once. On local these are cooperative guarantees in the trusted development/test environment, without sandboxing or hostile same-user containment.
 
 **Recovery state.** Before acknowledging each completed phase the supervisor durably records attempt/workload digest, immutable plans and their digests, trusted `WorkspaceRef`, journal sequence, phase, sealed input location/digest, `PreparedPublication`, inspection verdict and publication outcome. The checkpoint binds the API-sealed execution-request digest, exact derived plan/workspace identities and observed facts. Credential references/identities only are retained, never values or secret-derived hashes. Request/phase observations use the existing trusted journal and API event path; missing observations remain unknown, and duplicate journal sequence delivery is idempotent while conflicting content is rejected. A crash after sealing or preparation resumes from those bytes; no new commit is made. Loss/corruption of required private state is an infrastructure error, but leaves recovery unresolved until termination and dispatch/publication closure are proven. `release` removes bulky candidate, control-journal and publisher storage only after final output collection, terminal publication outcome and settled recovery; durable retirement/dispatcher registry evidence remains; partial usage/logs may still be collected on cancellation, but cancellation never initiates publication.
+
+**Command resources** (issue #45). For a command workload with `resources`, the worker fetches each file by digest through the lease-checked route `GET /attempts/{att}/resources/{sha256}` and hands the bytes to the runtime through its transfer channel; no graph package or author filesystem is involved. The runtime materialises them into a private `resource_root` outside the candidate root, with the same descriptor-relative, no-follow creation rules as plan files, so parent replacement, symlinks and hard-link aliases cannot redirect the writes. On a runtime declaring `protected_execution`, `resource_root` and every parent are owned by a principal other than candidate code and are read-only to it. The executor re-hashes every file after materialisation and again immediately before the command starts; any mismatch fails the attempt with `integrity_error` before the command runs. `{resource_root}` is the only placeholder that names the directory. A runtime that cannot transfer resources fails validation with `IR009` and execution with `config_error`. A runtime without `protected_execution`, including `local`, materialises the files and reports `resource_protection: none`; the namespace policy `require_protected_resources` turns that into `IR024` at validation.
 
 **Capabilities and reference runtimes.** `protected_execution` covers control-state integrity, whole-domain containment, immutable transfer and publisher credential isolation together. It is independent of `enforces_network_policy` and `credential_proxy`. Namespace policy `require_protected_execution` rejects a runtime declaring false (`IR021`); worker startup rejects a configured protected runtime whose installation cannot enforce its declaration. A missing executor is an error, not a warning that permits execution.
 
@@ -592,6 +595,20 @@ These are **future executable test contracts**, specified for issue #51; this re
 | Docker on Linux CI | required, including worker restart and private-volume handoff | real container/descendant, journal, alias and secret-boundary cases required; default container presence alone proves nothing |
 | independent runtime/provider | required without a shared worker filesystem, with native non-Git revision/input data | provider's actual process/service isolation and transfer tests required before it declares true; otherwise required-protection rejection |
 | configured fake runtime/VCS | required, deterministic phase/recovery barriers | protocol evidence only; cannot certify OS isolation |
+
+### Command-resource contracts (issue #45)
+
+These are **future executable test contracts**; documentation CI does not run them. Runtime cases run on the Linux CI job with Docker and on the fake runtime; metadata cases run on PostgreSQL and SQLite.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_resources_run_without_graph_package` | A worker host without the graph package or the author's files runs a command node from fetched resources and records their digests |
+| `test_graph_runs_on_repository_without_gates` | The canonical graph runs against a target repository that has no `tools/gates/` directory |
+| `test_changed_content_same_name_is_new_version` | Editing a resource without renaming it changes its digest and deploys a new graph version; runs of the old version keep executing the old bytes |
+| `test_deploy_rejects_missing_or_mismatched_resource` | Missing, extra and wrong-content files in the deploy body are refused with structured errors naming the resource |
+| `test_resource_digest_mismatch_fails_attempt` | Bytes altered in storage or in transfer fail the attempt with `integrity_error` before the command starts |
+| `test_candidate_cannot_alter_resources` | On a `protected_execution` runtime, agent and command code cannot write, rename, replace or symlink-redirect a resource or any parent of `resource_root`; the executed digest is the pinned one |
+| `test_unprotected_runtime_reports_protection_none` | On `local` the `CommandResult` says `resource_protection: none`; with `require_protected_resources` validation fails with `IR024` |
 
 ### Execution-recovery implementation gates (ADR-0017)
 
