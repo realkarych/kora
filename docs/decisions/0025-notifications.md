@@ -29,7 +29,7 @@ Event ids are creation-ordered, not commit-ordered: a transaction can create an 
 - **What a notification never does or carries.** It never approves. It carries no secret value, transcript or artifact payload.
 - **Scope.** Slack and Telegram are one-way notification channels in MVP. Chat-based approval stays post-MVP.
 
-**Delivery records written with the event.** When an event of a selected kind is inserted, the same transaction inserts one delivery record per enabled subscription that selects the kind. Delivery never scans the event table with a cursor, so commit order cannot skip an event.
+**Delivery records written with the event, serialised with subscription changes.** When an event of a selected kind is inserted, the same transaction inserts one delivery record per enabled subscription that selects the kind. Delivery never scans the event table with a cursor, so commit order cannot skip an event. To order events against subscription changes, every transaction that inserts a selectable event takes the namespace's notification lock in shared mode before reading the subscriptions, even when it finds none, and holds it until commit; creating, changing, disabling, enabling or deleting a subscription takes the same lock in exclusive mode. On PostgreSQL this is a transaction-scoped advisory lock; on SQLite the single writer already serialises them. An event therefore either commits before a subscription change, and is judged by the old state, or reads the new state.
 
 **Short claims, calls outside transactions, token-checked acknowledgements.** A bounded background task in the scheduler process works in three steps:
 
@@ -41,10 +41,10 @@ A crash leaves claims to expire, so another sender reclaims them. A stale acknow
 
 **Subscriptions have a lifecycle.** A subscription is a namespace resource with a stable id, managed with the `platform` flag.
 
-- **Selection.** It lists event kinds explicitly from an allowed set of actionable states: `approval.requested`, `approval.invalidated`, `approval.expired`, `run.failed`, `run.succeeded`, `attempt.lost` and `vcs.publish_repeated`.
+- **Selection.** It lists event kinds explicitly from an allowed set of actionable states: `approval.requested`, `approval.invalidated`, `approval.expired`, `run.failed`, `run.succeeded` and `attempt.recovery_required`. The last is a new event written once each time an attempt's `recovery_required` condition (ADR-0017) changes from false to true, with its reasons. It covers unknown execution after lease expiry and unknown publication outcomes, and an ordinary first claim awaiting its initial observation does not emit it.
 - **Start point.** A new subscription receives events whose transaction commits after it.
 - **Changes.** Changing the selection affects later events. Changing the destination advances its revision: pending records go to the current destination, each recording the revision it used.
-- **Disabling and deleting.** Disabling suspends pending records and enabling resumes them. Deleting drops them.
+- **Disabling and deleting.** Disabling suspends pending records and enabling resumes them. Deleting drops them. A send is authorised only for a record whose subscription exists and is enabled at claim time with the revision the claim records; a send already in flight when a disable commits may still complete, and nothing new is authorised after it.
 - **Failure.** A persistently failing subscription is marked `failing` with its last error and keeps retrying with capped back-off. It never blocks other subscriptions or graph execution.
 
 **Destinations are allow-listed.** The deployment configuration lists permitted hosts. A destination is checked when a subscription is saved and again at every send, after its secret is resolved. Redirects are not followed.

@@ -130,7 +130,6 @@ A notification subscription ([ADR-0025](../../../docs/decisions/0025-notificatio
 | `approval.expired` | pending review that timed out | the approval expired without a decision |
 | `run.failed` | exhausted budget, a failed gate or another terminal failure | the failing node and its error class |
 | `run.succeeded` | none | the run finished; optional, for teams that want completion messages |
-| `attempt.lost` | unknown execution | the runtime lost the attempt and it waits for recovery or reconciliation |
-| `vcs.publish_repeated` | unknown publish outcome | a publication was reconciled or repeated after an uncertain result |
+| `attempt.recovery_required` | unknown execution, unknown publish outcome | an attempt entered recovery (lease expiry, an uncertain effect, cancellation or failure awaiting closure); the message names the reasons and the reconcile action |
 
 Recoverable attempt failures that the retry policy handles are not in the set.

@@ -616,6 +616,9 @@ These are **future executable test contracts**; documentation CI does not run th
 | `test_sender_crash_and_two_replicas` | A crash after the send and before the acknowledgement redelivers; two replicas never send under one claim; a stale acknowledgement changes nothing |
 | `test_destination_checked_at_send` | A resolved secret that now names a host outside the allow-list, and a redirect, block delivery and mark the subscription `failing` |
 | `test_subscription_lifecycle` | Start point, selection change, destination change, disable, enable and delete behave as `scheduler.md` section 18 states |
+| `test_subscription_creation_orders_against_events` | On PostgreSQL, an event transaction that has read no subscriptions and a concurrent subscription creation: either the event commits first and gets no delivery, or the creation commits first and the event gets one; there is no event committed after the subscription without a delivery |
+| `test_disable_races_uncommitted_delivery` | An event transaction inserts a pending delivery while a disable runs: after the disable commits no new send is authorised for that record, and a send claimed before the disable may complete |
+| `test_recovery_entry_notifies` | A worker whose original execution domain becomes unreachable leaves its attempt in recovery; `attempt.recovery_required` is delivered before any reconciliation, once per entry, and an ordinary first claim awaiting its first observation sends nothing |
 | `test_notification_carries_no_payloads` | A `slack` and a `telegram` message for `approval.requested` contain the console and change-request links and no secret value, transcript or artifact payload |
 
 ### Execution-recovery implementation gates (ADR-0017)
