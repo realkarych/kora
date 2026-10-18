@@ -1,6 +1,6 @@
 # ADR-0010: Cost is a token ledger with a pluggable price table; USD limits are soft, hard limits are timeouts and event counts
 
-- Status: accepted, 2026-10-15; amended 2026-10-16 (run and sub-graph budgets enforced by the scheduler on aggregate usage; [architecture critique of 2026-10-16, finding A11](../../knowledge/reviews/architecture-critique-2026-10-16.md#a11-aggregate-budget), issue #13)
+- Status: accepted, 2026-10-15; amended 2026-10-16 (run and sub-graph budgets enforced by the scheduler on aggregate usage; [architecture critique of 2026-10-16, finding A11](../../knowledge/reviews/architecture-critique-2026-10-16.md#a11-aggregate-budget), issue #13); amended 2026-10-18 by [ADR-0024](0024-provider-limits-as-non-agent-failures.md) (the provider pause joins the admission limits)
 - Reviewed: by the project owner, 2026-10-16
 - Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (observation-gap completeness); wording pending owner review
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review

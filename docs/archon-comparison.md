@@ -31,7 +31,7 @@ Archon was checked at release v0.11.1, with the development branch as of 2026-10
 | Artifacts | JSON output validated by a schema | domain types with versions and lineage, review bundle | kora |
 | Deterministic gates | bash and script nodes, check that the tree is unchanged | command nodes, gate scripts protected from agent edits | tie, kora slightly ahead |
 | Cost | as reported by the provider; none for Codex | token ledger, price table, completeness, budgets at every level | kora |
-| Provider rate limits and quotas | rate-limit-aware retry, resume after quota reset, fallback model | none | Archon |
+| Provider rate limits and quotas | rate-limit-aware retry, resume after quota reset, fallback model | `provider_limited` outside agent attempts, a wait until the reset and one admission pause per quota (ADR-0024); no fallback model | Archon |
 | Concurrency per model provider | yes | per runtime, namespace and graph only | Archon |
 | Isolation | git worktree per run, not a sandbox | fresh checkout per node, container per attempt | kora |
 | Work without a VCS | yes | no | Archon |

@@ -191,7 +191,7 @@ class HarnessCapabilities:
 
 class HarnessAdapter(Protocol):
     name: str
-    config_schema: dict             # deployment config incl. `credentials: {ANTHROPIC_API_KEY: "secret://…"}` (DD-36)
+    config_schema: dict             # deployment config incl. `credentials: {ANTHROPIC_API_KEY: "secret://…"}` (DD-36) and `quota_resource`, the provider account or organisation whose limits apply (ADR-0024)
     tested_versions: str            # PEP 440 specifier of installed harness versions this adapter was tested with (design review finding: harness version health check)
     def capabilities(self) -> HarnessCapabilities: ...
     def check_config(self, config: dict) -> list[Warning]: ...          # compile-time: fields it cannot honour (IR008); never compares versions (DD-14)
@@ -211,6 +211,8 @@ class HarnessAdapter(Protocol):
 A fake adapter (`fake`) replays recorded SDK event streams for CI (NFR-10.1). Adapters are importable in supervisor installations; their harness subprocesses launch through the runtime boundary (section 2).
 
 **First-slice defaults** (DD-36). The normalised event is `{i, at, kind, data}`; `max_events` counts `turn`, `tool_call` and `tool_result` events; termination is interrupt, 30 s grace, then kill; for timeout the nominal thresholds derive from the immutable inherited deadline and its fixed `D + 30s` escalation, not a delayed observation (ADR-0022). The `claude` adapter opens a `ClaudeSDKClient` with `cwd` set to the workspace, `CLAUDE_CONFIG_DIR=<workspace>/.kora/claude` and `setting_sources=[]`, so the harness state the SDK writes there has the workspace's lifetime and is released with it: on the MVP runtimes a stored `resume` handle points at a checkpoint that no longer exists once the previous attempt was released (section 2); harness credentials come from the adapter's deployment configuration (`credentials`, secret references resolved at submit) and reach the session as environment variables (DD-30). Structured output is taken from `ResultMessage.structured_output`, else from the final text parsed as JSON, else the attempt fails `artifact_invalid`. Usage maps per model from the result message into `usage_record` rows with completeness; the `AgentSession` payload fields are listed in [ir.md](ir.md) section 3.
+
+**Provider limits** ([ADR-0024](../../docs/decisions/0024-provider-limits-as-non-agent-failures.md)). The adapter maps vendor signals to one normalised event, `provider_limited {retry_after, scope, limit_group, model, binding}`, and to the attempt's error class. A rejected limit or a `usageLimitExceeded`/`rateLimitExceeded` error is `provider_limited`, with `retry_after` from the matching window's reset time when one is reported. Credits or billing exhaustion and account holds are `config_error`; authentication failures stay `config_error`; overload and server errors stay `harness_error`. Signals that the harness is retrying internally are normalised as `provider_retrying` events, which count as liveness for `stall_after`; the adapter sets the harness's own retry ceiling (for Claude Code, `CLAUDE_CODE_MAX_RETRIES`). The session runner interrupts a session that reports a rejected limit whose reset lies beyond `stall_after`, so it ends through the normal collection and publication lifecycle, and the attempt fails with `provider_limited`. The quota resource key comes from the binding's `quota_resource`; a binding without one is its own resource. The mapping in section 14 is documented, not observed: the first slice records a trace per harness before it is relied on.
 
 ## 4. VCS (FR-5.2)
 
@@ -593,6 +595,20 @@ These are **future executable test contracts**, specified for issue #51; this re
 | independent runtime/provider | required without a shared worker filesystem, with native non-Git revision/input data | provider's actual process/service isolation and transfer tests required before it declares true; otherwise required-protection rejection |
 | configured fake runtime/VCS | required, deterministic phase/recovery barriers | protocol evidence only; cannot certify OS isolation |
 
+### Provider-limit contracts (ADR-0024)
+
+These are **future executable test contracts**; documentation CI does not run them. The fake harness emits the normalised limit and retry events with chosen values, and time comes from an injected clock. Metadata cases run on PostgreSQL and SQLite. A recorded trace per real harness, taken in the first slice, checks the mapping of section 14 separately.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_provider_limit_does_not_consume_agent_attempts` | A node with `max_attempts: 1` reports `provider_limited` with `retry_after` two hours ahead; it waits in a `wait` row holding no worker or runtime slot and succeeds on the next attempt after the clock passes the reset; its agent attempt count stays 1 |
+| `test_provider_limit_pauses_admission_for_quota` | Two ready nodes share a quota resource and limit group and a third uses another group; after the first reports `provider_limited`, the second is not admitted before the reset and the third is admitted at once; two aliases with one `quota_resource` share the pause |
+| `test_provider_limit_wakes_with_jitter` | Five attempts waiting on one reset are not all admitted in the same pass |
+| `test_provider_limit_ceiling_fails_node` | Without `retry_after`, back-off continues until `max_wait` and the node fails with `provider_limited` |
+| `test_provider_limit_keeps_partial_work` | A session stopped for a distant reset ends through the collection and publication lifecycle; the next attempt with `fresh_with_feedback` starts from that `VcsRef` |
+| `test_provider_wait_counts_towards_inherited_deadline` | A run whose inherited deadline passes during the wait fails with `timeout` |
+| `test_internal_retry_is_liveness_not_stall` | `provider_retrying` events keep the session alive past `stall_after`; with no events at all the session ends `stalled` |
+
 ### Execution-recovery implementation gates (ADR-0017)
 
 These named cases specify future behavior; this documentation change implements no runtime or test suite. Run integration cases against both PostgreSQL and SQLite using the same parametrized fixtures, injected time/randomness and explicit condition barriers with deadlines. Use configured protocol fakes validated by the runtime/VCS conformance suites, real local processes/Git and an independently controllable local execution service; never patch modules, environment or HTTP transports and never use a real model/code host. Local process cases run on Linux and macOS without a sandbox/VM/administrator setup; Docker and containerized PostgreSQL cases run on Linux CI. Separate protocol correctness evidence from OS/provider termination evidence.
@@ -651,6 +667,7 @@ Resolved node-config field → harness option. The Claude Agent SDK and Codex ap
 | harness credential (DD-30) | `ANTHROPIC_API_KEY` in the constructed env; base URL to the proxy post-MVP | `CODEX_API_KEY` in the constructed env | agent-specific variable |
 | billing class | auth-method probe on the init message | auth file inspection; default `api_key` | `subscription` unless the adapter config declares otherwise |
 | stop reason / error class | `ResultMessage.subtype` (`success`, `error_max_budget_usd` → `budget_exhausted`, `error_during_execution` → `harness_error`) | `turn/failed`, `error` → `harness_error` | `stopReason` (`end_turn`, `max_tokens`, `cancelled`, `refusal` → `harness_error`) |
+| provider limit (ADR-0024; documented, not yet observed) | `rate_limit_event.rate_limit_info.status = "rejected"` with `resetsAt` and `rateLimitType`; assistant `error = "rate_limit"`; result `api_error_status = 429` → `provider_limited`; `billing_error`, `account_on_hold`, `credits_required` → `config_error`; `overloaded` → `harness_error`; `api_retry` and `tool_progress.subagent_retry` → `provider_retrying` | `error` with `codexErrorInfo` `usageLimitExceeded` or `rateLimitExceeded` → `provider_limited`, reset from `account/rateLimits/updated` windows (`resetsAt`, `limitId`); `unauthorized` → `config_error`; `serverOverloaded` → `harness_error`; `willRetry: true` → `provider_retrying` | agent-dependent; without a documented signal a limit stays `harness_error` |
 
 Fields with the same semantics on every harness are the kora vocabulary; fields that only one harness has are mapped on that harness and warned on the others, never silently dropped (FR-3.3).
 

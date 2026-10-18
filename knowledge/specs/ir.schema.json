@@ -140,7 +140,7 @@
       "type": "string",
       "enum": ["harness_error", "command_failed", "timeout", "events_exhausted", "budget_exhausted",
                "artifact_invalid", "attempt_failed", "approval_rejected", "approval_expired", "candidate_moved", "wait_expired",
-               "stalled", "infrastructure", "cancelled", "config_error"]
+               "stalled", "provider_limited", "infrastructure", "cancelled", "config_error"]
     },
     "triggerRule": {
       "type": "string",
@@ -533,7 +533,8 @@
         "stall_after": { "$ref": "#/$defs/duration" },
         "retention": { "$ref": "#/$defs/retention" },
         "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "glob patterns of gate files agent nodes may not edit and command gates verify against the base commit (DD-34)" },
-        "infrastructure_retry": { "$ref": "#/$defs/retry" }
+        "infrastructure_retry": { "$ref": "#/$defs/retry" },
+        "provider_retry": { "type": "object", "properties": { "max_wait": { "$ref": "#/$defs/duration" } }, "additionalProperties": false, "description": "waiting allowed for model-provider limits before failing with provider_limited (ADR-0024)" }
       },
       "patternProperties": { "^x-": {} },
       "additionalProperties": false
