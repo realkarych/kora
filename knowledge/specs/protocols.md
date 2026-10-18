@@ -620,6 +620,7 @@ These are **future executable test contracts**; documentation CI does not run th
 | `test_disable_races_uncommitted_delivery` | An event transaction inserts a pending delivery while a disable runs: after the disable commits no new send is authorised for that record, and a send claimed before the disable may complete |
 | `test_recovery_entry_notifies` | A worker whose original execution domain becomes unreachable leaves its attempt in recovery; `attempt.recovery_required` is delivered before any reconciliation, once per entry, and an ordinary first claim awaiting its first observation sends nothing |
 | `test_notification_carries_no_payloads` | A `slack` and a `telegram` message for `approval.requested` contain the console and change-request links and no secret value, transcript or artifact payload |
+| `test_subscription_reads_need_no_platform` | With one token that has namespace access and no `platform` flag, listing and getting a subscription return the same `state`, failure and backlog fields over HTTP, `kora notifications list` and `show`, and `kora_reference`; the same token's put, delete, enable and disable are refused with `API005` over HTTP, the CLI and `kora_admin` |
 
 ### Execution-recovery implementation gates (ADR-0017)
 

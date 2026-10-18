@@ -187,7 +187,7 @@ kora ships **two curated MCP servers** with task-shaped tools, not one generated
 
 | server | tool | what it does (API operations behind it) |
 |---|---|---|
-| authoring | `kora_reference` | DSL reference, IR schema, error codes, and reads of the registry: presets and artifact types of the namespace, deployed graphs/versions, namespace policy with admission usage and graph trigger bindings with last occurrence diagnostics (`/reference/*`, `GET` presets, artifact types, graphs/versions, `GET /namespaces/{ns}`, `GET …/graphs/{graph}/triggers`); these reads require ordinary namespace access, not platform |
+| authoring | `kora_reference` | DSL reference, IR schema, error codes, and reads of the registry: presets and artifact types of the namespace, deployed graphs/versions, namespace policy with admission usage and graph trigger bindings with last occurrence diagnostics, and notification subscriptions with their state and backlog (`/reference/*`, `GET` presets, artifact types, graphs/versions, `GET /namespaces/{ns}`, `GET …/graphs/{graph}/triggers`, `GET …/notification-subscriptions`, `GET …/notification-subscriptions/{id}`); these reads require ordinary namespace access, not platform |
 | authoring | `kora_compile` | compile the graph sources in the MCP server's own process, which is the author's environment, then validate the document through `/validate`, and return IR plus `DSLnnn`/`IRnnn` errors and warnings in one call; stdio server only (local compile, `/validate`) |
 | authoring | `kora_plan` (task) | materialised plan on the fake runtime, with unhonoured-field warnings (`/plan`) |
 | authoring | `kora_deploy` | register a graph version (`POST /graphs/{graph}/versions`) |
@@ -200,7 +200,7 @@ kora ships **two curated MCP servers** with task-shaped tools, not one generated
 | operating | `kora_respond` | respond to an approval with the bound SHA and digests (`API006` on staleness); requires a token with `approve`, which the MCP server's default token lacks (DD-32) |
 | operating | `kora_retry` (task) | manual retry of a node (clear downstream) and wait for the node's next terminal state |
 | operating | `kora_cancel` | cancel a run or a node with grace |
-| operating | `kora_admin` | the `platform`-flag and operator operations: put presets and artifact types, put namespace policy, manage notification subscriptions, pause or resume a schedule, list workers and reconcile an attempt (`action: observe`, `stop` or `confirm_stopped` with the same expected version/domain, idempotency key and evidence); refused with `API005` without `platform` |
+| operating | `kora_admin` | the `platform`-flag and operator operations: put presets and artifact types, put namespace policy, put, delete, enable and disable notification subscriptions, pause or resume a schedule, list workers and reconcile an attempt (`action: observe`, `stop` or `confirm_stopped` with the same expected version/domain, idempotency key and evidence); refused with `API005` without `platform` |
 
 Tool output is the API JSON with the same error object on failure, returned as a tool error with `isError: true` so the agent sees the `code`. Fourteen tools in total, under the 15-tool cap (a rerun is an option of `kora_trigger`, since it starts a run); skills are files, not MCP resources (design review finding [skills and MCP overlap](../reviews/review-2026-10-15.md#skills-and-mcp-overlap)).
 
