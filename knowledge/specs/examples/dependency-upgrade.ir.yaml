@@ -1,9 +1,10 @@
-# Small example: weekly dependency upgrade. Codex upgrades one package, tests run as a command gate,
-# a human approves on the CLI/API channel, a sensor waits for the merge.
+# Weekly dependency-upgrade design fixture; agent, command gate, approval and merge sensor.
+# Hand-maintained until the compiler exists. Compiler identity and source digest below are illustrative,
+# not evidence of compilation. CI checks structural schema validity only.
 $schema: "https://kora.dev/schemas/ir/1.0.json"
 ir_version: "1.0"
 meta:
-  compiler: "kora 0.1.0"
+  compiler: "design-fixture (compiler not implemented)"
   source_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000002"
   defaults:
     trust_repo_config: false

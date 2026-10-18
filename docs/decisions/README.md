@@ -2,7 +2,9 @@
 
 One record per significant decision, in the MADR shape: context, decision, alternatives considered, consequences, where it is applied. Records are numbered in the order they were written and never renumbered; a record that changes an earlier one says so in its header (`Supersedes` / `Superseded by`) and the earlier record is kept with its status updated. Reviewed by the project owner on 2026-10-16; the ADR-0016, ADR-0017, ADR-0018, ADR-0019 and ADR-0020 additions and amendments dated 2026-10-17 are pending owner review.
 
-Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (first-slice implementation defaults) and `DD-37` (small mechanisms kept or dropped) are implementation-level and stay only in the register.
+Ownership-index amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
+
+Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (implementation defaults) and `DD-37` (small mechanisms kept or dropped) point to their component specification owners through the register; it preserves identifiers and dispositions without overriding those current contracts.
 
 | record | decision | status |
 |---|---|---|

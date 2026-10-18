@@ -1,91 +1,79 @@
-# kora MVP design — design decisions
+# Design decision identifier index
 
-Status: decided by the owner on 2026-10-15, after review of the first design drafts (DD-1 to DD-26), after three independent design reviews (DD-27 to DD-31) and after the second review cycle (DD-32 to DD-37); the review findings and their dispositions are in [review-2026-10-15.md](review-2026-10-15.md). This file keeps the numbering the design documents cite (**DD-n**, "design decision n"); the numbers are stable identifiers grouped by topic, not a sequence (DD-10 was never used). Each item states the decision and where it is applied. Nothing here is open.
+Historical identifiers from the owner's October 15, 2026 decisions. The original record is preserved at [the consolidation baseline](https://github.com/realkarych/kora/blob/a29bfa6a78adac97584a048a4ef4402969e8a100/knowledge/reviews/design-decisions-2026-10-15.md). This compact index records current owners and supersession; it is not a second specification. Read the linked ADR and component section. An accepted design is not evidence of an implemented or tested feature. DD-10 was never assigned; identifiers are not renumbered.
 
-Historical source note, 2026-10-17: the `architecture.md` links and section numbers below refer to the [pre-consolidation detailed architecture](https://github.com/realkarych/kora/blob/1baf9891af1d8dc69e4e33dd7bc2af22237072c5/knowledge/architecture/detailed.md). The decision identifiers and recorded dispositions are unchanged.
+## Decisions and current owners
 
-## Graph model and IR
+| Identifier | Disposition and current owner |
+|---|---|
+| DD-1 | Seven trigger rules; [IR nodes](../specs/ir.md#3-nodes) and schema `triggerRule`. |
+| DD-2 | Sensor provider; [protocols section 11](../specs/protocols.md#11-sensor-fr-23-fr-62-dd-2), under [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md). |
+| DD-3 | CEL strings and schema-driven checking; [IR expressions](../specs/ir.md#7-expressions-and-templates), [ADR-0013](../../docs/decisions/0013-implementation-stack.md). |
+| DD-4 | Retention; [data-model section 10](../specs/data-model.md#10-retention-dd-4). The original 90/180-day values are superseded by [ADR-0007](../../docs/decisions/0007-attempt-model-and-retries.md); payload availability also follows ADR-0018. |
+| DD-5, DD-16 | Agent nodes never operate kora; no per-attempt operator tokens, recursive child-run controls or child-cost attribution. [ADR-0002](../../docs/decisions/0002-ai-first-api-and-thin-clients.md). |
+| DD-6 | No per-token rate limits in MVP; [API limits](../specs/api-and-agent-surface.md#8-rate-and-size-limits). Bounded start acceptance is separately required by ADR-0020. |
+| DD-7 | Own scheduler; deferred alternative backend with a prose boundary. [ADR-0001](../../docs/decisions/0001-own-control-plane.md), [scheduler section 12](../specs/scheduler.md#12-execution-backend-boundary-nfr-55). |
+| DD-8 | No transform node. Original model-based packing/selection is superseded by deterministic commands in the canonical graph; narrative remains model-authored. [ADR-0012](../../docs/decisions/0012-no-transform-node.md). |
+| DD-9 | Fan-out bodies are subgraphs; inputs feed bodies and fan-out collects outputs. [IR composition](../specs/ir.md#4-node-kinds-and-their-config), [ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md). |
+| DD-11 | Full sandboxed Jinja2 retained; [IR expressions](../specs/ir.md#7-expressions-and-templates). |
+| DD-12 | Overlap policy; original universal `allow` default superseded for webhooks. [IR triggers](../specs/ir.md#8-triggers-fr-62), ADR-0006/0020. |
+| DD-13 | Outbound workers use HTTP only; [ADR-0003](../../docs/decisions/0003-scheduler-and-workers-over-http.md). Recovery and deadlines are amended by ADR-0017/0022. |
+| DD-14 | Installation-level harness versions, tested range and visible resume fallback; [ADR-0004](../../docs/decisions/0004-harness-adapters-over-vendor-sdks.md). |
+| DD-15 | Stall default and overrides; [IR limits](../specs/ir.md#9-limits-fr-65-fr-66-fr-94) and scheduler section 4. Inherited deadlines cap extension under ADR-0022. |
+| DD-17 | HMAC or replay-protected bearer webhook authentication; [IR triggers](../specs/ir.md#8-triggers-fr-62). |
+| DD-18 | Stdio and HTTP MCP forms; [API MCP section](../specs/api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28). |
+| DD-19 | Server-side browser session and fallback token login; one-time links added by [ADR-0011](../../docs/decisions/0011-namespaces-and-personal-tokens.md). Cookie/Bearer bridging remains an open question. |
+| DD-20 | Native skill mappings; [harness mapping](../specs/protocols.md#14-harness-mapping-tables-fr-33-dd-27). |
+| DD-21 | Runtime network enforcement with harness restrictions as an additional layer; [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md). |
+| DD-22 | Workspace-kind matching superseded by typed plans and shared executors; [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md), amended by ADR-0016. |
+| DD-23, DD-30 | Environment-injected harness credentials in reference MVP runtimes; per-attempt credential proxy deferred. [Runtime protocol](../specs/protocols.md#2-runtime-fr-81), ADR-0004/0009. |
+| DD-24 | Keyword-only node inputs; [DSL](../specs/dsl.md), ADR-0006. |
+| DD-25 | Local and registry presets, pulled separately and snapshotted at compile time; [DSL](../specs/dsl.md), ADR-0006. |
+| DD-26 | Optional graph repository default; every workspace-using node still needs a source. [DSL validation](../specs/dsl.md), ADR-0006. |
+| DD-27 | Vendor interfaces retained; old Codex SDK and MVP ACP wording superseded by direct app-server and post-MVP ACP. [ADR-0004](../../docs/decisions/0004-harness-adapters-over-vendor-sdks.md). |
+| DD-28 | Curated task-shaped MCP tools and operation/schema parity; old count and skills-as-MCP-resources wording superseded. Current inventory: [API sections 4–5](../specs/api-and-agent-surface.md#4-mcp-servers-fr-01-dd-28). |
+| DD-29 | One `tool_policy`, namespace deny precedence and explicit hook coverage; a permission prompt is not a universal interception hook. [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md). |
+| DD-31 | Namespace daily soft limit blocks admission; [ADR-0010](../../docs/decisions/0010-cost-accounting-and-limits.md), scheduler section 4. |
+| DD-32 | Personal tokens, two flags, transcript capability and preset escalation refusal; [ADR-0011](../../docs/decisions/0011-namespaces-and-personal-tokens.md), [DSL](../specs/dsl.md). |
+| DD-33 | Platform facts separate from agent narrative; [ADR-0008](../../docs/decisions/0008-content-bound-approvals.md). |
+| DD-34 | Protected gate paths and explicit measurement provenance, not evaluator attestation; [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md). |
+| DD-35 | Reviewer identity, allowlist, opt-in merge signal and filtered feedback; [ADR-0008](../../docs/decisions/0008-content-bound-approvals.md). |
+| DD-36 | Implementation defaults owned by the component sections below; later ADRs override original mechanisms. |
+| DD-37 | Small-mechanism dispositions and reasons retained below, with current owners. |
 
-**DD-1. Trigger rules.** `none_failed_min_one_success` is the seventh rule, in the closed enum of IR v1. Applied: [ir.md](../specs/ir.md) §3, [ir.schema.json](../specs/ir.schema.json) `triggerRule`.
+## DD-36 implementation-default ownership
 
-**DD-2. Sensors are a protocol.** The tenth protocol, `sensor`, registered through the `kora.provider` entry point; built-ins `change_request_status`, `ci_status` (through the VCS protocol) and `http`. `wait_event` nodes and sensor triggers reference a sensor by name with a `config` object and an `until` expression over the observation. Applied: [protocols.md](../specs/protocols.md) §11 (interface, capability flags, conformance), [ir.md](../specs/ir.md) §4.3 and §8, schema `sensorPoll`, [scheduler.md](../specs/scheduler.md) §2 and §5, [data-model.md](../specs/data-model.md) `trigger_binding`. NFR-5.1 lists all eleven protocols.
+| Default | Current contract owner |
+|---|---|
+| Standalone bootstrap, SQLite settings and generated token | Scheduler section 10 |
+| Self-contained claims, leases, polling and recovery | Scheduler section 3; API section 2; ADR-0017 |
+| Agent output cardinality and AgentSession fields | IR section 3 |
+| Repository resolution, Git credentials and publication | Protocols section 4; ADR-0016/0017/0022 |
+| Harness credentials and normalized event shape/counting | Protocols section 3 |
+| Termination/grace | Protocols section 2; scheduler section 17; ADR-0022 |
+| Claude client settings, structured-output fallback and usage mapping | Protocols sections 3 and 14 |
+| Finalization ownership and cancelled instances | Data-model section 4; scheduler section 2 |
+| Trigger idempotency and parameter validation | API section 1; data-model section 13; ADR-0020 |
+| Artifact upload, full payload/approval digests, inline threshold and paths | Data-model section 3; protocols section 7; ADR-0018/0019 |
+| Command outputs | IR section 4 |
+| Approval response and API body shapes | API section 2 |
+| Compile conventions | DSL sections 1–2; ADR-0002/0006 |
+| Tick semantics, fixed-point cap and discovery | Scheduler section 8; ADR-0003 |
+| Event kinds and payload ownership | Data-model section 2 and component transition sections |
+| CLI run/list columns | API section 3 |
 
-**DD-3. Expression language is CEL.** Branch conditions, retry predicates, `approve_when`, event `match` and sensor `until` are CEL expressions. After the review: the reference implementation uses the Rust-backed `common-expression-language` binding with kora's own schema-driven checker and the CEL conformance suite in CI, and the DSL takes CEL strings only (no expression builder). Applied: [ir.md](../specs/ir.md) §7 and §10 (`IR011`), [dsl.md](../specs/dsl.md) §1 and §2, [architecture.md](https://github.com/realkarych/kora/blob/1baf9891af1d8dc69e4e33dd7bc2af22237072c5/knowledge/architecture/detailed.md) §7, examples.
+These are links by document and section to the [scheduler](../specs/scheduler.md), [API](../specs/api-and-agent-surface.md), [IR](../specs/ir.md), [protocols](../specs/protocols.md), [data model](../specs/data-model.md) and [DSL](../specs/dsl.md). No remaining default is defined only in the historical body.
 
-**DD-8. No transform node kind, no helper CLI.** Packing a candidate, selecting the best candidate and assembling the `ReviewBundle` are ordinary agent nodes on a cheap model over typed inputs; a command node serves authors who want a fixed formula. kora attaches the run's aggregated cost to the approval request itself (after the review: the plain sum of the run's usage records at request time, no lineage walk). Applied: [ir.md](../specs/ir.md) §3 and §4.2, [examples/sql-optimization.ir.yaml](../specs/examples/sql-optimization.ir.yaml) (`accept`, `select_best`, `bundle` as agent nodes on the `packer` preset), [data-model.md](../specs/data-model.md) §5 and `approval_request.run_cost`, [scheduler.md](../specs/scheduler.md) §2, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) approvals route and frontend, [dsl.md](../specs/dsl.md) §1.
+## DD-37 retained and removed mechanisms
 
-**DD-9. Fan-out body is always a subgraph.** The compiler wraps a single node. After the review there is no `fan_in` node: the `fan_out` node declares the collected `List[T]` outputs, and a body is fed only through the node's `inputs` with `over` naming the mapped one. Applied: [ir.md](../specs/ir.md) §4.4, schema `fanOutConfig`, `outputDecl.collect`, [dsl.md](../specs/dsl.md) §1, examples.
-
-**DD-11. Prompt templates are full Jinja2 in a sandbox.** Sandboxed environment, no filesystem loaders, imports or includes. Applied: [ir.md](../specs/ir.md) §7 and §10 (`IR012`), [dsl.md](../specs/dsl.md) §1 and §2 (`DSL012`), examples.
-
-**DD-12. Trigger overlap default is `allow`** for every trigger kind; `skip` and `queue` are per-graph options (`graph.overlap`). Applied: [ir.md](../specs/ir.md) §2 and §8, schema `graph.overlap`, [scheduler.md](../specs/scheduler.md) §2, examples.
-
-## Data model and scheduling
-
-**DD-4. Retention.** Graph-level setting with namespace default. Defaults: run metadata and usage records forever; session transcripts 90 days; artifact payloads 180 days; `VcsRef` and other reference-only artifacts forever. Payloads only are deleted; metadata stays. After the review the deletion runs as a separate batched low-priority task with reference counting on `storage_ref` and the states `present` → `expiring` → `expired`. Applied: [data-model.md](../specs/data-model.md) §10 and `payload_state` columns, [ir.md](../specs/ir.md) §2 `runtime.retention`, schema `retention`, [scheduler.md](../specs/scheduler.md) §13, [dsl.md](../specs/dsl.md) `@graph(retention=…)`.
-
-**DD-7. Temporal-backed execution backend** is prototyped after MVP, by demand; the backend boundary stays documented, after the review as prose rather than a Python interface with one implementation. Applied: [scheduler.md](../specs/scheduler.md) §12, [data-model.md](../specs/data-model.md) §9.
-
-**DD-13. Scheduler and workers are separate processes.** The scheduler decides and persists; a worker per runtime claims attempts and streams events; workers may run inside an adopter's network and connect outbound only. After the review, workers have exactly one path to the control plane, the HTTP API, fenced by a lease epoch; standalone runs the same client over an in-process ASGI transport. Applied: [scheduler.md](../specs/scheduler.md) §1 and §3, [protocols.md](../specs/protocols.md) §2, [architecture.md](https://github.com/realkarych/kora/blob/1baf9891af1d8dc69e4e33dd7bc2af22237072c5/knowledge/architecture/detailed.md) §2 and §7, [data-model.md](../specs/data-model.md) §1.
-
-**DD-14. No harness version pin on nodes.** Harness versions are fixed by the installation (images, installed binaries). `harness_version` is removed from node config; the adapter records the installed version on `AgentSession` and the attempt and never compares it to a node requirement (a `resume` whose installed version differs from the previous attempt's falls back to `fresh_with_feedback`). Applied: [ir.md](../specs/ir.md) §4.1, schema `agentConfig`, [protocols.md](../specs/protocols.md) §3 and §14, [dsl.md](../specs/dsl.md) §3, [data-model.md](../specs/data-model.md) `attempt`, [scheduler.md](../specs/scheduler.md) §7, examples. NFR-5.3 and NFR-11.2 now state this installation-level rule: adapters declare a tested version range, checked by `kora doctor` and at worker start, never per node.
-
-**DD-15. `stall_after`** has a runtime-level default (15 minutes) with a graph-level value in `runtime.stall_after` and a per-node override in `limits.stall_after`. Applied: [ir.md](../specs/ir.md) §2, §3 and §9, schema `limits` and `runtimeSection`, [scheduler.md](../specs/scheduler.md) §4, [protocols.md](../specs/protocols.md) `RuntimeCapabilities.default_stall_after`.
-
-## API, clients and agent operation
-
-**DD-5 and DD-16. Removed: agent nodes never operate kora.** kora's MCP server and skills exist only for the user's own coding-agent session, replacing manual actions (author, compile, deploy, trigger, inspect, approve, retry, cancel). The MCP server acts with the user's token and has exactly the user's permissions; there is no operator allowlist, no per-attempt token, no child-run cost attribution and no recursion limit. Applied: [api-and-agent-surface.md](../specs/api-and-agent-surface.md) (introduction, §1, §4, §5; former §7 deleted), [protocols.md](../specs/protocols.md) §10, [data-model.md](../specs/data-model.md) (`run.parent_attempt_id` and attempt tokens removed), [scheduler.md](../specs/scheduler.md) §6, [ir.md](../specs/ir.md) §4.1, [dsl.md](../specs/dsl.md) §5. FR-0.5 is being removed by the owner.
-
-**DD-6. No per-token rate limits in MVP.** Applied: [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §8.
-
-**DD-17. Webhook authentication** supports both an HMAC body signature (Standard Webhooks shape, secret from the secrets provider) and a bearer token; the source picks per trigger. Applied: [ir.md](../specs/ir.md) §8, schema `trigger.auth`, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §1 (`API007`) and §2, [data-model.md](../specs/data-model.md) `inbound_event.auth_kind`, [scheduler.md](../specs/scheduler.md) §2, examples.
-
-**DD-18. MCP server in two forms**: a `kora mcp` stdio process talking to the API with the user's token, and HTTP MCP endpoints on the API server (`/mcp/authoring`, `/mcp/operating` after DD-28). Applied: [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §2 and §4.
-
-**DD-19. Frontend login**: the API token pasted into a login form; the approver is recorded as the token owner. After the review the browser keeps an opaque server-side session cookie (`SameSite=Strict`, `Secure`) rather than the token itself, with CSRF protection and CSP, and cookies are never accepted on Bearer-only API paths. Applied: [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §2 and §6, [architecture.md](https://github.com/realkarych/kora/blob/1baf9891af1d8dc69e4e33dd7bc2af22237072c5/knowledge/architecture/detailed.md) §7, [data-model.md](../specs/data-model.md) `api_token.owner`.
-
-## Protocols and harness mapping
-
-**DD-20. Codex skills are first-class** (`skills.config[]` in `config.toml`), so skills map natively on both harnesses. Applied: [protocols.md](../specs/protocols.md) §14 mapping table, [dsl.md](../specs/dsl.md) §5, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §5.
-
-**DD-21. Network policy is enforced by the runtime** (Docker rules, enterprise sandbox policy) with the harness sandbox as an additional layer; compile-time warning `IR009` when the runtime declares it cannot enforce. Applied: [protocols.md](../specs/protocols.md) §2 and §14, [ir.md](../specs/ir.md) §4.1 and §10.
-
-**DD-22. Workspace target kinds.** The VCS checks out into a `WorkspaceTarget` named by the runtime; runtime and VCS pairs must share at least one kind. Kinds after the review: `host_path`, `volume`, `remote` (opaque; covers provisioned workspaces and in-session bootstrap). Applied: [protocols.md](../specs/protocols.md) §2 (`workspace_targets`) and §4 (table), `IR009` in [ir.md](../specs/ir.md) §10.
-
-**DD-23. Harness credentials** reach the session through a credential proxy when the runtime declares `credential_proxy`, otherwise through environment variables; both paths are in the runtime protocol. Scoped by DD-30 for MVP. Applied: [protocols.md](../specs/protocols.md) §2 (`RuntimeCapabilities.credential_proxy`, `Workload.harness_credentials`) and §14, [ir.md](../specs/ir.md) §4.1.
-
-## DSL
-
-**DD-24. Keyword-only inputs** for node calls (`review(change=…, run=…)`); positional arguments only for subgraph calls with declared parameters; a positional argument to a node is `DSL003`. Applied: [dsl.md](../specs/dsl.md) §1 and §2.
-
-**DD-25. Presets live in both places**: Python objects in graph code and registry presets published through the API (`presets.registry(name, version=…)`), both snapshotted into the IR at compile time (under `meta.presets` after the review; registry presets are pulled by `kora presets pull` so compile stays offline). Applied: [dsl.md](../specs/dsl.md) §1 to §3, [ir.md](../specs/ir.md) §2, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §3, [data-model.md](../specs/data-model.md) `preset`.
-
-**DD-26. `@graph(repo=…)` is optional**; a node without any workspace source is compile error `DSL003`. Applied: [dsl.md](../specs/dsl.md) §1 and §2.
-
-## Decisions after the design review (2026-10-15)
-
-**DD-27. Harness adapters wrap the vendor SDKs.** The reference `claude` adapter uses the Claude Agent SDK for Python, the `codex` adapter the Codex SDK over the app-server JSON-RPC protocol, and a third built-in adapter speaks ACP (Agent Client Protocol, JSON-RPC over stdio) to OpenCode, Pi, Gemini and other ACP agents; no CLI JSONL parsing. kora still enforces `max_events`, the soft budget and `stall_after` itself from the SDK event stream, inside a session runner that executes in the runtime. Binaries remain fixed per installation image (DD-14). Applied: [protocols.md](../specs/protocols.md) §2 (runner), §3 and §14, [architecture.md](https://github.com/realkarych/kora/blob/1baf9891af1d8dc69e4e33dd7bc2af22237072c5/knowledge/architecture/detailed.md) §4, §5 and §7, [ir.md](../specs/ir.md) §4.1 (`harness: acp`).
-
-**DD-28. Curated MCP servers.** Two servers, `kora-authoring` and `kora-operating`, with 13 task-shaped tools in total; long operations (`kora_plan`, `kora_trigger`, `kora_retry`) are MCP Tasks per the 2026-07 specification; skills are also published over MCP as resources and prompts. Parity (FR-0.3) is verified by a coverage test that every API operation is reachable through at least one CLI command and one MCP tool, plus schema-coverage checks, not by generating one tool per operation. Applied: [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §4, §5 and §7, [architecture.md](https://github.com/realkarych/kora/blob/1baf9891af1d8dc69e4e33dd7bc2af22237072c5/knowledge/architecture/detailed.md) §2, §7 and §8, [dsl.md](../specs/dsl.md) §5.
-
-**DD-29. Policy protocol.** An eleventh protocol, `policy`, is the decision point for tool calls, invoked by the session runner through the harness's pre-tool-call hook (Claude Agent SDK `PreToolUse`, Codex `item/permissions/requestApproval`, ACP `session/request_permission`). After finding S2-2 of the [design review of 2026-10-15](review-2026-10-15.md), nodes carry one `tool_policy` field (`allow`, `deny`) into which the DSL's `allowed_tools` and `disallowed_tools` compile; the namespace's `tool_policy` is prepended so a namespace deny wins; denials travel as `permission_denied` session events. MVP implements allow/deny lists; Cedar and OPA follow as plugins without an IR change. Applied: [protocols.md](../specs/protocols.md) §12, §13 and §14, [ir.md](../specs/ir.md) §4.1 and §10 (`IR013`), schema `toolPolicy`, [data-model.md](../specs/data-model.md) `namespace.policy.tool_policy` and `policy.denied` events, [dsl.md](../specs/dsl.md) §3, [architecture.md](https://github.com/realkarych/kora/blob/1baf9891af1d8dc69e4e33dd7bc2af22237072c5/knowledge/architecture/detailed.md) §2, §4 and §7, examples.
-
-**DD-30. Harness credentials in MVP are environment variables** taken from the adapter's deployment configuration. The `credential_proxy` runtime capability stays in the protocol, but the reference runtimes declare it false; the per-attempt proxy (never shared between attempts) is the first post-MVP runtime item, alongside the cloud-sandbox runtime. Applied: [protocols.md](../specs/protocols.md) §2 and §14, [ir.md](../specs/ir.md) §4.1.
-
-**DD-31. Daily soft cost limit per namespace in MVP.** One policy field, `daily_budget_usd`; when the day's estimated spend exceeds it, no new attempts are admitted and running ones finish; the state is exposed in `/metrics` and on `GET /namespaces/{ns}/cost/daily`. Applied: [scheduler.md](../specs/scheduler.md) §6 and §11, [data-model.md](../specs/data-model.md) `namespace`, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §2 and §4.
-
-Confirmed unchanged by the review: DD-11 (full Jinja2 sandbox for prompt templates) and the post-MVP status of the Kubernetes runtime (FR-8.3).
-
-## Decisions after the second review cycle (2026-10-15)
-
-**DD-32. Personal tokens with two flags.** From MVP, user tokens are personal: bound to a person and a namespace list, with exactly two flags, `approve` (may respond to approvals) and `platform` (may publish presets, namespace policies and tool policies); reading transcripts is a per-namespace capability on the list, not a flag. No roles or groups. The MCP server's default token has no `approve`, and `kora_respond` requires it; the audit records the token owner as approver. Preset and namespace-policy writes require `platform`. `kora compile` fails (`DSL013`) when a registry preset raises `trust_repo_config`, the permission mode or foreign `mcp_servers` above the namespace policy. Applied: [data-model.md](../specs/data-model.md) `api_token`, [protocols.md](../specs/protocols.md) §10, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §1, §2, §4, §6, [dsl.md](../specs/dsl.md) §2, [scheduler.md](../specs/scheduler.md) §10 (standalone token).
-
-**DD-33. ReviewBundle split into facts and narrative.** `facts` (gate results, metrics from `CommandResult` rows, diff and commit references, attempt cost, provenance of each item: attempt, worker, image) are written by kora from its own records and are read-only to agents; the agent node writes only `narrative` (`summary`, `rationale`). Approvals bind to the digests of `facts`; `kora web` renders the parts visibly apart. Applied: [ir.md](../specs/ir.md) §3 and §4.2, [examples/sql-optimization.ir.yaml](../specs/examples/sql-optimization.ir.yaml) (`bundle` node and `final_pr` binds), [data-model.md](../specs/data-model.md) `approval_request`, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §2 and §6, [protocols.md](../specs/protocols.md) §5.
-
-**DD-34. Protected paths for gates.** A graph (`runtime.protected_paths`) and a node (`protected_paths`) declare gate scripts, build files, test directories and tooling configuration; the tool policy denies `Edit` and `Write` on them for the graph's agent nodes; before a command gate runs, the worker verifies the digests of those paths in the candidate checkout against the base commit (`Vcs.diff_paths`) and fails the attempt with class `protected_path_modified` on a mismatch. No second checkout. Applied: [ir.md](../specs/ir.md) §2, §3, §4.1, §6, schema, examples, [protocols.md](../specs/protocols.md) §4 and §12, [dsl.md](../specs/dsl.md) §1 and §3.
-
-**DD-35. VCS approval rules.** An approval from the change-request channel counts only when the approver is not the change-request author and not kora's own bot identity and, when the namespace sets `approver_allowlist`, is on the list; "merged" is a separate opt-in signal (`accept_merged_as_approval`, default false). The `ApprovalResponseDto` carries approver login and permission level. Feedback comments fed into `fresh_with_feedback` carry author and association, and the channel filters to collaborators with write access by default (`feedback_from: collaborators_write`). Applied: [protocols.md](../specs/protocols.md) §5, [ir.md](../specs/ir.md) §2 and §4.2, [data-model.md](../specs/data-model.md) `namespace` and the `approval_request` state machine, [scheduler.md](../specs/scheduler.md) §7, examples.
-
-**DD-36. First-slice implementation defaults.** The seventeen implementability defaults are accepted as written into the documents: standalone bootstrap ([scheduler.md](../specs/scheduler.md) §10); the self-contained claim response, lease and polling ([scheduler.md](../specs/scheduler.md) §3, [api-and-agent-surface.md](../specs/api-and-agent-surface.md) §2); the agent output contract and the `AgentSession` payload ([ir.md](../specs/ir.md) §3); repository resolution, git credentials and the publish contract ([protocols.md](../specs/protocols.md) §4); harness credentials from adapter configuration, the normalised event shape, `max_events` counting, termination, the `ClaudeSDKClient` settings, structured-output fallbacks and usage mapping ([protocols.md](../specs/protocols.md) §3); finalisation ownership and the `cancelled` instance state ([data-model.md](../specs/data-model.md) §4, [scheduler.md](../specs/scheduler.md) §2); manual-trigger idempotency and parameter validation ([api-and-agent-surface.md](../specs/api-and-agent-surface.md) §1); artifact upload, digest, inline threshold and storage paths ([data-model.md](../specs/data-model.md) §3, [protocols.md](../specs/protocols.md) §7); command node outputs ([ir.md](../specs/ir.md) §4); approval respond shape ([api-and-agent-surface.md](../specs/api-and-agent-surface.md) §2); compile conventions ([dsl.md](../specs/dsl.md) §1 and §2); API body shapes ([api-and-agent-surface.md](../specs/api-and-agent-surface.md) §2); tick semantics and SQLite settings ([scheduler.md](../specs/scheduler.md) §8 and §10); event kinds and payloads ([data-model.md](../specs/data-model.md) `event`); `kora runs` and `kora run` columns ([api-and-agent-surface.md](../specs/api-and-agent-surface.md) §3).
-
-**DD-37. Small mechanisms, kept or dropped.** Kept with their justification: schedule pause and resume (stopping a cron without a redeploy, through `kora_admin`); `success_exit_codes` (diff tools exit non-zero on a difference, as the equivalence gate in the example does); `reasoning_tokens` on usage records (Codex reports them and they are priced separately); `SensorCapabilities.min_interval` (protects code hosts from tight polling). Dropped from v1: `timer.until` (a timer takes a duration or an absolute `at` time), `cron.catchup` (cron fires forward only; backfill is post-MVP), `ArtifactStorage.presign` (the API proxies downloads), the sensor `cursor` (sensors are stateless between polls). Command nodes may emit a custom artifact type from `output_file`, and every command node in the examples declares its parsed output or none. Applied: [ir.md](../specs/ir.md) §4, §7, §8, schema, [protocols.md](../specs/protocols.md) §7 and §11, examples.
+| Disposition | Mechanism, reason and current owner |
+|---|---|
+| Retained | Schedule pause/resume stops cron without redeployment; API sections 2 and 4 (`kora_admin`). |
+| Retained | `success_exit_codes` permits tools whose nonzero result denotes a difference; IR command config. |
+| Retained | `reasoning_tokens` preserves separately reported usage for price attribution; data-model usage and protocols harness mapping. |
+| Retained | Sensor `min_interval` protects code hosts against tight polling; protocols section 11. |
+| Removed from v1 | `timer.until`: duration or absolute `at` already expresses timer wakes; IR section 4. |
+| Deferred | Cron catch-up/backfill; v1 fires forward only, IR section 8. |
+| Removed from v1 | Storage presign operation; API-proxied downloads remain the single path, protocols section 7. |
+| Removed | Sensor cursor; sensors are stateless between polls, protocols section 11. |
+| Retained | Commands can emit a declared custom artifact type from `output_file`; IR section 4 and worked fixtures. |
