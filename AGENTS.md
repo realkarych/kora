@@ -16,6 +16,7 @@ The repository holds what is durably true about kora; a GitHub issue holds why a
 - **Plan before code.** For anything beyond a trivial fix (a typo, a broken link, an obvious one-line bug), post an implementation plan as an issue comment: the files to change, the order of work, the risks, and the tests that prove each acceptance criterion. Do not edit files until the project owner approves the plan. When the implementation diverges from it, update the plan comment before continuing.
 - **Decisions never live only in an issue.** Discussion and draft decisions happen in the issue; once decided, the decision lands in the pull request as a decision record, a requirement or a specification change. Large or uncertain changes start as a proposal in `docs/proposals/`.
 - **The pull request** contains the code together with the document updates it requires and lists every acceptance criterion with the evidence that it holds (a test name, command output). Review happens in pull request comments. When the same review finding recurs, add the rule that prevents it to this file.
+- **Every pull request lands on `master` as one squash commit.** The repository allows no other merge method, and a ruleset requires linear history on `master` for everyone, administrators included. The commit subject is the pull request title followed by `(#N)` and the commit body is empty, so write the title as a commit subject that names the change on its own; the description, evidence and review stay in the pull request. Merge with `gh pr merge --squash`.
 
 ### Labels
 
