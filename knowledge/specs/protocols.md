@@ -601,10 +601,10 @@ These are **future executable test contracts** for issue #42; documentation CI d
 
 | test | setup and observable assertion |
 |---|---|
-| `test_agent_secret_rule_fails_closed` | `kora validate` refuses an agent node with `secret_env` and no `network_policy`, and one on a runtime without enforced egress, with `IR015`; the namespace policy `allow_unenforced_agent_secrets` lifts both |
+| `test_agent_secret_rule_fails_closed` | `kora validate` refuses with `IR015` an agent node with `secret_env` and no `network_policy`, one on a runtime without enforced egress, an MCP server with `secret_env` and no own `network_policy`, and one on a runtime that isolates tool secrets but does not enforce egress; the namespace policy `allow_unenforced_agent_secrets` lifts each |
 | `test_agent_cannot_read_mcp_server_secret` | On `docker`, an MCP server declares `secret_env`; the agent's environment, files and `/proc` show no trace of the value, while a tool call that uses it succeeds |
 | `test_docker_egress_blocks_unlisted_host` | On `docker`, a request from the candidate to a host outside the allowlist fails; the listed host and the adapter's declared model host succeed |
-| `test_unenforced_secrets_require_explicit_option` | On `local`, a trigger of a graph whose agent node has secrets is refused without `allow_unenforced_secrets`; with it the run starts, records the option and shows it in the run view |
+| `test_unenforced_secrets_require_explicit_option` | On `local`, a trigger of a graph whose agent node has secrets is refused without `allow_unenforced_secrets`; with it the run starts, records the option and shows it in the run view; a rerun of that run, pinned and with `graph_version: latest`, is refused without the option and accepted with it, and never inherits it |
 
 ### Execution-recovery implementation gates (ADR-0017)
 
