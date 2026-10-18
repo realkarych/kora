@@ -1,0 +1,15 @@
+# Browser review
+
+Act as an independent reviewer. Read `AGENTS.md`, the affected API contracts and console design/pilot documents linked from `knowledge/README.md`. Run only this profile without further delegation or source edits. Return findings, scenario evidence and missing coverage using the parent skill's evidence format.
+
+Before implementation, examine changed interactions, state transitions, loading/error/stale states, permissions and accessibility against the accepted console design. A design verdict is separate from browser execution.
+
+For every frontend/backend change with a runnable console, run Playwright common smoke plus the affected journeys against the real API/database/scheduler with configured fake harness/runtime providers. Do not stub routes or HTTP transports. If no visible journey changes, explain why common smoke plus component checks covers the effect. Use isolated local data and no live model/code-host calls.
+
+- Install listeners before navigation for console warnings/errors, uncaught exceptions, failed requests and HTTP error responses; `requestfailed` alone misses HTTP failures. Happy paths allow zero unexpected diagnostics. Negative scenarios match exact expected status/message/context; no broad ignores or warning allowlists.
+- Keep retries at zero and retain trace, screenshot and diagnostics on the first failure. Wait on explicit state with a deadline; do not synchronize with sleep or streaming `networkidle`. Fix flakiness instead of retrying to green.
+- Exercise changed actions, authorization denials, partial/stale data, error recovery and reconnect behavior. Verify rendering of untrusted content. Add the relevant segments of both pilot scenarios as capabilities land; require both complete pilots before console/MVP completion.
+- Check keyboard navigation and focus, automated accessibility (for example axe when adopted), responsive layouts, tokens and approved state labels/colors. Automated accessibility is supplemented by keyboard/interaction inspection.
+- Use a production build for E2E and a small development-mode smoke for React/development-only warnings. Common smoke checks boot, navigation, diagnostics and available basic accessibility; affected journeys supplement it.
+
+A package-only scaffold activates build/static checks, not fictitious browser results. The first runnable shell activates boot/diagnostics/accessibility checks; unsupported journeys stay pending with their implementing issue and trigger. Browser testing does not substitute for separate performance or security review.

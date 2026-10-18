@@ -15,16 +15,100 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  scaffold:
+    name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: 3.11.17
+          - os: ubuntu-24.04
+            python: 3.15.0
+          - os: macos-15
+            python: 3.11.17
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version-file: web/.node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
+        with:
+          package_json_file: web/package.json
+          run_install: false
+          cache: true
+          cache_dependency_path: web/pnpm-lock.yaml
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: 0.13.1
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: scaffold-${{ matrix.python }}
+      - name: Install locked dependencies
+        run: |
+          uv sync --locked --group build --no-install-project
+          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" \
+            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+            --require-hashes \
+            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
+          pnpm --dir web install --frozen-lockfile
+      - name: Check Python and frontend sources
+        run: |
+          uv lock --check
+          uv run --no-sync ruff format --check .
+          uv run --no-sync ruff check .
+          uv run --no-sync pyright
+          pnpm --dir web run typecheck
+          pnpm --dir web run lint
+          pnpm --dir web run build
+      - name: Build isolated distributions offline
+        run: |
+          KORA_BUILD_OFFLINE=1 uv build --offline \
+            --python "$PWD/.venv/bin/python" \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-hashes --clear
+      - name: Inspect archives and isolated wheel installation
+        run: uv run --no-sync pytest -q tests/packaging
+      - name: Check editable setup and unchanged dependency files
+        run: |
+          uv sync --locked --group build
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: 24
-      - run: npx --yes markdownlint-cli@0.45.0 .
+          node-version-file: web/.node-version
+          package-manager-cache: false
+      - name: Lint repository Markdown
+        shell: bash
+        run: |
+          set -euo pipefail
+          KORA_DOC_FILES="$(mktemp)"
+          git ls-files --cached --others --exclude-standard -z -- '*.md' > "$KORA_DOC_FILES"
+          test -s "$KORA_DOC_FILES"
+          xargs -0 npx --yes markdownlint-cli@0.45.0 -- < "$KORA_DOC_FILES"
 
   links:
     name: Links and anchors
@@ -32,10 +116,26 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Discover repository Markdown
+        id: markdown-files
+        shell: bash
+        run: |
+          set -euo pipefail
+          KORA_DOC_FILES="$(mktemp)"
+          git ls-files --cached --others --exclude-standard -z -- '*.md' > "$KORA_DOC_FILES"
+          test -s "$KORA_DOC_FILES"
+          args='--config lychee.toml --'
+          while IFS= read -r -d '' file; do
+            printf -v escaped '%q' "$file"
+            args+=" $escaped"
+          done < "$KORA_DOC_FILES"
+          printf 'args=%s\n' "$args" >> "$GITHUB_OUTPUT"
       - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
         with:
           lycheeVersion: v0.24.2
-          args: --config lychee.toml './**/*.md'
+          args: ${{ steps.markdown-files.outputs.args }}
           jobSummary: false
           output: ${{ runner.temp }}/lychee.md
 
@@ -45,21 +145,34 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
-          node-version: 24
+          node-version-file: web/.node-version
+          package-manager-cache: false
+      - name: Install diagram discovery tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
       - name: Parse every Mermaid diagram
         shell: bash
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/mermaid"
-          mkdir -p "$out"
-          git grep -l '^```mermaid' -- '*.md' | while read -r file; do
+          KORA_DOC_FILES="$(mktemp)"
+          git ls-files --cached --others --exclude-standard -z -- '*.md' > "$KORA_DOC_FILES"
+          test -s "$KORA_DOC_FILES"
+          KORA_MERMAID_FILES="$(mktemp)"
+          xargs -0 rg --files-with-matches --null '^```mermaid' -- \
+            < "$KORA_DOC_FILES" > "$KORA_MERMAID_FILES"
+          test -s "$KORA_MERMAID_FILES"
+          out="$(mktemp -d)"
+          while IFS= read -r -d '' file; do
             echo "parsing $file"
             npx --yes @mermaid-js/mermaid-cli@12.0.0 --quiet \
               --puppeteerConfigFile .github/puppeteer-config.json \
               --input "$file" --output "$out/${file//\//_}" --artefacts "$out"
-          done
+          done < "$KORA_MERMAID_FILES"
 
   ir-examples:
     name: Example graph documents
@@ -67,7 +180,13 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          cache-suffix: ir-examples
       - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml
 
   github-templates:
@@ -76,6 +195,12 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          cache-suffix: github-templates
       - run: uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/ISSUE_TEMPLATE/change.yml
       - run: uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml

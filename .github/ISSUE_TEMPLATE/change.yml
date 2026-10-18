@@ -30,6 +30,13 @@ body:
     validations:
       required: true
   - type: textarea
+    id: verification
+    attributes:
+      label: Verification scope
+      description: Affected components and contracts; planned independent reviews and named checks from kora-verify. Include observability impact, event/context ownership and logging evidence, or a concrete applicability reason. Collection, redaction, propagation, buffer or sink changes select correctness, security and performance reviews. A native GitHub review does not replace specialist reviews or executable checks. For unimplemented checks, name the implementing issue or this issue, the activation trigger and expected evidence. Resolve this scope before posting the implementation plan; missing tools for existing checks are blockers, not pending implementation.
+    validations:
+      required: true
+  - type: textarea
     id: constraints
     attributes:
       label: Constraints
