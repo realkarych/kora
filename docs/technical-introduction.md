@@ -107,7 +107,7 @@ Logical run state lives in the database. A runtime additionally keeps private ex
 
 Follow the upgrade graph from definition to completion:
 
-1. **Compile and deploy.** The author compiles Python locally. The API validates the IR and saves the immutable deployment contract.
+1. **Compile, test and deploy.** The author compiles Python locally and runs behavioural scenarios against it with `kora test`, which drives the ordinary engine with fakes, supplied agent outcomes and real command nodes ([dsl.md](../knowledge/specs/dsl.md) section 4). The API validates the IR and saves the immutable deployment contract.
 2. **Accept a start.** A manual request, schedule or external trigger starts a run under the graph's overlap and namespace acceptance rules. The scheduler materializes its node instances from the pinned version.
 3. **Admit the upgrade.** Once dependencies, policy and capacity permit, the scheduler records an attempt with exact input bindings. The worker claims it through the API. Before preparation effects, its nonsecret execution request is sealed into history.
 4. **Execute and publish.** The worker coordinates the runtime. Preparation supplies the checkout; the agent changes it; trusted supervision stops candidate execution, seals its output and inspects the prepared revision. Fresh authorization allows publication of that exact result. The resulting `VcsRef` identifies the revision and change request.

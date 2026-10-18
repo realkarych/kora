@@ -208,7 +208,7 @@ class HarnessAdapter(Protocol):
     def installed_version(self) -> str: ...     # from the SDK's init message; recorded on AgentSession, never enforced (DD-14)
 ```
 
-A fake adapter (`fake`) replays recorded SDK event streams for CI (NFR-10.1). Adapters are importable in supervisor installations; their harness subprocesses launch through the runtime boundary (section 2).
+A fake adapter (`fake`) replays recorded SDK event streams for CI (NFR-10.1), or, in a scenario run, produces the outcome the scenario supplies for the addressed execution (structured outputs, a change, an error class, usage) and nothing else ([dsl.md](dsl.md) section 4). Adapters are importable in supervisor installations; their harness subprocesses launch through the runtime boundary (section 2).
 
 **First-slice defaults** (DD-36). The normalised event is `{i, at, kind, data}`; `max_events` counts `turn`, `tool_call` and `tool_result` events; termination is interrupt, 30 s grace, then kill; for timeout the nominal thresholds derive from the immutable inherited deadline and its fixed `D + 30s` escalation, not a delayed observation (ADR-0022). The `claude` adapter opens a `ClaudeSDKClient` with `cwd` set to the workspace, `CLAUDE_CONFIG_DIR=<workspace>/.kora/claude` and `setting_sources=[]`, so the harness state the SDK writes there has the workspace's lifetime and is released with it: on the MVP runtimes a stored `resume` handle points at a checkpoint that no longer exists once the previous attempt was released (section 2); harness credentials come from the adapter's deployment configuration (`credentials`, secret references resolved at submit) and reach the session as environment variables (DD-30). Structured output is taken from `ResultMessage.structured_output`, else from the final text parsed as JSON, else the attempt fails `artifact_invalid`. Usage maps per model from the result message into `usage_record` rows with completeness; the `AgentSession` payload fields are listed in [ir.md](ir.md) section 3.
 
@@ -423,7 +423,7 @@ class SecretsProvider(Protocol):
     async def list_names(self, prefix: str) -> list[str]: ...                           # for validation of aliases, never values
 ```
 
-Secret references are **bound to the namespace** (design review finding [scoped tokens and secrets](../reviews/review-2026-10-15.md#scoped-tokens-and-secrets)): the provider configuration maps each namespace to the prefixes it may reference; `kora validate` enforces it (`IR007`) and `resolve` enforces it again at submission time. Resolution happens inside the runtime adapter at submission time, after the nonsecret request has been durably sealed (ADR-0018); the saved request contains references only and current namespace authorization is checked again. Credential injection is outside semantic hashing and never serialized back into history; `SecretValue` registers itself with the redaction filter that every captured stream, error detail and VCS result passes through (FR-10.2). Built-in: `env`, `file`.
+Secret references are **bound to the namespace** (design review finding [scoped tokens and secrets](../reviews/review-2026-10-15.md#scoped-tokens-and-secrets)): the provider configuration maps each namespace to the prefixes it may reference; `kora validate` enforces it (`IR007`) and `resolve` enforces it again at submission time. Resolution happens inside the runtime adapter at submission time, after the nonsecret request has been durably sealed (ADR-0018); the saved request contains references only and current namespace authorization is checked again. Credential injection is outside semantic hashing and never serialized back into history; `SecretValue` registers itself with the redaction filter that every captured stream, error detail and VCS result passes through (FR-10.2). Built-in: `env`, `file`, and `scenario`, which serves only the values a scenario declares and is the only secrets provider a scenario run loads.
 
 ## 7. Artifact storage (FR-4.4)
 
@@ -592,6 +592,20 @@ These are **future executable test contracts**, specified for issue #51; this re
 | Docker on Linux CI | required, including worker restart and private-volume handoff | real container/descendant, journal, alias and secret-boundary cases required; default container presence alone proves nothing |
 | independent runtime/provider | required without a shared worker filesystem, with native non-Git revision/input data | provider's actual process/service isolation and transfer tests required before it declares true; otherwise required-protection rejection |
 | configured fake runtime/VCS | required, deterministic phase/recovery barriers | protocol evidence only; cannot certify OS isolation |
+
+### Scenario contracts (issue #46)
+
+These are **future executable test contracts** for [dsl.md](dsl.md) section 4; documentation CI validates the scenario files against [scenario.schema.json](scenario.schema.json) and runs none of them. Two fake VCS backends serve scenarios: the independent directory-backed VCS, and a local Git repository with an in-process code-host fake; both pass the same VCS conformance suite. Metadata cases run on PostgreSQL and SQLite.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_scenario_selectors_are_strict` | A missing, an unused, a duplicate and an ambiguous outcome each end the scenario with `error` naming the selector; `optional: true` suppresses only the unused case |
+| `test_scenario_retry_then_success` | `implement@1` fails with `stalled` and `implement@2` succeeds; back-off passes on virtual time; two attempts are recorded |
+| `test_virtual_time_waits_for_real_commands` | A timer due while a real command runs fires only after the command exits |
+| `test_watchdog_releases_processes` | A hanging command is terminated at the limit; the result is `error: watchdog_expired` and no child process survives |
+| `test_scenario_isolation_is_enforced` | A command that opens a network connection or reads an undeclared secret fails; on a host that cannot enforce it the record says `network: unenforced` and strict mode fails |
+| `test_scenarios_run_on_both_fake_vcs` | A Git-independent scenario passes on the directory-backed VCS and on the local Git backend |
+| canonical scenarios | Each file in [examples/scenarios/sql_optimization/](examples/scenarios/sql_optimization/) passes with the status its `expect` states |
 
 ### Execution-recovery implementation gates (ADR-0017)
 

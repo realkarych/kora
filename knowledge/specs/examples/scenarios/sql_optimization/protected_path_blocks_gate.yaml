@@ -1,0 +1,15 @@
+graph: sql_optimization
+description: The agent's change touches a protected path; the gate that follows fails before it runs, and the change never reaches review.
+params: { target_task: daily_revenue }
+overrides:
+  - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
+outcomes:
+  - { select: find_target, outputs: { target: { task_id: daily_revenue, query_path: q/daily_revenue.sql } } }
+  - { select: hypotheses, outputs: { result: [ { title: relax the test, task_id: daily_revenue } ] } }
+  - select: "candidates[0]/implement"
+    change: { files: { q/daily_revenue.sql: "select 1\n", tests/test_daily_revenue.py: "def test_ok():\n    assert True\n" } }
+    outputs: { change: { branch: kora/daily-revenue-0 } }
+expect:
+  run: failed
+  nodes: { "candidates[0]/dev_run": failed, "candidates[0]/review": not_run }
+  error_classes: { "candidates[0]/dev_run": protected_path_modified }
