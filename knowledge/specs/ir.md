@@ -41,7 +41,7 @@ runtime:                      # section (b): policy and infrastructure
   runtime: docker             # runtime protocol implementation, by name
   vcs: git
   artifact_storage: s3        # artifact storage implementation: local (standalone, development) | s3 (any S3-compatible service) in MVP (FR-4.4)
-  approval_channels: { vcs: { provider: github, accept_merged_as_approval: false, feedback_from: collaborators_write }, cli: {} }   # DD-35
+  approval_channels: { vcs: { provider: github, accept_merged_as_approval: false, feedback_from: collaborators_write, request_reviewers: ["dwh-reviewers"] }, cli: {} }   # DD-35; request_reviewers notifies, it does not authorise (ADR-0025)
   concurrency: { max_running_nodes: 20 }
   limits: { timeout: "72h", budget_usd: 200 }      # whole run
   stall_after: "15m"          # runtime-level default for agent-loop silence; nodes override in limits (DD-15)

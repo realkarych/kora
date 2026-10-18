@@ -77,7 +77,7 @@ An engineer's own coding agent may operate kora through MCP. An agent session ru
 
 ### Scheduler: graph state becomes execution intent
 
-The scheduler repeatedly examines durable state: which dependencies are satisfied, which limits permit admission, which waits can finish, and which results require completion or retry. It records an attempt when an agent or command can run. It records a wait when a step needs time, a signal or available capacity.
+The scheduler repeatedly examines durable state: which dependencies are satisfied, which limits permit admission, which waits can finish, and which results require completion or retry. It records an attempt when an agent or command can run. It records a wait when a step needs time, a signal or available capacity. When a wait needs a person, kora tells them: the code host requests the configured reviewers, and namespace subscriptions send signed JSON, Slack or Telegram messages with links back to the console ([ADR-0025](decisions/0025-notifications.md)).
 
 These decisions use short database transactions. External sensor reads and approval delivery happen outside transactions, and their results are checked against current ownership before application. A slow code host therefore need not hold a run's database lock.
 
