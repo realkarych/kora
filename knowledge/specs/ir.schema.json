@@ -221,6 +221,7 @@
         "url": { "type": "string" },
         "env": { "type": "object", "additionalProperties": { "type": "string" } },
         "secret_env": { "type": "object", "additionalProperties": { "$ref": "#/$defs/envName" } },
+        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false },
         "headers": { "type": "object", "additionalProperties": { "type": "string" } },
         "digest": { "$ref": "#/$defs/digest", "description": "package or image digest the server is pinned to; filled at deploy when absent" }
       },
@@ -278,6 +279,7 @@
         "workspace": { "$ref": "#/$defs/workspace" },
         "env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "type": "string" } },
         "secret_env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "$ref": "#/$defs/envName" } },
+        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false },
         "success_exit_codes": { "type": "array", "items": { "type": "integer" } },
         "runtime": { "type": "string" },
         "vcs": { "type": "string" }
