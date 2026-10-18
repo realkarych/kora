@@ -197,8 +197,8 @@ graph:
               {{ inputs.previous_attempt.reason }}
               {% endif %}
             skills: [sql-optimizer]
-            mcp_servers: {}
-            tool_policy: { allow: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "Bash(sql *)"], deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
+            mcp_servers: { warehouse: { type: stdio, command: "warehouse-mcp", args: ["--cluster", "prod"], secret_env: { YT_TOKEN: YT_TOKEN }, network_policy: { egress: ["warehouse.internal"] } } }
+            tool_policy: { allow: ["Read", "Edit", "Write", "Bash(etl *)", "Bash(git *)", "mcp__warehouse__*"], deny: ["Bash(rm -rf *)", "Bash(git push --force*)"] }
             permission_mode: dont_ask
             sandbox: workspace_write
             trust_repo_config: false
@@ -208,7 +208,6 @@ graph:
               properties: { branch: { type: string }, summary: { type: string } }
               required: [branch]
             env: { ETL_ENV: dev }
-            secret_env: { YT_TOKEN: YT_TOKEN }
         dev_run:
           kind: command
           source: { file: "graphs/sql_optimization.py", line: 15 }
@@ -225,6 +224,7 @@ graph:
             workspace: { repo: "dwh/etl", from_ref: "inputs.change" }
             env: { ETL_ENV: dev }
             secret_env: { YT_TOKEN: YT_TOKEN }
+            network_policy: { egress: ["warehouse.internal"] }
         equivalence:
           kind: command
           source: { file: "graphs/sql_optimization.py", line: 17 }
@@ -241,6 +241,7 @@ graph:
             success_exit_codes: [0, 3]
             env: { ETL_ENV: dev }
             secret_env: { YT_TOKEN: YT_TOKEN }
+            network_policy: { egress: ["warehouse.internal"] }
         review:
           kind: agent
           source: { file: "graphs/sql_optimization.py", line: 19 }
@@ -318,7 +319,7 @@ graph:
         model: claude-opus-5-5
         prompt: "Scan the ETL pipeline and pick one slow task worth optimising{% if inputs.requested %} (use task {{ inputs.requested }}){% endif %}. Report task id, query location and why."
         skills: [sql-optimizer]
-        tool_policy: { allow: ["Read", "Bash(etl *)", "Bash(sql *)"] }
+        tool_policy: { allow: ["Read", "Bash(etl *)", "mcp__warehouse__*"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
@@ -327,7 +328,7 @@ graph:
           type: object
           properties: { task_id: { type: string }, query_path: { type: string }, reason: { type: string } }
           required: [task_id, query_path]
-        secret_env: { YT_TOKEN: YT_TOKEN }
+        mcp_servers: { warehouse: { type: stdio, command: "warehouse-mcp", args: ["--cluster", "prod"], secret_env: { YT_TOKEN: YT_TOKEN }, network_policy: { egress: ["warehouse.internal"] } } }
     baseline:
       kind: command
       source: { file: "graphs/sql_optimization.py", line: 44 }
@@ -344,6 +345,7 @@ graph:
         workspace: { repo: "dwh/etl", rev: "main" }
         env: { ETL_ENV: dev }
         secret_env: { YT_TOKEN: YT_TOKEN }
+        network_policy: { egress: ["warehouse.internal"] }
     hypotheses:
       kind: agent
       source: { file: "graphs/sql_optimization.py", line: 46 }
@@ -360,7 +362,7 @@ graph:
         model: claude-opus-5-5
         prompt: "Propose up to 5 independent optimisation hypotheses for task {{ inputs.target.task_id }} given the baseline metrics at {{ inputs.baseline.output_path }}."
         skills: [sql-optimizer]
-        tool_policy: { allow: ["Read", "Bash(sql *)"] }
+        tool_policy: { allow: ["Read", "mcp__warehouse__*"] }
         permission_mode: dont_ask
         sandbox: read_only
         trust_repo_config: false
@@ -371,7 +373,7 @@ graph:
             type: object
             properties: { title: { type: string }, rationale: { type: string }, task_id: { type: string } }
             required: [title, task_id]
-        secret_env: { YT_TOKEN: YT_TOKEN }
+        mcp_servers: { warehouse: { type: stdio, command: "warehouse-mcp", args: ["--cluster", "prod"], secret_env: { YT_TOKEN: YT_TOKEN }, network_policy: { egress: ["warehouse.internal"] } } }
     candidates:
       kind: fan_out
       source: { file: "graphs/sql_optimization.py", line: 48 }
@@ -480,6 +482,7 @@ graph:
         output_file: confirm.json
         workspace: { repo: "dwh/etl", rev: "main" }
         secret_env: { YT_TOKEN: YT_TOKEN }
+        network_policy: { egress: ["warehouse.internal"] }
 runtime:
   runtime: docker
   vcs: git
