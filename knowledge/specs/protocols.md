@@ -38,6 +38,7 @@ class RuntimeCapabilities:
     supports_resume: bool
     portable_handles: bool
     enforces_network_policy: bool
+    isolates_tool_secrets: bool
     credential_proxy: bool
     protected_execution: bool
     plan_executors: frozenset[Literal["runner", "worker_host"]]
@@ -165,7 +166,7 @@ A receipt binds the original attempt/domain and attests only to work controlled 
 
 **Recovery state.** Before acknowledging each completed phase the supervisor durably records attempt/workload digest, immutable plans and their digests, trusted `WorkspaceRef`, journal sequence, phase, sealed input location/digest, `PreparedPublication`, inspection verdict and publication outcome. The checkpoint binds the API-sealed execution-request digest, exact derived plan/workspace identities and observed facts. Credential references/identities only are retained, never values or secret-derived hashes. Request/phase observations use the existing trusted journal and API event path; missing observations remain unknown, and duplicate journal sequence delivery is idempotent while conflicting content is rejected. A crash after sealing or preparation resumes from those bytes; no new commit is made. Loss/corruption of required private state is an infrastructure error, but leaves recovery unresolved until termination and dispatch/publication closure are proven. `release` removes bulky candidate, control-journal and publisher storage only after final output collection, terminal publication outcome and settled recovery; durable retirement/dispatcher registry evidence remains; partial usage/logs may still be collected on cancellation, but cancellation never initiates publication.
 
-**Capabilities and reference runtimes.** `protected_execution` covers control-state integrity, whole-domain containment, immutable transfer and publisher credential isolation together. It is independent of `enforces_network_policy` and `credential_proxy`. Namespace policy `require_protected_execution` rejects a runtime declaring false (`IR021`); worker startup rejects a configured protected runtime whose installation cannot enforce its declaration. A missing executor is an error, not a warning that permits execution.
+**Capabilities and reference runtimes.** `protected_execution` covers control-state integrity, whole-domain containment, immutable transfer and publisher credential isolation together. It is independent of `enforces_network_policy`, `isolates_tool_secrets` and `credential_proxy`. `enforces_network_policy` means the candidate's traffic can reach only the resolved allowlist: the reference `docker` runtime places the candidate container on a network without a direct route out and sends its traffic through an egress proxy that allows only the listed domains, and `local` declares false. `isolates_tool_secrets` means an MCP server that declares `secret_env` runs outside the agent's process tree and filesystem: the reference `docker` runtime starts each such server in a sidecar container of the attempt, on the attempt's private network with the server's own `network_policy`, and configures the harness to reach it over MCP's HTTP transport; `local` declares false. Validation applies `IR015` to both (ADR-0009 as amended 2026-10-18). Namespace policy `require_protected_execution` rejects a runtime declaring false (`IR021`); worker startup rejects a configured protected runtime whose installation cannot enforce its declaration. A missing executor is an error, not a warning that permits execution.
 
 | runtime | lifecycle placement | protected execution | recovery and executors |
 |---|---|---|---|
@@ -192,6 +193,7 @@ class HarnessCapabilities:
 class HarnessAdapter(Protocol):
     name: str
     config_schema: dict             # deployment config incl. `credentials: {ANTHROPIC_API_KEY: "secret://…"}` (DD-36)
+    egress_hosts: tuple[str, ...]   # hosts the deployment configuration needs (model API or gateway base URL); the runtime adds them to the allowlist and the resolved config shows the result (ADR-0009)
     tested_versions: str            # PEP 440 specifier of installed harness versions this adapter was tested with (design review finding: harness version health check)
     def capabilities(self) -> HarnessCapabilities: ...
     def check_config(self, config: dict) -> list[Warning]: ...          # compile-time: fields it cannot honour (IR008); never compares versions (DD-14)
@@ -423,7 +425,7 @@ class SecretsProvider(Protocol):
     async def list_names(self, prefix: str) -> list[str]: ...                           # for validation of aliases, never values
 ```
 
-Secret references are **bound to the namespace** (design review finding [scoped tokens and secrets](../reviews/review-2026-10-15.md#scoped-tokens-and-secrets)): the provider configuration maps each namespace to the prefixes it may reference; `kora validate` enforces it (`IR007`) and `resolve` enforces it again at submission time. Resolution happens inside the runtime adapter at submission time, after the nonsecret request has been durably sealed (ADR-0018); the saved request contains references only and current namespace authorization is checked again. Credential injection is outside semantic hashing and never serialized back into history; `SecretValue` registers itself with the redaction filter that every captured stream, error detail and VCS result passes through (FR-10.2). Built-in: `env`, `file`.
+Secret references are **bound to the namespace** (design review finding [scoped tokens and secrets](../reviews/review-2026-10-15.md#scoped-tokens-and-secrets)): the provider configuration maps each namespace to the prefixes it may reference; `kora validate` enforces it (`IR007`) and `resolve` enforces it again at submission time. Resolution happens inside the runtime adapter at submission time, after the nonsecret request has been durably sealed (ADR-0018); the saved request contains references only and current namespace authorization is checked again. Credential injection is outside semantic hashing and never serialized back into history; `SecretValue` registers itself with the redaction filter that every captured stream, error detail and VCS result passes through (FR-10.2). Built-in: `env`, `file`. What secret handling guarantees and does not guarantee in MVP is stated in [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md) (amended 2026-10-18): an agent node's secrets fail closed without enforced egress, an MCP server's secrets stay outside the agent on runtimes declaring `isolates_tool_secrets`, the model API key stays in the harness environment until a credential proxy exists, and redaction covers literal values only.
 
 ## 7. Artifact storage (FR-4.4)
 
@@ -593,6 +595,17 @@ These are **future executable test contracts**, specified for issue #51; this re
 | independent runtime/provider | required without a shared worker filesystem, with native non-Git revision/input data | provider's actual process/service isolation and transfer tests required before it declares true; otherwise required-protection rejection |
 | configured fake runtime/VCS | required, deterministic phase/recovery barriers | protocol evidence only; cannot certify OS isolation |
 
+### Agent-secret contracts (ADR-0009, amended 2026-10-18)
+
+These are **future executable test contracts** for issue #42; documentation CI does not run them. Runtime cases run on the Linux CI job, where Docker is available; validation cases run everywhere. Metadata cases run on PostgreSQL and SQLite.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_agent_secret_rule_fails_closed` | `kora validate` refuses an agent node with `secret_env` and no `network_policy`, and one on a runtime without enforced egress, with `IR015`; the namespace policy `allow_unenforced_agent_secrets` lifts both |
+| `test_agent_cannot_read_mcp_server_secret` | On `docker`, an MCP server declares `secret_env`; the agent's environment, files and `/proc` show no trace of the value, while a tool call that uses it succeeds |
+| `test_docker_egress_blocks_unlisted_host` | On `docker`, a request from the candidate to a host outside the allowlist fails; the listed host and the adapter's declared model host succeed |
+| `test_unenforced_secrets_require_explicit_option` | On `local`, a trigger of a graph whose agent node has secrets is refused without `allow_unenforced_secrets`; with it the run starts, records the option and shows it in the run view |
+
 ### Execution-recovery implementation gates (ADR-0017)
 
 These named cases specify future behavior; this documentation change implements no runtime or test suite. Run integration cases against both PostgreSQL and SQLite using the same parametrized fixtures, injected time/randomness and explicit condition barriers with deadlines. Use configured protocol fakes validated by the runtime/VCS conformance suites, real local processes/Git and an independently controllable local execution service; never patch modules, environment or HTTP transports and never use a real model/code host. Local process cases run on Linux and macOS without a sandbox/VM/administrator setup; Docker and containerized PostgreSQL cases run on Linux CI. Separate protocol correctness evidence from OS/provider termination evidence.
@@ -648,6 +661,7 @@ Resolved node-config field → harness option. The Claude Agent SDK and Codex ap
 | usage source | `ResultMessage` per-model usage with cost basis (includes subagents) | `turn/completed.usage` summed per turn; `partial` if killed mid-turn | agent-dependent; `unavailable` when absent |
 | session handle (`resume`) | `resume=<session id>` | `thread/resume` | `session/load` when the agent declares `loadSession` |
 | `env` / `secret_env` | `env=` (the runner builds a minimal environment) | `shell_environment_policy` + constructed env | constructed env of the agent process |
+| MCP server `secret_env` (ADR-0009) | the sidecar server's own environment; the harness gets an HTTP MCP entry for it | the same, through the `mcp_servers` HTTP entry of `config.toml` | the same where the agent accepts HTTP MCP servers; otherwise `isolates_tool_secrets` is false for it |
 | harness credential (DD-30) | `ANTHROPIC_API_KEY` in the constructed env; base URL to the proxy post-MVP | `CODEX_API_KEY` in the constructed env | agent-specific variable |
 | billing class | auth-method probe on the init message | auth file inspection; default `api_key` | `subscription` unless the adapter config declares otherwise |
 | stop reason / error class | `ResultMessage.subtype` (`success`, `error_max_budget_usd` → `budget_exhausted`, `error_during_execution` → `harness_error`) | `turn/failed`, `error` → `harness_error` | `stopReason` (`end_turn`, `max_tokens`, `cancelled`, `refusal` → `harness_error`) |
