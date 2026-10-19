@@ -25,7 +25,7 @@ The scheduler runs the following passes continuously; each database phase is a s
 5. **Admission.** `ready` instances that need a runtime (`agent`, `command`) become `queued` with an `attempt` row (`created`) and an immutable copy of exact input bindings (ADR-0018), subject to concurrency limits and the namespace's daily soft cost limit (section 6); an instance held back gets an `admission` wait row rather than a field of its own, whose `reason` names the limit that held it (`concurrency_limit` with its scope, `daily_budget`, `target_held` with all other holding runs, or `execution_recovery` with blocking attempt ids; [ADR-0015](../../docs/decisions/0015-web-console-design.md)). Waiting kinds (`human_input`, `wait_event`, `timer`) become `waiting` with a `wait` row and, for approvals, an `approval_request` row (section 5).
 6. **Wake-ups.** Scheduler-only target sources route their output/success through the same atomic acceptance below, after validating the current wait/request. `wait` rows with `wake_at <= now`, a matching `inbound_event`, or a current prepared observation are evaluated; the owning instance returns to `running`, `ready` (retry back-off), completes (timer/valid wait), or expires. Sensor `until` uses a prepared current observation; polling and backoff use separate due times and do not move the expiry clock. An inbound event's `payload` is projected once per path set and matched against open waits in batches, per run under its run lock and the evaluation allowance. The transaction that evaluates an event for a wait inserts an `event_evaluation` row for the pair (data-model.md section 2), so each pair is evaluated at most once whatever the commit order of events; an open wait with an eligible event it has not evaluated keeps `needs_scheduling` set. A `match` error is no match. An `until` error is "not yet" (ir.md section 7.7); both errors are stored as the wait's last evaluation error record.
 7. **Timeouts and liveness** (section 4).
-8. **Completion.** Attempts in `finishing` whose runtime/dispatcher/publication closure is established and declared outputs are schema-validated and complete move their instance to `succeeded`, otherwise `failed` with `artifact_invalid`. Ordinary outputs are `current`; every output of the declared target source remains `staged` until its complete result and key are accepted together ([data-model.md section 12](data-model.md#12-immutable-run-target-identity-adr-0019), ADR-0019). A valid different key fails that source with `config_error` / `target_identity_conflict`, without promoting any companion result. Retry policy applies to ordinary failures; target identity conflict is never automatically retried, including by a source wrapper's own retry/skip-failures behavior. A sub-graph whose body failed and may retry runs **clear downstream** for its body and re-materialises it with `subgraph_attempt + 1` (data-model.md section 6); the run completes when no instance is non-terminal (DD-36 finalisation ownership).
+8. **Completion.** Attempts in `finishing` whose runtime/dispatcher/publication closure is established and declared outputs are schema-validated and complete move their instance to `succeeded`, otherwise `failed` with `artifact_invalid`. Ordinary outputs are `current`; every output of the declared target source remains `staged` until its complete result and key are accepted together ([data-model.md section 12](data-model.md#12-immutable-run-target-identity-adr-0019), ADR-0019). A valid different key fails that source with `config_error` / `target_identity_conflict`, without promoting any companion result. Retry policy applies to ordinary failures; target identity conflict is never automatically retried, including by a source wrapper's own retry/skip-failures behavior. A sub-graph whose body failed and may retry runs **clear downstream** for its body and re-materialises it with `subgraph_attempt + 1` (data-model.md section 6); the run settles and takes its outcome under [run settlement and outcome](#21-run-settlement-and-outcome) (DD-36 finalisation ownership).
 
 A manual retry from the API is the same clear-downstream transaction on the chosen node, followed by the ordinary passes. When an approval request is created (pass 5), the scheduler sums the run's usage records into `run_cost` on the request (DD-8).
 
@@ -36,6 +36,40 @@ A manual retry from the API is the same clear-downstream transaction on the chos
 Full outstanding quota returns retryable HTTP 409/API002 with `reason=run_backlog_full`, scope, limit and used count, with no run, accepted receipt or unprocessed trigger event. Do not poison the retry key/24-hour response cache. Matching accepted replay still succeeds when the quota is full, after a deployment or after response loss. Cron/start-sensor/graph-triggered saturation instead records explicit `trigger.rejected` and advances the occurrence cursor atomically; skip records `trigger.skipped`. No hidden occurrence queue or catch-up is added. Existing trigger reads show the latest outcome/reason/time; wait-directed events retain ordinary wake processing.
 
 Workers run a separate loop: claim `created` attempts of their runtime through the API (section 3), prepare the workspace, submit, stream, enforce, finalise.
+
+### 2.1 Run settlement and outcome
+
+**Settled.** A run is settled when both of these hold:
+
+- no top-level node instance is `pending`, `ready`, `queued`, `running` or `waiting`;
+- no attempt of the run is non-terminal or has `recovery_required` ([ADR-0017](../../docs/decisions/0017-execution-uncertainty-and-safe-replacement.md)).
+
+A node with a retry left is `waiting` on its `retry_backoff` wait, so it holds the run open. A `failed` node whose retry policy is exhausted counts as settled for the run, while it stays non-terminal for `retry node` (FR-6.8). The completion pass evaluates the predicate under the run lock after its local fixed point ([data-model.md section 2.1](data-model.md#21-durable-run-scheduling-marker)).
+
+**Outcome.** A settled run becomes `failed` when at least one top-level instance is `failed`, `upstream_failed` or `cancelled`. Otherwise it becomes `succeeded`.
+
+- `skipped` counts as success, whether it comes from a trigger rule, branch non-selection or `on_expiry: skip`.
+- A `cancelled` top-level instance in a run that is not itself cancelled counts as a failure. No path produces one today, and the rule fails safe for one added later.
+- Nested scopes count only through their container. A `fan_out` instance counts by its own state: with `skip_failures: true` it absorbs its failed items ([ir.md section 4](ir.md#4-node-kinds-and-their-config)). A `subgraph` instance counts by the outcome of its current sub-graph attempt; earlier sub-graph attempts are history.
+- A node that runs because of a failure (`all_done`, `one_failed`) never turns that failure into success. The failed upstream instance is itself top-level or is summarised by a top-level container, so it fails the run.
+- A graph that handles a failure on purpose, for example through a fallback branch after `one_failed`, still settles `failed`. Declaring an outcome, such as an output node or a predicate over top-level states, needs its own proposal.
+
+**No fail-fast.** A final failure cancels nothing. Independent branches keep being admitted and finishing. The run settles only when the predicate above holds, so a later `retry node` reuses the finished work. There is no `graph.fail_fast` option.
+
+**Transition.** Settling moves the run from `running` to `succeeded` or `failed` in the completion transaction and writes `run.succeeded` or `run.failed`. The `run.failed` payload lists the top-level instances that decided the outcome, each with its error class. Settled `failed` releases outstanding acceptance, and `retry node` reacquires it before effects (ADR-0020). `retry node` moves the run back to `running` and sets `needs_scheduling` (data-model section 2.1).
+
+These are **future executable test contracts**. Documentation CI does not run them. They use the fake harness and the fake runtime and run on PostgreSQL and SQLite.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_run_fails_on_top_level_failure` | One of two independent top-level nodes fails after its last attempt; the run ends `failed`, and `run.failed` names that node and its error class |
+| `test_cleanup_node_does_not_mask_failure` | A failed node is followed by an `all_done` notification node that succeeds; the run ends `failed` |
+| `test_skip_failures_fan_out_does_not_fail_run` | A fan-out with `skip_failures: true` in which one item fails and the others succeed; the run ends `succeeded`. With `skip_failures: false` it ends `failed` |
+| `test_superseded_subgraph_attempt_does_not_count` | Sub-graph attempt 1 fails and attempt 2 succeeds; the run ends `succeeded` |
+| `test_independent_branches_finish_before_failed` | Branch A fails while branch B is still running; B is admitted and succeeds, and only then does the run become `failed`. A later `retry node` on A reuses B's outputs |
+| `test_pending_retry_does_not_settle_run` | A node waiting on `retry_backoff` keeps the run `running` until its last attempt resolves |
+| `test_unresolved_recovery_does_not_settle_run` | An attempt with `recovery_required` keeps the run unsettled until closure evidence is applied |
+| `test_skipped_branch_counts_as_success` | Branch non-selection and `on_expiry: skip` leave the run `succeeded` |
 
 ## 3. Submission, execution uncertainty and recovery
 
