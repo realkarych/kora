@@ -7,7 +7,7 @@
 - Absorbs: issue #52
 - Supersedes in part: [ADR-0003](0003-scheduler-and-workers-over-http.md) (lease recovery), [ADR-0007](0007-attempt-model-and-retries.md) (replacement eligibility), [ADR-0014](0014-target-identity.md) (hold release), [ADR-0016](0016-trusted-execution-and-publication.md) (recovery authority)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
-- Tool-count alignment dated 2026-10-19: reconciliation is stated as adding no curated tool instead of keeping a count that `kora_test` (issue #46) has since changed, under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
+- Tool-count amendment dated 2026-10-19: reconciliation is stated as adding no curated tool instead of keeping a count that `kora_test` (issue #46) has since changed, under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
 
 ## Context
 
