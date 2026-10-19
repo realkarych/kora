@@ -2,6 +2,8 @@
 
 Status: normative design under [issue #91](https://github.com/realkarych/kora/issues/91); direction and implementation plan approved by the project owner on 2026-10-18. Runtime implementation and executable evidence are pending. This specification applies [NFR-9.4](../../docs/requirements/non-functional.md#9-observability) and the existing [ADR-0013 stack](../../docs/decisions/0013-implementation-stack.md); it introduces no new provider protocol or service.
 
+First-implementation amendment dated 2026-10-20: the shared bootstrap, the `kora` entry point, the configuration ranges and the process exit contracts landed under [issue #147](https://github.com/realkarych/kora/issues/147); decisions approved by the project owner on 2026-10-20.
+
 Read this contract whenever implementing or changing a component's behavior, logging configuration, collection, context, redaction or output. The [research](../research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](../reviews/structured-logging-plan-review-2026-10-18.md) explain its basis; they do not replace the contract or prove runtime behavior.
 
 ## 1. Streams and authority
@@ -57,6 +59,23 @@ Each event definition names its owner, level, allowed fields/types and sensitive
 
 Configuration is validated at startup; invalid names, levels, nonfinite/unbounded limits and limits too small for required fields fail visibly. This contract fixes defaults, not a measured performance budget. The first implementation issue must specify finite supported configuration ranges and limits for string bytes, field/collection counts, nesting, frames, active secret registrations and incident keys, with measured cost and tests. It must not accept unlimited settings or arbitrary executable handler imports through untrusted graph configuration. There is no live level-control API in this stage. Runtime dependencies are added only with that first implemented consumer through `uv`, with their existing stack reason recorded.
 
+**First implementation** ([issue #147](https://github.com/realkarych/kora/issues/147)). Every kora process reads its logging configuration from environment variables; `kora standalone` additionally maps a `[logging]` table of `kora.toml` onto the same settings. No CLI flag sets a logging setting.
+
+| Variable | Default | Accepted |
+|---|---|---|
+| `KORA_LOG_LEVEL` | `INFO` | one of the five level names |
+| `KORA_LOG_COMPONENT_LEVELS` | empty | `component=LEVEL` pairs separated by commas; the component must be registered in the process |
+| `KORA_LOG_THIRD_PARTY` | empty | `logger=LEVEL` pairs separated by commas; a name without a level is captured at `WARNING`; `py.warnings` is always captured at `WARNING` |
+| `KORA_LOG_FORMAT` | `json` | `json`, `text` |
+| `KORA_LOG_MAX_RECORD_BYTES` | 16384 | 4096 to 1048576, and at most a quarter of `KORA_LOG_QUEUE_BYTES` |
+| `KORA_LOG_QUEUE_RECORDS` | 1024 | 16 to 65536 |
+| `KORA_LOG_QUEUE_BYTES` | 4194304 | 65536 to 268435456 |
+| `KORA_LOG_DRAIN_SECONDS` | 1 | 0 to 1 |
+
+Fixed bounds of the first implementation, not configurable: 1024 bytes per string value, 32 fields per record, 64 items per collection, nesting depth 4, 256 values per record, 32 frames per exception and 8 exceptions per chain, 256 registered secrets of at least 8 bytes each and 65536 bytes of registered values per process. The walk over a record keeps a cumulative budget of values and string bytes and rejects the record with a counted reason as soon as the budget is exceeded, before redaction runs. Incident keys are tuples of a registered component, event and reason, so their number is bounded by the event catalog.
+
+Invalid logging configuration ends the process with exit code 78 and exactly one line on stderr, written before any sink exists: `kora: invalid logging configuration: <VARIABLE>: <static reason>`, where the static reason names the accepted form and never the value.
+
 For browser diagnostics, the same schema/content/volume rules apply where meaningful; the page owns its bounded incident state. It does not imitate a process pipe, introduce a browser-to-server telemetry route or claim to control the browser's own console storage. Its first diagnostic-producing feature specifies and tests finite client-side work and volume limits.
 
 ## 3. Levels and emission ownership
@@ -68,6 +87,8 @@ For browser diagnostics, the same schema/content/volume rules apply where meanin
 | WARNING | Unusual recoverable degradation: unavailable provider, stale lease rejection, observation gap, first overload and recovery summary | Ordinary validation failure or every expected retry |
 | ERROR | Failed operation with an actionable outcome: exhausted retries, unrecoverable submission/storage failure or unexpected request failure | Treating every failed user command as a control-plane outage |
 | CRITICAL | Component cannot continue safely: startup or invariant failure | An ordinary failed run |
+
+Short-lived client processes, the CLI and the stdio MCP server, emit their process lifecycle events at DEBUG, because an INFO line on every invocation would be noise on the user's terminal; long-running processes emit them at INFO (decided under [issue #147](https://github.com/realkarych/kora/issues/147), 2026-10-20).
 
 The boundary that handles a failure owns its diagnostic and safe stack context. Lower layers propagate typed errors; logging and re-raising the same failure through every layer creates duplicate diagnostics. Distinct server and client boundary events may share correlation without each printing the same stack. Expected user errors return their structured result without a traceback. Unexpected errors include a safe exception type and bounded frames after the content policy. Business errors still propagate or produce their specified structured failure; logging never fabricates success.
 
@@ -96,7 +117,7 @@ Idempotency replay preserves the saved body exactly, including any original erro
 
 Use event-specific allowlisted fields. Never emit request/response bodies, prompts/feedback, transcripts, tool arguments/results, artifact payloads, environment/configuration dumps, SQL parameters, authorization/cookies, full URLs/query strings, arbitrary `repr` or exception locals. Content does not become safe because it lacks a registered secret. Route templates, safe codes, bounded identifiers and counts explain the outcome without duplicating payload retention.
 
-Exception messages, chained exceptions, source text, framework access/error logs, third-party handlers, startup and unhandled errors use the same policy. Keep only safe type/frame metadata and reviewed static explanations; omit unsafe source/message text. DEBUG uses exactly the same protection. Unknown fields or formatting failures produce a fixed content-free rejection reason/counter, never a fallback representation of the input.
+Exception messages, chained exceptions, source text, framework access/error logs, third-party handlers, startup and unhandled errors use the same policy. Keep only safe type/frame metadata and reviewed static explanations; omit unsafe source/message text. DEBUG uses exactly the same protection. Unknown fields or formatting failures produce a fixed content-free rejection reason/counter, never a fallback representation of the input. An exception that reaches a process's composition root is recorded as one CRITICAL `process.failed` record through this policy (exception type, module and frames, no message) and the process exits with code 70; an interrupt exits with code 130 and no failure record. A standard-library record admitted through the third-party allowlist becomes the event `thirdparty.record` with its logger name, its level and the safe exception chain; its message text and arguments are never formatted or kept ([issue #147](https://github.com/realkarych/kora/issues/147)).
 
 Known resolved values are redacted before serialization/enqueue in JSON and text. Do not transmit a secret to another component just to improve its logs. Escape embedded CR/LF, control characters and terminal escapes; truncate approved values with an explicit marker while retaining valid records and required fields. If a valid safe bounded record cannot be formed, reject it with bounded loss accounting. Name-based masking alone is insufficient, and arbitrary transformed secret removal is not guaranteed.
 
@@ -138,8 +159,8 @@ All rows inherit sections 1–6: safe fields, single failure owner, stderr or br
 | DSL/compiler/IR | Compile/validation result and unexpected internal failure | Author-side operation ID, safe code/location classification; no source/prompt dumps | First compiler/validator: schema/content and CLI stdout tests; caller owns rendering |
 | Shared clients/CLI/MCP | Operation completion/failure, transport recovery | Current request and saved error ID; no HTTP bodies/tokens; stdout reserved | First client/public surface: request-ID and real CLI/MCP framing tests |
 | Browser | Safe client failure/recovery diagnostic | Page instance and authorized API IDs; no cookies, bodies or transcript state | First diagnostic-producing feature: browser diagnostics/content checks and applicable performance; current shell checks remain active |
-| Startup/doctor/deployment | Configuration validation, ready/stopped, unavailable dependency | Component/instance and safe failure code; never configuration/environment dumps | First entry point: schema/configuration/content tests and blocked-writer process exit |
-| Logging infrastructure | Rejection, loss, sink failure/recovery and bounded drain | Fixed component/level/reason, independent counters; no recursive failure output | First backend consumer: common schema/content/redaction/framing/sink tests and measured overhead |
+| Startup/doctor/deployment | Configuration validation, ready/stopped, unavailable dependency | Component/instance and safe failure code; never configuration/environment dumps | First entry point: schema/configuration/content tests and blocked-writer process exit. The `kora` entry point ([issue #147](https://github.com/realkarych/kora/issues/147)) delivers the configuration, content and blocked-writer exit tests for the CLI process; `kora standalone` keeps the row for its own entry point |
+| Logging infrastructure | Rejection, loss, sink failure/recovery and bounded drain | Fixed component/level/reason, independent counters; no recursive failure output | Active since [issue #147](https://github.com/realkarych/kora/issues/147): `tests/observability/` carries the bootstrap legs of the four shared tests below plus `test_entry_point_exit_paths` and `test_logging_loss_is_visible_without_the_sink`; `tests/measurements/test_logging_overhead.py` carries the measured overhead and resource lifetime |
 | Product harness instructions | Correlation and error/recovery guidance | User-session instructions, not a runtime logging process | First relevant instruction/example change: existing operation/example and generation-drift checks |
 
 ### All eleven provider protocols
@@ -166,15 +187,15 @@ These are release obligations for the owning implementation issues, not existing
 
 | Named obligation | Required assertion and activation owner |
 |---|---|
-| `test_logging_schema_levels_and_component_overrides` | First bootstrap: real JSON/text output, five levels, defaults/overrides, invalid startup settings, stdlib bridge and no duplicate handlers |
-| `test_logging_context_isolated_and_propagated` | Each relevant boundary: concurrent run/request isolation, sync/async bridge, subprocess and recovery identity, cancellation/reset; no fabricated or leaked context |
+| `test_logging_schema_levels_and_component_overrides` | First bootstrap: real JSON/text output, five levels, defaults/overrides, invalid startup settings, stdlib bridge and no duplicate handlers. Bootstrap leg active since [issue #147](https://github.com/realkarych/kora/issues/147), through the real `kora` process |
+| `test_logging_context_isolated_and_propagated` | Each relevant boundary: concurrent run/request isolation, sync/async bridge, subprocess and recovery identity, cancellation/reset; no fabricated or leaked context. In-process leg (tasks, thread bridge, cancellation, context override) active since [issue #147](https://github.com/realkarych/kora/issues/147); subprocess and recovery legs stay with their components |
 | `test_api_request_id_matches_response_error_and_logs` | First API/client: spoofed inbound IDs ignored; fresh error/header/log agreement; cached error replay through another API instance retains original body and links fresh transport ID; success replay does not repeat mutation; clients preserve both IDs |
 | `test_cli_and_mcp_stdout_remains_machine_readable` | First CLI/MCP: real process stdout remains exact JSON results/MCP frames while diagnostics go to stderr |
-| `test_logging_redacts_content_and_safe_exception_chains` | First bootstrap and every capture path: registered secrets plus distinct unregistered nonsecret markers in forbidden bodies, prompts, transcripts, tools/artifacts, SQL parameters, exception chains/locals/source and third-party output; real error/startup/framework paths; JSON/text at DEBUG/INFO omit all forbidden markers and retain expected safe fields |
+| `test_logging_redacts_content_and_safe_exception_chains` | First bootstrap and every capture path: registered secrets plus distinct unregistered nonsecret markers in forbidden bodies, prompts, transcripts, tools/artifacts, SQL parameters, exception chains/locals/source and third-party output; real error/startup/framework paths; JSON/text at DEBUG/INFO omit all forbidden markers and retain expected safe fields. Bootstrap leg (fields, collections, exception chains, third-party records, warnings, the unhandled-error path of the entry point) active since [issue #147](https://github.com/realkarych/kora/issues/147); the body, prompt, transcript, artifact, SQL and framework legs stay with their components |
 | `test_candidate_output_cannot_forge_component_diagnostics` | First runtime/harness: real candidate and descendant emit forged JSON/context and control sequences; no candidate record reaches trusted diagnostics, valid supervisor context remains, operational stderr is not session content; protected runtimes prove descriptor/control-channel isolation, local proves intended plumbing |
 | `test_logging_redaction_state_is_bounded_across_rotation` | First secrets/redactor: concurrent scopes and rotation keep count/bytes/work bounded; outstanding output retains masks; exhausted admission fails before exposure without silent eviction or input disclosure; measure steady-state CPU/retained memory |
 | `test_logging_multiprocess_framing_with_slow_reader` | First trusted child/merger: near-limit concurrent records parse with intact identities; partial writes, incomplete-tail loss, recovery, bounded buffers and stopped-reader process exit on Linux/macOS |
-| `test_logging_sink_failure_does_not_stall_work` | First sink and each core integration: real blocked/broken pipe, continuing core progress, finite record/byte queues, independent loss state, no recursive fallback and actual bounded process exit |
+| `test_logging_sink_failure_does_not_stall_work` | First sink and each core integration: real blocked/broken pipe, continuing core progress, finite record/byte queues, independent loss state, no recursive fallback and actual bounded process exit. Sink leg active since [issue #147](https://github.com/realkarych/kora/issues/147), including single-stream framing above `PIPE_BUF` and a nonblocking inherited descriptor; the core-integration legs stay with their components |
 | `test_logging_volume_tracks_transitions_not_poll_frequency` | First repeated loop: injected clock/barriers; more unchanged polls/heartbeats produce no INFO growth; bounded incident keys and first/recovery suppression counts |
 | `test_log_filtering_does_not_change_durable_events` | First persistence/transition path: INFO/ERROR/CRITICAL and overflow preserve exact domain/audit sequence; rollback never emits a committed-state claim |
 | Provider logging conformance | Each provider: bound logger, typed context, safe failure fields and no root reconfiguration, including a locally installed third-party fixture |

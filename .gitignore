@@ -12,3 +12,4 @@ web/node_modules/
 web/.vite/
 src/kora/api/static/
 .superpowers/
+/measurements/

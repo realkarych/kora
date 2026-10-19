@@ -77,6 +77,17 @@ jobs:
           pnpm --dir web run build
       - name: Run tests
         run: uv run --no-sync pytest -q
+      - name: Measure logging overhead and resource lifetime
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
+            uv run --no-sync pytest -q -m measurement tests/measurements/test_logging_overhead.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: always() && matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
+        with:
+          name: logging-overhead-measurement
+          path: measurements/logging-overhead.json
+          if-no-files-found: error
       - name: Build isolated distributions offline
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \

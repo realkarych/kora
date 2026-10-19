@@ -1,0 +1,46 @@
+name: OSV-Scanner
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches:
+      - master
+  schedule:
+    - cron: "30 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pull-request:
+    name: Dependencies introduced by the pull request
+    if: github.event_name == 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36  # v2.7.0
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    with:
+      scan-args: |-
+        --lockfile=uv.lock
+        --lockfile=web/pnpm-lock.yaml
+      fail-on-vuln: true
+
+  full-scan:
+    name: Dependencies of the whole repository
+    if: github.event_name != 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36  # v2.7.0
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    with:
+      scan-args: |-
+        --lockfile=uv.lock
+        --lockfile=web/pnpm-lock.yaml
+      fail-on-vuln: true

@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-dependencies = []
+dependencies = [
+    "structlog==26.1.0",
+    "typer==0.27.3",
+]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Operating System :: MacOS",
@@ -19,6 +22,9 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Typing :: Typed",
 ]
+
+[project.scripts]
+kora = "kora.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/realkarych/kora"
@@ -65,12 +71,25 @@ include = ["*.py", "*.pyi", "*.ipynb", "**/pyproject.toml", "**/ruff.toml", "**/
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ANN"]
+select = ["E", "F", "I", "UP", "B", "ANN", "S"]
+ignore = ["S603"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--import-mode=importlib",
+    "-m",
+    "not measurement",
+]
 filterwarnings = ["error"]
+markers = ["measurement: serial performance and resource-lifetime measurement"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 build = [
@@ -79,5 +98,6 @@ build = [
 dev = [
     "pyright==1.1.414",
     "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
     "ruff==0.17.1",
 ]

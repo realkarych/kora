@@ -6,7 +6,9 @@ Packaging-test removal amendment dated 2026-10-19: removal decided by the projec
 
 Import-layer test amendment dated 2026-10-19: the pytest source check added under [issue #104](https://github.com/realkarych/kora/issues/104); wording pending line-by-line owner review.
 
-The repository contains an importable typed Python package, a minimal React shell and distribution builds. The execution engine, HTTP API, CLI and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
+Logging and scanner amendment dated 2026-10-20: the measurement step, the Ruff `S` family and the scanner commands added under [issue #147](https://github.com/realkarych/kora/issues/147); wording pending line-by-line owner review.
+
+The repository contains an importable typed Python package with the logging bootstrap and the `kora` entry point (`kora --version`), a minimal React shell and distribution builds. The execution engine, HTTP API, the CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup
 
@@ -67,6 +69,20 @@ KORA_BUILD_OFFLINE=1 uv build --offline \
 uv sync --locked --group build
 git diff --exit-code -- pyproject.toml uv.lock web/package.json \
   web/pnpm-lock.yaml web/pnpm-workspace.yaml
+```
+
+The default pytest run excludes the `measurement` marker. The logging overhead and resource-lifetime measurement runs serially, writes its samples to the path in `KORA_MEASUREMENT_OUTPUT` and gates only the contract-derived criteria (queue bounds, no growth over repeated configure-and-shutdown cycles, bounded process exit and idle shutdown); CI runs it in the Linux 3.11 lane after the parallel checks and uploads the artifact `logging-overhead-measurement`:
+
+```sh
+KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
+  uv run --no-sync pytest -q -m measurement tests/measurements/test_logging_overhead.py
+```
+
+Ruff's `S` family runs inside `ruff check`. The dependency and secret scanners run in CI through the workflows `osv-scanner.yml` and `gitleaks.yml`; contributors who install the same releases locally (OSV-Scanner 2.7.0, Gitleaks 8.30.1) run the equivalent scans with the commands below. On a pull request Gitleaks scans the pull request's commits and OSV-Scanner reports only newly introduced vulnerabilities; on a push to `master` and weekly, OSV-Scanner scans both lockfiles in full and Gitleaks the whole history. CodeQL (`codeql.yml`) runs in CI only, because its analysis needs the hosted toolchain, and uploads its alerts to the repository's code-scanning view. The [logging and scanner research](../knowledge/research/logging-stack-and-ci-scanners-2026-10-20.md) records the pinned versions and what each scanner covers.
+
+```sh
+osv-scanner --lockfile=uv.lock --lockfile=web/pnpm-lock.yaml
+gitleaks git --redact
 ```
 
 The build writes both archives to `dist/`. No test inspects the archives or installs the wheel. The wheel build hook described below checks that every local `src` and `href` reference in the built `index.html` resolves to a file in the output directory; nothing checks that those assets reach the wheel.

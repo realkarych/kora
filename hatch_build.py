@@ -38,11 +38,14 @@ class FrontendBuildHook(BuildHookInterface[BuilderConfig]):
         if output.exists():
             shutil.rmtree(output)
 
-        install = ["pnpm", "--dir", "web", "install", "--frozen-lockfile"]
+        pnpm = shutil.which("pnpm")
+        if pnpm is None:
+            raise FileNotFoundError("pnpm is required to build the frontend")
+        install = [pnpm, "--dir", "web", "install", "--frozen-lockfile"]
         if offline == "1":
             install.append("--offline")
         subprocess.run(install, cwd=root, check=True)
-        subprocess.run(["pnpm", "--dir", "web", "run", "build"], cwd=root, check=True)
+        subprocess.run([pnpm, "--dir", "web", "run", "build"], cwd=root, check=True)
 
         entry_point = output / "index.html"
         references = FrontendReferences()

@@ -2,6 +2,8 @@
 
 Scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127) on 2026-10-19; wording pending line-by-line owner review.
 
+Work item 1 amendment dated 2026-10-20: landed under [issue #147](https://github.com/realkarych/kora/issues/147); wording pending line-by-line owner review.
+
 This page orders the work of the first implementation slice so that two developers can work in parallel with little overlap. It records no decisions of its own. The decisions are in [decisions/](decisions/README.md), and the contracts are in the [specifications](../knowledge/README.md).
 
 Where a contract is still open, the page names the issue that settles it, marked *pending*. Until that issue lands, the merged text governs and the work that depends on it waits. The page does not restate what a pending issue proposes.
@@ -140,7 +142,7 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 
 | # | Work item | Side | Depends on |
 |---|---|---|---|
-| 1 | Logging bootstrap and process configuration, with the common logging tests run through the first process entry point it adds; the static-analysis, dependency and secret scanners in CI, placed here by the owner on 2026-10-19 | server | step 1 |
+| 1 | Logging bootstrap and process configuration, with the common logging tests run through the first process entry point it adds; the static-analysis, dependency and secret scanners in CI, placed here by the owner on 2026-10-19. Landed under [issue #147](https://github.com/realkarych/kora/issues/147) | server | step 1 |
 | 2 | `ir` models of the whole IR and the built-in artifact types of revision 1; the generated `ir.schema.json` replaces the hand-written draft, with a check that the committed schema matches the models | server | steps 1, 4 |
 | 3 | `ir` validator: collected diagnostics, the refusal of features outside the slice per #140, a slice-1 graph example. It needs the provider models of work item 6, so this server item waits for an execution item | server | 2, 4, 6; step 7; #140 |
 | 4 | CEL parser, checker, projections and evaluation per [ir.md section 7](../knowledge/specs/ir.md#7-expressions-and-templates), with the packaging, CI and development obligations of the "Expression language" row of the [stack table](../knowledge/architecture/detailed.md#stack-per-component) | server | step 1; 2 for the schema-driven checker |
