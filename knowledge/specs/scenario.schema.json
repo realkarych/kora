@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/realkarych/kora/knowledge/specs/scenario.schema.json",
+  "title": "kora graph scenario",
+  "description": "One behavioural test of a graph: the outside world of a run and the expected result (dsl.md section 4).",
+  "type": "object",
+  "required": ["graph", "description", "outcomes", "expect"],
+  "additionalProperties": false,
+  "properties": {
+    "graph": { "type": "string", "description": "graph id of the compiled document under test" },
+    "description": { "type": "string" },
+    "params": { "type": "object", "description": "run parameters, validated against the graph's params schema" },
+    "vcs": { "enum": ["directory", "git"], "default": "directory", "description": "the fake VCS backend the scenario runs on" },
+    "strict": { "type": "boolean", "default": true, "description": "fail when network isolation cannot be enforced" },
+    "watchdog": { "$ref": "#/$defs/duration", "description": "real-time limit per real command; default 60s" },
+    "secrets": { "type": "object", "additionalProperties": { "type": "string" }, "description": "alias to value served by the scenario secrets provider" },
+    "outcomes": { "type": "array", "items": { "$ref": "#/$defs/outcome" } },
+    "overrides": { "type": "array", "items": { "$ref": "#/$defs/override" } },
+    "actions": { "type": "array", "items": { "$ref": "#/$defs/action" } },
+    "expect": { "$ref": "#/$defs/expect" }
+  },
+  "$defs": {
+    "selector": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*(\\[[0-9]+\\])?(#[0-9]+)?(@[0-9]+)?(/[a-z_][a-z0-9_]*(\\[[0-9]+\\])?(#[0-9]+)?(@[0-9]+)?)*$"
+    },
+    "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d)$" },
+    "errorClass": {
+      "enum": ["harness_error", "command_failed", "timeout", "events_exhausted", "budget_exhausted", "artifact_invalid",
+               "attempt_failed", "stalled", "protected_path_modified", "secret_leak", "infrastructure", "config_error"]
+    },
+    "change": {
+      "type": "object",
+      "required": ["files"],
+      "additionalProperties": false,
+      "properties": {
+        "files": { "type": "object", "additionalProperties": { "type": ["string", "null"] }, "description": "path to new content; null deletes the file" },
+        "message": { "type": "string" }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "required": ["select"],
+      "additionalProperties": false,
+      "properties": {
+        "select": { "$ref": "#/$defs/selector" },
+        "outputs": { "type": "object", "description": "declared output name to payload" },
+        "change": { "$ref": "#/$defs/change" },
+        "error": { "$ref": "#/$defs/errorClass" },
+        "usage": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 }, "description": "model to total tokens" },
+        "optional": { "type": "boolean", "default": false }
+      },
+      "not": { "required": ["outputs", "error"] }
+    },
+    "override": {
+      "type": "object",
+      "required": ["select", "exit_code"],
+      "additionalProperties": false,
+      "properties": {
+        "select": { "$ref": "#/$defs/selector" },
+        "exit_code": { "type": "integer" },
+        "output": { "type": "object", "description": "the parsed output_file the overridden command would have written" },
+        "reason": { "type": "string" },
+        "optional": { "type": "boolean", "default": false }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["when", "do"],
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "waiting": { "$ref": "#/$defs/selector", "description": "the addressed human-input or wait node is open" },
+            "settled": { "type": "boolean", "const": true, "description": "the run is execution-quiescent with no claimable work and no open approval or wait, or it is terminal" }
+          }
+        },
+        "do": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "respond": {
+              "type": "object",
+              "required": ["response"],
+              "additionalProperties": false,
+              "properties": {
+                "response": { "type": "object", "description": "forwarded unchanged as the response of the ordinary approval API and validated there against the form of the addressed human-input node" },
+                "reviewer": { "type": "string", "description": "a provider-neutral reviewer reference of the fake VCS, kept outside the response" }
+              }
+            },
+            "retry": {
+              "type": "object",
+              "required": ["node"],
+              "additionalProperties": false,
+              "properties": {
+                "node": { "$ref": "#/$defs/selector" },
+                "strategy": { "enum": ["fresh", "resume", "fresh_with_feedback"] }
+              }
+            },
+            "push": {
+              "type": "object",
+              "required": ["files"],
+              "additionalProperties": false,
+              "properties": {
+                "files": { "type": "object", "additionalProperties": { "type": ["string", "null"] } },
+                "to": { "const": "candidate", "description": "the candidate branch bound by the open approval" }
+              }
+            },
+            "event": {
+              "type": "object",
+              "required": ["name"],
+              "additionalProperties": false,
+              "properties": { "name": { "type": "string" }, "payload": { "type": "object" } }
+            }
+          }
+        },
+        "optional": { "type": "boolean", "default": false }
+      }
+    },
+    "expect": {
+      "type": "object",
+      "required": ["run"],
+      "additionalProperties": false,
+      "properties": {
+        "run": { "enum": ["succeeded", "failed", "cancelled", "waiting"] },
+        "nodes": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/selector" },
+          "additionalProperties": { "enum": ["succeeded", "failed", "skipped", "upstream_failed", "cancelled", "waiting", "pending", "not_run"] }
+        },
+        "error_classes": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/selector" },
+          "additionalProperties": { "type": "string" }
+        },
+        "artifacts": {
+          "type": "object",
+          "propertyNames": { "type": "string", "description": "selector, a dot, the output name, then an optional field path" },
+          "additionalProperties": true
+        },
+        "approvals": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/selector" },
+          "additionalProperties": { "enum": ["pending", "approved", "rejected", "invalidated", "expired", "cancelled"] }
+        },
+        "feedback_contains": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/selector" },
+          "additionalProperties": { "type": "string" },
+          "description": "selector of an attempt to the text its Feedback must contain"
+        }
+      }
+    }
+  }
+}

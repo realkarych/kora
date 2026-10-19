@@ -4,11 +4,13 @@ One record per significant decision, in the MADR shape: context, decision, alter
 
 Ownership-index amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
 
+Slice-scope amendment dated 2026-10-19: ADR-0001 status updated under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
+
 Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (implementation defaults) and `DD-37` (small mechanisms kept or dropped) point to their component specification owners through the register; it preserves identifiers and dispositions without overriding those current contracts.
 
 | record | decision | status |
 |---|---|---|
-| [ADR-0001](0001-own-control-plane.md) | Own control plane, with a Temporal-backed execution backend kept possible | accepted, amended 2026-10-16 |
+| [ADR-0001](0001-own-control-plane.md) | Own control plane, with a Temporal-backed execution backend kept possible | accepted, amended 2026-10-16 and 2026-10-19 |
 | [ADR-0002](0002-ai-first-api-and-thin-clients.md) | AI-first: the HTTP API is the single implementation, every surface is a thin client, agent nodes never operate kora | accepted |
 | [ADR-0003](0003-scheduler-and-workers-over-http.md) | Scheduler and workers are separate processes; workers reach the control plane only through the HTTP API | accepted |
 | [ADR-0004](0004-harness-adapters-over-vendor-sdks.md) | Harness adapters drive harnesses through vendor interfaces (Claude Agent SDK, Codex app-server; an ACP adapter after MVP), not CLI output; harness versions are fixed per installation; kora enforces the limits | accepted, amended 2026-10-16 |
@@ -30,6 +32,9 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md) | Bounded outstanding run acceptance, physical execution-run occupancy and independent target holds; canonical start/replay and eligible ordering | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0021](0021-external-observations-outside-transactions.md) | Unlocked bounded external calls, exact current-owner application and recoverable approval delivery with cooperative providers | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0022](0022-inherited-execution-deadlines.md) | Immutable inherited node/subgraph/run deadlines across managed phases; fixed nominal grace and evidence-based recovery | direction and plan accepted 2026-10-17; document pending owner review |
+| [ADR-0023](0023-code-host-identity-and-purpose-scoped-credentials.md) | Code-host identity: credentials acquired per purpose by trusted code, GitHub App issuance in the control plane, honest backend reports, stable principals | accepted, wording pending review |
+| [ADR-0024](0024-provider-limits-as-non-agent-failures.md) | Model-provider rate limits and quotas: a non-agent failure that waits for the reset, a pause per quota resource and limit group | accepted, wording pending review |
+| [ADR-0025](0025-notifications.md) | Notifications: requested reviewers, durable outbound JSON, Slack and Telegram webhooks written with the event, subscriptions with a lifecycle | accepted, wording pending review |
 
 ## Writing a new record
 
@@ -52,3 +57,9 @@ Copy the skeleton below into `NNNN-short-title.md` with the next free number, fi
 ```
 
 [ADR-0022](0022-inherited-execution-deadlines.md) defines one inherited node/subgraph/run deadline across managed phases, fixed nominal grace and unchanged termination-evidence barriers. Direction and implementation plan accepted on 2026-10-17; document wording pending owner review.
+
+[ADR-0023](0023-code-host-identity-and-purpose-scoped-credentials.md) defines kora's identity on code hosts: credentials acquired per purpose by trusted code at the moment they are needed, GitHub App issuance in the control plane, backend reports of the rights actually enforced, and stable principals for automation and self-approval checks. Direction and implementation plan accepted on 2026-10-18, relayed from the project owner; document wording pending owner review.
+
+[ADR-0024](0024-provider-limits-as-non-agent-failures.md) makes model-provider rate limits and quotas a non-agent failure: `provider_limited`, a time-bounded `provider_retry` policy, a wait until the reset, and one admission pause per quota resource and limit group. Direction and implementation plan accepted on 2026-10-18, relayed from the project owner; document wording pending owner review.
+
+[ADR-0025](0025-notifications.md) defines notifications: reviewer requests through the VCS integration and durable at-least-once outbound webhooks (signed JSON, Slack, Telegram) whose delivery records are written with the event. Direction and implementation plan accepted on 2026-10-18, relayed from the project owner; document wording pending owner review.

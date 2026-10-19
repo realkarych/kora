@@ -1,6 +1,6 @@
 # ADR-0004: Harness adapters drive harnesses through vendor interfaces, not CLI output; harness versions are fixed per installation; kora enforces the limits
 
-- Status: accepted, 2026-10-15; amended 2026-10-16 (the ACP adapter moved after MVP, requirements decision 22)
+- Status: accepted, 2026-10-15; amended 2026-10-16 (the ACP adapter moved after MVP, requirements decision 22); amended 2026-10-18 by [ADR-0024](0024-provider-limits-as-non-agent-failures.md) (adapters classify model-provider limits and report internal retries)
 - Reviewed: by the project owner, 2026-10-16
 - Deciders: project owner, after review of the first design drafts (DD-14, DD-20, DD-23) and after the design review of 2026-10-15 (first cycle: DD-27, DD-30)
 - Absorbs: DD-27, DD-14, DD-20, DD-23, DD-30; requirements decision 11; the harness part of requirements decisions 18 and 19

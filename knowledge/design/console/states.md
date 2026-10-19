@@ -118,3 +118,18 @@ The six states the architecture critique asked the console to keep apart ([archi
 | unknown publish outcome | runtime phase `publication` with a recovery reason and retained reservations | stored prepared revision/destination, operation, every pending dispatcher and reconciliation evidence | whether an earlier call can still take effect until authoritative closure | observe/stop via the operator command; wait for closure before retry or new publication; branch cleanup remains the graph author's command node |
 | unknown execution | blue recovery reason on the node or admission wait; System backlog and Targets include terminal runs with retained holds | original domain/version, last observation, earlier dispatcher grants, retained scopes, evidence provenance and operator command | whether old execution or an in-flight publication can still take effect | observe or stop through `kora reconcile`; attest actual termination and closure with evidence if the authority is permanently inaccessible; cancel does not release unresolved holds |
 | incompatible resume | the attempt's `strategy_fallback` in the panel and in the comparison | that `resume` fell back to `fresh_with_feedback` and why (runtime capability, missing handle, changed harness version) | what the lost session state held | nothing; the fallback is the designed behaviour |
+
+## Notifications
+
+A notification subscription ([ADR-0025](../../../docs/decisions/0025-notifications.md)) selects event kinds explicitly from this set, which matches the states that need a person:
+
+| event kind | attention state | message |
+|---|---|---|
+| `approval.requested` | pending review | what waits for approval, with links to the review page and the change request |
+| `approval.invalidated` | stale evidence | the approval lapsed because the candidate moved or upstream was retried |
+| `approval.expired` | pending review that timed out | the approval expired without a decision |
+| `run.failed` | exhausted budget, a failed gate or another terminal failure | the failing node and its error class |
+| `run.succeeded` | none | the run finished; optional, for teams that want completion messages |
+| `attempt.recovery_required` | unknown execution, unknown publish outcome | an attempt entered recovery (lease expiry, an uncertain effect, cancellation or failure awaiting closure); the message names the reasons and the reconcile action |
+
+Recoverable attempt failures that the retry policy handles are not in the set.

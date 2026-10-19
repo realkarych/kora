@@ -124,7 +124,62 @@ Precedents: gh-aw `imports` merge table (lists concatenated and deduped, maps de
 
 ## 4. Testing graphs without model calls (NFR-10.1)
 
-`kora plan build/sql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora trigger <graph> --dry-run` runs the graph on the fake runtime and fake harness (current contract [api-and-agent-surface](api-and-agent-surface.md)), replaying recorded event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`, so a graph's branching, retries and fan-out can be asserted in CI. The DSL ships `kora.testing.compile_graph(fn)` returning the IR dict for unit tests.
+`kora plan build/sql.ir.yaml --param target_task=x` prints the materialised plan: node order, trigger rules, resolved config digests, which fields each harness cannot honour. `kora.testing.compile_graph(fn)` returns the IR dict for unit tests. Neither shows behaviour: retry, branching, fan-out and approval are tested with **scenarios** (issue #46).
+
+### 4.1 Scenarios
+
+A scenario file `tests/scenarios/<graph>/<name>.yaml`, validated by [scenario.schema.json](scenario.schema.json), describes everything a run would receive from outside: `params`, the outcome of each agent execution, overrides of command nodes that need external systems, approval responses, inbound events, explicit public operations such as a retry, and an `expect` block. Outcomes are hand-authored: a structured output, a `change` as files that becomes a real commit, an error class, and usage. Raw SDK recordings test adapter normalisation in the harness conformance suite, and live-model evaluation tests response quality; neither belongs to a scenario.
+
+**Selectors** address an execution independently of execution order. A selector is a path of segments separated by `/`:
+
+| segment | meaning |
+|---|---|
+| `implement` | a node id at the current level |
+| `candidates[1]` | item 1 of the fan-out `candidates`, by position in its `over` list; that list comes from scenario-supplied outcomes, so positions are fixed before execution |
+| `#2` | suffix on a sub-graph node or a fan-out item: its sub-graph attempt 2 |
+| `@3` | suffix on a node: its runtime attempt 3 |
+
+For example, `candidates[1]#2/implement@1` is the first runtime attempt of `implement` in the second sub-graph attempt of fan-out item 1. An omitted sub-graph attempt or runtime attempt means 1. A selector names the execution of an agent node, a command node, a human-input node or a wait.
+
+**Actions** are armed in file order: each fires at most once, and an action is armed only after every earlier action has fired, so a sequence such as reject, retry, approve is deterministic. An armed `when: {waiting: <selector>}` fires once the addressed human-input or wait node has a currently open activation, which after a retry is the new activation, not the closed one. An armed `when: {settled: true}` fires once the run is terminal, or once all of these hold together: no claimable work, no open approval or wait, and execution quiescence, meaning no attempt claimed or running, no real subprocess alive, and no preparation, publication or result report in flight. A real command that is still running therefore holds `settled` until its result is recorded, whatever the worker and process scheduling. An action still armed when the run ends is reported as unused. `do` is one of `respond` (an approval response through the ordinary approval API: `response` is forwarded unchanged as the API's `response` and validated against the form of the addressed node, so a graph-specific form with fields such as `rollout_percent` takes its own fields; the engine adds the bound SHA and digests from the open request as the CLI does, and `reviewer` stays outside the response as the fake VCS reviewer reference), `retry` (the public retry operation on a node), `push` (a commit to the candidate branch bound by the open approval) and `event` (an inbound event through webhook ingress). A string value of the form `$from: <selector>.<output>.<path>` is resolved from that artifact when the action fires, so an event can name a commit the scenario cannot know in advance. In `expect`, `not_run` means the node never executed and never opened: it had no runtime attempt and, for a human-input or wait node, never opened a wait. A node blocked by its dependencies counts, whether it stayed `pending`, was never materialised, or ended `upstream_failed` or `skipped`.
+
+**Strictness.** Every supplied outcome, override and action is consumed exactly once. The scenario fails as an **execution error** in four cases: an agent execution without a matching outcome; an outcome or action that matches no execution; two entries for one selector; a selector matching two executions. Only an entry marked `optional: true` may stay unused. Overrides are explicit per selector (`override: {exit_code, output}`). No gate or external command is overridden implicitly.
+
+**Results.** `kora test --json` and the stdio authoring tool return one record per scenario with `status`:
+
+- `passed` — every expectation held;
+- `failed` — an `expect` did not hold;
+- `error` — the scenario could not be executed as written.
+
+A scenario expecting `run: failed` that gets it is `passed`. The record lists unused or missing selectors, each expectation with expected and actual values, the waits still open at the end, and every command node marked `executed` or `overridden` with its exit code.
+
+### 4.2 The engine, isolation and time
+
+A scenario run is `kora standalone` wired through configuration:
+
+- the fake harness reads outcomes from the scenario;
+- the scenario secrets provider supplies only values the scenario declares;
+- approvals, events and public operations go through the ordinary API;
+- time and randomness are injected.
+
+The API, database, scheduler, worker and provider paths are the ordinary ones; there is no second execution engine (NFR-0.1). The VCS is selected by configuration: the independent directory-backed VCS by default, or a local Git repository with an in-process code-host fake for Git-specific scenarios. Scenarios refer to revisions and change requests through provider-neutral references and run ordinary VCS plans; recorded publication events never replace real preparation and publication.
+
+**No production secrets and no network, enforced.**
+
+- `kora test` refuses a configuration that names any secrets provider other than the scenario provider. The run rebinds every secret alias of the graph document (`secrets.aliases`) to the scenario provider by alias name, whatever provider the deployment reference names; the scenario's `secrets` map supplies dummy values, and resolving an alias it does not declare is an execution error. No value is read from the host environment.
+- Commands run on a runtime that enforces the absence of network: the `docker` runtime with no network, or the `local` runtime inside a network namespace where the host allows unprivileged ones.
+- Each command's record reports `network: enforced` or `network: unenforced`, and `filesystem: isolated` or `filesystem: shared`. `--strict`, the default in CI, fails on `network: unenforced`. A macOS host without Docker cannot enforce it and says so.
+- **What is guaranteed and what is not.** The secrets guarantee is that no production secret is resolved: the scenario provider is the only one loaded. It does not stop a command from reading files on the host. Only a runtime with filesystem isolation (`docker`, reported `filesystem: isolated`) keeps host credentials out of reach; on `local` (`filesystem: shared`) a command runs as the author's user, as ADR-0016 states for `local`.
+
+**Virtual time** advances only when the engine is quiescent: no real subprocess running, no claimable work, and every remaining step waiting on a timer. It then jumps to the next `wake_at`; it never advances while a command runs.
+
+**Watchdog.** Each real command has a real-time limit, 60 seconds by default and configurable per scenario. On expiry the process group is terminated, the scenario ends with `error: watchdog_expired`, and every child process group is released before the result is returned.
+
+### 4.3 Entry points
+
+`kora test <graph module>` runs every scenario of the graph in the author's own process, like `kora compile`; it is not an API operation (ADR-0002). The stdio authoring MCP server exposes the same runner as `kora_test`; the HTTP-mounted server omits it because it would import graph sources. `kora.testing.run_scenario(...)` returns the same result to pytest. `kora trigger --dry-run` keeps its earlier meaning: it runs the graph on the fake runtime and fake harness, replaying recorded event files declared per node in `tests/fixtures/<graph>/<node>.jsonl`. Behavioural assertions belong in scenarios.
+
+The future executable contracts for this section are in [protocols.md](protocols.md) section 13, "Scenario contracts"; documentation CI validates scenario files against the schema and executes none of them.
 
 ## 5. How an agent authors a graph through the skill (FR-0.2)
 
