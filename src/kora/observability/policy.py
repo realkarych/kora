@@ -1,11 +1,14 @@
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import TypeAlias, cast
 
 from kora.observability.catalog import (
+    CONTEXT_INTEGER_KEYS,
     CONTEXT_KEYS,
+    CONTEXT_STRING_KEYS,
     RESERVED_KEYS,
     EventSpec,
     FieldKind,
@@ -23,6 +26,8 @@ from kora.observability.settings import (
 )
 
 TRUNCATION_MARKER: str = "[truncated]"
+CONTEXT_IDENTIFIER: re.Pattern[str] = re.compile(r"\A[\x21-\x7e]{1,256}\Z")
+MAX_INTEGER: int = 2**63
 CONTROL_CHARACTERS: frozenset[int] = frozenset(
     {*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)}
 )
@@ -54,6 +59,10 @@ class Budget:
             raise RecordRejected(LossReason.OVER_BUDGET)
 
 
+def name_or_empty(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def escape_controls(text: str) -> str:
     if not any(ord(character) in CONTROL_CHARACTERS for character in text):
         return text
@@ -82,9 +91,11 @@ class ContentPolicy:
         return Budget(values=MAX_VALUES, string_bytes=self._max_record_bytes)
 
     def safe_string(self, value: str, budget: Budget) -> str:
+        encoded = value.encode("utf-8", errors="replace")
         budget.take_value()
-        budget.take_string(len(value.encode("utf-8")))
-        return truncate(escape_controls(self._registry.mask(value)))
+        budget.take_string(len(encoded))
+        text = encoded.decode("utf-8")
+        return truncate(escape_controls(self._registry.mask(text)))
 
     def safe_scalar(self, value: object, budget: Budget) -> SafeValue:
         if isinstance(value, str):
@@ -93,14 +104,19 @@ class ContentPolicy:
             budget.take_value()
             return value
         if isinstance(value, int):
-            budget.take_value()
-            return value
+            return self.safe_integer(value, budget)
         if isinstance(value, float):
             if not math.isfinite(value):
                 raise RecordRejected(LossReason.INVALID_FIELD)
             budget.take_value()
             return value
         raise RecordRejected(LossReason.INVALID_FIELD)
+
+    def safe_integer(self, value: int, budget: Budget) -> int:
+        if abs(value) > MAX_INTEGER:
+            raise RecordRejected(LossReason.INVALID_FIELD)
+        budget.take_value()
+        return value
 
     def safe_strings(self, value: object, budget: Budget) -> list[SafeValue]:
         if isinstance(value, str) or not isinstance(value, Sequence):
@@ -160,25 +176,31 @@ class ContentPolicy:
     def safe_exception_entry(
         self, error: BaseException, budget: Budget
     ) -> dict[str, SafeValue]:
-        frames: list[SafeValue] = []
+        frames: list[tuple[str, str, int]] = []
         traceback: TracebackType | None = error.__traceback__
         while traceback is not None:
             code = traceback.tb_frame.f_code
             module = traceback.tb_frame.f_globals.get("__name__")
             frames.append(
-                {
-                    "module": module if isinstance(module, str) else "",
-                    "function": code.co_qualname,
-                    "line": traceback.tb_lineno,
-                }
+                (name_or_empty(module), code.co_qualname, traceback.tb_lineno)
             )
             traceback = traceback.tb_next
-        kept = frames[-MAX_FRAMES:]
-        for _ in range(len(kept)):
-            budget.take_value()
+        kept: list[SafeValue] = [
+            {
+                "module": self.safe_string(module, budget),
+                "function": self.safe_string(function, budget),
+                "line": line,
+            }
+            for module, function, line in frames[-MAX_FRAMES:]
+        ]
+        error_type: object = type(error)
         return {
-            "type": self.safe_string(type(error).__qualname__, budget),
-            "module": self.safe_string(type(error).__module__, budget),
+            "type": self.safe_string(
+                name_or_empty(getattr(error_type, "__qualname__", "")), budget
+            ),
+            "module": self.safe_string(
+                name_or_empty(getattr(error_type, "__module__", "")), budget
+            ),
             "frames": kept,
         }
 
@@ -190,8 +212,7 @@ class ContentPolicy:
         if kind is FieldKind.INTEGER:
             if isinstance(value, bool) or not isinstance(value, int):
                 raise RecordRejected(LossReason.INVALID_FIELD)
-            budget.take_value()
-            return value
+            return self.safe_integer(value, budget)
         if kind is FieldKind.FLOAT:
             if isinstance(value, bool) or not isinstance(value, int | float):
                 raise RecordRejected(LossReason.INVALID_FIELD)
@@ -206,6 +227,22 @@ class ContentPolicy:
         if kind is FieldKind.MAPPING:
             return self.safe_mapping(value, budget, 1)
         return self.safe_exception(value, budget)
+
+    def safe_context(self, context: Mapping[str, object]) -> dict[str, SafeValue]:
+        result: dict[str, SafeValue] = {}
+        for key in sorted(context):
+            value = context[key]
+            if key in CONTEXT_STRING_KEYS:
+                if not isinstance(value, str) or not CONTEXT_IDENTIFIER.match(value):
+                    raise RecordRejected(LossReason.INVALID_CONTEXT)
+                if self._registry.mask(value) != value:
+                    raise RecordRejected(LossReason.INVALID_CONTEXT)
+                result[key] = value
+            elif key in CONTEXT_INTEGER_KEYS:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise RecordRejected(LossReason.INVALID_CONTEXT)
+                result[key] = value
+        return result
 
     def safe_fields(
         self, spec: EventSpec, fields: Mapping[str, object]

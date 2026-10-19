@@ -131,6 +131,9 @@ class ComponentLogger:
         if not self.is_enabled(level):
             return
         emission = Emission(spec, level, self.component, self.logger_name, fields)
+        if CATALOG.get(spec.name) != spec:
+            self._diagnostics.reject(emission, LossReason.UNKNOWN_EVENT)
+            return
         self._bound.log(int(level), spec.name, **{PAYLOAD_KEY: emission})
 
     def bind(self, **context: str | int) -> "ComponentLogger":
@@ -224,9 +227,7 @@ class ProcessDiagnostics:
         self._queue = BoundedQueue(
             settings.queue_records, settings.queue_bytes, self.state
         )
-        self._writer = StreamWriter(
-            descriptor, self._queue, self.state, self._on_sink_failure
-        )
+        self._writer = StreamWriter(descriptor, self._queue, self.state)
         self._incidents = IncidentTracker(clock, SUPPRESSION_WINDOW_SECONDS)
         self._reentrancy = threading.local()
         self._pending = threading.local()
@@ -278,16 +279,16 @@ class ProcessDiagnostics:
         if not isinstance(payload, Emission):
             raise structlog.DropEvent
         emission: Emission = payload
+        bound = {key: event_dict[key] for key in CONTEXT_KEYS if key in event_dict}
         try:
             fields = self._policy.safe_fields(emission.spec, emission.fields)
+            context = self._policy.safe_context(bound)
         except RecordRejected as rejected:
-            self._reject(emission, rejected.reason)
+            self.reject(emission, rejected.reason)
             raise structlog.DropEvent from None
-        context: dict[str, SafeValue] = {}
-        for key in sorted(CONTEXT_KEYS):
-            value = event_dict.get(key)
-            if isinstance(value, str | int) and not isinstance(value, bool):
-                context[key] = value
+        except Exception:
+            self.reject(emission, LossReason.POLICY_FAILURE)
+            raise structlog.DropEvent from None
         record: dict[str, SafeValue] = {
             "schema_version": SCHEMA_VERSION,
             "timestamp": format_timestamp(self.clock()),
@@ -307,9 +308,13 @@ class ProcessDiagnostics:
     ) -> bytes:
         record = event_dict["record"]
         emission = event_dict[PAYLOAD_KEY]
-        rendered = render(record, self.settings.render_format)
+        try:
+            rendered = render(record, self.settings.render_format)
+        except Exception:
+            self.reject(emission, LossReason.POLICY_FAILURE)
+            raise structlog.DropEvent from None
         if len(rendered) > self.settings.max_record_bytes:
-            self._reject(emission, LossReason.OVER_BUDGET)
+            self.reject(emission, LossReason.OVER_BUDGET)
             raise structlog.DropEvent
         self._pending.emission = emission
         return rendered
@@ -319,6 +324,8 @@ class ProcessDiagnostics:
         reason = self._queue.put(rendered)
         if reason is not None:
             self.state.count_dropped(emission.component, emission.level, reason)
+            if reason is LossReason.SHUTDOWN or reason is LossReason.SINK_FAILED:
+                return
             with self._loss_lock:
                 self._loss_pending = True
                 self._dropped_since_recovery += 1
@@ -349,7 +356,7 @@ class ProcessDiagnostics:
         finally:
             self._leave()
 
-    def _reject(self, emission: Emission, reason: LossReason) -> None:
+    def reject(self, emission: Emission, reason: LossReason) -> None:
         self.state.count_rejected(emission.component, emission.level, reason)
         self._report_loss(RECORD_REJECTED, emission, reason)
 
@@ -384,9 +391,6 @@ class ProcessDiagnostics:
 
     def _leave(self) -> None:
         self._reentrancy.active = False
-
-    def _on_sink_failure(self) -> None:
-        return None
 
     def start(self) -> None:
         self._writer.start()
@@ -456,6 +460,7 @@ class ProcessDiagnostics:
                 secret_admission_failures=summary.secret_admission_failures,
                 sink_failures=summary.sink_failures,
             )
+        self._queue.seal()
         drained = self._writer.stop(deadline)
         self._queue.close()
         release_current(self)

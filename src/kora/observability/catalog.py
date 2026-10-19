@@ -56,9 +56,12 @@ class LossReason(enum.StrEnum):
     INVALID_FIELD = "invalid_field"
     OVER_BUDGET = "over_budget"
     CONTEXT_OVERRIDE = "context_override"
+    INVALID_CONTEXT = "invalid_context"
+    POLICY_FAILURE = "policy_failure"
     QUEUE_RECORDS = "queue_records"
     QUEUE_BYTES = "queue_bytes"
     SINK_FAILED = "sink_failed"
+    SHUTDOWN = "shutdown"
     SUPPRESSED = "suppressed"
     REDACTION_ADMISSION = "secret_admission"
 

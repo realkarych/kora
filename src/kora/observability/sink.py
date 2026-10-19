@@ -1,16 +1,13 @@
 import collections
-import errno
 import os
 import select
 import threading
 import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from kora.observability.catalog import LossReason
 from kora.observability.settings import Level
 
-UNRECOVERABLE_ERRNOS: frozenset[int] = frozenset({errno.EPIPE, errno.EBADF, errno.EIO})
 WRITE_WAIT_SECONDS: float = 0.1
 BATCH_BYTES: int = 65_536
 
@@ -111,12 +108,15 @@ class BoundedQueue:
         self._items: collections.deque[bytes] = collections.deque()
         self._size = 0
         self._closed = False
+        self._sealed = False
         self._condition = threading.Condition()
 
     def put(self, item: bytes) -> LossReason | None:
         with self._condition:
             if self._closed:
                 return LossReason.SINK_FAILED
+            if self._sealed:
+                return LossReason.SHUTDOWN
             if len(self._items) >= self._max_records:
                 return LossReason.QUEUE_RECORDS
             if self._size + len(item) > self._max_bytes:
@@ -149,6 +149,10 @@ class BoundedQueue:
         with self._condition:
             return not self._items
 
+    def seal(self) -> None:
+        with self._condition:
+            self._sealed = True
+
     def wake(self) -> None:
         with self._condition:
             self._condition.notify_all()
@@ -177,12 +181,10 @@ class StreamWriter:
         descriptor: int,
         queue: BoundedQueue,
         state: DiagnosticsState,
-        on_failure: Callable[[], None],
     ) -> None:
         self._descriptor = descriptor
         self._queue = queue
         self._state = state
-        self._on_failure = on_failure
         self._stop = threading.Event()
         self._idle = threading.Event()
         self._idle.set()
@@ -209,7 +211,6 @@ class StreamWriter:
                     self._idle.set()
         except BaseException:
             self._fail()
-            raise
 
     def _write_all(self, item: bytes) -> bool:
         view = memoryview(item)
@@ -221,18 +222,15 @@ class StreamWriter:
                     return False
                 select.select([], [self._descriptor], [], WRITE_WAIT_SECONDS)
                 continue
-            except OSError as error:
-                if error.errno in UNRECOVERABLE_ERRNOS:
-                    self._fail()
-                    return False
-                raise
+            except OSError:
+                self._fail()
+                return False
             view = view[written:]
         return True
 
     def _fail(self) -> None:
         self._state.mark_sink_failed()
         self._queue.close()
-        self._on_failure()
 
     def stop(self, deadline_seconds: float) -> bool:
         deadline = time.monotonic() + deadline_seconds

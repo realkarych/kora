@@ -36,7 +36,7 @@ DEFAULT_THIRD_PARTY_LEVEL_NAME: str = "WARNING"
 WARNINGS_LOGGER: str = "py.warnings"
 
 DOTTED_NAME: re.Pattern[str] = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$"
+    r"\A[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\Z"
 )
 
 
@@ -83,12 +83,12 @@ class LoggingSettings:
 
     def third_party_levels(self) -> dict[str, Level]:
         levels = dict(self.third_party)
-        levels.setdefault(WARNINGS_LOGGER, Level.WARNING)
+        levels[WARNINGS_LOGGER] = Level.WARNING
         return levels
 
 
 def is_dotted_name(name: str) -> bool:
-    return len(name.encode("utf-8")) <= MAX_NAME_BYTES and bool(DOTTED_NAME.match(name))
+    return len(name) <= MAX_NAME_BYTES and bool(DOTTED_NAME.match(name))
 
 
 def parse_level(variable: str, value: str) -> Level:

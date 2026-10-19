@@ -73,6 +73,7 @@ class SecretRegistry:
             return
         literals = sorted(set(self._values.values()), key=len, reverse=True)
         self._pattern = re.compile("|".join(re.escape(literal) for literal in literals))
+        re.purge()
 
     def mask(self, text: str) -> str:
         pattern = self._pattern

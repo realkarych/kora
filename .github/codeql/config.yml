@@ -1,11 +1,4 @@
 name: kora code scanning
-paths:
-  - src
-  - tests
-  - hatch_build.py
-  - web/src
-  - web/vite.config.ts
-  - .github/workflows
 paths-ignore:
   - web/node_modules
   - web/dist

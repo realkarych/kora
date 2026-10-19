@@ -3,6 +3,7 @@ from kora.cli.app import (
     PROCESS_FAILED,
     PROCESS_STARTED,
     PROCESS_STOPPED,
+    THREAD_FAILED,
     build_app,
 )
 
@@ -11,5 +12,6 @@ __all__ = [
     "PROCESS_FAILED",
     "PROCESS_STARTED",
     "PROCESS_STOPPED",
+    "THREAD_FAILED",
     "build_app",
 ]

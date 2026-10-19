@@ -14,6 +14,7 @@ from kora.cli import (
     PROCESS_FAILED,
     PROCESS_STARTED,
     PROCESS_STOPPED,
+    THREAD_FAILED,
     build_app,
 )
 from kora.observability import (
@@ -31,13 +32,10 @@ EXIT_SOFTWARE: int = 70
 EXIT_CONFIGURATION: int = 78
 EXIT_INTERRUPT: int = 130
 STDERR_DESCRIPTOR: int = 2
+STDOUT_DESCRIPTOR: int = 1
 PROGRAM: str = "kora"
 CONFIGURATION_PREFIX: str = "kora: invalid logging configuration"
 MISSING_COMMAND: str = "a command or --version is required"
-
-ExceptHook = Callable[
-    [type[BaseException], BaseException, TracebackType | None], object
-]
 
 
 def write_stderr(text: str) -> None:
@@ -84,19 +82,14 @@ def run_application(app: typer.Typer, argv: Sequence[str]) -> int:
     return EXIT_SUCCESS
 
 
-class FailureHooks:
+class ThreadFailureHook:
     def __init__(self, log: ComponentLogger) -> None:
         self._log = log
-        self._previous_excepthook: ExceptHook | None = None
-        self._previous_threading_hook: (
-            Callable[[threading.ExceptHookArgs], object] | None
-        ) = None
+        self._previous: Callable[[threading.ExceptHookArgs], object] | None = None
 
-    def __enter__(self) -> "FailureHooks":
-        self._previous_excepthook = sys.excepthook
-        self._previous_threading_hook = threading.excepthook
-        sys.excepthook = self._handle
-        threading.excepthook = self._handle_thread
+    def __enter__(self) -> "ThreadFailureHook":
+        self._previous = threading.excepthook
+        threading.excepthook = self._handle
         return self
 
     def __exit__(
@@ -105,24 +98,38 @@ class FailureHooks:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if self._previous_excepthook is not None:
-            sys.excepthook = self._previous_excepthook
-        if self._previous_threading_hook is not None:
-            threading.excepthook = self._previous_threading_hook
+        if self._previous is not None:
+            threading.excepthook = self._previous
 
-    def _handle(
-        self,
-        exc_type: type[BaseException],
-        exc_value: BaseException,
-        traceback: TracebackType | None,
-    ) -> None:
-        self._log.emit(PROCESS_FAILED, exception=exc_value, exit_code=EXIT_SOFTWARE)
-
-    def _handle_thread(self, args: threading.ExceptHookArgs) -> None:
+    def _handle(self, args: threading.ExceptHookArgs) -> None:
         if args.exc_value is not None:
-            self._log.emit(
-                PROCESS_FAILED, exception=args.exc_value, exit_code=EXIT_SOFTWARE
-            )
+            self._log.emit(THREAD_FAILED, exception=args.exc_value)
+
+
+def exit_code_of(request: SystemExit) -> int:
+    code = request.code
+    if code is None:
+        return EXIT_SUCCESS
+    if isinstance(code, int):
+        return code
+    write_stderr(f"{code}\n")
+    return EXIT_FAILURE
+
+
+def silence_broken_stdout() -> int:
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, STDOUT_DESCRIPTOR)
+    os.close(devnull)
+    return EXIT_FAILURE
+
+
+def flush_stdout(exit_code: int) -> int:
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        silence_broken_stdout()
+        return exit_code if exit_code != EXIT_SUCCESS else EXIT_FAILURE
+    return exit_code
 
 
 def main(
@@ -142,15 +149,20 @@ def main(
     log.emit(PROCESS_STARTED)
     exit_code = EXIT_SOFTWARE
     try:
-        with FailureHooks(log):
+        with ThreadFailureHook(log):
             try:
                 exit_code = run_application(application or build_app(), arguments)
             except KeyboardInterrupt:
                 exit_code = EXIT_INTERRUPT
-            except Exception as error:
+            except SystemExit as request:
+                exit_code = exit_code_of(request)
+            except BrokenPipeError:
+                exit_code = silence_broken_stdout()
+            except BaseException as error:
                 log.emit(PROCESS_FAILED, exception=error, exit_code=EXIT_SOFTWARE)
                 exit_code = EXIT_SOFTWARE
     finally:
+        exit_code = flush_stdout(exit_code)
         log.emit(PROCESS_STOPPED, exit_code=exit_code)
         diagnostics.shutdown()
     return exit_code

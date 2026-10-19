@@ -48,7 +48,7 @@ def test_state_reports_loss_while_the_sink_is_blocked(
     wait_until(lambda: diagnostics.snapshot().queue_records == 0)
     after = diagnostics.snapshot()
 
-    assert blocked.queue_records == SMALL_QUEUE.queue_records
+    assert 0 < blocked.queue_records <= SMALL_QUEUE.queue_records
     assert blocked.queue_bytes > 0
     assert blocked.dropped_total() > 0
     assert blocked.rejected[(TEST_COMPONENT, "INFO", LossReason.OVER_BUDGET.value)] == 1

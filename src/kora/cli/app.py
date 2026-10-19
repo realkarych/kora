@@ -34,6 +34,15 @@ PROCESS_FAILED: EventSpec = CATALOG.register(
         fields={"exception": FieldKind.EXCEPTION, "exit_code": FieldKind.INTEGER},
     )
 )
+THREAD_FAILED: EventSpec = CATALOG.register(
+    EventSpec(
+        name="thread.failed",
+        component=CLI_COMPONENT,
+        level=Level.ERROR,
+        message="a thread ended on an unhandled error",
+        fields={"exception": FieldKind.EXCEPTION},
+    )
+)
 
 
 def kora_version() -> str:

@@ -55,7 +55,7 @@ jobs:
           cache-suffix: scaffold-${{ matrix.python }}
       - name: Install locked dependencies
         run: |
-          uv sync --locked --group build --no-install-project
+          uv sync --locked --group build
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
           uv export --locked --only-group build --no-emit-project \
             --format requirements.txt \
@@ -78,12 +78,13 @@ jobs:
       - name: Run tests
         run: uv run --no-sync pytest -q
       - name: Measure logging overhead and resource lifetime
+        id: measurement
         if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
         run: |
           KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
             uv run --no-sync pytest -q -m measurement tests/measurements/test_logging_overhead.py
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        if: always() && matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
+        if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
         with:
           name: logging-overhead-measurement
           path: measurements/logging-overhead.json
@@ -94,7 +95,7 @@ jobs:
             --python "$PWD/.venv/bin/python" \
             --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
             --require-hashes --clear
-      - name: Check editable setup and unchanged dependency files
+      - name: Check the synced environment and unchanged dependency files
         run: |
           uv sync --locked --group build
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \

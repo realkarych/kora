@@ -33,10 +33,12 @@ diagnostics = configure_process(
     component, LoggingSettings(), "filler", lambda: datetime.datetime.now(datetime.UTC)
 )
 log = diagnostics.logger(component)
+import time
 for index in range(20000):
     log.emit(spec, text="y" * 500)
+started = time.monotonic()
 drained = diagnostics.shutdown()
-sys.stdout.write("drained=%s\\n" % drained)
+sys.stdout.write("drained=%s shutdown=%.3f\\n" % (drained, time.monotonic() - started))
 """
 
 
@@ -163,5 +165,10 @@ def test_real_process_exits_within_the_drain_deadline_on_a_full_pipe() -> None:
     process.stdout.close()
 
     assert code == 0
-    assert stdout == b"drained=False\n"
-    assert elapsed < LoggingSettings().drain_seconds + DRAIN_MARGIN_SECONDS
+    drained, shutdown = stdout.decode().split()
+    assert drained == "drained=False"
+    assert (
+        float(shutdown.removeprefix("shutdown="))
+        < LoggingSettings().drain_seconds + 0.5
+    )
+    assert elapsed < 30

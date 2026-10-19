@@ -1,13 +1,11 @@
 import contextlib
 import contextvars
-import re
 from collections.abc import Generator, Mapping
 
 import structlog.contextvars
 
 from kora.observability.catalog import CONTEXT_INTEGER_KEYS, CONTEXT_STRING_KEYS
-
-IDENTIFIER: re.Pattern[str] = re.compile(r"^[\x21-\x7e]{1,256}$")
+from kora.observability.policy import CONTEXT_IDENTIFIER as IDENTIFIER
 
 
 class ContextError(ValueError):

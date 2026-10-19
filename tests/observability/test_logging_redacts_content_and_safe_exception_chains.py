@@ -1,10 +1,13 @@
 import logging
+import types
 import warnings
 from typing import cast
 
 import pytest
+import structlog.contextvars
 
 from kora.observability import (
+    EventSpec,
     Level,
     LoggingSettings,
     LossReason,
@@ -34,6 +37,10 @@ def raise_chained(marker: str) -> None:
             raise ValueError(f"context {local_copy}")
         except ValueError:
             raise RuntimeError(f"outer {marker}") from cause
+
+
+def raise_plain() -> None:
+    raise ValueError("plain")
 
 
 def finished_output(diagnostics_shutdown: object, pipe: Pipe) -> str:
@@ -207,3 +214,85 @@ def test_registration_outside_the_bounds_fails_before_any_record(
     assert records[-1]["event"] == "logging.loss_summary"
     assert records[-1]["secret_admission_failures"] == 2
     assert diagnostics.registry.count() == 0
+
+
+def test_context_bound_outside_the_validated_scope_is_rejected(
+    configure: Configure, pipe: Pipe
+) -> None:
+    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    log = diagnostics.logger(TEST_COMPONENT)
+    registration = diagnostics.register_secret(REGISTERED_VALUE)
+    pipe.reader.start()
+
+    tokens = structlog.contextvars.bind_contextvars(
+        request_id=f"req {REGISTERED_VALUE}\x1b[31m", run_id=12345
+    )
+    try:
+        log.emit(NOTE, text="forged-context")
+    finally:
+        structlog.contextvars.reset_contextvars(**tokens)
+    log.emit(NOTE, text="clean-context")
+    diagnostics.shutdown()
+    output = finished_output(None, pipe)
+    registration.release()
+
+    events = [record["event"] for record in pipe.reader.records()]
+    rejected = diagnostics.snapshot().rejected
+    assert REGISTERED_VALUE not in output
+    assert "forged-context" not in output
+    assert events.count("testing.note") == 1
+    assert rejected[(TEST_COMPONENT, "INFO", LossReason.INVALID_CONTEXT.value)] == 1
+
+
+def test_exception_frame_names_and_odd_types_go_through_the_policy(
+    configure: Configure, pipe: Pipe
+) -> None:
+    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    log = diagnostics.logger(TEST_COMPONENT)
+    registration = diagnostics.register_secret(REGISTERED_VALUE)
+    pipe.reader.start()
+    renamed_globals: dict[str, object] = {"__name__": f"mod {REGISTERED_VALUE}\x1b[31m"}
+    boom = types.FunctionType(raise_plain.__code__, renamed_globals)
+
+    try:
+        boom()
+    except ValueError as error:
+        log.emit(NOTE, exception=error)
+    odd_type = type("Odd", (Exception,), {"__module__": 7})
+    log.emit(NOTE, exception=odd_type("odd"))
+    log.emit(NOTE, count=2**70)
+    log.emit(NOTE, text="\udcff surrogate")
+    diagnostics.shutdown()
+    output = finished_output(None, pipe)
+    registration.release()
+
+    records = [r for r in pipe.reader.records() if r["event"] == "testing.note"]
+    rejected = diagnostics.snapshot().rejected
+    assert REGISTERED_VALUE not in output
+    assert "\x1b" not in output
+    assert len(records) == 3
+    odd = cast(list[dict[str, object]], records[1]["exception"])
+    assert odd[0]["type"] == "Odd"
+    assert odd[0]["module"] == ""
+    assert str(records[2]["text"]).endswith("surrogate")
+    assert rejected[(TEST_COMPONENT, "INFO", LossReason.INVALID_FIELD.value)] == 1
+
+
+def test_unregistered_event_specifications_are_rejected(
+    configure: Configure, pipe: Pipe
+) -> None:
+    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    log = diagnostics.logger(TEST_COMPONENT)
+    pipe.reader.start()
+    rogue = EventSpec("testing.rogue", TEST_COMPONENT, Level.INFO, "rogue", {})
+
+    log.emit(rogue)
+    log.emit(NOTE, text="kept")
+    diagnostics.shutdown()
+    finished_output(None, pipe)
+
+    events = [record["event"] for record in pipe.reader.records()]
+    rejected = diagnostics.snapshot().rejected
+    assert "testing.rogue" not in events
+    assert events.count("testing.note") == 1
+    assert rejected[(TEST_COMPONENT, "INFO", LossReason.UNKNOWN_EVENT.value)] == 1
