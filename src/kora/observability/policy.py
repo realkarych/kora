@@ -239,7 +239,9 @@ class ContentPolicy:
                     raise RecordRejected(LossReason.INVALID_CONTEXT)
                 result[key] = value
             elif key in CONTEXT_INTEGER_KEYS:
-                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise RecordRejected(LossReason.INVALID_CONTEXT)
+                if value < 0 or value > MAX_INTEGER:
                     raise RecordRejected(LossReason.INVALID_CONTEXT)
                 result[key] = value
         return result

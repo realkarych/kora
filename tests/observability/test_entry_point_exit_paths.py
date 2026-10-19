@@ -1,3 +1,7 @@
+import os
+import shutil
+import subprocess
+import sys
 from typing import cast
 
 from tests.observability.conftest import run_kora, run_python
@@ -223,3 +227,25 @@ def test_broken_stdout_exits_one_without_a_failure_record() -> None:
     assert "Exception ignored" not in stderr_text
     assert "BrokenPipeError" not in stderr_text
     assert result.records()[-1]["exit_code"] == 1
+
+
+def shell() -> str:
+    found = shutil.which("sh")
+    assert found is not None
+    return found
+
+
+def test_closed_stdout_descriptor_still_shuts_down_cleanly() -> None:
+    completed = subprocess.run(
+        [shell(), "-c", 'exec "$0" -m kora --version 1>&-', sys.executable],
+        env={"PATH": os.environ["PATH"], "KORA_LOG_LEVEL": "DEBUG"},
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    lines = completed.stderr.decode("utf-8").splitlines()
+    assert completed.returncode == 0
+    assert all(line.startswith("{") for line in lines)
+    assert "Traceback" not in completed.stderr.decode("utf-8")
+    assert '"event":"process.stopped"' in lines[-1]

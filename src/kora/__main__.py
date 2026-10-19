@@ -124,11 +124,16 @@ def silence_broken_stdout() -> int:
 
 
 def flush_stdout(exit_code: int) -> int:
+    stream = sys.stdout
+    if stream is None:
+        return exit_code
     try:
-        sys.stdout.flush()
+        stream.flush()
     except BrokenPipeError:
         silence_broken_stdout()
         return exit_code if exit_code != EXIT_SUCCESS else EXIT_FAILURE
+    except ValueError:
+        return exit_code
     return exit_code
 
 
