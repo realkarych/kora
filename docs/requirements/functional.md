@@ -26,6 +26,8 @@ MVP definition: basic graphs can be run and deployed; all core functionality is 
 
 Evidence wording amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
 
+Tool-policy coverage amendment dated 2026-10-19 (FR-8b.1): scope and implementation plan approved under [issue #125](https://github.com/realkarych/kora/issues/125); wording pending line-by-line owner review.
+
 ## 0. AI-first parity
 
 - **FR-0.0 [MVP]** Scope of AI-first: kora's MCP server and skills serve the **user's own coding-agent session** (the engineer's Claude Code or Codex replacing manual actions). Agent nodes inside a graph have no access to kora's MCP server or API; they only receive typed inputs and produce typed outputs.
@@ -140,7 +142,7 @@ Evidence wording amendment dated 2026-10-18: scope approved under issue #95; wor
 
 ## 8b. Tool-call policy
 
-- **FR-8b.1 [MVP]** Tool policy is a protocol (decision point for tool calls: `decide(principal, tool, arguments, context) → allow | deny`) invoked through the harness's pre-tool-use hook mechanism (Claude Code hooks, the Codex equivalent, and after MVP ACP's permission request). The node configuration carries one `tool_policy` with `allow` and `deny` lists (this replaces separate allowed/disallowed tool fields) inherited through the layers; the namespace-level policy set by the platform team is prepended. MVP implementation: allow/deny lists by tool name and argument patterns with argv-level matching that denies shell chaining and `-c`/`--exec`-style indirection; a conformance test verifies that a deny reaches every tool call under every permission mode and adapter. Denials are recorded as session events on the `AgentSession` artifact. Cedar/OPA evaluators as plugins later (additive IR change).
+- **FR-8b.1 [MVP]** Tool policy is a protocol (decision point for tool calls: `decide(principal, tool, arguments, context) → allow | deny`) invoked through the harness's pre-tool-use hook mechanism (Claude Code hooks, the Codex equivalent, and after MVP ACP's permission request). The node configuration carries one `tool_policy` with `allow` and `deny` lists (this replaces separate allowed/disallowed tool fields) inherited through the layers; the namespace-level policy set by the platform team is prepended. MVP implementation: allow/deny lists by tool name and argument patterns with argv-level matching that denies shell chaining and `-c`/`--exec`-style indirection; a conformance test verifies, for every call kind an adapter declares covered and under every permission mode, that a deny reaches every tool call the harness does not reject itself (amended 2026-10-19, [ADR-0009](../decisions/0009-target-repository-trust-boundary.md)). Denials, including calls the harness rejected before the hook, are recorded as session events on the `AgentSession` artifact. Cedar/OPA evaluators as plugins later (additive IR change).
 
 ## 9. Cost accounting and limits
 
