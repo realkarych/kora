@@ -165,7 +165,7 @@ Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), whi
 | `client` | the shared `httpx` API client | `models`, `protocols`, `ir`, `observability` |
 | `executor` | VCS plan executor | `protocols`, `ir`, `observability` |
 | `runner` | `kora-runner` supervisor, including its registry, control channel and journal | `executor`, `protocols`, `ir`, `observability` |
-| `db` | SQLAlchemy tables, repositories and migrations | `ir`, `observability` |
+| `db` | SQLAlchemy tables, read functions and migrations; writes of the execution tables, `approval_request` and `artifact_version` are `engine` functions | `ir`, `observability` |
 | `cel_eval` | evaluation of checked expressions through the binding | `cel`, `ir`, `observability` |
 | `engine` | shared transition functions | `db`, `cel_eval`, `protocols`, `ir`, `observability` |
 | `api` | FastAPI application | `engine`, `db`, `models`, `cel_eval`, `cel`, `protocols`, `ir`, `observability` |

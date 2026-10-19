@@ -263,9 +263,9 @@ For diagnosis, first inspect component/instance and safe correlation IDs, then t
 
 `test_transitions_only_through_shared_functions`, in `tests/architecture/` beside the ADR-0026 layer test, checks this statically, including `kora.plugins`. It resolves imports, relative imports, aliases and package attribute chains.
 
-- **Outside `kora.db`, `kora.engine` and the exceptions** it flags any import of these table objects, including a re-export from `kora.db` and a star import, any attribute reference to them, and any table built or looked up by one of their names (`table()`, `Table()`, `metadata.tables[...]`, `.get(...)`, `getattr`).
+- **Outside `kora.db`, `kora.engine` and the exceptions** it flags any import from `kora.db.tables`, including `metadata`, static or dynamic; any import of these tables, `tables` or `metadata` re-exported from a module under `kora.db` or `kora.engine`, and star imports of them; any attribute reference resolving to these tables under those packages; any `.tables` or `.sorted_tables` access; any table built or looked up by one of their names (`table()`, `Table()`, `metadata.tables[...]`, `.tables.get(...)`, `getattr` on those modules); and any import of a database driver (`sqlite3`, `asyncpg`, `aiosqlite`, `psycopg`).
 - **Inside `kora.db`, outside the exceptions,** it flags Core writes to them, through `sqlalchemy` write functions and classes (aliases and the `table` keyword included) or table methods.
-- **Outside the exceptions,** it flags every `text()` whose constant text writes them, every `text()` built at run time, and every `exec_driver_sql` or driver-connection call.
+- **Outside the exceptions,** it flags every `text()` whose constant text writes them, after removing SQL comments and backticks, every `text()` built at run time, and every `exec_driver_sql`, `raw_connection`, `dbapi_connection`, `driver_connection` or `get_raw_connection` use.
 - **Everywhere,** it flags any ORM mapping of these tables.
 
 What it cannot see is recorded as a limit: inside `kora.db`, a generic helper that writes a table passed in as a parameter, or a loop over `metadata.sorted_tables`. Review covers these. Providers installed out of tree through entry points are also outside this check and the layer check, under the existing trust in installed providers.

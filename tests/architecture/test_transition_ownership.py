@@ -28,8 +28,21 @@ TABLE_CONSTRUCTORS: frozenset[str] = frozenset({"table", "Table"})
 MAPPING_FUNCTIONS: frozenset[str] = frozenset({"map_imperatively", "mapper"})
 MAPPING_ATTRIBUTES: frozenset[str] = frozenset({"__tablename__", "__table__"})
 RAW_CONNECTION_ATTRIBUTES: frozenset[str] = frozenset(
-    {"exec_driver_sql", "driver_connection", "get_raw_connection"}
+    {
+        "exec_driver_sql",
+        "driver_connection",
+        "get_raw_connection",
+        "raw_connection",
+        "dbapi_connection",
+    }
 )
+METADATA_ATTRIBUTES: frozenset[str] = frozenset({"tables", "sorted_tables"})
+CONFINING_PACKAGES: tuple[str, ...] = (DB_PACKAGE, "kora.engine")
+DATABASE_DRIVERS: frozenset[str] = frozenset(
+    {"sqlite3", "asyncpg", "aiosqlite", "psycopg", "psycopg2"}
+)
+TABLE_HANDLES: frozenset[str] = GUARDED_TABLES | {"tables", "metadata"}
+SQL_COMMENT: re.Pattern[str] = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
 RAW_WRITE: re.Pattern[str] = re.compile(
     r"\b(insert(\s+or\s+\w+)?\s+into|replace\s+into|merge\s+into|update(\s+only)?"
     r"|delete\s+from(\s+only)?|truncate(\s+table)?(\s+only)?)\s+(\"?\w+\"?\.)?\"?("
@@ -132,26 +145,37 @@ def is_sqlalchemy_call(
     return is_within(name, SQLALCHEMY) and name.split(".")[-1] in names
 
 
+def under_confining_package(name: str) -> bool:
+    return any(is_within(name, package) for package in CONFINING_PACKAGES)
+
+
 def names_guarded_table(node: ast.expr, bindings: dict[str, str]) -> bool:
     if isinstance(node, ast.Subscript):
         return constant_string(node.slice) in GUARDED_TABLES
     if isinstance(node, ast.Call):
         name = dotted(node.func, bindings)
         leaf = None if name is None else name.split(".")[-1]
-        if leaf in TABLE_CONSTRUCTORS or leaf in {"get", "getattr"}:
-            arguments = node.args[1:2] if leaf == "getattr" else node.args[:1]
-            return any(constant_string(a) in GUARDED_TABLES for a in arguments)
+        if leaf in TABLE_CONSTRUCTORS:
+            return (
+                constant_string(node.args[0] if node.args else None) in GUARDED_TABLES
+            )
+        function = node.func
+        if leaf == "get" and isinstance(function, ast.Attribute):
+            receiver = function.value
+            return (
+                isinstance(receiver, ast.Attribute)
+                and receiver.attr == "tables"
+                and constant_string(node.args[0] if node.args else None)
+                in GUARDED_TABLES
+            )
+        if leaf == "getattr" and len(node.args) > 1:
+            owner = dotted(node.args[0], bindings)
+            return owner is not None and under_confining_package(owner)
         return False
     name = dotted(node, bindings)
-    if name is None:
+    if name is None or not under_confining_package(name):
         return False
-    for prefix in (TABLES_MODULE, DB_PACKAGE):
-        if (
-            name.startswith(f"{prefix}.")
-            and name.removeprefix(f"{prefix}.") in GUARDED_TABLES
-        ):
-            return True
-    return False
+    return name.split(".")[-1] in GUARDED_TABLES
 
 
 def write_targets(node: ast.Call, bindings: dict[str, str]) -> list[ast.expr]:
@@ -176,22 +200,33 @@ def raw_sql_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
     statement = constant_string(arguments[0])
     if statement is None:
         return "builds SQL text dynamically outside kora.engine"
-    if RAW_WRITE.search(statement) is not None:
+    normalized = SQL_COMMENT.sub(" ", statement).replace("`", "")
+    if RAW_WRITE.search(normalized) is not None:
         return "writes an execution table in raw SQL"
     return None
 
 
 def guarded_import_reasons(node: ast.AST, module: SourceModule) -> Iterator[str]:
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if is_within(alias.name, TABLES_MODULE):
+                yield "imports kora.db.tables"
+            elif alias.name.split(".")[0] in DATABASE_DRIVERS:
+                yield f"imports the database driver {alias.name}"
+        return
     if not isinstance(node, ast.ImportFrom):
         return
     source = import_source(module, node)
-    if not (source == TABLES_MODULE or source == DB_PACKAGE):
-        return
-    for alias in node.names:
-        if alias.name == "*":
-            yield "star-imports the execution tables"
-        elif alias.name in GUARDED_TABLES:
-            yield f"imports the execution table {alias.name}"
+    if source.split(".")[0] in DATABASE_DRIVERS:
+        yield f"imports the database driver {source}"
+    elif is_within(source, TABLES_MODULE):
+        yield "imports from kora.db.tables"
+    elif under_confining_package(source):
+        for alias in node.names:
+            if alias.name == "*":
+                yield f"star-imports {source}"
+            elif alias.name in TABLE_HANDLES:
+                yield f"imports {alias.name} from {source}"
 
 
 def mapping_reason(node: ast.AST, bindings: dict[str, str]) -> str | None:
@@ -238,11 +273,25 @@ def names_mapped_table(statement: ast.stmt, bindings: dict[str, str]) -> bool:
 
 
 def outside_db_reason(node: ast.AST, bindings: dict[str, str]) -> str | None:
+    if isinstance(node, ast.Attribute) and node.attr in METADATA_ATTRIBUTES:
+        return "accesses table metadata"
     if isinstance(node, ast.Attribute) and names_guarded_table(node, bindings):
         return "references an execution table"
+    if isinstance(node, ast.Subscript) and names_guarded_table(node, bindings):
+        return "looks up an execution table"
     if isinstance(node, ast.Call) and names_guarded_table(node, bindings):
         return "builds or looks up an execution table"
+    if isinstance(node, ast.Call) and dynamic_tables_import(node, bindings):
+        return "imports kora.db.tables dynamically"
     return None
+
+
+def dynamic_tables_import(node: ast.Call, bindings: dict[str, str]) -> bool:
+    name = dotted(node.func, bindings)
+    if name is None or name.split(".")[-1] not in {"import_module", "__import__"}:
+        return False
+    target = constant_string(node.args[0]) if node.args else None
+    return target is not None and is_within(target, TABLES_MODULE)
 
 
 def call_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
@@ -325,20 +374,48 @@ def test_checker_refuses_execution_tables_outside_db_and_engine(tmp_path: Path) 
         "sa.Table('attempt', sa.MetaData())\n"
         "metadata.tables['node_instance']\n"
         "metadata.tables.get('wait')\n"
-        "getattr(tables, 'approval_request')\n",
+        "importlib.import_module('kora.db.tables')\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.worker.helpers",
+        "from kora.db.tables import metadata\n"
+        "import kora.db.tables\n"
+        "from kora.db import tables\n"
+        "import sqlite3\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.api.reexports",
+        "from kora.db.reads import run\n"
+        "import kora.db.reads as reads\n"
+        "from kora.engine import attempt\n"
+        "reads.wait.update()\n",
     )
 
     violations = find_violations(tmp_path)
 
     assert violations == [
-        "kora/api/routes.py:1: imports the execution table run",
-        "kora/api/routes.py:2: imports the execution table attempt",
-        "kora/api/routes.py:3: star-imports the execution tables",
+        "kora/api/reexports.py:1: imports run from kora.db.reads",
+        "kora/api/reexports.py:3: imports attempt from kora.engine",
+        "kora/api/reexports.py:4: references an execution table",
+        "kora/api/reexports.py:4: writes an execution table outside kora.engine",
+        "kora/api/routes.py:1: imports from kora.db.tables",
+        "kora/api/routes.py:2: imports attempt from kora.db",
+        "kora/api/routes.py:3: imports from kora.db.tables",
+        "kora/api/routes.py:5: accesses table metadata",
         "kora/api/routes.py:5: references an execution table",
         "kora/scheduler/passes.py:2: builds or looks up an execution table",
         "kora/scheduler/passes.py:3: builds or looks up an execution table",
+        "kora/scheduler/passes.py:4: accesses table metadata",
+        "kora/scheduler/passes.py:4: looks up an execution table",
+        "kora/scheduler/passes.py:5: accesses table metadata",
         "kora/scheduler/passes.py:5: builds or looks up an execution table",
-        "kora/scheduler/passes.py:6: builds or looks up an execution table",
+        "kora/scheduler/passes.py:6: imports kora.db.tables dynamically",
+        "kora/worker/helpers.py:1: imports from kora.db.tables",
+        "kora/worker/helpers.py:2: imports kora.db.tables",
+        "kora/worker/helpers.py:3: imports tables from kora.db",
+        "kora/worker/helpers.py:4: imports the database driver sqlite3",
     ]
 
 
@@ -379,6 +456,9 @@ def test_checker_flags_raw_and_driver_sql(tmp_path: Path) -> None:
         'text(f"UPDATE {name} SET x = 1")\n'
         "connection.exec_driver_sql(statement)\n"
         "raw.driver_connection.execute(statement)\n"
+        "engine.raw_connection().cursor()\n"
+        "c.connection.dbapi_connection\n"
+        'text("UPDATE/**/`run` SET x = 1")\n'
         'text("SELECT * FROM run")\n'
         "widget.text(value)\n",
     )
@@ -386,12 +466,15 @@ def test_checker_flags_raw_and_driver_sql(tmp_path: Path) -> None:
     violations = find_violations(tmp_path)
 
     assert violations == [
+        "kora/db/reports.py:10: writes an execution table in raw SQL",
         "kora/db/reports.py:2: writes an execution table in raw SQL",
         "kora/db/reports.py:3: writes an execution table in raw SQL",
         "kora/db/reports.py:4: writes an execution table in raw SQL",
         "kora/db/reports.py:5: builds SQL text dynamically outside kora.engine",
         "kora/db/reports.py:6: executes driver-level SQL outside kora.engine",
         "kora/db/reports.py:7: executes driver-level SQL outside kora.engine",
+        "kora/db/reports.py:8: executes driver-level SQL outside kora.engine",
+        "kora/db/reports.py:9: executes driver-level SQL outside kora.engine",
     ]
 
 
@@ -454,7 +537,9 @@ def test_checker_allows_owning_modules_and_reads_in_db(tmp_path: Path) -> None:
     write_module(
         tmp_path,
         "kora.api.tokens",
-        "from kora.db.reads import load_run\nfrom kora.db.tables import api_token\n",
+        "from kora.db.reads import load_run\n"
+        "body.get('run')\n"
+        "getattr(payload, 'wait')\n",
     )
 
     violations = find_violations(tmp_path)
