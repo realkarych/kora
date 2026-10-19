@@ -1,0 +1,28 @@
+graph: sql_optimization
+description: Two hypotheses; one passes review and the gates, is approved, rolls out and confirms its gain.
+params: { target_task: daily_revenue }
+secrets: { YT_TOKEN: dummy-warehouse-token }
+overrides:
+  - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]/dev_run", exit_code: 0, output: { cpu_seconds: 70.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]/equivalence", exit_code: 0, reason: needs the warehouse }
+  - { select: "candidates[1]/dev_run", exit_code: 0, output: { cpu_seconds: 95.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[1]/equivalence", exit_code: 0, reason: needs the warehouse }
+  - { select: confirm_gain, exit_code: 0, output: { cpu_seconds: 68.0, output_path: out.json }, reason: needs the warehouse }
+outcomes:
+  - { select: find_target, outputs: { target: { task_id: daily_revenue, query_path: q/daily_revenue.sql } } }
+  - select: hypotheses
+    outputs: { result: [ { title: push filter down, task_id: daily_revenue }, { title: add index hint, task_id: daily_revenue } ] }
+  - { select: "candidates[0]/implement", change: { files: { q/daily_revenue.sql: "select 1 -- filtered\n" } }, outputs: { change: { branch: kora/daily-revenue-0 } } }
+  - { select: "candidates[0]/review", outputs: { verdict: { approved: true, comments: "" } } }
+  - { select: "candidates[1]/implement", change: { files: { q/daily_revenue.sql: "select 1 -- hinted\n" } }, outputs: { change: { branch: kora/daily-revenue-1 } } }
+  - { select: "candidates[1]/review", outputs: { verdict: { approved: true, comments: "" } } }
+  - { select: bundle, outputs: { bundle: { narrative: { summary: filter push-down saves 30 percent, rationale: largest gain over the 15 percent threshold } } } }
+actions:
+  - { when: { waiting: final_pr }, do: { respond: { response: { decision: approve }, reviewer: reviewer-1 } } }
+  - { when: { waiting: prestable_rollout }, do: { event: { name: deploy.finished, payload: { commit: "$from: bundle.bundle.facts.change.commit" } } } }
+expect:
+  run: succeeded
+  nodes: { select_best: succeeded, final_pr: succeeded, confirm_gain: succeeded }
+  approvals: { final_pr: approved }
+  artifacts: { "select_best.best.hypothesis.title": push filter down }

@@ -186,6 +186,7 @@ jobs:
           python-version: 3.11.17
           cache-suffix: ir-examples
       - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml
+      - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/scenario.schema.json knowledge/specs/examples/scenarios/*/*.yaml
 
   github-templates:
     name: GitHub templates
