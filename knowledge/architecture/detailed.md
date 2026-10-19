@@ -152,14 +152,15 @@ Cross-component changes also consult the owners of [content-bound approvals](../
 
 ## Package layers
 
-Normative under [ADR-0026](../../docs/decisions/0026-package-layers.md). A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is listed in `y`'s row. A module under `plugins` belongs to its longest listed family prefix. Relative imports count after resolution, and imports under `if TYPE_CHECKING:` count too. The composition roots `kora.__main__`, `kora.standalone` and `kora.testing` may import any package and each other, and no package imports a root; `kora.__main__` also assembles the CLI and MCP commands that need server components, and `import kora` alone is allowed only in a root. Only `cel_eval` may import the third-party CEL binding, `cel`, and this binds the roots too. The check is static; dynamic and entry-point imports are not checked. `tests/architecture/test_import_layers.py` enforces this table, and a package enters it in the change that creates the package.
+Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), which states the invariant and the rules; `tests/architecture/test_import_layers.py` mirrors this table and checks both. A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is listed in `y`'s row; a module under `plugins` belongs to its longest listed family prefix, and `mcp.stdio` is matched before `mcp`. The composition roots `kora.__main__`, `kora.standalone`, `kora.testing` and `kora.conformance` may import anything, and no package imports a root. A new package enters the table in the change that creates it; widening a row is approved in that change's issue plan.
 
 | package | holds | may import |
 |---|---|---|
+| `kora` | the package root, with no module-level imports | — |
 | `observability` | the logging bootstrap and bound loggers ([observability](../specs/observability.md)) | — |
 | `cel` | CEL parser, schema-driven checker and canonical rendering, without the binding | `observability` |
 | `ir` | IR models and the validator | `cel`, `observability` |
-| `protocols` | provider protocols and their data types, including the recovery, dispatcher, publication and credential types and the workload descriptors that worker routes carry | `ir`, `observability` |
+| `protocols` | provider protocols, their data types and provider loading, including the recovery, dispatcher, publication and credential types and the workload descriptors that worker routes carry | `ir`, `observability` |
 | `models` | API request and response models, including worker-route bodies | `ir`, `protocols`, `observability` |
 | `client` | the shared `httpx` API client | `models`, `protocols`, `ir`, `observability` |
 | `executor` | VCS plan executor | `protocols`, `ir`, `observability` |
@@ -170,11 +171,15 @@ Normative under [ADR-0026](../../docs/decisions/0026-package-layers.md). A modul
 | `api` | FastAPI application | `engine`, `db`, `models`, `cel_eval`, `cel`, `protocols`, `ir`, `observability` |
 | `scheduler` | scheduling passes and tick | `engine`, `db`, `cel_eval`, `protocols`, `ir`, `observability` |
 | `worker` | claims, preparation and upload | `client`, `executor`, `models`, `protocols`, `ir`, `observability` |
-| `dsl` | Python DSL and author-side compiler | `cel`, `ir`, `observability` |
+| `dsl` | Python DSL and author-side compiler; compile asks the harness adapter's `check_config` through the provider registry | `cel`, `protocols`, `ir`, `observability` |
 | `cli` | CLI over the shared client; `kora compile` runs the DSL in-process | `client`, `models`, `dsl`, `cel`, `protocols`, `ir`, `observability` |
-| `mcp` | MCP servers over the shared client; stdio `kora_compile` runs the DSL in-process | `client`, `models`, `dsl`, `cel`, `protocols`, `ir`, `observability` |
-| `plugins.runtime`, `plugins.harness`, `plugins.vcs`, `plugins.policy`, `plugins.secrets` | execution-side providers; the local runtime shares supervisor code with `runner` | `runner`, `executor`, `protocols`, `ir`, `observability` |
-| `plugins.authentication`, `plugins.approval`, `plugins.sensor`, `plugins.storage`, `plugins.artifact_type`, `plugins.exporter` | control-plane providers, some of which read their own rows | `db`, `protocols`, `ir`, `observability` |
+| `mcp` | MCP tool definitions shared by the stdio and HTTP-mounted servers | `client`, `models`, `protocols`, `ir`, `observability` |
+| `mcp.stdio` | the stdio-only authoring tools `kora_compile` and `kora_test`, which the HTTP-mounted server omits | `mcp`, `client`, `models`, `dsl`, `cel`, `protocols`, `ir`, `observability` |
+| `plugins.runtime`, `plugins.harness` | execution-side providers that share supervisor code with `runner` | `runner`, `executor`, `protocols`, `ir`, `observability` |
+| `plugins.vcs` | VCS providers | `executor`, `protocols`, `ir`, `observability` |
+| `plugins.policy`, `plugins.secrets` | policy and secrets providers | `protocols`, `ir`, `observability` |
+| `plugins.authentication`, `plugins.approval` | providers that read their own rows: `static_token` reads `api_token`, the `cli` channel polls its request row | `db`, `protocols`, `ir`, `observability` |
+| `plugins.sensor`, `plugins.storage`, `plugins.artifact_type`, `plugins.exporter` | control-plane providers without database access | `protocols`, `ir`, `observability` |
 
 ## Stack per component
 
@@ -212,7 +217,7 @@ The inventory is maintained under [AGENTS.md](../../AGENTS.md#code). *Decided* e
 | Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (current contract [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md)) | one entry-point group per protocol; pluggy |
 | Authentication | `static_token` authenticator in MVP issuing personal bearer tokens: a user principal is bound to a person and a namespace list with the two flags `approve` and `platform` and a per-namespace `transcripts` capability; a service principal per worker is bound to a runtime and a namespace list; no roles or groups (DD-32, [protocols.md](../specs/protocols.md) §10); OIDC via `authlib` post-MVP behind the same `Principal` | decided | single shared API token; RBAC in MVP |
 | Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL and an S3-compatible server on the Linux CI job, which has Docker (macOS CI runs the artifact storage suite on `local`); fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | decided (ADR-0013) | — |
-| Repo layout | `src/kora/{observability,cel,ir,protocols,models,client,executor,runner,db,cel_eval,engine,api,scheduler,worker,dsl,cli,mcp,plugins/{runtime,harness,vcs,…}}` under the [package layers](#package-layers) of ADR-0026; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
+| Repo layout | `src/kora/{observability,cel,ir,protocols,models,client,executor,runner,db,cel_eval,engine,api,scheduler,worker,dsl,cli,mcp,mcp/stdio,plugins/{runtime,harness,vcs,…}}` plus the composition roots `__main__`, `standalone`, `testing` and `conformance` under the [package layers](#package-layers) of ADR-0026; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
 
 ## Glossary
 
@@ -269,6 +274,8 @@ These are unresolved aspects of the repository design at the consolidation basel
 | Health serving | How do scheduler and worker serve health/readiness/metrics? [NFR-7.3](../../docs/requirements/non-functional.md) requires them and [scheduler health](../specs/scheduler.md#11-metrics-and-health-nfr-73) specifies content, not serving placement. |
 | Transition code ownership | How is the passes-only wording reconciled with [API-mediated worker reports](../specs/scheduler.md#3-submission-execution-uncertainty-and-recovery) and [finishing transitions](../specs/data-model.md#4-state-machines)? Reporting behavior is specified; internal delegation must be consistent. |
 | Command inputs | Who materializes `.kora/inputs/*.json` for a runner executor? [IR command inputs](../specs/ir.md#4-node-kinds-and-their-config) name the worker; [executor placement](../specs/protocols.md#4-vcs-fr-52) must still respect workspace authority. |
+| Provider discovery footprint | Entry-point discovery imports every registered provider module, so a runner resolving its harness could load a control-plane provider and, through it, `db` ([ADR-0026](../../docs/decisions/0026-package-layers.md)). Selective discovery, by entry-point names that encode the protocol or by loading only configured entry points, would amend [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) and [provider loading](../specs/protocols.md#1-common-rules). The runner work item adds the pending contract `test_runner_process_import_footprint`: start the real runner entry point under `python -I`, run provider discovery, and assert that `sys.modules` holds no module of the ADR-0026 server set and none of its checked server libraries. |
+| Credential models | The worker-route models (issue #139) decode `IssuedCredential`'s value straight into `SecretValue` and set `hide_input_in_errors`, so a validation error cannot repeat a credential ([ADR-0023](../../docs/decisions/0023-code-host-identity-and-purpose-scoped-credentials.md)). |
 | Digest mismatch errors | Which [error class](../specs/ir.md#6-retry-policy-and-strategy-fr-63-fr-64) represents a skill/MCP digest mismatch? Pinning and verification are required; this mapping is unspecified. |
 | Skill delivery | Where is skill content read at deploy time and obtained at execution time? [ADR-0018](../../docs/decisions/0018-immutable-attempt-history.md) preserves identity/availability while deferring resource/skill transport. |
 | Secret prefix ownership | Are allowed prefixes owned by [namespace policy](../specs/data-model.md#2-entities) or [provider configuration](../specs/protocols.md#6-secrets-fr-101)? Validation-time and resolution-time enforcement remain required. |

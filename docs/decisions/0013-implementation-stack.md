@@ -13,6 +13,8 @@ Evidence wording amendment dated 2026-10-18: scope approved under issue #95; wor
 
 CEL amendment dated 2026-10-19: decisions taken and implementation plan approved by the project owner under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review. The CEL row is refined by [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), amended the same day.
 
+Package-layer amendment dated 2026-10-19: the repository layout is refined by [ADR-0026](0026-package-layers.md) under [issue #104](https://github.com/realkarych/kora/issues/104), which places every shared component in a package by role with a checked import invariant; wording pending line-by-line owner review.
+
 ## Context
 
 The architecture fixes a control plane, outbound-only workers per runtime, protocol implementations loaded by entry points, and four thin clients of the API. The stack had to serve all of these from one repository and keep standalone mode (one process on SQLite) identical in behaviour to the platform deployment on PostgreSQL (NFR-0.1). The design review of 2026-10-15 refined two rows: [one shared client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) instead of three generated ones, and the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details).

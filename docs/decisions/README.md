@@ -37,7 +37,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0023](0023-code-host-identity-and-purpose-scoped-credentials.md) | Code-host identity: credentials acquired per purpose by trusted code, GitHub App issuance in the control plane, honest backend reports, stable principals | accepted, wording pending review |
 | [ADR-0024](0024-provider-limits-as-non-agent-failures.md) | Model-provider rate limits and quotas: a non-agent failure that waits for the reset, a pause per quota resource and limit group | accepted, wording pending review |
 | [ADR-0025](0025-notifications.md) | Notifications: requested reviewers, durable outbound JSON, Slack and Telegram webhooks written with the event, subscriptions with a lifecycle | accepted, wording pending review |
-| [ADR-0026](0026-package-layers.md) | Package layers: packages by role under `src/kora`, a normative import table checked by a standard-library test, one base installation | accepted, wording pending review |
+| [ADR-0026](0026-package-layers.md) | Package layers: packages by role under `src/kora`, server-free packages never statically reach server packages, a standard-library test enforces it, one base installation | accepted, wording pending review |
 
 ## Writing a new record
 
@@ -67,4 +67,4 @@ Copy the skeleton below into `NNNN-short-title.md` with the next free number, fi
 
 [ADR-0025](0025-notifications.md) defines notifications: reviewer requests through the VCS integration and durable at-least-once outbound webhooks (signed JSON, Slack, Telegram) whose delivery records are written with the event. Direction and implementation plan accepted on 2026-10-18, relayed from the project owner; document wording pending owner review.
 
-[ADR-0026](0026-package-layers.md) places every shared component in a package by role under `src/kora` and fixes which package may import which. Code that runs next to the agent or on a worker host never statically imports server code, and only the CEL evaluator imports the binding. A standard-library pytest test enforces the table in CI.
+[ADR-0026](0026-package-layers.md) places every shared component in a package by role under `src/kora` and fixes which package may import which. The server-free packages, such as the runner, the worker, the client and the DSL, never reach the server packages through static imports, and only the CEL evaluator imports the binding. A standard-library pytest test enforces this in CI. Layering is a packaging rule with defence in depth, not an isolation control.
