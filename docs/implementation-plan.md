@@ -51,7 +51,7 @@ Until #140 lands, the ADR-0001 amendment and the [roadmap](roadmap.md#what-the-d
   - runtime, through the launcher on local, for the constructed environment, the binary digest and the release of resources;
   - manual, outside CI, which records the real-session, provider-limit and internal-retry traces.
 
-  The connect and scripted-model layers run on the Linux job inside a container without an external network, and each case asserts that no outbound connection was attempted.
+  The connect and scripted-model layers run on the Linux job inside a container without an external network, and each case asserts that no outbound connection was attempted. A case the tested version cannot run that way moves to the manual layer, and the gap is reported.
 - Git runs for real against local repositories.
 - `tick` runs with an injected clock ([issue #103](https://github.com/realkarych/kora/issues/103), pending).
 - PostgreSQL runs through containers on the Linux job, and SQLite runs everywhere.
@@ -77,7 +77,7 @@ A step is frozen when its specification text is merged. The work item in the las
 | 4 | Built-in artifact types, revision 1, and the names of implicit outputs | [#138](https://github.com/realkarych/kora/issues/138), [#137](https://github.com/realkarych/kora/issues/137) (pending) | server | work item 2 |
 | 5a | Runtime, harness, VCS, policy and secrets models, the transfer channel, the harness launcher and its directories, command inputs | [#123](https://github.com/realkarych/kora/issues/123), [#106](https://github.com/realkarych/kora/issues/106), [#134](https://github.com/realkarych/kora/issues/134) (pending); the `claude` adapter text is merged in [protocols.md section 3](../knowledge/specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27) | execution | work item 6 |
 | 5b | Authentication, artifact storage, artifact type and approval-channel protocols | merged in [protocols.md](../knowledge/specs/protocols.md) sections 5, 7, 8 and 10; section 10 changes under [#135](https://github.com/realkarych/kora/issues/135) and section 8 under [#138](https://github.com/realkarych/kora/issues/138) (pending) | server | work item 8 |
-| 6 | Worker route models and the attempt's terminal report | [#139](https://github.com/realkarych/kora/issues/139) (pending) | execution | the terminal-report types no later than work item 9, in the package #104 assigns; the route bodies in work item 17 |
+| 6 | Worker route models and the attempt's terminal report | [#139](https://github.com/realkarych/kora/issues/139) (pending) | execution | the terminal-report types in work item 6 once this step lands, no later than work item 9; the route bodies in work item 17 |
 | 7 | Error model and route authorization | [#135](https://github.com/realkarych/kora/issues/135) (pending) | server | the error and diagnostic models in work item 3; route authorization in work item 11 |
 | 8 | Fake harness and fake runtime contract, including what a serving process may select | [#136](https://github.com/realkarych/kora/issues/136) (pending) | execution | work item 7 |
 
@@ -110,9 +110,9 @@ Rows that name a work item are settled in that work item's issue before its code
 | Shape of client transport failures | [#135](https://github.com/realkarych/kora/issues/135) (pending) |
 | Exposure of the unauthenticated health and metrics routes | [#135](https://github.com/realkarych/kora/issues/135) and [#140](https://github.com/realkarych/kora/issues/140) (pending) |
 | Evidence that a candidate process group is still the original one before fallback retirement ([owner comment](https://github.com/realkarych/kora/issues/123#issuecomment-6270810525)) | [#123](https://github.com/realkarych/kora/issues/123) (pending), then work item 14 |
-| Adoption on Linux when a service manager runs the worker | [#123](https://github.com/realkarych/kora/issues/123) (pending) |
+| Adoption on Linux when a service manager runs the worker | [#123](https://github.com/realkarych/kora/issues/123) (pending), then work item 14 |
 | Health serving (open question "Health serving") | work item 20, through the API process ([api-and-agent-surface.md section 2](../knowledge/specs/api-and-agent-surface.md#2-resources-and-operations), [scheduler.md section 11](../knowledge/specs/scheduler.md#11-metrics-and-health-nfr-73)) |
-| Secret-prefix ownership (open question "Secret prefix ownership") | work item 14, with [#140](https://github.com/realkarych/kora/issues/140) and [#141](https://github.com/realkarych/kora/issues/141) (pending); work item 3 applies `IR007` to the prefixes the secrets provider declares |
+| Secret-prefix ownership (open question "Secret prefix ownership") | until it is settled, the provider configuration of [protocols.md section 6](../knowledge/specs/protocols.md#6-secrets-fr-101) governs: work item 3 applies `IR007` to the prefixes it declares, and work item 14 resolves against the same source, with the exclusion of [#141](https://github.com/realkarych/kora/issues/141) (pending) |
 | Attribution of scheduling-latency intervals | work item 10 |
 | Authorization of follow streams | work item 12 |
 | Whether the MCP SDK brings its own HTTP stack | work item 11 |
@@ -142,13 +142,13 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 |---|---|---|---|
 | 1 | Logging bootstrap and process configuration, with the common logging tests run through the first process entry point it adds; the static-analysis, dependency and secret scanners in CI, placed here by the owner on 2026-10-19 | server | step 1 |
 | 2 | `ir` models of the whole IR and the built-in artifact types of revision 1; the generated `ir.schema.json` replaces the hand-written draft, with a check that the committed schema matches the models | server | steps 1, 4 |
-| 3 | `ir` validator: collected diagnostics, the refusal of features outside the slice per #140, a slice-1 graph example | server | 2, 4; steps 5a, 7; #140 |
+| 3 | `ir` validator: collected diagnostics, the refusal of features outside the slice per #140, a slice-1 graph example. It needs the provider models of work item 6, so this server item waits for an execution item | server | 2, 4, 6; step 7; #140 |
 | 4 | CEL parser, checker, projections and evaluation per [ir.md section 7](../knowledge/specs/ir.md#7-expressions-and-templates), with the packaging, CI and development obligations of the "Expression language" row of the [stack table](../knowledge/architecture/detailed.md#stack-per-component) | server | step 1; 2 for the schema-driven checker |
 | 5 | `db`: tables, migrations, repositories and the two-database fixture; the claim and lock statements land with work item 9, and later work items add their own migrations | server | 1; step 1 |
 | 6 | `protocols` for runtime, harness, VCS, policy and secrets; provider loading; conformance-suite skeletons | execution | 1, 2; step 5a |
 | 7 | Fake harness, fake runtime and the directory-backed fake VCS | execution | 6, 13; step 8 |
 | 8 | Server providers: static-token authentication, local artifact storage, the CLI approval channel, the artifact-type provider | server | 5, 6; steps 5b, 7; #141 |
-| 9 | `engine`: canonical start, admission, approval and cancel transitions, worker-report transitions with the terminal report, completion and reconcile intent | server | 2, 4, 5, 7, 8; steps 2, 3, 6; #142, #123 |
+| 9 | `engine`: canonical start, admission, approval and cancel transitions, worker-report transitions with the terminal report, completion and reconcile intent | server | 2, 4, 5, 7, 8; steps 2, 3, 6, 7; #142, #123 |
 | 10 | `scheduler`: `tick`, the passes the slice needs, lease expiry, inherited-deadline timeouts and wake-up; the scheduler part of the NFR-3.1 measurement | server | 9 |
 | 11 | API application and the graph operations; the parity coverage test, the published OpenAPI document, the client contract test and the route-authorization coverage test; the stdio MCP server | server | 3, 8, 9; step 7; #140, #141 |
 | 12 | Run operations: trigger, run reads, events, nodes and attempts, logs, artifacts and cancel | server | 7, 11 |
@@ -182,7 +182,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | Section | Work items | Pending in slice 1 |
 |---|---|---|
 | [protocols.md section 3](../knowledge/specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27) | 14, 15 | `test_skill_directory_digest_mismatch_prevents_session_start` (skills) |
-| [protocols.md section 13](../knowledge/specs/protocols.md#13-conformance-suites-nfr-102) | runtime 6, 7, 14; harness 7, 15; VCS 7, 13, and 14 for the local-runtime legs of `test_vcs_runtime_cross_product`; approval channel 8, 16; secrets 14; artifact storage and artifact type 8, with the built-in schemas of 2; authentication 8; policy 15; `test_workspace_preparation_recovers_after_worker_crash` 7, 13, 14, 17 | `test_publish_and_open_change_request_are_idempotent` (code host); the change-request leg of `test_publish_reconciles_after_response_loss` (code host); the Docker legs of `test_vcs_runtime_cross_product`; the local-Git fake VCS with its in-process code-host fake (code host); the Codex leg of `test_required_policy_is_enforced_or_rejected`; the sensor suite (starts, `wait_event`); the end-to-end canonical-graph suite (branch, fan-out, sub-graph, `wait_event`, timer, code host) |
+| [protocols.md section 13](../knowledge/specs/protocols.md#13-conformance-suites-nfr-102) | runtime 6, 7, 14; harness 7, 15; VCS 7, 13, and 14 for the local-runtime legs of `test_vcs_runtime_cross_product`; approval channel 8, 16; secrets 14; artifact storage and artifact type 8, with the built-in schemas of 2; authentication 8; policy 14, and 15 for the `claude` hook legs; `test_workspace_preparation_recovers_after_worker_crash` 7, 13, 14, 17 | `test_publish_and_open_change_request_are_idempotent` (code host); the change-request leg of `test_publish_reconciles_after_response_loss` (code host); the Docker legs of `test_vcs_runtime_cross_product`; the local-Git fake VCS with its in-process code-host fake (code host); the Codex leg of `test_required_policy_is_enforced_or_rejected`; the sensor suite (starts, `wait_event`); the end-to-end canonical-graph suite (branch, fan-out, sub-graph, `wait_event`, timer, code host) |
 | [External observation gates](../knowledge/specs/protocols.md#external-observation-conformance-gates) | 8, 13, 14, 16 | sensor references (starts); channel references (code host) |
 | [Publication authority and recovery](../knowledge/specs/protocols.md#publication-authority-and-recovery-contracts) | 13, 14, 17; `test_non_git_inspection_stream_scans_intermediate_history` 7, 13; `test_harness_launcher_preserves_control_boundary` 14, 15; `test_required_execution_protection_rejects_local` is in the #140 list below | `test_candidate_cannot_forge_runner_journal` and `test_agent_descendants_cannot_access_publication_credentials` (Docker); `test_publication_authorization_is_late` (code host); the protected leg of `test_publication_sealing_rejects_mutable_aliases` (Docker); the Codex leg of the launcher test |
 | [Command-resource contracts](../knowledge/specs/protocols.md#command-resource-contracts-issue-45) | 3, 8, 11, 14, 17 | `test_compile_exit_then_deploy` and the compiler leg of `test_resource_set_digest_vector` (DSL); `test_graph_runs_on_repository_without_gates` (branch, fan-out, sub-graph, `wait_event`, timer); `test_candidate_cannot_alter_resources` (Docker) |
@@ -218,7 +218,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | [CEL conformance](../knowledge/specs/ir.md#78-conformance) and [CEL future contracts](../knowledge/specs/ir.md#79-future-contracts) | 4, with 3, 5, 9, 11, 12, 18 and 20 | listed below |
 | [Worked examples](../knowledge/specs/ir.md#11-worked-examples), [DSL compile step](../knowledge/specs/dsl.md#2-compile-step-kora-compile) and [testing graphs without model calls](../knowledge/specs/dsl.md#4-testing-graphs-without-model-calls-nfr-101) | — | all (the canonical-graph fixture; DSL) |
 | [Future executable evidence](../knowledge/specs/observability.md#8-future-executable-evidence) | `test_logging_schema_levels_and_component_overrides` 1, 20; `test_logging_context_isolated_and_propagated` 1, 10, 11, 13, 14, 16, 17, 19; `test_api_request_id_matches_response_error_and_logs` 11, 17; `test_cli_and_mcp_stdout_remains_machine_readable` 11, 19; `test_logging_redacts_content_and_safe_exception_chains` 1, 3, 5, 11, 13, 14, 15, 16, 17, 20; `test_candidate_output_cannot_forge_component_diagnostics` 13, 14, 15; `test_logging_redaction_state_is_bounded_across_rotation` 14; `test_logging_multiprocess_framing_with_slow_reader` 13, 14, 17; `test_logging_sink_failure_does_not_stall_work` 1, 10, 13, 14, 16, 17, 20; `test_logging_volume_tracks_transitions_not_poll_frequency` 10, 16, 17, 19; `test_log_filtering_does_not_change_durable_events` 5, 9, 10, 11; provider logging conformance 6, 7, 8, 13, 14, 15 | the browser scenarios (web console); the protected leg of the forged-diagnostics test (Docker) |
-| Contracts that pending design issues name | [#102](https://github.com/realkarych/kora/issues/102) 9, 10; [#103](https://github.com/realkarych/kora/issues/103) 5, 9, 10, 11; [#104](https://github.com/realkarych/kora/issues/104) 1; [#106](https://github.com/realkarych/kora/issues/106) 6, 14, 17; [#123](https://github.com/realkarych/kora/issues/123) 14, 17, 21; [#134](https://github.com/realkarych/kora/issues/134) 6, 7; [#135](https://github.com/realkarych/kora/issues/135) 3, 8, 11, 20; [#136](https://github.com/realkarych/kora/issues/136) 7, 17, 20; [#137](https://github.com/realkarych/kora/issues/137) 2, 3; [#138](https://github.com/realkarych/kora/issues/138) 2, 8; [#139](https://github.com/realkarych/kora/issues/139) 9, 17; [#140](https://github.com/realkarych/kora/issues/140) 3, 11, 12, 13, 14, 15, 20; [#141](https://github.com/realkarych/kora/issues/141) 8, 11, 14, 18, 20; [#142](https://github.com/realkarych/kora/issues/142) 9, 14, 15 | as each issue settles |
+| Contracts that pending design issues name | [#102](https://github.com/realkarych/kora/issues/102) 9, 10; [#103](https://github.com/realkarych/kora/issues/103) 9, 10, 11; [#104](https://github.com/realkarych/kora/issues/104) 1; [#106](https://github.com/realkarych/kora/issues/106) 6, 14, 17; [#123](https://github.com/realkarych/kora/issues/123) 9, 14, 17, 21; [#134](https://github.com/realkarych/kora/issues/134) 6, 7; [#135](https://github.com/realkarych/kora/issues/135) 3, 8, 11, 20; [#136](https://github.com/realkarych/kora/issues/136) 7, 17, 20; [#137](https://github.com/realkarych/kora/issues/137) 2, 3; [#138](https://github.com/realkarych/kora/issues/138) 2, 8; [#139](https://github.com/realkarych/kora/issues/139) 9, 17; [#140](https://github.com/realkarych/kora/issues/140) 3, 11, 12, 13, 14, 15, 20; [#141](https://github.com/realkarych/kora/issues/141) 8, 11, 14, 18, 20; [#142](https://github.com/realkarych/kora/issues/142) 9, 14, 15 | as each issue settles |
 
 **Pending CEL contracts.** Of the [CEL future contracts](../knowledge/specs/ir.md#79-future-contracts), these wait for a trigger:
 
@@ -270,6 +270,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
   - the policy legs of `test_unprotected_runtime_reports_protection_none` and `test_agent_secret_rule_fails_closed`, whose local legs run in work items 3, 14 and 17;
   - the policy legs of `test_admission_limits_are_atomic`, `test_approval_requires_fresh_current_head_observation` and `test_admission_state_has_surface_parity`;
   - the namespace-pattern legs of `test_required_policy_is_enforced_or_rejected`;
+  - the quota-change leg of `test_run_acceptance_preserves_overlap_and_replay`;
 - the retention task's leg of `test_cel_projection_absent_optional_is_absent`;
 - the attempt-diff leg of `test_attempt_history_respects_transcript_access_and_secret_boundary`;
 - `kora plugins list` and `kora conformance`, and the installed third-party provider fixture;
@@ -292,7 +293,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | Runtime supervisor/common executor | 13 for the common executor, 14 for the runner |
 | Secrets provider row | 14 |
 | Session runner/harness bridge | 14, 15 |
-| Policy provider row | 15 |
+| Policy provider row | 14 |
 | Sensors and observation dispatcher | 16 |
 | Worker | 17 |
 | Startup/doctor/deployment | 20 |
@@ -308,7 +309,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | TM-06, TM-07 | `test_claude_session_receives_only_constructed_environment` on local: 15. `IR007`: 3. Secret-prefix rejection and redaction: 14. Retained-projection authorization: 12. Pending: the Docker leg and runtime network-capability conformance (Docker), sensor destinations (starts), payload expiry (the retention task, #140) and the browser checks (web console) |
 | TM-08, TM-09 | Stale approvals, changed digests and the CEL approval cases on the API path: 9 and 18. Unknown execution and dispatcher closure: 9, 14 and 17. Pending: replaced waits and late results that need retry or wait events, and the channel-path legs (code host) |
 | TM-10 | Admission races on both databases: 9. Deadline enforcement: 10, 13, 14 and 17. Bounded malformed inputs and provider results: `test_claude_stream_volume_is_bounded` (15) and the external observation gates (13, 14). The bounded run-read wait: 19 |
-| TM-12 | `test_claude_binary_digest_mismatch_prevents_session_start`: 15. Installed-provider discovery: 6. The CEL binding's packaging and entry-point cases: 4, 11 and 20. Dependency, secret and static-analysis scanning in CI: 1. What a serving process may select, per #136 (pending): 17 and 20 |
+| TM-12 | `test_claude_binary_digest_mismatch_prevents_session_start`: 15. Installed-provider discovery: 6; its third-party conformance leg is in the #140 list. The CEL binding's packaging cases and the scheduled scan of its bundled crates: 4; its entry-point cases: 4, 10, 11 and 20. Dependency, secret and static-analysis scanning in CI: 1. What a serving process may select, per #136 (pending): 17 and 20 |
 
 **Measurements:**
 
@@ -317,10 +318,12 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | The run-read wait measurements of [api-and-agent-surface.md](../knowledge/specs/api-and-agent-surface.md#bounded-run-read-wait-adr-0002); their process-exit leg runs once work item 20 exists | 19; the retry, fan-out and mounted-MCP legs are pending |
 | `test_claude_stream_volume_is_bounded` and `test_claude_session_releases_resources` | 15 |
 | CEL validation time, the cost model and the crash thresholds ([ir.md section 7](../knowledge/specs/ir.md#7-expressions-and-templates)) | 4 |
+| CEL lifetime: repeated compile and evaluate cycles with cancellation and shutdown, and the compiled-program cache over its bound | 4 |
+| CEL validation of a 1,000-node IR and of a maximal `/validate` body | 3, 11 |
 | CEL lifetime: metadata growth and listing latency on both databases | 5, 12 |
 | CEL under load: approval and start latency while validation runs | 18 |
 | CEL in standalone: event-loop lag and start and stop cycles | 20 |
-| CEL under the scheduler's evaluation allowance, many waits, `event_evaluation` growth, fan-out and `kora test` cycles | pending: branch, retry, `wait_event`, fan-out, DSL |
+| CEL under the scheduler's evaluation allowance, many waits, `event_evaluation` growth, the projection of a 4 MB event, fan-out and `kora test` cycles | pending: branch, retry, `wait_event`, fan-out, DSL |
 | NFR-3.1 scheduling latency: the scheduler part | 10 |
 | NFR-3.1 scheduling latency: end to end | 21 |
 | Logging overhead and bounded output ([observability.md section 8](../knowledge/specs/observability.md#8-future-executable-evidence)) | 1 |
