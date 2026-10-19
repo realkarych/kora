@@ -100,9 +100,9 @@ The historical source review highlighted explicit transition ownership, durable 
 
 ## How to decide about the own scheduler
 
-[ADR-0001](../../docs/decisions/0001-own-control-plane.md) keeps the SQL control plane. Its **ten accepted first-slice fault checks now live in [scheduler section 18](../specs/scheduler.md#18-first-vertical-slice-acceptance)**, including the shared scenario, both-database requirement, contention, upgrade/recovery and operational-cost evidence. They remain in the checkout independently of this historical record.
+[ADR-0001](../../docs/decisions/0001-own-control-plane.md) keeps the SQL control plane. Its **ten accepted fault checks now live in [scheduler section 18](../specs/scheduler.md#18-scheduler-prototype-milestone-acceptance)**, including the shared scenario, both-database requirement, contention, upgrade/recovery and operational-cost evidence. They remain in the checkout independently of this historical record. The review adopted them for the first slice; on 2026-10-19, under issue #122, ADR-0001 made them the acceptance of the scheduler-prototype milestone that follows the first slice.
 
-Do not start a comparative engine prototype before that slice. Reconsider DBOS with its measured data; Temporal remains a deferred alternative with an explicit transition/projection ownership problem. Engine activity retries do not remove runtime submission or publication idempotency responsibilities.
+Do not start a comparative engine prototype before that milestone. Reconsider DBOS with its measured data; Temporal remains a deferred alternative with an explicit transition/projection ownership problem. Engine activity retries do not remove runtime submission or publication idempotency responsibilities.
 
 ## Priorities for the user-experience design
 

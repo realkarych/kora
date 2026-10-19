@@ -149,7 +149,7 @@ The supervisor appends `{i, at, kind, data}` events to its **control journal**, 
 
 Before a protected runtime begins inspection it confirms that the entire candidate domain stopped, including detached descendants, then seals a private handoff. Unconfirmed termination or sealing prevents authorization and fails with `publication_input_unavailable` (`infrastructure`); it does not authorize another concurrent execution. Local follows the lifecycle with ordinary process management in its trusted environment, without this adversarial guarantee.
 
-**Late authorization.** After the supervisor reports `inspection` succeeded and `awaiting_authorization` with a `PreparedPublication`, the worker checks its current lease and desired state through the API heartbeat and obtains a fresh publication credential through the VCS integration. The parent credential remains on the worker/provider side; no publish credential is resolved at `submit`. Issuance, expiry, principal identity and effective backend rights are owned by issue #43; a static credential stays static and is never advertised as scoped or short-lived. Before dispatch the worker checks that every earlier dispatcher and its platform operations are closed (ADR-0017). The current worker owns a local dispatch gate; a lease check does not fence an already queued call. The worker calls `finalize` through an authenticated runtime control channel, not candidate stdio, files or environment. The authorization binds attempt, operation, prepared digest and destination digest; mismatches fail `publication_authorization_mismatch` (`config_error`). Values are redacted and never persisted. Expired/rejected credentials can be reacquired for the same operation; no retry reruns the agent or inspection against mutable files.
+**Late authorization.** After the supervisor reports `inspection` succeeded and `awaiting_authorization` with a `PreparedPublication`, the worker checks its current lease and desired state through the API heartbeat and obtains a fresh publication credential through `Vcs.acquire_credential` with purpose `publish`, bound to the operation, prepared digest and destination digest (section 4, [ADR-0023](../../docs/decisions/0023-code-host-identity-and-purpose-scoped-credentials.md)). The parent credential remains with the backend's declared issuer, the control plane for the reference GitHub App backend; no publish credential is resolved at `submit`. The issued credential reports its enforced scope, operations, expiry, replacement, revocation and principal; a static credential reports itself as static and is never advertised as scoped or short-lived. Before dispatch the worker checks that every earlier dispatcher and its platform operations are closed (ADR-0017). The current worker owns a local dispatch gate; a lease check does not fence an already queued call. The worker calls `finalize` through an authenticated runtime control channel, not candidate stdio, files or environment. The authorization binds attempt, operation, prepared digest and destination digest; mismatches fail `publication_authorization_mismatch` (`config_error`). Values are redacted and never persisted. Expired/rejected credentials can be reacquired for the same operation; no retry reruns the agent or inspection against mutable files.
 
 `finalize` coordinates the selected common plan executor. With `runner`, publication runs in the runtime's trusted publication environment; with `worker_host`, the runtime adapter transfers sealed input to the private worker-host executor immediately after sealing, before prepare/inspect. That executor produces the stored `PreparedPublication`; `finalize` subsequently delivers authorization to it and consumes that existing checkpoint. VCS tools may exist only on that host. It never points a credentialed publisher at the exposed candidate directory. Placement is a runtime transport responsibility, not VCS-specific logic. A runtime declaring portable handles must also make sealed input, journal and publication checkpoint accessible to an adopting worker; host-local storage cannot support that claim. An active finalization is serialized per operation, and repetitions reconcile the same prepared revision (section 4). The worker opens the change request through the VCS API, uploads outputs/usage and requests `finishing`; output-source artifacts may return `staged` until atomic complete-result/key acceptance (ADR-0019), which is not another execution or publication grant; it keeps heartbeating through authorization and publication. An API fence is not an atomic fence against an external push already in flight.
 
@@ -335,9 +335,42 @@ class PreparedPublication:
     changed_paths: tuple[str, ...]
     diff_stat: str
 
+@dataclass(frozen=True)
+class PrincipalRef:
+    provider_instance: str
+    stable_id: str
+    kind: Literal["app", "bot_user", "service_user", "user"]
+    display_name: str
+
+@dataclass(frozen=True)
+class CredentialRequest:
+    binding: str
+    repo: str
+    purpose: Literal["checkout", "publish", "api"]
+    attempt_id: str | None
+    operation_id: str | None
+    prepared_digest: str | None
+    destination_digest: str | None
+
+@dataclass(frozen=True)
+class CredentialRights:
+    resource_scope: Literal["repository", "repository_set", "account", "unknown"]
+    native_permissions: tuple[str, ...]
+    operations: frozenset[Literal["read", "write_refs", "change_requests", "comments"]]
+
+@dataclass(frozen=True)
+class IssuedCredential:
+    value: SecretValue
+    principal: PrincipalRef
+    rights: CredentialRights
+    expires_at: datetime | None
+    replacement: Literal["reissue", "rotate", "static"]
+    revocation: Literal["native", "expiry_only", "manual"]
+
 class Vcs(Protocol):
     name: str
     def capabilities(self) -> VcsCapabilities: ...
+    async def acquire_credential(self, request: CredentialRequest) -> IssuedCredential: ...
     async def checkout_plan(self, request: CheckoutRequest) -> CheckoutPlan: ...
     async def publish_plan(self, request: PublishRequest) -> PublishPlan: ...
     async def open_change_request(self, ref: VcsRef, title: str, body: str) -> VcsRef: ...
@@ -350,6 +383,22 @@ class Vcs(Protocol):
 **Trusted roots and captures.** The runtime privately allocates `control_root` and `publication_root` outside `WorkspaceTarget.root`; `host_path` exposes only the candidate workspace for compatible preparation, never permission to publish there. `PlanFile.path` is relative to its named private area, rejects traversal/absolute paths, and is created with descriptor-relative no-follow operations. Parent replacement, symlinks and writable hard-link aliases cannot redirect private writes. Plans are immutable trusted provider output, not files loaded from the repository. Allowed placeholders in argv/env/stdin are `{candidate_root}`, `{control_root}`, `{publication_root}`, `{input_location}`, `{base_commit}`, `{commit}` and `{branch}`; all values come from supervisor state. There is no shell interpolation.
 
 Captures are bounded typed outputs: `commit` and `branch` are validated single identifiers; `changed_paths` is a JSON array of relative paths, not newline-split text; `diff` is display text, not an executable validation source; `diff_stat` is display text. The provider-owned native decoder additionally emits the common `InspectionManifest` and `InspectionContent` index defined below; an opaque native manifest alone is not sufficient. Missing/malformed captures fail the phase. Core treats `PublicationInput.format` and revision strings as opaque; only the provider understands them. Locations name immutable bytes reachable through the runtime's transfer channel, not a worker-local filesystem assumption.
+
+**Credentials and principals ([ADR-0023](../../docs/decisions/0023-code-host-identity-and-purpose-scoped-credentials.md)).** Only the worker, its private worker-host executor and control-plane providers call `acquire_credential`, never code in the candidate domain. `checkout` is acquired immediately before preparation, `publish` only at late authorization (section 2) with the operation, prepared digest and destination digest set, and `api` per code-host call. `CheckoutPlan.credentials` and the publication steps name environment variables whose values come from the acquired credential of their purpose. The reference GitHub App backend issues in the control plane: the App signing key stays with `kora api`, and the worker requests each credential through the worker-facing issuance route bound to the attempt, its current lease epoch, the purpose and, for `publish`, the bound digests ([api-and-agent-surface.md](api-and-agent-surface.md) section 2). Other backends declare where their parent credential lives.
+
+`IssuedCredential` reports what the backend enforces upstream: `rights.resource_scope`, the provider's own `native_permissions` with the mapped coarse `operations`, `expires_at` (null without native expiry), `replacement` and `revocation`, each independent of the others. A deployment binding declares the minimum `resource_scope` and `operations` it requires per purpose; a backend that cannot meet them fails acquisition with `config_error`, and nothing falls back to a broader credential. Reports state residual authority: a repository-scoped write token is not a single-push or single-branch grant. `expires_at` is independent of `replacement`: a static credential can still expire, and acquisition of a static credential past its `expires_at` fails with `config_error` instead of returning it. A credential that expires or is rejected is reacquired for the same request; an adopting worker reacquires instead of reusing a predecessor's credential. Values are redacted and never persisted; each issuance writes a `vcs.credential_issued` event with purpose, principal, rights, expiry and binding revision, and no value.
+
+`PrincipalRef.stable_id` is the host's immutable account or app identifier, never a login, token id or alias. Each publication records the pushing principal and the principal that opened the change request. Each binding revision keeps the set of automation principals kora has used for it; a token replacement or a change of bot principal adds to the set. A backend declares whether its rotation preserves the principal.
+
+Reference backends in MVP:
+
+| backend | issuer | reports |
+|---|---|---|
+| GitHub App | control plane, from the App key | per-attempt installation tokens narrowed to the repository and the purpose's permissions; `expires_at` one hour after issue; `replacement: reissue`; `revocation: native`; principal kind `app` |
+| static service credential | the secrets provider | `replacement: static`, `revocation: manual`; `expires_at` as configured by the operator or discovered from the host (for example a personal access token with an expiry date), null only when the credential has no native expiry; rights as configured by the operator, `resource_scope: unknown` unless the operator declares it |
+| GitLab project or group token | the secrets provider | the token's scope names in `native_permissions`; date-based `expires_at` when configured; `replacement: rotate` or `static`; principal kind `bot_user` with the token's user id |
+
+Git transport uses the Git CLI with credential-helper and SSH mechanisms; an SSH agent socket or key is a credential and never enters the candidate domain. A non-Git VCS supplies its own plans and backends.
 
 **Preparation.** The selected executor creates an empty candidate root, materializes plan helpers only in control storage, checks required tools and executes the checkout plan with a minimal environment and checkout credentials. It captures `commit`, optional `branch`, and `changed_paths` for a `VcsRef` checkout. The supervisor constructs `WorkspaceRef` using the trusted request and persists it before starting the harness. For a `VcsRef`, `base_commit` comes from that input and protected-path checks run before a command gate. Checkout secrets/helpers and credential stores must not be inherited by candidate code. Reclaiming an attempt adopts a completed preparation rather than deleting a live workspace; a pre-submit absence alone permits no preparation anew while an earlier dispatcher may resume. Recovery observes/adopts the same attempt or retires it under section 2; only a never-dispatched first claim can prepare without resolving earlier authority.
 
@@ -405,7 +454,7 @@ Built-in: `cli` (the API itself is the channel; `poll` reads the row) and `vcs` 
 
 A push to the candidate branch during review is not the channel's business either: the scheduler observes the head of the bound `VcsRef`'s branch through the VCS protocol's `head_sha`, moves the request to `invalidated` and fails the node with class `candidate_moved` (scheduler.md section 5); the channel learns of it through `notify("invalidated")`, and a response it reports afterwards is recorded and ignored.
 
-`ApprovalCapabilities` retains `push_notifications`, `carries_identity` and `observes_head_sha`. The request DTO binds the stable approval id, saved form/context and immutable SHA/digests. Response DTOs carry payload, reviewer identity/permission, author/bot flags, timestamp and observed SHA/digests; feedback retains author/association/body and the existing collaborator filter. Only shared scheduler/API transitions decide validity.
+`ApprovalCapabilities` retains `push_notifications`, `carries_identity` and `observes_head_sha`. The request DTO binds the stable approval id, saved form/context and immutable SHA/digests. Response DTOs carry payload, the reviewer's `PrincipalRef` and permission, timestamp and observed SHA/digests; the scheduler, not the channel, derives the author and automation classification from the recorded publication principals and the binding's automation-principal set (section 4, ADR-0023), so a token replacement or bot change cannot let earlier automation or the author approve; feedback retains author/association/body and the existing collaborator filter. Only shared scheduler/API transitions decide validity.
 
 `lookup` is strictly read-only on the configured original channel resource: enumerate every request/comment carrying the approval marker, including duplicates, through bounded pages and resumable cursor. Default at most 100 ids per page, within installation byte limits. Persist progress between calls and repeat scans with backoff to find late creation. Empty/complete pagination means none observed in that scan, not proof an earlier authorized write cannot appear. A provider with affirmative operation-closure evidence may expose that evidence through its delivery reconciliation metadata; lookup absence cannot invent it. `request` reconciles the same marker before creation while its local intent remains open; search-before-create does not establish generic exactly-once publication.
 
@@ -652,6 +701,20 @@ These are **future executable test contracts** for [dsl.md](dsl.md) section 4; d
 | `test_empty_fan_out_succeeds` | An empty `over` list gives a succeeded fan-out with empty outputs on both `skip_failures` values; a non-empty list whose instances all fail still fails |
 | `test_scenarios_run_on_both_fake_vcs` | A Git-independent scenario passes on the directory-backed VCS and on the local Git backend |
 | canonical scenarios | Each file in [examples/scenarios/sql_optimization/](examples/scenarios/sql_optimization/) passes with the status its `expect` states |
+
+### Code-host identity contracts (ADR-0023)
+
+These are **future executable test contracts** for [ADR-0023](../../docs/decisions/0023-code-host-identity-and-purpose-scoped-credentials.md); documentation CI does not run them. Each runs against two configurations: the GitHub App backend over a local Git repository with an in-process code-host fake, and the independent directory-backed VCS with an issuance backend of its own and opaque revision and change-request identifiers. The static-credential configuration runs the same cases to show its weaker reports. Metadata cases run on PostgreSQL and SQLite.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_publication_credential_after_initial_expiry` | The issuer's first credential expires during the session. Publication acquires a fresh `publish` credential after inspection and succeeds; no credential or parent credential appears in the workload, candidate environment, files, journal, logs or events |
+| `test_publication_reacquired_after_worker_recovery` | The worker stops between authorization and `finalize`. An adopting worker reacquires for the same operation and finalizes the same prepared revision; there is one publication |
+| `test_unauthorized_purpose_or_repository_refused` | Requests for another repository, another purpose, a stale lease epoch or a different destination digest are refused before any credential is returned |
+| `test_backend_reports_actual_guarantees` | Each configuration reports `resource_scope`, `native_permissions`, `operations`, `expires_at`, `replacement` and `revocation` as specified in section 4; a static credential with a configured expiry reports that `expires_at` with `replacement: static`, and acquisition after it fails with `config_error`; a binding requiring more than the backend offers fails with `config_error` and receives no broader credential |
+| `test_credential_issuance_is_never_replayed` | Two issuance requests with one `Idempotency-Key` both run the current lease, epoch, purpose, repository and digest checks, and nothing holding a value is persisted: the `idempotency_record` table, caches, logs and events contain no credential value. On a backend with `replacement: reissue` or `rotate`, the two requests return distinct credentials and a request after the first expires returns a fresh one. On the static configuration both requests may return the same valid value, and after its configured `expires_at` every request fails with `config_error` until the operator replaces the credential |
+| `test_self_review_excluded_across_principal_change` | After a token replacement and after a change of bot principal, reviews by every historical automation principal and by the recorded publication principals do not count; a review by the triggering person counts |
+| `test_core_independent_of_git_and_github` | The directory-backed VCS passes every case above without Git refs or installation identifiers |
 
 ### Execution-recovery implementation gates (ADR-0017)
 
