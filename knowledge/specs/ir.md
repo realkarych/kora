@@ -288,7 +288,7 @@ The probe measured these thresholds on one macOS machine:
 
 The limits keep a wide margin below them on the evaluation thread of section 7.6. Every change of the binding pin re-measures them, separately for compile and for evaluation, under the pin rule above.
 
-**Canonical rendering.** From the checked tree kora writes a canonical text: every operator parenthesized, string literals as double-quoted non-raw literals with only the escapes `\\`, `\"`, `\n`, `\r`, `\t` and `\u`/`\U` for other control and non-ASCII characters, bytes literals the same with `\x` for every byte outside printable ASCII, no comments, single spaces. Server-side validation parses the rendering again with kora's parser and requires the same tree, ignoring grouping parentheses, otherwise `IR011`. The rendering is not held to the author-text limits: its length is at most a fixed multiple of the source's, and its parenthesis nesting follows the tree depth of at most 32, below the binding's bracket limit of 96. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked. The IR keeps the author's text.
+**Canonical rendering.** From the checked tree kora writes a canonical text: every operator parenthesized, string literals as double-quoted non-raw literals with only the escapes `\\`, `\"`, `\n`, `\r`, `\t` and `\u`/`\U` for other control and non-ASCII characters, bytes literals the same with `\x` for every byte outside printable ASCII, no comments, single spaces. Validation parses the rendering again with kora's parser and requires the same tree, ignoring grouping parentheses, otherwise `IR011`; this uses only kora's parser, so `kora compile` runs it too. The rendering is not held to the author-text limits: its length is at most a fixed multiple of the source's, and its parenthesis nesting follows the tree depth of at most 32, below the binding's bracket limit of 96. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked. The IR keeps the author's text.
 
 **Where the binding runs.** Server-side validation (`/validate`, `/plan`, deployment, and `kora_compile` through `/validate`) compiles every rendering with the binding, deduplicated by rendering, and compiles each distinct `matches()` pattern once; a rejection is `IR011`, reported without the binding's message. `kora compile` runs on the author's machine with kora's parser and checker only and never imports the binding ([dsl.md](dsl.md) section 2). Deployment stores the rendering, the projection path sets (section 7.5) and the cost estimate with the graph version, and evaluation never recomputes them.
 
@@ -346,7 +346,7 @@ These rules give `IR011`, reported at the expression's YAML path and offset:
   - The parent of a `has()` operand must itself be present or guarded, as in `has(a.b) && has(a.b.c) && a.b.c`.
 - **Null.** A comparison with `null` yields `bool`. Selection, ordering, arithmetic or a call on a `null` value is an evaluation error.
 - **`size()`** on a `string` or a `dyn` value is rejected while the binding counts UTF-8 bytes instead of code points.
-- **`matches()`** takes a string-literal pattern only. kora parses the pattern in the binding's regular-expression syntax, which has no backreferences, and computes a deterministic size estimate from it (atoms times repetition bounds); a pattern over the cap of that estimate is `IR027`. The server-side compile also compiles the pattern in the binding.
+- **`matches()`** takes a string-literal pattern only. kora parses the pattern in the binding's regular-expression syntax, which has no backreferences, with group nesting at most 32, and computes a deterministic size estimate from it: each atom is weighted by its compiled size, from class-size tables for `.`, `\w`, `\d`, `\s`, `\p{…}` and case-insensitive literals pinned under `kora.execution.v1`, and multiplied by repetition bounds. A pattern over the nesting limit or over the cap of that estimate is `IR027`. The cap, like the budget, is fixed by the first implementation from measurements. The server-side compile also compiles the pattern in the binding.
 - **Result type.** The result must have the field's type from section 7.1.
 
 A child type must keep the CEL type of every parent property: assignability (`IR003`, section 2.1) rejects a child that narrows `number` to `integer`.
@@ -365,19 +365,19 @@ Diagnostics come out in YAML-path order, then offset order, one per expression. 
   - `collect` and subgraph exports;
   - `$params`, cut from `run.params`;
   - `$previous_attempt`, including `artifacts['n.o']`, whose paths compose into the earlier iteration's output.
-- **Whole subtrees.** A dynamic index, a comprehension range and a whole-value read project the whole subtree at their path. A path read only through `has()` projects its presence: the field is kept with an empty value of its type, so `has()` gives the payload's answer without copying the subtree.
+- **Whole subtrees.** A dynamic index, a comprehension range and a whole-value read project the whole subtree at their path. A path read only through `has()`, or a map key tested only by a literal-key `in`, projects its presence: the field or key is kept with an empty value of its type, so the test gives the payload's answer without copying the subtree.
 
-**Cutting and storing.** Every projection is cut once, by whichever step produces its value. For `AgentSession`, whose stored payload is the transcript, the projection is cut only from the session metadata fields of its schema (usage, cost, turns, duration, stop reason, provenance); transcript content is never projected, so CEL needs no `transcripts` capability.
+**Cutting and storing.** Every projection is cut once, by whichever step produces its value. For `AgentSession`, whose stored payload is the transcript, the projectable fields are exactly the summary fields kept after the transcript expires ([data-model.md](data-model.md) section 10). Reading any other `AgentSession` field is `IR011`. Transcript content is never projected, so CEL needs no `transcripts` capability.
 
 - **Uploaded outputs.** An uploaded output is cut when it is validated at upload, including a staged target-source output (ADR-0019).
-- **Scheduler-produced outputs.** Each is cut in the transition that produces it: a `human_input` response, a `wait_event` payload output, a `PreviousAttempt`, a fan-out collection and a subgraph export. A collection or export is re-cut from its children's stored projections under its own path set, so no storage I/O happens inside a scheduler transaction.
+- **Scheduler-produced outputs.** Each is cut in the transition that produces it: a `human_input` response, a `wait_event` payload output, a `PreviousAttempt`, a fan-out collection and a subgraph export. A collection or export is re-cut from its children's stored projections under its own path set, so no storage I/O happens inside a scheduler transaction; the re-cut stops reading at the first bound it crosses, and one re-cut counts as progress under the allowance.
 - **Run parameters.** They are cut at run creation.
 
 kora cuts from the validated value, converts it as described below, checks it against the data bounds of section 7.6 and stores it inline in the metadata database with the artifact version, or with the run for parameters. A projection keeps its artifact's retention class: the artifact-payload period, forever for reference-only types, and for `AgentSession` the lifetime of its summary fields, since its projection holds only metadata ([data-model.md](data-model.md) section 10). Listings never load it.
 
 **Binding.** Evaluation binds only stored projections.
 
-- **Absent and unavailable.** A path missing from the value is absent in the projection, as it would be in the payload. A projection that is itself unavailable is the error kind `projection_unavailable`, never absent data. A projection is unavailable when its `payload_state` is not `present`, when it was never cut, or when it was cut under a different path set.
+- **Absent and unavailable.** A path missing from the value is absent in the projection, as it would be in the payload. A projection that is itself unavailable is the error kind `projection_unavailable`, never absent data. A projection is unavailable when retention has deleted it, when it was never cut, or when it was cut under a different path set. It follows its artifact's `payload_state`, except that an `AgentSession` projection stays available with the session's summary fields after its transcript expires.
 - **Summaries.** The artifact type's `summary` serves API and console views and is never visible to CEL ([protocols.md](protocols.md) section 8).
 - **`payload` and `observation`.** They are projected once per event or observation and per frozen path-set digest, by a bounded walker, and the bounds are checked against that path set. A wait's result therefore never depends on which other waits are open. The projection is a disposable cache bounded by entry count, released when the event's batches finish, and recomputed after a restart.
 
@@ -392,7 +392,7 @@ kora cuts from the validated value, converts it as described below, checks it ag
 **Invalid values at entry.** A value outside the signed 64-bit range under `integer`, or data over a section 7.6 bound, is refused where it enters kora:
 
 - an output fails with `artifact_invalid`;
-- a direct form response, and run parameters at trigger, webhook start and rerun, are refused with `API003`;
+- a direct form response, and run parameters at trigger, webhook start and rerun, are refused with `API003`, and the static `params` of cron, sensor and graph triggers are `IR027` at deployment;
 - a polled channel response is not applied, the request stays `pending`, and a diagnostic is recorded ([scheduler.md](scheduler.md) section 16.3).
 
 **The FR-2.5 example.** In the IR it reads `inputs.review.verdict == "approved" && inputs.bench.cpu < inputs.baseline.cpu * 0.85`.
@@ -441,7 +441,7 @@ An expression over either dimension of the budget is `IR027`. The charges follow
 | conversions and string functions | the operand size |
 | `matches()` | kora's size estimate of its literal pattern, for compiling on every call, plus that estimate times the subject length for matching; the compiled pattern also counts toward memory |
 | a compile on a cache miss | the canonical rendering's length |
-| projection work in a scheduler transaction (re-cutting a collection, projecting an event) | the bytes read and written |
+| projection work in a scheduler transaction (re-cutting a collection, projecting an event); charged to the allowance only, not to an expression | the bytes read and written |
 
 **Calibration.**
 
@@ -456,10 +456,10 @@ Two consequences follow:
 
 **Evaluation.** It runs in the API and scheduler processes, inside the existing short transactions ([scheduler.md](scheduler.md) section 2).
 
-- **The evaluation thread.** Each process has one dedicated long-lived evaluation thread with a stack of at least 1 MiB. Startup sets the thread stack size, creates the thread and restores the previous setting, so no other thread is affected.
+- **The evaluation thread.** Each process has one dedicated long-lived evaluation thread with a stack of at least 1 MiB, shared by every in-process standalone instance the process starts. Startup sets the thread stack size, creates the thread and restores the previous setting, so no other thread is affected.
   - It runs one job at a time.
   - Evaluations requested from inside a transaction take priority over server-side compile jobs. Compile work is submitted one expression at a time, so an evaluation waits for at most one compile, whose length and pattern size the static limits bound.
-  - At shutdown, queued jobs are rejected and the job in flight is joined with a deadline; past it the process exits and the in-flight caller's transaction rolls back. A cancelled caller discards its result.
+  - At shutdown, queued jobs are rejected and the job in flight finishes, since it holds the GIL and cannot be interrupted; the per-evaluation budget bounds the wait, and an external supervisor's kill is the hard limit. Stopping an embedded standalone (`kora test`, `run_scenario`, `kora_test`) waits for that job the same way and never exits the host process. A cancelled caller discards its result.
 - **The compiled-program cache.** Compiled programs live in a cache bounded by count, with least-recently-used eviction, keyed by deployment digest and the expression's YAML path. A compile on a miss is charged to the allowance.
 - **No interruption.** The binding holds the GIL while it parses or evaluates and cannot be interrupted (probe). These bounds, not a timeout, keep evaluation short.
 
@@ -550,7 +550,7 @@ The parser, checker, cost estimate and textproto reader are unit-tested, as AGEN
 | `test_cel_limits_at_boundary_compile_in_binding` | expressions exactly at the length, depth and comprehension limits pass the checker and compile in the binding |
 | `test_cel_cost_estimate_rejects_compounding_concatenation` | four sequential `map` operations, each joining eight copies of a 16 KiB element of a list with `maxItems: 1`, are `IR027` because the memory dimension is exceeded, not for a static limit |
 | `test_cel_cost_estimate_golden_corpus` | the estimate of every corpus expression is unchanged |
-| `test_cel_regex_compile_cost_bounded` | a literal pattern over the size-estimate cap, such as `a{1000}{1000}`, is `IR027` in `kora compile` and at `/validate` alike; a request compiles each distinct pattern once |
+| `test_cel_regex_compile_cost_bounded` | literal patterns over the size-estimate cap or the group-nesting limit, such as `a{1000}{1000}`, `\w{500}`, `\p{L}{500}` and case-insensitive repetitions, are `IR027` in `kora compile` and at `/validate` alike; a request compiles each distinct pattern once |
 | `test_cel_rejects_non_literal_regex_pattern` | `x.matches(y)` with a non-literal `y` is `IR011`; a literal with a backreference is `IR011` at server-side validation |
 | `test_cel_binding_compiles_canonical_rendering` | the binding receives only kora's rendering; a lexically ambiguous author text cannot reach it |
 | `test_cel_canonical_rendering_matches_author_text` | every rendering parses back to the same tree, ignoring grouping; over a corpus and expressions generated from a fixed seed, author text and rendering give equal results in the binding |
@@ -569,19 +569,19 @@ The parser, checker, cost estimate and textproto reader are unit-tested, as AGEN
 | `test_cel_server_validation_compiles_with_binding` | an expression the binding rejects is `IR011` at server-side validation without the binding's message, never a server error |
 | `test_kora_compile_and_validate_report_same_location` | for faults kora's own parser, checker and estimate find, `kora compile` and `/validate` report the same code, YAML path and offset, with a character outside the Basic Multilingual Plane before the fault |
 | `test_kora_compile_does_not_import_cel_binding` | a fresh `kora compile` process never loads the binding |
-| `test_cel_projection_matches_full_binding` | evaluating over the stored projection gives the result of evaluating over the full value |
+| `test_cel_projection_matches_full_binding` | evaluating over the stored projection gives the result of evaluating over the full value; a read of an `AgentSession` field outside its summary fields is `IR011` |
 | `test_cel_projection_absent_optional_is_absent` | an optional field absent from an available projection is false to `has()`; an expired, never-cut or differently cut projection is `config_error`, and a manual retry needing it is refused with `API002` |
 | `test_cel_projection_composes_through_collect_and_exports` | projections through `inputs[*].path`, the fan-out element, `collect`, exports, `$inputs`, `$params` and `PreviousAttempt.artifacts` carry every read path |
-| `test_cel_scheduler_produced_outputs_are_projected` | a form response, a wait payload output, a `PreviousAttempt`, a collection and an export are cut in their producing transition; over a bound the producing node fails with `artifact_invalid` |
+| `test_cel_scheduler_produced_outputs_are_projected` | a form response, a wait payload output, a `PreviousAttempt`, a collection and an export are cut in their producing transition; over a bound a wait payload output, `PreviousAttempt`, collection or export fails its producing node with `artifact_invalid`, while a form response is refused at receipt |
 | `test_cel_projection_number_kinds_round_trip` | stored `int` and `double` values keep their kind on both databases |
 | `test_cel_oversized_projection_fails_producer_with_artifact_invalid` | an over-bound projection fails its producer, including a staged target source, atomically |
-| `test_cel_rejects_over_bound_data_at_entry` | an `integer` beyond 64 bits, or data over any bound, fails an output, is `API003` for a direct response and for parameters at trigger, webhook start and rerun, and leaves a polled response `pending` |
+| `test_cel_rejects_over_bound_data_at_entry` | an `integer` beyond 64 bits, or data over any bound, fails an output, is `API003` for a direct response and for parameters at trigger, webhook start and rerun, is `IR027` at deployment for static trigger `params`, and leaves a polled response `pending` |
 | `test_cel_external_projection_over_bound_is_no_match` | an over-bound `payload` is no match and an over-bound `observation` is "not yet"; with two waits of different graph versions, one wait's wider path set does not change the other's result |
 | `test_cel_retry_predicate_ignores_invalid_outputs` | an output that failed validation is absent to `has()` |
 | `test_cel_branch_error_fails_with_config_error` | a `when` or `reason` error fails the branch with `config_error`, reason `cel_evaluation_error`, and direct targets become `upstream_failed` |
 | `test_cel_approve_when_error_marks_request_failed` | on the API and the channel path the request becomes `failed`, the response is kept, the channel closes and the node fails with `config_error`. The direct response is HTTP 200 with status `failed`, `?status=failed` lists the request, and a later response is `applied: false` |
 | `test_cel_approve_when_not_evaluated_without_authority` | responses refused for `API005`, `API006`, approver rules or a stale token are never evaluated; the request stays `pending` and the node is not failed, on both paths |
-| `test_cel_retry_predicate_error_keeps_original_class` | a predicate error prevents the retry and keeps the attempt's class; `infrastructure` and `provider_limited` never evaluate the predicate |
+| `test_cel_retry_predicate_error_keeps_original_class` | a predicate error, including `projection_unavailable`, prevents the retry and keeps the attempt's class; `infrastructure` and `provider_limited` never evaluate the predicate |
 | `test_cel_match_evaluated_once_per_wait` | each eligible event and wait pair is evaluated exactly once, and an error is no match and is visible. This holds across ticks and a restart, and when an event with a lower identifier commits late (a PostgreSQL barrier, and the serialized SQLite equivalent) |
 | `test_cel_until_error_keeps_waiting_and_is_visible` | an `until` error keeps the wait open and the start binding idle, and records the error from the current claim only |
 | `test_cel_until_error_does_not_degrade_integration` | repeated `until` errors leave the integration's failure count and interval unchanged |
@@ -598,7 +598,7 @@ The parser, checker, cost estimate and textproto reader are unit-tested, as AGEN
 Measurements, `pending implementation`, register with the first parser, checker and evaluator. Peak native memory is measured as RSS per fresh process, because Python heap tracing misses it; accumulation is measured in one long-lived process.
 
 - **Validation:**
-  - parse, check and estimate time on hostile input;
+  - parse, check and estimate time on hostile input, including class-heavy regular-expression literals;
   - validation of a 1,000-node IR;
   - a maximal 4 MB `/validate` request;
   - compile time and GIL hold of maximal canonical renderings.
@@ -618,6 +618,7 @@ Measurements, `pending implementation`, register with the first parser, checker 
 - **Lifetime:**
   - repeated compile and evaluate cycles covering error paths, cancellation and shutdown with queued jobs;
   - repeated in-process standalone start and stop cycles, as `kora test` runs them: threads, caches and RSS;
+  - growth and release of `event_evaluation` rows (open waits times eligible events) on completion, expiry, cancellation and clear, on both databases;
   - the compiled-program cache with more versions than its bound;
   - metadata growth and listing latency with maximal inline projections on both databases.
 
