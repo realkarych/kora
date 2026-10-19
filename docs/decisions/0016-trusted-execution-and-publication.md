@@ -3,9 +3,10 @@
 - Status: architectural direction accepted, 2026-10-17; document pending owner review
 - Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (execution uncertainty, dispatch closure and retained reservations); wording pending owner review
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
+- Amended by: [ADR-0023](0023-code-host-identity-and-purpose-scoped-credentials.md), 2026-10-18 (issuer, rights, expiry and principal of the late publication credential); wording pending owner review
 - Deciders: project owner
 - Related: [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0009](0009-target-repository-trust-boundary.md)
-- Resolves: [issue #51](https://github.com/realkarych/kora/issues/51); credential acquisition and principal identity remain [issue #43](https://github.com/realkarych/kora/issues/43)
+- Resolves: [issue #51](https://github.com/realkarych/kora/issues/51); credential acquisition and principal identity are defined by [ADR-0023](0023-code-host-identity-and-purpose-scoped-credentials.md) (issue #43)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context

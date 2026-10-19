@@ -34,6 +34,7 @@ Component-logging amendment dated 2026-10-18: direction and implementation plan 
 - **NFR-2.3 [MVP]** Keep worker lease liveness and agent-loop liveness separate: lease expiry records unknown execution and enables recovery, while a stalled agent loop is detected and terminated by the supervisor within the configured interval. Neither heartbeat silence nor elapsed recovery time proves physical termination. A stalled failure is retryable by policy only after execution/dispatch/publication closure (ADR-0017).
 - **NFR-2.4 [MVP]** Preemption/infrastructure failure of a runtime is distinguished from agent failure (separate error classes), so that confirmed infrastructure loss does not consume agent retry attempts. Unknown execution remains non-terminal with unchanged retry counts and reservations; no replacement starts until termination and dispatch/publication closure is established (ADR-0017).
 - **NFR-2.5 [MVP]** Approval and sensor waits survive restarts and have an explicit timeout with a defined expiry behaviour; no wait is unbounded. Poll due times and retry backoff never extend that expiry. External calls hold no database transaction or run/scope lock; applying a result checks its exact current owner and token. Approval delivery intent survives crashes, with uncertain terminal cleanup retaining only compact identity/progress, no form/context payload or execution reservations (ADR-0021).
+- **NFR-2.6 [MVP]** A model-provider rate limit or quota is distinguished from agent failure (`provider_limited`): it consumes no agent attempts, waits for the provider's reset under a time-bounded policy without holding a worker or runtime slot, and pauses admission of other attempts on the same quota resource and limit group until the reset (ADR-0024).
 
 ## 3. Performance
 
@@ -89,7 +90,7 @@ Component-logging amendment dated 2026-10-18: direction and implementation plan 
 
 ## 10. Testability and developer experience
 
-- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora plan` prints the materialised execution plan and `kora trigger --dry-run` executes a run on the fake runtime and harness.
+- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora plan` prints the materialised execution plan and `kora trigger --dry-run` executes a run on the fake runtime and harness. Behavioural scenarios (`kora test` and the stdio `kora_test` tool) supply agent outcomes by unambiguous selectors, execute command nodes for real with explicit reported overrides, inject approvals, events, time and randomness, enforce and report the absence of network and production secrets, and return machine-readable results, through the ordinary engine with configured fakes (dsl.md section 4).
 - **NFR-10.2 [MVP]** Conformance suites exist for every protocol (NFR-5.1) so adopters can validate their enterprise runtime, VCS and secrets implementations.
 - **NFR-10.3 [MVP]** Compile-time errors point to the Python source line of the offending node; IR validation errors point to the YAML path.
 

@@ -1,0 +1,25 @@
+graph: sql_optimization
+description: Every fan-out item fails review in all of its sub-graph attempts; with skip_failures the fan-out fails because no item succeeded, and selection never runs.
+params: { target_task: daily_revenue }
+secrets: { YT_TOKEN: dummy-warehouse-token }
+overrides:
+  - { select: baseline, exit_code: 0, output: { cpu_seconds: 100.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]/dev_run", exit_code: 0, output: { cpu_seconds: 99.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]/equivalence", exit_code: 0, reason: needs the warehouse }
+  - { select: "candidates[0]#2/dev_run", exit_code: 0, output: { cpu_seconds: 99.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]#2/equivalence", exit_code: 0, reason: needs the warehouse }
+  - { select: "candidates[0]#3/dev_run", exit_code: 0, output: { cpu_seconds: 99.0, output_path: out.json }, reason: needs the warehouse }
+  - { select: "candidates[0]#3/equivalence", exit_code: 0, reason: needs the warehouse }
+outcomes:
+  - { select: find_target, outputs: { target: { task_id: daily_revenue, query_path: q/daily_revenue.sql } } }
+  - { select: hypotheses, outputs: { result: [ { title: rewrite join, task_id: daily_revenue } ] } }
+  - { select: "candidates[0]/implement", change: { files: { q/daily_revenue.sql: "select 2\n" } }, outputs: { change: { branch: kora/daily-revenue-0 } } }
+  - { select: "candidates[0]/review", outputs: { verdict: { approved: false, comments: results differ } } }
+  - { select: "candidates[0]#2/implement", change: { files: { q/daily_revenue.sql: "select 3\n" } }, outputs: { change: { branch: kora/daily-revenue-0 } } }
+  - { select: "candidates[0]#2/review", outputs: { verdict: { approved: false, comments: still differ } } }
+  - { select: "candidates[0]#3/implement", change: { files: { q/daily_revenue.sql: "select 4\n" } }, outputs: { change: { branch: kora/daily-revenue-0 } } }
+  - { select: "candidates[0]#3/review", outputs: { verdict: { approved: false, comments: still differ } } }
+expect:
+  run: failed
+  nodes: { candidates: failed, select_best: upstream_failed, final_pr: not_run }
+  error_classes: { "candidates[0]#3": attempt_failed }
