@@ -167,7 +167,7 @@ Passes run every 1 s when idle and immediately after any transition (a lightweig
 
 The schema and all queries are shared; the repository layer has exactly two dialect-specific statements (claim and notify). Anything that works only on SQLite or only on Postgres is a bug by NFR-0.1.
 
-**Standalone bootstrap** (DD-36): `kora standalone` reads `kora.toml` (or defaults), creates the namespace `default` and the data directory `./.kora-data/{kora.db,artifacts,workspaces}`, prints a personal user token once (with `approve` and `platform` set, namespace `default`, transcripts readable) and mints an internal service token for the in-process worker; the CLI and the MCP servers read `KORA_URL` and `KORA_TOKEN`.
+**Standalone bootstrap** (DD-36): `kora standalone` reads `kora.toml` (or defaults), creates the namespace `default` and the data directory `./.kora-data/{kora.db,artifacts,workspaces}`, prints a personal user token once (with `approve` and `platform` set, namespace `default`, transcripts readable) and mints an internal service token for the in-process worker; the CLI and the stdio MCP servers read `KORA_URL` and `KORA_TOKEN`.
 
 ## 11. Metrics and health (NFR-7.3)
 

@@ -56,12 +56,12 @@ Agent nodes inside a graph have no access to kora's MCP server or API. They rece
 - Skills are installed into the user's own session, never into the sessions kora runs as nodes.
 - Nothing compiles in the browser in MVP: graphs are authored in Python and compiled with the CLI or the stdio MCP tool, consistent with FR-7.3, which keeps graph editing in the console post-MVP (FR-1.5). When console editing arrives, where compilation runs needs its own decision; the isolated compile job above is the recorded alternative.
 - A session that uses the HTTP-mounted authoring server compiles with `kora compile` and passes the document to `kora_plan` and `kora_deploy`.
-- An agent follows a run by calling `kora_runs` with a wait repeatedly; each call returns the current state shortly after the cap at the latest: the API answers within the cap plus one final read, and the client's deadline adds a bounded margin. The API holds no database connection between the re-checks of such a read. Operation coverage cannot see an option, so named contract tests prove that the CLI and the MCP tools forward it (amended 2026-10-19).
+- An agent follows a run by calling `kora_runs` with a wait repeatedly; each call ends shortly after the cap at the latest, normally with the current state: the API answers within the cap plus one re-check and one final read, and the client's deadline adds a bounded margin. The API holds no database connection between the re-checks of such a read. Operation coverage cannot see an option, so named contract tests prove that the CLI and the MCP tools forward it (amended 2026-10-19).
 
 ## Where it is applied
 
 - [FR-0.0 to FR-0.4, FR-12.2](../requirements/functional.md); [NFR-0.3, NFR-5.1](../requirements/non-functional.md); [positioning.md, "AI-first"](../positioning.md)
-- [api-and-agent-surface.md introduction, §1 to §7](../../knowledge/specs/api-and-agent-surface.md) (§2 and §7: compilation is not an API operation, client-side operations in the parity checklist; §1 to §5 and §7: the bounded run-read wait)
+- [api-and-agent-surface.md introduction, §1 to §7](../../knowledge/specs/api-and-agent-surface.md) (§2 and §7: compilation is not an API operation, client-side operations in the parity checklist; §1 to §5, §7 and §8: the bounded run-read wait)
 - [stack reference, MCP server row](../../knowledge/architecture/detailed.md#stack-per-component)
 - [component map](../technical-introduction.md#3-the-component-map) and [core boundaries](../technical-introduction.md#5-why-the-boundaries-matter), including compilation in the author's process
 - [protocols.md §10](../../knowledge/specs/protocols.md), [dsl.md §2 (compilation runs in the author's process), §5](../../knowledge/specs/dsl.md), [ir.md §4.1](../../knowledge/specs/ir.md)
