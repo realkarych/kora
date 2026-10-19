@@ -61,7 +61,7 @@ Agent nodes inside a graph have no access to kora's MCP server or API. They rece
 ## Where it is applied
 
 - [FR-0.0 to FR-0.4, FR-12.2](../requirements/functional.md); [NFR-0.3, NFR-5.1](../requirements/non-functional.md); [positioning.md, "AI-first"](../positioning.md)
-- [api-and-agent-surface.md introduction, §1 to §7](../../knowledge/specs/api-and-agent-surface.md) (§2 and §7: compilation is not an API operation, client-side operations in the parity checklist; §1 to §5, §7 and §8: the bounded run-read wait)
+- [api-and-agent-surface.md introduction, §1 to §8](../../knowledge/specs/api-and-agent-surface.md) (§2 and §7: compilation is not an API operation, client-side operations in the parity checklist; §1 to §5, §7 and §8: the bounded run-read wait)
 - [stack reference, MCP server row](../../knowledge/architecture/detailed.md#stack-per-component)
 - [component map](../technical-introduction.md#3-the-component-map) and [core boundaries](../technical-introduction.md#5-why-the-boundaries-matter), including compilation in the author's process
 - [protocols.md §10](../../knowledge/specs/protocols.md), [dsl.md §2 (compilation runs in the author's process), §5](../../knowledge/specs/dsl.md), [ir.md §4.1](../../knowledge/specs/ir.md)
