@@ -7,6 +7,7 @@
 - Amends: [ADR-0014](0014-target-identity.md) (deferred-run occupancy and independent progress), [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md) (overlap before materialisation)
 - Related: ADR-0002, ADR-0003, ADR-0007, ADR-0017, ADR-0018, ADR-0019
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
+- Amended by: [ADR-0002](0002-ai-first-api-and-thin-clients.md), 2026-10-19 (start outcomes are immediate tool results; [issue #124](https://github.com/realkarych/kora/issues/124)); wording pending owner review
 
 ## Context
 
@@ -34,7 +35,7 @@ Full outstanding capacity returns HTTP 409 / `API002`, `retryable: true`, reason
 
 **Serialize decisions, then scan past blocked work.** Run locks precede the ordered global, namespace, graph, runtime, fan-out and target locks; counts use fresh reads after locks. Inserts, terminal releases, hold changes and policy writes follow compatible locking on both databases. No other holder's run lock is acquired under a target lock. Reason priority can differ from lock order: expose recovery or target blockage before generic capacity when applicable, but acquire neither attempt nor hold until every check passes. The single-scheduler MVP visits candidates FIFO by stable `node_instance.id`, skips ineligible ones and continues. Recreated waits do not reset age. Concurrent participants preserve capacity safety, without strict multi-scheduler FIFO, starvation freedom or weighted fairness.
 
-**Expose the three facts through existing surfaces.** Namespace/graph/run/node/target reads show effective scope, limit, usage, cap-source version and observation time; run execution occupancy and outstanding contribution; target holders and recovery blockers; recheck time and next action. Large blocker sets include an explicit count, bounded sample and existing paginated read reference. CLI and MCP forward the same API data; the console adds read-only information, keeping its four mutations. Existing kora_reference explicitly maps namespace policy/admission and graph-trigger reads with ordinary namespace authorization. A trigger task receiving a no-run skip completes immediately without run polling. No operation or curated tool is added.
+**Expose the three facts through existing surfaces.** Namespace/graph/run/node/target reads show effective scope, limit, usage, cap-source version and observation time; run execution occupancy and outstanding contribution; target holders and recovery blockers; recheck time and next action. Large blocker sets include an explicit count, bounded sample and existing paginated read reference. CLI and MCP forward the same API data; the console adds read-only information, keeping its four mutations. Existing kora_reference explicitly maps namespace policy/admission and graph-trigger reads with ordinary namespace authorization. `kora_trigger` returns a no-run skip, including a replayed one, as its immediate result, like every other start outcome (ADR-0002). No operation or curated tool is added.
 
 ## Alternatives considered
 

@@ -363,7 +363,7 @@ These are future implementation/release gates, not tests executed by this design
 | `test_admission_skips_blocked_candidates` | older blocked Q does not stop R; target reason is not masked by graph capacity; all allow holders block defer; resumed hold gives no execution priority |
 | `test_admission_limits_are_atomic` | last-slot contenders, first/last attempt and release races, start versus failed retry, policy lowering, graph-wide version counts and deploy/retire cap-source changes preserve bounds; fresh PG reads and equivalent SQLite outcomes |
 | `test_run_acceptance_preserves_overlap_and_replay` | pending/running skip with permanent no-run outcome, one queue promotion, untouched blocked queue revisited after predecessor completion/restart, explicit allow, deployment before accepted replay, lost response, cache/payload expiry, changed request, quota changes and internal rejection diagnostics |
-| `test_admission_state_has_surface_parity` | existing API/CLI/MCP expose identical actual scopes/counts/cap source, occupancy, all-holder/recovery blockers, recheck and next action; sampled lists explicitly incomplete; accepted/no-run-skip response union, immediate skip/replay MCP task completion without run polling, ordinary namespace-authorized trigger/policy reads; no new operation |
+| `test_admission_state_has_surface_parity` | existing API/CLI/MCP expose identical actual scopes/counts/cap source, occupancy, all-holder/recovery blockers, recheck and next action; sampled lists explicitly incomplete; accepted/no-run-skip response union, immediate skip/replay `kora_trigger` result without waiting, ordinary namespace-authorized trigger/policy reads; no new operation |
 
 ## 14. External observation and delivery ownership (ADR-0021)
 
