@@ -4,6 +4,8 @@ import subprocess
 import sys
 from typing import cast
 
+import pytest
+
 from tests.observability.conftest import run_kora, run_python
 
 FAILING_APPLICATION_SCRIPT: str = """
@@ -115,7 +117,7 @@ app = typer.Typer(pretty_exceptions_enable=False)
 
 @app.command()
 def leave() -> None:
-    raise SystemExit(3)
+    raise SystemExit(EXIT_REQUEST)
 
 @app.command()
 def other() -> None:
@@ -182,14 +184,22 @@ sys.exit(main(["--version"], {"KORA_LOG_LEVEL": "DEBUG"}))
 """
 
 
-def test_system_exit_from_a_command_keeps_its_code() -> None:
-    result = run_python(["-c", EXITING_APPLICATION_SCRIPT], {})
+@pytest.mark.parametrize(
+    ("request_code", "exit_code"), [("3", 3), ("-1", 255), ("True", 1)]
+)
+def test_system_exit_from_a_command_keeps_its_code(
+    request_code: str, exit_code: int
+) -> None:
+    script = EXITING_APPLICATION_SCRIPT.replace("EXIT_REQUEST", request_code)
+
+    result = run_python(["-c", script], {})
 
     events = [record["event"] for record in result.records()]
-    assert result.code == 3
+    assert result.code == exit_code
     assert result.stdout == b""
     assert "process.failed" not in events
-    assert result.records()[-1]["exit_code"] == 3
+    assert events[-1] == "process.stopped"
+    assert result.records()[-1]["exit_code"] == exit_code
 
 
 def test_base_exception_is_recorded_and_exits_seventy() -> None:
@@ -235,9 +245,14 @@ def shell() -> str:
     return found
 
 
-def test_closed_stdout_descriptor_still_shuts_down_cleanly() -> None:
+@pytest.mark.parametrize(
+    ("redirection", "exit_code"), [("1>&-", 0), ("1</dev/null", 70)]
+)
+def test_unusable_stdout_descriptor_still_shuts_down_cleanly(
+    redirection: str, exit_code: int
+) -> None:
     completed = subprocess.run(
-        [shell(), "-c", 'exec "$0" -m kora --version 1>&-', sys.executable],
+        [shell(), "-c", f'exec "$0" -m kora --version {redirection}', sys.executable],
         env={"PATH": os.environ["PATH"], "KORA_LOG_LEVEL": "DEBUG"},
         capture_output=True,
         timeout=60,
@@ -245,7 +260,32 @@ def test_closed_stdout_descriptor_still_shuts_down_cleanly() -> None:
     )
 
     lines = completed.stderr.decode("utf-8").splitlines()
-    assert completed.returncode == 0
+    assert completed.returncode == exit_code
     assert all(line.startswith("{") for line in lines)
     assert "Traceback" not in completed.stderr.decode("utf-8")
     assert '"event":"process.stopped"' in lines[-1]
+    assert f'"exit_code":{exit_code}' in lines[-1]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "environment", "exit_code"),
+    [
+        ("--nope", {}, 2),
+        ("--version", {"KORA_LOG_LEVEL": "verbose"}, 78),
+        ("--version", {"KORA_LOG_LEVEL": "DEBUG"}, 0),
+    ],
+)
+def test_closed_stderr_keeps_the_exit_code(
+    arguments: str, environment: dict[str, str], exit_code: int
+) -> None:
+    completed = subprocess.run(
+        [shell(), "-c", f'exec "$0" -m kora {arguments} 2>&-', sys.executable],
+        env={"PATH": os.environ["PATH"], **environment},
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == exit_code
+    assert completed.stderr == b""
+    assert completed.stdout == (b"kora 0.1.0.dev0\n" if exit_code == 0 else b"")

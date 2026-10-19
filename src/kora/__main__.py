@@ -31,6 +31,7 @@ EXIT_USAGE: int = 2
 EXIT_SOFTWARE: int = 70
 EXIT_CONFIGURATION: int = 78
 EXIT_INTERRUPT: int = 130
+EXIT_STATUS_MASK: int = 0xFF
 STDERR_DESCRIPTOR: int = 2
 STDOUT_DESCRIPTOR: int = 1
 PROGRAM: str = "kora"
@@ -41,9 +42,12 @@ MISSING_COMMAND: str = "a command or --version is required"
 def write_stderr(text: str) -> None:
     data = text.encode("utf-8", errors="replace")
     view = memoryview(data)
-    while view:
-        written = os.write(STDERR_DESCRIPTOR, view)
-        view = view[written:]
+    try:
+        while view:
+            written = os.write(STDERR_DESCRIPTOR, view)
+            view = view[written:]
+    except OSError:
+        return
 
 
 def write_usage(usage: str, message: str) -> None:
@@ -111,7 +115,7 @@ def exit_code_of(request: SystemExit) -> int:
     if code is None:
         return EXIT_SUCCESS
     if isinstance(code, int):
-        return code
+        return code & EXIT_STATUS_MASK
     write_stderr(f"{code}\n")
     return EXIT_FAILURE
 
@@ -129,11 +133,11 @@ def flush_stdout(exit_code: int) -> int:
         return exit_code
     try:
         stream.flush()
-    except BrokenPipeError:
-        silence_broken_stdout()
-        return exit_code if exit_code != EXIT_SUCCESS else EXIT_FAILURE
     except ValueError:
         return exit_code
+    except OSError:
+        silence_broken_stdout()
+        return exit_code if exit_code != EXIT_SUCCESS else EXIT_FAILURE
     return exit_code
 
 
