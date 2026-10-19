@@ -11,6 +11,8 @@
 
 Evidence wording amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
 
+CEL amendment dated 2026-10-19: decisions taken and implementation plan approved by the project owner under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review. The CEL row is refined by [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), amended the same day.
+
 ## Context
 
 The architecture fixes a control plane, outbound-only workers per runtime, protocol implementations loaded by entry points, and four thin clients of the API. The stack had to serve all of these from one repository and keep standalone mode (one process on SQLite) identical in behaviour to the platform deployment on PostgreSQL (NFR-0.1). The design review of 2026-10-15 refined two rows: [one shared client](../../knowledge/reviews/review-2026-10-15.md#one-shared-api-client) instead of three generated ones, and the [build backend and CEL binding](../../knowledge/reviews/review-2026-10-15.md#stack-details).
@@ -18,12 +20,12 @@ The architecture fixes a control plane, outbound-only workers per runtime, proto
 ## Decision
 
 - **Python 3.11+ with `asyncio` throughout** (NFR-11.1).
-- **`uv` + `hatchling`, one distribution `kora`** with extras (`kora[postgres]`, `kora[docker]`, `kora[otel]`), `src/` layout, monorepo with the frontend in `web/`. `hatchling` is kept over `uv_build` because the embedded web build needs a custom build hook.
+- **`uv` + `hatchling`, one distribution `kora`** with extras (`kora[postgres]`, `kora[docker]`, `kora[otel]`, `kora[cel]`), `src/` layout, monorepo with the frontend in `web/`. `hatchling` is kept over `uv_build` because the embedded web build needs a custom build hook.
 - **FastAPI + Pydantic v2** for the HTTP API. Pydantic models are the single definition of the intermediate representation (IR) and publish `ir.schema.json`; OpenAPI feeds the web client generator and the parity coverage test.
 - **SQLAlchemy 2.0 + Alembic** over **PostgreSQL via `asyncpg`** and **SQLite via `aiosqlite`** for standalone. Row claims use `SELECT … FOR UPDATE SKIP LOCKED` on PostgreSQL and a single-writer process on SQLite; an external queue was rejected because run state must live only in the database (NFR-1.2).
 - **One hand-written `httpx` client** sharing the Pydantic models with the API, used by the CLI, the MCP tools and the worker, contract-tested against OpenAPI.
 - **Typer CLI** over that client; the **official `mcp` Python SDK** for the two curated MCP servers (ADR-0002).
-- **CEL through the Rust-backed `common-expression-language` binding**, with kora's own schema-driven checker for the `inputs.*` environment and the CEL conformance suite in CI; `cel-python` has no static checking.
+- **CEL through the Rust-backed `common-expression-language` binding**, with kora's own parser and schema-driven checker for every expression environment, and the CEL conformance suite in CI; `cel-python` has no static checking. The binding is the `kora[cel]` extra, pinned exactly and installed only from binary wheels; the API, the scheduler and `kora standalone` require it, and `kora compile` does not ([ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), [ir.md section 7](../../knowledge/specs/ir.md#7-expressions-and-templates)). No new dependency is added: the binding's transitive packages are recorded with their reason in the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component).
 - **Jinja2 `SandboxedEnvironment`** for prompt templates (DD-11).
 - **`ruamel.yaml`** for IR read and write, because it round-trips comments.
 - **`obstore`** (Rust-backed, async) for the `s3` artifact storage against any S3-compatible service, with GCS and Azure reachable through the same library; `aiobotocore` was the alternative, rejected for its weight and its pinned `botocore` versions (decided 2026-10-16).
@@ -34,7 +36,7 @@ The architecture fixes a control plane, outbound-only workers per runtime, proto
 
 ## Alternatives considered
 
-Per row, as recorded in the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component): Poetry, `uv_build`; Litestar, Django REST; raw SQL with `psycopg` 3, SQLModel; a generated `openapi-python-client`; Click, argparse; `cel-python`; PyYAML; server-rendered Jinja2 + HTMX, Next.js, SvelteKit; vendor observability SDKs only; CLI JSONL parsing for harnesses (replaced, ADR-0004).
+Per row, as recorded in the [stack reference](../../knowledge/architecture/detailed.md#stack-per-component): Poetry, `uv_build`; Litestar, Django REST; raw SQL with `psycopg` 3, SQLModel; a generated `openapi-python-client`; Click, argparse; `cel-python`, and as parser sources `lark` with the cel-python grammar, cel-python's own parser and `cel-expr-python`; PyYAML; server-rendered Jinja2 + HTMX, Next.js, SvelteKit; vendor observability SDKs only; CLI JSONL parsing for harnesses (replaced, ADR-0004).
 
 ## Consequences
 
@@ -42,7 +44,7 @@ The stack must preserve the boundaries of the architecture: the API is the only 
 
 Load: the [planning estimate](../../knowledge/analysis/control-plane-load-estimate.md) is unmeasured and does not establish a bottleneck or capacity headroom. Keep the accepted stack; measure the NFR-1.1 workload before proposing a change, including runner memory, database contention, storage and event-loop latency.
 
-Practical effects: a pnpm toolchain is needed to build the package; CEL depends on a compiled binding; Docker-dependent tests run on the Linux CI job only; protocol implementations are written against async interfaces.
+Practical effects: a pnpm toolchain is needed to build the package; CEL evaluation depends on a compiled binding installed only from binary wheels, so the API, scheduler and standalone run only on platforms with a published wheel; Docker-dependent tests run on the Linux CI job only; protocol implementations are written against async interfaces.
 
 ## Where it is applied
 

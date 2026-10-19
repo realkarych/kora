@@ -100,11 +100,12 @@ The run's colour and word in the header, on the runs list and in the traffic lig
 | `pending` | amber; the deadline from the wait |
 | `approved` | approved audit badge, approver/channel/time; current node is blue during verification, green after success, red on gate failure, or its current state after clear; audit alone does not set node colour |
 | `rejected` | the node is red "rejected"; the response and its comments |
+| `failed` | the node is red "approval could not be applied" (`config_error`); the response stays visible next to the evaluation error kind and field, never shown as approved ([ir.md section 7.7](../../specs/ir.md#77-evaluation-errors)) |
 | `expired` | the node is red "approval expired" or gray `skipped` per `on_expiry` |
 | `invalidated` | the banner with the bound commit and the observed head; the node is red "candidate moved" |
 | `cancelled` | gray; the run or node was cancelled |
 
-Observation/delivery errors are read-only reasons beside the existing lifecycle state (ADR-0021). Show last success/time, current deadline, next poll/retry and structured hint; unknown delivery can persist on terminal history without keeping a run active or retaining execution capacity. Never label an outage solely as waiting for a person, an empty lookup as successful cleanup, or recorded approval as verified gate success.
+A wait's or sensor trigger's last CEL evaluation error (`match` or `until`) is a read-only reason beside a still-open wait: kind, field and time, never values, and separate from integration health ([ir.md section 7.7](../../specs/ir.md#77-evaluation-errors)). Observation/delivery errors are read-only reasons beside the existing lifecycle state (ADR-0021). Show last success/time, current deadline, next poll/retry and structured hint; unknown delivery can persist on terminal history without keeping a run active or retaining execution capacity. Never label an outage solely as waiting for a person, an empty lookup as successful cleanup, or recorded approval as verified gate success.
 
 ## Attention states
 

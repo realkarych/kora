@@ -14,6 +14,8 @@ External-observation amendment dated 2026-10-17: direction and implementation pl
 
 Component-logging amendment dated 2026-10-18: direction and implementation plan approved by the project owner under [issue #91](https://github.com/realkarych/kora/issues/91); NFR-9.4 wording accepted for merge by the project owner in [PR #93](https://github.com/realkarych/kora/pull/93) on 2026-10-18. The [dated research](../../knowledge/research/orchestrator-logging-patterns-2026-10-18.md) and [planning review](../../knowledge/reviews/structured-logging-plan-review-2026-10-18.md) are evidence, not runtime verification.
 
+CEL amendment dated 2026-10-19: decisions taken and implementation plan approved by the project owner under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review. See [ADR-0006](../decisions/0006-graph-definition-dsl-and-yaml-representation.md).
+
 ## 0. Design centre
 
 - **NFR-0.1** The platform persona is the design centre: every requirement below is written for an instance shared by many teams on an organisation's own infrastructure. Standalone mode (NFR-7.1) is a development convenience and must never constrain the platform design (no feature may exist only in standalone mode; nothing in the data model may assume a single tenant).
@@ -96,7 +98,7 @@ Component-logging amendment dated 2026-10-18: direction and implementation plan 
 
 ## 11. Compatibility
 
-- **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 16+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime.
+- **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 16+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime. The components that evaluate CEL (API, scheduler, standalone and scenario tests) install the expression binding only from published binary wheels, never from source, so they run only where a wheel exists for the Python version and platform; the current matrix is recorded as dated evidence ([stack reference](../../knowledge/architecture/detailed.md#stack-per-component)).
 - **NFR-11.2 [MVP]** Harness compatibility is declared per adapter (tested Claude Code and Codex version ranges) and checked at installation health check and worker start, not per node.
 - **NFR-11.3 [target]** The control plane API is versioned (`/api/v1`) and backwards compatible within a major version.
 

@@ -138,7 +138,7 @@
       "patternProperties": { "^x-": {} },
       "additionalProperties": false
     },
-    "expression": { "type": "string", "minLength": 1, "description": "CEL expression" },
+    "expression": { "type": "string", "minLength": 1, "maxLength": 4096, "description": "CEL expression; limits and checking in ir.md section 7" },
     "secretRef": { "type": "string", "pattern": "^secret://[a-z][a-z0-9_-]*/[A-Za-z0-9_./-]+$" },
     "artifactType": {"type": "string", "pattern": "^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\\[(List\\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\\]+)$", "description": "Structural spelling only. Semantic validation parses recursive List[T] and rejects unbalanced nesting without imposing a depth limit."},
     "errorClass": {
@@ -191,7 +191,7 @@
         "type": { "$ref": "#/$defs/artifactType" },
         "from": { "type": "string", "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|[a-z][a-z0-9_]{0,63})$" },
         "output": { "$ref": "#/$defs/id" },
-        "path": { "type": "string", "description": "dotted path into the source artifact or params; for $inputs the subgraph input name" },
+        "path": { "type": "string", "maxLength": 4096, "description": "dotted path into the source artifact or params; for $inputs the subgraph input name" },
         "optional": { "type": "boolean" }
       },
       "patternProperties": { "^x-": {} },
@@ -241,7 +241,7 @@
       "properties": {
         "repo": { "type": "string" },
         "rev": { "type": "string", "description": "revision or template expression" },
-        "from_ref": { "type": "string", "description": "input path of a VcsRef to check out instead of rev" }
+        "from_ref": { "type": "string", "maxLength": 4096, "description": "input path of a VcsRef to check out instead of rev" }
       },
       "patternProperties": { "^x-": {} },
       "additionalProperties": false
@@ -309,14 +309,14 @@
         "binds": {
           "type": "object",
           "properties": {
-            "vcs_ref": { "type": "string" },
-            "gate_digests": { "type": "array", "items": { "type": "string" } }
+            "vcs_ref": { "type": "string", "maxLength": 4096 },
+            "gate_digests": { "type": "array", "items": { "type": "string", "maxLength": 4096 } }
           },
           "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
         "approve_when": { "$ref": "#/$defs/expression" },
-        "context": { "type": "string", "description": "input path of the artifact shown to the approver, e.g. a ReviewBundle" }
+        "context": { "type": "string", "maxLength": 4096, "description": "input path of the artifact shown to the approver, e.g. a ReviewBundle" }
       },
       "patternProperties": { "^x-": {} },
       "additionalProperties": false
@@ -486,7 +486,7 @@
         "key": {
           "oneOf": [
             { "type": "object", "required": ["param"], "properties": { "param": { "type": "string", "minLength": 1, "description": "a run parameter of graph.params; bound when the run is created" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false },
-            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "description": "one scalar string in a top-level node output; key binds once when the complete source result is atomically accepted (ADR-0019)" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false }
+            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "maxLength": 4096, "description": "one scalar string in a top-level node output; key binds once when the complete source result is atomically accepted (ADR-0019)" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false }
           ]
         },
         "on_active": { "type": "string", "enum": ["allow", "defer"], "description": "what a new run does while another run of the namespace holds the same target; when absent: allow (FR-6.11, ADR-0014)" }
