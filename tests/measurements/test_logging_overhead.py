@@ -84,6 +84,7 @@ HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
 HEAP_SLOPE_ALLOWANCE_BYTES: int = 65_536
 RSS_GROWTH_ALLOWANCE_BYTES: int = 16_777_216
 OUTPUT_VARIABLE: str = "KORA_MEASUREMENT_OUTPUT"
+REVISION_VARIABLE: str = "KORA_MEASUREMENT_REVISION"
 
 FULL_PIPE_SCRIPT: str = """
 import datetime
@@ -295,7 +296,7 @@ def report() -> Iterator[Report]:
         utc_now().isoformat(),
         sys.platform,
         sys.version.split()[0],
-        os.environ.get("GITHUB_SHA", ""),
+        os.environ.get(REVISION_VARIABLE, ""),
     )
     yield created
     output = os.environ.get(OUTPUT_VARIABLE)
