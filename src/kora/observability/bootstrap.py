@@ -44,6 +44,7 @@ Clock = Callable[[], datetime]
 SUPPRESSION_WINDOW_SECONDS: float = 60.0
 MAX_BRIDGED_LOGGERS: int = 256
 PAYLOAD_KEY: str = "kora"
+SORTED_CONTEXT_KEYS: tuple[str, ...] = tuple(sorted(CONTEXT_KEYS))
 STDERR_DESCRIPTOR: int = 2
 
 
@@ -280,7 +281,9 @@ class ProcessDiagnostics:
         if not isinstance(payload, Emission):
             raise structlog.DropEvent
         emission: Emission = payload
-        bound = {key: event_dict[key] for key in CONTEXT_KEYS if key in event_dict}
+        bound = {
+            key: event_dict[key] for key in SORTED_CONTEXT_KEYS if key in event_dict
+        }
         try:
             fields = self._policy.safe_fields(emission.spec, emission.fields)
             context = self._policy.safe_context(bound)
@@ -322,6 +325,7 @@ class ProcessDiagnostics:
 
     def _deliver(self, rendered: bytes) -> None:
         emission: Emission = self._pending.emission
+        self._pending.emission = None
         reason = self._queue.put(rendered)
         if reason is not None:
             self.state.count_dropped(emission.component, emission.level, reason)

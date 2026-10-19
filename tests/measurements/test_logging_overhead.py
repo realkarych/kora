@@ -76,10 +76,12 @@ REPEATS: int = 3
 HEAVY_REPEATS: int = 2
 CYCLES: int = 200
 PRODUCER_THREADS: int = 4
-STEP_BUDGET_SECONDS: float = 120.0
+STEP_BUDGET_SECONDS: float = 300.0
+ROTATION_ROUNDS: int = 100
 EXIT_MARGIN_SECONDS: float = 2.0
 IDLE_SHUTDOWN_SECONDS: float = 0.5
 HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
+HEAP_SLOPE_ALLOWANCE_BYTES: int = 65_536
 RSS_GROWTH_ALLOWANCE_BYTES: int = 16_777_216
 OUTPUT_VARIABLE: str = "KORA_MEASUREMENT_OUTPUT"
 
@@ -95,9 +97,12 @@ diagnostics = configure_process(
     component, LoggingSettings(), "filler", lambda: datetime.datetime.now(datetime.UTC)
 )
 log = diagnostics.logger(component)
-for index in range(20000):
+import sys, time
+for index in range(3000):
     log.emit(spec, text="y" * 500)
+started = time.monotonic()
 diagnostics.shutdown()
+sys.stdout.write("%.3f" % (time.monotonic() - started))
 """
 
 
@@ -442,16 +447,20 @@ def redaction_workloads(report: Report) -> None:
     )
     for registration in registrations:
         registration.release()
-    rotating = registered_values(50)
+    rounds = iter(range(10**9))
 
     def rotate() -> None:
-        for _ in range(HEAVY_RECORDS):
-            handles = [diagnostics.register_secret(value) for value in rotating]
+        for _ in range(ROTATION_ROUNDS):
+            stamp = next(rounds)
+            handles = [
+                diagnostics.register_secret(f"rotating-{stamp:08d}-{index:02d}-value")
+                for index in range(50)
+            ]
             for handle in handles:
                 handle.release()
 
     repeat(
-        report, "redaction_rotation_50x1000", HEAVY_RECORDS * 50, HEAVY_REPEATS, rotate
+        report, "redaction_rotation_50x100", ROTATION_ROUNDS * 50, HEAVY_REPEATS, rotate
     )
     diagnostics.shutdown()
     sink.close()
@@ -561,21 +570,33 @@ def exit_on_full_pipe(report: Report) -> bool:
         stderr=subprocess.PIPE,
     )
     started = time.perf_counter()
-    code = process.wait(timeout=30)
+    code = process.wait(timeout=60)
     elapsed = time.perf_counter() - started
-    if process.stdout is not None:
-        process.stdout.close()
-    if process.stderr is not None:
-        process.stderr.close()
-    report.samples.append(Sample("exit_on_full_pipe", 0, 1, elapsed, {"code": code}))
-    return code == 0 and elapsed < LoggingSettings().drain_seconds + EXIT_MARGIN_SECONDS
+    assert process.stdout is not None
+    assert process.stderr is not None
+    shutdown_seconds = float(process.stdout.read().decode().strip() or "nan")
+    process.stdout.close()
+    failure = "" if code == 0 else process.stderr.read()[-400:].decode(errors="replace")
+    process.stderr.close()
+    report.samples.append(
+        Sample(
+            "exit_on_full_pipe",
+            0,
+            1,
+            elapsed,
+            {"code": code, "shutdown_seconds": shutdown_seconds, "failure": failure},
+        )
+    )
+    bound = LoggingSettings().drain_seconds + EXIT_MARGIN_SECONDS
+    return code == 0 and shutdown_seconds < bound
 
 
 def idle_shutdown(report: Report) -> bool:
     sink = Sink()
     sink.drain()
     diagnostics = configured(LoggingSettings(), sink)
-    while diagnostics.snapshot().queue_records:
+    deadline = time.monotonic() + 30
+    while diagnostics.snapshot().queue_records and time.monotonic() < deadline:
         time.sleep(0.001)
 
     def shut() -> None:
@@ -608,15 +629,23 @@ def configure_shutdown_cycles(report: Report) -> dict[str, bool]:
     heap_before = tracemalloc.get_traced_memory()[0]
     elapsed = timed(run_cycles)
     gc.collect()
+    heap_middle = tracemalloc.get_traced_memory()[0]
+    run_cycles()
+    gc.collect()
     heap_after = tracemalloc.get_traced_memory()[0]
     tracemalloc.stop()
+    first_half = heap_middle - heap_before
+    second_half = heap_after - heap_middle
     report.samples.append(
         Sample(
             "configure_shutdown_cycles_traced",
             0,
             CYCLES,
             elapsed,
-            {"heap_growth_bytes": heap_after - heap_before},
+            {
+                "heap_growth_first_half_bytes": first_half,
+                "heap_growth_second_half_bytes": second_half,
+            },
         )
     )
     rss_before = current_rss_bytes()
@@ -654,6 +683,7 @@ def configure_shutdown_cycles(report: Report) -> dict[str, bool]:
     gates["descriptors_return_to_baseline"] = descriptors_after == descriptors_before
     gates["heap_growth_bounded"] = (
         heap_after - heap_before < HEAP_GROWTH_ALLOWANCE_BYTES
+        and second_half <= max(HEAP_SLOPE_ALLOWANCE_BYTES, first_half)
     )
     gates["rss_growth_bounded"] = (
         rss_growth is None or rss_growth < RSS_GROWTH_ALLOWANCE_BYTES

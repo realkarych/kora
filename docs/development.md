@@ -75,7 +75,7 @@ The default pytest run excludes the `measurement` marker. The logging overhead a
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
-  uv run --no-sync pytest -q -m measurement tests/measurements/test_logging_overhead.py
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
 ```
 
 Ruff's `S` family runs inside `ruff check`. The dependency and secret scanners run in CI through the workflows `osv-scanner.yml` and `gitleaks.yml`; contributors who install the same releases locally (OSV-Scanner 2.7.0, Gitleaks 8.30.1) run the equivalent scans with the commands below. On a pull request Gitleaks scans the first 30 first-parent, non-merge commits of the pull request and OSV-Scanner reports only newly introduced vulnerabilities; on a push to `master` Gitleaks scans the pushed range and OSV-Scanner both lockfiles in full; weekly, and on dispatch for Gitleaks, OSV-Scanner scans both lockfiles in full and Gitleaks the whole history. CodeQL (`codeql.yml`) runs in CI only, because its analysis needs the hosted toolchain, and uploads its alerts to the repository's code-scanning view. The [logging and scanner research](../knowledge/research/logging-stack-and-ci-scanners-2026-10-20.md) records the pinned versions and what each scanner covers.

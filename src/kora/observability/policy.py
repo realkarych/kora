@@ -1,5 +1,6 @@
 import math
 import re
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
@@ -28,9 +29,7 @@ from kora.observability.settings import (
 TRUNCATION_MARKER: str = "[truncated]"
 CONTEXT_IDENTIFIER: re.Pattern[str] = re.compile(r"\A[\x21-\x7e]{1,256}\Z")
 MAX_INTEGER: int = 2**63
-CONTROL_CHARACTERS: frozenset[int] = frozenset(
-    {*range(0x00, 0x20), 0x7F, *range(0x80, 0xA0)}
-)
+CONTROL_PATTERN: re.Pattern[str] = re.compile("[\x00-\x1f\x7f-\x9f]")
 
 SafeValue: TypeAlias = (
     str | int | float | bool | None | list["SafeValue"] | dict[str, "SafeValue"]
@@ -63,15 +62,12 @@ def name_or_empty(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+def escape_control(match: re.Match[str]) -> str:
+    return f"\\x{ord(match.group(0)):02x}"
+
+
 def escape_controls(text: str) -> str:
-    if not any(ord(character) in CONTROL_CHARACTERS for character in text):
-        return text
-    return "".join(
-        f"\\x{ord(character):02x}"
-        if ord(character) in CONTROL_CHARACTERS
-        else character
-        for character in text
-    )
+    return CONTROL_PATTERN.sub(escape_control, text)
 
 
 def truncate(text: str) -> str:
@@ -91,6 +87,8 @@ class ContentPolicy:
         return Budget(values=MAX_VALUES, string_bytes=self._max_record_bytes)
 
     def safe_string(self, value: str, budget: Budget) -> str:
+        if len(value) > budget.string_bytes:
+            raise RecordRejected(LossReason.OVER_BUDGET)
         encoded = value.encode("utf-8", errors="replace")
         budget.take_value()
         budget.take_string(len(encoded))
@@ -176,7 +174,7 @@ class ContentPolicy:
     def safe_exception_entry(
         self, error: BaseException, budget: Budget
     ) -> dict[str, SafeValue]:
-        frames: list[tuple[str, str, int]] = []
+        frames: deque[tuple[str, str, int]] = deque(maxlen=MAX_FRAMES)
         traceback: TracebackType | None = error.__traceback__
         while traceback is not None:
             code = traceback.tb_frame.f_code
@@ -191,7 +189,7 @@ class ContentPolicy:
                 "function": self.safe_string(function, budget),
                 "line": line,
             }
-            for module, function, line in frames[-MAX_FRAMES:]
+            for module, function, line in frames
         ]
         error_type: object = type(error)
         return {

@@ -37,30 +37,32 @@ The baseline row "No dedicated jobs" for dependency, secret and static-analysis 
 
 ## Measurements
 
-`tests/measurements/test_logging_overhead.py` declares its workloads and criteria before running and keeps every sample in the artifact `logging-overhead-measurement`. The first local run on 2026-10-20 (macOS 15 on Apple silicon, CPython 3.11.17, a laptop, not an uncontended runner) gave the figures below; the CI runner's figures from the pull request's final revision are the baseline for the throughput budgets, with a documented multiple for runner variance, and land in the test with their rationale.
+`tests/measurements/test_logging_overhead.py` declares its workloads and criteria before running and keeps every sample in the artifact `logging-overhead-measurement`. The local run of the final harness on 2026-10-20 (macOS 15 on Apple silicon, CPython 3.11.17, a laptop, not an uncontended runner) gave the figures below. The hosted Linux runner is about 2.5 to 3 times slower per record (the first CI run measured 92 µs for the INFO workload against 34 µs locally with the same harness); its figures from the pull request's final revision are the baseline for any future throughput budget, which is not set in this change.
 
 | Workload | Median µs per record | Note |
 |---|---|---|
-| disabled level, 16 fields | 0.9 | the filtering bound logger returns before any processor |
-| INFO, 16 string fields | 34 | policy walk, redaction scan, JSON rendering, enqueue |
-| DEBUG, 16 string fields | 35 | |
-| text renderer, 16 string fields | 38 | |
-| maximal record under the default 16 KiB limit (12 strings of 1024 bytes and an exception chain) | 283 | |
-| maximal record under the 1 MiB limit | 284 | |
-| adversarial nested mapping, rejected by the value budget | 146 | the walk stops at 256 values, before redaction |
-| 64 KiB string, rejected by the string budget | 7 | |
-| maximal registry (256 values, 65536 bytes) against maximal records, no match | 284 | one compiled alternation per string |
-| maximal registry against maximal records, many matches | 141 | |
-| 50 registrations rotated 1,000 times | 39 per registration | |
-| bridged standard-library record | 12 | no message formatting |
-| bind, emit and reset with all eleven context keys | 17 | |
-| four producer threads against a saturated queue | 42 | queue records and bytes never exceeded the configured limits |
-| writer throughput with a fast reader (50,000 records) | 35 per produced record | the single-process Python producer outpaces the writer and reader threads under the interpreter lock, so a burst of this size drops records; the writer batches queued records up to 64 KiB per `write` |
+| disabled level, 16 fields | 0.8 | the filtering bound logger returns before any processor |
+| INFO, 16 string fields | 21 | policy walk, redaction scan, JSON rendering, enqueue |
+| DEBUG, 16 string fields | 21 | |
+| text renderer, 16 string fields | 25 | |
+| maximal record under the default 16 KiB limit (12 strings of 1024 bytes and an exception chain) | 97 | |
+| maximal record under the 1 MiB limit | 93 | |
+| adversarial nested mapping, rejected by the value budget | 122 | the walk stops at 256 values, before redaction |
+| 64 KiB string, rejected by the string budget | 5 | the length check runs before encoding |
+| maximal registry (256 values, 65536 bytes) against maximal records, no match | 96 | one compiled alternation per string |
+| maximal registry against maximal records, many matches | 107 | |
+| 50 registrations rotated 100 times with fresh values | 512 per registration | each round recompiles the alternation and purges the `re` cache; see below |
+| bridged standard-library record | 11 | no message formatting |
+| bind, emit and reset with all eleven context keys | 19 | |
+| four producer threads against a saturated queue | 28 | queue records and bytes never exceeded the configured limits |
+| writer throughput with a fast reader (50,000 records) | 22 per produced record | the single-process Python producer outpaces the writer and reader threads under the interpreter lock, so a burst of this size drops records; the writer batches queued records up to 64 KiB per `write` |
 
-Lifecycle and process figures from the same run: idle shutdown 0.1 ms; the real entry point writing into a full pipe exits 1.5 s after start with a 1 s drain deadline; 200 configure-and-shutdown cycles in one process keep the traced heap within the 1 MiB allowance (79 KiB measured after garbage collection) and return threads and descriptors to their pre-cycle counts; resident memory is read from `/proc/self/statm` and is unavailable on macOS; `python -m kora --version` cold start 70 to 180 ms. Two gates failed in earlier local runs for harness reasons and were corrected in the harness: the drain wait did not wake when the writer emptied the queue, which the bootstrap now does, and the counts were taken after the measurement's own reader thread had been closed.
+The control-character escape moved from a per-character Python loop to one compiled pattern substitution, which brought the INFO workload from 34 µs to 21 µs locally.
 
-The step's declared wall-clock budget is two minutes in the Linux 3.11 lane. The local run took 77 s with 50,000 records per repeat and three repeats for the per-record workloads, two for the maximal and redaction shapes; the issue plan's first sizing of 100,000 records and five repeats took 525 s before the drain fix and would exceed the budget, so the sizes were reduced and the plan comment updated.
+Lifecycle and process figures from the same run: idle shutdown 0.1 ms; the real entry point writing into a full pipe reports a shutdown of 1.01 s against the 1 s drain deadline and exits 1.1 s after start; 200 configure-and-shutdown cycles in one process grow the traced heap by 79 KiB in the first hundred cycles and 6 KiB in the second hundred, within the gate (the second half may not exceed the first half or 64 KiB, and the total stays under 1 MiB), and return threads and descriptors to their pre-cycle counts; resident memory is read from `/proc/self/statm` and is unavailable on macOS; `python -m kora --version` cold start about 70 ms. Two gates failed in earlier local runs for harness reasons and were corrected in the harness: the drain wait did not wake when the writer emptied the queue, which the bootstrap now does, and the counts were taken after the measurement's own reader thread had been closed.
+
+The step's declared wall-clock budget is five minutes in the Linux 3.11 lane. The local run of the final harness took 77 s with 50,000 records per repeat and three repeats for the per-record workloads, two for the maximal and redaction shapes. The issue plan's first sizing of 100,000 records and five repeats took 525 s locally before the drain fix; the first CI run of the reduced sizing took 458 s against the two-minute budget declared then, 204 s of which went to the rotation workload (50 registrations rotated 1,000 times, dominated by recompiling the alternation and purging the `re` cache after every registration). The rotation workload now runs 100 rounds with fresh values per round, which keeps the recompilation cost visible without dominating the step, and the budget was set to five minutes so that the whole step fits on the hosted runner with the measured slowdown and the pipeline stays under its ten-minute limit.
 
 ## Limits of this record
 
-No CI run existed when this record was written: the whole-pipeline duration with the three scanner workflows, cold and warm, and the CodeQL analysis time are recorded in the pull request from its final revision. Scanners report patterns and known advisories; a clean run is not absence of vulnerabilities. The console script inside a built wheel is not tested, since the installed-wheel tests were removed under [issue #112](https://github.com/realkarych/kora/issues/112).
+The figures above come from one laptop run; the hosted runner's measurement artifact, the whole-pipeline duration with the three scanner workflows, cold and warm, and the CodeQL analysis time are recorded in the pull request from its final revision, since a run of the final revision cannot exist before that revision is pushed. Scanners report patterns and known advisories; a clean run is not absence of vulnerabilities. The console script inside a built wheel is not tested, since the installed-wheel tests were removed under [issue #112](https://github.com/realkarych/kora/issues/112).
