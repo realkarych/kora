@@ -6,12 +6,14 @@ Ownership-index amendment dated 2026-10-18: scope approved under issue #95; word
 
 Slice-scope amendment dated 2026-10-19: ADR-0001 status updated under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
 
+MCP long-operation amendment dated 2026-10-19: ADR-0002 and ADR-0020 statuses updated, and ADR-0014 and ADR-0017 carry dated tool-count amendments, under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
+
 Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (implementation defaults) and `DD-37` (small mechanisms kept or dropped) point to their component specification owners through the register; it preserves identifiers and dispositions without overriding those current contracts.
 
 | record | decision | status |
 |---|---|---|
 | [ADR-0001](0001-own-control-plane.md) | Own control plane, with a Temporal-backed execution backend kept possible | accepted, amended 2026-10-16 and 2026-10-19 |
-| [ADR-0002](0002-ai-first-api-and-thin-clients.md) | AI-first: the HTTP API is the single implementation, every surface is a thin client, agent nodes never operate kora | accepted |
+| [ADR-0002](0002-ai-first-api-and-thin-clients.md) | AI-first: the HTTP API is the single implementation, every surface is a thin client, agent nodes never operate kora | accepted, amended 2026-10-16 and 2026-10-19 |
 | [ADR-0003](0003-scheduler-and-workers-over-http.md) | Scheduler and workers are separate processes; workers reach the control plane only through the HTTP API | accepted |
 | [ADR-0004](0004-harness-adapters-over-vendor-sdks.md) | Harness adapters drive harnesses through vendor interfaces (Claude Agent SDK, Codex app-server; an ACP adapter after MVP), not CLI output; harness versions are fixed per installation; kora enforces the limits | accepted, amended 2026-10-16 |
 | [ADR-0005](0005-eleven-protocols-with-conformance-suites.md) | Eleven provider protocols, each with a conformance suite, registered through one entry point | accepted |
@@ -29,7 +31,7 @@ Each record lists the identifiers it absorbs: `DD-n` from the flat register [kno
 | [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md) | Preserve execution uncertainty; require runtime termination and dispatcher closure before replacement; explicit operator reconciliation | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0018](0018-immutable-attempt-history.md) | Immutable deployment contracts and attempt-owned inputs/requests; explicit compatibility, retention and access boundaries | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0019](0019-immutable-run-target-identity.md) | One immutable target per run; atomic acceptance of the complete target-source result; separate history and hold lifecycle | direction and plan accepted 2026-10-17; document pending owner review |
-| [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md) | Bounded outstanding run acceptance, physical execution-run occupancy and independent target holds; canonical start/replay and eligible ordering | direction and plan accepted 2026-10-17; document pending owner review |
+| [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md) | Bounded outstanding run acceptance, physical execution-run occupancy and independent target holds; canonical start/replay and eligible ordering | direction and plan accepted 2026-10-17; amended by ADR-0002 2026-10-19; document pending owner review |
 | [ADR-0021](0021-external-observations-outside-transactions.md) | Unlocked bounded external calls, exact current-owner application and recoverable approval delivery with cooperative providers | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0022](0022-inherited-execution-deadlines.md) | Immutable inherited node/subgraph/run deadlines across managed phases; fixed nominal grace and evidence-based recovery | direction and plan accepted 2026-10-17; document pending owner review |
 | [ADR-0023](0023-code-host-identity-and-purpose-scoped-credentials.md) | Code-host identity: credentials acquired per purpose by trusted code, GitHub App issuance in the control plane, honest backend reports, stable principals | accepted, wording pending review |
