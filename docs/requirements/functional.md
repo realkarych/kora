@@ -26,7 +26,7 @@ MVP definition: basic graphs can be run and deployed; all core functionality is 
 
 Evidence wording amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
 
-Tool-policy coverage amendment dated 2026-10-19 (FR-8b.1): scope and implementation plan approved under [issue #125](https://github.com/realkarych/kora/issues/125); wording pending line-by-line owner review.
+Tool-policy coverage amendment dated 2026-10-19 (FR-8b.1): scope and implementation plan approved under [issue #125](https://github.com/realkarych/kora/issues/125); accepted by the project owner on 2026-10-19.
 
 ## 0. AI-first parity
 

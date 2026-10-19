@@ -1,6 +1,6 @@
 # Threat model
 
-Scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); document accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18. Claude harness amendment dated 2026-10-19 (TM-03, TM-05, TM-06, TM-12 and their evidence): scope and implementation plan approved under [issue #125](https://github.com/realkarych/kora/issues/125); wording pending line-by-line owner review.
+Scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); document accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18. Claude harness amendment dated 2026-10-19 (TM-03, TM-05, TM-06, TM-12 and their evidence): scope and implementation plan approved under [issue #125](https://github.com/realkarych/kora/issues/125); accepted by the project owner on 2026-10-19.
 
 ## Purpose, scope and status
 
