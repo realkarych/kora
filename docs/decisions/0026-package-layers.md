@@ -38,6 +38,7 @@ Several components are shared between these processes: the API client and its mo
   - `kora.__main__` assembles the CLI and MCP entry points, including the commands that need server components: `kora standalone`, the server subcommands such as `kora db upgrade`, and the MCP servers mounted on the API;
   - `kora.standalone` composes the API, scheduler and worker in one process;
   - `kora.testing` runs scenarios on an embedded standalone (`kora test`, the stdio `kora_test` and `run_scenario`, dsl.md section 4).
+- `import kora` alone is allowed only in a composition root.
 - Third-party imports are governed by the stack table, with one exception that also binds the composition roots: only `cel_eval` may import the CEL binding (`cel`), so that `cel`, `ir` and `dsl` work without the `kora[cel]` extra.
 
 **Enforcement.**
