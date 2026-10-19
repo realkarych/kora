@@ -7,6 +7,7 @@
 - Amends: [ADR-0008](0008-content-bound-approvals.md) (observation and channel-delivery lifecycle)
 - Related: ADR-0002, ADR-0003, ADR-0005, ADR-0011, ADR-0013, ADR-0017, ADR-0018, ADR-0019, ADR-0020
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
+- CEL amendment dated 2026-10-19: the approval status `failed` added under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review.
 
 ## Context
 
@@ -24,7 +25,7 @@ Installed providers must keep import, initialization, synchronous work and hooks
 
 **Preserve immutable approval evidence and make push ordering explicit.** Changed-head observations for a pending request retain ADR-0008 invalidation. Ingress processing freezes the exact locally selected wait/request recipients before asynchronous handling; queued events do not attach themselves to replacement waits. Unordered generic ref pushes are conservative negative evidence for those recipients. A remotely old push first arriving during a newer request can therefore cause a conservative failure. Local tokens or arbitrary timestamps do not establish remote chronology. Equal-head pushes never authorize. A final equal-head sample is a point-in-time check; downstream consumes the approved immutable commit, and later external effects require their own provider conditions.
 
-**Recover channel effects through existing approval rows.** Commit request/notification/closure intent before external dispatch. Only a current pending request desires an open channel interaction; approved, rejected, expired, invalidated, cancelled and superseded requests desire it closed. Closing the channel changes no approval audit decision. Approved gates awaiting verification remain unresolved locally, with their channel interaction already closed. A `resolved` notification links the canonical status page for approval/rejection; later gate failure remains visible there.
+**Recover channel effects through existing approval rows.** Commit request/notification/closure intent before external dispatch. Only a current pending request desires an open channel interaction; approved, rejected, failed (an `approve_when` that could not be evaluated, [ir.md section 7.7](../../knowledge/specs/ir.md#77-evaluation-errors)), expired, invalidated, cancelled and superseded requests desire it closed. Closing the channel changes no approval audit decision. Approved gates awaiting verification remain unresolved locally, with their channel interaction already closed. A `resolved` notification links the canonical status page for approval, rejection or failure; later gate failure remains visible there.
 
 Terminal intent prevents new create authorizations and retries. A previously authorized call may still send or finish after cancellation; a database comparison cannot fence that remote send. Retain every learned external ID on the original request and close it, without restoring approval authority. Reconcile uncertain creation through read-only, paginated marker lookup; never create a new request merely to find a terminal one. Search-before-create is not generic exactly-once delivery. Notifications may repeat or arrive out of order; the API remains authoritative.
 

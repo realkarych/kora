@@ -98,7 +98,7 @@ CEL amendment dated 2026-10-19: decisions taken and implementation plan approved
 
 ## 11. Compatibility
 
-- **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 16+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime. The components that evaluate CEL (API, scheduler, standalone and scenario tests) install the expression binding only from published binary wheels, never from source, so they run only where a wheel exists for the Python version and platform; the current matrix is recorded as dated evidence ([stack reference](../../knowledge/architecture/detailed.md#stack-per-component)).
+- **NFR-11.1 [MVP]** Python 3.11+; PostgreSQL 16+; SQLite for standalone; Docker Engine API as the Docker runtime dependency; Linux and macOS hosts for the local runtime. The components that evaluate CEL (API, scheduler, standalone and scenario tests) need the expression binding. Installs kora controls take it only from published binary wheels, and building it from source is unsupported, so these components run only where a wheel exists for the Python version and platform. The current wheel matrix is dated evidence in the [CEL binding probe](../../knowledge/research/cel-binding-probe-2026-10-19.md#installation-and-wheels).
 - **NFR-11.2 [MVP]** Harness compatibility is declared per adapter (tested Claude Code and Codex version ranges) and checked at installation health check and worker start, not per node.
 - **NFR-11.3 [target]** The control plane API is versioned (`/api/v1`) and backwards compatible within a major version.
 

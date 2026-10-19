@@ -6,6 +6,8 @@ Execution-recovery amendment dated 2026-10-17: direction and implementation plan
 
 Publication-boundary amendment dated 2026-10-17: pending owner review; architectural direction recorded in [ADR-0016](decisions/0016-trusted-execution-and-publication.md).
 
+CEL amendment dated 2026-10-19: the approval status `failed` added under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review. See [ADR-0006](decisions/0006-graph-definition-dsl-and-yaml-representation.md).
+
 External-observation amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line owner review. See [ADR-0021](decisions/0021-external-observations-outside-transactions.md).
 
 Consistency amendment dated 2026-10-18: scope approved under [issue #95](https://github.com/realkarych/kora/issues/95); wording pending line-by-line owner review.
@@ -71,7 +73,7 @@ The Targets list includes terminal runs with retained holds and shows active tar
 
 ## Approvals, Cost and System
 
-Approvals has two blocks: the requests waiting for a person (target, graph, how long and the deadline, the bound commit, the run's cost), each opening the review page, and the history of responses (decision and approver, time, commit; invalidated and expired requests with their reason).
+Approvals has two blocks: the requests waiting for a person (target, graph, how long and the deadline, the bound commit, the run's cost), each opening the review page, and the history of responses (decision and approver, time, commit; invalidated, expired and failed requests with their reason, where failed means the response was received but the graph's `approve_when` could not be evaluated).
 
 Cost shows the namespace's spend today against its daily soft limit, the admission-blocked flag when it is set, and the graphs with their tokens today. Daily history and monthly totals follow after MVP.
 

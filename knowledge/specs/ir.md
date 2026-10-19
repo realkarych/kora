@@ -248,7 +248,7 @@ Error classes (closed enum, used by `retry_on`, `non_retryable` and the data mod
 
 ## 7. Expressions and templates
 
-Branch conditions and reasons, retry predicates, `approve_when`, event `match` and sensor `until` are **CEL** (Common Expression Language) expressions (DD-3). kora parses and checks every expression with its own parser and schema-driven checker, then evaluates it through the Rust-backed `common-expression-language` binding, which the `kora[cel]` extra installs ([ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md) as amended under issue #126). Other SDKs use any conforming CEL implementation. Only CEL's standard functions and macros are available, narrowed by the rules below. There are no custom functions and no user code. The parser, limits, checker rules, projections, conversions, data bounds and cost model in this section belong to the execution semantics `kora.execution.v1` ([data-model.md](data-model.md) section 11). Every installation applies the same rules, and changing one of them needs a new semantics identity. Measurements of the binding cited here are dated evidence from the [CEL binding probe](../research/cel-binding-probe-2026-10-19.md), not guarantees.
+Branch conditions and reasons, retry predicates, `approve_when`, event `match` and sensor `until` are **CEL** (Common Expression Language) expressions (DD-3). kora parses and checks every expression with its own parser and schema-driven checker, then evaluates it through the Rust-backed `common-expression-language` binding, which the `kora[cel]` extra installs ([ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md) as amended under issue #126). Other SDKs use any conforming CEL implementation. Only CEL's standard functions and macros are available, narrowed by the rules below. There are no custom functions and no user code. The parser, limits, checker rules, projections, conversions, data bounds and cost model in this section belong to the execution semantics `kora.execution.v1` ([data-model.md](data-model.md) section 11). Every installation applies the same rules, and changing one of them needs a new semantics identity. A new pin of the binding may run under `kora.execution.v1` only if its measured costs stay within the v1 cost weights and its measured crash thresholds stay clear of the v1 limits; otherwise it needs a new semantics identity, so a stored estimate never describes a binding it does not bound. Measurements of the binding cited here are dated evidence from the [CEL binding probe](../research/cel-binding-probe-2026-10-19.md), not guarantees.
 
 ### 7.1 Expression kinds and environments
 
@@ -264,8 +264,8 @@ Branch conditions and reasons, retry predicates, `approve_when`, event `match` a
 
 - `inputs.<name>` is the node's declared input, bound from the stored projection of the consumed artifact version (section 7.5). An input declared `optional: true`, and `$previous_attempt`, is a non-required member.
 - `outputs.<name>` is an output of the failed attempt, or an export of the failed subgraph attempt, that passed validation and the data bounds. Every member is non-required.
-- `params` are the run parameters, typed by `graph.params`.
-- `response` is the approval form response, typed by `form`.
+- `params` are the run parameters, typed by `graph.params` and bound from the projection cut at run creation.
+- `response` is the approval form response, typed by `form`, projected and bound-checked when the response is received.
 - `payload` is the inbound event body and `observation` the sensor result. Neither has a declared schema; both are `map(string, dyn)`.
 
 ### 7.2 Parser, limits and canonical rendering
@@ -275,8 +275,8 @@ kora's own lexer and recursive-descent parser follow the CEL grammar of cel-spec
 Static limits. An expression or path over any of them is `IR027`, including a `maxLength` violation found by schema validation:
 
 - At most **4,096 code points**, checked before lexing. `ir.schema.json` carries the same `maxLength`.
-- Syntax-tree depth at most **32**. Depth is measured on the built tree. Each binary-operator link, selection, index, call receiver, unary operator, parenthesis, list or map literal and macro body adds one level, checked as each node is built, so chains a parser builds in a loop (`a + a + …`, `a.b.b…`) count fully.
-- At most **4 comprehension macros** (`all`, `exists`, `exists_one`, `map`, `filter`) per expression, nested at most **2** deep.
+- Syntax-tree depth at most **32**. Depth is measured on the built tree: each binary-operator link, conditional `?:` branch, selection, index, call receiver or argument, unary operator, parenthesis, list or map literal and macro body adds one level. It is checked on every descent of the parser, before recursing, and as each node is built, so prefix nesting (`((((`, `!!!!`, `----`) stops with `IR027` before any recursion limit and chains a parser builds in a loop (`a + a + …`, `a.b.b…`) count fully.
+- At most **4 comprehension macros** (`all`, `exists`, `exists_one`, `map`, `filter`) per expression, nested at most **2** deep. A macro nests in another when it appears in that macro's body; a macro in another macro's receiver, as in a chain `l.map(…).map(…)`, does not nest.
 
 Lexing, parsing, checking and the cost estimate are linear in the size of the tree. Checking stops at an expression's first error.
 
@@ -286,11 +286,11 @@ The probe measured these thresholds on one macOS machine:
 - a chain of about 12,000 selections or additions crashed the process with SIGSEGV on a main thread;
 - on a 256 KiB thread stack, a chain of 300 survived and 1,000 crashed.
 
-The limits keep a wide margin below them on the evaluation thread of section 7.6. Every change of the binding pin re-measures them, separately for compile and for evaluation.
+The limits keep a wide margin below them on the evaluation thread of section 7.6. Every change of the binding pin re-measures them, separately for compile and for evaluation, under the pin rule above.
 
-**Canonical rendering.** From the checked tree kora writes a canonical text: every operator parenthesized, string and bytes literals in one escaped form, no comments, normalized whitespace. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked. The IR keeps the author's text.
+**Canonical rendering.** From the checked tree kora writes a canonical text: every operator parenthesized, string and bytes literals as double-quoted non-raw literals with only the escapes `\\`, `\"`, `\n`, `\r`, `\t` and `\u`/`\U` for other control and non-ASCII characters, no comments, single spaces. Deployment parses the rendering again with kora's parser and requires the identical tree, otherwise `IR011`. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked. The IR keeps the author's text.
 
-**Where the binding runs.** Server-side validation (`/validate`, `/plan`, deployment) compiles every rendering with the binding; a rejection is `IR011`, reported without the binding's message. `kora compile` runs on the author's machine with kora's parser and checker only and never imports the binding ([dsl.md](dsl.md) section 2). Deployment stores the rendering, the projection path sets (section 7.5) and the cost estimate with the graph version, and evaluation never recomputes them.
+**Where the binding runs.** Server-side validation (`/validate`, `/plan`, deployment, and `kora_compile` through `/validate`) compiles every rendering with the binding, deduplicated by rendering, and compiles each distinct `matches()` pattern once; a rejection is `IR011`, reported without the binding's message. `kora compile` runs on the author's machine with kora's parser and checker only and never imports the binding ([dsl.md](dsl.md) section 2). Deployment stores the rendering, the projection path sets (section 7.5) and the cost estimate with the graph version, and evaluation never recomputes them.
 
 ### 7.3 Paths
 
@@ -306,17 +306,25 @@ The limits keep a wide margin below them on the evaluation thread of section 7.6
 
 Types come from the saved type closure (section 2.1). It is resolved lazily and memoized within one validation, so recursive `$ref` structures are checked in bounded time. Each input is typed from the producer's effective saved output contract at its call site.
 
+A schema is mapped after resolving `$ref` and a single-schema `allOf`. Its type then comes from `type`, or, when `type` is absent, from its keywords: `properties` means an object, `items` or `prefixItems` an array, and `enum` or `const` the JSON type of their values. The first matching row wins:
+
 | JSON Schema | CEL type |
 |---|---|
+| `type: [T, "null"]`, `anyOf`/`oneOf` of `T` and `null`, or an `enum` of one type plus `null` | nullable `T`, following CEL wrapper types |
 | object with `properties` | record of the declared fields, with the `required` set; `additionalProperties` types index reads |
 | object without `properties`, or with only `patternProperties` | `map(string, V)`; `V` from `additionalProperties` or `patternProperties`, else `dyn` |
-| `type: string`, string `enum` or `const` | `string`, with its allowed values |
-| `type: integer` | `int` |
-| `type: number`, numeric `enum` or `const` | `double` (`int` under `type: integer`) |
-| `type: boolean` | `bool` |
-| `type: array` with `items` | `list(T)`; with `prefixItems`, `list(dyn)` |
-| `type: [T, "null"]`, or `anyOf`/`oneOf` of `T` and `null` | nullable `T`, following CEL wrapper types |
-| any other `anyOf`, `oneOf` or multi-schema `allOf`, the boolean schema `true`, a schema without `type` | `dyn` |
+| string, or an `enum` or `const` of strings | `string`, with its allowed values |
+| integer | `int` |
+| number, or an `enum` or `const` of numbers | `double` (`int` under `type: integer`) |
+| boolean | `bool` |
+| array with `items` | `list(T)`; with `prefixItems` or without `items`, `list(dyn)` |
+| any other `anyOf`, `oneOf` or multi-schema `allOf`, an `enum` of mixed types, the boolean schema `true`, a schema with no type, keyword or `$ref` | `dyn` |
+
+`payload` and `observation` are `map(string, dyn)`, and a `dyn` value is checked dynamically:
+
+- selection on a map or `dyn` value is allowed and needs no guard; a missing key is the evaluation error `missing_field`;
+- a `dyn` operand satisfies the same-type rule for `==`;
+- a `dyn` result passes checking and is checked for exact `bool` (or `string`) when evaluated.
 
 These rules give `IR011`, reported at the expression's YAML path and offset:
 
@@ -330,9 +338,12 @@ These rules give `IR011`, reported at the expression's YAML path and offset:
   - Ordering across `int`, `uint` and `double` is allowed.
   - Arithmetic that mixes numeric types needs `double()` or `int()`.
 - **Optional fields.** Reading a non-required field without a guard on the same path is rejected.
-  - The guards are: `has(p)` as the left operand of `&&`; `!has(p)` as the left operand of `||`; `has(p)` as the condition of `?:`.
+  - The guards are:
+    - `has(p)` as any conjunct to the left of the read in an `&&` chain;
+    - `!has(p)` as any disjunct to the left of the read in an `||` chain;
+    - `has(p)` as the condition of `?:` for its true branch.
   - `'k' in x` guards `x['k']` in the same positions.
-  - The parent of a `has()` operand must itself be present or guarded.
+  - The parent of a `has()` operand must itself be present or guarded, as in `has(a.b) && has(a.b.c) && a.b.c`.
 - **Null.** A comparison with `null` yields `bool`. Selection, ordering, arithmetic or a call on a `null` value is an evaluation error.
 - **`size()`** on a `string` or a `dyn` value is rejected while the binding counts UTF-8 bytes instead of code points.
 - **`matches()`** takes a string-literal pattern only. The server-side compile also compiles the pattern in the binding's regular-expression syntax, which has no backreferences and a compiled-size limit.
@@ -346,27 +357,43 @@ Diagnostics come out in YAML-path order, then offset order, one per expression. 
 
 **Projection path sets.** At deployment the checker records, for every output an expression can read, the set of paths it reads, and freezes these path sets in `graph_version.execution_contract`.
 
-- Paths compose through every route by which a value reaches an expression: `inputs[*].path`, `$inputs` forwarding into a body, the fan-out element, `collect`, subgraph exports, `$params` (cut from `run.params`) and `$previous_attempt`.
-- A dynamic index, a comprehension range or a whole-value read projects the whole subtree at its path.
+- **Notation.** A path set is a sorted list of section 7.3 paths, in which `[*]` stands for every element of a list and `['k']` for a map key.
+- **Composition.** Paths compose through every route by which a value reaches an expression:
+  - `inputs[*].path`;
+  - `$inputs` forwarding into a body;
+  - the fan-out element, which becomes `[*]` on the mapped list;
+  - `collect` and subgraph exports;
+  - `$params`, cut from `run.params`;
+  - `$previous_attempt`, including `artifacts['n.o']`, whose paths compose into the earlier iteration's output.
+- **Whole subtrees.** A dynamic index, a comprehension range, a whole-value read and a `has()` operand project the whole subtree at their path.
 
-**Cutting and storing.** kora cuts the projection when an output is validated at upload, including a staged target-source output (ADR-0019).
+**Cutting and storing.** Every projection is cut once, by whichever step produces its value:
 
-- It cuts from the validated payload, converts the values as described below and stores the result inline in the metadata database with the artifact version.
-- Collectors and exports reuse their children's stored projections, so no storage I/O happens inside a scheduler transaction.
-- A projection follows its artifact's payload retention and `payload_state` ([data-model.md](data-model.md) section 10).
+- **Uploaded outputs.** An uploaded output is cut when it is validated at upload, including a staged target-source output (ADR-0019).
+- **Scheduler-produced outputs.** Each is cut in the transition that produces it: a `human_input` response, a `wait_event` payload output, a `PreviousAttempt`, a fan-out collection and a subgraph export. A collection or export is re-cut from its children's stored projections under its own path set, so no storage I/O happens inside a scheduler transaction.
+- **Run parameters.** They are cut at run creation.
 
-**Binding.** Evaluation binds only stored projections. A path in the frozen set that the stored projection lacks is the error kind `projection_unavailable`, never an absent field. The artifact type's `summary` serves API and console views and is never visible to CEL ([protocols.md](protocols.md) section 8). `payload` and `observation` are projected once per event or observation, by a bounded walker over the paths the waiting expressions read. That projection is reused across every wait it is matched against.
+kora cuts from the validated value, converts it as described below, checks it against the data bounds of section 7.6 and stores it inline in the metadata database with the artifact version, or with the run for parameters. A projection keeps its artifact's retention class: the artifact-payload period, the transcript period for `AgentSession`, or forever for reference-only types ([data-model.md](data-model.md) section 10). Listings never load it.
+
+**Binding.** Evaluation binds only stored projections.
+
+- **Absent and unavailable.** A path missing from the value is absent in the projection, as it would be in the payload. A projection that is itself unavailable is the error kind `projection_unavailable`, never absent data. A projection is unavailable when its `payload_state` is not `present`, when it was never cut, or when it was cut under a different path set.
+- **Summaries.** The artifact type's `summary` serves API and console views and is never visible to CEL ([protocols.md](protocols.md) section 8).
+- **`payload` and `observation`.** They are projected once per event or observation and per frozen path-set digest, by a bounded walker, and the bounds are checked against that path set. A wait's result therefore never depends on which other waits are open. The projection is a disposable, bounded cache, recomputed after a restart.
 
 **Conversion.** It follows the producer's saved contract:
 
-- `integer` becomes `int`, and `1.0` becomes `1`. A value outside the signed 64-bit range is invalid:
-  - an output fails with `artifact_invalid`;
-  - a direct form response, or run parameters, are refused with the existing validation error;
-  - a polled channel response is not applied, the request stays `pending`, and a diagnostic is recorded.
-- `number` becomes `double`.
-- Without a schema (`payload`, `observation`, `dyn` subtrees), every JSON number becomes `double`, as in CEL's JSON mapping.
-- Strings stay strings, whatever their `format`.
-- Schema defaults are not filled in.
+- **Integers.** `integer` becomes `int`, and `1.0` becomes `1`.
+- **Numbers.** `number` becomes `double`.
+- **Values without a schema** (`payload`, `observation`, `dyn` subtrees). Every JSON number becomes `double`, as in CEL's JSON mapping.
+- **Strings.** They stay strings, whatever their `format`.
+- **Schema defaults** are not filled in.
+
+**Invalid values at entry.** A value outside the signed 64-bit range under `integer`, or data over a section 7.6 bound, is refused where it enters kora:
+
+- an output fails with `artifact_invalid`;
+- a direct form response, and run parameters at trigger, webhook start and rerun, are refused with `API003`;
+- a polled channel response is not applied, the request stays `pending`, and a diagnostic is recorded ([scheduler.md](scheduler.md) section 16.3).
 
 **The FR-2.5 example.** In the IR it reads `inputs.review.verdict == "approved" && inputs.bench.cpu < inputs.baseline.cpu * 0.85`.
 
@@ -380,7 +407,7 @@ Diagnostics come out in YAML-path order, then offset order, one per expression. 
 
 | bound | limit |
 |---|---|
-| total size of the bound values | 64 KiB of canonical JSON |
+| total size of the bound values, and of each stored projection | 64 KiB of canonical JSON |
 | list length | 1,000 elements |
 | string length | 16 KiB of UTF-8 |
 | nesting depth | 32 |
@@ -388,40 +415,60 @@ Diagnostics come out in YAML-path order, then offset order, one per expression. 
 
 Where each bound is checked:
 
-- **Per projection**, and per element of a fan-out `over` list, at upload. Over a bound, the producer fails with `artifact_invalid`. For a scheduler-produced collection or export, the producing node fails with `artifact_invalid`.
-- **The total**, at binding. Over the bound, the evaluation error kind is `bound_exceeded`.
+- **At the cut.** Every stored projection is checked against every bound where it is cut (section 7.5). For a fan-out `over` list, each element is checked as well as the list. Over a bound:
+  - the producer fails with `artifact_invalid`, including a scheduler-produced collection, export, response, payload or `PreviousAttempt`, whose producing node fails;
+  - a refused run parameter or direct response is `API003`;
+  - a polled response stays `pending`.
+- **At binding.** The total is checked; over it, the evaluation error kind is `bound_exceeded`.
 - **`payload` and `observation`**, at projection. Over a bound, the result is an evaluation error with the meaning of section 7.7.
 
-**Cost estimate.** At validation the checker computes each expression's worst-case cost from its tree and the size bounds of its variables; a smaller `maxItems` or `maxLength` in a schema tightens the bounds.
+**Cost estimate.** At validation the checker computes each expression's worst-case cost from its tree and the size bounds of its variables; a smaller `maxItems` or `maxLength` in a schema tightens the bounds. The estimate has two dimensions:
 
-- **What it charges.** Each operation is charged at the pinned binding's measured complexity:
-  - `map` and `filter` are quadratic in the list length (binding 0.10.0);
-  - `matches()` compiles its pattern on each call;
-  - concatenation, equality, `in` and conversions are charged by operand size.
-- **What it bounds.** The size of every intermediate value as well as the number of steps. An expression over the budget is `IR027`.
-- **The budget and calibration.**
-  - The budget targets 10 ms and 16 MiB per evaluation on a named reference CI runner.
-  - The first implementation fixes the budget in estimate units, the per-operator weights and the reference runner from registered measurements, and a golden corpus pins the estimate. The evaluator does not ship without them.
-  - Every change of the binding pin recalibrates the weights.
+- **Steps.** The work charged by the table below.
+- **Memory.** The peak size of live intermediate values.
+
+An expression over either dimension of the budget is `IR027`. The charges follow the pinned binding's measured complexity, not CEL's nominal cost:
+
+| charge | proportional to |
+|---|---|
+| each evaluation | a fixed base, plus the bound size of every variable it binds (the binding converts all bound data on every call) |
+| a node visit | one unit |
+| `all`, `exists`, `exists_one` | the range's bound length times the body's charge; nested macros multiply |
+| `map`, `filter` | the square of the range's bound length (binding 0.10.0), plus the range length times the body's charge |
+| `+` on strings, bytes and lists; list and map literals | the result size, which is the sum of the operand sizes and propagates to every consumer |
+| result size of `map` and `filter` | the range length times the body's result size |
+| `==`, `!=`, `in` | the operand sizes |
+| conversions and string functions | the operand size |
+| `matches()` | the compiled size of its literal pattern, measured at the server-side compile, plus the subject length, on every call |
+
+**Calibration.**
+
+- The budget targets 10 ms and 16 MiB per evaluation on a named reference CI runner.
+- The first implementation fixes, from registered measurements, the budget in estimate units, the weight of each charge and the reference runner, and a golden corpus pins the estimate. The evaluator does not ship without them.
+- The weights belong to `kora.execution.v1`, under the pin rule at the start of section 7.
 
 Two consequences follow:
 
 - With binding 0.10.0 one `map` over a 1,000-element list takes about 14 ms, so such an expression needs a smaller `maxItems`.
-- The size bound rejects compounding concatenation inside sequential `map` operations: four of them, each joining eight copies of a 16 KiB element, denote 64 MiB while fitting every static limit.
+- The memory dimension rejects compounding concatenation inside sequential `map` operations. Four of them, each joining eight copies of a 16 KiB element of a list with `maxItems: 1`, denote 64 MiB while fitting every static limit.
 
 **Evaluation.** It runs in the API and scheduler processes, inside the existing short transactions ([scheduler.md](scheduler.md) section 2).
 
-- **The evaluation thread.** Each process has one dedicated long-lived evaluation thread with an explicit stack of at least 1 MiB, created for it rather than by a process-wide stack setting.
-  - It runs one evaluation at a time; the server-side compile of section 7.2 uses the same thread.
-  - It is joined at shutdown, and a cancelled caller discards its result.
-- **The compiled-program cache.** Compiled programs live in a bounded cache keyed by deployment digest and field, released when the version is no longer runnable.
-- **No interruption.** The binding holds the GIL while it evaluates and cannot be interrupted (probe), so these bounds keep evaluation short, not a timeout.
+- **The evaluation thread.** Each process has one dedicated long-lived evaluation thread with a stack of at least 1 MiB. Startup sets the thread stack size, creates the thread and restores the previous setting, so no other thread is affected.
+  - It runs one job at a time.
+  - Evaluations requested from inside a transaction take priority over server-side compile jobs. Compile work is submitted one expression at a time, so an evaluation waits for at most one compile.
+  - At shutdown, queued jobs are rejected and the job in flight is joined with a deadline. A cancelled caller discards its result.
+- **The compiled-program cache.** Compiled programs live in a cache bounded by count, with least-recently-used eviction, keyed by deployment digest and the expression's YAML path. A compile on a miss is charged to the allowance.
+- **No interruption.** The binding holds the GIL while it parses or evaluates and cannot be interrupted (probe). These bounds, not a timeout, keep evaluation short.
 
-**Evaluation allowance.** The installation limits the sum of estimates evaluated in one scheduler transaction; by default the sum may reach the equivalent of 50 ms.
+**Evaluation allowance.** The installation limits the sum of charges evaluated in one scheduler transaction; by default the sum may reach the equivalent of 50 ms, and it may never be set below the per-evaluation budget.
 
-- When the allowance is used up, the pass commits what it has decided, leaves `needs_scheduling` set for the rest and moves on, rotating across runs and namespaces.
-- One inbound event is matched against open waits in batches under the same allowance.
-- The allowance changes only the order of work, never a result, so it is installation configuration rather than execution semantics.
+- **Scope.** The allowance applies to every scheduler transaction that evaluates CEL: the branch pass, retry handling, wake-ups and prepared-observation apply.
+- **Progress.** Each transaction evaluates at least one expression. When the allowance is used up, the pass commits what it has decided, leaves `needs_scheduling` set for the rest and moves on, rotating across runs and namespaces.
+- **Events.** One inbound event is matched against open waits in batches, per run and under that run's lock.
+- **Order, not results.** The allowance changes when work happens, never how an expression evaluates. Deferred work may cross a wait's expiry, which the existing expiry rules then decide.
+- **Configuration.** It is installation configuration rather than execution semantics.
+- **API evaluations.** An evaluation in the API (`approve_when`) is not under the allowance and is bounded by the per-evaluation budget alone.
 
 ### 7.7 Evaluation errors
 
@@ -437,7 +484,11 @@ Two consequences follow:
   | `ZeroDivisionError` | `division_by_zero` |
   | `OverflowError` | `overflow` |
 
-- Raised by kora itself: `bound_exceeded`, `number_out_of_range`, `wrong_result_type` (anything that is not exactly `bool`, or `string` for reasons; Python truthiness never applies) and `projection_unavailable`.
+- Raised by kora itself:
+  - `bound_exceeded`;
+  - `number_out_of_range`;
+  - `wrong_result_type`: anything that is not exactly `bool`, or `string` for reasons; Python truthiness never applies;
+  - `projection_unavailable`.
 - `internal_fault`, logged at ERROR, covers everything the checker should already have prevented: a `ValueError` or `RuntimeError` at execution, and the binding's parser panic.
 
 **Catching.** Exceptions are caught narrowly, around the binding call only; kora's own conversion code runs outside that handler.
@@ -445,22 +496,33 @@ Two consequences follow:
 - The parser panic class is a `BaseException`. It is resolved exactly when the process starts, and a process that cannot resolve it refuses to start.
 - `CancelledError`, `KeyboardInterrupt` and `SystemExit` are never caught.
 
+**The error record.** A recorded error has these fields:
+
+- **`kind`**: one of the kinds above.
+- **`field`**: the YAML path of the expression.
+- **`offset`**: set only when kora itself locates the fault, null for kinds the binding raises.
+- **`event_id`**: for a `match` error, the inbound event's identifier.
+- **`observed_at`**: for an `until` error, the time of the observation.
+- **`at`**: when the error was recorded.
+
+A node that fails because of an evaluation error fails with `config_error`, reason `cel_evaluation_error`, and carries this record in its details.
+
 **Meaning per kind**, beyond section 7.1:
 
-- **`approve_when`** is evaluated only after the response has passed the staleness, commit and digest, and approver checks (section 4.2). On an error:
+- **`approve_when`** is evaluated only after the response has passed the staleness, commit and digest, and approver checks (section 4.2). A response refused by those checks is never evaluated. On an error:
   - the response is kept with the request, and the request becomes `failed` ([data-model.md](data-model.md) section 4);
-  - `approval.responded` records `applied: true` and the error kind;
-  - the channel closes the request with a notification that the response could not be applied;
+  - `approval.responded` records `applied: true` and the error record;
+  - the channel is closed with `notify(resolved)` linking the canonical status, which shows `failed`;
   - the node fails with `config_error`.
 
-  A `failed` request never counts as approval. A direct API response returns HTTP 200 with the request's status.
+  A `failed` request never counts as approval, and a later response is recorded with `applied: false`. A direct API response returns HTTP 200 with the request's status.
 - **`retry.predicate`** is evaluated only when the class is retryable, listed in `retry_on` and attempts remain. It is never evaluated for `infrastructure` or `provider_limited`, which do not consume attempts. Every `outputs.*` read needs a `has()` guard (section 7.4). An error is recorded on the node's failure event.
-- **`match`.** A durable per-wait cursor ensures each event and wait pair is evaluated at most once, whether the result is false or an error.
-- **`until`.** An error counts as a successful observation for dispatch: the token is consumed, the next poll keeps the normal interval and the integration is not degraded ([scheduler.md](scheduler.md) section 16). A start binding consumes no occurrence or cursor and writes no `trigger.*` event.
-- **Recording external errors.** The last `match` or `until` error is stored on the wait or the start binding, written only from a current claim, and is visible in the API and the console.
-- **Expired data.** `projection_unavailable` on a node is `config_error`.
+- **`match`.** Each event and wait pair is evaluated at most once, whether the result is false or an error. The evaluating transaction appends the wait to the event's `evaluated_for` list ([data-model.md](data-model.md) section 2), together with any consumption. An event is eligible for a wait under the existing matching rules, and an open wait with an eligible event it has not evaluated keeps its run's `needs_scheduling` set. A `match` error is written in that pass-6 transaction, after the exact open wait is verified under the run lock.
+- **`until`.** An error counts as a successful observation for dispatch: the token is consumed, the next poll keeps the normal interval and the integration is not degraded ([scheduler.md](scheduler.md) section 16). A start binding consumes no occurrence or cursor and writes no `trigger.*` event. An `until` error is written only from the current claim.
+- **Recording external errors.** The last `match` or `until` error is stored on the wait or the start binding and is visible in the API and the console.
+- **Unavailable inputs.** `projection_unavailable` fails the owning node with `config_error` for every kind, waits included, because an expired or missing projection never becomes available again.
 
-**Safe content.** Errors stored on a node failure, a wait, a start binding, an approval request or an event, and every error the API returns, carry only the error kind, field, offset and the event or observation identifier. They never carry expression text, bound values, binding messages, chained exceptions or panic payloads. Diagnostics follow the same rule ([observability.md](observability.md) section 5). The evaluating component emits them, the scheduler or the API, and deduplicates them on the wait, binding or node, the field and the error kind.
+**Safe content.** Error records stored on a node failure, a wait, a start binding, an approval request or an event, and every error the API returns, carry only the fields above. They never carry expression text, bound values, binding messages, chained exceptions or panic payloads. Diagnostics follow the same rule ([observability.md](observability.md) section 5), including at DEBUG. The evaluating component emits them, the scheduler or the API, and deduplicates them on the wait, binding or node, the field and the kind.
 
 ### 7.8 Conformance
 
@@ -473,72 +535,88 @@ The cel-spec conformance suite runs in CI against the binding, through a hand-wr
 
 ### 7.9 Future contracts
 
-The parser, checker, cost estimate and textproto reader are unit-tested, as AGENTS.md allows for parsers, checkers and arithmetic. Every test that touches the metadata database runs on PostgreSQL and SQLite. All are `pending implementation`.
+The parser, checker, cost estimate and textproto reader are unit-tested, as AGENTS.md allows for parsers, checkers and arithmetic. Every test that touches the metadata database runs on PostgreSQL and SQLite. All are `pending implementation` and deterministic; anything that measures time or memory is a measurement below, not a test.
 
 | Test | Required result |
 |---|---|
 | `test_cel_rejects_unknown_field` | `response.decison` and a dot selection of an undeclared field on an open object are `IR011` at the right offset |
 | `test_cel_rejects_non_boolean_approve_when` | `approve_when: "response.decision"` is `IR011` |
 | `test_cel_converts_json_numbers_to_schema_types` | stored `100` under `number` binds as `double` and the FR-2.5 example evaluates; under `integer` the checker rejects `int * double`; schema-less numbers bind as `double` |
-| `test_cel_rejects_expression_over_depth_limit` | 33 levels of each node kind (`+` and selection chains, `!`, parentheses, calls, literals, macro bodies) are `IR027`; 32 levels are accepted and compile in the binding |
+| `test_cel_rejects_expression_over_depth_limit` | 33 levels of each node kind (`+`, `&&` and selection chains, `?:`, `!`, `-`, parentheses, call arguments, list literals) are `IR027`. 4,096 code points of prefix or conditional nesting are `IR027` without a recursion error |
 | `test_cel_rejects_expression_over_length_limit` | 4,097 code points are `IR027`, also when found by schema validation |
-| `test_cel_rejects_comprehension_over_limits` | a fifth macro and a third nesting level are `IR027` |
-| `test_cel_cost_estimate_rejects_compounding_concatenation` | four sequential `map` operations joining eight copies of a 16 KiB element are `IR027` for the cost budget, not for a static limit |
-| `test_cel_cost_estimate_bounds_measured_cost` | for each operation family at the budget, the measured cost on the reference runner stays within the estimate |
+| `test_cel_rejects_comprehension_over_limits` | a fifth macro, and a macro in the body of a macro in the body of a macro, are `IR027`; four chained macros are accepted |
+| `test_cel_limits_at_boundary_compile_in_binding` | expressions exactly at the length, depth and comprehension limits pass the checker and compile in the binding |
+| `test_cel_cost_estimate_rejects_compounding_concatenation` | four sequential `map` operations, each joining eight copies of a 16 KiB element of a list with `maxItems: 1`, are `IR027` for the memory dimension, not for a static limit or the step dimension |
 | `test_cel_cost_estimate_golden_corpus` | the estimate of every corpus expression is unchanged |
+| `test_cel_regex_compile_cost_bounded` | a literal pattern whose compiled size exceeds the budget is `IR027`; a request compiles each distinct pattern once |
 | `test_cel_rejects_non_literal_regex_pattern` | `x.matches(y)` with a non-literal `y` is `IR011`; a literal with a backreference is `IR011` at server-side validation |
 | `test_cel_binding_compiles_canonical_rendering` | the binding receives only kora's rendering; a lexically ambiguous author text cannot reach it |
-| `test_cel_canonical_rendering_matches_author_text` | over a corpus and generated expressions, author text and rendering give equal results in the binding |
+| `test_cel_canonical_rendering_matches_author_text` | every rendering parses back to the identical tree; over a corpus and generated expressions, author text and rendering give equal results in the binding |
 | `test_cel_paths_obey_limits_and_never_reach_binding` | an over-long or over-deep path is `IR027`; resolution never calls the binding |
 | `test_deploy_rejects_hand_written_ir_over_cel_limit` | `/validate`, `/plan` and deployment reject a hand-written IR over each limit and over the budget |
-| `test_cel_validation_diagnostics_bounded` | a 4 MB request of maximal expressions returns a bounded diagnostic list with its omitted count |
-| `test_cel_rejects_unknown_enum_literal` | `response.decision == 'aprove'` is `IR011` |
+| `test_cel_validation_work_bounded` | a 4 MB request of maximal expressions compiles each distinct rendering once and returns a bounded diagnostic list with its omitted count |
+| `test_cel_rejects_unknown_enum_literal` | `response.decision == 'aprove'` is `IR011`, also for an `enum` without `type` |
 | `test_cel_rejects_mixed_int_double_equality` | `inputs.same.exit_code == 0.0` is `IR011`; `inputs.metrics.cpu_seconds < 100` is accepted |
-| `test_cel_rejects_unguarded_optional_field` | an unguarded optional read, and an unguarded `outputs.*` read in a predicate, are `IR011`; each guard form is accepted |
+| `test_cel_rejects_unguarded_optional_field` | an unguarded optional read, and an unguarded `outputs.*` read in a predicate, are `IR011`; each guard form is accepted, including inside conjunction and disjunction chains and nested `has()` chains |
+| `test_cel_dyn_selection_needs_no_guard` | `observation.body.ready == true` and `payload.commit == inputs.bundle.facts.change.commit` pass the checker; a missing key at run time is `missing_field` |
 | `test_cel_rejects_string_size` | `size()` on a string or a `dyn` value is `IR011`; on lists, maps and bytes it is accepted |
-| `test_cel_recursive_closure_checked_in_bounded_time` | recursive and doubly referenced `$ref` closures are checked in time linear in their size |
+| `test_cel_recursive_closure_checked_in_bounded_time` | recursive and doubly referenced `$ref` closures are checked in a number of checker steps linear in their size, counted deterministically |
 | `test_cel_child_type_keeps_parent_cel_types` | a child type narrowing `number` to `integer` is `IR003` |
 | `test_cel_examples_pass_checker` | every expression in the example IRs and in dsl.md section 1 passes the checker against published built-in schemas |
 | `test_cel_parser_agrees_with_binding_compile` | every corpus or generated expression kora accepts compiles in the binding |
-| `test_cel_server_validation_compiles_with_binding` | an expression the binding rejects is `IR011` at `/validate` without the binding's message, never a server error |
-| `test_kora_compile_and_validate_report_same_location` | for faults kora's own parser and checker find, `kora compile` and `/validate` report the same code, YAML path and offset |
+| `test_cel_server_validation_compiles_with_binding` | an expression the binding rejects is `IR011` at server-side validation without the binding's message, never a server error |
+| `test_kora_compile_and_validate_report_same_location` | for faults kora's own parser, checker and estimate find, `kora compile` and `/validate` report the same code, YAML path and offset, with a character outside the Basic Multilingual Plane before the fault |
 | `test_kora_compile_does_not_import_cel_binding` | a fresh `kora compile` process never loads the binding |
-| `test_cel_projection_matches_full_binding` | evaluating over the stored projection gives the result of evaluating over the full payload |
-| `test_cel_projection_composes_through_collect_and_exports` | projections through `collect`, exports, `$inputs`, `$params` and `$previous_attempt` carry every read path |
+| `test_cel_projection_matches_full_binding` | evaluating over the stored projection gives the result of evaluating over the full value |
+| `test_cel_projection_absent_optional_is_absent` | an optional field absent from an available projection is false to `has()`; an expired, never-cut or differently cut projection is `config_error`, and a manual retry needing it is refused with `API002` |
+| `test_cel_projection_composes_through_collect_and_exports` | projections through `inputs[*].path`, the fan-out element, `collect`, exports, `$inputs`, `$params` and `PreviousAttempt.artifacts` carry every read path |
+| `test_cel_scheduler_produced_outputs_are_projected` | a form response, a wait payload output, a `PreviousAttempt`, a collection and an export are cut in their producing transition; over a bound the producing node fails with `artifact_invalid` |
+| `test_cel_projection_number_kinds_round_trip` | stored `int` and `double` values keep their kind on both databases |
 | `test_cel_oversized_projection_fails_producer_with_artifact_invalid` | an over-bound projection fails its producer, including a staged target source, atomically |
-| `test_cel_rejects_out_of_range_integer_at_entry` | an `integer` beyond 64 bits fails an output, and is refused in a form response and in run parameters |
-| `test_cel_external_projection_over_bound_is_no_match` | an over-bound `payload` is no match and an over-bound `observation` is "not yet" |
+| `test_cel_rejects_over_bound_data_at_entry` | an `integer` beyond 64 bits, or data over any bound, fails an output, is `API003` for a direct response and for parameters at trigger, webhook start and rerun, and leaves a polled response `pending` |
+| `test_cel_external_projection_over_bound_is_no_match` | an over-bound `payload` is no match and an over-bound `observation` is "not yet"; with two waits of different graph versions, one wait's wider path set does not change the other's result |
 | `test_cel_retry_predicate_ignores_invalid_outputs` | an output that failed validation is absent to `has()` |
-| `test_cel_branch_error_fails_with_config_error` | a `when` or `reason` error fails the branch with `config_error`, and direct targets become `upstream_failed` |
-| `test_cel_approve_when_error_marks_request_failed` | on the API and the channel path the request becomes `failed`, the response is kept, the channel closes and the node fails with `config_error` |
+| `test_cel_branch_error_fails_with_config_error` | a `when` or `reason` error fails the branch with `config_error`, reason `cel_evaluation_error`, and direct targets become `upstream_failed` |
+| `test_cel_approve_when_error_marks_request_failed` | on the API and the channel path the request becomes `failed`, the response is kept, the channel closes and the node fails with `config_error`. The direct response is HTTP 200 with status `failed`, `?status=failed` lists the request, and a later response is `applied: false` |
+| `test_cel_approve_when_not_evaluated_without_authority` | responses refused for `API005`, `API006`, approver rules or a stale token are never evaluated; the request stays `pending` and the node is not failed, on both paths |
 | `test_cel_retry_predicate_error_keeps_original_class` | a predicate error prevents the retry and keeps the attempt's class; `infrastructure` and `provider_limited` never evaluate the predicate |
-| `test_cel_match_evaluated_once_per_wait` | across ticks and a restart, an event and wait pair is evaluated at most once; an error is no match and is visible |
+| `test_cel_match_evaluated_once_per_wait` | each eligible event and wait pair is evaluated exactly once, and an error is no match and is visible. This holds across ticks and a restart, and when an event with a lower identifier commits late (a PostgreSQL barrier, and the serialized SQLite equivalent) |
 | `test_cel_until_error_keeps_waiting_and_is_visible` | an `until` error keeps the wait open and the start binding idle, and records the error from the current claim only |
 | `test_cel_until_error_does_not_degrade_integration` | repeated `until` errors leave the integration's failure count and interval unchanged |
 | `test_cel_dyn_result_requires_exact_bool` | `observation.body.ready` returning `"false"` is `wrong_result_type`, never true |
-| `test_cel_evaluation_allowance_yields_between_batches` | at the allowance, the pass commits, leaves `needs_scheduling` set and serves another run |
-| `test_cel_binding_exceptions_map_to_error_kinds` | each documented binding exception maps to its kind |
+| `test_cel_evaluation_allowance_yields_between_batches` | at the allowance, the pass commits, leaves `needs_scheduling` set and serves another run of another namespace; each transaction evaluates at least one expression; the rest continues after a restart |
+| `test_cel_binding_exceptions_map_to_error_kinds` | each documented binding exception maps to its kind, with a null `offset` |
 | `test_cel_panic_maps_and_preserves_cancellation` | the parser panic becomes `internal_fault`; cancellation during evaluation still propagates |
-| `test_cel_persisted_errors_exclude_values` | stored and returned errors and diagnostics carry no expression text, values or binding messages |
-| `test_cel_evaluating_entry_points_refuse_without_binding` | the API, scheduler, standalone and scenario tests refuse to start without `kora[cel]`, through an injected binding loader |
+| `test_cel_persisted_errors_exclude_values` | no stored, returned or logged error carries expression text, values or binding messages. This includes binding messages that contain payload keys, DEBUG output and exception chains, in every sink: wait, binding, approval, event, API, CLI, MCP and logs |
+| `test_cel_evaluation_error_reads_parity` | the error record appears in node, trigger-binding and approval reads, the Python client, CLI `--json`, MCP output and the TypeScript client |
+| `test_cel_evaluating_entry_points_refuse_without_binding` | the API, scheduler and standalone refuse to start without `kora[cel]`, and `kora test` and `kora_test` return a structured error naming the extra, through an injected binding loader; `kora doctor` reports the missing extra |
 | `test_cel_evaluating_entry_points_refuse_mismatched_binding_version` | a binding other than the pinned version, or a `cel` module from another distribution, prevents start |
 | `test_cel_conformance_suite` | the vendored suite passes, with every known deviation asserted exactly |
 
-Measurements, `pending implementation`, register with the first parser, checker and evaluator. Native memory is measured as RSS per fresh process, because Python heap tracing misses it.
+Measurements, `pending implementation`, register with the first parser, checker and evaluator. Peak native memory is measured as RSS per fresh process, because Python heap tracing misses it; accumulation is measured in one long-lived process.
 
 - **Validation:**
   - parse, check and estimate time on hostile input;
   - validation of a 1,000-node IR;
-  - a maximal 4 MB `/validate` request.
-- **The worst case at the budget**, on the reference runner: time, peak RSS and GIL hold.
+  - a maximal 4 MB `/validate` request;
+  - compile time and GIL hold of maximal canonical renderings.
+- **Cost model:**
+  - for each charge at the budget, the measured cost on the reference runner stays within the estimate;
+  - the worst case at the budget, including conversion of 64 KiB bindings: time, peak RSS and GIL hold;
+  - on every pin change, the gate that keeps the pin under `kora.execution.v1`.
 - **Allowance and fan-in:**
+  - transaction duration at the allowance with cheap expressions over 64 KiB bindings;
   - one event against 1, 100 and 1,000 waits;
-  - a 1,000-body fan-out with branches;
+  - projecting a 4 MB event;
+  - a 1,000-body fan-out with branches, and collecting 1,000 child projections;
   - NFR-3.1 latency of an unrelated run while evaluations are at the allowance;
+  - approval and start latency under concurrent maximal `/validate` requests;
   - event-loop lag in standalone.
-- **Crash thresholds** per node kind, for compile and for evaluation, on Linux x86_64, Linux aarch64 and macOS, on the 1 MiB evaluation thread.
-- **Lifetime.** Repeated compile and evaluate cycles in one long-lived process, covering error paths and the compiled-program cache across deploy and retire.
-- **Projection and conversion cost.**
+- **Crash thresholds:** per node kind, for compile and for evaluation, on Linux x86_64, Linux aarch64 and macOS, on the 1 MiB evaluation thread.
+- **Lifetime:**
+  - repeated compile and evaluate cycles covering error paths, cancellation and shutdown with queued jobs;
+  - the compiled-program cache with more versions than its bound;
+  - metadata growth and listing latency with maximal inline projections on both databases.
 
 ### 7.10 Prompt templates
 
@@ -578,7 +656,7 @@ The session runner inside the runtime is the only enforcer of the attempt-level 
 
 ## 10. Validation rules (`kora validate`)
 
-Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` names a list-typed input and every `collect` names a body output, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve, fall inside the namespace's allowed reference prefixes and no value-like strings appear in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume`, or the node's runtime and VCS declare no common plan executor ([protocols.md](protocols.md) section 4) (warning for optional capabilities; no common plan executor is an error), `IR010` branch targets exist in their graph/body scope, each has the owning branch directly in `depends_on`, no target has multiple distinct branch owners, neither branches nor ordinary direct targets set `attempt_invariant: true`, and `$fail_attempt` appears only inside a subgraph, `IR011` CEL expressions and paths parse and type-check against the declared schemas: unsupported syntax or functions, unknown identifiers and fields, enum literals outside the allowed values, operand overloads, unguarded optional reads, `size()` on strings, non-literal `matches()` patterns, wrong result types and expressions the binding cannot compile at server-side validation (section 7), `IR012` Jinja2 templates parse in the sandbox, `IR013` `tool_policy` patterns are valid, `IR014` sensor `config` fails the sensor's `config_schema`, `IR015` an agent node with `secret_env` lacks a non-empty `network_policy` or runs on a runtime declaring `enforces_network_policy: false`, an MCP server with `secret_env` lacks a non-empty own `network_policy` or runs on a runtime declaring `isolates_tool_secrets: false` or `enforces_network_policy: false`, unless the namespace sets `allow_unenforced_agent_secrets`; a command node with secrets on a non-enforcing runtime while the namespace sets `require_network_enforcement` (ADR-0009 as amended 2026-10-18), `IR016` run parameters appear in a `cmd` element or `workspace.rev` of a graph with a webhook trigger, `IR017` `trust_repo_config: true` on a node whose namespace policy does not allow it (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)), `IR018` an agent node's `harness` names no harness adapter registered with the installation, which in MVP includes every reserved `acp:<agent>` name (an error, not a warning: unlike `IR008` and `IR009`, the node could not run at all; ADR-0004), `IR019` a `tool_policy` pattern from the namespace policy names a call kind the node's harness adapter does not intercept (`HarnessCapabilities.policy_coverage`, [protocols.md](protocols.md) section 12), an error because the platform team's rule would otherwise run unenforced; the same pattern from the node alone is warning `IR008` (ADR-0009), `IR020` `graph.target.key` names a run parameter that is not a string in `graph.params`, or a node, an output or a path that does not resolve to a string, checked against the output's declared schema like `IR011` (FR-6.11, ADR-0014), `IR021` the selected runtime lacks `protected_execution` while namespace policy requires it (ADR-0016); local remains valid for trusted development/tests without that requirement. `IR022` rejects missing/inconsistent type closure, unsupported schema dialect or behavior, invalid schema references and incompatible author-side contract declarations (section 2.1). `IR023` rejects an `independent_of` entry that is not a declared input name of that node. `IR024` rejects a command node with `resources` on a runtime that does not declare `protected_execution` when the namespace sets `require_protected_resources` (issue #45). `IR027` rejects a CEL expression or path over a static limit (4,096 code points, depth 32, four comprehension macros nested at most two deep) or over the cost budget, including a `maxLength` violation found by schema validation (section 7).
+Schema validation first, then semantic checks, each with a stable code and a YAML path (FR-0.4): `IR001` acyclic graph (including `depends_on`), `IR002` every `from` resolves, `IR003` output/input type assignable, `IR004` fan-out `over` names a list-typed input and every `collect` names a body output, `IR005` `binds` paths resolve to a `VcsRef` and digest-bearing artifacts, `IR006` `$previous_attempt` only inside a retried subgraph, `IR007` secret aliases resolve, fall inside the namespace's allowed reference prefixes and no value-like strings appear in `env`, `IR008` harness cannot honour a field (warning), `IR009` runtime lacks a requested capability such as `enforces_network_policy` or `supports_resume`, or the node's runtime and VCS declare no common plan executor ([protocols.md](protocols.md) section 4) (warning for optional capabilities; no common plan executor is an error), `IR010` branch targets exist in their graph/body scope, each has the owning branch directly in `depends_on`, no target has multiple distinct branch owners, neither branches nor ordinary direct targets set `attempt_invariant: true`, and `$fail_attempt` appears only inside a subgraph, `IR011` CEL expressions parse and type-check against the declared schemas, and paths parse: unsupported syntax or functions, unknown identifiers and fields, shadowing comprehension variables, enum literals outside the allowed values, operand overloads, unguarded optional reads, `size()` on strings or `dyn` values, non-literal or uncompilable `matches()` patterns, wrong result types, a canonical rendering that does not parse back to the same tree and expressions the binding cannot compile at server-side validation (section 7); path resolution keeps its own codes, `IR012` Jinja2 templates parse in the sandbox, `IR013` `tool_policy` patterns are valid, `IR014` sensor `config` fails the sensor's `config_schema`, `IR015` an agent node with `secret_env` lacks a non-empty `network_policy` or runs on a runtime declaring `enforces_network_policy: false`, an MCP server with `secret_env` lacks a non-empty own `network_policy` or runs on a runtime declaring `isolates_tool_secrets: false` or `enforces_network_policy: false`, unless the namespace sets `allow_unenforced_agent_secrets`; a command node with secrets on a non-enforcing runtime while the namespace sets `require_network_enforcement` (ADR-0009 as amended 2026-10-18), `IR016` run parameters appear in a `cmd` element or `workspace.rev` of a graph with a webhook trigger, `IR017` `trust_repo_config: true` on a node whose namespace policy does not allow it (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)), `IR018` an agent node's `harness` names no harness adapter registered with the installation, which in MVP includes every reserved `acp:<agent>` name (an error, not a warning: unlike `IR008` and `IR009`, the node could not run at all; ADR-0004), `IR019` a `tool_policy` pattern from the namespace policy names a call kind the node's harness adapter does not intercept (`HarnessCapabilities.policy_coverage`, [protocols.md](protocols.md) section 12), an error because the platform team's rule would otherwise run unenforced; the same pattern from the node alone is warning `IR008` (ADR-0009), `IR020` `graph.target.key` names a run parameter that is not a string in `graph.params`, or a node, an output or a path that does not resolve to a string, checked against the output's declared schema like `IR011` (FR-6.11, ADR-0014), `IR021` the selected runtime lacks `protected_execution` while namespace policy requires it (ADR-0016); local remains valid for trusted development/tests without that requirement. `IR022` rejects missing/inconsistent type closure, unsupported schema dialect or behavior, invalid schema references and incompatible author-side contract declarations (section 2.1). `IR023` rejects an `independent_of` entry that is not a declared input name of that node. `IR024` rejects a command node with `resources` on a runtime that does not declare `protected_execution` when the namespace sets `require_protected_resources` (issue #45). `IR027` rejects a CEL expression or path over a static limit (4,096 code points, depth 32, four comprehension macros nested at most two deep) or over the cost budget, including a `maxLength` violation found by schema validation (section 7).
 
 ## 11. Worked examples
 

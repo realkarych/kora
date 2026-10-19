@@ -147,7 +147,7 @@
         "approvals": {
           "type": "object",
           "propertyNames": { "$ref": "#/$defs/selector" },
-          "additionalProperties": { "enum": ["pending", "approved", "rejected", "invalidated", "expired", "cancelled"] }
+          "additionalProperties": { "enum": ["pending", "approved", "rejected", "failed", "invalidated", "expired", "cancelled"] }
         },
         "feedback_contains": {
           "type": "object",

@@ -475,7 +475,7 @@ A push to the candidate branch during review is not the channel's business eithe
 | Approved and gate succeeded | Remains closed; canonical status shows approved revision and completed gate |
 | Approved and gate failed/superseded | Remains closed; canonical status separates immutable approval from failed/current gate |
 | Rejected | `closed`: notify resolved and cancel transport |
-| Failed (`approve_when` could not be evaluated, [ir.md section 7.7](ir.md#77-evaluation-errors)) | `closed`: notify resolved, saying the response was received but could not be applied, and cancel transport; never shown as approved |
+| Failed (`approve_when` could not be evaluated, [ir.md section 7.7](ir.md#77-evaluation-errors)) | `closed`: `notify(resolved)` linking the canonical status, which shows `failed`, and cancel transport; never shown as approved |
 | Invalidated, expired, cancelled or historical owner | `closed`: corresponding terminal notification and transport cancel; never create during lookup |
 
 `cancel` closes the channel interaction, not the immutable approval audit decision. If native code-host reviews cannot be disabled, mark the kora interaction closed; subsequent responses have no local authority. `notify(resolved)` says the request is no longer actionable and links canonical status; it never claims pending head verification succeeded. All terminal messages remain compatible with closure, even if remote delivery is delayed, duplicated or reordered. The API, not channel text, is authoritative.

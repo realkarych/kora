@@ -126,7 +126,7 @@ Opens from a human-input node and from Approvals; one approval request.
 | element | content | route |
 |---|---|---|
 | waiting | rows: target, graph, how long it waits and the deadline, the bound commit, `run_cost`; click opens the review page | `GET /namespaces/{ns}/approvals?status=pending`; the deadline from the node's wait (ADR-0015) |
-| history | rows: target, decision and approver, time, commit; `invalidated` and `expired` with their reason; pending/unknown channel delivery stays visible on approved/rejected/terminal records | `GET /namespaces/{ns}/approvals?status=` (ADR-0015) |
+| history | rows: target, decision and approver, time, commit; `invalidated`, `expired` and `failed` with their reason (for `failed`, the CEL error kind and field); pending/unknown channel delivery stays visible on approved/rejected/terminal records | `GET /namespaces/{ns}/approvals?status=` (ADR-0015) |
 
 ## Cost
 
@@ -205,7 +205,7 @@ Every action answers in the place where it was taken: no toasts, no modal dialog
 
 | action | on success | on refusal |
 |---|---|---|
-| approve or reject | the pinned bar becomes one line, "approved by you at <time> · commit <sha>" (or "rejected …"), the form goes, the facts and the narrative stay as history, and the line links the node that continues; the page stays | the structured error under the bar with its code and message; `API006` (already answered, or the request moved) reloads the request and shows its current state |
+| approve or reject | the pinned bar becomes one line, "approved by you at <time> · commit <sha>" (or "rejected …", or, when the response status is `failed`, "response received, but `approve_when` could not be evaluated" with the error kind and field, never shown as approved), the form goes, the facts and the narrative stay as history, and the line links the node that continues; the page stays | the structured error under the bar with its code and message; `API006` (already answered, or the request moved) reloads the request and shows its current state |
 | run | accepted: select the new pending run and its pinned version; skipped: show "not started · graph overlap" with no invented run | validation errors under each field; full quota keeps the form filled and shows API002/run_backlog_full with scope, used/limit and retry guidance; no run was accepted |
 | retry | the dialog closes; the node panel stays open and shows the new attempt as current in `created` after recovery settles, or recovery/capacity/target blockers and next recheck while admission waits; the nodes that clear-downstream reset turn gray | the error under the retry button; full outstanding quota states that nothing was cleared and shows used/limit; `deadline_expired` states that nothing was cleared and shows the expired scope/deadline with the existing rerun command guidance; a node that is no longer failed reloads the node view |
 | cancel | the run line (or the node's second line) reads "cancelling" until the API reports the terminal state, then `cancelled` with retained scopes/recovery reason when physical closure remains unknown; the panel stays open | the error under the cancel control; a run or node already finished reloads the view |

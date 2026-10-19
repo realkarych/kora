@@ -37,6 +37,8 @@ The wait kind, deadline, subscription and admission reason come from the API (AD
 
 A node whose declared definition is materialised per fan-out element is one rectangle: its colour is the worst state among its instances in the order red, amber, blue, green, gray, and the strip inside it carries one segment per element in that element's colour; the counts of elements per state are always words beside the strip, whatever the colour, so that a group with two elements done and two not started never reads as finished.
 
+A waiting node's last CEL evaluation error (`match` or `until`) is a read-only reason in the node panel beside the still-open wait: kind, field and time, never values, separate from integration health. A sensor trigger binding shows the same on Schedules ([ir.md section 7.7](../../specs/ir.md#77-evaluation-errors)).
+
 ## Node text
 
 A node carries two lines and nothing else. The first line is the node's name, truncated at the end with an ellipsis when it exceeds the node's width, the full name on hover and in the panel. The second line is at most 32 characters in the grammar "<state or reason word> · <duration>": "running · 48 min", "in queue · 12 min", "target held · 3 h", "failed · command failed", "infrastructure · branch left". Identifiers (run ids, branch names, worker names, event names longer than a word) never appear in a node; they are in the panel. The selected node has a 2 px outline in both themes at every zoom level, distinct from the focus ring.
@@ -100,12 +102,12 @@ The run's colour and word in the header, on the runs list and in the traffic lig
 | `pending` | amber; the deadline from the wait |
 | `approved` | approved audit badge, approver/channel/time; current node is blue during verification, green after success, red on gate failure, or its current state after clear; audit alone does not set node colour |
 | `rejected` | the node is red "rejected"; the response and its comments |
-| `failed` | the node is red "approval could not be applied" (`config_error`); the response stays visible next to the evaluation error kind and field, never shown as approved ([ir.md section 7.7](../../specs/ir.md#77-evaluation-errors)) |
+| `failed` | the node is red "configuration error"; on the review page and in Approvals, "approval could not be applied" with the response, the evaluation error kind and field, never shown as approved ([ir.md section 7.7](../../specs/ir.md#77-evaluation-errors)) |
 | `expired` | the node is red "approval expired" or gray `skipped` per `on_expiry` |
 | `invalidated` | the banner with the bound commit and the observed head; the node is red "candidate moved" |
 | `cancelled` | gray; the run or node was cancelled |
 
-A wait's or sensor trigger's last CEL evaluation error (`match` or `until`) is a read-only reason beside a still-open wait: kind, field and time, never values, and separate from integration health ([ir.md section 7.7](../../specs/ir.md#77-evaluation-errors)). Observation/delivery errors are read-only reasons beside the existing lifecycle state (ADR-0021). Show last success/time, current deadline, next poll/retry and structured hint; unknown delivery can persist on terminal history without keeping a run active or retaining execution capacity. Never label an outage solely as waiting for a person, an empty lookup as successful cleanup, or recorded approval as verified gate success.
+Observation/delivery errors are read-only reasons beside the existing lifecycle state (ADR-0021). Show last success/time, current deadline, next poll/retry and structured hint; unknown delivery can persist on terminal history without keeping a run active or retaining execution capacity. Never label an outage solely as waiting for a person, an empty lookup as successful cleanup, or recorded approval as verified gate success.
 
 ## Attention states
 
