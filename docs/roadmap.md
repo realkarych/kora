@@ -12,6 +12,8 @@ Packaging-test removal amendment dated 2026-10-19: removal decided by the projec
 
 Slice-scope amendment dated 2026-10-19: scope decided by the project owner under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
 
+Implementation-plan amendment dated 2026-10-19: next step 1 links the [implementation plan](implementation-plan.md); scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review. Items 1 and 5 of "What the documents cannot settle" are under revision in [issue #140](https://github.com/realkarych/kora/issues/140).
+
 ## Where the project stands
 
 - Positioning, requirements and the design are written, went through two design-review cycles, and on 2026-10-16 the project owner reviewed every statement in `docs/`; that review established the initial design baseline. Open design corrections are tracked in GitHub issues; ADR-0016 records the publication-boundary correction and ADR-0017 preserves execution uncertainty through recovery. Deferred work is tagged `[post-MVP]` in the requirements or written up in [proposals/](proposals/README.md).
@@ -32,7 +34,7 @@ These are the assumptions that only code can confirm, in the order they should b
 
 ## Next steps, in order
 
-1. **Implementation plan.** Vertical slices, each stating what it proves and how it is tested without model calls; the first slice is the one above, built around items 1 to 3. The plan is the next document; it goes into this folder.
+1. **Implementation plan.** Written on 2026-10-19: [implementation-plan.md](implementation-plan.md) states what the first slice proves and how it is tested without model calls, the order in which shared contracts freeze, the split between two developers and the work items in order. It covers the first slice; later slices are added when they are planned.
 2. **Design of the web console** against [NFR-13.1](requirements/non-functional.md): information architecture, visual language and the key screens (approvals, run page with the live graph, attempts and their diff, cost), before the console is built. Its design inputs, settled before the screens are detailed: target identity ([ADR-0014](decisions/0014-target-identity.md)), the attention states a run can be in (pending review, stale evidence, budget exhausted, unknown publish outcome, unknown execution with retained holds, confirmed runtime loss, incompatible resume) and the review-revision page; the two pilot scenarios (an engineer without database access explains from the console why a change is ready for approval, why an approval lapsed, where the work is and why it waits; an operator resolves an ambiguous publish and a lost worker through the public surface) are written as checkable lists in [knowledge/design/console/pilot-scenarios.md](../knowledge/design/console/pilot-scenarios.md). Done on 2026-10-16: [console.md](console.md) and [ADR-0015](decisions/0015-web-console-design.md).
 3. **Repository scaffold** following the layout in [ADR-0013](decisions/0013-implementation-stack.md): `src/kora/`, `web/`, isolated distribution builds and CI on Linux and macOS are implemented under [issue #86](https://github.com/realkarych/kora/issues/86). Complete-workflow timing and cache evidence against the ten-minute budget are required in the implementation PR. Domain directories and `conformance/` enter with their first implementation.
 4. **First slice**, with the scope above.

@@ -8,6 +8,8 @@ Scaffold amendment dated 2026-10-18: scope and implementation plan approved unde
 
 Threat-model navigation amendment: scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); wording accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18.
 
+Implementation-plan navigation amendment dated 2026-10-19: a reading-order entry for the implementation plan; scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review.
+
 ## Reading order
 
 1. [positioning.md](positioning.md): the one-liner, the problem, who kora is for, the primary contrast (Archon), the canonical use case, non-goals, evidence and hypotheses.
@@ -19,6 +21,7 @@ Threat-model navigation amendment: scope and implementation plan approved under 
 5. [decisions/](decisions/README.md): the architecture decision records, one per significant decision, with context, alternatives and consequences.
 6. [proposals/](proposals/README.md): changes that are designed but deferred, in a fixed template with a status.
 7. [roadmap.md](roadmap.md): where the project stands, what only code can settle, and the next steps in order.
+   [implementation-plan.md](implementation-plan.md): the order of work for the first implementation slice, the order in which shared contracts freeze and the split between two developers.
 
 Technical-introduction amendment dated 2026-10-17: scope and implementation plan approved; the introduction and navigation wording remain pending line-by-line owner review under [issue #67](https://github.com/realkarych/kora/issues/67).
 

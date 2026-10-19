@@ -131,7 +131,7 @@ A notification subscription ([ADR-0025](../../../docs/decisions/0025-notificatio
 | `approval.requested` | pending review | what waits for approval, with links to the review page and the change request |
 | `approval.invalidated` | stale evidence | the approval lapsed because the candidate moved or upstream was retried |
 | `approval.expired` | pending review that timed out | the approval expired without a decision |
-| `run.failed` | exhausted budget, a failed gate or another terminal failure | the failing node and its error class |
+| `run.failed` | exhausted budget, a failed gate, a run deadline or another terminal failure | the failing node and, where its last attempt failed, its error class, or the run deadline |
 | `run.succeeded` | none | the run finished; optional, for teams that want completion messages |
 | `attempt.recovery_required` | unknown execution, unknown publish outcome | an attempt entered recovery (lease expiry, an uncertain effect, cancellation or failure awaiting closure); the message names the reasons and the reconcile action |
 
