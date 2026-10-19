@@ -4,7 +4,7 @@ Orchestrate coding-agent sessions as a graph.
 
 kora is an open-source (Apache-2.0) control plane for graphs whose nodes are full coding-agent sessions (Claude Code, Codex, agents speaking the Agent Client Protocol). Graphs are written in Python and compiled to a versioned YAML document; the control plane adds triggers, retries of nodes and sub-graphs, typed artifacts, approvals bound to the exact content under review, cost accounting, and protocols through which an organisation plugs in its own runtime, version control, secrets and observability.
 
-The repository now has a typed Python package, a minimal React shell, reproducible distribution builds and packaging integration tests. The control-plane behavior and full web console remain to be implemented. See the [development guide](docs/development.md) for setup, source checks and builds.
+The repository now has a typed Python package, a minimal React shell and reproducible distribution builds. The control-plane behavior and full web console remain to be implemented. See the [development guide](docs/development.md) for setup, source checks and builds.
 
 ## Documentation
 

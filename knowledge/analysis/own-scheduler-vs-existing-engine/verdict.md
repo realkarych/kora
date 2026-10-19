@@ -4,7 +4,7 @@ Observed: 2026-10-15; corrected and extended with DBOS on 2026-10-16. Consolidat
 
 ## Decision and shared work
 
-Keep the own control plane for MVP. Temporal remains a possible backend after MVP by demand; DBOS is reconsidered after the first vertical slice supplies data. Do not start a comparative prototype before that slice. Its [ten fault checks](../../specs/scheduler.md#18-first-vertical-slice-acceptance) include operating cost and remain mandatory whichever engine is considered.
+Keep the own control plane for MVP. Temporal remains a possible backend after MVP by demand; DBOS is reconsidered after the scheduler-prototype milestone, which follows the first implementation slice, supplies data. Do not start a comparative prototype before that milestone. Its [ten fault checks](../../specs/scheduler.md#18-scheduler-prototype-milestone-acceptance) include operating cost and remain mandatory whichever engine is considered.
 
 All candidates leave kora-specific work: compiled graph documents, presets, artifact types and lineage, content-bound approvals, harness/runtime/VCS adapters, cost accounting and the public surfaces. Engine retries do not themselves provide kora's `previous_attempt` artifact inputs. Submission still needs durable identity and authoritative lookup. The original percentages of requirements covered, claims that an engine supplies all scale work, and cost estimates were not measured and are withdrawn.
 

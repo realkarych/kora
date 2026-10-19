@@ -90,7 +90,7 @@ Component-logging amendment dated 2026-10-18: direction and implementation plan 
 
 ## 10. Testability and developer experience
 
-- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora plan` prints the materialised execution plan and `kora trigger --dry-run` executes a run on the fake runtime and harness.
+- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora plan` prints the materialised execution plan and `kora trigger --dry-run` executes a run on the fake runtime and harness. Behavioural scenarios (`kora test` and the stdio `kora_test` tool) supply agent outcomes by unambiguous selectors, execute command nodes for real with explicit reported overrides, inject approvals, events, time and randomness, enforce and report the absence of network and production secrets, and return machine-readable results, through the ordinary engine with configured fakes (dsl.md section 4).
 - **NFR-10.2 [MVP]** Conformance suites exist for every protocol (NFR-5.1) so adopters can validate their enterprise runtime, VCS and secrets implementations.
 - **NFR-10.3 [MVP]** Compile-time errors point to the Python source line of the offending node; IR validation errors point to the YAML path.
 
