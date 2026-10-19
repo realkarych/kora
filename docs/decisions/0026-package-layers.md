@@ -32,7 +32,7 @@ Several components are shared between these processes: the API client and its mo
 - A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is allowed by `y`'s row. A module under `plugins` belongs to the longest listed family prefix, and `mcp.stdio` is matched before `mcp`.
 - `from kora import x` resolves to `kora.x` when that module exists, and to the package root otherwise. Relative imports are resolved against the package for an `__init__.py` and against the module's parent otherwise.
 - Imports inside functions and under `if TYPE_CHECKING:` count, because a type-only dependency still couples the layers.
-- The package root `kora` imports no kora package at module level.
+- The package root `kora` imports no kora package at module level, and no package imports the root itself (`import kora`, or `from kora import name` where `name` is not a module). `kora.plugins` is a namespace package that imports nothing. How the DSL's `from kora import graph, …` (dsl.md section 1) is exposed is open: the DSL work item decides it without loading the compiler into the API, scheduler, worker or runner, consistent with `test_control_plane_never_imports_compiler` (dsl.md section 2), and changes the root row in that change.
 
 **Composition roots.** `kora.__main__`, `kora.standalone`, `kora.testing` and `kora.conformance` may import anything. No package imports a root.
 
@@ -43,11 +43,11 @@ Several components are shared between these processes: the API client and its mo
 
 **Third-party checks.**
 
-- Only `cel_eval` may import the CEL binding `cel`, so `cel`, `ir` and `dsl` work without the `kora[cel]` extra.
+- Only `cel_eval` may import the CEL binding `cel`, and this binds the composition roots too, so `cel`, `ir`, `dsl` and the CLI entry point work without the `kora[cel]` extra.
 - `fastapi`, `starlette`, `uvicorn`, `sqlalchemy`, `alembic`, `asyncpg` and `aiosqlite` may not be imported by `observability`, `cel`, `ir`, `protocols`, `models`, `client`, `executor`, `runner` or `worker`. `mcp` is left out until the MCP SDK's HTTP stack is settled.
-- A call to `importlib.import_module`, `__import__` or `pkgutil.resolve_name` whose first argument is a string literal starting with `kora.` is refused outside the provider-loading module `kora.protocols.loading`.
+- A call to `importlib.import_module`, `__import__` or `pkgutil.resolve_name` whose module argument is a string literal naming a kora module is refused outside the provider-loading module `kora.protocols.loading`. The check follows aliases of these functions and of their modules, `builtins.__import__`, the `name` keyword and a relative literal with a literal package. Dynamic edges do not count towards the invariant, which is about static imports.
 
-**Enforcement.** `tests/architecture/test_import_layers.py` parses every module under `src/kora` with the standard library `ast` module. It checks the import rule against the table and the invariant over the transitive closure of the actual import graph, independently of the table. It also checks the third-party rules, and it keeps the test's table identical to the documented one. CI runs pytest in every scaffold lane.
+**Enforcement.** `tests/architecture/test_import_layers.py` parses every module under `src/kora` with the standard library `ast` module. It checks the import rule against the table and the invariant over the transitive closure of the actual static import graph, independently of the table. It also checks the third-party rules, keeps the test's table identical to the documented one, and keeps its server-free set, server set and composition roots identical to this record. CI runs pytest in every scaffold lane.
 
 **How the table changes.**
 
@@ -62,8 +62,8 @@ Several components are shared between these processes: the API client and its mo
 Layering is a maintainability and packaging rule, with defence in depth for trusted processes. It is not an isolation control.
 
 - **The ADR-0016 boundary does not rest on it.** That boundary rests on runtime authority, not on which modules a process imports. One distribution installs all server code and its dependencies wherever `kora-runner` is installed (ADR-0004, ADR-0013).
-- **Process placement.** On both reference runtimes the supervisor runs on the host ([protocols.md section 2](../../knowledge/specs/protocols.md#2-runtime-fr-81)). The plan executor runs in `runner` or `worker_host`. The Codex `kora-runner policy-hook` is the one piece of kora code that runs inside the candidate domain ([protocols.md section 12](../../knowledge/specs/protocols.md#12-policy-dd-29)).
-- **What it gives.** Trusted processes that parse candidate-controlled data load less code. `runner` has no code path to `client`, matching "the supervisor has no API credential" (ADR-0016).
+- **Process placement.** On both reference runtimes the supervisor runs on the host ([protocols.md section 2](../../knowledge/specs/protocols.md#2-runtime-fr-81)). The plan executor runs in `runner` or `worker_host`. Kora code that runs inside the candidate domain includes the Codex `kora-runner policy-hook` ([protocols.md section 12](../../knowledge/specs/protocols.md#12-policy-dd-29)) and the candidate-side steps of a publish plan ([protocols.md section 4](../../knowledge/specs/protocols.md#4-vcs-fr-52)); whatever those import is reachable from the candidate.
+- **What it gives.** Trusted processes that parse candidate-controlled data load less code. `runner` has no code path to `client`, matching "the supervisor has no API credential" in the [threat model's trust boundaries](../threat-model.md#trust-boundaries-and-data-flows).
 
 It does not guarantee:
 

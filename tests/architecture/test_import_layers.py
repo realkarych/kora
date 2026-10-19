@@ -8,6 +8,9 @@ REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Path = REPOSITORY_ROOT / "src"
 LAYER_DOCUMENT: Path = REPOSITORY_ROOT / "knowledge" / "architecture" / "detailed.md"
 LAYER_SECTION_HEADING: str = "## Package layers"
+DECISION_RECORD: Path = (
+    REPOSITORY_ROOT / "docs" / "decisions" / "0026-package-layers.md"
+)
 
 ROOT_PACKAGE: str = "kora"
 COMPOSITION_ROOTS: frozenset[str] = frozenset(
@@ -18,8 +21,9 @@ PROVIDER_LOADING_MODULE: str = "kora.protocols.loading"
 CEL_BINDING: str = "cel"
 CEL_BINDING_OWNER: str = "cel_eval"
 DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
-    {"importlib.import_module", "import_module", "__import__", "pkgutil.resolve_name"}
+    {"importlib.import_module", "builtins.__import__", "pkgutil.resolve_name"}
 )
+BUILTIN_NAMES: dict[str, str] = {"__import__": "builtins.__import__"}
 
 BASE: frozenset[str] = frozenset({"ir", "observability"})
 SUPERVISOR_PROVIDER_IMPORTS: frozenset[str] = BASE | {"runner", "executor", "protocols"}
@@ -152,14 +156,28 @@ def is_composition_root(module: str) -> bool:
     return any(is_within(module, root) for root in COMPOSITION_ROOTS)
 
 
+def dotted_name(path: Path, source_root: Path) -> str:
+    parts = list(path.relative_to(source_root).with_suffix("").parts)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts)
+
+
 def source_modules(source_root: Path) -> list[SourceModule]:
-    modules: list[SourceModule] = []
-    for path in sorted((source_root / ROOT_PACKAGE).rglob("*.py")):
-        parts = list(path.relative_to(source_root).with_suffix("").parts)
-        if parts[-1] == "__init__":
-            parts.pop()
-        modules.append(SourceModule(path, ".".join(parts)))
-    return modules
+    package_root = source_root / ROOT_PACKAGE
+    paths = [*package_root.rglob("*.py"), *package_root.rglob("*.pyi")]
+    return [
+        SourceModule(path, dotted_name(path, source_root)) for path in sorted(paths)
+    ]
+
+
+def known_modules(source_root: Path) -> frozenset[str]:
+    package_root = source_root / ROOT_PACKAGE
+    directories = [path for path in package_root.rglob("*") if path.is_dir()]
+    names = {dotted_name(path / "__init__.py", source_root) for path in directories}
+    names.add(ROOT_PACKAGE)
+    names.update(module.name for module in source_modules(source_root))
+    return frozenset(names)
 
 
 def resolve_relative(module: SourceModule, level: int, name: str) -> str:
@@ -169,29 +187,66 @@ def resolve_relative(module: SourceModule, level: int, name: str) -> str:
     return ".".join([*base_parts, name] if name else base_parts)
 
 
-def call_name(node: ast.Call) -> str | None:
+def local_bindings(tree: ast.Module) -> dict[str, str]:
+    bindings = dict(BUILTIN_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = alias.name
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bindings
+
+
+def call_name(node: ast.Call, bindings: dict[str, str]) -> str | None:
     function = node.func
     if isinstance(function, ast.Name):
-        return function.id
+        return bindings.get(function.id, function.id)
     if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
-        return f"{function.value.id}.{function.attr}"
+        owner = bindings.get(function.value.id, function.value.id)
+        return f"{owner}.{function.attr}"
     return None
 
 
-def literal_first_argument(node: ast.Call) -> str | None:
-    if not node.args:
+def literal_argument(node: ast.Call, position: int, keyword: str) -> str | None:
+    candidates = [node.args[position]] if len(node.args) > position else []
+    candidates += [item.value for item in node.keywords if item.arg == keyword]
+    for candidate in candidates:
+        if isinstance(candidate, ast.Constant) and isinstance(candidate.value, str):
+            return candidate.value
+    return None
+
+
+def dynamic_target(node: ast.Call) -> str | None:
+    name = literal_argument(node, 0, "name")
+    if name is None or not name.startswith("."):
+        return name
+    package = literal_argument(node, 1, "package")
+    if package is None:
         return None
-    first = node.args[0]
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value
-    return None
+    level = len(name) - len(name.lstrip("."))
+    base = package.split(".")[: len(package.split(".")) - (level - 1)]
+    remainder = name.lstrip(".")
+    return ".".join([*base, remainder] if remainder else base)
+
+
+def module_level_nodes(tree: ast.Module) -> Iterator[ast.AST]:
+    pending: list[ast.AST] = list(tree.body)
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            pending.extend(ast.iter_child_nodes(node))
 
 
 def imported_modules(
     module: SourceModule, known: frozenset[str]
 ) -> Iterator[ImportedModule]:
     tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
-    for node in ast.walk(tree):
+    bindings = local_bindings(tree)
+    nodes = module_level_nodes(tree) if module.name == ROOT_PACKAGE else ast.walk(tree)
+    for node in nodes:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 yield ImportedModule(node.lineno, alias.name, dynamic=False)
@@ -203,8 +258,11 @@ def imported_modules(
                 candidate = f"{source}.{alias.name}"
                 target = candidate if candidate in known else source
                 yield ImportedModule(node.lineno, target, dynamic=False)
-        elif isinstance(node, ast.Call) and call_name(node) in DYNAMIC_IMPORT_CALLS:
-            target = literal_first_argument(node)
+        elif (
+            isinstance(node, ast.Call)
+            and call_name(node, bindings) in DYNAMIC_IMPORT_CALLS
+        ):
+            target = dynamic_target(node)
             if target is not None and is_within(target, ROOT_PACKAGE):
                 yield ImportedModule(node.lineno, target, dynamic=True)
 
@@ -241,12 +299,22 @@ def import_violation(
     return kora_violation(importer_layer, imported.target)
 
 
+def composition_root_violations(
+    module: SourceModule, known: frozenset[str]
+) -> Iterator[Violation]:
+    for imported in imported_modules(module, known):
+        if is_within(imported.target, CEL_BINDING):
+            reason = f"only {CEL_BINDING_OWNER} may import the CEL binding cel"
+            yield Violation(module.path, imported.line, reason)
+
+
 def find_violations(source_root: Path) -> list[Violation]:
     modules = source_modules(source_root)
-    known = frozenset(module.name for module in modules)
+    known = known_modules(source_root)
     violations: list[Violation] = []
     for module in modules:
         if is_composition_root(module.name):
+            violations.extend(composition_root_violations(module, known))
             continue
         importer_layer = layer_of(module.name)
         if module.name in NAMESPACE_MODULES:
@@ -264,7 +332,7 @@ def find_violations(source_root: Path) -> list[Violation]:
 
 def package_import_graph(source_root: Path) -> dict[str, set[str]]:
     modules = source_modules(source_root)
-    known = frozenset(module.name for module in modules)
+    known = known_modules(source_root)
     graph: dict[str, set[str]] = {}
     for module in modules:
         importer_layer = layer_of(module.name)
@@ -273,8 +341,9 @@ def package_import_graph(source_root: Path) -> dict[str, set[str]]:
         edges = graph.setdefault(importer_layer, set())
         for imported in imported_modules(module, known):
             target_layer = layer_of(imported.target)
-            if target_layer is not None and target_layer != importer_layer:
-                edges.add(target_layer)
+            if imported.dynamic or target_layer in (None, importer_layer):
+                continue
+            edges.add(target_layer)
     return graph
 
 
@@ -314,6 +383,11 @@ def documented_layers(document: str) -> dict[str, frozenset[str]]:
     return layers
 
 
+def decision_record_set(document: str, label: str) -> frozenset[str]:
+    line = next(line for line in document.splitlines() if f"**{label}**" in line)
+    return backticked_names(line.split(" is ", 1)[1])
+
+
 def write_module(source_root: Path, module: str, source: str) -> None:
     path = source_root.joinpath(*module.split(".")).with_suffix(".py")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,6 +421,23 @@ def test_layer_table_matches_documentation() -> None:
     assert layers == LAYERS
 
 
+def test_invariant_sets_match_the_decision_record() -> None:
+    document = DECISION_RECORD.read_text(encoding="utf-8")
+
+    server_free = decision_record_set(document, "server-free set")
+    server = decision_record_set(document, "server set")
+    roots_line = next(
+        line for line in document.splitlines() if "**Composition roots.**" in line
+    )
+    roots = backticked_names(roots_line)
+
+    assert server_free == SERVER_FREE
+    assert server == SERVER
+    assert roots == COMPOSITION_ROOTS
+    assert not SERVER_FREE & SERVER
+    assert SERVER_FREE | SERVER <= LAYERS.keys()
+
+
 def test_server_free_packages_never_reach_server_packages() -> None:
     source_root = SOURCE_ROOT
 
@@ -372,11 +463,13 @@ def test_checker_flags_forbidden_import_forms(tmp_path: Path) -> None:
         "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import kora.db\n",
     )
     write_module(tmp_path, "kora.runner.composition", "import kora.testing\n")
+    write_module(tmp_path, "kora.runner.bare_root", "import kora\n")
 
     violations = find_violations(tmp_path)
 
     assert describe_all(violations, tmp_path) == [
         "kora/runner/absolute.py:1: runner may not import db (kora.db)",
+        "kora/runner/bare_root.py:1: runner may not import kora (kora)",
         "kora/runner/composition.py:1: imports the composition root kora.testing",
         "kora/runner/from_module.py:1: runner may not import db (kora.db)",
         "kora/runner/from_root.py:1: runner may not import db (kora.db)",
@@ -404,10 +497,25 @@ def test_checker_flags_dynamic_kora_import(tmp_path: Path) -> None:
     dynamic_source = 'import importlib\nimportlib.import_module("kora.db")\n'
     write_module(tmp_path, "kora.worker.loader", dynamic_source)
     write_module(tmp_path, "kora.protocols.loading", dynamic_source)
+    write_module(
+        tmp_path,
+        "kora.worker.aliased",
+        "import importlib as il\n"
+        "from importlib import import_module as load\n"
+        "import builtins\n"
+        'il.import_module("kora.db")\n'
+        'load(name="kora.engine")\n'
+        'builtins.__import__("kora.api")\n'
+        'importlib.import_module(".scheduler", "kora")\n',
+    )
 
     violations = find_violations(tmp_path)
 
     assert describe_all(violations, tmp_path) == [
+        "kora/worker/aliased.py:4: dynamically imports kora.db",
+        "kora/worker/aliased.py:5: dynamically imports kora.engine",
+        "kora/worker/aliased.py:6: dynamically imports kora.api",
+        "kora/worker/aliased.py:7: dynamically imports kora.scheduler",
         "kora/worker/loader.py:2: dynamically imports kora.db",
     ]
 
@@ -429,19 +537,48 @@ def test_only_cel_eval_imports_cel_binding(tmp_path: Path) -> None:
     write_packages(tmp_path, ["kora", "kora.cel", "kora.cel_eval", "kora.ir"])
     write_module(tmp_path, "kora.ir.conditions", "import cel\nimport kora.cel\n")
     write_module(tmp_path, "kora.cel_eval.binding", "import cel\nfrom cel import x\n")
+    write_module(tmp_path, "kora.__main__", "import cel\nimport kora.db\n")
 
     violations = find_violations(tmp_path)
 
     assert describe_all(violations, tmp_path) == [
+        "kora/__main__.py:1: only cel_eval may import the CEL binding cel",
         "kora/ir/conditions.py:1: only cel_eval may import the CEL binding cel",
     ]
 
 
-def test_checker_flags_transitive_reach_through_widened_row(tmp_path: Path) -> None:
+def test_checker_flags_transitive_reach_independent_of_the_table(
+    tmp_path: Path,
+) -> None:
     write_packages(tmp_path, ["kora", "kora.db", "kora.executor", "kora.worker"])
     write_module(tmp_path, "kora.executor.plans", "import kora.db\n")
     write_module(tmp_path, "kora.worker.claims", "import kora.executor\n")
+    write_module(
+        tmp_path,
+        "kora.protocols.loading",
+        'import importlib\nimportlib.import_module("kora.db")\n',
+    )
 
     reach = server_reach(tmp_path)
 
     assert reach == {"executor": ["db"], "worker": ["db"]}
+
+
+def test_checker_resolves_namespace_subpackages_and_root_scope(tmp_path: Path) -> None:
+    write_packages(tmp_path, ["kora", "kora.mcp", "kora.db"])
+    stdio_directory = tmp_path / "kora" / "mcp" / "stdio"
+    stdio_directory.mkdir(parents=True)
+    write_module(tmp_path, "kora.mcp.stdio.tools", "")
+    write_module(tmp_path, "kora.mcp.tools", "from kora.mcp import stdio\n")
+    write_module(
+        tmp_path,
+        "kora.__init__",
+        "def load() -> None:\n    import kora.db\nimport kora.db\n",
+    )
+
+    violations = find_violations(tmp_path)
+
+    assert describe_all(violations, tmp_path) == [
+        "kora/__init__.py:3: kora may not import db (kora.db)",
+        "kora/mcp/tools.py:1: mcp may not import mcp.stdio (kora.mcp.stdio)",
+    ]
