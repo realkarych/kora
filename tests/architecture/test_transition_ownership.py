@@ -1,12 +1,15 @@
 import ast
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Path = REPOSITORY_ROOT / "src"
 ROOT_PACKAGE: str = "kora"
+DB_PACKAGE: str = "kora.db"
 TABLES_MODULE: str = "kora.db.tables"
+SQLALCHEMY: str = "sqlalchemy"
 OWNING_MODULES: frozenset[str] = frozenset(
     {
         "kora.engine",
@@ -18,10 +21,18 @@ OWNING_MODULES: frozenset[str] = frozenset(
 GUARDED_TABLES: frozenset[str] = frozenset(
     {"run", "node_instance", "attempt", "wait", "approval_request", "artifact_version"}
 )
-WRITE_FUNCTIONS: frozenset[str] = frozenset({"insert", "update", "delete"})
+WRITE_FUNCTIONS: frozenset[str] = frozenset(
+    {"insert", "update", "delete", "Insert", "Update", "Delete"}
+)
+TABLE_CONSTRUCTORS: frozenset[str] = frozenset({"table", "Table"})
 MAPPING_FUNCTIONS: frozenset[str] = frozenset({"map_imperatively", "mapper"})
+MAPPING_ATTRIBUTES: frozenset[str] = frozenset({"__tablename__", "__table__"})
+RAW_CONNECTION_ATTRIBUTES: frozenset[str] = frozenset(
+    {"exec_driver_sql", "driver_connection", "get_raw_connection"}
+)
 RAW_WRITE: re.Pattern[str] = re.compile(
-    r"\b(insert\s+into|update|delete\s+from)\s+(\"?\w+\"?\.)?\"?("
+    r"\b(insert(\s+or\s+\w+)?\s+into|replace\s+into|merge\s+into|update(\s+only)?"
+    r"|delete\s+from(\s+only)?|truncate(\s+table)?(\s+only)?)\s+(\"?\w+\"?\.)?\"?("
     + "|".join(sorted(GUARDED_TABLES))
     + r")\b",
     re.IGNORECASE,
@@ -69,6 +80,13 @@ def resolve_relative(module: SourceModule, level: int, name: str) -> str:
     return ".".join([*base_parts, name] if name else base_parts)
 
 
+def import_source(module: SourceModule, node: ast.ImportFrom) -> str:
+    source = node.module or ""
+    if node.level > 0:
+        source = resolve_relative(module, node.level, source)
+    return source
+
+
 def import_bindings(module: SourceModule, tree: ast.Module) -> dict[str, str]:
     bindings: dict[str, str] = {}
     for node in ast.walk(tree):
@@ -80,9 +98,7 @@ def import_bindings(module: SourceModule, tree: ast.Module) -> dict[str, str]:
                     head = alias.name.split(".")[0]
                     bindings[head] = head
         elif isinstance(node, ast.ImportFrom):
-            source = node.module or ""
-            if node.level > 0:
-                source = resolve_relative(module, node.level, source)
+            source = import_source(module, node)
             for alias in node.names:
                 bindings[alias.asname or alias.name] = f"{source}.{alias.name}"
     return bindings
@@ -97,106 +113,184 @@ def dotted(node: ast.expr, bindings: dict[str, str]) -> str | None:
     return None
 
 
-def guarded_table_name(node: ast.expr, bindings: dict[str, str]) -> bool:
-    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute):
-        key = node.slice
-        return (
-            node.value.attr == "tables"
-            and isinstance(key, ast.Constant)
-            and key.value in GUARDED_TABLES
-        )
-    name = dotted(node, bindings)
-    if name is None or not name.startswith(f"{TABLES_MODULE}."):
-        return False
-    return name.removeprefix(f"{TABLES_MODULE}.") in GUARDED_TABLES
+def constant_string(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
 
 
-def is_write_function(node: ast.Call, bindings: dict[str, str]) -> bool:
+def call_arguments(node: ast.Call, keyword: str) -> list[ast.expr]:
+    return [*node.args[:1], *[k.value for k in node.keywords if k.arg == keyword]]
+
+
+def is_sqlalchemy_call(
+    node: ast.Call, bindings: dict[str, str], names: frozenset[str]
+) -> bool:
     name = dotted(node.func, bindings)
-    return name is not None and name.split(".")[-1] in WRITE_FUNCTIONS
-
-
-def core_write(node: ast.Call, bindings: dict[str, str]) -> bool:
-    if not is_write_function(node, bindings):
+    if name is None:
         return False
-    if node.args and guarded_table_name(node.args[0], bindings):
-        return True
+    return is_within(name, SQLALCHEMY) and name.split(".")[-1] in names
+
+
+def names_guarded_table(node: ast.expr, bindings: dict[str, str]) -> bool:
+    if isinstance(node, ast.Subscript):
+        return constant_string(node.slice) in GUARDED_TABLES
+    if isinstance(node, ast.Call):
+        name = dotted(node.func, bindings)
+        leaf = None if name is None else name.split(".")[-1]
+        if leaf in TABLE_CONSTRUCTORS or leaf in {"get", "getattr"}:
+            arguments = node.args[1:2] if leaf == "getattr" else node.args[:1]
+            return any(constant_string(a) in GUARDED_TABLES for a in arguments)
+        return False
+    name = dotted(node, bindings)
+    if name is None:
+        return False
+    for prefix in (TABLES_MODULE, DB_PACKAGE):
+        if (
+            name.startswith(f"{prefix}.")
+            and name.removeprefix(f"{prefix}.") in GUARDED_TABLES
+        ):
+            return True
+    return False
+
+
+def write_targets(node: ast.Call, bindings: dict[str, str]) -> list[ast.expr]:
     function = node.func
-    return isinstance(function, ast.Attribute) and guarded_table_name(
-        function.value, bindings
-    )
+    if is_sqlalchemy_call(node, bindings, WRITE_FUNCTIONS):
+        return call_arguments(node, "table")
+    if isinstance(function, ast.Attribute) and function.attr in {
+        "insert",
+        "update",
+        "delete",
+    }:
+        return [function.value]
+    return []
 
 
 def raw_sql_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
-    name = dotted(node.func, bindings)
-    leaf = None if name is None else name.split(".")[-1]
-    if leaf == "exec_driver_sql":
-        return "executes driver SQL outside kora.engine"
-    if leaf != "text" or not node.args:
+    if not is_sqlalchemy_call(node, bindings, frozenset({"text"})):
         return None
-    first = node.args[0]
-    if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+    arguments = call_arguments(node, "text")
+    if not arguments:
+        return None
+    statement = constant_string(arguments[0])
+    if statement is None:
         return "builds SQL text dynamically outside kora.engine"
-    if RAW_WRITE.search(first.value) is not None:
+    if RAW_WRITE.search(statement) is not None:
         return "writes an execution table in raw SQL"
     return None
+
+
+def guarded_import_reasons(node: ast.AST, module: SourceModule) -> Iterator[str]:
+    if not isinstance(node, ast.ImportFrom):
+        return
+    source = import_source(module, node)
+    if not (source == TABLES_MODULE or source == DB_PACKAGE):
+        return
+    for alias in node.names:
+        if alias.name == "*":
+            yield "star-imports the execution tables"
+        elif alias.name in GUARDED_TABLES:
+            yield f"imports the execution table {alias.name}"
 
 
 def mapping_reason(node: ast.AST, bindings: dict[str, str]) -> str | None:
     if isinstance(node, ast.ClassDef):
         for statement in node.body:
-            if not isinstance(statement, ast.Assign):
-                continue
-            targets = [t.id for t in statement.targets if isinstance(t, ast.Name)]
-            value = statement.value
-            names_guarded = (
-                isinstance(value, ast.Constant) and value.value in GUARDED_TABLES
-            ) or guarded_table_name(value, bindings)
-            if names_guarded and {"__tablename__", "__table__"} & set(targets):
+            if names_mapped_table(statement, bindings):
                 return f"maps {node.name} to an execution table through the ORM"
     if isinstance(node, ast.Call):
         name = dotted(node.func, bindings)
         if name is not None and name.split(".")[-1] in MAPPING_FUNCTIONS:
-            if any(guarded_table_name(argument, bindings) for argument in node.args):
+            arguments = [*node.args, *[k.value for k in node.keywords]]
+            if any(names_guarded_value(a, bindings) for a in arguments):
                 return "maps an execution table through the ORM"
     return None
 
 
-def star_import_reason(node: ast.AST, module: SourceModule) -> str | None:
-    if not isinstance(node, ast.ImportFrom):
-        return None
-    source = node.module or ""
-    if node.level > 0:
-        source = resolve_relative(module, node.level, source)
-    if source == TABLES_MODULE and any(alias.name == "*" for alias in node.names):
-        return "star-imports the execution tables"
+def names_guarded_value(node: ast.expr, bindings: dict[str, str]) -> bool:
+    return constant_string(node) in GUARDED_TABLES or names_guarded_table(
+        node, bindings
+    )
+
+
+def names_mapped_table(statement: ast.stmt, bindings: dict[str, str]) -> bool:
+    if isinstance(statement, ast.Assign):
+        targets = {t.id for t in statement.targets if isinstance(t, ast.Name)}
+        value: ast.expr | None = statement.value
+    elif isinstance(statement, ast.AnnAssign) and isinstance(
+        statement.target, ast.Name
+    ):
+        targets = {statement.target.id}
+        value = statement.value
+    elif (
+        isinstance(statement, ast.FunctionDef) and statement.name in MAPPING_ATTRIBUTES
+    ):
+        returns = [s.value for s in ast.walk(statement) if isinstance(s, ast.Return)]
+        return any(r is not None and names_guarded_value(r, bindings) for r in returns)
+    else:
+        return False
+    return (
+        bool(targets & MAPPING_ATTRIBUTES)
+        and value is not None
+        and names_guarded_value(value, bindings)
+    )
+
+
+def outside_db_reason(node: ast.AST, bindings: dict[str, str]) -> str | None:
+    if isinstance(node, ast.Attribute) and names_guarded_table(node, bindings):
+        return "references an execution table"
+    if isinstance(node, ast.Call) and names_guarded_table(node, bindings):
+        return "builds or looks up an execution table"
     return None
 
 
-def module_violations(module: SourceModule, owner: bool) -> list[Violation]:
+def call_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
+    if any(
+        names_guarded_table(target, bindings)
+        for target in write_targets(node, bindings)
+    ):
+        return "writes an execution table outside kora.engine"
+    return raw_sql_reason(node, bindings)
+
+
+def module_violations(module: SourceModule) -> list[Violation]:
     tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
     bindings = import_bindings(module, tree)
+    owner = is_owner(module.name)
+    inside_db = is_within(module.name, DB_PACKAGE)
     violations: list[Violation] = []
     for node in ast.walk(tree):
-        reason = mapping_reason(node, bindings)
-        if reason is None and not owner:
-            reason = star_import_reason(node, module)
-            if reason is None and isinstance(node, ast.Call):
-                if core_write(node, bindings):
-                    reason = "writes an execution table outside kora.engine"
-                else:
-                    reason = raw_sql_reason(node, bindings)
-        if reason is not None:
-            line = getattr(node, "lineno", 1)
-            violations.append(Violation(module.path, line, reason))
+        reasons: list[str] = []
+        mapping = mapping_reason(node, bindings)
+        if mapping is not None:
+            reasons.append(mapping)
+        if not owner:
+            if not inside_db:
+                reasons.extend(guarded_import_reasons(node, module))
+                outside = outside_db_reason(node, bindings)
+                if outside is not None:
+                    reasons.append(outside)
+            if isinstance(node, ast.Call):
+                call = call_reason(node, bindings)
+                if call is not None:
+                    reasons.append(call)
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr in RAW_CONNECTION_ATTRIBUTES
+            ):
+                reasons.append("executes driver-level SQL outside kora.engine")
+        line = getattr(node, "lineno", 1)
+        violations.extend(Violation(module.path, line, reason) for reason in reasons)
     return violations
 
 
-def find_violations(source_root: Path) -> list[Violation]:
+def find_violations(source_root: Path) -> list[str]:
     violations: list[Violation] = []
     for module in source_modules(source_root):
-        violations.extend(module_violations(module, is_owner(module.name)))
-    return sorted(violations, key=lambda v: (str(v.path), v.line))
+        violations.extend(module_violations(module))
+    described = {violation.describe(source_root) for violation in violations}
+    return sorted(described)
 
 
 def write_module(source_root: Path, module: str, source: str) -> None:
@@ -205,70 +299,99 @@ def write_module(source_root: Path, module: str, source: str) -> None:
     path.write_text(source, encoding="utf-8")
 
 
-def describe_all(violations: list[Violation], source_root: Path) -> list[str]:
-    return [violation.describe(source_root) for violation in violations]
-
-
 def test_transitions_only_through_shared_functions() -> None:
     source_root = SOURCE_ROOT
 
     violations = find_violations(source_root)
 
-    assert describe_all(violations, source_root) == []
+    assert violations == []
 
 
-def test_checker_flags_execution_table_writes_outside_engine(tmp_path: Path) -> None:
+def test_checker_refuses_execution_tables_outside_db_and_engine(tmp_path: Path) -> None:
     write_module(
         tmp_path,
         "kora.api.routes",
-        "from sqlalchemy import insert, update\n"
-        "from kora.db.tables import run, attempt as attempts\n"
-        "insert(run)\n"
-        "update(attempts)\n",
-    )
-    write_module(
-        tmp_path,
-        "kora.api.forms",
-        "from sqlalchemy.dialects.postgresql import insert as pg_insert\n"
-        "from ..db.tables import run\n"
+        "from kora.db.tables import run\n"
+        "from ..db import attempt\n"
+        "from kora.db.tables import *\n"
         "import kora.db as d\n"
-        "from kora import db\n"
-        "pg_insert(run)\n"
-        "d.tables.attempt.delete()\n"
-        "db.tables.wait.update()\n"
-        "update(metadata.tables['node_instance'])\n",
-    )
-    write_module(
-        tmp_path,
-        "kora.plugins.approval.cli",
-        "from kora.db import tables as t\nt.approval_request.update()\n",
+        "d.tables.wait\n",
     )
     write_module(
         tmp_path,
         "kora.scheduler.passes",
-        "from sqlalchemy import text\n"
-        'text("UPDATE wait SET status = 1")\n'
-        'text("delete from public.run")\n'
-        'text(f"UPDATE {name} SET x = 1")\n'
-        'connection.exec_driver_sql("SELECT 1")\n',
+        "import sqlalchemy as sa\n"
+        "sa.table('run', sa.column('status'))\n"
+        "sa.Table('attempt', sa.MetaData())\n"
+        "metadata.tables['node_instance']\n"
+        "metadata.tables.get('wait')\n"
+        "getattr(tables, 'approval_request')\n",
     )
-    write_module(tmp_path, "kora.worker.cache", "from kora.db.tables import *\n")
 
     violations = find_violations(tmp_path)
 
-    assert describe_all(violations, tmp_path) == [
-        "kora/api/forms.py:5: writes an execution table outside kora.engine",
-        "kora/api/forms.py:6: writes an execution table outside kora.engine",
-        "kora/api/forms.py:7: writes an execution table outside kora.engine",
-        "kora/api/forms.py:8: writes an execution table outside kora.engine",
-        "kora/api/routes.py:3: writes an execution table outside kora.engine",
-        "kora/api/routes.py:4: writes an execution table outside kora.engine",
-        "kora/plugins/approval/cli.py:2: writes an execution table outside kora.engine",
-        "kora/scheduler/passes.py:2: writes an execution table in raw SQL",
-        "kora/scheduler/passes.py:3: writes an execution table in raw SQL",
-        "kora/scheduler/passes.py:4: builds SQL text dynamically outside kora.engine",
-        "kora/scheduler/passes.py:5: executes driver SQL outside kora.engine",
-        "kora/worker/cache.py:1: star-imports the execution tables",
+    assert violations == [
+        "kora/api/routes.py:1: imports the execution table run",
+        "kora/api/routes.py:2: imports the execution table attempt",
+        "kora/api/routes.py:3: star-imports the execution tables",
+        "kora/api/routes.py:5: references an execution table",
+        "kora/scheduler/passes.py:2: builds or looks up an execution table",
+        "kora/scheduler/passes.py:3: builds or looks up an execution table",
+        "kora/scheduler/passes.py:5: builds or looks up an execution table",
+        "kora/scheduler/passes.py:6: builds or looks up an execution table",
+    ]
+
+
+def test_checker_flags_writes_inside_db(tmp_path: Path) -> None:
+    write_module(
+        tmp_path,
+        "kora.db.repository",
+        "from sqlalchemy import insert, Update\n"
+        "from sqlalchemy.dialects.postgresql import insert as pg_insert\n"
+        "from kora.db.tables import run, attempt\n"
+        "insert(run)\n"
+        "pg_insert(attempt)\n"
+        "Update(run)\n"
+        "insert(table=attempt)\n"
+        "run.delete()\n"
+        "seen.update(run)\n",
+    )
+
+    violations = find_violations(tmp_path)
+
+    assert violations == [
+        "kora/db/repository.py:4: writes an execution table outside kora.engine",
+        "kora/db/repository.py:5: writes an execution table outside kora.engine",
+        "kora/db/repository.py:6: writes an execution table outside kora.engine",
+        "kora/db/repository.py:7: writes an execution table outside kora.engine",
+        "kora/db/repository.py:8: writes an execution table outside kora.engine",
+    ]
+
+
+def test_checker_flags_raw_and_driver_sql(tmp_path: Path) -> None:
+    write_module(
+        tmp_path,
+        "kora.db.reports",
+        "from sqlalchemy import text\n"
+        'text("UPDATE ONLY wait SET status = 1")\n'
+        'text("INSERT OR REPLACE INTO run VALUES (1)")\n'
+        'text(text="TRUNCATE TABLE attempt")\n'
+        'text(f"UPDATE {name} SET x = 1")\n'
+        "connection.exec_driver_sql(statement)\n"
+        "raw.driver_connection.execute(statement)\n"
+        'text("SELECT * FROM run")\n'
+        "widget.text(value)\n",
+    )
+
+    violations = find_violations(tmp_path)
+
+    assert violations == [
+        "kora/db/reports.py:2: writes an execution table in raw SQL",
+        "kora/db/reports.py:3: writes an execution table in raw SQL",
+        "kora/db/reports.py:4: writes an execution table in raw SQL",
+        "kora/db/reports.py:5: builds SQL text dynamically outside kora.engine",
+        "kora/db/reports.py:6: executes driver-level SQL outside kora.engine",
+        "kora/db/reports.py:7: executes driver-level SQL outside kora.engine",
     ]
 
 
@@ -276,26 +399,35 @@ def test_checker_flags_orm_mapping_of_execution_tables(tmp_path: Path) -> None:
     write_module(
         tmp_path,
         "kora.db.orm",
+        "from sqlalchemy import Table\n"
         "from kora.db.tables import attempt\n"
         "class Attempt(Base):\n"
         "    __table__ = attempt\n"
         "class Run(Base):\n"
-        '    __tablename__ = "run"\n'
+        '    __tablename__: str = "run"\n'
+        "class Wait(Base):\n"
+        "    __table__ = Table('wait', Base.metadata)\n"
+        "class Node(Base):\n"
+        "    @declared_attr\n"
+        "    def __tablename__(cls) -> str:\n"
+        "        return 'node_instance'\n"
         "class Token(Base):\n"
         '    __tablename__ = "api_token"\n'
-        "registry.map_imperatively(Wait, attempt)\n",
+        "registry.map_imperatively(Item, local_table=attempt)\n",
     )
 
     violations = find_violations(tmp_path)
 
-    assert describe_all(violations, tmp_path) == [
-        "kora/db/orm.py:2: maps Attempt to an execution table through the ORM",
-        "kora/db/orm.py:4: maps Run to an execution table through the ORM",
-        "kora/db/orm.py:8: maps an execution table through the ORM",
+    assert violations == [
+        "kora/db/orm.py:15: maps an execution table through the ORM",
+        "kora/db/orm.py:3: maps Attempt to an execution table through the ORM",
+        "kora/db/orm.py:5: maps Run to an execution table through the ORM",
+        "kora/db/orm.py:7: maps Wait to an execution table through the ORM",
+        "kora/db/orm.py:9: maps Node to an execution table through the ORM",
     ]
 
 
-def test_checker_allows_owning_modules_and_unguarded_tables(tmp_path: Path) -> None:
+def test_checker_allows_owning_modules_and_reads_in_db(tmp_path: Path) -> None:
     write_module(
         tmp_path,
         "kora.engine.attempts",
@@ -309,22 +441,22 @@ def test_checker_allows_owning_modules_and_unguarded_tables(tmp_path: Path) -> N
     )
     write_module(
         tmp_path,
-        "kora.db.maintenance",
-        "from kora.db.tables import artifact_version\nartifact_version.update()\n",
+        "kora.db.tables",
+        "from sqlalchemy import Table, MetaData\nrun = Table('run', MetaData())\n",
     )
     write_module(
         tmp_path,
-        "kora.scheduler.retention",
-        "from kora.db.tables import artifact_version\nartifact_version.update()\n",
+        "kora.db.reads",
+        "from sqlalchemy import select, insert\n"
+        "from kora.db.tables import run, api_token\n"
+        "select(run)\ninsert(api_token)\n",
     )
     write_module(
         tmp_path,
         "kora.api.tokens",
-        "from sqlalchemy import insert, select, text\n"
-        "from kora.db.tables import api_token, run\n"
-        'insert(api_token)\nselect(run)\nitems.add(run)\ntext("SELECT * FROM run")\n',
+        "from kora.db.reads import load_run\nfrom kora.db.tables import api_token\n",
     )
 
     violations = find_violations(tmp_path)
 
-    assert describe_all(violations, tmp_path) == []
+    assert violations == []
