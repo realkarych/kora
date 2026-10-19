@@ -172,7 +172,7 @@ class BridgeHandler(logging.Handler):
             return logger
 
     def emit(self, record: logging.LogRecord) -> None:
-        name: object = record.name
+        name = getattr(record, "name", None)
         if not isinstance(name, str) or not is_dotted_name(name):
             self._diagnostics.state.count_rejected(
                 THIRD_PARTY_COMPONENT, Level.DEBUG, LossReason.INVALID_FIELD
