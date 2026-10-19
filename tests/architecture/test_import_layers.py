@@ -182,7 +182,7 @@ def known_modules(source_root: Path) -> frozenset[str]:
 
 def resolve_relative(module: SourceModule, level: int, name: str) -> str:
     parts = module.name.split(".")
-    package_parts = parts if module.path.name == "__init__.py" else parts[:-1]
+    package_parts = parts if module.path.stem == "__init__" else parts[:-1]
     base_parts = package_parts[: len(package_parts) - (level - 1)]
     return ".".join([*base_parts, name] if name else base_parts)
 
@@ -575,10 +575,15 @@ def test_checker_resolves_namespace_subpackages_and_root_scope(tmp_path: Path) -
         "kora.__init__",
         "def load() -> None:\n    import kora.db\nimport kora.db\n",
     )
+    stub = tmp_path / "kora" / "runner" / "__init__.pyi"
+    stub.parent.mkdir(parents=True)
+    stub.write_text("from . import plans\nfrom .. import db\n", encoding="utf-8")
+    write_module(tmp_path, "kora.runner.plans", "")
 
     violations = find_violations(tmp_path)
 
     assert describe_all(violations, tmp_path) == [
         "kora/__init__.py:3: kora may not import db (kora.db)",
         "kora/mcp/tools.py:1: mcp may not import mcp.stdio (kora.mcp.stdio)",
+        "kora/runner/__init__.pyi:2: runner may not import db (kora.db)",
     ]

@@ -43,7 +43,7 @@ Several components are shared between these processes: the API client and its mo
 
 **Third-party checks.**
 
-- Only `cel_eval` may import the CEL binding `cel`, and this binds the composition roots too, so `cel`, `ir`, `dsl` and the CLI entry point work without the `kora[cel]` extra.
+- Only `cel_eval` may import the CEL binding `cel`, and this binds the composition roots too, so `cel`, `ir` and `dsl` work without the `kora[cel]` extra. A root may still import `cel_eval` or `api`, so that the CLI entry point starts without the extra depends on `kora.__main__` deferring those imports; the CLI work item adds the pending contract `test_cli_compile_runs_without_cel_extra`, which runs `kora compile` in an environment without `kora[cel]`.
 - `fastapi`, `starlette`, `uvicorn`, `sqlalchemy`, `alembic`, `asyncpg` and `aiosqlite` may not be imported by `observability`, `cel`, `ir`, `protocols`, `models`, `client`, `executor`, `runner` or `worker`. `mcp` is left out until the MCP SDK's HTTP stack is settled.
 - A call to `importlib.import_module`, `__import__` or `pkgutil.resolve_name` whose module argument is a string literal naming a kora module is refused outside the provider-loading module `kora.protocols.loading`. The check follows aliases of these functions and of their modules, `builtins.__import__`, the `name` keyword and a relative literal with a literal package. Dynamic edges do not count towards the invariant, which is about static imports.
 
@@ -63,7 +63,7 @@ Layering is a maintainability and packaging rule, with defence in depth for trus
 
 - **The ADR-0016 boundary does not rest on it.** That boundary rests on runtime authority, not on which modules a process imports. One distribution installs all server code and its dependencies wherever `kora-runner` is installed (ADR-0004, ADR-0013).
 - **Process placement.** On both reference runtimes the supervisor runs on the host ([protocols.md section 2](../../knowledge/specs/protocols.md#2-runtime-fr-81)). The plan executor runs in `runner` or `worker_host`. Kora code that runs inside the candidate domain includes the Codex `kora-runner policy-hook` ([protocols.md section 12](../../knowledge/specs/protocols.md#12-policy-dd-29)) and the candidate-side steps of a publish plan ([protocols.md section 4](../../knowledge/specs/protocols.md#4-vcs-fr-52)); whatever those import is reachable from the candidate.
-- **What it gives.** Trusted processes that parse candidate-controlled data load less code. `runner` has no code path to `client`, matching "the supervisor has no API credential" in the [threat model's trust boundaries](../threat-model.md#trust-boundaries-and-data-flows).
+- **What it gives.** Trusted processes that parse candidate-controlled data load less code. `runner` has no code path to `client`, matching "the supervisor has no API credential" in the [threat model's actor table](../threat-model.md#assets-actors-and-assumptions).
 
 It does not guarantee:
 
