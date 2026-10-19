@@ -23,13 +23,13 @@ The settings reference (`/docs/en/settings-reference`) adds that `disableClaudeA
 
 ## Hooks and permissions
 
-From the hooks reference (`/docs/en/hooks`) and the permissions page (`/docs/en/permissions`):
+From the hooks reference (`/docs/en/hooks`), the permissions page (`/docs/en/permissions`) and the permission-modes page (`/docs/en/permission-modes`):
 
 - All matching hooks run in parallel. When hooks disagree, the precedence is `deny` over `defer` over `ask` over `allow`.
 - `updatedInput` in a `PreToolUse` result replaces the whole tool input before the tool runs. Permission rules are evaluated against the input the hook returns, not the input the model sent.
 - `PreToolUse` hook decisions do not bypass permission rules. Deny and ask rules are evaluated whatever the hook returns, so a hook's `allow` does not override a matching deny rule.
 - A `PreToolUse` `allow` skips the permission prompt. In plan mode it has no effect on a file edit or another call that is not read-only, apart from `ExitPlanMode`.
-- `dontAsk` denies every call that would otherwise prompt. Calls that need no approval, and tools pre-approved through `permissions.allow` rules, still run.
+- `dontAsk` denies every call that would otherwise prompt. Calls that need no approval, actions matching `permissions.allow` rules and calls approved by a `PreToolUse` hook still run, per the permission-modes page; the permissions page's summary table lists only the first two.
 - `disableAllHooks: true` in a settings file disables hooks. The value left after settings precedence applies counts, so a project `.claude/settings.json` can set it. The documentation does not say whether it affects Agent SDK callback hooks.
 
 ## Settings reload
@@ -44,4 +44,4 @@ From the settings page (`/docs/en/settings`):
 
 - These statements back the "not yet observed" items of the `claude` defaults in protocols.md section 3: the disabling variables, the reserved proxy variables, and the claude.ai connector exclusion.
 - They also back the `trust_repo_config: true` residual of section 12 and [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md): repository hooks can rewrite input, a project setting can disable hooks, and settings written during a session are reloaded.
-- The plan-mode and `dontAsk` rules decide what the callback's explicit allow achieves in each permission mode. Whether a callback allow lets a call run under `dontAsk` is not stated directly and is not yet observed.
+- The plan-mode and `dontAsk` rules decide what the callback's explicit allow achieves in each permission mode. Under `dontAsk` a hook-approved call runs per the permission-modes page, which agrees with the [harness policy hooks](harness-policy-hooks.md) note of 2026-10-16. This is not yet observed.
