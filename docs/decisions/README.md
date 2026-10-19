@@ -4,6 +4,8 @@ One record per significant decision, in the MADR shape: context, decision, alter
 
 Ownership-index amendment dated 2026-10-18: scope approved under issue #95; wording pending owner review.
 
+Slice-scope amendment dated 2026-10-19: ADR-0001 status updated under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
+
 Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (implementation defaults) and `DD-37` (small mechanisms kept or dropped) point to their component specification owners through the register; it preserves identifiers and dispositions without overriding those current contracts.
 
 | record | decision | status |
