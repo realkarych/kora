@@ -58,7 +58,7 @@ Execution:
 |---|---|
 | Run creation, promotion, retry/clear, cancellation and lifecycle changes | Include the marker in the accepted transition, also when a settled failed run returns to running |
 | Current attempt/state/result acceptance, output promotion, recovery changes and reservation release | Mark when local readiness, completion or admission can change; historical-only late output never gains result authority |
-| Counter/usage updates and relevant effective-limit changes | Mark affected runs so aggregate budget/admission checks cannot miss new information; unrelated diagnostics alone need not mark |
+| Counter/usage updates and relevant effective-limit changes | Mark affected runs so aggregate budget/admission checks cannot miss new information; unrelated diagnostics alone need not mark. A namespace policy or limit write holds no run lock, so it marks nothing: the independent admission-recheck predicate of scheduler.md section 8 finds the affected runs and takes each run's lock |
 | Wait/event/approval resolution, current observation application and deadline expiry | Mark atomically with their accepted state/artifact changes; future due work still has its independent discovery predicate |
 | Body materialisation, branch decision/target state, wrapper export and collection | Mark atomically, including child-only recollection and every affected downstream clear |
 | Any other transition enabling a local scheduler pass | Mark in its transaction; the list above is not an exemption for an unlisted enabling transition |

@@ -6,7 +6,7 @@ Held-read amendment dated 2026-10-19: the TM-10 scenario names callers that hold
 
 CEL amendment dated 2026-10-19 (TM-02, TM-04, TM-10, TM-12 and the TM-03/TM-04, TM-08/TM-09, TM-10 and TM-12 evidence rows): decisions taken and implementation plan approved by the project owner under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review.
 
-Shared-transition amendment dated 2026-10-19: the scheduler label in the trust-boundary diagram names the shared transition functions that the API and the scheduler both call ([issue #103](https://github.com/realkarych/kora/issues/103)). TM-01, TM-02, TM-08, TM-09 and TM-10 are unchanged in authority: object-level checks run inside every transition under the run lock, and the API evaluates only `approve_when` (TM-10). Wording pending line-by-line owner review.
+Shared-transition amendment dated 2026-10-19: the scheduler label in the trust-boundary diagram names the shared transition functions that the API and the scheduler both call ([issue #103](https://github.com/realkarych/kora/issues/103)). The API label names them too, because the API runs them in its own process. TM-01, TM-02, TM-08, TM-09 and TM-10 are unchanged in authority: object-level checks run inside every transition under the run lock, and the API evaluates only `approve_when` (TM-10). TM-10 gains a remaining availability limit: a signal route holds its pooled connection while it waits for its locks, bounded per lock by `lock_timeout`, so an authenticated caller repeating signals at its own hot run can occupy the shared pool until those waits expire. Wording pending line-by-line owner review.
 
 ## Purpose, scope and status
 
@@ -52,7 +52,7 @@ The diagram separates authorities, not network deployment units. Arrows carry da
 flowchart TB
     user["User, CLI, web, authoring MCP"]
     repo["Graph source and target repository"]
-    api["API: authentication and current authority"]
+    api["API: authentication, current authority and shared transition functions"]
     db[("Metadata and immutable contracts")]
     scheduler["Scheduler: admission; shared transition functions with the API"]
     worker["Worker: service principal and lease"]
