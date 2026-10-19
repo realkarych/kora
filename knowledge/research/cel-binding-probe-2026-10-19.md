@@ -1,6 +1,6 @@
 # CEL binding probe
 
-Checked on 2026-10-19. Scope: a hands-on probe for [issue #116](https://github.com/realkarych/kora/issues/116) of the Rust-backed CEL binding chosen by [ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md) and the "Expression language" row of the [stack table](../architecture/detailed.md), against the CEL usage in [ir.md section 7](../specs/ir.md) at `94cd45451f56b1b786f7b1c8c418276890a06ddb`. This is dated evidence, not a decision. The prototype is throwaway code outside the repository; the snippets below are the parts needed to reproduce each result.
+Checked on 2026-10-19. Scope: a hands-on probe for [issue #116](https://github.com/realkarych/kora/issues/116) of the Rust-backed CEL binding chosen by [ADR-0006](../../docs/decisions/0006-graph-definition-dsl-and-yaml-representation.md) and the "Expression language" row of the [stack table](../architecture/detailed.md), against the CEL usage in [ir.md section 7](../specs/ir.md) at `94cd45451f56b1b786f7b1c8c418276890a06ddb`. This is dated evidence, not a decision. The prototype is throwaway code outside the repository. The scratch scripts named below (for example `run_binding.py`, `untrusted.py`, `celcheck/`) are not retained in the repository; the snippets below are the parts needed to reproduce each result.
 
 Environment: macOS 27.0.1 on Apple silicon (arm64), uv 0.11.7, CPython 3.11.17 and 3.15.0 in separate throwaway virtual environments. Packages: `common-expression-language` 0.10.0, `cel-python` 0.5.0 and, as a side check, `cel-expr-python` 0.1.3. Timings are single-machine wall-clock figures and only their order of magnitude is meaningful.
 
@@ -10,9 +10,9 @@ Environment: macOS 27.0.1 on Apple silicon (arm64), uv 0.11.7, CPython 3.11.17 a
 |---|---|---|
 | Installation | PyPI `common-expression-language`, import name `cel`, Apache-2.0, latest 0.10.0 (2026-09-15). Wheels for CPython 3.11–3.14 on macOS arm64, Linux x86_64 and Linux aarch64; 3.15 has a wheel only for Linux x86_64. Elsewhere on 3.15 the sdist builds with maturin, which downloads a Rust toolchain when none is installed. Single maintainer, beta status. | Confirms the choice for 3.11–3.14. On macOS arm64 and Linux aarch64, Python 3.15 has no wheel yet, a gap the stack table does not mention. |
 | Evaluation | Every expression in the specifications and examples evaluates correctly. The FR-2.5 example fails at run time with `TypeError` because a JSON integer multiplied by a double has no overload. Missing fields raise `KeyError`. `size()` on strings counts UTF-8 bytes, not code points. | Confirms, with three integration requirements: per-schema number normalisation, an explicit exception mapping and result-type checks. |
-| Static checking | The binding has no type checker and does not expose its syntax tree. `Program.references()` lists only top-level identifiers. kora has to parse expressions itself. A hand-written parser and checker sketch of about 690 non-blank lines checks every example expression and catches field typos, enum-literal typos, non-bool results and numeric mismatches. | Confirms "the binding has no static checker of its own" and that kora's own checker (`IR011`) is necessary. |
-| Untrusted expressions | The binding has no cost limit, no timeout and holds the GIL during evaluation, and a signal cannot interrupt it. About 12,000 chained selections or additions crash the interpreter with SIGSEGV; on a 256 KiB thread stack, 1,000 are enough. `map` and `filter` take quadratic time in the list size. Chained `map` calls grow memory exponentially. Regular expressions run in linear time. | Not covered by ADR-0006 or ir.md. The checker has to enforce length and depth limits, and evaluation needs process isolation or bounded inputs. |
-| cel-python | No static checker either. It exposes a lark syntax tree with positions. It deviates from current CEL semantics in 6 of the 7 cases where the two libraries disagree. Compile is about 6× slower and comprehensions about 80× slower. It cannot be installed on Python 3.15 on any platform because of its `google-re2` dependency. Deep nesting raises a catchable `RecursionError`, and a signal can interrupt evaluation. | Confirms "`cel-python` has no static checking"; as the fallback it is weaker than the decided binding. |
+| Static checking | The binding has no type checker and does not expose its syntax tree. `Program.references()` lists only top-level identifiers. kora has to parse expressions itself. A hand-written parser and checker sketch of about 690 non-blank lines checks every example expression and catches field typos, enum-literal typos, non-bool results and numeric mismatches. | Confirms "the binding has no static checker of its own" and that kora's own checker (`IR011`) is necessary; refines ADR-0006 with a requirement it does not state: the checker needs kora's own parser. |
+| Untrusted expressions | The binding has no cost limit, no timeout and holds the GIL during evaluation, and a signal cannot interrupt it. About 12,000 chained selections or additions crash the interpreter with SIGSEGV; on a 256 KiB thread stack, 1,000 are enough. `map` and `filter` take quadratic time in the list size. Chained `map(a, a + a)` calls grow memory exponentially. Regular expressions run in linear time. | Not covered by ADR-0006 or ir.md. The checker has to enforce length and depth limits, and evaluation needs process isolation or bounded inputs. |
+| cel-python | No static checker either. It exposes a lark syntax tree with positions. It deviates from current CEL semantics in 6 of the 7 cases where the two libraries disagree. Compile is about 6× slower and comprehensions about 80× slower. Its dependency `google-re2` has no cp315 wheels; a source build needs system RE2 and abseil, and one macOS source build failed on missing abseil headers (Linux not attempted). Deep nesting raises a catchable `RecursionError`, and a signal can interrupt evaluation. | Confirms "`cel-python` has no static checking"; as the fallback it is weaker than the decided binding. |
 
 **Recommendation for the first slice:** keep the decided binding and do not switch to the fallback. The reasons and conditions are in the [last section](#recommendation-for-the-first-slice).
 
@@ -187,7 +187,7 @@ The binding exposes no checker and no syntax tree. Its whole compiled-program su
 ['_!=_', '_&&_', '_+_', '_==_', '_?_:_', 'size']
 ```
 
-`variables()` returns top-level identifiers only, and comprehension variables appear as if they were free. `functions()` includes the operators that the `filter` macro expands into. The package's introspection guide states that the upstream crate "has no protobuf support and no separate type-checking phase". Exposing the tree is open as issue #48. Field paths, types and positions of sub-expressions are therefore unavailable, which confirms ADR-0006: kora needs its own parser as well as its own checker.
+`variables()` returns top-level identifiers only, and comprehension variables appear as if they were free. `functions()` includes the operators that the `filter` macro expands into. The package's introspection guide states that the upstream crate "has no protobuf support and no separate type-checking phase". Exposing the tree is open as issue #48. Field paths, types and positions of sub-expressions are therefore unavailable. This confirms ADR-0006's statement that the binding has no checker and refines it: kora needs its own parser as well as its own checker, which ADR-0006 does not state.
 
 Ways to obtain a syntax tree:
 
@@ -195,14 +195,14 @@ Ways to obtain a syntax tree:
 |---|---|
 | Hand-written lexer and recursive-descent parser for the CEL grammar | No new dependency. The grammar is small: about two dozen parser rules in the cel-spec ANTLR grammar. The probe sketch below takes 310 non-blank lines. Position information and limits on length and depth come naturally. |
 | `lark` with the grammar from cel-python (`celpy/cel.lark`, 179 lines, Apache-2.0) | `lark` is pure Python (`py3-none-any`). Vendoring a grammar adds a dependency to record in the stack table, and kora would still write the whole checker. |
-| The cel-python package's own parser (`celpy.Environment().compile()` returns a `lark.Tree` with line and column) | It drags in `google-re2`, `pendulum`, `jmespath`, `lark` and `pyyaml`, and cannot be installed on Python 3.15 (see the comparison below). |
+| The cel-python package's own parser (`celpy.Environment().compile()` returns a `lark.Tree` with line and column) | It drags in `google-re2`, `pendulum`, `jmespath`, `lark` and `pyyaml`, and on Python 3.15 needs a `google-re2` source build against system RE2 and abseil (see the comparison below). |
 | `cel-expr-python` 0.1.3 (PyPI, Apache-2.0, the CEL project's own Python runtime over cel-cpp) | It has a real checker: `cel.NewEnv(variables={"count": Type.INT})` with `env.compile("count * 0.85")` raises `found no matching overload for '_*_' applied to '(int, double)'`, and `respons.decision` reports an undeclared reference. But a JSON object can only be declared as `map(string, dyn)`. Field-level typing needs protobuf message types, so kora would have to generate descriptors from JSON Schema. Version 0.1.x, an 11.5 MB wheel, and no cp315 wheel on any platform. A candidate to watch, not to adopt for the first slice. |
 
 ### Checker sketch
 
 A minimal schema-driven checker in three modules (`celcheck/syntax.py`, `types.py`, `checker.py`):
 
-- **Syntax:** a lexer for CEL literals (int, uint, double, hex, single, double and triple-quoted strings, raw strings and bytes, escapes), identifiers and operators, and a recursive-descent parser following CEL precedence: `?:`, `||`, `&&`, relations and `in`, `+ -`, `* / %`, unary, member and index chains, list and map literals. The parser enforces at most 4096 characters and an AST depth of at most 64, counting chained selections and binary operators. Both limits fall below the binding's crash thresholds. Message construction and `.?` are rejected with explicit errors.
+- **Syntax:** a lexer for CEL literals (int, uint, double, hex, single, double and triple-quoted strings, raw strings and bytes, escapes), identifiers and operators, and a recursive-descent parser following CEL precedence: `?:`, `||`, `&&`, relations and `in`, `+ -`, `* / %`, unary, member and index chains, list and map literals. The parser enforces at most 4096 characters and an AST depth of at most 64, counting chained selections and binary operators. The depth limit keeps every accepted expression far below the measured crash thresholds; the length limit alone would not on small thread stacks (see [Untrusted expressions](#untrusted-expressions)). Message construction and `.?` are rejected with explicit errors.
 - **Types:** CEL types from JSON Schema. An `object` with `properties` becomes a record with known fields and a required set; an object without properties becomes `map(string, dyn)`. String `enum` becomes `string` with its allowed values; `integer` becomes `int`, `number` becomes `double`, `boolean` becomes `bool`, `array` becomes `list(T)`, and anything else becomes `dyn`.
 - **Checker:** resolves identifiers and comprehension variables, checks field selection against declared properties, and applies the standard overloads (equality, ordering with cross-numeric comparison, arithmetic without implicit conversion, `&&`, `||`, `!`, `?:`, `in`, indexing). It covers `size`, the string predicates, the conversions, `timestamp`, `duration`, `dyn` and `type`. Macros `has`, `all`, `exists`, `exists_one`, `map` and `filter` bind the element type. It rejects functions outside the standard library and checks the expected result type: `bool`, or `string` for reasons. Unknown fields, enum literals outside the allowed values and type mismatches are errors. An optional field read without a `has()` guard is a warning. Comprehensions are limited to 4 per expression and a nesting depth of 2.
 
@@ -281,7 +281,7 @@ Gaps the sketch exposed in the specifications:
 - The built-in artifact types (`CommandResult`, `VcsRef`, `ReviewBundle`, `AgentSession`) have no published field schemas in the IR or the specifications, so `inputs.same.exit_code` cannot be typed until those schemas exist.
 - Webhook `payload` and sensor `observation` have no declared schema (the `http` sensor's `body` is arbitrary JSON). `IR011` can type only the `inputs.*` side of `match` and `until`, and the rest stays `dyn`.
 
-Relation to the decision: this confirms ADR-0006 and the stack table. The binding has no checker, kora's checker is required, and it has to include a parser.
+Relation to the decision: this confirms ADR-0006 and the stack table on the missing checker and the need for kora's own checker, and refines them: that checker has to include kora's own parser, a requirement neither document states.
 
 ## Untrusted expressions
 
@@ -291,8 +291,8 @@ Each case runs in a fresh child process with a 15-second kill timeout (`untruste
 |---|---|---|
 | `(` nested n deep | n ≤ 95 ok; 96 and above give `ValueError` ("Recursion limit of 96 exceeded"); n = 100,000 gives `PanicException` (a `BaseException`) | n = 50 ok; n = 100 gives `RecursionError` (catchable) |
 | `[` nested n deep | n ≤ 96 ok; 97 and above give `ValueError` | n = 100 gives `RecursionError` |
-| `a.b.b…` member chain | 10,000 ok; ~12,000 crashes the process with **SIGSEGV** while parsing | 1,000 gives `RecursionError` |
-| `1 + 1 + …` chain | 10,000 ok; ~12,000 crashes with **SIGSEGV** while evaluating, and 30,000 while parsing | 1,000 gives `RecursionError` |
+| `a.b.b…` member chain | 10,000 ok; ~12,000 crashes the process with **SIGSEGV** | 1,000 gives `RecursionError` |
+| `1 + 1 + …` chain | 10,000 ok; ~12,000 crashes the process with **SIGSEGV** | 1,000 gives `RecursionError` |
 | `true && true && …` chain | 100,000 ok (0.26 s) | 1,000 gives `RecursionError` |
 | 10 MB string literal; 10 MB string input with `contains` | ok, 0.03 s; ok, 0.002 s | ok, 1.1 s and 1.7 GB peak RSS; ok |
 | `l.all(a, l.all(b, l.all(c, true)))`, \|l\| = 100 / 200 / 1,000 | 0.12 s / 0.96 s / **timeout** | 9.8 s / **timeout** / **timeout** |
@@ -315,7 +315,7 @@ stack  1024 KiB, member chain  1000: KeyError survived
 stack  1024 KiB, member chain  3000: crashed rc=138
 ```
 
-A stack overflow in the Rust parser or evaluator kills the whole Python process; no exception reaches Python. A 4096-character limit on its own is not enough, because on a 256 KiB thread stack a member chain of 1,000 selections (about 2,000 characters) already crashes. An AST depth limit in the dozens is safe on every stack size measured.
+The bisection compiles and executes in one child process, so it does not separate parse-time from evaluation-time overflows. A stack overflow kills the whole Python process; no exception reaches Python. A 4096-character limit on its own is not enough, because on a 256 KiB thread stack a member chain of 1,000 selections (about 2,000 characters) already crashes. An AST depth limit in the dozens is safe on every stack size measured.
 
 The binding holds the GIL during evaluation, and a signal cannot interrupt it (`gil_and_alarm.py`; a background thread increments a counter every millisecond):
 
@@ -326,14 +326,14 @@ celpy: evaluation took 0.67s; background thread ticks during it: 92 (about 538 e
 celpy: SIGALRM at 0.5s interrupted evaluation after 0.50s
 ```
 
-The binding releases the GIL only while parsing expressions of 32 bytes or more (0.10.0 changelog). Releasing it during evaluation is open issue #45. In-process, the binding offers no way to bound time or memory. An expensive expression stalls every thread of the process, including an asyncio event loop, until it finishes. A Python-level timeout fires only afterwards.
+The pinned 0.10.0 holds the GIL while parsing too: its Rust sources contain no `allow_threads` or `detach` call. Releasing the GIL while parsing expressions of 32 bytes or more appears only in the upstream changelog's `[Unreleased]` section, and evaluation still holds it there; releasing it during evaluation is open issue #45. In-process, the binding offers no way to bound time or memory. An expensive expression stalls every thread of the process, including an asyncio event loop, until it finishes. A Python-level timeout fires only afterwards.
 
 Bound data matters too. With an 888 KiB payload bound as `inputs`, `response.decision == 'approve'` takes 25 ms per evaluation, because the whole dictionary is converted on every call. Binding only `response` takes 1.7 µs. `Program.variables()` and `Context.set_variable_resolver()` let kora bind only the top-level names an expression references.
 
 Consequences for kora, which ADR-0006 and ir.md do not address today:
 
-1. The checker enforces a maximum source length, an AST depth limit well below the binding's parser limit of 96 (chained selections and binary operators count) and limits on comprehension count and nesting. It runs before the binding ever sees the expression, at `kora validate` and at deployment.
-2. Comprehension cost depends on run-time data: quadratic `map` and `filter`, multiplicative nesting, exponential growth through chained `map` with `+`. Static limits alone cannot bound time and memory. One of these is still needed: evaluation in a separate worker process with a wall-clock timeout and a memory limit; a size bound on the lists bound into CEL (artifact payloads, sensor bodies); or a cost estimator. The scheduler is shared by many teams (FR-7.5), so in-process evaluation on its event loop is the riskiest placement.
+1. The checker enforces a maximum source length, an AST depth limit in which chained selections and binary operators count, and limits on comprehension count and nesting. The binding's own limit of 96 applies only to `(` and `[` nesting; chained selections and arithmetic are unlimited there and crash near 12,000 terms (1,000 on a 256 KiB stack). It runs before the binding ever sees the expression, at `kora validate` and at deployment.
+2. Comprehension cost depends on run-time data: quadratic `map` and `filter`, multiplicative nesting, exponential growth through chained `map(a, a + a)`. Static limits alone cannot bound time and memory. One of these is still needed: evaluation in a separate worker process with a wall-clock timeout and a memory limit; a size bound on the lists bound into CEL (artifact payloads, sensor bodies); or a cost estimator. The scheduler is shared by many teams (NFR-0.1), so in-process evaluation on its event loop is the riskiest placement.
 3. The exception handling maps the binding's documented exception classes and `PanicException` to structured errors explicitly. A bare `except Exception` would miss `PanicException`, and the project rules forbid it anyway.
 
 Relation to the decision: neither ADR-0006 nor the stack table makes a claim about untrusted-expression behaviour. These findings add requirements without contradicting the choice.
@@ -362,9 +362,9 @@ cel-python lacks heterogeneous numeric equality and silently converts in `double
 | One million comprehension iterations (`nested_all_3`, \|l\| = 100) | 0.12 s | 9.8 s |
 | `import` time | 63 ms (loads typer, rich, prompt_toolkit, pygments) | 83 ms |
 | Distribution | native wheels per platform and version; Rust needed where no wheel exists | `py3-none-any` wheel, but its dependencies `google-re2` (C++, no cp315 wheel anywhere) and `pendulum` (native, has cp315 wheels) are native |
-| Python 3.15 | wheel on Linux x86_64; source build with an automatically downloaded Rust toolchain elsewhere | **not installable** on macOS arm64, Linux x86_64 or Linux aarch64: building `google-re2` fails with `'absl/strings/string_view.h' file not found` |
+| Python 3.15 | wheel on Linux x86_64; source build with an automatically downloaded Rust toolchain elsewhere | no cp315 wheels for its `google-re2` dependency on any of the three platforms; a source build needs system RE2 and abseil. One macOS arm64 source build failed with `'absl/strings/string_view.h' file not found`; a Linux build was not attempted |
 | Behaviour on hostile input | stack-overflow crash, GIL held, not interruptible | `RecursionError`, interruptible, but much slower |
-| Maintenance | single maintainer, 5 releases in 2026, active upstream engine | cloud-custodian organisation, several maintainers, 173 stars, last release 0.5.0 on 2026-01-31, last commit on `main` 2026-07-17 |
+| Maintenance | single maintainer, 7 releases in 2026 (0.5.5, 0.5.6, 0.6.0–0.10.0), active upstream engine | cloud-custodian organisation, several maintainers, 173 stars, last release 0.5.0 on 2026-01-31, last commit on `main` 2026-07-17 |
 
 Wheel-only resolution on all three platforms:
 
@@ -376,7 +376,7 @@ x86_64-manylinux_2_28          ok     ok     ok     ok     NO
 aarch64-manylinux_2_28         ok     ok     ok     ok     NO
 ```
 
-Relation to the decision: this confirms the stack table's note that `cel-python` has no static checking. As the fallback, cel-python offers no checker either, so kora's checker is needed in both cases. It also departs from current CEL semantics, is slower, and installs on fewer Python versions than the decided binding.
+Relation to the decision: this confirms the stack table's note that `cel-python` has no static checking. As the fallback, cel-python offers no checker either, so kora's checker is needed in both cases. It also departs from current CEL semantics, is slower, and on Python 3.15 depends on a `google-re2` source build with system libraries, where the decided binding needs only a Rust toolchain.
 
 ## Recommendation for the first slice
 
@@ -385,7 +385,7 @@ Keep the decided binding, `common-expression-language`, pinned to 0.10.0, and do
 Reasons:
 
 - It evaluates every expression the specifications use, and its semantics match the cel-cpp reference in 6 of the 7 cases where the two libraries differ. Its one deviation, string `size`, is irrelevant to `approve_when`.
-- The fallback brings no static checking, so switching would not remove the main cost, kora's own parser and checker. It would add semantic deviations and make Python 3.15 impossible to install on every target platform.
+- The fallback brings no static checking, so switching would not remove the main cost, kora's own parser and checker. It would add semantic deviations, and on Python 3.15 it would depend on building `google-re2` from source against system RE2 and abseil (no cp315 wheels; one macOS build failed on missing abseil headers; Linux not attempted), which is harder to provision than the binding's Rust build.
 - The binding's weaknesses are hostile-input crashes, the held GIL, quadratic macros and the 3.15 wheel gap. Each has a bounded mitigation that the first slice needs anyway.
 
 Conditions for the slice:
