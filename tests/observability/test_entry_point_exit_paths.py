@@ -183,6 +183,26 @@ os.close(write_end)
 sys.exit(main(["--version"], {"KORA_LOG_LEVEL": "DEBUG"}))
 """
 
+CLOSING_STDOUT_APPLICATION_SCRIPT: str = """
+import os
+import sys
+import typer
+from kora.__main__ import main
+
+app = typer.Typer(pretty_exceptions_enable=False)
+
+@app.command()
+def close() -> None:
+    sys.stdout.write("buffered")
+    os.close(1)
+
+@app.command()
+def other() -> None:
+    return None
+
+sys.exit(main(["close"], {"KORA_LOG_LEVEL": "DEBUG"}, app))
+"""
+
 
 @pytest.mark.parametrize(
     ("request_code", "exit_code"), [("3", 3), ("-1", 255), ("True", 1)]
@@ -227,15 +247,18 @@ def test_thread_failure_is_recorded_without_failing_the_process() -> None:
     assert records[-1]["exit_code"] == 0
 
 
-def test_broken_stdout_exits_one_without_a_failure_record() -> None:
-    result = run_python(["-c", BROKEN_STDOUT_SCRIPT], {})
+@pytest.mark.parametrize(
+    "script", [BROKEN_STDOUT_SCRIPT, CLOSING_STDOUT_APPLICATION_SCRIPT]
+)
+def test_broken_stdout_exits_one_without_a_failure_record(script: str) -> None:
+    result = run_python(["-c", script], {})
 
     events = [record["event"] for record in result.records()]
     stderr_text = result.stderr.decode("utf-8")
     assert result.code == 1
     assert "process.failed" not in events
     assert "Exception ignored" not in stderr_text
-    assert "BrokenPipeError" not in stderr_text
+    assert "Error" not in stderr_text
     assert result.records()[-1]["exit_code"] == 1
 
 

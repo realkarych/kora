@@ -122,8 +122,9 @@ def exit_code_of(request: SystemExit) -> int:
 
 def silence_broken_stdout() -> int:
     devnull = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(devnull, STDOUT_DESCRIPTOR)
-    os.close(devnull)
+    if devnull != STDOUT_DESCRIPTOR:
+        os.dup2(devnull, STDOUT_DESCRIPTOR)
+        os.close(devnull)
     return EXIT_FAILURE
 
 
