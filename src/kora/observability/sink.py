@@ -110,13 +110,14 @@ class BoundedQueue:
         self._closed = False
         self._sealed = False
         self._condition = threading.Condition()
+        self._stopping = False
 
     def put(self, item: bytes) -> LossReason | None:
         with self._condition:
-            if self._closed:
-                return LossReason.SINK_FAILED
             if self._sealed:
                 return LossReason.SHUTDOWN
+            if self._closed:
+                return LossReason.SINK_FAILED
             if len(self._items) >= self._max_records:
                 return LossReason.QUEUE_RECORDS
             if self._size + len(item) > self._max_bytes:
@@ -129,7 +130,7 @@ class BoundedQueue:
 
     def get_batch(self, timeout: float, max_bytes: int) -> bytes | None:
         with self._condition:
-            if not self._items:
+            if not self._items and not self._stopping:
                 self._condition.wait(timeout)
             if not self._items:
                 return None
@@ -153,8 +154,9 @@ class BoundedQueue:
         with self._condition:
             self._sealed = True
 
-    def wake(self) -> None:
+    def request_stop(self) -> None:
         with self._condition:
+            self._stopping = True
             self._condition.notify_all()
 
     def close(self) -> None:
@@ -236,7 +238,7 @@ class StreamWriter:
         deadline = time.monotonic() + deadline_seconds
         drained = self._queue.wait_empty(deadline)
         self._stop.set()
-        self._queue.wake()
+        self._queue.request_stop()
         self._thread.join(max(0.0, deadline - time.monotonic()))
         return drained and not self._thread.is_alive()
 

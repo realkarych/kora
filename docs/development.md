@@ -71,7 +71,7 @@ git diff --exit-code -- pyproject.toml uv.lock web/package.json \
   web/pnpm-lock.yaml web/pnpm-workspace.yaml
 ```
 
-The default pytest run excludes the `measurement` marker. The logging overhead and resource-lifetime measurement runs serially, writes its samples to the path in `KORA_MEASUREMENT_OUTPUT` and gates only the contract-derived criteria (queue bounds, no growth over repeated configure-and-shutdown cycles, bounded process exit and idle shutdown); CI runs it in the Linux 3.11 lane after the parallel checks and uploads the artifact `logging-overhead-measurement`:
+The default pytest run excludes the `measurement` marker. The logging overhead and resource-lifetime measurement runs serially, writes its samples to the path in `KORA_MEASUREMENT_OUTPUT` and gates only the contract-derived criteria (queue bounds, bounded heap and resident-memory growth with threads and descriptors back at baseline over repeated configure-and-shutdown cycles, bounded process exit and idle shutdown); CI runs it in the Linux 3.11 lane after the parallel checks and uploads the artifact `logging-overhead-measurement`:
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \

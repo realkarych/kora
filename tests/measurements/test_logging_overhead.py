@@ -143,6 +143,7 @@ class Report:
     started_at: str
     platform: str
     python: str
+    revision: str
     samples: list[Sample] = field(default_factory=new_samples)
     gates: dict[str, bool] = field(default_factory=new_gates)
     durations: dict[str, float] = field(default_factory=new_durations)
@@ -170,6 +171,7 @@ class Report:
                 "started_at": self.started_at,
                 "platform": self.platform,
                 "python": self.python,
+                "revision": self.revision,
                 "summary": self.summary(),
                 "gates": self.gates,
                 "durations_seconds": self.durations,
@@ -289,7 +291,12 @@ def registered_values(count: int) -> list[str]:
 
 @pytest.fixture
 def report() -> Iterator[Report]:
-    created = Report(utc_now().isoformat(), sys.platform, sys.version.split()[0])
+    created = Report(
+        utc_now().isoformat(),
+        sys.platform,
+        sys.version.split()[0],
+        os.environ.get("GITHUB_SHA", ""),
+    )
     yield created
     output = os.environ.get(OUTPUT_VARIABLE)
     if output:
@@ -588,7 +595,7 @@ def exit_on_full_pipe(report: Report) -> bool:
         )
     )
     bound = LoggingSettings().drain_seconds + EXIT_MARGIN_SECONDS
-    return code == 0 and shutdown_seconds < bound
+    return code == 0 and shutdown_seconds < bound and elapsed < bound
 
 
 def idle_shutdown(report: Report) -> bool:
@@ -683,7 +690,7 @@ def configure_shutdown_cycles(report: Report) -> dict[str, bool]:
     gates["descriptors_return_to_baseline"] = descriptors_after == descriptors_before
     gates["heap_growth_bounded"] = (
         heap_after - heap_before < HEAP_GROWTH_ALLOWANCE_BYTES
-        and second_half <= max(HEAP_SLOPE_ALLOWANCE_BYTES, first_half)
+        and second_half <= HEAP_SLOPE_ALLOWANCE_BYTES
     )
     gates["rss_growth_bounded"] = (
         rss_growth is None or rss_growth < RSS_GROWTH_ALLOWANCE_BYTES
