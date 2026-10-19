@@ -5,6 +5,7 @@
 - Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (execution uncertainty, dispatch closure and retained reservations); wording pending owner review
 - Amended by: [ADR-0019](0019-immutable-run-target-identity.md), 2026-10-17 (immutable binding and atomic source-result acceptance); wording pending owner review
 - Amended by: [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md), 2026-10-17 (bounded acceptance, execution occupancy and pending-window overlap); wording pending owner review
+- Tool-count alignment dated 2026-10-19: the consequence on the MCP tool count reflects the console design and `kora_test` (issue #46), under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
 - Deciders: project owner, after the architecture critique of 2026-10-16 ([finding A14](../../knowledge/reviews/architecture-critique-2026-10-16.md#a14-target-identity)), issue #23
 - Absorbs: requirements decision 26
 - Related: [0006-graph-definition-dsl-and-yaml-representation.md](0006-graph-definition-dsl-and-yaml-representation.md), [0007-attempt-model-and-retries.md](0007-attempt-model-and-retries.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md)
@@ -55,7 +56,7 @@ The critique proposed, for MVP, an optional stable target key with namespace sco
 - A `failed` holder with settled execution and publication releases its target, so a failed run with an open change request lets a deferred run proceed and the projection may show two requests for one key with their status; unresolved execution retains the hold even after cancellation until closure is established (ADR-0017).
 - A key bound from an output costs the producing node before `defer` can act; a graph that wants a free wait binds from a parameter. Pre-binding work and a wrapper body are not retroactively target-gated, and scheduler-only approval paths need not acquire a runtime hold. ADR-0019 prevents rejected exported results from becoming current, not prior external effects or false business-target declarations. A rerun rediscovers independently and does not guarantee the rejected target will be selected.
 - Two graphs of one namespace can collide on a key by coincidence and defer each other; the key convention is the namespace's. Scoping the policy per graph is one sentence in [scheduler.md §6](../../knowledge/specs/scheduler.md) if the pilot shows the collision.
-- The MCP operating server has fourteen tools of fifteen; the console design decides whether its attention listing is the last tool or an option of `kora_runs`.
+- The MCP servers had fourteen tools of fifteen when this was decided; the console design rejected an attention queue ([ADR-0015](0015-web-console-design.md)), so no attention-listing tool was added, and `kora_test` (issue #46) is now the fifteenth.
 - The console design builds the target page on the projection and the attention queue on the events of this record.
 
 ## Where it is applied

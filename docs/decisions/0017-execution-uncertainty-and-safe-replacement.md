@@ -7,6 +7,7 @@
 - Absorbs: issue #52
 - Supersedes in part: [ADR-0003](0003-scheduler-and-workers-over-http.md) (lease recovery), [ADR-0007](0007-attempt-model-and-retries.md) (replacement eligibility), [ADR-0014](0014-target-identity.md) (hold release), [ADR-0016](0016-trusted-execution-and-publication.md) (recovery authority)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
+- Tool-count alignment dated 2026-10-19: reconciliation is stated as adding no curated tool instead of keeping a count that `kora_test` (issue #46) has since changed, under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
 
 ## Context
 
@@ -32,7 +33,7 @@ A missing handle is not sufficient evidence either: a worker paused before submi
 
 **Expose explicit reconciliation.** A namespace-authorized operator with `platform` uses `POST /namespaces/{ns}/runs/{run}/nodes/{node_path}/attempts/{att}/reconcile` with `observe`, `stop` or `confirm_stopped`, an idempotency key and expected recovery version/domain. `observe` and `stop` persist requests for workers; the API does not call the runtime under a database lock. `confirm_stopped` records human attestation that the execution was actually terminated or decommissioned and all old dispatch/publication authority was closed, with a nonempty reason and evidence reference. It is not a force-overlap operation or automatically verified provider evidence. A stale or conflicting request is `API002`; an identical replay returns its original response. There is no assume-stopped action.
 
-**One implementation across surfaces.** Existing reads, events, metrics and console views expose state, domain, version, reason, observations, evidence provenance, retained scopes and permitted actions. `kora reconcile` calls the operation through the shared client; MCP maps it to existing `kora_admin`, keeping fourteen curated tools. The console adds recovery information and an operator command, keeping its four MVP mutations. Cost during an observation gap is last-known and `partial`, with its observation time, never fabricated as zero or complete.
+**One implementation across surfaces.** Existing reads, events, metrics and console views expose state, domain, version, reason, observations, evidence provenance, retained scopes and permitted actions. `kora reconcile` calls the operation through the shared client; MCP maps it to existing `kora_admin` and adds no curated tool. The console adds recovery information and an operator command, keeping its four MVP mutations. Cost during an observation gap is last-known and `partial`, with its observation time, never fabricated as zero or complete.
 
 ## Alternatives considered
 

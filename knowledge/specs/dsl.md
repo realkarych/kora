@@ -188,9 +188,10 @@ The `kora-author` skill (api-and-agent-surface.md section 5) runs in the **user'
 1. Call `kora_reference` for the DSL, the registry presets of the namespace and the existing artifact types.
 2. Write `graphs/<name>.py` using keyword-only inputs, CEL strings for conditions and only presets that exist, never inventing harness flags; declare custom artifact types as `Artifact` subclasses.
 3. Call `kora_compile`, a tool of the stdio authoring server that compiles in the author's own process (api-and-agent-surface.md section 4), with the graph source files; on `DSLnnn` errors edit the named `file:line`; on `IRnnn` errors read `yaml_path` and map it back through the `source` field of the node.
-4. Call `kora_plan` with representative params; check the warnings list for unhonoured fields and the resolved `trust_repo_config` and `tool_policy` values.
-5. Call `kora_deploy`; record the returned graph version id in the response to the user.
-6. Only when the task asks for it, switch to the `kora-operating` server: call `kora_trigger`, which returns at once with an accepted run id, a no-run skip or a structured refusal, and follow and report the run as the operating loop of api-and-agent-surface.md section 5 describes, adding the estimated cost from `kora_cost` with its completeness. Approvals need a token with `approve`; the default MCP token has none (DD-32).
+4. Write scenarios in `tests/scenarios/<graph>/` (section 4.1) and call `kora_test`, a tool of the stdio authoring server, until every scenario passes; report a call that the client's tool-call timeout cuts off, or scenarios that keep returning `error`, and run a long suite with `kora test --json`.
+5. Call `kora_plan` with representative params; check the warnings list for unhonoured fields and the resolved `trust_repo_config` and `tool_policy` values.
+6. Call `kora_deploy`; record the returned graph version id in the response to the user.
+7. Only when the task asks for it, switch to the `kora-operating` server: call `kora_trigger`, which returns at once with an accepted run id, a no-run skip or a structured refusal, and follow and report the run as the operating loop of api-and-agent-surface.md section 5 describes, adding the estimated cost from `kora_cost` with its completeness. Approvals need a token with `approve`; the default MCP token has none (DD-32).
 
 The skill also states what the agent must not do: hand-edit `*.ir.yaml`, embed secrets, loosen `trust_repo_config` or `permission_mode` beyond what the task asks, or respond to approvals the user did not ask it to answer. The Codex variant carries the same steps as a Codex skill (DD-20).
 
