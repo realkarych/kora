@@ -4,6 +4,8 @@ Scope and implementation plan approved by the project owner under [issue #86](ht
 
 Packaging-test removal amendment dated 2026-10-19: removal decided by the project owner under [issue #112](https://github.com/realkarych/kora/issues/112); wording pending line-by-line owner review.
 
+Import-layer test amendment dated 2026-10-19: the pytest source check added under [issue #104](https://github.com/realkarych/kora/issues/104); wording pending line-by-line owner review.
+
 The repository contains an importable typed Python package, a minimal React shell and distribution builds. The execution engine, HTTP API, CLI and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup

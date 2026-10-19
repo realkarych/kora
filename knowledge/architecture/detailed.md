@@ -152,7 +152,7 @@ Cross-component changes also consult the owners of [content-bound approvals](../
 
 ## Package layers
 
-Normative under [ADR-0026](../../docs/decisions/0026-package-layers.md). A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is listed in `y`'s row. A module under `plugins` belongs to its longest listed family prefix. Relative imports count after resolution, and imports under `if TYPE_CHECKING:` count too. `kora.standalone` and `kora.__main__` are the only composition roots and may import anything; `import kora` alone is allowed only there. Only `cel_eval` may import the third-party CEL binding, `cel`. `tests/architecture/test_import_layers.py` enforces this table, and a package enters it in the change that creates the package.
+Normative under [ADR-0026](../../docs/decisions/0026-package-layers.md). A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is listed in `y`'s row. A module under `plugins` belongs to its longest listed family prefix. Relative imports count after resolution, and imports under `if TYPE_CHECKING:` count too. The composition roots `kora.__main__`, `kora.standalone` and `kora.testing` may import any package and each other, and no package imports a root; `kora.__main__` also assembles the CLI and MCP commands that need server components, and `import kora` alone is allowed only in a root. Only `cel_eval` may import the third-party CEL binding, `cel`, and this binds the roots too. The check is static; dynamic and entry-point imports are not checked. `tests/architecture/test_import_layers.py` enforces this table, and a package enters it in the change that creates the package.
 
 | package | holds | may import |
 |---|---|---|

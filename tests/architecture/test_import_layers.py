@@ -10,7 +10,9 @@ LAYER_DOCUMENT: Path = REPOSITORY_ROOT / "knowledge" / "architecture" / "detaile
 LAYER_SECTION_HEADING: str = "## Package layers"
 
 ROOT_PACKAGE: str = "kora"
-COMPOSITION_ROOTS: frozenset[str] = frozenset({"kora.standalone", "kora.__main__"})
+COMPOSITION_ROOTS: frozenset[str] = frozenset(
+    {"kora.__main__", "kora.standalone", "kora.testing"}
+)
 NAMESPACE_MODULES: frozenset[str] = frozenset({"kora", "kora.plugins"})
 CEL_BINDING: str = "cel"
 CEL_BINDING_OWNER: str = "cel_eval"
@@ -114,16 +116,23 @@ def imported_modules(path: Path, module: str) -> Iterator[ImportedModule]:
             source = node.module or ""
             if node.level > 0:
                 source = resolve_relative(module, is_package, node.level, source)
-            if source == ROOT_PACKAGE:
+            if source in NAMESPACE_MODULES:
                 for alias in node.names:
-                    yield ImportedModule(node.lineno, f"{ROOT_PACKAGE}.{alias.name}")
+                    yield ImportedModule(node.lineno, f"{source}.{alias.name}")
             else:
                 yield ImportedModule(node.lineno, source)
 
 
-def import_violation(importer_layer: str | None, target: str) -> str | None:
+def binding_violation(importer_layer: str | None, target: str) -> str | None:
     if is_within(target, CEL_BINDING) and importer_layer != CEL_BINDING_OWNER:
         return f"only {CEL_BINDING_OWNER} may import the CEL binding {target}"
+    return None
+
+
+def import_violation(importer_layer: str | None, target: str) -> str | None:
+    binding = binding_violation(importer_layer, target)
+    if binding is not None:
+        return binding
     if not is_within(target, ROOT_PACKAGE):
         return None
     if target == ROOT_PACKAGE:
@@ -140,18 +149,24 @@ def import_violation(importer_layer: str | None, target: str) -> str | None:
     return f"{importer_layer} may not import {target_layer} ({target})"
 
 
+def composition_root_violation(target: str) -> str | None:
+    return binding_violation(None, target)
+
+
 def find_violations(source_root: Path) -> list[Violation]:
     violations: list[Violation] = []
     for path in sorted((source_root / ROOT_PACKAGE).rglob("*.py")):
         module = module_name(path, source_root)
-        if is_composition_root(module):
-            continue
+        check = composition_root_violation if is_composition_root(module) else None
         importer_layer = layer_of(module)
-        if importer_layer is None and module not in NAMESPACE_MODULES:
+        if check is None and importer_layer is None and module not in NAMESPACE_MODULES:
             violations.append(Violation(path, 1, f"{module} is outside the table"))
             continue
         for imported in imported_modules(path, module):
-            reason = import_violation(importer_layer, imported.target)
+            if check is None:
+                reason = import_violation(importer_layer, imported.target)
+            else:
+                reason = check(imported.target)
             if reason is not None:
                 violations.append(Violation(path, imported.line, reason))
     return violations
@@ -201,12 +216,35 @@ def test_checker_reports_forbidden_imports(tmp_path: Path) -> None:
     write_module(tmp_path, "kora.worker.claims", "from ..engine import transitions\n")
     write_module(tmp_path, "kora.cel_eval.__init__", "import cel\nimport kora.cel\n")
     write_module(tmp_path, "kora.unlisted", "")
+    write_module(
+        tmp_path,
+        "kora.executor.plans",
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n    import kora.api\n",
+    )
+    write_module(tmp_path, "kora.dsl.__init__", "from kora import cel, cel_eval\n")
+    write_module(tmp_path, "kora.plugins.__init__", "")
+    write_module(tmp_path, "kora.plugins.runtime.local", "import kora.db\n")
+    write_module(
+        tmp_path,
+        "kora.plugins.storage.local",
+        "from kora.plugins import storage, runtime\n",
+    )
+    write_module(tmp_path, "kora.client.__init__", "import kora\nimport kora.testing\n")
+    write_module(tmp_path, "kora.standalone", "import kora.api\nimport cel\n")
 
     violations = find_violations(tmp_path)
 
     assert [v.describe(tmp_path) for v in violations] == [
+        "kora/client/__init__.py:1: imports the bare package root",
+        "kora/client/__init__.py:2: imports the composition root kora.testing",
+        "kora/dsl/__init__.py:1: dsl may not import cel_eval (kora.cel_eval)",
+        "kora/executor/plans.py:3: executor may not import api (kora.api)",
         "kora/ir/__init__.py:1: only cel_eval may import the CEL binding cel",
+        "kora/plugins/runtime/local.py:1: plugins.runtime may not import db (kora.db)",
+        "kora/plugins/storage/local.py:1: "
+        "plugins.storage may not import plugins.runtime (kora.plugins.runtime)",
         "kora/runner/__init__.py:1: runner may not import db (kora.db)",
+        "kora/standalone.py:2: only cel_eval may import the CEL binding cel",
         "kora/unlisted.py:1: kora.unlisted is outside the table",
         "kora/worker/claims.py:1: worker may not import engine (kora.engine)",
     ]

@@ -67,4 +67,4 @@ Copy the skeleton below into `NNNN-short-title.md` with the next free number, fi
 
 [ADR-0025](0025-notifications.md) defines notifications: reviewer requests through the VCS integration and durable at-least-once outbound webhooks (signed JSON, Slack, Telegram) whose delivery records are written with the event. Direction and implementation plan accepted on 2026-10-18, relayed from the project owner; document wording pending owner review.
 
-[ADR-0026](0026-package-layers.md) places every shared component in a package by role under `src/kora` and fixes which package may import which. Code that runs next to the agent or on a worker host never imports server code, and only the CEL evaluator imports the binding. A standard-library pytest test enforces the table in CI.
+[ADR-0026](0026-package-layers.md) places every shared component in a package by role under `src/kora` and fixes which package may import which. Code that runs next to the agent or on a worker host never statically imports server code, and only the CEL evaluator imports the binding. A standard-library pytest test enforces the table in CI.
