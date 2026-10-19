@@ -6,6 +6,8 @@ Held-read amendment dated 2026-10-19: the TM-10 scenario names callers that hold
 
 CEL amendment dated 2026-10-19 (TM-02, TM-04, TM-10, TM-12 and the TM-03/TM-04, TM-08/TM-09, TM-10 and TM-12 evidence rows): decisions taken and implementation plan approved by the project owner under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review.
 
+Shared-transition amendment dated 2026-10-19: the scheduler label in the trust-boundary diagram names the shared transition functions that the API and the scheduler both call ([issue #103](https://github.com/realkarych/kora/issues/103)). TM-01, TM-02, TM-08, TM-09 and TM-10 are unchanged in authority: object-level checks run inside every transition under the run lock, and the API evaluates only `approve_when` (TM-10). Wording pending line-by-line owner review.
+
 ## Purpose, scope and status
 
 This document explains what kora protects, which actors already have authority, and where that protection ends. It covers the control plane, its thin clients, managed execution and publication, external integrations, and the contributor workflow that changes them. It summarizes the existing requirements, specifications and decisions; it does not introduce new product guarantees or override an ADR. Read the [technical introduction](technical-introduction.md) for the component map and the [architecture reference](../knowledge/architecture/detailed.md) for deployment details.
@@ -52,7 +54,7 @@ flowchart TB
     repo["Graph source and target repository"]
     api["API: authentication and current authority"]
     db[("Metadata and immutable contracts")]
-    scheduler["Scheduler: admission and transition ownership"]
+    scheduler["Scheduler: admission; shared transition functions with the API"]
     worker["Worker: service principal and lease"]
     supervisor["Trusted supervisor and runtime control"]
     candidate["Candidate: harness, commands, tools, descendants"]

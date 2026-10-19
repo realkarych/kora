@@ -8,7 +8,7 @@ Status: design draft for owner review (2026-10-15, revised after the design revi
 2. **Multi-tenant from the first table.** Every entity carries `namespace_id`; every query is scoped by it; ids are globally unique (ULIDs), so no composite tenant keys are needed in URLs.
 3. **Durable before side effects** (NFR-2.1). An attempt row is committed before `runtime.submit`, and the submission is keyed by the attempt id; an approval request row is committed before `channel.request`; a start is acknowledged only after its canonical pending run or durable overlap-skip outcome commits (ADR-0020).
 4. **Append, do not overwrite.** Superseded results stay as rows with a status; the timeline is an append-only `event` table.
-5. **Same schema on SQLite and Postgres.** Only the claim/lease statements differ (see scheduler.md); no feature exists only in standalone mode (NFR-0.1).
+5. **Same schema on SQLite and Postgres.** Only the statements in the dialect table of [scheduler.md section 10](scheduler.md#10-standalone-sqlite-versus-postgres) differ; no feature exists only in standalone mode (NFR-0.1).
 6. **One writer path for workers.** Workers never touch these tables directly; they read and write through the HTTP API with a service principal, fenced by a lease epoch (section 3). Standalone mode runs the same client over an in-process ASGI transport.
 
 ## 2. Entities
@@ -52,7 +52,7 @@ Execution:
 
 ### 2.1 Durable run scheduling marker
 
-`run.needs_scheduling` is a non-null boolean initialized true on canonical run creation. Index the true-run discovery predicate. Existing-run graph-relevant writes hold the run lock and set it true in the same transaction as the state change. No separate notification or follow-up touch is sufficient. This marker requests reevaluation; it supplies neither effect authority nor a replacement generation (ADR-0003).
+`run.needs_scheduling` is a non-null boolean initialized true on canonical run creation. Index the true-run discovery predicate. Existing-run graph-relevant writes hold the run lock and set it true in the same transaction as the state change. No separate notification or follow-up touch is sufficient. This marker requests reevaluation; it supplies neither effect authority nor a replacement generation (ADR-0003). Worker reports classify as scheduler.md section 12 states: a state transition writes its event and the marker, a counter or usage update marks the run without an event, and a lease-only renewal writes neither.
 
 | Transition family | Marking obligation |
 |---|---|
@@ -197,7 +197,7 @@ api_token(kind=user) ─n namespace   (namespace list with transcripts flag; app
 
 ## 9. Compatibility with a Temporal-backed backend (NFR-5.5)
 
-The scheduler passes in [scheduler.md](scheduler.md) own the transitions of `run`, `node_instance`, `attempt` and `wait`. A Temporal backend would keep those four as projections written by workflow code (so the API still reads kora's DB), while `artifact_version`, `artifact_lineage`, `approval_request`, `usage_record`, `session_segment`, `event` and the registry are written by activities through the same repository layer. Nothing in the API or the protocols depends on which backend performs the transitions. Two rules keep the door open: no table stores backend-specific handles except `attempt.handle` and `attempt.lease_*`, and the scheduler never relies on in-memory state between passes (NFR-1.2). The boundary is described in prose (scheduler.md section 12), not as an interface with one implementation (DD-7, [ADR-0001](../../docs/decisions/0001-own-control-plane.md) and [scheduler section 12](scheduler.md#12-execution-backend-boundary-nfr-55)).
+The shared transition functions of [scheduler.md section 12](scheduler.md#12-execution-backend-boundary-nfr-55) own the transitions of `run`, `node_instance`, `attempt` and `wait`; the API calls them for the requests it receives and the scheduler for its passes. A Temporal backend would replace the callers, not the rows: it would keep those four as projections written by workflow code, so the API still reads kora's DB, and it would need a synchronous, validated Update for signals, because the API applies a signal durably before it responds. Meanwhile `artifact_version`, `artifact_lineage`, `approval_request`, `usage_record`, `session_segment`, `event` and the registry are written by activities through the same repository layer. The API's synchronous contract and the protocols stay the same whichever backend performs the transitions. Two rules keep the door open: no table stores backend-specific handles except `attempt.handle` and `attempt.lease_*`, and the scheduler never relies on in-memory state between passes (NFR-1.2). The boundary is described in prose (scheduler.md section 12), not as an interface with one implementation (DD-7, [ADR-0001](../../docs/decisions/0001-own-control-plane.md) and [scheduler section 12](scheduler.md#12-execution-backend-boundary-nfr-55)).
 
 ## 10. Retention (DD-4)
 

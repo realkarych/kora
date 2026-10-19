@@ -12,11 +12,11 @@ Status: design draft for owner review (2026-10-15, revised after the design revi
 | retention task | section 13 | a low-priority coroutine inside the scheduler process, batch-paced; not a process of its own |
 | `kora standalone` | api + scheduler + worker(local) in one process on SQLite; the worker uses the same API client over an in-process ASGI transport | development |
 
-The split between scheduler and worker is a decision (DD-13) and follows the Airflow executor model: the scheduler decides and persists; workers perform the runtime calls and report through the API. There is no direct-SQL path for workers.
+The split between scheduler and worker is a decision (DD-13) and follows the Airflow executor model: the scheduler decides and persists; workers perform the runtime calls and report through the API. There is no direct-SQL path for workers. Every state change goes through the shared transition functions of `kora.engine`: the API calls them for the requests it receives, and the scheduler for its passes and the results it observes (section 12).
 
 ## 2. The scheduling loop
 
-The scheduler runs the following passes continuously; each database phase is a short transaction that claims rows, decides, and writes rows. External observations and channel effects use separate claim, unlocked call and compare/apply phases (section 16, ADR-0021); no transaction, connection or run/scope lock spans provider hooks, network/storage I/O or secret resolution. Disposable bounded tasks carry no authoritative run state between passes (NFR-1.2). Passes 2 to 8 operate per run under the **run lock** (a transaction-scoped advisory lock on `run.id` on PostgreSQL, the single writer on SQLite), so two scheduler replicas never evaluate the same run concurrently (current contract [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlines.md)); trigger and timeout discovery may claim individual rows, but their authoritative start, expiry and result transitions obey the shared run/scope locks (ADR-0020, ADR-0022). Discovery does not authorize an unlocked state mutation.
+The scheduler runs the following passes continuously; each database phase is a short transaction that claims rows, decides, and writes rows. "Pass" means passes 1 to 8 below; clear-downstream is a transition, not a pass, and every transition goes through the shared functions of section 12. External observations and channel effects use separate claim, unlocked call and compare/apply phases (section 16, ADR-0021); no transaction, connection or run/scope lock spans provider hooks, network/storage I/O or secret resolution. Disposable bounded tasks carry no authoritative run state between passes (NFR-1.2). Passes 2 to 8 operate per run under the **run lock** (a transaction-scoped advisory lock on `run.id` on PostgreSQL, the single writer on SQLite), so two scheduler replicas never evaluate the same run concurrently (current contract [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlines.md)); trigger and timeout discovery may claim individual rows, but their authoritative start, expiry and result transitions obey the shared run/scope locks (ADR-0020, ADR-0022). Discovery does not authorize an unlocked state mutation.
 
 1. **Triggers.** Apply current start-sensor observations and fire due cron bindings and graph-triggered occurrences through the canonical start-run transition below, with derived idempotency keys. Webhook start acceptance already committed its pending run or no-run skip receipt in the API; this pass never converts an acknowledged trigger event into another run. Wait-directed inbound events remain wake-ups. Target policy decides at physical admission, per key (section 6), after graph overlap decided at acceptance/promotion.
 2. **Materialise.** Promote an accepted `pending` run under its run lock and ordered scopes, including the graph lock. A queued-overlap run promotes only when no graph run is `running` and it is the oldest pending run by ID; other explicitly allowed starts retain their policy. Save write-once `started_at`/`run.started` on promotion and create top-level instances from the pinned IR; subgraph bodies and fan-out instances are materialised lazily when the containing node becomes `ready` (NFR-3.3). Fan-out body activation obeys its existing max_parallel body-instance cap under the relevant ordered scopes, including scheduler-only bodies; it does not reserve a graph execution-run slot without a physical attempt.
@@ -139,33 +139,35 @@ Manual retry (FR-6.8) first checks availability of required input/feedback sourc
 
 ## 8. Restart and multi-scheduler safety
 
-- Row discovery/claims do not replace transition locking. Trigger acceptance uses section 2's canonical start lock order; timeout guards and expiry mutations take the owning run lock (section 17). The broader discovery/pass-order implementation remains an [open question](../architecture/detailed.md#open-implementation-questions).
+- Row discovery/claims do not replace transition locking. Trigger acceptance uses section 2's canonical start lock order. Timeout discovery claims due rows without locks, then takes the owning run lock and rechecks before any expiry mutation (sections 12 and 17).
 - **Pending promotion candidates** (ADR-0020): every tick queries the oldest pending run of each graph independently of `needs_scheduling` and attempts promotion under its own run lock and ordered scopes. Recheck graph lifecycle/queue eligibility under the graph lock. A blocked pending run needs no node wait or timestamp update to be revisited when its predecessor ends, including after restart. Notifications may accelerate the loop; the ordinary one-second tick remains the fallback.
 - **Observation/delivery discovery** (ADR-0021): every tick scans due/expired observation claims and pending delivery records directly, independently of `needs_scheduling`. Restart supersedes expired read authority and reconciles delivery on original identities; stale tokens never reopen state. In-memory task credits are not durable workflow state; MVP has one scheduler, and any HA aggregate budget must be designed explicitly.
 - **Durable candidate discovery** (ADR-0003): query indexed `needs_scheduling = true` rows with no `updated_at`/sequence cutoff. Process finite rotating batches, with a fixed upper ID ceiling for each sweep and wrap after reaching it. New arrivals cannot extend the sweep forever, and rows marked behind its cursor are included on a later sweep. Never restart every page at the first persistently marked rows. The cursor/ceiling are disposable scheduling optimizations; after restart a fresh sweep reads the same durable predicate. Blocked pending/settled runs may acknowledge no local work without suppressing independent scans.
-- **Tick semantics** (DD-36, amended by ADR-0003): for each candidate, passes 2 to 8 repeat until a fixed point, capped at 10 rounds per run per tick. Every graph-relevant write, including writes by these passes, sets the marker as specified in data-model section 2.1. Acknowledge only under the run lock after a fresh read/check that no local transition is currently actionable; this check and setting `needs_scheduling = false` are one transaction. An earlier round's cached no-change result is insufficient. If work remains at the cap, leave the marker true for the next sweep. Releasing the lock between rounds is permitted, never between the final check and acknowledgement. A concurrent producer takes the same lock: either its change participates in that check or it commits the marker true afterwards. Every table still carries `created_at` and `updated_at` for inspection.
+- **Tick semantics** (DD-36, amended by ADR-0003): for each candidate, passes 2 to 8 repeat until a fixed point, capped at 10 rounds per run per tick. Every graph-relevant write, including writes by these passes, sets the marker as specified in data-model section 2.1. Acknowledge only under the run lock after a fresh read/check that no local transition is currently actionable; this check and setting `needs_scheduling = false` are one transaction. An earlier round's cached no-change result is insufficient. If work remains at the cap, leave the marker true for the next sweep. Each round is its own transaction and releases the lock between rounds, never between the final check and acknowledgement (section 12). A concurrent producer takes the same lock: either its change participates in that check or it commits the marker true afterwards. Every table still carries `created_at` and `updated_at` for inspection.
 - **Independent progress sources**: timed waits, admission rechecks, pending promotion, due observations/delivery, deadline enforcement and execution recovery are queried by their own durable predicates each tick, without requiring a marked or running run. Apply graph-relevant results with the marker in the same locked transaction. The marker may be cleared while waiting for a future timer, admission recheck or an external observation only when that durable independent source remains discoverable. Terminal-run recovery and delivery never disappear behind the ordinary run filter.
 - Actions are idempotent on `(run id, node path, attempt id)` (NFR-2.2): re-running a pass after a crash re-derives the same decisions from rows; side effects are guarded by the attempt id as submission key, `approval_request.id`, `inbound_event` idempotency per `(namespace, name)` and the `idempotency_record` table.
 - On restart the scheduler performs a **recovery pass** first: expired leases on `claimed`/`submitted`/`running`/`finishing` attempts are marked reclaimable under the domain rule of section 3; lookup and adoption are performed by the workers that claim them. Then ordinary marked-run discovery resumes from a fresh sweep alongside all independent due-work scans; neither pre-crash timestamps nor in-memory notifications are needed.
 
 ## 9. Scheduling latency (NFR-3.1)
 
-Passes run every 1 s when idle and immediately after any transition (a lightweight in-process notification, or Postgres `LISTEN/NOTIFY`, wakes the loop; SQLite polls). The under-5-second admission target at MVP scale includes complete candidate discovery (including cursor wrap), all required bounded local processing and the worker claim interval. Verify it with notifications disabled; a one-second tick alone is not a latency proof. Candidate batching must keep NFR-3.3 incremental behavior on a 1,000-node graph. This does not add a starvation-free or bounded-latency guarantee under overload. The current `startup_ms` interval is `submitted` to first event; it remains exposed as a metric and on the attempt. It does not include `worker_host` preparation/checkout before submission (ADR-0022), and the ready-to-submitted histogram does not include dependencies-satisfied-to-ready time. How these intervals account for NFR-3.1's dependencies-satisfied-to-submitted SLO and its startup/checkout exclusion remains an [open attribution question](../architecture/detailed.md#open-implementation-questions). Neither metric alone proves the SLO; its threshold and exclusions are unchanged.
+Passes run every 1 s when idle and immediately after a wake-up. A state transition that turns the marker from false to true wakes the loop: on PostgreSQL by a payload-free `NOTIFY` inside the transaction, delivered at commit; in standalone by the in-process event plus the 1 s poll (sections 10 and 12). The under-5-second admission target at MVP scale includes complete candidate discovery (including cursor wrap), all required bounded local processing and the worker claim interval. Verify it with notifications disabled; a one-second tick alone is not a latency proof. Candidate batching must keep NFR-3.3 incremental behavior on a 1,000-node graph. This does not add a starvation-free or bounded-latency guarantee under overload. The current `startup_ms` interval is `submitted` to first event; it remains exposed as a metric and on the attempt. It does not include `worker_host` preparation/checkout before submission (ADR-0022), and the ready-to-submitted histogram does not include dependencies-satisfied-to-ready time. How these intervals account for NFR-3.1's dependencies-satisfied-to-submitted SLO and its startup/checkout exclusion remains an [open attribution question](../architecture/detailed.md#open-implementation-questions). Neither metric alone proves the SLO; its threshold and exclusions are unchanged.
 
 ## 10. Standalone (SQLite) versus Postgres
 
 | concern | Postgres | SQLite (standalone) |
 |---|---|---|
-| row claims | `SELECT … FOR UPDATE SKIP LOCKED` | single-writer connection with `BEGIN IMMEDIATE`; one process owns all loops, so claims are plain updates |
+| row claims | candidate without locks, `pg_try_advisory_xact_lock` on its run, then `SELECT … WHERE run_id = R … FOR UPDATE SKIP LOCKED LIMIT 1` (section 12) | single-writer connection with `BEGIN IMMEDIATE`; one process owns all loops, so claims are plain updates |
 | run lock | `pg_advisory_xact_lock(hash(run.id))` | implicit: one writer |
 | admission scope locks | `pg_advisory_xact_lock` per limit scope in the fixed order of section 6 | implicit: one writer |
+| notification lock | transaction-scoped advisory lock per namespace, shared or exclusive (section 19) | implicit: one writer |
+| run-lock wait bound | `lock_timeout` on signal routes (section 12) | `busy_timeout` |
 | connection | pool | one connection, WAL mode, `busy_timeout` 5 s, one `asyncio` lock per transaction |
-| wake-up | `LISTEN/NOTIFY` plus 1 s poll | in-process event plus 1 s poll |
+| wake-up | payload-free `NOTIFY` in the transaction, `LISTEN` in the scheduler, plus 1 s poll | in-process event plus 1 s poll |
 | JSON columns | `jsonb`, indexed on `consumed_versions` keys | `json` text, no partial indexes; sufficient at standalone scale |
 | concurrency | n api replicas, n workers | all coroutines in one process; local runtime only by default (Docker allowed) |
 | migrations | `kora db upgrade`, online (NFR-7.2) | same migration files |
 
-The schema and all queries are shared; the repository layer has exactly two dialect-specific statements (claim and notify). Anything that works only on SQLite or only on Postgres is a bug by NFR-0.1.
+The schema and all queries are shared; this table is the authority for every dialect-specific statement, and the repository layer has no other. Anything that works only on SQLite or only on Postgres is a bug by NFR-0.1.
 
 **Standalone bootstrap** (DD-36): `kora standalone` reads `kora.toml` (or defaults), creates the namespace `default` and the data directory `./.kora-data/{kora.db,artifacts,workspaces}`, prints a personal user token once (with `approve` and `platform` set, namespace `default`, transcripts readable) and mints an internal service token for the in-process worker; the CLI and the stdio MCP servers read `KORA_URL` and `KORA_TOKEN`.
 
@@ -181,7 +183,109 @@ For diagnosis, first inspect component/instance and safe correlation IDs, then t
 
 ## 12. Execution backend boundary (NFR-5.5)
 
-The shared start-run transition and passes in section 2 own `run`, `node_instance`, `attempt` and `wait` rows between states, and the API reaches them through three entry points: start a run, deliver a signal (approval response, inbound event, cancel, manual retry) and tick. Canonical start commits bounded acceptance and receipt/skip replay through this shared entry, including webhook calls in the API; the scheduler owns later promotion/materialisation and physical admission. It does not convert acknowledged trigger receipts into new runs (ADR-0020). That boundary is documented in prose rather than as a Python interface with one implementation (DD-7, [ADR-0001](../../docs/decisions/0001-own-control-plane.md) and [scheduler section 12](scheduler.md#12-execution-backend-boundary-nfr-55)): when the Temporal-backed backend is prototyped after MVP, the generic interpreter workflow replaces the passes and projects transitions into the same rows (data-model.md section 9); readers always read kora's tables.
+**Shared transition functions** ([ADR-0001](../../docs/decisions/0001-own-control-plane.md), as amended 2026-10-19). Module `kora.engine` ([ADR-0026](../../docs/decisions/0026-package-layers.md)) holds every function that changes the state of `run`, `node_instance`, `attempt` or `wait`. It also holds the writes those functions make in the same transaction: the `event` row, `run.needs_scheduling`, the `idempotency_record` row, `approval_request` status and artifact version promotion. The execution-backend boundary stays the four tables (data-model sections 1 and 9); the module's scope is wider because those rows change in the same transactions.
+
+- **Callers.** Only `api` route handlers and the scheduler process call these functions; the ADR-0026 layer table lets only `api` and `scheduler` import `engine`. Worker, providers, CLI, MCP and console never do. The worker reaches them only through the HTTP API (DD-13), in `kora standalone` too, through the in-process ASGI transport.
+- **Locks.** The caller that owns the transaction takes the run lock, then the complete sorted set of scope locks (section 6), before any row work. Transition functions assert that the locks are held and never take them, so several transitions in one transaction keep the sorted order and cannot re-enter the SQLite writer lock.
+- **Authority.** Every transition function takes an explicit authority. The kinds are:
+  - a user principal with namespace and flags;
+  - a lease holder: service principal, worker, incarnation, execution domain, attempt and epoch;
+  - a webhook ingress: namespace, trigger, authentication kind and delivery id;
+  - an observation token;
+  - the scheduler's system authority.
+
+  Principal-level checks (token kind, flags, namespace list) happen in the API before any lock. Object-level checks happen inside the function, under the lock and against fresh rows: the row's namespace, the lease holder and epoch, the current wait and request, bound content and approver rules, the expected recovery version and the deadlines. The lease epoch is a counter, not a secret, so it is never authority on its own. The authority also fills `event.actor`.
+- **Idempotency.** The replay lookup happens before the transition. The `idempotency_record` commits in the same transaction as the transition, so a lost response cannot make a replayed manual retry run a second clear.
+- **Time.** Clock and randomness are injected into every transition function, for API callers as well as the scheduler; ADR-0022 guards run in both.
+- **No I/O.** Transition functions do no network, storage, provider or secret I/O (ADR-0021). An upload stores its bytes first; then a short locked transaction rechecks authority and accepts it.
+
+**Who calls which transition.** The table records the existing assignment.
+
+| caller | transitions | source |
+|---|---|---|
+| API, for requests it receives | canonical start (manual and webhook) | ADR-0020 |
+| | direct approval response: request status; without a VCS binding the response also completes the node through the existing wake transition; with a binding the wait stays open and an `approved_head` read is scheduled | section 5 |
+| | run cancel and node cancel: the existing cancellation transition (data-model section 4; section 3 for never-dispatched attempts). Their effect on downstream readiness and the run outcome is out of scope (#102) | FR-6.7 |
+| | manual retry: the clear-downstream transaction | data-model section 6 |
+| | reconcile: records the request and evidence; the terminal transition and release follow when the scheduler applies complete evidence | ADR-0017 |
+| | worker reports: claim, heartbeat (lease, counters), transition (including node `queued → running` on `submitted`, and `finishing`), artifact and segment acceptance, usage | data-model section 4 |
+| | deadline expiry observed while handling any of the above | ADR-0022, section 17 |
+| | namespace policy and limit changes that mark affected runs | data-model section 2.1 |
+| | inbound event: authenticate, deduplicate, persist; for push events fix the recipients durably (ADR-0021); no `match` evaluation | ADR-0003, ADR-0020 |
+| scheduler | passes 1 to 8, including starts from cron, sensor and graph-triggered occurrences through canonical start | section 2 |
+| | observation results: channel approval responses, head reads, sensor observations, push handling | section 16 |
+| | event matching for waits (pass 6) | ir.md section 7.6 |
+| | deadline discovery and expiry | section 17 |
+| | lease-expiry recovery and application of complete reconcile evidence | section 8, ADR-0017 |
+
+"Pass" means passes 1 to 8 of section 2. Clear-downstream is a transition, not a pass. How a newly persisted inbound event makes the runs with matching open waits discoverable is open ([architecture reference](../architecture/detailed.md#open-implementation-questions)); it is outside the first slice.
+
+**What a report writes.**
+
+- **State transitions.** An attempt, node, wait or request status change writes its event row and the marker.
+- **Counter and usage updates.** They mark the run (data-model section 2.1) and write no event row.
+- **Lease-only renewals.** They write no event and set no marker.
+- **Wake-ups.** The scheduler is woken only when a state transition turns the marker from false to true: on PostgreSQL by a payload-free `NOTIFY` inside the transaction, delivered at commit; in standalone by the in-process event. A lost wake-up costs at most the 1 s idle tick, because the marker is durable (section 9).
+
+**Transaction unit, release and latency.**
+
+- **Before a connection is checked out:** authentication, body consumption, storage writes and validation hooks.
+- **The transaction unit:** begin, locks, fresh reads, the transition, event, marker and idempotency record, then commit. The unit is shielded from request cancellation and client disconnect. Every path ends in commit or rollback, returns or discards the connection, and on SQLite releases the writer.
+- **While the connection is held:** no response composition and no I/O. The wake-up is sent after commit and never awaited under a lock.
+- **Bounded lock waits.** On PostgreSQL a signal route bounds its wait for the run lock with `lock_timeout`. On expiry it returns a retryable structured error, whose code the error-model work item of #127 assigns.
+- **Scheduler rounds.** Each round of passes 2 to 8 is its own transaction, and the run lock is released between rounds; the final check and the acknowledgement stay in one transaction (section 8).
+- **Latency bound.** On PostgreSQL, a signal waits for at most one scheduler transaction on that run plus the signals queued before it. On SQLite it waits for the queue of writer transactions in the process. Numeric budgets come from the measurements below.
+
+**Lock order, claims and timeout discovery.**
+
+- The order is: the run lock; the ordered scope locks (section 6); the namespace notification lock, when taken (section 19); row locks. No lock is taken after a row lock.
+- **A claim:**
+  1. finds a candidate attempt without locks;
+  2. takes that attempt's run lock, on PostgreSQL with `pg_try_advisory_xact_lock`, moving to the next candidate run on failure;
+  3. runs `SELECT … WHERE run_id = R … FOR UPDATE SKIP LOCKED LIMIT 1`;
+  4. rechecks under the lock.
+- Heartbeats, uploads and transitions take the run lock before any attempt row lock.
+- **Timeout discovery** claims due rows without locks, then takes the owning run lock and rechecks under it before any expiry mutation.
+- **Dialect statements.** The table of section 10 is the authority for every dialect-specific statement.
+
+**Tick.**
+
+- `tick(clock, random)` is one iteration of the scheduler loop: the restart recovery pass on the first iteration, pass 1, the independent scans of section 8, and one discovery batch of marked runs, each taken to its per-run fixed point under the ten-round cap.
+- **The other components of the scheduler process** are the observation dispatcher (section 16), notification delivery (section 19) and retention (section 13). Each exposes a deterministic `step(clock)`.
+- **The loop.** The scheduler process calls `tick` every second when idle and on wake-up, and runs the components alongside. `kora standalone` runs the same loop.
+- **Tests.** Integration tests call `tick` and the steps they need directly with an injected clock. The scenario engine stays as [dsl.md section 4.2](dsl.md) specifies: `kora standalone` with injected time and no second execution engine.
+- **Fixed point.** "One tick reaches the fixed point" holds for runs inside one discovery batch; a test sizes its batch accordingly.
+
+**The static check.** Writes to `run`, `node_instance`, `attempt`, `wait`, `approval_request` and `artifact_version` are SQLAlchemy Core `insert`, `update` and `delete` statements on the table objects of `kora.db.tables`. They appear only in `kora.engine`, with two named exceptions: the migrations in `kora.db.migrations` and the retention of saved payloads in `kora.scheduler.retention` (section 13). There is no ORM unit of work and no raw SQL text for these tables. `test_transitions_only_through_shared_functions`, in `tests/architecture/` beside the ADR-0026 layer test, flags outside those modules, including `kora.plugins`:
+
+- every Core write to these tables;
+- every `text()` that writes to them;
+- every ORM session write of a class mapped to them.
+
+The boundary is still documented in prose rather than as a Python interface with one implementation (DD-7, ADR-0001). A Temporal-backed backend would replace the scheduler's passes behind the same synchronous signal entry point and project transitions into the same rows (data-model section 9); readers always read kora's tables.
+
+These are **future executable test contracts**, except `test_transitions_only_through_shared_functions`, which runs now. They run on PostgreSQL and SQLite unless marked, with explicit transaction barriers instead of sleeps.
+
+| test | setup and observable assertion |
+|---|---|
+| `test_signal_transition_commits_in_api_request` | With the scheduler stopped, a direct approval response, a run cancel, a manual retry and a worker transition each commit their transition, event and marker. A non-VCS approval leaves its node `succeeded`; a VCS-bound one leaves the wait open with an `approved_head` read due. No readiness or admission change happens until a tick |
+| `test_api_and_scheduler_transitions_serialize_on_run_lock` | Barriers hold an API signal and a scheduler round on the same run. The final state equals the two transitions applied serially in the observed commit order, the marker stays true while work remains, and PostgreSQL raises no 40P01 |
+| `test_claim_and_cancel_take_row_locks_last` (PostgreSQL, Linux job) | Barriers park each transaction after its first lock, for claim against cancel, claim against deadline expiry, and heartbeat against clear-downstream. No 40P01 occurs, and `pg_locks` shows that a claim waiting for a run lock holds no attempt row lock |
+| `test_transition_checks_object_authority_under_lock` | Each is refused with no state change: a foreign-namespace object id, a worker token on a user route and the reverse, a non-holder worker with a guessed epoch, a stale epoch, and a missing `approve` or `platform` flag |
+| `test_idempotent_signal_replay_commits_with_transition` | A manual retry commits and its response is lost. The replay returns the saved result and runs no second clear |
+| `test_counter_only_heartbeat_writes_no_event` | A heartbeat that only updates counters marks the run and writes no event. A lease-only renewal writes neither |
+| `test_signal_cancellation_releases_transaction_and_locks` | Cancellation or disconnect is injected at each await point, over HTTP and over the in-process transport. Each outcome is all or nothing; afterwards the run lock and the SQLite writer are free, pool checkouts are back to baseline, and a scheduler round on that run can start at once |
+| `test_lost_wakeup_is_recovered_by_marker` | The post-commit notification is dropped, and the next idle tick still processes the signal |
+| `test_tick_reaches_fixed_point_with_injected_clock` | One tick over runs inside one discovery batch reaches the fixed point, or keeps the marker at the round cap; advancing the clock and ticking again fires due waits |
+| `test_transitions_only_through_shared_functions` | The static check above |
+
+**Performance obligations, pending implementation.** The #127 work item that ships the first signal route and `tick` owns them, and they activate with it. Each runs on SQLite standalone and on PostgreSQL with two API replicas:
+
+- **Hot run.** One run with 10 and 100 concurrent attempts reporting at the 15 s renewal and a declared upload interval, with concurrent claims, a cancel, a manual retry and scheduler rounds. Record the run-lock wait distribution, the longest scheduler hold, p50 and p99 latency for requests on the hot run and on an unrelated run, pool checkouts and waiters, SQLite writer wait, the wake-up rate, and NFR-3.1 with notifications disabled.
+- **Bulk signals.** Cancel and manual retry of a 1,000-node run. Record transaction duration, rows written and scope-lock hold time.
+- **Release.** At least 1,000 cycles per ending path: success, refusal, stale epoch, lock-wait timeout, disconnect, in-process cancellation and shutdown. Connections, transactions, locks, tasks and memory return to baseline.
+
+**Observability.** A transition's post-commit diagnostic comes from the process that applied it, the API or the scheduler, with the run, node and attempt correlation fields of the [observability specification](observability.md). Event rows stay the durable record, and logs are never authority. The named tests of the first signal route carry the evidence.
 
 ## 13. Retention task (DD-4)
 
@@ -307,6 +411,6 @@ A bounded background task in the scheduler process delivers `notification_delive
 2. **Call.** With no database transaction, connection, lock or SQLite writer held, re-read the subscription's current revision, resolve its secrets, check the destination host against the deployment allow-list, and send one request under the ADR-0021 credit and deadline rules. Redirects are not followed. The `json` body is signed in the Standard Webhooks shape with the subscription's signing key, and `webhook-id` is the event id.
 3. **Acknowledge.** In another short transaction, compare the token and the authorised revision; a mismatch changes nothing. On success, set `delivered`. On a retryable failure, set `next_attempt_at` with exponential back-off from 30 seconds to 1 hour and jitter. A receiver that rejects the request as invalid, a destination outside the allow-list or a redirect keeps the record `pending` with capped back-off and marks the subscription `failing` with the last error. A stale token changes nothing.
 
-Event insertion and subscription changes are serialised by the namespace's notification lock: an event transaction takes it in shared mode before reading subscriptions, even when none exist, and holds it until commit, and every subscription change takes it in exclusive mode (an advisory lock on PostgreSQL; the single writer on SQLite). A subscription therefore never misses an event that commits after the subscription's creation, and a disable never races an uncommitted delivery record into a later send. A sender crash leaves claims to expire and another sender reclaims them, so delivery is at least once and a receiver may see duplicates. Order across events is not guaranteed; each message carries the event time and id. A disabled subscription's records become `suspended` and return to `pending` when it is enabled; deleting it marks them `dropped`. A subscription receives events whose transaction commits after its own creation. Metrics expose backlog, oldest pending age and failures per subscription.
+The lock's place in the order of section 12 is after the scope locks and before any row lock, taken once per event-writing transaction in the one shared event-writing helper. The first slice ships no notification subscriptions, so the slice-1 engine does not take it; the work item that implements ADR-0025 adds it. Event insertion and subscription changes are serialised by the namespace's notification lock: an event transaction takes it in shared mode before reading subscriptions, even when none exist, and holds it until commit, and every subscription change takes it in exclusive mode (an advisory lock on PostgreSQL; the single writer on SQLite). A subscription therefore never misses an event that commits after the subscription's creation, and a disable never races an uncommitted delivery record into a later send. A sender crash leaves claims to expire and another sender reclaims them, so delivery is at least once and a receiver may see duplicates. Order across events is not guaranteed; each message carries the event time and id. A disabled subscription's records become `suspended` and return to `pending` when it is enabled; deleting it marks them `dropped`. A subscription receives events whose transaction commits after its own creation. Metrics expose backlog, oldest pending age and failures per subscription.
 
 Future contracts, on PostgreSQL and SQLite, with in-process receivers and an injected clock: `test_delivery_survives_restart_and_retry`, `test_late_committing_event_is_delivered`, `test_slow_receiver_holds_no_lock`, `test_sender_crash_and_two_replicas`, `test_destination_checked_at_send`, `test_subscription_lifecycle`. Their setups and assertions are in [protocols.md](protocols.md) section 13; documentation CI runs none of them.
