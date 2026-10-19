@@ -52,6 +52,7 @@ uv lock --check
 uv run --no-sync ruff format --check .
 uv run --no-sync ruff check .
 uv run --no-sync pyright
+uv run --no-sync pytest -q
 pnpm --dir web run typecheck
 pnpm --dir web run lint
 pnpm --dir web run build

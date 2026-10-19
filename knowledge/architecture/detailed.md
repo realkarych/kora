@@ -130,7 +130,7 @@ These layouts use the same scheduling code and schema. [Standalone](../specs/sch
 
 ## Module and contract map
 
-Paths below are planned package locations from the stack decision, not a claim that implementation exists. Shared-component placement remains [open](#open-implementation-questions).
+Paths below are planned package locations from the stack decision and [ADR-0026](../../docs/decisions/0026-package-layers.md), not a claim that implementation exists. Which package may import which is fixed in [package layers](#package-layers).
 
 | Planned area | Contract to read before changing it |
 |---|---|
@@ -138,11 +138,43 @@ Paths below are planned package locations from the stack decision, not a claim t
 | `src/kora/api` | [HTTP resources and errors](../specs/api-and-agent-surface.md#2-resources-and-operations); [scheduler entry points](../specs/scheduler.md#12-execution-backend-boundary-nfr-55); [persistence and state machines](../specs/data-model.md). |
 | `src/kora/scheduler` | [Passes](../specs/scheduler.md), [capacity and locks](../specs/data-model.md#13-run-acceptance-and-execution-capacity-adr-0020), [waits and approvals](../specs/scheduler.md#5-waits-hold-no-worker-nfr-13). |
 | `src/kora/worker` | [API-mediated claims/recovery](../specs/scheduler.md#3-submission-execution-uncertainty-and-recovery), [runtime workload](../specs/protocols.md#2-runtime-fr-81), [VCS plans](../specs/protocols.md#4-vcs-fr-52). |
+| `src/kora/observability` | [Logging contract](../specs/observability.md); every package may import it. |
+| `src/kora/cel`, `src/kora/cel_eval` | [CEL parsing, checking and evaluation](../specs/ir.md#7-expressions-and-templates); only `cel_eval` imports the binding. |
+| `src/kora/models`, `src/kora/client` | [HTTP resources and errors](../specs/api-and-agent-surface.md#2-resources-and-operations); the [shared API client](#stack-per-component). |
+| `src/kora/db` | [Persistence and state machines](../specs/data-model.md), [migrations](../specs/scheduler.md#14-migrations-nfr-72). |
+| `src/kora/engine` | [Scheduler entry points](../specs/scheduler.md#12-execution-backend-boundary-nfr-55), [state machines](../specs/data-model.md#4-state-machines). |
+| `src/kora/runner`, `src/kora/executor` | [Runtime lifecycle](../specs/protocols.md#2-runtime-fr-81), [VCS plans](../specs/protocols.md#4-vcs-fr-52), [protected execution boundary](#protected-execution-boundary). |
 | `src/kora/protocols`, `src/kora/plugins/<protocol>/` | [Provider metadata and loading](../specs/protocols.md#1-common-rules); core depends on protocols, implementations register through `kora.provider`. |
 | `src/kora/cli`, `src/kora/mcp`, `web/` | [Shared API surface and parity](../specs/api-and-agent-surface.md); [console design](../../docs/console.md). |
 | `conformance/`, `tests/` | [Provider conformance](../specs/protocols.md#13-conformance-suites-nfr-102), [testing rules](../../AGENTS.md#testing); [standalone parity](../specs/scheduler.md#10-standalone-sqlite-versus-postgres). |
 
 Cross-component changes also consult the owners of [content-bound approvals](../../docs/decisions/0008-content-bound-approvals.md), [cost accounting](../../docs/decisions/0010-cost-accounting-and-limits.md), [redaction and secrets](../specs/protocols.md#6-secrets-fr-101), [metrics](../specs/scheduler.md#11-metrics-and-health-nfr-73) and [inherited deadlines](../../docs/decisions/0022-inherited-execution-deadlines.md). These links replace a second catalog of rules and future test names.
+
+## Package layers
+
+Normative under [ADR-0026](../../docs/decisions/0026-package-layers.md). A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is listed in `y`'s row. A module under `plugins` belongs to its longest listed family prefix. Relative imports count after resolution, and imports under `if TYPE_CHECKING:` count too. `kora.standalone` and `kora.__main__` are the only composition roots and may import anything; `import kora` alone is allowed only there. Only `cel_eval` may import the third-party CEL binding, `cel`. `tests/architecture/test_import_layers.py` enforces this table, and a package enters it in the change that creates the package.
+
+| package | holds | may import |
+|---|---|---|
+| `observability` | the logging bootstrap and bound loggers ([observability](../specs/observability.md)) | — |
+| `cel` | CEL parser, schema-driven checker and canonical rendering, without the binding | `observability` |
+| `ir` | IR models and the validator | `cel`, `observability` |
+| `protocols` | provider protocols and their data types, including the recovery, dispatcher, publication and credential types and the workload descriptors that worker routes carry | `ir`, `observability` |
+| `models` | API request and response models, including worker-route bodies | `ir`, `protocols`, `observability` |
+| `client` | the shared `httpx` API client | `models`, `protocols`, `ir`, `observability` |
+| `executor` | VCS plan executor | `protocols`, `ir`, `observability` |
+| `runner` | `kora-runner` supervisor, including its registry, control channel and journal | `executor`, `protocols`, `ir`, `observability` |
+| `db` | SQLAlchemy tables, repositories and migrations | `ir`, `observability` |
+| `cel_eval` | evaluation of checked expressions through the binding | `cel`, `ir`, `observability` |
+| `engine` | shared transition functions | `db`, `cel_eval`, `protocols`, `ir`, `observability` |
+| `api` | FastAPI application | `engine`, `db`, `models`, `cel_eval`, `cel`, `protocols`, `ir`, `observability` |
+| `scheduler` | scheduling passes and tick | `engine`, `db`, `cel_eval`, `protocols`, `ir`, `observability` |
+| `worker` | claims, preparation and upload | `client`, `executor`, `models`, `protocols`, `ir`, `observability` |
+| `dsl` | Python DSL and author-side compiler | `cel`, `ir`, `observability` |
+| `cli` | CLI over the shared client; `kora compile` runs the DSL in-process | `client`, `models`, `dsl`, `cel`, `protocols`, `ir`, `observability` |
+| `mcp` | MCP servers over the shared client; stdio `kora_compile` runs the DSL in-process | `client`, `models`, `dsl`, `cel`, `protocols`, `ir`, `observability` |
+| `plugins.runtime`, `plugins.harness`, `plugins.vcs`, `plugins.policy`, `plugins.secrets` | execution-side providers; the local runtime shares supervisor code with `runner` | `runner`, `executor`, `protocols`, `ir`, `observability` |
+| `plugins.authentication`, `plugins.approval`, `plugins.sensor`, `plugins.storage`, `plugins.artifact_type`, `plugins.exporter` | control-plane providers, some of which read their own rows | `db`, `protocols`, `ir`, `observability` |
 
 ## Stack per component
 
@@ -180,7 +212,7 @@ The inventory is maintained under [AGENTS.md](../../AGENTS.md#code). *Decided* e
 | Plugins | one `kora.provider` entry-point group returning validated provider metadata with a `config_schema` per protocol; `kora plugins list`; no pluggy hook wrappers in MVP | decided (current contract [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md)) | one entry-point group per protocol; pluggy |
 | Authentication | `static_token` authenticator in MVP issuing personal bearer tokens: a user principal is bound to a person and a namespace list with the two flags `approve` and `platform` and a per-namespace `transcripts` capability; a service principal per worker is bound to a runtime and a namespace list; no roles or groups (DD-32, [protocols.md](../specs/protocols.md) §10); OIDC via `authlib` post-MVP behind the same `Principal` | decided | single shared API token; RBAC in MVP |
 | Testing | `pytest` + `pytest-asyncio`; `hypothesis` for IR and compiler properties; `testcontainers` for PostgreSQL and an S3-compatible server on the Linux CI job, which has Docker (macOS CI runs the artifact storage suite on `local`); fake harness and fake runtime shipped as test fixtures (NFR-10.1); conformance suites as pytest plugins adopters run against their implementations | decided (ADR-0013) | — |
-| Repo layout | `src/kora/{ir,dsl,api,scheduler,worker,protocols,plugins/{runtime,harness,vcs,…},cli,mcp}`; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
+| Repo layout | `src/kora/{observability,cel,ir,protocols,models,client,executor,runner,db,cel_eval,engine,api,scheduler,worker,dsl,cli,mcp,plugins/{runtime,harness,vcs,…}}` under the [package layers](#package-layers) of ADR-0026; `web/` (Vite project, build output embedded into `src/kora/api/static` at package build); `docs/`; `examples/`; `tests/`; `conformance/` | decided | multi-package monorepo |
 
 ## Glossary
 
@@ -224,7 +256,6 @@ These are unresolved aspects of the repository design at the consolidation basel
 
 | Topic | Remaining question and established constraint |
 |---|---|
-| Shared packages | Where do the runner, plan executor, shared API client, persistence and shared validator live? The [stack layout](#stack-per-component) names only the main packages. |
 | Run outcome | What complete predicate selects `succeeded` versus `failed` when work is settled? Compare [node/run terminality](../specs/data-model.md#4-state-machines) with the [completion pass](../specs/scheduler.md#2-the-scheduling-loop). |
 | Price ownership | Which process writes `price_table_id`, derives `usd_estimate` and distributes the snapshot? [Snapshotting and derivation](../../docs/decisions/0010-cost-accounting-and-limits.md) are decided; [harness mappings](../specs/protocols.md#14-harness-mapping-tables-fr-33-dd-27) do not settle the handoff. |
 | Token semantics across harnesses | Harnesses can differ in whether input counts include cached input and whether output counts include reasoning. On `claude` input excludes cache tokens, output includes thinking tokens, and cache writes have two lifetimes priced differently ([protocols.md section 3](../specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27)); ADR-0010 prices reasoning tokens separately. The price table and the runner's soft budget need one convention, including whether a node whose model has no price row is refused before launch when it sets `budget_usd`, and how scope aggregates ([scheduler.md](../specs/scheduler.md) section 4) treat its null `counters.usd`. |

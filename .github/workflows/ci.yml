@@ -75,6 +75,8 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
+      - name: Run tests
+        run: uv run --no-sync pytest -q
       - name: Build isolated distributions offline
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
