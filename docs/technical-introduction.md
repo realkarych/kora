@@ -4,6 +4,8 @@ Status: scope and implementation plan approved on 2026-10-17; document wording p
 
 Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
+Shared-transition amendment dated 2026-10-19: the open-mechanics sentence drops the two mechanics settled under [issue #103](https://github.com/realkarych/kora/issues/103); wording pending line-by-line owner review.
+
 ## 1. What the core does
 
 kora coordinates work that spans several coding-agent sessions. An agent edits code; a command tests it; a person reviews the result; an external system signals that the change has landed. The core turns these steps into a durable graph execution, keeping their dependencies, results, costs and recovery state together.
@@ -181,7 +183,7 @@ A provider declares capabilities and must satisfy the relevant conformance suite
 
 ## 7. What remains open, and where to read next
 
-Some implementation mechanics remain unresolved: how the API reaches scheduler transition entry points, who applies certain attempt transitions, and the full rule for aggregating terminal run failures. The [architecture reference](../knowledge/architecture/detailed.md#open-implementation-questions) records these questions; [issue #48](https://github.com/realkarych/kora/issues/48) tracks their resolution. The successful path above does not choose answers.
+Some implementation mechanics remain unresolved, such as the full rule for aggregating terminal run failures. The [architecture reference](../knowledge/architecture/detailed.md#open-implementation-questions) records these questions; [issue #48](https://github.com/realkarych/kora/issues/48) tracks their resolution. The successful path above does not choose answers.
 
 - For component views, deployment, the stack and terminology: [architecture reference](../knowledge/architecture/detailed.md).
 - For a specific change: the [specification task index](../knowledge/README.md#which-file-to-load-for-which-task), then the decision records cited there.
