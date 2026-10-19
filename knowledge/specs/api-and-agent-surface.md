@@ -287,7 +287,7 @@ The checklist is executed by a CI job on every release; a failing line blocks th
 2. **Schema coverage**: every request and response model used by the CLI, the MCP tools and the worker client is a model the API exports; the TypeScript client is regenerated and diffed.
 3. Every operation appears in the skill reference (`kora_reference` topic index) with at least one example; the run read has one example per `wait` condition, including a wait that ends at `timeout` with `satisfied: false`, a `needs_person` wait that ends `run_finished` and the approvals list filtered by run.
 4. The web console performs every action through the public API (verified by the generated client being its only HTTP dependency).
-5. Every error code in the registry, and every `details.reason` value the skills branch on, has a documented recovery hint and appears in the skill's error table; `IR027`'s hint is to simplify the expression or declare a smaller `maxItems` or `maxLength`, and `cel_evaluation_error`'s is to fix the expression the error record names.
+5. Every error code in the registry, and every `details.reason` value the skills branch on, has a documented recovery hint and appears in the skill's error table; `IR027`'s hint is to simplify the expression or declare a smaller `maxItems` or `maxLength`.
 6. No operation requires interactive input: CLI prompts are disabled under `--json`; `kora approve` fails with a structured error when required form fields are missing instead of asking.
 
 ## 8. Rate and size limits
