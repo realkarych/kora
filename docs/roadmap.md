@@ -12,7 +12,7 @@ Packaging-test removal amendment dated 2026-10-19: removal decided by the projec
 
 Slice-scope amendment dated 2026-10-19: scope decided by the project owner under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
 
-Implementation-plan amendment dated 2026-10-19: next step 1 links the [implementation plan](implementation-plan.md), approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review. Items 1 and 5 of "What the documents cannot settle" are under revision in [issue #140](https://github.com/realkarych/kora/issues/140).
+Implementation-plan amendment dated 2026-10-19: next step 1 links the [implementation plan](implementation-plan.md); scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review. Items 1 and 5 of "What the documents cannot settle" are under revision in [issue #140](https://github.com/realkarych/kora/issues/140).
 
 ## Where the project stands
 

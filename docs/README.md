@@ -8,7 +8,7 @@ Scaffold amendment dated 2026-10-18: scope and implementation plan approved unde
 
 Threat-model navigation amendment: scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); wording accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18.
 
-Implementation-plan navigation amendment dated 2026-10-19: the reading-order entry for the implementation plan, approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review.
+Implementation-plan navigation amendment dated 2026-10-19: a reading-order entry for the implementation plan; scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review.
 
 ## Reading order
 
