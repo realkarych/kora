@@ -151,7 +151,12 @@ def under_confining_package(name: str) -> bool:
 
 def names_guarded_table(node: ast.expr, bindings: dict[str, str]) -> bool:
     if isinstance(node, ast.Subscript):
-        return constant_string(node.slice) in GUARDED_TABLES
+        receiver = node.value
+        return (
+            isinstance(receiver, ast.Attribute)
+            and receiver.attr == "tables"
+            and constant_string(node.slice) in GUARDED_TABLES
+        )
     if isinstance(node, ast.Call):
         name = dotted(node.func, bindings)
         leaf = None if name is None else name.split(".")[-1]
@@ -200,7 +205,9 @@ def raw_sql_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
     statement = constant_string(arguments[0])
     if statement is None:
         return "builds SQL text dynamically outside kora.engine"
-    normalized = SQL_COMMENT.sub(" ", statement).replace("`", "")
+    normalized = SQL_COMMENT.sub(" ", statement)
+    for quote in "`[]":
+        normalized = normalized.replace(quote, "")
     if RAW_WRITE.search(normalized) is not None:
         return "writes an execution table in raw SQL"
     return None
@@ -459,6 +466,7 @@ def test_checker_flags_raw_and_driver_sql(tmp_path: Path) -> None:
         "engine.raw_connection().cursor()\n"
         "c.connection.dbapi_connection\n"
         'text("UPDATE/**/`run` SET x = 1")\n'
+        'text("UPDATE [wait] SET x = 1")\n'
         'text("SELECT * FROM run")\n'
         "widget.text(value)\n",
     )
@@ -467,6 +475,7 @@ def test_checker_flags_raw_and_driver_sql(tmp_path: Path) -> None:
 
     assert violations == [
         "kora/db/reports.py:10: writes an execution table in raw SQL",
+        "kora/db/reports.py:11: writes an execution table in raw SQL",
         "kora/db/reports.py:2: writes an execution table in raw SQL",
         "kora/db/reports.py:3: writes an execution table in raw SQL",
         "kora/db/reports.py:4: writes an execution table in raw SQL",
@@ -539,6 +548,7 @@ def test_checker_allows_owning_modules_and_reads_in_db(tmp_path: Path) -> None:
         "kora.api.tokens",
         "from kora.db.reads import load_run\n"
         "body.get('run')\n"
+        "body['attempt']\n"
         "getattr(payload, 'wait')\n",
     )
 
