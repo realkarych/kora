@@ -9,6 +9,7 @@ import pytest_asyncio
 from kora.db.connection import Database, DatabaseSettings
 from tests.support.databases import (
     EMPTY_TEMPLATE,
+    RYUK_VARIABLE,
     TEMPLATE_DATABASE,
     DatabaseKind,
     PostgresServer,
@@ -40,7 +41,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 @pytest.fixture(scope="session")
 def postgres_server() -> Iterator[PostgresServer]:
-    yield from start_postgres(os.environ)
+    yield from start_postgres(os.environ.get(RYUK_VARIABLE))
 
 
 @pytest.fixture(scope="session")

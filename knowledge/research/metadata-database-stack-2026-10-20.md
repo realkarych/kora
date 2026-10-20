@@ -47,7 +47,7 @@ The container listens on every host interface for the duration of a run; the ran
 
 ## Measurements
 
-`tests/measurements/test_metadata_database_lifetime.py` declares its workloads and gates before running and writes every sample to the artifact `metadata-database-lifetime-measurement`. Workloads per selected database: 20 migrate-from-empty cycles with a no-op re-run each; 200 connect-and-dispose cycles; 2,000 commit and 2,000 rollback cycles, 200 cancellations of a statement in flight and, on SQLite, 200 cancellations while waiting for the writer; one sweep over 1,000 marked runs beside 1,000 unmarked ones in pages of 100; 200 run finish checks on a run with 10 top-level and 1,000 body instances; the event page over 5,000 events; and 100,000 identifiers. Gates: migration re-run is a no-op and leaves no temporary file; pool checkouts balanced, writer free, no open transaction and no temporary file after every ending path; heap growth over the second half of each cycle set within 64 KiB and under 1 MiB in all; threads, descriptors and server connections back at baseline; every marked run visited once per sweep; one statement per finish check; every event row read. Durations are recorded, not gated. The step budget is 120 s.
+`tests/measurements/test_metadata_database_lifetime.py` declares its workloads and gates before running and writes every sample to the artifact `metadata-database-lifetime-measurement`. Workloads per selected database: 20 migrate-from-empty cycles with a no-op re-run each; 200 connect-and-dispose cycles; 2,000 commit and 2,000 rollback cycles; 200 cancellations of a statement in flight, synchronised on the statement's execution; on SQLite 200 cancellations while waiting for the writer, on PostgreSQL 50 cancellations while waiting for a one-connection pool with a 50 ms checkout timeout; one sweep over 1,000 marked runs beside 1,000 unmarked ones in pages of 100; 200 run finish checks on a run with 10 top-level and 1,000 body instances; the event page over 5,000 events; and 100,000 identifiers. Gates: migration re-run is a no-op and leaves no temporary file; pool checkouts balanced, writer free, no open transaction and no temporary file after every ending path; the cancelled statements were observed running; invalidations as the dialect predicts (none on SQLite, one per in-flight cancellation on PostgreSQL); heap growth over the second half of each cycle set within 64 KiB and under 1 MiB in all; threads, descriptors and server connections back at baselines measured outside the event loop; every marked run visited once per sweep; one statement per finish check; every event row read. Each transaction path records its per-cycle minimum, median, 95th percentile and maximum and the peak traced memory. Durations are recorded, not gated. The step budget is 120 s, with the container fixture timed separately.
 
 Laptop figures (Apple Silicon, macOS, Python 3.11.17, SQLite 3.53.1, PostgreSQL 16.15 in the pinned container on Docker Desktop), one run per database on 2026-10-20 before the pull request's CI run:
 
@@ -65,7 +65,24 @@ Laptop figures (Apple Silicon, macOS, Python 3.11.17, SQLite 3.53.1, PostgreSQL 
 | event timeline page | 51 pages | 10.3 ms per page, 5,000 rows | 4.3 ms per page, 5,000 rows |
 | identifier generation | 100,000 | 1.6 µs per identifier | same process |
 
-Threads, descriptors and server connections returned to their baselines; the heap grew by less than 25 KiB over the first half of any cycle set and did not grow over the second half. The transaction cycles record their per-cycle minimum, median, 95th percentile and maximum and the peak traced memory, and the figures are taken with `tracemalloc` active, which inflates allocation-heavy paths. The container start, readiness and template migration are timed separately from the step. The whole step took 12.4 s on SQLite and 24.2 s on PostgreSQL. Hosted-runner figures are added from the pull request's artifact once CI has run on the final revision.
+Threads, descriptors and server connections returned to their baselines; the heap grew by less than 25 KiB over the first half of any cycle set and did not grow over the second half. The transaction cycles record their per-cycle minimum, median, 95th percentile and maximum and the peak traced memory, and the figures are taken with `tracemalloc` active, which inflates allocation-heavy paths. The container start, readiness and template migration are timed separately from the step. The whole step took 12.4 s on SQLite and 24.2 s on PostgreSQL.
+
+Hosted-runner figures (`ubuntu-24.04`, four CPUs, Python 3.11.17), from the artifact of CI run [39452331149](https://github.com/realkarych/kora/actions/runs/39452331149) on revision b6667b6, all 66 gates passing, step 59.8 s with the container fixture at 1.3 s outside it:
+
+| Workload | SQLite | PostgreSQL |
+|---|---|---|
+| migrate from empty | 165 ms per migration | 256 ms per migration |
+| connect and dispose | 46.8 ms per cycle | 66.5 ms per cycle |
+| transaction commit (median, 95th percentile) | 1.50 ms, 1.60 ms | 1.58 ms, 1.94 ms |
+| transaction rollback (median, 95th percentile) | 1.51 ms, 1.58 ms | 1.48 ms, 1.61 ms |
+| statement cancelled in flight (median) | 20.4 ms, no invalidation | 8.9 ms, one invalidation per cycle |
+| cancelled while waiting (median) | 0.75 ms for the writer lock | 51.0 ms for the one-connection pool at a 50 ms timeout |
+| marked-run sweep | 1.4 ms per page | 1.3 ms per page |
+| run finish check | 0.89 ms per call | 0.94 ms per call |
+| event timeline page | 13.1 ms per page | 5.5 ms per page |
+| identifier generation | 2 µs per identifier | same process |
+
+The logging measurement of the same lane took 71.6 s; the lane as a whole stayed under five minutes and the four workflows of the run finished within about four and a half minutes of wall-clock.
 
 ## Limits of this record
 

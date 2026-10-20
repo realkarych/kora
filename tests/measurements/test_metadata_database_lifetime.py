@@ -502,7 +502,7 @@ async def run_path(
 ) -> None:
     checkouts = CheckoutBalance(database)
     heap_samples: list[int] = []
-    durations: list[float] = []
+    durations: list[float] = [0.0] * cycles
     await path(database)
     heap_samples.append(heap_bytes())
     tracemalloc.reset_peak()
@@ -510,7 +510,7 @@ async def run_path(
     for index in range(cycles):
         cycle_started = time.perf_counter()
         await path(database)
-        durations.append(time.perf_counter() - cycle_started)
+        durations[index] = time.perf_counter() - cycle_started
         if index == cycles // 2:
             heap_samples.append(heap_bytes())
     seconds = time.perf_counter() - started

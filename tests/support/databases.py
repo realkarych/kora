@@ -181,8 +181,8 @@ def quote(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def start_postgres(environ: Mapping[str, str]) -> Iterator[PostgresServer]:
-    if environ.get(RYUK_VARIABLE) is None:
+def start_postgres(reaper_setting: str | None) -> Iterator[PostgresServer]:
+    if reaper_setting is None:
         testcontainers_config.ryuk_disabled = True
     password = secrets.token_urlsafe(24)
     container = SilentPostgresContainer(

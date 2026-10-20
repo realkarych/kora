@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from time import perf_counter
 
 from sqlalchemy import Connection
@@ -58,11 +59,16 @@ def record_finished(report: MigrationReport, started: float) -> MigrationReport:
     return report
 
 
-async def upgrade_database(settings: DatabaseSettings) -> MigrationReport:
+OpenDatabase = Callable[[DatabaseSettings], Database]
+
+
+async def upgrade_database(
+    settings: DatabaseSettings, open_database: OpenDatabase = Database
+) -> MigrationReport:
     database: Database | None = None
     started = perf_counter()
     try:
-        database = Database(settings)
+        database = open_database(settings)
         async with database.transaction() as connection:
             report = await connection.run_sync(upgrade_with_diagnostics)
         return record_finished(report, started)

@@ -2,8 +2,9 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, text, update
-from sqlalchemy.exc import DBAPIError, StatementError
+from sqlalchemy import func, insert, select, text, update
+from sqlalchemy.exc import DBAPIError, IntegrityError, StatementError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database
 from kora.db.identifiers import (
@@ -16,6 +17,7 @@ from kora.db.identifiers import (
 )
 from kora.db.tables import (
     api_token,
+    artifact_type,
     attempt,
     namespace,
     node_instance,
@@ -248,3 +250,43 @@ async def test_boolean_columns_refuse_other_values(database: Database) -> None:
             )
         ).scalar_one()
     assert marked is True
+
+
+@pytest.mark.asyncio
+async def test_built_in_artifact_type_names_are_unique(database: Database) -> None:
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        namespace_id = await seeder.namespace()
+        await insert_artifact_type(connection, seeder, None, "VcsRef")
+        await insert_artifact_type(connection, seeder, namespace_id, "VcsRef")
+
+    with pytest.raises(IntegrityError):
+        async with database.transaction() as connection:
+            await insert_artifact_type(connection, Seeder(connection), None, "VcsRef")
+    with pytest.raises(IntegrityError):
+        async with database.transaction() as connection:
+            await insert_artifact_type(
+                connection, Seeder(connection), namespace_id, "VcsRef"
+            )
+
+    async with database.read_transaction() as connection:
+        count = (
+            await connection.execute(select(func.count()).select_from(artifact_type))
+        ).scalar_one()
+    assert count == 2
+
+
+async def insert_artifact_type(
+    connection: AsyncConnection, seeder: Seeder, namespace_id: str | None, name: str
+) -> None:
+    await connection.execute(
+        insert(artifact_type).values(
+            id=seeder.new_id(),
+            namespace_id=namespace_id,
+            name=name,
+            schema={"type": "object"},
+            parent=None,
+            behavior={},
+            **seeder.stamps(),
+        )
+    )

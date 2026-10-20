@@ -97,28 +97,14 @@ async def test_a_refused_migration_commit_leaves_no_finished_record(
     ]
 
 
-async def upgrade_refusing_commit(settings: DatabaseSettings) -> None:
-    from kora.db.migrations import record_finished, upgrade_with_diagnostics
-
+def refusing_commits(settings: DatabaseSettings) -> Database:
     database = Database(settings)
     event.listen(database.writer_engine.sync_engine, "commit", refuse_commit)
-    try:
-        try:
-            async with database.transaction() as connection:
-                report = await connection.run_sync(upgrade_with_diagnostics)
-            record_finished(report, 0.0)
-        except Exception as error:
-            from kora.db import MIGRATION_FAILED
-            from kora.db.migrations import migration_logger
+    return database
 
-            log = migration_logger()
-            if log is not None:
-                log.emit(
-                    MIGRATION_FAILED, dialect=str(settings.dialect), exception=error
-                )
-            raise
-    finally:
-        await database.close()
+
+async def upgrade_refusing_commit(settings: DatabaseSettings) -> None:
+    await upgrade_database(settings, refusing_commits)
 
 
 @pytest.mark.asyncio
@@ -159,3 +145,42 @@ async def test_body_faults_are_recorded_once_and_cancellations_never(
     assert len(records) == 1
     chain = cast(list[dict[str, object]], records[0]["exception"])
     assert chain[0]["type"] == "BodyFault"
+
+
+@pytest.mark.asyncio
+async def test_close_after_the_deadline_is_recorded(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    settings = LoggingSettings(
+        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
+    )
+    diagnostics = configure(settings, pipe.write_end)
+    pipe.reader.start()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        try:
+            async with database.transaction() as connection:
+                await Seeder(connection).namespace("outlived")
+                entered.set()
+                await asyncio.wait_for(release.wait(), 10)
+        except Exception:
+            return
+
+    holding = asyncio.create_task(holder())
+    await asyncio.wait_for(entered.wait(), 10)
+    await database.close(deadline_seconds=0.2)
+    release.set()
+    await holding
+    diagnostics.shutdown()
+    finished_output(pipe)
+
+    timed_out = [
+        record
+        for record in pipe.reader.records()
+        if record["event"] == "db.close.timed_out"
+    ]
+    assert len(timed_out) == 1
+    assert timed_out[0]["level"] == "WARNING"
+    assert timed_out[0]["units_in_flight"] == 1
