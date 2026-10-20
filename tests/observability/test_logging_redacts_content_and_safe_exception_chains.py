@@ -89,19 +89,19 @@ def test_a_value_extending_another_is_masked_whole_across_the_scan_window(
     registrations = [
         diagnostics.register_secret(v) for v in (REGISTERED_VALUE, extended)
     ]
-    filler = "b" * (1030 - 50 - 50 - 2 * len(REGISTERED_VALUE))
-    text = f"{'a' * 50}{REGISTERED_VALUE}{'b' * 50}{REGISTERED_VALUE}{filler}{extended}"
+    head = ("a" * 5 + REGISTERED_VALUE) * 10
+    text = head + "b" * (1030 - len(head)) + extended + "d" * 300
     pipe.reader.start()
 
-    log.emit(NOTE, text=text + "d" * 300)
+    log.emit(NOTE, text=text)
     diagnostics.shutdown()
     output = finished_output(None, pipe)
     for registration in registrations:
         registration.release()
 
-    assert "-extended-0002" not in output
+    assert "extended" not in output
     assert REGISTERED_VALUE[:4] not in output
-    assert output.count(MASK) == 3
+    assert output.count(MASK) == 11
     assert TRUNCATION_MARKER in output
 
 
