@@ -80,6 +80,7 @@ CYCLES: int = 200
 PRODUCER_THREADS: int = 4
 STEP_BUDGET_SECONDS: float = 300.0
 ROTATION_ROUNDS: int = 100
+MATCHER_RECORDS: int = 200
 EXIT_MARGIN_SECONDS: float = 2.0
 IDLE_SHUTDOWN_SECONDS: float = 0.5
 HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
@@ -480,12 +481,17 @@ def redaction_workloads(report: Report) -> None:
         diagnostics.register_secret(value)
         for value in scattered_registry_values(256, 255)
     ]
+
+    def emit_scattered_miss() -> None:
+        for _ in range(MATCHER_RECORDS):
+            log.emit(MAXIMAL, **miss)
+
     repeat(
         report,
         "redaction_scattered_registry_miss",
-        HEAVY_RECORDS,
+        MATCHER_RECORDS,
         HEAVY_REPEATS,
-        emit_miss,
+        emit_scattered_miss,
     )
     for registration in random_registrations:
         registration.release()
@@ -495,11 +501,11 @@ def redaction_workloads(report: Report) -> None:
     run = {"s00": "shared-prefix-" + "p" * 16_000, "exception": miss["exception"]}
 
     def emit_run() -> None:
-        for _ in range(HEAVY_RECORDS):
+        for _ in range(MATCHER_RECORDS):
             log.emit(MAXIMAL, **run)
 
     repeat(
-        report, "redaction_shared_prefix_run", HEAVY_RECORDS, HEAVY_REPEATS, emit_run
+        report, "redaction_shared_prefix_run", MATCHER_RECORDS, HEAVY_REPEATS, emit_run
     )
     for registration in prefix_registrations:
         registration.release()
