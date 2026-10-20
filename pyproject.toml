@@ -80,6 +80,7 @@ venv = ".venv"
 [tool.ruff]
 target-version = "py311"
 respect-gitignore = false
+extend-exclude = [".claude"]
 include = ["*.py", "*.pyi", "*.ipynb", "**/pyproject.toml", "**/ruff.toml", "**/.ruff.toml"]
 line-length = 88
 

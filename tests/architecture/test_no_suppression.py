@@ -37,7 +37,6 @@ SHADOW_NAMES: frozenset[str] = frozenset(
         PYPROJECT,
     }
 )
-WEB_DIRECTORY: str = "web"
 ESLINT_CONFIG: str = "web/eslint.config.mjs"
 ESLINT_CONFIG_PREFIXES: tuple[str, ...] = (".eslintrc", "eslint.config.")
 WEB_PACKAGE: str = "web/package.json"
@@ -92,7 +91,7 @@ TSCONFIG_TABLES: dict[str, dict[str, object]] = {
         "include": ["vite.config.ts"],
     },
 }
-WEB_CONFIGURATION: tuple[str, ...] = (*TSCONFIG_TABLES, WEB_PACKAGE)
+WEB_CONFIGURATION: tuple[str, ...] = (*TSCONFIG_TABLES, WEB_PACKAGE, ESLINT_CONFIG)
 SHEBANG: str = "#!"
 ENV_PROGRAM: str = "env"
 SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "ksh"})
@@ -116,6 +115,29 @@ PACKAGE_KEYWORD: str = "package"
 RUNTIME_CONFIGURATION_CALLS: frozenset[str] = frozenset({"addinivalue_line"})
 WARNING_FILTER_CALLS: frozenset[str] = frozenset({"catch_warnings"})
 PLUGIN_MANAGER: str = "pluginmanager"
+TESTS_DIRECTORY: str = "tests/"
+GETATTR: str = "getattr"
+MODULES_ATTRIBUTE: str = "modules"
+BANNED_ATTRIBUTES: frozenset[str] = frozenset(
+    {
+        "skip",
+        "xfail",
+        "importorskip",
+        "exit",
+        "skipif",
+        "filterwarnings",
+        "simplefilter",
+        "catch_warnings",
+        "resetwarnings",
+        "filters",
+        "skipTest",
+        "SkipTest",
+        "MonkeyPatch",
+        "suppress",
+        "_exit",
+    }
+)
+PYTEST_ENTRY_POINTS: str = "pytest11"
 DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
     {"__import__", "import_module", "resolve_name"}
 )
@@ -135,7 +157,6 @@ SCOPE_NODES: tuple[type[ast.AST], ...] = (
     ast.TryStar,
 )
 HOOK_PREFIX: str = "pytest_"
-CONFTEST: str = "conftest.py"
 WARNINGS_MODULE: str = "warnings"
 
 ALLOWED_BLIND_HANDLERS: dict[str, int] = {
@@ -149,6 +170,19 @@ ALLOWED_WARNING_NAMES: dict[str, frozenset[str]] = {
         {"catch_warnings", "filterwarnings", "simplefilter"}
     )
 }
+ALLOWED_WARNING_DEFINITIONS: dict[str, frozenset[str]] = {
+    WARNING_FILTERS_MODULE: frozenset(
+        {
+            "EXPRESSION_INDEX_WARNING",
+            "expression_index_warnings_ignored",
+            "every_warning_raised",
+        }
+    )
+}
+ALWAYS_ACTION: str = "always"
+SIMPLE_FILTER: str = "simplefilter"
+MESSAGE_FILTER: str = "filterwarnings"
+MESSAGE_FILTER_ARGUMENTS: int = 3
 ALLOWED_WARNING_IMPORTS: dict[str, frozenset[str]] = {
     WARNING_FILTERS_MODULE: frozenset(
         {
@@ -195,6 +229,7 @@ BANNED_API: dict[str, dict[str, str]] = {
 RUFF_TABLE: dict[str, object] = {
     "target-version": "py311",
     "respect-gitignore": False,
+    "extend-exclude": [".claude"],
     "include": [
         "*.py",
         "*.pyi",
@@ -516,6 +551,21 @@ def call_violations(source: SourceFile, node: ast.Call) -> Iterator[Violation]:
         target = guarded_dynamic_import(node)
         if target is not None:
             yield Violation(source.relative, line, f"dynamic import of {target}")
+    if name == GETATTR and len(node.args) > 1:
+        attribute = string_value(node.args[1])
+        if attribute in BANNED_ATTRIBUTES:
+            yield Violation(source.relative, line, f"dynamic access to {attribute}")
+
+
+def guarded_modules_lookup(node: ast.Subscript) -> str | None:
+    if not (
+        isinstance(node.value, ast.Attribute) and node.value.attr == MODULES_ATTRIBUTE
+    ):
+        return None
+    key = string_value(node.slice)
+    if key is not None and top_level_module(key) in GUARDED_DYNAMIC_MODULES:
+        return key
+    return None
 
 
 def function_violations(
@@ -550,9 +600,10 @@ def imported_names(node: ast.stmt) -> Iterator[tuple[str, str | None]]:
         for alias in node.names:
             yield alias.name, alias.asname
     if isinstance(node, ast.ImportFrom):
-        source = "." * node.level + (node.module or "")
+        dots = "." * node.level
+        source = f"{dots}{node.module}." if node.module else dots
         for alias in node.names:
-            yield f"{source}.{alias.name}", alias.asname
+            yield f"{source}{alias.name}", alias.asname
 
 
 def warning_import_violations(
@@ -561,7 +612,9 @@ def warning_import_violations(
     allowed = ALLOWED_WARNING_IMPORTS.get(source.relative)
     if allowed is None:
         return
-    for node in tree.body:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import | ast.ImportFrom):
+            continue
         for qualified, alias in imported_names(node):
             if qualified not in allowed or alias is not None:
                 yield Violation(
@@ -571,6 +624,34 @@ def warning_import_violations(
                 )
 
 
+def is_blanket_filter(node: ast.Call) -> bool:
+    name = call_name(node)
+    if name == SIMPLE_FILTER:
+        return first_string_argument(node) != ALWAYS_ACTION
+    if name == MESSAGE_FILTER:
+        if len(node.args) < MESSAGE_FILTER_ARGUMENTS:
+            return True
+        return string_value(node.args[1]) == ""
+    return False
+
+
+def warning_definition_violations(
+    source: SourceFile, tree: ast.Module
+) -> Iterator[Violation]:
+    allowed = ALLOWED_WARNING_DEFINITIONS.get(source.relative, frozenset())
+    for node in module_scope_statements(tree.body):
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            continue
+        for name in bound_names(node):
+            if name not in allowed:
+                yield Violation(
+                    source.relative, node.lineno, f"definition of {name} is not allowed"
+                )
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and is_blanket_filter(node):
+            yield Violation(source.relative, node.lineno, "blanket warning filter")
+
+
 def warning_name_violations(
     source: SourceFile, tree: ast.Module
 ) -> Iterator[Violation]:
@@ -578,6 +659,7 @@ def warning_name_violations(
     if allowed is None:
         return
     yield from warning_import_violations(source, tree)
+    yield from warning_definition_violations(source, tree)
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -592,23 +674,62 @@ def warning_name_violations(
             )
 
 
+def target_names(target: ast.expr) -> Iterator[str]:
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, ast.Tuple | ast.List):
+        for element in target.elts:
+            yield from target_names(element)
+    elif isinstance(target, ast.Starred):
+        yield from target_names(target.value)
+
+
 def bound_names(node: ast.stmt) -> list[str]:
     if isinstance(node, ast.Assign):
-        return [target.id for target in node.targets if isinstance(target, ast.Name)]
-    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-        return [node.target.id]
+        return [name for target in node.targets for name in target_names(target)]
+    if isinstance(node, ast.AnnAssign | ast.AugAssign):
+        return list(target_names(node.target))
+    if isinstance(node, ast.For | ast.AsyncFor):
+        return list(target_names(node.target))
+    if isinstance(node, ast.With | ast.AsyncWith):
+        return [
+            name
+            for item in node.items
+            if item.optional_vars is not None
+            for name in target_names(item.optional_vars)
+        ]
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
         return [node.name]
     if isinstance(node, ast.ImportFrom):
         return [alias.asname or alias.name for alias in node.names]
+    if isinstance(node, ast.Import):
+        return [alias.asname for alias in node.names if alias.asname is not None]
     return []
 
 
-def conftest_violations(source: SourceFile, tree: ast.Module) -> Iterator[Violation]:
-    if Path(source.relative).name != CONFTEST:
-        return
+def nested_blocks(statement: ast.stmt) -> list[list[ast.stmt]]:
+    if isinstance(statement, ast.If | ast.For | ast.AsyncFor | ast.While):
+        return [statement.body, statement.orelse]
+    if isinstance(statement, ast.With | ast.AsyncWith):
+        return [statement.body]
+    if isinstance(statement, ast.Try | ast.TryStar):
+        handler_bodies = [handler.body for handler in statement.handlers]
+        return [statement.body, *handler_bodies, statement.orelse, statement.finalbody]
+    if isinstance(statement, ast.Match):
+        return [case.body for case in statement.cases]
+    return []
+
+
+def module_scope_statements(statements: list[ast.stmt]) -> Iterator[ast.stmt]:
+    for statement in statements:
+        yield statement
+        for block in nested_blocks(statement):
+            yield from module_scope_statements(block)
+
+
+def hook_violations(source: SourceFile, tree: ast.Module) -> Iterator[Violation]:
     allowed = ALLOWED_HOOKS.get(source.relative, frozenset())
-    for node in tree.body:
+    for node in module_scope_statements(tree.body):
         for name in bound_names(node):
             if name in COLLECTION_OVERRIDES:
                 yield Violation(
@@ -626,15 +747,25 @@ def python_violations(source: SourceFile, text: str) -> Iterator[Violation]:
     for node in ast.walk(tree):
         if is_string_statement(node):
             yield Violation(source.relative, node.lineno, "string statement")
-        if isinstance(node, ast.Attribute) and node.attr == PLUGIN_MANAGER:
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == PLUGIN_MANAGER
+            and source.relative.startswith(TESTS_DIRECTORY)
+        ):
             yield Violation(source.relative, node.lineno, "plugin manager access")
+        if isinstance(node, ast.Subscript):
+            module = guarded_modules_lookup(node)
+            if module is not None:
+                yield Violation(
+                    source.relative, node.lineno, f"dynamic import of {module}"
+                )
         if isinstance(node, ast.Call):
             yield from call_violations(source, node)
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             yield from function_violations(source, node)
     yield from blind_handler_violations(source, tree)
     yield from warning_name_violations(source, tree)
-    yield from conftest_violations(source, tree)
+    yield from hook_violations(source, tree)
 
 
 def strip_quotes(line: str) -> str:
@@ -758,15 +889,13 @@ def pyproject_violations(root: Path) -> Iterator[Violation]:
     missing = STRICT_ADDOPTS - set(string_list(pytest_options.get("addopts")))
     for option in sorted(missing):
         yield Violation(PYPROJECT, 1, f"addopts lacks {option}")
+    if PYTEST_ENTRY_POINTS in table(document, "project", "entry-points"):
+        yield Violation(PYPROJECT, 1, "registers pytest plugins through entry points")
 
 
 def shadows_eslint_config(relative: str) -> bool:
     name = Path(relative).name
-    return (
-        relative.startswith(f"{WEB_DIRECTORY}/")
-        and relative != ESLINT_CONFIG
-        and name.startswith(ESLINT_CONFIG_PREFIXES)
-    )
+    return relative != ESLINT_CONFIG and name.startswith(ESLINT_CONFIG_PREFIXES)
 
 
 def shadow_violations(root: Path) -> Iterator[Violation]:
@@ -795,6 +924,8 @@ def web_configuration_violations(root: Path) -> Iterator[Violation]:
             table(document, "compilerOptions").get("strict") is not True
         ):
             yield Violation(relative, 1, "compilerOptions.strict is not true")
+    if not (root / ESLINT_CONFIG).is_file():
+        yield Violation(ESLINT_CONFIG, 1, "missing")
     package = root / WEB_PACKAGE
     if not package.is_file():
         yield Violation(WEB_PACKAGE, 1, "missing")
@@ -945,6 +1076,8 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "    importlib.import_module('warnings').simplefilter('ignore')\n"
         "    importlib.import_module('.outcomes', package='_pytest')\n"
         "    pkgutil.resolve_name('pytest:skip')\n"
+        "    getattr(pytest, 'skip')('x')\n"
+        "    sys.modules['pytest'].skip('x')\n"
         "    with warnings.catch_warnings(action='ignore'):\n"
         "        pass\n"
         "    try:\n"
@@ -980,7 +1113,12 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "pytest_runtest_makereport = _report\n"
         "def pytest_sessionstart(session: pytest.Session) -> None:\n"
         "    session.config.addinivalue_line('filterwarnings', 'ignore')\n"
-        "    session.config.pluginmanager.register(object())\n",
+        "    session.config.pluginmanager.register(object())\n"
+        "if True:\n"
+        "    def pytest_runtest_setup() -> None:\n"
+        "        return None\n"
+        "    pytest_runtest_call, other = _report, None\n"
+        "import tests.hooks as pytest_runtest_teardown\n",
     )
     write(
         tmp_path,
@@ -988,7 +1126,10 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "def test_it(request: object) -> None:\n"
         "    request.applymarker('xfail')\n"
         "    request.applymarker(marker)\n"
-        "    request.skipTest('x')\n",
+        "    request.skipTest('x')\n"
+        "pytest_plugins = ['tests.helpers.report']\n"
+        "def pytest_runtest_makereport() -> None:\n"
+        "    return None\n",
     )
     write(
         tmp_path,
@@ -1006,7 +1147,13 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "from warnings import resetwarnings\n"
         "from contextlib import suppress\n"
         "warnings.resetwarnings()\n"
-        "warnings.filters.clear()\n",
+        "warnings.filters.clear()\n"
+        "def quietly() -> None:\n"
+        "    import unittest\n"
+        "    from . import helpers\n"
+        "    warnings.simplefilter('ignore')\n"
+        "    warnings.filterwarnings('ignore')\n"
+        "    warnings.filterwarnings('ignore', '', Warning)\n",
     )
     write(tmp_path, "tests/measurements/test_slow.py", "# measured\nx = 1\n")
     write(tmp_path, "tests/bom.py", "\ufeff# after a byte order mark\nx = 1\n")
@@ -1042,9 +1189,11 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "src/kora/module.py:26: dynamic import of warnings",
         "src/kora/module.py:27: dynamic import of _pytest",
         "src/kora/module.py:28: dynamic import of pytest:skip",
-        "src/kora/module.py:29: warning filter",
-        "src/kora/module.py:33: blind exception handler",
-        "src/kora/module.py:39: blind exception handler",
+        "src/kora/module.py:29: dynamic access to skip",
+        "src/kora/module.py:30: dynamic import of pytest",
+        "src/kora/module.py:31: warning filter",
+        "src/kora/module.py:35: blind exception handler",
+        "src/kora/module.py:41: blind exception handler",
         "src/kora/observability/sink.py:1: 0 blind exception handlers, 1 allowed",
         "tests/bom.py:1: comment",
         "tests/conftest.py:2: unlisted pytest hook pytest_configure",
@@ -1057,6 +1206,9 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "tests/conftest.py:14: unlisted pytest hook pytest_sessionstart",
         "tests/conftest.py:15: runtime configuration change",
         "tests/conftest.py:16: plugin manager access",
+        "tests/conftest.py:18: unlisted pytest hook pytest_runtest_setup",
+        "tests/conftest.py:20: unlisted pytest hook pytest_runtest_call",
+        "tests/conftest.py:21: unlisted pytest hook pytest_runtest_teardown",
         "tests/measurements/test_slow.py:1: comment",
         f"{WARNING_FILTERS_MODULE}:2: import of pytest is not allowed",
         f"{WARNING_FILTERS_MODULE}:3: import of warnings is not allowed",
@@ -1064,8 +1216,16 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         f"{WARNING_FILTERS_MODULE}:5: import of contextlib.suppress is not allowed",
         f"{WARNING_FILTERS_MODULE}:6: warnings.resetwarnings is not allowed",
         f"{WARNING_FILTERS_MODULE}:7: warnings.filters is not allowed",
+        f"{WARNING_FILTERS_MODULE}:8: definition of quietly is not allowed",
+        f"{WARNING_FILTERS_MODULE}:9: import of unittest is not allowed",
+        f"{WARNING_FILTERS_MODULE}:10: import of .helpers is not allowed",
+        f"{WARNING_FILTERS_MODULE}:11: blanket warning filter",
+        f"{WARNING_FILTERS_MODULE}:12: blanket warning filter",
+        f"{WARNING_FILTERS_MODULE}:13: blanket warning filter",
         "tests/test_things.py:2: string marker",
         "tests/test_things.py:4: unittest skip method",
+        "tests/test_things.py:5: collection override pytest_plugins",
+        "tests/test_things.py:6: unlisted pytest hook pytest_runtest_makereport",
     ]
 
 
@@ -1128,7 +1288,7 @@ def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> N
         "from sqlalchemy.exc import SAWarning\n"
         "with warnings.catch_warnings(action='always'):\n"
         "    warnings.simplefilter('always')\n"
-        "    warnings.filterwarnings('ignore', '', SAWarning)\n",
+        "    warnings.filterwarnings('ignore', '.*skipped.*', SAWarning)\n",
     )
     write(
         tmp_path,
@@ -1181,6 +1341,7 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
         'typeCheckingMode = "strict"\nenableTypeIgnoreComments = false\n',
         'typeCheckingMode = "basic"\nenableTypeIgnoreComments = true\n',
     )
+    pyproject += '\n[project.entry-points.pytest11]\nquiet = "tests.quiet"\n'
     write(tmp_path, PYPROJECT, pyproject)
     write(tmp_path, "pytest.ini", "[pytest]\nfilterwarnings = ignore\n")
     write(tmp_path, "tests/.pytest.ini", "[pytest]\n")
@@ -1193,6 +1354,8 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
     write(tmp_path, "web/.eslintrc.json", "{}\n")
     write(tmp_path, "web/eslint.config.js", "export default []\n")
     write(tmp_path, "web/src/eslint.config.mjs", "export default []\n")
+    write(tmp_path, "eslint.config.js", "export default []\n")
+    (tmp_path / ESLINT_CONFIG).unlink()
     write(
         tmp_path,
         "web/tsconfig.node.json",
@@ -1210,6 +1373,7 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
     violations = configuration_violations(tmp_path)
 
     assert violations == [
+        "eslint.config.js:1: shadows eslint.config.mjs",
         "pyproject.toml:1: [tool.pyright] differs from the recorded table",
         "pyproject.toml:1: [tool.pyright] honours type: ignore comments",
         "pyproject.toml:1: [tool.pyright] typeCheckingMode is not strict",
@@ -1217,6 +1381,7 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
         "pyproject.toml:1: [tool.ruff] differs from the recorded table",
         "pyproject.toml:1: addopts lacks --strict-markers",
         "pyproject.toml:1: filterwarnings 'ignore::DeprecationWarning' is not error",
+        "pyproject.toml:1: registers pytest plugins through entry points",
         "pyrightconfig.json:1: shadows pyproject.toml",
         "pytest.ini:1: shadows pyproject.toml",
         "src/kora/.ruff.toml:1: shadows pyproject.toml",
@@ -1227,6 +1392,7 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
         "tests/pyproject.toml:1: shadows pyproject.toml",
         "web/.eslintrc.json:1: shadows eslint.config.mjs",
         "web/eslint.config.js:1: shadows eslint.config.mjs",
+        "web/eslint.config.mjs:1: missing",
         "web/package.json:1: scripts differ from the recorded table",
         "web/pnpm-lock.yaml:1: listed generated file is missing",
         "web/src/eslint.config.mjs:1: shadows eslint.config.mjs",
