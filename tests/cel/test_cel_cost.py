@@ -15,7 +15,7 @@ from kora.cel import (
 from kora.cel.cost import estimate
 from kora.cel.parser import parse
 from kora.cel.render import canonical_rendering
-from kora.cel.types import DYN, INT, STRING, ListOf
+from kora.cel.types import DYN, INT, STRING, CelType, ListOf, Record, RecordField
 from tests.cel.generator import generated_expressions
 from tests.cel.support import accepted
 
@@ -147,6 +147,16 @@ def test_cel_cost_estimate_charges_follow_the_table() -> None:
     rendering = estimated("s.contains(t)", only(rendering_character=3), **strings)
     scoped = estimated("l.all(x, x == y)", ZERO_WEIGHTS, l=numbers)
     held = estimated("s == 'a'", only(memory_byte=1), **strings)
+    counted = estimated("s == 'a'", only(convert_value=1), **strings)
+    compared_values = estimated("s == t", only(compare_value=1), **strings)
+    membership = estimated("s in [t]", only(compare_value=1), **strings)
+    joined_values = estimated("s + t", only(concat_value=1), **strings)
+    listed = estimated("[s, t]", only(concat_byte=1), **strings)
+    listed_values = estimated("[s, t]", only(concat_value=1), **strings)
+    mapped = estimated("{'k': s}", only(concat_byte=1), **strings)
+    integer = estimated("int(s)", only(function_byte=1), **strings)
+    filtered = estimated("l.filter(x, true)", only(map_quadratic=1), l=numbers)
+    pattern_memory = estimated("s.matches('a')", only(memory_byte=1), **strings)
 
     assert compare.steps == 102 + 52
     assert nodes.steps == 5
@@ -163,6 +173,16 @@ def test_cel_cost_estimate_charges_follow_the_table() -> None:
     assert rendering.compile_steps == 3 * len("s.contains(t)")
     assert scoped.variables == ("l", "y")
     assert held.memory == 102 + 3
+    assert counted.steps == 1
+    assert compared_values.steps == 1 + 1
+    assert membership.steps == 1 + (1 + 1)
+    assert joined_values.steps == 1 + 1
+    assert listed.steps == 102 + 52 + 3
+    assert listed_values.steps == 1 + 1 + 1
+    assert mapped.steps == 3 + 102 + 3
+    assert integer.steps == 102
+    assert filtered.steps == 30 * 30
+    assert pattern_memory.memory == 102 + 3 + 32
 
 
 def test_cel_cost_estimate_closes_every_comprehension_scope() -> None:
@@ -180,7 +200,8 @@ def test_cel_cost_estimate_closes_every_comprehension_scope() -> None:
     outcomes = [check(source) for source in generated]
 
     assert all(isinstance(result, CheckedExpression) for result in results)
-    assert len(outcomes) == len(generated)
+    assert any(isinstance(outcome, CheckedExpression) for outcome in outcomes)
+    assert any(isinstance(outcome, Diagnostic) for outcome in outcomes)
 
 
 def test_cel_cost_estimate_keeps_element_bounds_through_literals() -> None:
@@ -204,3 +225,42 @@ def test_cel_cost_estimate_keeps_element_bounds_through_literals() -> None:
     for diagnostic in [*untyped, typed]:
         assert isinstance(diagnostic, Diagnostic)
         assert diagnostic.reason is Reason.STEPS
+
+
+def test_cel_cost_estimate_survives_deep_shared_and_cyclic_environments() -> None:
+    deep = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    for _ in range(3000):
+        deep = ValueBound(
+            bytes=60_000, values=30_000, items=1, string_bytes=0, element=deep
+        )
+    first = shared_record(32)
+    second = shared_record(32)
+    first_fields: dict[str, RecordField] = {}
+    cyclic_first = Record(first_fields)
+    first_fields["next"] = RecordField(cyclic_first, True)
+    second_fields: dict[str, RecordField] = {}
+    cyclic_second = Record(second_fields)
+    second_fields["next"] = RecordField(cyclic_second, True)
+    bound = ValueBound(bytes=60_000, values=30_000, items=2, string_bytes=0)
+
+    nested = check("v[0][0] == 1", {"v": Variable(DYN, deep)})
+    shared = check(
+        "[v, w]", {"v": Variable(first, bound), "w": Variable(second, bound)}
+    )
+    cyclic = check(
+        "[v, w, v.next, w.next.next]",
+        {"v": Variable(cyclic_first, bound), "w": Variable(cyclic_second, bound)},
+    )
+
+    assert isinstance(nested, CheckedExpression)
+    assert isinstance(shared, CheckedExpression)
+    assert isinstance(cyclic, CheckedExpression)
+
+
+def shared_record(depth: int) -> CelType:
+    cel_type: CelType = INT
+    for _ in range(depth):
+        cel_type = Record(
+            {"a": RecordField(cel_type, True), "b": RecordField(cel_type, True)}
+        )
+    return cel_type

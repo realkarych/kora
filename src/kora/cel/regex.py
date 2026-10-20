@@ -94,6 +94,7 @@ class PatternParser:
         self.position: int = 0
         self.depth: int = 0
         self.meter: Meter = meter
+        self.group_names: set[str] = set()
         caseless = is_caseless(text)
         self.literal_weight: int = (
             CASELESS_LITERAL_WEIGHT if caseless else LITERAL_WEIGHT
@@ -220,8 +221,10 @@ class PatternParser:
             raise PatternError(Reason.INVALID_PATTERN)
         while self.peek() in NAME_CHARACTERS:
             self.advance()
-        if self.position == start or self.advance() != ">":
+        name = self.text[start : self.position]
+        if self.position == start or self.advance() != ">" or name in self.group_names:
             raise PatternError(Reason.INVALID_PATTERN)
+        self.group_names.add(name)
 
     def flags(self) -> bool:
         seen = False

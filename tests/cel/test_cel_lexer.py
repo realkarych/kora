@@ -16,6 +16,9 @@ REJECTED_TEXT: list[tuple[str, Reason]] = [
     ("x == '\ufeff'", Reason.INVALID_CHARACTER),
     ("a @ b", Reason.INVALID_CHARACTER),
     ("1 // c\r + 1", Reason.INVALID_CHARACTER),
+    ("'''a\rb''' == x", Reason.INVALID_CHARACTER),
+    ("r'''a\r\nb''' == x", Reason.INVALID_CHARACTER),
+    ("b'''a\rb''' == x", Reason.INVALID_CHARACTER),
     ("b'\\u0041'", Reason.INVALID_ESCAPE),
     ("b'\\U0001F600'", Reason.INVALID_ESCAPE),
     ("0X10 == 16", Reason.UNEXPECTED_INPUT),
@@ -55,6 +58,9 @@ ACCEPTED_TEXT: list[tuple[str, str]] = [
     ("!-1", "(!(-1))"),
     ("--1", "(-(-(1)))"),
     ("-(-1)", "(-(-1))"),
+    ("!!x", "(!(!x))"),
+    ("!!-1", "(!(!(-1)))"),
+    ("x // a\fb\n + 1", "(x + 1)"),
     ("'caf\u00e9' == x", '("caf\\u00e9" == x)'),
 ]
 

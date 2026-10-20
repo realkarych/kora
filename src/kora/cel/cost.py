@@ -2,6 +2,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from functools import cached_property
 from typing import Final
 
 from kora.cel.diagnostics import Reason, fail
@@ -42,8 +43,10 @@ from kora.cel.types import (
     STRING,
     UINT,
     CelType,
+    Dyn,
     ListOf,
     MapOf,
+    Primitive,
     Record,
     element_type,
     is_concatenable,
@@ -235,16 +238,15 @@ class Shape:
     string_bytes: int
     element: "Shape | None" = None
     fields: Mapping[str, "Shape"] = field(default_factory=lambda: {})
-    free: bool = field(init=False, repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        free = (
+    @cached_property
+    def free(self) -> bool:
+        return (
             not self.bytes.terms
             and not self.values.terms
             and (self.element is None or self.element.free)
             and all(child.free for child in self.fields.values())
         )
-        object.__setattr__(self, "free", free)
 
     def hereditary(self, child_type: CelType) -> "Shape":
         return Shape(child_type, self.bytes, self.values, DATA_ITEMS, DATA_STRING_BYTES)
@@ -260,7 +262,9 @@ class Shape:
             declared = self.element
         if declared is None:
             return self.hereditary(child_type)
-        return declared if child_type == DYN else replace(declared, type=child_type)
+        if isinstance(child_type, Dyn) or declared.type is child_type:
+            return declared
+        return replace(declared, type=child_type)
 
     def substituted(self, key: Key, replacement: Affine) -> "Shape":
         if self.free:
@@ -305,21 +309,26 @@ class BoundShapes:
         self.meter: Meter = meter
         self.memo: dict[tuple[int, int], tuple[ValueBound, CelType, Shape]] = {}
 
-    def shape(self, cel_type: CelType, bound: ValueBound) -> Shape:
+    def shape(self, cel_type: CelType, bound: ValueBound, depth: int = 0) -> Shape:
         key = (id(bound), id(cel_type))
         known = self.memo.get(key)
         if known is not None:
             return known[2]
-        self.meter.tick()
+        self.meter.tick(1 + len(bound.fields))
+        declared = depth < DATA_DEPTH
         element = (
-            self.shape(element_type(cel_type), bound.element)
-            if bound.element is not None
+            self.shape(element_type(cel_type), bound.element, depth + 1)
+            if bound.element is not None and declared
             else None
         )
-        fields = {
-            name: self.shape(member_type(cel_type, name), child)
-            for name, child in bound.fields.items()
-        }
+        fields = (
+            {
+                name: self.shape(member_type(cel_type, name), child, depth + 1)
+                for name, child in bound.fields.items()
+            }
+            if declared
+            else {}
+        )
         result = Shape(
             cel_type,
             Affine.of(bound.bytes),
@@ -588,7 +597,7 @@ class Estimator:
         if function.charge is Charge.PATTERN and receiver is not None:
             pattern = node.arguments[0]
             compiled = (
-                parse_pattern(pattern.value)
+                parse_pattern(pattern.value, self.meter)
                 if isinstance(pattern, StringLiteral)
                 else 0
             )
@@ -677,6 +686,14 @@ def across_range(
     )
 
 
+def same_type(left: CelType, right: CelType) -> bool:
+    if left is right:
+        return True
+    if isinstance(left, Primitive) and isinstance(right, Primitive):
+        return left.kind is right.kind
+    return isinstance(left, Dyn) and isinstance(right, Dyn)
+
+
 def members(left: Shape, right: Shape) -> Shape | None:
     if left.element is None and right.element is None:
         return None
@@ -685,7 +702,7 @@ def members(left: Shape, right: Shape) -> Shape | None:
 
 def concatenated(left: Shape, right: Shape) -> Shape:
     element = members(left, right)
-    cel_type = left.type if left.type == right.type else DYN
+    cel_type = left.type if same_type(left.type, right.type) else DYN
     return Shape(
         cel_type,
         left.bytes.plus(right.bytes),
@@ -698,7 +715,7 @@ def concatenated(left: Shape, right: Shape) -> Shape:
 
 def join_shapes(left: Shape, right: Shape) -> Shape:
     element = members(left, right)
-    cel_type = left.type if left.type == right.type else DYN
+    cel_type = left.type if same_type(left.type, right.type) else DYN
     return Shape(
         cel_type,
         left.bytes.join(right.bytes),

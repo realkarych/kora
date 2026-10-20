@@ -270,6 +270,8 @@ class Lexer:
             character = self.peek()
             if len(delimiter) == 1 and character in NEWLINES:
                 raise fail(Reason.UNTERMINATED_LITERAL, start)
+            if character == "\r":
+                raise fail(Reason.INVALID_CHARACTER, self.position)
             if character == "\\" and not raw:
                 points.extend(self.escape(is_bytes))
             else:

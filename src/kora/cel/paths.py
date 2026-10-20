@@ -42,7 +42,7 @@ class Absent:
 
 ABSENT: Final[Absent] = Absent()
 
-HEX_PREFIXES: Final[tuple[str, ...]] = ("0x", "0X")
+HEX_PREFIXES: Final[tuple[str, ...]] = ("0x",)
 
 
 class PathParser:

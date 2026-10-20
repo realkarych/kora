@@ -43,6 +43,9 @@ INVALID: list[str] = [
     "(?i-m-s)a",
     "(?P<1a>a)",
     "[\\\\d-z]",
+    "(?P<a>x)(?P<a>y)",
+    "(?P<a>x)(?<a>y)",
+    "(?P<a>x)|(?P<a>y)",
 ]
 
 SUPPORTED: list[str] = [

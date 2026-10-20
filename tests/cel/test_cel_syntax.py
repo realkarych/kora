@@ -61,7 +61,7 @@ STANDARD: list[str] = [
 ]
 
 
-def narrowed_source(name: str, arity: int, form: Form) -> str:
+def call_source(name: str, arity: int, form: Form) -> str:
     arguments = ", ".join("'a'" for _ in range(arity))
     if form is Form.GLOBAL:
         return f"{name}({arguments})"
@@ -90,7 +90,7 @@ def test_cel_rejects_unknown_functions_and_malformed_macros(
 def test_cel_rejects_functions_the_binding_lacks(
     name: str, arity: int, form: Form
 ) -> None:
-    source = narrowed_source(name, arity, form)
+    source = call_source(name, arity, form)
 
     diagnostic = rejected(source)
 
@@ -102,7 +102,7 @@ def test_cel_rejects_functions_the_binding_lacks(
     [(function.name, function.arity, function.form) for function in STANDARD_FUNCTIONS],
 )
 def test_cel_accepts_every_table_entry(name: str, arity: int, form: Form) -> None:
-    source = narrowed_source(name, arity, form)
+    source = call_source(name, arity, form)
 
     rendering = accepted(source)
 
@@ -118,7 +118,11 @@ def test_cel_accepts_every_macro_form(macro: str) -> None:
     longer = checked_syntax(three_arguments)
 
     assert rendering == f"l.{macro}(v, (v == 1))"
-    assert isinstance(longer, Diagnostic) == (macro != "map")
+    if macro == "map":
+        assert not isinstance(longer, Diagnostic)
+    else:
+        assert isinstance(longer, Diagnostic)
+        assert longer.reason is Reason.TWO_VARIABLE_COMPREHENSION
 
 
 @pytest.mark.parametrize("source", STANDARD)

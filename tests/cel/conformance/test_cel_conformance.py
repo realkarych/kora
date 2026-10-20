@@ -29,6 +29,7 @@ from tests.cel.conformance.manifest import COMMIT, FILES, LICENSE_SHA256
 from tests.cel.conformance.selection import (
     CEL_STANDARD_FUNCTIONS,
     EXCLUDED_FILES,
+    FEATURE_REASONS,
     INCLUDED_FILES,
     KORA_REJECTIONS,
     Feature,
@@ -156,6 +157,7 @@ def test_cel_textproto_reader() -> None:
         "section { test { name: 'a' description { anything: 1 } } }",
         "section { description: 1.5 test { name: 'a' } }",
         "description: 7",
+        "section { test { name: 'a' value: { null_value: 1.5 } } }",
         "section { test { name: 'a' value: { object_value { [] {} } } } }",
         "section { test { name: 'a' "
         "bindings { key: 'x' value { value { int64_value: 1 } } } "
@@ -205,10 +207,10 @@ def test_cel_conformance_cases_decode_their_values() -> None:
         for name in ("basic", "fields")
         for case in read_cases(name, files[name].read_text(encoding="utf-8")).cases
     }
-
     zero = cases[("basic", "self_eval_zeroish", "self_eval_int_zero")]
-    assert zero.expected == ExpectedValue(IntValue(0))
     bound = cases[("basic", "variables", "self_eval_bound_lookup")]
+
+    assert zero.expected == ExpectedValue(IntValue(0))
     assert bound.bindings == (("x", IntValue(123)),)
     assert bound.declarations[0].type == PrimitiveType("INT64")
     assert bound.expected == ExpectedValue(IntValue(123))
@@ -223,7 +225,20 @@ def called_function(expression: str, offset: int) -> str:
     return expression[offset:end]
 
 
+def has_control_character(expression: str) -> bool:
+    return any(
+        ord(character) < 0x20 and character not in "\t\n\f\r"
+        for character in expression
+    )
+
+
 def feature_holds(rejection: Rejection, case: Case, outcome: Diagnostic) -> bool:
+    if outcome.reason not in FEATURE_REASONS[rejection.feature]:
+        return False
+    if rejection.feature is Feature.RAW_CONTROL_CHARACTERS:
+        return has_control_character(case.expression)
+    if rejection.feature is Feature.QUOTED_FIELDS:
+        return "`" in case.expression
     if rejection.feature is Feature.NARROWED_FUNCTIONS:
         return (
             called_function(case.expression, outcome.offset) in CEL_STANDARD_FUNCTIONS

@@ -220,6 +220,17 @@ CEL_STANDARD_FUNCTIONS: Final[frozenset[str]] = frozenset(
 )
 
 
+FEATURE_REASONS: Final[dict[Feature, frozenset[Reason]]] = {
+    Feature.MESSAGE_TYPES: frozenset(
+        {Reason.MESSAGE_CONSTRUCTION, Reason.QUALIFIED_NAME}
+    ),
+    Feature.QUOTED_FIELDS: frozenset({Reason.QUOTED_FIELD}),
+    Feature.RAW_CONTROL_CHARACTERS: frozenset({Reason.INVALID_CHARACTER}),
+    Feature.NARROWED_FUNCTIONS: frozenset({Reason.UNKNOWN_FUNCTION}),
+    Feature.UNDECLARED_FUNCTIONS: frozenset({Reason.UNKNOWN_FUNCTION}),
+}
+
+
 def rejection_for(file: str, section: str, test: str) -> Rejection | None:
     for rejection in KORA_REJECTIONS:
         if (rejection.file, rejection.section) != (file, section):

@@ -272,7 +272,7 @@ def read_value(message: Message, context: str) -> Value:
     if name == "null_value":
         if isinstance(raw, Word) and raw.text == "NULL_VALUE":
             return NullValue()
-        if isinstance(raw, Number) and int(raw.text) == 0:
+        if isinstance(raw, Number) and as_integer(raw, context, range(0, 1)) == 0:
             return NullValue()
         raise CaseModelError(f"{context}: invalid null value")
     if name == "bool_value":
