@@ -82,7 +82,7 @@ async def cancelled_in_flight_path(database: Database) -> None:
 
     task = asyncio.create_task(work())
     await asyncio.sleep(0)
-    while not task.done() and database.writer_is_free():
+    while not task.done() and database.units_in_flight() == 0:
         await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

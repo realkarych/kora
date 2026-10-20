@@ -66,8 +66,7 @@ def records(result: ProcessResult) -> list[dict[str, object]]:
     return [json.loads(line) for line in result.stderr_lines() if line.startswith("{")]
 
 
-@pytest.mark.asyncio
-async def test_log_filtering_does_not_change_durable_events(
+def test_log_filtering_does_not_change_durable_events(
     database_kind: DatabaseKind, request: pytest.FixtureRequest, tmp_path: Path
 ) -> None:
     created: list[str] = []
@@ -89,12 +88,11 @@ async def test_log_filtering_does_not_change_durable_events(
             for level, settings in settings_by_level.items()
         }
         snapshots = {
-            level: await snapshot(settings)
+            level: asyncio.run(snapshot(settings))
             for level, settings in settings_by_level.items()
         }
     finally:
         if server is not None:
-            await asyncio.sleep(0)
             for name in created:
                 server.drop_database(name)
 

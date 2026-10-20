@@ -40,6 +40,7 @@ PAGE_SIZE: int = 100
 TOP_LEVEL_NODES: int = 10
 BODY_NODES: int = 1000
 EVENTS: int = 250
+OTHER_EVENTS: int = 3000
 FINISH_INDEX: str = "ix_node_instance_run_top_level"
 SWEEP_INDEX: str = "ix_run_needs_scheduling"
 
@@ -276,6 +277,9 @@ async def test_registry_reads_are_namespace_scoped(database: Database) -> None:
         run_id = await seeder.run(namespace_id, graph_id, version_id)
         node_id = await seeder.node(run_id, "step")
         event_ids = await seeder.events(namespace_id, run_id, EVENTS)
+        other_run = await seeder.run(namespace_id, graph_id, version_id)
+        await seeder.events(namespace_id, other_run, OTHER_EVENTS)
+        await seeder.events(other_namespace, None, OTHER_EVENTS)
         token_id = await seeder.token("a" * 64, kind="service", owner="worker-1")
         worker_id = await seeder.worker(token_id)
 

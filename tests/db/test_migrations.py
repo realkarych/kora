@@ -3,7 +3,7 @@ import warnings
 
 import pytest
 from sqlalchemy import Connection, inspect, select, text
-from sqlalchemy.exc import OperationalError, SAWarning
+from sqlalchemy.exc import DBAPIError, SAWarning
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.migrations import (
@@ -97,7 +97,7 @@ async def test_migration_lock_wait_is_bounded(database: Database) -> None:
         )
         locked_run = asyncio.create_task(run_upgrade(database))
 
-        with pytest.raises(OperationalError, match="lock timeout"):
+        with pytest.raises(DBAPIError, match="lock timeout"):
             await locked_run
 
     async with database.transaction() as connection:

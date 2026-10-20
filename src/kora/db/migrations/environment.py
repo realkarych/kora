@@ -64,11 +64,11 @@ def bound_lock_waits(connection: Connection) -> None:
 
 def upgrade_to_head(connection: Connection) -> MigrationReport:
     started = perf_counter()
+    bound_lock_waits(connection)
     config = alembic_config(connection)
     head = head_revision(config)
     from_revision = current_revision(connection)
     steps = pending_steps(config, from_revision, head)
-    bound_lock_waits(connection)
     command.upgrade(config, HEAD)
     return MigrationReport(
         dialect=connection.dialect.name,

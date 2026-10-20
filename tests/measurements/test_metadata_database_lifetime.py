@@ -530,7 +530,7 @@ async def cancel_in_flight(database: Database, statement: str) -> None:
 
     task = asyncio.create_task(work())
     await asyncio.sleep(0)
-    while not task.done() and database.writer_is_free():
+    while not task.done() and database.units_in_flight() == 0:
         await asyncio.sleep(0)
     task.cancel()
     try:

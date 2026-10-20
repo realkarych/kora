@@ -11,6 +11,7 @@ from kora.db.connection import Database, DatabaseSettings
 from kora.db.migrations.environment import (
     MigrationReport,
     alembic_config,
+    bound_lock_waits,
     current_revision,
     head_revision,
     schema_differences,
@@ -31,6 +32,7 @@ def migration_logger() -> ComponentLogger | None:
 def upgrade_with_diagnostics(connection: Connection) -> MigrationReport:
     log = migration_logger()
     dialect = connection.dialect.name
+    bound_lock_waits(connection)
     if log is not None:
         from_revision = current_revision(connection)
         log.emit(

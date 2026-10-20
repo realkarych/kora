@@ -203,6 +203,9 @@ class Database:
             self._writer = postgresql_engine(settings)
             self._reader = self._writer
         self._closed = False
+        self._in_flight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     @property
     def writer_engine(self) -> AsyncEngine:
@@ -214,6 +217,18 @@ class Database:
 
     def writer_is_free(self) -> bool:
         return not self._writer_lock.locked()
+
+    def units_in_flight(self) -> int:
+        return self._in_flight
+
+    def _enter_unit(self) -> None:
+        self._in_flight += 1
+        self._idle.clear()
+
+    def _leave_unit(self) -> None:
+        self._in_flight -= 1
+        if self._in_flight == 0:
+            self._idle.set()
 
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[AsyncConnection, None]:
@@ -237,6 +252,7 @@ class Database:
     @asynccontextmanager
     async def _unit(self, engine: AsyncEngine) -> AsyncGenerator[AsyncConnection, None]:
         connection = await finish_releasing(engine.connect(), close_connection)
+        self._enter_unit()
         try:
             await asyncio.shield(connection.begin())
             try:
@@ -249,6 +265,7 @@ class Database:
                 await asyncio.shield(connection.commit())
         finally:
             await asyncio.shield(connection.close())
+            self._leave_unit()
 
     def _record_rollback(self, error: BaseException) -> None:
         if isinstance(error, asyncio.CancelledError):
@@ -270,11 +287,9 @@ class Database:
             return
         self._closed = True
         try:
-            await asyncio.wait_for(self._writer_lock.acquire(), deadline_seconds)
+            await asyncio.wait_for(self._idle.wait(), deadline_seconds)
         except TimeoutError:
             pass
-        else:
-            self._writer_lock.release()
         await self._writer.dispose()
         if self._reader is not self._writer:
             await self._reader.dispose()
