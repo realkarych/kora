@@ -204,6 +204,28 @@ sys.exit(main(["close"], {"KORA_LOG_LEVEL": "DEBUG"}, app))
 """
 
 
+def test_usage_and_exit_text_on_stderr_are_escaped_and_bounded() -> None:
+    hostile = "--nope\x1b[31m\r\n" + "x" * 5000
+    usage = run_kora([hostile], {})
+    script = EXITING_APPLICATION_SCRIPT.replace(
+        "EXIT_REQUEST", 'SystemExit("left\\x1b[2Jright" + "E" * 3000)'
+    )
+    exiting = run_python(["-c", script], {})
+
+    usage_error = usage.stderr_lines()[-1]
+    exit_text = [line for line in exiting.stderr_lines() if line.startswith("left")]
+    assert usage.code == 2
+    assert "\x1b" not in usage.stderr.decode("utf-8")
+    assert usage_error.startswith("Error: No such option: --nope\\x1b[31m\\x0d\\x0a")
+    assert usage_error.endswith("[truncated]")
+    assert len(usage_error.encode("utf-8")) < 1100
+    assert exiting.code == 1
+    assert exit_text == [exit_text[0]]
+    assert exit_text[0].startswith("left\\x1b[2Jright")
+    assert exit_text[0].endswith("[truncated]")
+    assert "\x1b" not in exiting.stderr.decode("utf-8")
+
+
 @pytest.mark.parametrize(
     ("exit_request", "exit_code"),
     [
