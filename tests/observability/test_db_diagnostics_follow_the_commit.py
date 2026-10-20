@@ -180,6 +180,7 @@ async def test_close_after_the_deadline_is_recorded(
     await asyncio.wait_for(entered.wait(), 10)
     waiting = asyncio.create_task(queued())
     await until(lambda: closing.units_in_flight() == 2)
+
     await closing.close(deadline_seconds=0.2)
     release.set()
     results = await asyncio.gather(holding, waiting, return_exceptions=True)
@@ -253,6 +254,7 @@ async def test_a_close_past_its_deadline_keeps_each_unit_outcome_and_records_onc
     await asyncio.wait_for(writer_entered.wait(), 10)
     reading = asyncio.create_task(reader())
     await asyncio.wait_for(reader_entered.wait(), 10)
+
     await asyncio.gather(
         closing.close(deadline_seconds=0.2), closing.close(deadline_seconds=0)
     )

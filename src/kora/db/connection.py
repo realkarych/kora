@@ -361,11 +361,11 @@ class Database:
         self, deadline_seconds: float = DEFAULT_CLOSE_DEADLINE_SECONDS
     ) -> None:
         if self._closing is None:
+            self._lifecycle = Lifecycle.CLOSING
             self._closing = asyncio.ensure_future(self._close(deadline_seconds))
         await asyncio.shield(self._closing)
 
     async def _close(self, deadline_seconds: float) -> None:
-        self._lifecycle = Lifecycle.CLOSING
         try:
             await asyncio.wait_for(self._idle.wait(), deadline_seconds)
         except TimeoutError:

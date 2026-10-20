@@ -467,6 +467,30 @@ async def test_close_after_the_deadline_fails_a_read_transaction_waiting_for_the
     assert closing.units_in_flight() == 0
 
 
+@pytest.mark.asyncio
+async def test_a_unit_started_after_close_was_called_is_refused_while_closing(
+    database: Database,
+) -> None:
+    closing = narrow_database(database)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    holding = asyncio.create_task(hold_writer(closing, "held", entered, release))
+    await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+
+    closer = asyncio.create_task(closing.close(deadline_seconds=BARRIER_SECONDS))
+    late_writer = asyncio.create_task(write(closing, "late"))
+    late_reader = asyncio.create_task(read_one_namespace(closing))
+    late = await asyncio.gather(late_writer, late_reader, return_exceptions=True)
+    lifecycle_while_refusing = closing.lifecycle
+    release.set()
+    await holding
+    await closer
+
+    assert failure_messages(late) == ["the database is closed"] * 2
+    assert lifecycle_while_refusing is Lifecycle.CLOSING
+    assert await names_after_close(closing) == ["held"]
+
+
 def readers_in_the_pool(database: Database) -> int:
     if database.dialect is Dialect.SQLITE:
         return SQLITE_READERS
