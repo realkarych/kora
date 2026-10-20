@@ -31,6 +31,35 @@ Wheel availability on the CI lanes, from PyPI metadata on 2026-10-20: `asyncpg`,
 - SQLAlchemy wraps a bind-processing error in `StatementError` whose message contains the statement; the content policy keeps exception messages out of records, which `test_sql_parameters_and_statements_never_appear_in_diagnostics` checks with the `sqlalchemy` loggers admitted at DEBUG.
 - Alembic logs through `alembic.runtime.migration` at INFO and prints nothing on `upgrade`; the environment never calls `fileConfig`, and the engine is created without `echo`.
 
+## Closing past the deadline
+
+Checked on 2026-10-20 for [issue #158](https://github.com/realkarych/kora/issues/158) against `master` at 409a763, with SQLAlchemy 2.1.5, aiosqlite 0.22.1 and asyncpg 0.32.0.
+
+- `StaticPool.dispose()` (`sqlalchemy/pool/impl.py`) closes its single connection whether or not it is checked out. The `QueuePool` family closes only the connections idle in the pool when it is disposed.
+- The aiosqlite adapter (`AsyncAdapt_aiosqlite_connection.commit` and `rollback` in `sqlalchemy/dialects/sqlite/aiosqlite.py`) does nothing once the aiosqlite connection is closed. A unit whose SQLite writer connection was closed underneath it therefore returned as committed while SQLite had rolled the transaction back. On 409a763 a writer unit held past `close(deadline_seconds=0.2)` returned normally on both databases, and after reopening the database its row was absent on SQLite and present on PostgreSQL.
+- `Engine.dispose(close=False)` drops the pool without touching it and gives the engine a new pool, carrying the pool event listeners over. A connection checked in to a dropped pool afterwards stays open until garbage collection.
+- aiosqlite runs one non-daemon worker thread per connection. Its finalizer issues a `ResourceWarning` before stopping that thread, so under the test suite's `filterwarnings = error` the warning raises inside the finalizer and the thread is never stopped.
+
+Release owners after this change:
+
+| Resource | Released by |
+|---|---|
+| the connection a unit checked out (SQLite writer, SQLite reader, PostgreSQL) | the unit, which returns it open to the live pool on every path |
+| the pools and the connections idle in them | the engine disposal, run once: by `close` when no unit is in flight once it stops waiting, otherwise by the last unit to leave |
+| the closing task | shared by every caller of `close` through a shield; a cancelled caller does not stop it |
+| the `finish_releasing` tasks of a checkout, a begin, a commit, a rollback or a close | the unit, which waits for each through cancellations |
+
+A planning review reproduced a leak of an earlier design that disposed the SQLite writer pool without closing it whenever the writer lock was held: the lock is held without a checkout between acquisition and checkout and between checkin and release, and a hand-off at a zero deadline left one aiosqlite connection, its thread and the WAL companion files open in 8 of 210 interleavings. The last-unit-out rule left none.
+
+Laptop figures of the close workloads (Apple Silicon, macOS, Python 3.11.17, PostgreSQL 16.15 in the pinned container), one run per database on 2026-10-20, all 86 gates passing; the median and 95th percentile are per cycle, including opening and closing the `Database`:
+
+| Workload | SQLite | PostgreSQL |
+|---|---|---|
+| `close_past_deadline`, 50 cycles | 19.0 ms, 19.9 ms | 42.2 ms, 47.4 ms |
+| `close_during_handoff`, 50 cycles | 4.3 ms, 5.4 ms | 18.4 ms, 20.2 ms |
+
+The same run on 409a763 and on the change gave comparable figures for the unchanged workloads (connect and dispose 18.3 and 17.9 ms on SQLite, 35.8 and 36.5 ms on PostgreSQL; commit 1.17 and 1.10 ms, and 2.42 and 2.62 ms), and the whole step took 46.1 s and 51.3 s.
+
 ## Container image and test fixture
 
 | Item | Value | Checked |
@@ -47,7 +76,7 @@ The container listens on every host interface for the duration of a run; the ran
 
 ## Measurements
 
-`tests/measurements/test_metadata_database_lifetime.py` declares its workloads and gates before running and writes every sample to the artifact `metadata-database-lifetime-measurement`. Workloads per selected database: 20 migrate-from-empty cycles with a no-op re-run each; 200 connect-and-dispose cycles; 2,000 commit and 2,000 rollback cycles; 200 cancellations of a statement in flight, synchronised on the statement's execution; on SQLite 200 cancellations while waiting for the writer, on PostgreSQL 50 cancellations while waiting for a one-connection pool with a 50 ms checkout timeout; one sweep over 1,000 marked runs beside 1,000 unmarked ones in pages of 100; 200 run finish checks on a run with 10 top-level and 1,000 body instances; the event page over 5,000 events; and 100,000 identifiers. Gates: migration re-run is a no-op and leaves no temporary file; pool checkouts balanced, writer free, no open transaction and no temporary file after every ending path; the cancelled statements were observed running; invalidations as the dialect predicts (none on SQLite, one per in-flight cancellation on PostgreSQL); heap growth over the second half of each cycle set within 64 KiB and under 1 MiB in all; threads, descriptors and server connections back at baselines measured outside the event loop; every marked run visited once per sweep; one statement per finish check; every event row read. Each transaction path records its per-cycle minimum, median, 95th percentile and maximum and the peak traced memory. Durations are recorded, not gated. The step budget is 120 s, with the container fixture timed separately.
+`tests/measurements/test_metadata_database_lifetime.py` declares its workloads and gates before running and writes every sample to the artifact `metadata-database-lifetime-measurement`. Workloads per selected database: 20 migrate-from-empty cycles with a no-op re-run each; 200 connect-and-dispose cycles; two close-past-the-deadline scenarios of one warm-up and 50 measured cycles each, on a fresh `Database` with a two-connection pool per cycle (`close_past_deadline`: a held writer, a held read transaction and a writer queued behind them, closed with a 10 ms deadline; `close_during_handoff`: a close with a zero deadline started from the writer pool's `reset` event while a committed writer checks its connection in, with a second writer behind it); 2,000 commit and 2,000 rollback cycles; 200 cancellations of a statement in flight, synchronised on the statement's execution; on SQLite 200 cancellations while waiting for the writer, on PostgreSQL 50 cancellations while waiting for a one-connection pool with a 50 ms checkout timeout; one sweep over 1,000 marked runs beside 1,000 unmarked ones in pages of 100; 200 run finish checks on a run with 10 top-level and 1,000 body instances; the event page over 5,000 events; and 100,000 identifiers. Gates: migration re-run is a no-op and leaves no temporary file; in every close cycle, checked before any garbage collection, every held or queued unit raised `DatabaseClosedError`, the pool `connect` events equal the `close` and `close_detached` events with no checkout outstanding, the thread count returns to its value before the cycle and no SQLite companion file remains; pool checkouts balanced, writer free, no open transaction and no temporary file after every ending path; the cancelled statements were observed running; invalidations as the dialect predicts (none on SQLite, one per in-flight cancellation on PostgreSQL); heap growth over the second half of each cycle set within 64 KiB and under 1 MiB in all; threads, descriptors and server connections back at baselines measured outside the event loop; every marked run visited once per sweep; one statement per finish check; every event row read. Each transaction path records its per-cycle minimum, median, 95th percentile and maximum and the peak traced memory. Durations are recorded, not gated. The step budget is 120 s, with the container fixture timed separately.
 
 Laptop figures (Apple Silicon, macOS, Python 3.11.17, SQLite 3.53.1, PostgreSQL 16.15 in the pinned container on Docker Desktop), one run per database on 2026-10-20 before the pull request's CI run:
 

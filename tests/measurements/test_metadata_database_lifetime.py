@@ -3,6 +3,7 @@ import gc
 import os
 import platform
 import sqlite3
+import threading
 import time
 import tracemalloc
 from collections.abc import Awaitable, Callable, Iterator
@@ -23,6 +24,17 @@ from kora.db.reads import (
     has_unfinished_top_level_instance,
 )
 from kora.db.tables import namespace
+from tests.db.closing import (
+    CLOSED_BEFORE_FINISHING,
+    ConnectionLedger,
+    failure_messages,
+    hold_reader,
+    hold_writer,
+    narrow_settings,
+    sqlite_companions,
+    until,
+    write,
+)
 from tests.db.seed import Seeder
 from tests.measurements.harness import (
     Report,
@@ -54,6 +66,9 @@ TRANSACTION_CYCLES: int = 2_000
 CANCELLATION_CYCLES: int = 200
 POOL_WAIT_CYCLES: int = 50
 POOL_WAIT_TIMEOUT_SECONDS: float = 0.05
+CLOSE_CYCLES: int = 50
+CLOSE_DEADLINE_SECONDS: float = 0.01
+CLOSE_WAIT_SECONDS: float = 10.0
 WARM_UP_CYCLES: int = 1
 MARKED_RUNS: int = 1_000
 PAGE_SIZE: int = 100
@@ -299,6 +314,7 @@ def measure_identifiers(report: Report, name: str) -> None:
 async def measure(report: Report, kind: DatabaseKind, factory: DatabaseFactory) -> None:
     await migration_cycles(report, kind, factory)
     await connect_cycles(report, kind, factory)
+    await close_cycles(report, kind, factory)
     await transaction_cycles(report, kind, factory)
     await read_workloads(report, kind, factory)
 
@@ -390,6 +406,145 @@ async def connect_cycles(
         rss_growth_bytes=rss_growth,
     )
     await factory.discard(settings)
+
+
+CloseScenario = Callable[[Database], Awaitable[list[str]]]
+
+
+async def close_past_deadline(database: Database) -> list[str]:
+    writer_entered = asyncio.Event()
+    reader_entered = asyncio.Event()
+    release = asyncio.Event()
+    holding = asyncio.create_task(
+        hold_writer(database, "outlived", writer_entered, release)
+    )
+    await asyncio.wait_for(writer_entered.wait(), CLOSE_WAIT_SECONDS)
+    reading = asyncio.create_task(hold_reader(database, reader_entered, release))
+    await asyncio.wait_for(reader_entered.wait(), CLOSE_WAIT_SECONDS)
+    queued = asyncio.create_task(write(database, "queued"))
+    await until(lambda: database.units_in_flight() == 3)
+    await database.close(deadline_seconds=CLOSE_DEADLINE_SECONDS)
+    release.set()
+    results = await asyncio.gather(holding, reading, queued, return_exceptions=True)
+    return failure_messages(results)
+
+
+async def close_during_handoff(database: Database) -> list[str]:
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+    closes: list[asyncio.Future[None]] = []
+
+    def close_during_checkin(*arguments: object) -> None:
+        if not closes:
+            closes.append(asyncio.ensure_future(database.close(deadline_seconds=0)))
+
+    event.listen(database.writer_engine.sync_engine, "reset", close_during_checkin)
+    first = asyncio.create_task(
+        hold_writer(
+            database,
+            f"handed-off-{time.perf_counter_ns()}",
+            first_entered,
+            release_first,
+        )
+    )
+    await asyncio.wait_for(first_entered.wait(), CLOSE_WAIT_SECONDS)
+    second = asyncio.create_task(
+        hold_writer(database, "behind", second_entered, release_second)
+    )
+    await until(lambda: database.units_in_flight() == 2)
+    release_first.set()
+    await first
+    await closes[0]
+    release_second.set()
+    results = await asyncio.gather(second, return_exceptions=True)
+    return failure_messages(results)
+
+
+CLOSE_SCENARIOS: dict[str, tuple[CloseScenario, int]] = {
+    "close_past_deadline": (close_past_deadline, 3),
+    "close_during_handoff": (close_during_handoff, 1),
+}
+
+
+async def close_cycles(
+    report: Report, kind: DatabaseKind, factory: DatabaseFactory
+) -> None:
+    settings = await factory.migrated()
+    for name, (scenario, failing_units) in CLOSE_SCENARIOS.items():
+        await close_scenario_cycles(
+            report, kind, factory, settings, name, scenario, failing_units
+        )
+    await factory.discard(settings)
+
+
+async def close_scenario_cycles(
+    report: Report,
+    kind: DatabaseKind,
+    factory: DatabaseFactory,
+    settings: DatabaseSettings,
+    name: str,
+    scenario: CloseScenario,
+    failing_units: int,
+) -> None:
+    heap_samples: list[int] = []
+    durations: list[float] = []
+    outcomes_as_expected = True
+    connections_released = True
+    threads_released = True
+    leftovers: list[str] = []
+    for index in range(WARM_UP_CYCLES + CLOSE_CYCLES):
+        threads_before = threading.active_count()
+        database = Database(narrow_settings(settings))
+        ledger = ConnectionLedger(database)
+        started = time.perf_counter()
+        messages = await scenario(database)
+        elapsed = time.perf_counter() - started
+        released = ledger.closed == ledger.opened and ledger.outstanding == 0
+        companions = sqlite_companions(database)
+        await until_threads_return(threads_before)
+        threads_back = threading.active_count() == threads_before
+        if index < WARM_UP_CYCLES:
+            heap_samples.append(heap_bytes())
+            continue
+        durations.append(elapsed)
+        outcomes_as_expected = outcomes_as_expected and (
+            messages == [CLOSED_BEFORE_FINISHING] * failing_units
+        )
+        connections_released = connections_released and released
+        threads_released = threads_released and threads_back
+        leftovers.extend(companions)
+        if index == WARM_UP_CYCLES + CLOSE_CYCLES // 2:
+            heap_samples.append(heap_bytes())
+    heap_samples.append(heap_bytes())
+    gate(report, f"{name}_units_failed", kind, outcomes_as_expected)
+    gate(report, f"{name}_connections_closed_each_cycle", kind, connections_released)
+    gate(report, f"{name}_threads_returned_each_cycle", kind, threads_released)
+    gate(report, f"{name}_no_temporary_files", kind, not leftovers)
+    gate(
+        report,
+        f"{name}_heap_growth_bounded",
+        kind,
+        heap_samples[-1] - heap_samples[1] <= HEAP_SLOPE_ALLOWANCE_BYTES
+        and heap_samples[-1] - heap_samples[0] < HEAP_GROWTH_ALLOWANCE_BYTES,
+    )
+    record(
+        report,
+        name,
+        CLOSE_CYCLES,
+        sum(durations),
+        kind,
+        p50_ms=percentile(durations, 0.5) * 1_000,
+        p95_ms=percentile(durations, 0.95) * 1_000,
+        max_ms=max(durations) * 1_000,
+        heap_growth_first_half_bytes=heap_samples[1] - heap_samples[0],
+        heap_growth_second_half_bytes=heap_samples[-1] - heap_samples[1],
+    )
+
+
+async def until_threads_return(count: int) -> None:
+    await until(lambda: threading.active_count() <= count)
 
 
 def slow_statement(kind: DatabaseKind) -> str:

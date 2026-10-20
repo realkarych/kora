@@ -8,8 +8,19 @@ from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 
-from kora.db.connection import Database, DatabaseClosedError, Dialect
+from kora.db.connection import Database, DatabaseClosedError, Dialect, Lifecycle
 from kora.db.tables import namespace
+from tests.db.closing import (
+    CLOSED_BEFORE_FINISHING,
+    ConnectionLedger,
+    failure_messages,
+    hold_reader,
+    hold_writer,
+    narrow_database,
+    sqlite_companions,
+    until,
+    write,
+)
 from tests.db.seed import Seeder
 
 SLOW_SQLITE_STATEMENT: str = (
@@ -375,26 +386,105 @@ async def names_through(connection: AsyncConnection) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_close_after_the_deadline_fails_the_unit_and_releases(
+async def test_close_after_the_deadline_fails_every_unit_in_flight_and_writes_nothing(
     database: Database,
 ) -> None:
+    closing = narrow_database(database)
+    ledger = ConnectionLedger(closing)
+    writer_entered = asyncio.Event()
+    reader_entered = asyncio.Event()
+    release = asyncio.Event()
+    holding = asyncio.create_task(
+        hold_writer(closing, "outlived", writer_entered, release)
+    )
+    await asyncio.wait_for(writer_entered.wait(), BARRIER_SECONDS)
+    reading = asyncio.create_task(hold_reader(closing, reader_entered, release))
+    await asyncio.wait_for(reader_entered.wait(), BARRIER_SECONDS)
+    queued = asyncio.create_task(write(closing, "queued"))
+    await until(lambda: closing.units_in_flight() == 3)
+    opened_before_close = ledger.opened
+
+    await closing.close(deadline_seconds=0.2)
+    release.set()
+    results = await asyncio.gather(holding, reading, queued, return_exceptions=True)
+    companions = sqlite_companions(closing)
+
+    assert failure_messages(results) == [CLOSED_BEFORE_FINISHING] * 3
+    assert await names_after_close(closing) == []
+    assert ledger.opened == opened_before_close
+    assert ledger.closed == ledger.opened
+    assert ledger.outstanding == 0
+    assert companions == []
+    assert closing.units_in_flight() == 0
+    assert closing.writer_is_free()
+
+
+@pytest.mark.asyncio
+async def test_close_during_a_commit_lets_it_finish_and_fails_the_unit_behind_it(
+    database: Database,
+) -> None:
+    closing = narrow_database(database)
+    ledger = ConnectionLedger(closing)
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    release_second = asyncio.Event()
+    closes: list[asyncio.Future[None]] = []
+
+    def close_during_checkin(*arguments: object) -> None:
+        if not closes:
+            closes.append(asyncio.ensure_future(closing.close(deadline_seconds=0)))
+
+    event.listen(closing.writer_engine.sync_engine, "reset", close_during_checkin)
+    first = asyncio.create_task(
+        hold_writer(closing, "handed-off", first_entered, release_first)
+    )
+    await asyncio.wait_for(first_entered.wait(), BARRIER_SECONDS)
+    second = asyncio.create_task(
+        hold_writer(closing, "behind", second_entered, release_second)
+    )
+    await until(lambda: closing.units_in_flight() == 2)
+
+    release_first.set()
+    await first
+    await closes[0]
+    release_second.set()
+    results = await asyncio.gather(second, return_exceptions=True)
+    companions = sqlite_companions(closing)
+
+    assert failure_messages(results) == [CLOSED_BEFORE_FINISHING]
+    assert await names_after_close(closing) == ["handed-off"]
+    assert ledger.closed == ledger.opened
+    assert ledger.outstanding == 0
+    assert companions == []
+    assert closing.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_close_is_shared_by_every_caller_and_survives_their_cancellation(
+    database: Database,
+) -> None:
+    closing = narrow_database(database)
+    ledger = ConnectionLedger(closing)
     entered = asyncio.Event()
     release = asyncio.Event()
-    outcomes: list[str] = []
-
-    async def holder() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("outlived")
-            entered.set()
-            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-        outcomes.append("committed")
-
-    holding = asyncio.create_task(holder())
+    holding = asyncio.create_task(hold_writer(closing, "outlived", entered, release))
     await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-    await database.close(deadline_seconds=0.2)
-    release.set()
-    await holding
+    first = asyncio.create_task(closing.close(deadline_seconds=0.2))
+    await until(lambda: closing.lifecycle is not Lifecycle.OPEN)
 
-    assert len(outcomes) == 1
-    assert database.units_in_flight() == 0
-    assert database.writer_is_free()
+    first.cancel()
+    await closing.close(deadline_seconds=0)
+    lifecycle_when_second_returned = closing.lifecycle
+    in_flight_when_second_returned = closing.units_in_flight()
+    release.set()
+    results = await asyncio.gather(holding, return_exceptions=True)
+    first_results = await asyncio.gather(first, return_exceptions=True)
+
+    assert lifecycle_when_second_returned is Lifecycle.CLOSED
+    assert in_flight_when_second_returned == 1
+    assert isinstance(first_results[0], asyncio.CancelledError)
+    assert failure_messages(results) == [CLOSED_BEFORE_FINISHING]
+    assert await names_after_close(closing) == []
+    assert ledger.closed == ledger.opened
+    assert ledger.outstanding == 0

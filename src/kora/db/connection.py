@@ -67,6 +67,12 @@ class Dialect(enum.StrEnum):
     POSTGRESQL = POSTGRESQL
 
 
+class Lifecycle(enum.Enum):
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
+
+
 @dataclass(frozen=True)
 class DatabaseSettings:
     url: URL
@@ -237,7 +243,9 @@ class Database:
         else:
             self._writer = postgresql_engine(settings)
             self._reader = self._writer
-        self._closed = False
+        self._lifecycle = Lifecycle.OPEN
+        self._closing: asyncio.Future[None] | None = None
+        self._disposed = False
         self._in_flight = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -250,6 +258,10 @@ class Database:
     def reader_engine(self) -> AsyncEngine:
         return self._reader
 
+    @property
+    def lifecycle(self) -> Lifecycle:
+        return self._lifecycle
+
     def writer_is_free(self) -> bool:
         return not self._writer_lock.locked()
 
@@ -257,15 +269,25 @@ class Database:
         return self._in_flight
 
     def _enter_unit(self) -> None:
-        if self._closed:
+        if self._lifecycle is not Lifecycle.OPEN:
             raise DatabaseClosedError("the database is closed")
         self._in_flight += 1
         self._idle.clear()
 
-    def _leave_unit(self) -> None:
+    def _leave_unit(self) -> bool:
         self._in_flight -= 1
-        if self._in_flight == 0:
-            self._idle.set()
+        if self._in_flight > 0:
+            return False
+        self._idle.set()
+        return self._lifecycle is Lifecycle.CLOSED
+
+    async def _leave_unit_and_release(self) -> None:
+        if self._leave_unit():
+            await complete(self._dispose())
+
+    def _refuse_when_closed(self) -> None:
+        if self._lifecycle is Lifecycle.CLOSED:
+            raise DatabaseClosedError("the database closed before the unit finished")
 
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[AsyncConnection, None]:
@@ -279,7 +301,7 @@ class Database:
                 async with self._unit(self._writer) as connection:
                     yield connection
         finally:
-            self._leave_unit()
+            await self._leave_unit_and_release()
 
     async def run(self, unit: Unit[Result]) -> Result:
         async def execute() -> Result:
@@ -302,23 +324,24 @@ class Database:
             async with self._unit(self._reader) as connection:
                 yield connection
         finally:
-            self._leave_unit()
+            await self._leave_unit_and_release()
 
     @asynccontextmanager
     async def _unit(self, engine: AsyncEngine) -> AsyncGenerator[AsyncConnection, None]:
+        self._refuse_when_closed()
         connection = await finish_releasing(engine.connect(), close_connection)
         try:
+            self._refuse_when_closed()
             await complete(connection.begin())
             try:
                 yield connection
+                self._refuse_when_closed()
                 await complete(connection.commit())
             except BaseException as error:
                 await complete(connection.rollback())
                 self._record_rollback(error)
                 raise
         finally:
-            if self._closed:
-                await complete(connection.invalidate())
             await complete(connection.close())
 
     def _record_rollback(self, error: BaseException) -> None:
@@ -337,19 +360,33 @@ class Database:
     async def close(
         self, deadline_seconds: float = DEFAULT_CLOSE_DEADLINE_SECONDS
     ) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        if self._closing is None:
+            self._closing = asyncio.ensure_future(self._close(deadline_seconds))
+        await asyncio.shield(self._closing)
+
+    async def _close(self, deadline_seconds: float) -> None:
+        self._lifecycle = Lifecycle.CLOSING
         try:
             await asyncio.wait_for(self._idle.wait(), deadline_seconds)
         except TimeoutError:
-            logger = self._logger()
-            if logger is not None:
-                logger.emit(
-                    CLOSE_TIMED_OUT,
-                    dialect=str(self.dialect),
-                    units_in_flight=self._in_flight,
-                )
+            self._record_close_timed_out()
+        self._lifecycle = Lifecycle.CLOSED
+        if self._in_flight == 0:
+            await self._dispose()
+
+    def _record_close_timed_out(self) -> None:
+        logger = self._logger()
+        if logger is not None:
+            logger.emit(
+                CLOSE_TIMED_OUT,
+                dialect=str(self.dialect),
+                units_in_flight=self._in_flight,
+            )
+
+    async def _dispose(self) -> None:
+        if self._disposed:
+            return
+        self._disposed = True
         await self._writer.dispose()
         if self._reader is not self._writer:
             await self._reader.dispose()

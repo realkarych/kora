@@ -5,9 +5,10 @@ import pytest
 from sqlalchemy import Connection, event
 
 from kora.db import DB_COMPONENT
-from kora.db.connection import Database, DatabaseSettings
+from kora.db.connection import Database, DatabaseClosedError, DatabaseSettings
 from kora.db.migrations import upgrade_database
 from kora.observability import Level, LoggingSettings
+from tests.db.closing import narrow_database, until
 from tests.db.seed import Seeder
 from tests.observability.conftest import Configure, Pipe
 
@@ -160,28 +161,42 @@ async def test_close_after_the_deadline_is_recorded(
     )
     diagnostics = configure(settings, pipe.write_end)
     pipe.reader.start()
+    closing = narrow_database(database, pool_size=1)
     entered = asyncio.Event()
     release = asyncio.Event()
 
     async def holder() -> None:
-        async with database.transaction() as connection:
+        async with closing.transaction() as connection:
             await Seeder(connection).namespace("outlived")
             entered.set()
             await asyncio.wait_for(release.wait(), 10)
 
+    async def queued() -> None:
+        async with closing.transaction() as connection:
+            await Seeder(connection).namespace("queued")
+
     holding = asyncio.create_task(holder())
     await asyncio.wait_for(entered.wait(), 10)
-    await database.close(deadline_seconds=0.2)
+    waiting = asyncio.create_task(queued())
+    await until(lambda: closing.units_in_flight() == 2)
+    await closing.close(deadline_seconds=0.2)
     release.set()
-    await holding
+    results = await asyncio.gather(holding, waiting, return_exceptions=True)
     diagnostics.shutdown()
     finished_output(pipe)
 
-    timed_out = [
+    records = [
         record
         for record in pipe.reader.records()
-        if record["event"] == "db.close.timed_out"
+        if record["event"] in {"db.close.timed_out", "db.transaction.failed"}
     ]
-    assert len(timed_out) == 1
-    assert timed_out[0]["level"] == "WARNING"
-    assert timed_out[0]["units_in_flight"] == 1
+    assert [type(result) for result in results] == [DatabaseClosedError] * 2
+    assert [record["event"] for record in records] == [
+        "db.close.timed_out",
+        "db.transaction.failed",
+    ]
+    assert records[0]["level"] == "WARNING"
+    assert records[0]["units_in_flight"] == 2
+    assert records[1]["level"] == "DEBUG"
+    chain = cast(list[dict[str, object]], records[1]["exception"])
+    assert chain[0]["type"] == "DatabaseClosedError"
