@@ -117,7 +117,7 @@ app = typer.Typer(pretty_exceptions_enable=False)
 
 @app.command()
 def leave() -> None:
-    raise SystemExit(EXIT_REQUEST)
+    raise EXIT_REQUEST
 
 @app.command()
 def other() -> None:
@@ -205,12 +205,18 @@ sys.exit(main(["close"], {"KORA_LOG_LEVEL": "DEBUG"}, app))
 
 
 @pytest.mark.parametrize(
-    ("request_code", "exit_code"), [("3", 3), ("-1", 255), ("True", 1)]
+    ("request", "exit_code"),
+    [
+        ("SystemExit(3)", 3),
+        ("SystemExit(-1)", 255),
+        ("SystemExit(True)", 1),
+        ("typer.Exit(300)", 44),
+    ],
 )
 def test_system_exit_from_a_command_keeps_its_code(
-    request_code: str, exit_code: int
+    request: str, exit_code: int
 ) -> None:
-    script = EXITING_APPLICATION_SCRIPT.replace("EXIT_REQUEST", request_code)
+    script = EXITING_APPLICATION_SCRIPT.replace("EXIT_REQUEST", request)
 
     result = run_python(["-c", script], {})
 
@@ -283,11 +289,13 @@ def test_unusable_stdout_descriptor_still_shuts_down_cleanly(
     )
 
     lines = completed.stderr.decode("utf-8").splitlines()
+    failures = [line for line in lines if '"event":"process.failed"' in line]
     assert completed.returncode == exit_code
     assert all(line.startswith("{") for line in lines)
     assert "Traceback" not in completed.stderr.decode("utf-8")
     assert '"event":"process.stopped"' in lines[-1]
     assert f'"exit_code":{exit_code}' in lines[-1]
+    assert len(failures) == (1 if exit_code == 70 else 0)
 
 
 @pytest.mark.parametrize(

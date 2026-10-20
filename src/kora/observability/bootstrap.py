@@ -238,6 +238,8 @@ class ProcessDiagnostics:
         self._loss_pending = False
         self._dropped_since_recovery = 0
         self._loss_lock = threading.Lock()
+        self._release_lock = threading.Lock()
+        self._writer_exited = False
         self._internal = self.logger(LOGGING_COMPONENT)
         self._handler: BridgeHandler | None = None
         self._previous_root_level: int | None = None
@@ -447,13 +449,17 @@ class ProcessDiagnostics:
         return not self._active
 
     def _release_after_shutdown(self) -> None:
-        if not self._active:
+        with self._release_lock:
+            self._writer_exited = True
+            release = not self._active
+        if release:
             release_current(self)
 
     def shutdown(self, deadline_seconds: float | None = None) -> bool:
-        if not self._active:
-            return True
-        self._active = False
+        with self._release_lock:
+            if not self._active:
+                return True
+            self._active = False
         deadline = (
             deadline_seconds
             if deadline_seconds is not None
@@ -479,7 +485,9 @@ class ProcessDiagnostics:
         self._queue.seal()
         drained = self._writer.stop(deadline)
         self._queue.close()
-        if not self._writer.is_alive():
+        with self._release_lock:
+            exited = self._writer_exited
+        if exited or not self._writer.is_alive():
             release_current(self)
         return drained
 

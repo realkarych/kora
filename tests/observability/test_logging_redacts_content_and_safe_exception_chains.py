@@ -80,6 +80,31 @@ def test_registered_values_are_masked_everywhere(
     assert TRUNCATION_MARKER in output
 
 
+def test_a_value_extending_another_is_masked_whole_across_the_scan_window(
+    configure: Configure, pipe: Pipe
+) -> None:
+    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    log = diagnostics.logger(TEST_COMPONENT)
+    extended = REGISTERED_VALUE + "-extended-0002"
+    registrations = [
+        diagnostics.register_secret(v) for v in (REGISTERED_VALUE, extended)
+    ]
+    filler = "b" * (1030 - 50 - 50 - 2 * len(REGISTERED_VALUE))
+    text = f"{'a' * 50}{REGISTERED_VALUE}{'b' * 50}{REGISTERED_VALUE}{filler}{extended}"
+    pipe.reader.start()
+
+    log.emit(NOTE, text=text + "d" * 300)
+    diagnostics.shutdown()
+    output = finished_output(None, pipe)
+    for registration in registrations:
+        registration.release()
+
+    assert "-extended-0002" not in output
+    assert REGISTERED_VALUE[:4] not in output
+    assert output.count(MASK) == 3
+    assert TRUNCATION_MARKER in output
+
+
 def test_unregistered_markers_in_exceptions_and_third_party_output_never_appear(
     configure: Configure, pipe: Pipe
 ) -> None:

@@ -117,7 +117,7 @@ def exit_code_of(request: SystemExit) -> int:
         return EXIT_SUCCESS
     if isinstance(code, int):
         return code & EXIT_STATUS_MASK
-    write_stderr(f"{code}\n")
+    write_stderr(f"{truncate(escape_controls(str(code)))}\n")
     return EXIT_FAILURE
 
 
