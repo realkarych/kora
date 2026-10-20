@@ -128,18 +128,22 @@ class PostgresServer:
     def wait_ready(self) -> None:
         wait_until(lambda: asyncio.run(self._ready()), READINESS_DEADLINE_SECONDS)
 
-    def create_database(self, name: str, template: str) -> None:
+    async def create_database_in_loop(self, name: str, template: str) -> None:
         quoted_name = quote(valid_database_name(name))
         quoted_template = quote(valid_database_name(template))
-        asyncio.run(
-            self._execute_admin(
-                f"CREATE DATABASE {quoted_name} TEMPLATE {quoted_template}"
-            )
+        await self._execute_admin(
+            f"CREATE DATABASE {quoted_name} TEMPLATE {quoted_template}"
         )
 
-    def drop_database(self, name: str) -> None:
+    async def drop_database_in_loop(self, name: str) -> None:
         quoted_name = quote(valid_database_name(name))
-        asyncio.run(self._execute_admin(f"DROP DATABASE {quoted_name} WITH (FORCE)"))
+        await self._execute_admin(f"DROP DATABASE {quoted_name} WITH (FORCE)")
+
+    def create_database(self, name: str, template: str) -> None:
+        asyncio.run(self.create_database_in_loop(name, template))
+
+    def drop_database(self, name: str) -> None:
+        asyncio.run(self.drop_database_in_loop(name))
 
     def connection_count(self) -> int:
         return asyncio.run(self._count_connections())

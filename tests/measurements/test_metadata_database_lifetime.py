@@ -111,26 +111,26 @@ class DatabaseFactory:
         self._counter += 1
         return f"kora_measure_{os.getpid()}_{self._counter}"
 
-    def empty(self) -> DatabaseSettings:
+    async def empty(self) -> DatabaseSettings:
         if self.server is None:
             return sqlite_settings(self.directory / f"{self._next_name()}.db")
         name = self._next_name()
-        self.server.create_database(name, EMPTY_TEMPLATE)
+        await self.server.create_database_in_loop(name, EMPTY_TEMPLATE)
         self.created.append(name)
         return self.server.settings_for(name)
 
-    def migrated(self) -> DatabaseSettings:
-        if self.server is None or self.sqlite_template is None:
+    async def migrated(self) -> DatabaseSettings:
+        if self.server is None:
             assert self.sqlite_template is not None
             return copy_sqlite_template(
                 self.sqlite_template, self.directory / f"{self._next_name()}.db"
             )
         name = self._next_name()
-        self.server.create_database(name, TEMPLATE_DATABASE)
+        await self.server.create_database_in_loop(name, TEMPLATE_DATABASE)
         self.created.append(name)
         return self.server.settings_for(name)
 
-    def discard(self, settings: DatabaseSettings) -> None:
+    async def discard(self, settings: DatabaseSettings) -> None:
         if self.server is None:
             path = settings.sqlite_path
             for candidate in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
@@ -139,7 +139,7 @@ class DatabaseFactory:
             return
         name = str(settings.url.database)
         if name in self.created:
-            self.server.drop_database(name)
+            await self.server.drop_database_in_loop(name)
             self.created.remove(name)
 
     def temporary_files(self, settings: DatabaseSettings) -> list[str]:
@@ -216,8 +216,33 @@ def test_metadata_database_lifetime(
             factory = DatabaseFactory(kind, tmp_path / kind.value, server)
             try:
                 baseline_connections = factory.server_connections()
+                baseline_threads, baseline_descriptors = settled_counts()
                 asyncio.run(measure(report, kind, factory))
+                threads, descriptors = settled_counts()
                 connections = factory.server_connections()
+                gate(
+                    report,
+                    "threads_return_to_baseline",
+                    kind,
+                    threads <= baseline_threads,
+                )
+                gate(
+                    report,
+                    "descriptors_return_to_baseline",
+                    kind,
+                    descriptors <= baseline_descriptors,
+                )
+                record(
+                    report,
+                    "resource_counts",
+                    1,
+                    0.0,
+                    kind,
+                    baseline_threads=baseline_threads,
+                    threads=threads,
+                    baseline_descriptors=baseline_descriptors,
+                    descriptors=descriptors,
+                )
                 gate(
                     report,
                     "server_connections_return_to_baseline",
@@ -265,30 +290,10 @@ def measure_identifiers(report: Report, name: str) -> None:
 
 
 async def measure(report: Report, kind: DatabaseKind, factory: DatabaseFactory) -> None:
-    baseline_threads, baseline_descriptors = settled_counts()
     await migration_cycles(report, kind, factory)
     await connect_cycles(report, kind, factory)
     await transaction_cycles(report, kind, factory)
     await read_workloads(report, kind, factory)
-    threads, descriptors = settled_counts()
-    gate(report, "threads_return_to_baseline", kind, threads <= baseline_threads)
-    gate(
-        report,
-        "descriptors_return_to_baseline",
-        kind,
-        descriptors <= baseline_descriptors,
-    )
-    record(
-        report,
-        "resource_counts",
-        1,
-        0.0,
-        kind,
-        baseline_threads=baseline_threads,
-        threads=threads,
-        baseline_descriptors=baseline_descriptors,
-        descriptors=descriptors,
-    )
 
 
 async def migration_cycles(
@@ -298,14 +303,14 @@ async def migration_cycles(
     leftovers: list[str] = []
     no_op_steps: list[int] = []
     for _ in range(MIGRATION_CYCLES):
-        settings = factory.empty()
+        settings = await factory.empty()
         started = time.perf_counter()
         first = await upgrade_database(settings)
         durations.append(time.perf_counter() - started)
         second = await upgrade_database(settings)
         no_op_steps.append(second.steps)
         leftovers.extend(factory.temporary_files(settings))
-        factory.discard(settings)
+        await factory.discard(settings)
         assert first.steps == 1
     gate(report, "migration_rerun_is_a_no_op", kind, all(s == 0 for s in no_op_steps))
     gate(report, "migration_leaves_no_temporary_files", kind, leftovers == [])
@@ -323,7 +328,7 @@ async def migration_cycles(
 async def connect_cycles(
     report: Report, kind: DatabaseKind, factory: DatabaseFactory
 ) -> None:
-    settings = factory.migrated()
+    settings = await factory.migrated()
     heap_samples: list[int] = []
     rss_start = current_rss_bytes()
 
@@ -377,7 +382,7 @@ async def connect_cycles(
         heap_growth_second_half_bytes=second_half,
         rss_growth_bytes=rss_growth,
     )
-    factory.discard(settings)
+    await factory.discard(settings)
 
 
 def slow_statement(kind: DatabaseKind) -> str:
@@ -389,7 +394,7 @@ def slow_statement(kind: DatabaseKind) -> str:
 async def transaction_cycles(
     report: Report, kind: DatabaseKind, factory: DatabaseFactory
 ) -> None:
-    settings = factory.migrated()
+    settings = await factory.migrated()
     database = Database(settings)
     counter = StatementCounter(database)
     try:
@@ -436,7 +441,7 @@ async def transaction_cycles(
         kind,
         factory.temporary_files(settings) == [],
     )
-    factory.discard(settings)
+    await factory.discard(settings)
 
 
 Path_ = Callable[[Database], Awaitable[None]]
@@ -575,7 +580,7 @@ async def cancel_while_waiting(database: Database) -> None:
 async def read_workloads(
     report: Report, kind: DatabaseKind, factory: DatabaseFactory
 ) -> None:
-    settings = factory.migrated()
+    settings = await factory.migrated()
     database = Database(settings)
     try:
         async with database.transaction() as connection:
@@ -677,5 +682,5 @@ async def read_workloads(
         gate(report, "event_pages_read_every_row", kind, read_rows == EVENT_ROWS)
     finally:
         await database.close()
-    factory.discard(settings)
+    await factory.discard(settings)
     assert open_descriptors() >= 0

@@ -3,6 +3,7 @@ import os
 import sqlite3
 import stat
 from collections.abc import Mapping
+from contextlib import closing
 from pathlib import Path
 from typing import cast
 
@@ -63,7 +64,7 @@ def test_db_upgrade_succeeds_and_reruns_as_a_no_op(tmp_path: Path) -> None:
     assert first_finished[0]["steps"] == 1
     assert second_finished[0]["steps"] == 0
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         version = connection.execute(
             "SELECT version_num FROM alembic_version"
         ).fetchall()
