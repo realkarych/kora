@@ -427,6 +427,74 @@ def test_cel_cost_estimate_shapes_filter_results_as_lists_of_keys() -> None:
     assert estimates[2][0].memory - estimates[1][0].memory <= bracket_bytes
 
 
+def test_cel_cost_estimate_counts_filtered_keys_as_range_elements() -> None:
+    bound = ValueBound(bytes=16384, values=8193, items=300, string_bytes=1024)
+    environment = {
+        "v": Variable(MapOf(STRING, DYN), bound),
+        "w": Variable(DYN, bound),
+    }
+
+    alone = [check(f"{name}.filter(k, true).size() > 0", environment) for name in "vw"]
+    nested = [
+        check(f"{name}.filter(k, true).all(x, {name}.all(y, true))", environment)
+        for name in "vw"
+    ]
+
+    assert all(isinstance(result, CheckedExpression) for result in alone)
+    assert all(isinstance(result, Diagnostic) for result in nested)
+    assert all(
+        result.reason is Reason.STEPS
+        for result in nested
+        if isinstance(result, Diagnostic)
+    )
+
+
+def declared_field_environment(cel_type: CelType) -> dict[str, Variable]:
+    small = ValueBound(bytes=2, values=1, items=0, string_bytes=0)
+    large = ValueBound(bytes=16000, values=1, items=0, string_bytes=16000)
+    record = ValueBound(
+        bytes=16020,
+        values=3,
+        items=2,
+        string_bytes=16000,
+        element=small,
+        fields={"a": large},
+    )
+    outer = ValueBound(bytes=64, values=33, items=4, string_bytes=0)
+    return {"r": Variable(cel_type, record), "l": Variable(ListOf(DYN), outer)}
+
+
+def test_cel_cost_estimate_reads_declared_fields_through_indexes_and_joins() -> None:
+    selected = "l.map(x, r.a + r.a)"
+    reads = [
+        "l.map(x, r['a'] + r['a'])",
+        "l.map(x, r[x] + r[x])",
+        "l.map(x, dyn(r)['a'] + dyn(r)['a'])",
+        "l.map(x, r.map(k, r[k]) + r.map(k, r[k]))",
+        "l.map(x, [r][0].a + [r][0].a)",
+        "l.map(x, (x == 1 ? r : r).a + (x == 1 ? r : r).a)",
+    ]
+    forms = [
+        DYN,
+        MapOf(STRING, DYN),
+        Record({"a": RecordField(DYN, True)}),
+    ]
+
+    results = [
+        (check(selected, environment), [check(read, environment) for read in reads])
+        for environment in map(declared_field_environment, forms)
+    ]
+
+    for direct, indirect in results:
+        assert isinstance(direct, CheckedExpression)
+        assert all(isinstance(result, CheckedExpression) for result in indirect)
+        assert all(
+            result.estimate.memory >= direct.estimate.memory
+            for result in indirect
+            if isinstance(result, CheckedExpression)
+        )
+
+
 class DerivedBound(ValueBound):
     pass
 

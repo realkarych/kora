@@ -255,9 +255,16 @@ class Shape:
         return Shape(child_type, self.bytes, self.values, DATA_ITEMS, DATA_STRING_BYTES)
 
     def member(self) -> "Shape":
-        if self.element is not None:
+        if self.element is not None and not self.fields:
             return self.element
         return self.hereditary(element_type(self.type))
+
+    def indexed(self, child_type: CelType, name: str | None) -> "Shape":
+        if name is not None and name in self.fields:
+            return self.child(child_type, name)
+        if self.fields:
+            return self.hereditary(child_type)
+        return self.child(child_type, None)
 
     def child(self, child_type: CelType, name: str | None) -> "Shape":
         declared = self.fields.get(name) if name is not None else None
@@ -666,7 +673,8 @@ class Estimator:
             case Index(operand=operand, index=index):
                 inner = self.visit(operand)
                 key = self.visit(index)
-                shape = inner.shape.child(element_type(inner.shape.type), None)
+                name = index.value if isinstance(index, StringLiteral) else None
+                shape = inner.shape.indexed(element_type(inner.shape.type), name)
                 _, peak = held_while([inner, key])
                 steps = self.node_steps(inner.steps, key.steps)
                 return NodeCost(shape, steps, peak, inner.allocated)
