@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
+from types import MappingProxyType
 from typing import Final
 
 from kora.cel.diagnostics import Reason, fail
@@ -330,8 +331,12 @@ def is_exact_bound(value: object) -> bool:
     return type(value) is ValueBound
 
 
-def is_mapping(value: object) -> bool:
-    return isinstance(value, Mapping)
+def is_plain_mapping(value: object) -> bool:
+    return type(value) in (dict, MappingProxyType)
+
+
+def is_variable(value: object) -> bool:
+    return type(value) is Variable
 
 
 def is_text(value: object) -> bool:
@@ -346,24 +351,19 @@ def take_snapshot(bound: object) -> Snapshot:
         raise BoundError("a value bound size is not an integer")
     if any(size < 0 for size in sizes):
         raise BoundError("a value bound is negative")
-    if not is_mapping(bound.fields):
+    fields = bound.fields
+    element = bound.element
+    if not is_plain_mapping(fields):
         raise BoundError("a bound's fields are not a mapping")
     pairs: list[tuple[str, ValueBound]] = []
-    for name, child in bound.fields.items():
+    for name, child in fields.items():
         if not is_text(name) or not is_exact_bound(child):
             raise BoundError("a bound is not a value bound")
         pairs.append((name, child))
-    if bound.element is not None and not is_exact_bound(bound.element):
+    if element is not None and not is_exact_bound(element):
         raise BoundError("a bound is not a value bound")
     bytes_size, values, items, string_bytes = sizes
-    return Snapshot(
-        bytes_size,
-        values,
-        items,
-        string_bytes,
-        bound.element,
-        tuple(pairs),
-    )
+    return Snapshot(bytes_size, values, items, string_bytes, element, tuple(pairs))
 
 
 @dataclass(frozen=True)
@@ -657,6 +657,8 @@ class Estimator:
         if known is not None:
             return known
         variable = self.environment.get(name, self.default)
+        if not is_variable(variable):
+            raise BoundError("an environment entry is not a variable")
         shape = self.bounds.shape(variable.type, variable.bound)
         self.variables[name] = shape
         return shape

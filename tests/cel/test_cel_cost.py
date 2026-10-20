@@ -1,4 +1,7 @@
+from collections import ChainMap
 from dataclasses import replace
+from types import MappingProxyType
+from typing import cast
 
 import pytest
 
@@ -410,11 +413,38 @@ def test_cel_cost_estimate_refuses_malformed_bounds() -> None:
     object.__setattr__(first, "bytes", "10")
     negative = ValueBound(bytes=-1, values=1, items=0, string_bytes=0)
 
+    bad_field = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    object.__setattr__(bad_field, "fields", {"a": 5})
+    bad_name = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    object.__setattr__(bad_name, "fields", {1: leaf})
+    derived_field = ValueBound(
+        bytes=10, values=1, items=0, string_bytes=0, fields={"a": derived}
+    )
+    custom_fields = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    object.__setattr__(custom_fields, "fields", ChainMap({"a": leaf}))
+    proxied = ValueBound(
+        bytes=10,
+        values=1,
+        items=0,
+        string_bytes=0,
+        fields=MappingProxyType({"a": leaf}),
+    )
+    entries = cast("dict[str, Variable]", {"v": leaf})
+
     unreached = check(
         "v == v", {"v": Variable(DYN, leaf), "w": Variable(DYN, negative)}
     )
+    proxy = check("v.a == v.a", {"v": Variable(DYN, proxied)})
 
     assert isinstance(unreached, CheckedExpression)
+    assert isinstance(proxy, CheckedExpression)
+    for malformed in (bad_field, bad_name, derived_field):
+        with pytest.raises(BoundError, match="not a value bound"):
+            check("v == v", {"v": Variable(DYN, malformed)})
+    with pytest.raises(BoundError, match="not a mapping"):
+        check("v == v", {"v": Variable(DYN, custom_fields)})
+    with pytest.raises(BoundError, match="not a variable"):
+        check("v == v", entries)
     with pytest.raises(BoundError, match="not a value bound"):
         check("v == v", {"v": Variable(DYN, bad_element)})
     with pytest.raises(BoundError, match="not a mapping"):
