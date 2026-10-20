@@ -1,4 +1,5 @@
 import ast
+import hashlib
 import io
 import json
 import re
@@ -169,6 +170,12 @@ ALLOWED_WARNING_NAMES: dict[str, frozenset[str]] = {
     WARNING_FILTERS_MODULE: frozenset(
         {"catch_warnings", "filterwarnings", "simplefilter"}
     )
+}
+WARNING_FILTERS_DIGEST: str = (
+    "b5f9ff40d88dc8de988005de79a4af635e844a3af8637b7066389ff91c4b8105"
+)
+ALLOWED_WARNING_DIGESTS: dict[str, str] = {
+    WARNING_FILTERS_MODULE: WARNING_FILTERS_DIGEST
 }
 ALLOWED_WARNING_DEFINITIONS: dict[str, frozenset[str]] = {
     WARNING_FILTERS_MODULE: frozenset(
@@ -698,6 +705,9 @@ def warning_name_violations(
     allowed = ALLOWED_WARNING_NAMES.get(source.relative)
     if allowed is None:
         return
+    digest = hashlib.sha256(source.path.read_bytes()).hexdigest()
+    if digest != ALLOWED_WARNING_DIGESTS[source.relative]:
+        yield Violation(source.relative, 1, "content differs from the recorded digest")
     yield from warning_import_violations(source, tree)
     yield from warning_definition_violations(source, tree)
     for node in ast.walk(tree):
@@ -1276,6 +1286,7 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "tests/conftest.py:21: unlisted pytest hook pytest_runtest_teardown",
         "tests/conftest.py:22: unlisted pytest hook pytest_runtest_logreport",
         "tests/measurements/test_slow.py:1: comment",
+        f"{WARNING_FILTERS_MODULE}:1: content differs from the recorded digest",
         f"{WARNING_FILTERS_MODULE}:2: import of pytest is not allowed",
         f"{WARNING_FILTERS_MODULE}:3: import of warnings is not allowed",
         f"{WARNING_FILTERS_MODULE}:4: import of warnings.resetwarnings is not allowed",
@@ -1352,15 +1363,7 @@ def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> N
     write(
         tmp_path,
         WARNING_FILTERS_MODULE,
-        "import warnings\n"
-        "from collections.abc import Generator\n"
-        "from contextlib import contextmanager\n"
-        "from sqlalchemy.exc import SAWarning\n"
-        "EXPRESSION_INDEX_WARNING: str = '.*expression-based index.*'\n"
-        "with warnings.catch_warnings():\n"
-        "    warnings.simplefilter('always')\n"
-        "    warnings.filterwarnings('ignore', EXPRESSION_INDEX_WARNING, SAWarning)\n"
-        "    warnings.filterwarnings('ignore', '.*skipped.*', UserWarning)\n",
+        (REPOSITORY_ROOT / WARNING_FILTERS_MODULE).read_text(encoding="utf-8"),
     )
     write(
         tmp_path,
