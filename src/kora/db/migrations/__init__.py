@@ -1,3 +1,5 @@
+from time import perf_counter
+
 from sqlalchemy import Connection
 
 from kora.db import (
@@ -31,34 +33,39 @@ def migration_logger() -> ComponentLogger | None:
 
 def upgrade_with_diagnostics(connection: Connection) -> MigrationReport:
     log = migration_logger()
-    dialect = connection.dialect.name
     bound_lock_waits(connection)
     if log is not None:
         from_revision = current_revision(connection)
         log.emit(
             MIGRATION_STARTED,
-            dialect=dialect,
+            dialect=connection.dialect.name,
             from_revision=BASE_REVISION if from_revision is None else from_revision,
             to_revision=head_revision(alembic_config(connection)),
         )
-    report = upgrade_to_head(connection)
+    return upgrade_to_head(connection)
+
+
+def record_finished(report: MigrationReport, started: float) -> MigrationReport:
+    log = migration_logger()
     if log is not None:
         log.emit(
             MIGRATION_FINISHED,
-            dialect=dialect,
+            dialect=report.dialect,
             revision=report.to_revision,
             steps=report.steps,
-            duration_ms=report.duration_ms,
+            duration_ms=(perf_counter() - started) * 1000,
         )
     return report
 
 
 async def upgrade_database(settings: DatabaseSettings) -> MigrationReport:
     database: Database | None = None
+    started = perf_counter()
     try:
         database = Database(settings)
         async with database.transaction() as connection:
-            return await connection.run_sync(upgrade_with_diagnostics)
+            report = await connection.run_sync(upgrade_with_diagnostics)
+        return record_finished(report, started)
     except Exception as error:
         log = migration_logger()
         if log is not None:

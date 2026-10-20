@@ -2,8 +2,8 @@ from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, update
-from sqlalchemy.exc import StatementError
+from sqlalchemy import select, text, update
+from sqlalchemy.exc import DBAPIError, StatementError
 
 from kora.db.connection import Database
 from kora.db.identifiers import (
@@ -14,7 +14,14 @@ from kora.db.identifiers import (
     is_identifier,
     timestamp_of,
 )
-from kora.db.tables import api_token, namespace, node_instance, usage_record
+from kora.db.tables import (
+    api_token,
+    attempt,
+    namespace,
+    node_instance,
+    run,
+    usage_record,
+)
 from tests.db.seed import START, FakeClock, Seeder, fixed_randomness
 
 NESTED_POLICY: dict[str, object] = {
@@ -88,6 +95,13 @@ async def test_column_types_round_trip_identically(database: Database) -> None:
                 )
             )
         ).scalar_one()
+        recovery = (
+            await connection.execute(
+                select(attempt.c.recovery, attempt.c.handle).where(
+                    attempt.c.id == attempt_id
+                )
+            )
+        ).one()
 
     assert policy == NESTED_POLICY
     assert expiries[whole_token] == whole_second
@@ -101,6 +115,7 @@ async def test_column_types_round_trip_identically(database: Database) -> None:
     )
     assert due_by_fractional == sorted([whole_token, fractional_token, shifted_token])
     assert amount == Decimal("12.3456789012")
+    assert tuple(recovery) == (None, None)
 
 
 @pytest.mark.asyncio
@@ -208,3 +223,28 @@ async def test_inserted_rows_use_the_injected_clock(database: Database) -> None:
 
     assert tuple(row) == (moment, moment)
     assert timestamp_of(namespace_id) == moment
+
+
+@pytest.mark.asyncio
+async def test_boolean_columns_refuse_other_values(database: Database) -> None:
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        namespace_id = await seeder.namespace()
+        graph_id = await seeder.graph(namespace_id)
+        version_id = await seeder.graph_version(graph_id)
+        run_id = await seeder.run(namespace_id, graph_id, version_id)
+
+    with pytest.raises(DBAPIError):
+        async with database.transaction() as connection:
+            await connection.execute(
+                text("UPDATE run SET needs_scheduling = 2 WHERE id = :run_id"),
+                {"run_id": run_id},
+            )
+
+    async with database.read_transaction() as connection:
+        marked = (
+            await connection.execute(
+                select(run.c.needs_scheduling).where(run.c.id == run_id)
+            )
+        ).scalar_one()
+    assert marked is True

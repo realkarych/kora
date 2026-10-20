@@ -17,8 +17,16 @@ def upgrade() -> None:
         sa.Column("digest", kora.db.types.CollatedText(64), nullable=False),
         sa.Column("owner", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("namespaces", kora.db.types.JsonDocument(), nullable=False),
-        sa.Column("approve", sa.Boolean(), nullable=False),
-        sa.Column("platform", sa.Boolean(), nullable=False),
+        sa.Column(
+            "approve",
+            sa.Boolean(create_constraint=True, name="approve_is_boolean"),
+            nullable=False,
+        ),
+        sa.Column(
+            "platform",
+            sa.Boolean(create_constraint=True, name="platform_is_boolean"),
+            nullable=False,
+        ),
         sa.Column("runtime", kora.db.types.CollatedText(255), nullable=True),
         sa.Column("expires_at", kora.db.types.UtcTimestamp(), nullable=True),
         sa.Column("created_at", kora.db.types.UtcTimestamp(), nullable=False),
@@ -160,7 +168,11 @@ def upgrade() -> None:
         sa.Column("revision", sa.Integer(), nullable=False),
         sa.Column("kinds", kora.db.types.JsonDocument(), nullable=False),
         sa.Column("destination", kora.db.types.JsonDocument(), nullable=False),
-        sa.Column("enabled", sa.Boolean(), nullable=False),
+        sa.Column(
+            "enabled",
+            sa.Boolean(create_constraint=True, name="enabled_is_boolean"),
+            nullable=False,
+        ),
         sa.Column("state", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("last_error", kora.db.types.CollatedText(255), nullable=True),
         sa.Column("created_at", kora.db.types.UtcTimestamp(), nullable=False),
@@ -295,9 +307,19 @@ def upgrade() -> None:
         sa.Column(
             "cel_params_projection", kora.db.types.JsonDocument(), nullable=False
         ),
-        sa.Column("allow_unenforced_secrets", sa.Boolean(), nullable=False),
+        sa.Column(
+            "allow_unenforced_secrets",
+            sa.Boolean(
+                create_constraint=True, name="allow_unenforced_secrets_is_boolean"
+            ),
+            nullable=False,
+        ),
         sa.Column("status", kora.db.types.CollatedText(255), nullable=False),
-        sa.Column("needs_scheduling", sa.Boolean(), nullable=False),
+        sa.Column(
+            "needs_scheduling",
+            sa.Boolean(create_constraint=True, name="needs_scheduling_is_boolean"),
+            nullable=False,
+        ),
         sa.Column("trigger", kora.db.types.JsonDocument(), nullable=False),
         sa.Column("limits", kora.db.types.JsonDocument(), nullable=False),
         sa.Column("retention", kora.db.types.JsonDocument(), nullable=False),
@@ -347,7 +369,11 @@ def upgrade() -> None:
         sa.Column("status", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("trigger_rule", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("subgraph_attempt", sa.Integer(), nullable=False),
-        sa.Column("top_level", sa.Boolean(), nullable=False),
+        sa.Column(
+            "top_level",
+            sa.Boolean(create_constraint=True, name="top_level_is_boolean"),
+            nullable=False,
+        ),
         sa.Column("consumed_versions", kora.db.types.JsonDocument(), nullable=False),
         sa.Column("current_attempt_id", kora.db.types.CollatedText(26), nullable=True),
         sa.Column("branch_selection", kora.db.types.JsonDocument(), nullable=True),
@@ -383,7 +409,11 @@ def upgrade() -> None:
         sa.Column("execution_domain_id", kora.db.types.CollatedText(26), nullable=True),
         sa.Column("execution_state", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("recovery_version", sa.Integer(), nullable=False),
-        sa.Column("recovery_required", sa.Boolean(), nullable=False),
+        sa.Column(
+            "recovery_required",
+            sa.Boolean(create_constraint=True, name="recovery_required_is_boolean"),
+            nullable=False,
+        ),
         sa.Column("recovery", kora.db.types.JsonDocument(), nullable=True),
         sa.Column("handle", kora.db.types.JsonDocument(), nullable=True),
         sa.Column("status", kora.db.types.CollatedText(255), nullable=False),
@@ -458,7 +488,7 @@ def upgrade() -> None:
         sa.Column("cel_projection_set", kora.db.types.CollatedText(64), nullable=True),
         sa.Column("digest", kora.db.types.CollatedText(64), nullable=False),
         sa.Column("storage_ref", kora.db.types.CollatedText(2048), nullable=True),
-        sa.Column("size", sa.Integer(), nullable=False),
+        sa.Column("size", sa.BigInteger(), nullable=False),
         sa.Column("inline", kora.db.types.JsonDocument(), nullable=True),
         sa.Column("payload_digest", kora.db.types.CollatedText(64), nullable=False),
         sa.Column("status", kora.db.types.CollatedText(255), nullable=False),
@@ -559,7 +589,11 @@ def upgrade() -> None:
         sa.Column("offset", sa.Integer(), nullable=False),
         sa.Column("count", sa.Integer(), nullable=False),
         sa.Column("storage_ref", kora.db.types.CollatedText(2048), nullable=False),
-        sa.Column("truncated", sa.Boolean(), nullable=False),
+        sa.Column(
+            "truncated",
+            sa.Boolean(create_constraint=True, name="truncated_is_boolean"),
+            nullable=False,
+        ),
         sa.Column("payload_state", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("uploaded_at", kora.db.types.UtcTimestamp(), nullable=False),
         sa.Column("created_at", kora.db.types.UtcTimestamp(), nullable=False),
@@ -587,7 +621,13 @@ def upgrade() -> None:
         sa.Column("basis", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("billing_class", kora.db.types.CollatedText(255), nullable=False),
         sa.Column("usd_estimate", kora.db.types.UsdAmount(), nullable=False),
-        sa.Column("delta_of_session_totals", sa.Boolean(), nullable=False),
+        sa.Column(
+            "delta_of_session_totals",
+            sa.Boolean(
+                create_constraint=True, name="delta_of_session_totals_is_boolean"
+            ),
+            nullable=False,
+        ),
         sa.Column("source", kora.db.types.JsonDocument(), nullable=False),
         sa.Column("worker_id", kora.db.types.CollatedText(255), nullable=True),
         sa.Column("image_digest", kora.db.types.CollatedText(255), nullable=True),

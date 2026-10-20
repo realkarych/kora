@@ -49,7 +49,18 @@ TRANSACTION_FAILED: EventSpec = CATALOG.register(
     )
 )
 
+CLOSE_TIMED_OUT: EventSpec = CATALOG.register(
+    EventSpec(
+        name="db.close.timed_out",
+        component=DB_COMPONENT,
+        level=Level.WARNING,
+        message="the database closed with units still in flight",
+        fields={"dialect": FieldKind.STRING, "units_in_flight": FieldKind.INTEGER},
+    )
+)
+
 __all__ = [
+    "CLOSE_TIMED_OUT",
     "DB_COMPONENT",
     "DB_LOGGER_NAME",
     "MIGRATION_FAILED",

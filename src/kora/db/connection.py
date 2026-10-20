@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 from sqlalchemy.pool.base import ConnectionPoolEntry
 
-from kora.db import DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
+from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import ComponentLogger, current_diagnostics
 
@@ -49,6 +49,10 @@ READER_PRAGMAS: tuple[str, ...] = (
 BEGIN_IMMEDIATE: str = "BEGIN IMMEDIATE"
 
 Result = TypeVar("Result")
+
+
+class DatabaseClosedError(RuntimeError):
+    pass
 
 
 class DatabaseConfigurationError(ValueError):
@@ -180,6 +184,16 @@ def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
     )
 
 
+async def wait_through_cancellations(task: asyncio.Future[Result]) -> int:
+    cancellations = 0
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancellations += 1
+    return cancellations
+
+
 async def finish_releasing(
     pending: Awaitable[Result], release: Callable[[Result], Awaitable[None]]
 ) -> Result:
@@ -187,10 +201,10 @@ async def finish_releasing(
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        if not task.done():
-            await asyncio.shield(task)
+        await wait_through_cancellations(task)
         if task.exception() is None:
-            await asyncio.shield(release(task.result()))
+            release_task = asyncio.ensure_future(release(task.result()))
+            await wait_through_cancellations(release_task)
         raise
 
 
@@ -241,6 +255,8 @@ class Database:
         return self._in_flight
 
     def _enter_unit(self) -> None:
+        if self._closed:
+            raise DatabaseClosedError("the database is closed")
         self._in_flight += 1
         self._idle.clear()
 
@@ -251,15 +267,17 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[AsyncConnection, None]:
-        if self._closed:
-            raise RuntimeError("the database is closed")
-        if self.dialect is Dialect.SQLITE:
-            async with self._writer_lock:
+        self._enter_unit()
+        try:
+            if self.dialect is Dialect.SQLITE:
+                async with self._writer_lock:
+                    async with self._unit(self._writer) as connection:
+                        yield connection
+            else:
                 async with self._unit(self._writer) as connection:
                     yield connection
-        else:
-            async with self._unit(self._writer) as connection:
-                yield connection
+        finally:
+            self._leave_unit()
 
     async def run(self, unit: Unit[Result]) -> Result:
         async def execute() -> Result:
@@ -277,28 +295,27 @@ class Database:
 
     @asynccontextmanager
     async def read_transaction(self) -> AsyncGenerator[AsyncConnection, None]:
-        if self._closed:
-            raise RuntimeError("the database is closed")
-        async with self._unit(self._reader) as connection:
-            yield connection
+        self._enter_unit()
+        try:
+            async with self._unit(self._reader) as connection:
+                yield connection
+        finally:
+            self._leave_unit()
 
     @asynccontextmanager
     async def _unit(self, engine: AsyncEngine) -> AsyncGenerator[AsyncConnection, None]:
         connection = await finish_releasing(engine.connect(), close_connection)
-        self._enter_unit()
         try:
             await complete(connection.begin())
             try:
                 yield connection
+                await complete(connection.commit())
             except BaseException as error:
                 await complete(connection.rollback())
                 self._record_rollback(error)
                 raise
-            else:
-                await complete(connection.commit())
         finally:
             await complete(connection.close())
-            self._leave_unit()
 
     def _record_rollback(self, error: BaseException) -> None:
         if isinstance(error, asyncio.CancelledError):
@@ -322,7 +339,13 @@ class Database:
         try:
             await asyncio.wait_for(self._idle.wait(), deadline_seconds)
         except TimeoutError:
-            pass
+            logger = self._logger()
+            if logger is not None:
+                logger.emit(
+                    CLOSE_TIMED_OUT,
+                    dialect=str(self.dialect),
+                    units_in_flight=self._in_flight,
+                )
         await self._writer.dispose()
         if self._reader is not self._writer:
             await self._reader.dispose()

@@ -101,6 +101,10 @@ def test_log_filtering_does_not_change_durable_events(
     assert snapshots["ERROR"] == snapshots["DEBUG"]
     assert snapshots["ERROR"]["version"] == [("0001",)]
     assert len(records(results["ERROR"])) < len(records(results["DEBUG"]))
+    debug_events = [str(record["event"]) for record in records(results["DEBUG"])]
+    assert debug_events.index("db.migration.started") < debug_events.index(
+        "db.migration.finished"
+    )
     assert all(
         record["level"] in {"ERROR", "CRITICAL"} for record in records(results["ERROR"])
     )

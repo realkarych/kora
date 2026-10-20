@@ -5,7 +5,7 @@ import secrets
 import shutil
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -84,11 +84,16 @@ def valid_database_name(name: str) -> str:
     return name
 
 
+class SilentPostgresContainer(PostgresContainer):
+    def _connect(self) -> None:
+        return None
+
+
 @dataclass(frozen=True)
 class PostgresServer:
     host: str
     port: int
-    password: str
+    password: str = field(repr=False)
 
     def url_for(self, database: str) -> URL:
         return URL.create(
@@ -171,7 +176,7 @@ def start_postgres(environ: Mapping[str, str]) -> Iterator[PostgresServer]:
     if environ.get(RYUK_VARIABLE) is None:
         testcontainers_config.ryuk_disabled = True
     password = secrets.token_urlsafe(24)
-    container = PostgresContainer(
+    container = SilentPostgresContainer(
         image=POSTGRES_IMAGE,
         port=POSTGRES_PORT,
         username=POSTGRES_USER,
@@ -179,8 +184,8 @@ def start_postgres(environ: Mapping[str, str]) -> Iterator[PostgresServer]:
         dbname=TEMPLATE_DATABASE,
         driver="asyncpg",
     )
-    container.start()
     try:
+        container.start()
         server = PostgresServer(
             host=container.get_container_host_ip(),
             port=container.get_exposed_port(POSTGRES_PORT),

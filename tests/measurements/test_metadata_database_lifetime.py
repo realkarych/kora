@@ -535,15 +535,32 @@ async def rollback(database: Database) -> None:
         return
 
 
+class StatementWatch:
+    def __init__(self, database: Database, fragment: str) -> None:
+        self.fragment = fragment
+        self.started = asyncio.Event()
+        event.listen(
+            database.writer_engine.sync_engine, "before_cursor_execute", self._observe
+        )
+
+    def _observe(
+        self, connection: object, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        if self.fragment in statement:
+            self.started.set()
+
+
 async def cancel_in_flight(database: Database, statement: str) -> None:
+    watch = StatementWatch(
+        database, "pg_sleep" if "pg_sleep" in statement else "counter"
+    )
+
     async def work() -> None:
         async with database.transaction() as connection:
             await connection.execute(text(statement))
 
     task = asyncio.create_task(work())
-    await asyncio.sleep(0)
-    while not task.done() and database.units_in_flight() == 0:
-        await asyncio.sleep(0)
+    await asyncio.wait_for(watch.started.wait(), 10)
     task.cancel()
     try:
         await task

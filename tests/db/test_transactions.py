@@ -7,7 +7,7 @@ from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 
-from kora.db.connection import Database, Dialect
+from kora.db.connection import Database, DatabaseClosedError, Dialect
 from kora.db.tables import namespace
 from tests.db.seed import Seeder
 
@@ -75,16 +75,55 @@ async def rollback_path(database: Database) -> None:
             raise Fault()
 
 
+class StatementWatch:
+    def __init__(self, database: Database, fragment: str) -> None:
+        self.fragment = fragment
+        self.started = asyncio.Event()
+        event.listen(
+            database.writer_engine.sync_engine, "before_cursor_execute", self._observe
+        )
+
+    def _observe(
+        self,
+        connection: object,
+        cursor: object,
+        statement: str,
+        *arguments: object,
+    ) -> None:
+        if self.fragment in statement:
+            self.started.set()
+
+
 async def cancelled_in_flight_path(database: Database) -> None:
+    watch = StatementWatch(
+        database, "pg_sleep" if database.dialect is Dialect.POSTGRESQL else "counter"
+    )
+
     async def work() -> None:
         async with database.transaction() as connection:
             await Seeder(connection).namespace("cancelled-in-flight")
             await connection.execute(text(slow_statement(database)))
 
     task = asyncio.create_task(work())
+    await asyncio.wait_for(watch.started.wait(), BARRIER_SECONDS)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert watch.started.is_set()
+
+
+async def cancelled_twice_path(database: Database) -> None:
+    async def work() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("cancelled-twice")
+            await asyncio.sleep(BARRIER_SECONDS)
+
+    task = asyncio.create_task(work())
     await asyncio.sleep(0)
     while not task.done() and database.units_in_flight() == 0:
         await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.sleep(0)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -122,6 +161,7 @@ PATHS: list[Callable[[Database], Awaitable[None]]] = [
     commit_path,
     rollback_path,
     cancelled_in_flight_path,
+    cancelled_twice_path,
     cancelled_while_waiting_path,
 ]
 
@@ -217,23 +257,41 @@ async def test_close_waits_for_the_unit_in_flight_then_refuses_new_work(
             entered.set()
             await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
 
+    async def queued() -> None:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("queued")
+
     holding = asyncio.create_task(holder())
     await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+    waiting = asyncio.create_task(queued())
+    await asyncio.sleep(0)
     closing = asyncio.create_task(database.close(deadline_seconds=BARRIER_SECONDS))
     for _ in range(10):
         await asyncio.sleep(0)
     closed_early = closing.done()
+    in_flight_while_queued = database.units_in_flight()
     release.set()
     await holding
+    await waiting
     await closing
 
     assert not closed_early
-    with pytest.raises(RuntimeError):
+    assert in_flight_while_queued == 2
+    assert await names_after_close(database) == ["held", "queued"]
+    with pytest.raises(DatabaseClosedError):
         async with database.transaction():
             pass
-    with pytest.raises(RuntimeError):
+    with pytest.raises(DatabaseClosedError):
         async with database.read_transaction():
             pass
+
+
+async def names_after_close(database: Database) -> list[str]:
+    reopened = Database(database.settings)
+    try:
+        return await names(reopened)
+    finally:
+        await reopened.close()
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     ForeignKey,
@@ -80,7 +81,11 @@ def document(column_name: str, nullable: bool = False) -> Column[object]:
 
 
 def flag(column_name: str) -> Column[bool]:
-    return Column(column_name, Boolean(), nullable=False)
+    return Column(
+        column_name,
+        Boolean(create_constraint=True, name=f"{column_name}_is_boolean"),
+        nullable=False,
+    )
 
 
 def reference(column_name: str, target: str, nullable: bool = False) -> Column[str]:
@@ -401,7 +406,7 @@ artifact_version: Table = Table(
     Column("cel_projection_set", digest(), nullable=True),
     Column("digest", digest(), nullable=False),
     Column("storage_ref", path(), nullable=True),
-    Column("size", Integer, nullable=False),
+    Column("size", BigInteger, nullable=False),
     document("inline", nullable=True),
     Column("payload_digest", digest(), nullable=False),
     Column("status", name(), nullable=False),
