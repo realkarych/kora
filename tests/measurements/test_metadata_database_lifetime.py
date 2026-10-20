@@ -212,10 +212,29 @@ def test_metadata_database_lifetime(
                 report.environment["postgres_image"] = (
                     f"{POSTGRES_TAG}@{POSTGRES_DIGEST}"
                 )
-            factory = DatabaseFactory(kind, tmp_path / kind.value, server)
             (tmp_path / kind.value).mkdir(exist_ok=True)
+            factory = DatabaseFactory(kind, tmp_path / kind.value, server)
             try:
+                baseline_connections = factory.server_connections()
                 asyncio.run(measure(report, kind, factory))
+                connections = factory.server_connections()
+                gate(
+                    report,
+                    "server_connections_return_to_baseline",
+                    kind,
+                    connections is None
+                    or baseline_connections is None
+                    or connections <= baseline_connections,
+                )
+                record(
+                    report,
+                    "server_connections",
+                    1,
+                    0.0,
+                    kind,
+                    baseline=baseline_connections,
+                    after=connections,
+                )
             finally:
                 factory.close()
     finally:
@@ -247,7 +266,6 @@ def measure_identifiers(report: Report, name: str) -> None:
 
 async def measure(report: Report, kind: DatabaseKind, factory: DatabaseFactory) -> None:
     baseline_threads, baseline_descriptors = settled_counts()
-    baseline_connections = factory.server_connections()
     await migration_cycles(report, kind, factory)
     await connect_cycles(report, kind, factory)
     await transaction_cycles(report, kind, factory)
@@ -260,15 +278,6 @@ async def measure(report: Report, kind: DatabaseKind, factory: DatabaseFactory) 
         kind,
         descriptors <= baseline_descriptors,
     )
-    connections = factory.server_connections()
-    gate(
-        report,
-        "server_connections_return_to_baseline",
-        kind,
-        connections is None
-        or baseline_connections is None
-        or connections <= baseline_connections,
-    )
     record(
         report,
         "resource_counts",
@@ -279,8 +288,6 @@ async def measure(report: Report, kind: DatabaseKind, factory: DatabaseFactory) 
         threads=threads,
         baseline_descriptors=baseline_descriptors,
         descriptors=descriptors,
-        baseline_server_connections=baseline_connections,
-        server_connections=connections,
     )
 
 

@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 from sqlalchemy import event, select, text
 from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 
 from kora.db.connection import Database, Dialect
@@ -233,3 +234,40 @@ async def test_close_waits_for_the_unit_in_flight_then_refuses_new_work(
     with pytest.raises(RuntimeError):
         async with database.read_transaction():
             pass
+
+
+@pytest.mark.asyncio
+async def test_run_shields_the_unit_from_cancellation(database: Database) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    finished: list[str] = []
+
+    async def unit(connection: AsyncConnection) -> str:
+        await Seeder(connection).namespace("shielded")
+        entered.set()
+        await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+        finished.append("unit finished")
+        return "done"
+
+    task = asyncio.create_task(database.run(unit))
+    await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+    task.cancel()
+    await asyncio.sleep(0)
+    cancelled_before_release = task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    result = await database.run(lambda connection: names_through(connection))
+
+    assert not cancelled_before_release
+    assert finished == ["unit finished"]
+    assert result == ["shielded"]
+    assert database.units_in_flight() == 0
+    assert database.writer_is_free()
+
+
+async def names_through(connection: AsyncConnection) -> list[str]:
+    rows = (
+        await connection.execute(select(namespace.c.name).order_by(namespace.c.name))
+    ).all()
+    return [str(row[0]) for row in rows]

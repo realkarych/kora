@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from sqlalchemy import URL, Connection, event, make_url
-from sqlalchemy.engine.interfaces import DBAPIConnection
+from sqlalchemy.engine.interfaces import DBAPIConnection, ExceptionContext
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -140,6 +140,11 @@ def begin_immediately(connection: Connection) -> None:
     cursor.close()
 
 
+def keep_connection_on_cancellation(context: ExceptionContext) -> None:
+    if isinstance(context.original_exception, asyncio.CancelledError):
+        context.is_disconnect = False
+
+
 def sqlite_engine(settings: DatabaseSettings, writer: bool) -> AsyncEngine:
     connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "isolation_level": None}
     if writer:
@@ -159,6 +164,9 @@ def sqlite_engine(settings: DatabaseSettings, writer: bool) -> AsyncEngine:
     event.listen(engine.sync_engine, "connect", apply_pragmas(pragmas))
     if writer:
         event.listen(engine.sync_engine, "begin", begin_immediately)
+        event.listen(
+            engine.sync_engine, "handle_error", keep_connection_on_cancellation
+        )
     return engine
 
 
@@ -188,6 +196,17 @@ async def finish_releasing(
 
 async def close_connection(connection: AsyncConnection) -> None:
     await connection.close()
+
+
+async def nothing(result: object) -> None:
+    return None
+
+
+async def complete(pending: Awaitable[Result]) -> Result:
+    return await finish_releasing(pending, nothing)
+
+
+Unit = Callable[[AsyncConnection], Awaitable[Result]]
 
 
 class Database:
@@ -242,6 +261,20 @@ class Database:
             async with self._unit(self._writer) as connection:
                 yield connection
 
+    async def run(self, unit: Unit[Result]) -> Result:
+        async def execute() -> Result:
+            async with self.transaction() as connection:
+                return await unit(connection)
+
+        return await complete(execute())
+
+    async def read(self, unit: Unit[Result]) -> Result:
+        async def execute() -> Result:
+            async with self.read_transaction() as connection:
+                return await unit(connection)
+
+        return await complete(execute())
+
     @asynccontextmanager
     async def read_transaction(self) -> AsyncGenerator[AsyncConnection, None]:
         if self._closed:
@@ -254,17 +287,17 @@ class Database:
         connection = await finish_releasing(engine.connect(), close_connection)
         self._enter_unit()
         try:
-            await asyncio.shield(connection.begin())
+            await complete(connection.begin())
             try:
                 yield connection
             except BaseException as error:
-                await asyncio.shield(connection.rollback())
+                await complete(connection.rollback())
                 self._record_rollback(error)
                 raise
             else:
-                await asyncio.shield(connection.commit())
+                await complete(connection.commit())
         finally:
-            await asyncio.shield(connection.close())
+            await complete(connection.close())
             self._leave_unit()
 
     def _record_rollback(self, error: BaseException) -> None:
