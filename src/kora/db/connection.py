@@ -317,6 +317,8 @@ class Database:
                 self._record_rollback(error)
                 raise
         finally:
+            if self._closed:
+                await complete(connection.invalidate())
             await complete(connection.close())
 
     def _record_rollback(self, error: BaseException) -> None:
