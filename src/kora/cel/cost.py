@@ -864,7 +864,7 @@ class Estimator:
         if node.macro in (Macro.MAP, Macro.FILTER):
             steps = steps.plus(Affine.of(self.weights.map_quadratic * count * count))
         if node.macro is Macro.FILTER:
-            shape = source.shape
+            shape = filtered(source.shape, element, count)
         elif node.macro is Macro.MAP:
             transform = body[-1].shape
             transformed_element = transform.substituted(
@@ -884,6 +884,12 @@ class Estimator:
         allocated = self.allocation(shape.bytes)
         memory = source.memory.join(source.allocated.plus(body_memory).plus(allocated))
         return NodeCost(shape, steps, memory, allocated)
+
+
+def filtered(source: Shape, element: Shape, count: int) -> Shape:
+    if isinstance(unwrap(source.type), ListOf):
+        return source
+    return Shape(ListOf(element.type), source.bytes, source.values, count, 0, element)
 
 
 def across_range(

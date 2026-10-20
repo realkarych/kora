@@ -29,6 +29,7 @@ from kora.cel.types import (
     CelType,
     Kind,
     ListOf,
+    MapOf,
     Nullable,
     Primitive,
     Record,
@@ -390,6 +391,40 @@ def test_cel_cost_estimate_never_charges_dyn_additions_below_typed_ones() -> Non
     assert isinstance(untyped, CheckedExpression)
     assert isinstance(typed, CheckedExpression)
     assert untyped.estimate.memory >= typed.estimate.memory
+
+
+FILTERED_KEYS = 4
+
+
+def filter_environment(cel_type: CelType) -> dict[str, Variable]:
+    value = ValueBound(bytes=2, values=1, items=0, string_bytes=0)
+    source = ValueBound(
+        bytes=4096, values=2049, items=FILTERED_KEYS, string_bytes=1024, element=value
+    )
+    outer = ValueBound(bytes=64, values=33, items=4, string_bytes=0)
+    return {"v": Variable(cel_type, source), "l": Variable(ListOf(DYN), outer)}
+
+
+def test_cel_cost_estimate_shapes_filter_results_as_lists_of_keys() -> None:
+    concatenated = "l.map(x, v.filter(k, true) + v.filter(k, true))"
+    indexed = "l.map(x, v.filter(k, true)[0] + v.filter(k, true)[0])"
+    mapped = "l.map(x, v.map(k, k)[0] + v.map(k, k)[0])"
+    forms = [DYN, MapOf(STRING, DYN), Record({})]
+
+    results = [
+        [check(source, filter_environment(form)) for form in forms]
+        for source in (concatenated, indexed, mapped)
+    ]
+
+    estimates = [
+        [result.estimate for result in row if isinstance(result, CheckedExpression)]
+        for row in results
+    ]
+    assert all(len(row) == len(forms) for row in estimates)
+    for row in estimates:
+        assert all(estimate == row[0] for estimate in row)
+    bracket_bytes = 2 * (FILTERED_KEYS + 1)
+    assert estimates[2][0].memory - estimates[1][0].memory <= bracket_bytes
 
 
 class DerivedBound(ValueBound):

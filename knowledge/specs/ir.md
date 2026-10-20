@@ -323,7 +323,7 @@ A schema is mapped after resolving `$ref` and a single-schema `allOf`. Its type 
 
 | JSON Schema | CEL type |
 |---|---|
-| `type: [T, "null"]`, `anyOf`/`oneOf` of `T` and `null`, or an `enum` of one type plus `null` | nullable `T`, following CEL wrapper types |
+| `type: [T, "null"]`, `anyOf`/`oneOf` of `T` and `null`, or an `enum` of one type plus `null` | nullable `T`, following CEL wrapper types; when `T` is already nullable, that same nullable type, so no nullable type wraps another |
 | object with `properties` | record of the declared fields, with the `required` set; `additionalProperties` types index reads |
 | object without `properties`, or with only `patternProperties` | `map(string, V)`; `V` from `additionalProperties` or `patternProperties`, else `dyn` |
 | string, or an `enum` or `const` of strings | `string`, with its allowed values |
@@ -455,7 +455,7 @@ An expression over either dimension of the budget is `IR027`. The charges follow
 | `all`, `exists`, `exists_one` | the range's bound length times the body's charge; nested macros multiply |
 | `map`, `filter` | the square of the range's bound length (binding 0.10.0), plus the range length times the body's charge |
 | `+` on an operand that may be a string, bytes, list or `dyn` value; list and map literals | the result size and value count, the sums over the operands, which propagate to every consumer |
-| result size and element count of `map` and `filter` | the range length times the body's result size; the element count is the range length |
+| result size and element count of `map` and `filter` | the range length times the body's result size; the element count is the range length. `filter` over a list keeps the list's bounds; over a map, a record or `dyn` it yields a list of the iterated values, with the range's total size and value count and the iterated element bound |
 | comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` | the operand sizes and value counts |
 | conversions and string functions | the operand size |
 | `matches()` | kora's size estimate of its literal pattern, for compiling on every call, plus that estimate times the subject length for matching; the compiled pattern also counts toward memory |
@@ -656,6 +656,7 @@ The binding legs, the evaluator tests, the golden corpus and the conformance sui
 | `test_cel_cost_estimate_bounds_comprehension_results` | the result of `map` and `filter` is bounded by its range's total size |
 | `test_cel_cost_estimate_closes_every_comprehension_scope` | a value carrying an iteration variable out of its comprehension leaves no unbounded term, and generated expressions never fail the estimate with an exception |
 | `test_cel_cost_estimate_keeps_element_bounds_through_literals` | ranges built by `dyn()`, concatenation and conditionals over a large list keep its element bounds, so a nested quadratic macro over them is `IR027` |
+| `test_cel_cost_estimate_shapes_filter_results_as_lists_of_keys` | `filter` over a typed map or record is estimated exactly as over `dyn`, both for concatenating its results and for indexing them, and indexing a filtered map's keys costs at least the same keys produced by `map` less the bracket bytes of the two result lists |
 | `test_cel_estimate_is_linear_in_the_environment` | the estimate's counted steps grow by at least one per declared field and linearly with the number of declared fields, and stay small for shared bounds nested 32 deep |
 | `test_cel_cost_estimate_charges_follow_the_table` | with one weight set at a time, each weight contributes exactly its formula: the evaluation base, conversion per byte and per value, node visits, iterations, the `map` and `filter` square, concatenation and collection literals per byte and per value, comparisons and `in` per byte and per value, conversions and string functions, pattern compile and match, the compile on a miss, and memory including a compiled pattern; only top-level variables are charged for conversion |
 | `test_cel_cost_estimate_rejects_quadratic_macros_over_unbounded_lists` | a `map` over a `dyn` list at the default bounds is `IR027` for steps, and over a small typed list it is accepted |
