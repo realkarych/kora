@@ -308,8 +308,10 @@ def scattered_registry_values(count: int, length: int) -> list[str]:
     return values
 
 
-def shared_prefix_values(count: int) -> list[str]:
-    return ["shared-prefix-" + "p" * length for length in range(1, count + 1)]
+def near_miss_values() -> list[str]:
+    return [
+        family + "x" * length for family in ("ab", "cb") for length in range(6, 133)
+    ]
 
 
 @pytest.fixture
@@ -495,19 +497,17 @@ def redaction_workloads(report: Report) -> None:
     )
     for registration in random_registrations:
         registration.release()
-    prefix_registrations = [
-        diagnostics.register_secret(value) for value in shared_prefix_values(255)
+    near_miss_registrations = [
+        diagnostics.register_secret(value) for value in near_miss_values()
     ]
-    run = {"s00": "shared-prefix-" + "p" * 16_000, "exception": miss["exception"]}
+    run = {"s00": "abxxxxx" * 2_300, "exception": miss["exception"]}
 
     def emit_run() -> None:
         for _ in range(MATCHER_RECORDS):
             log.emit(MAXIMAL, **run)
 
-    repeat(
-        report, "redaction_shared_prefix_run", MATCHER_RECORDS, HEAVY_REPEATS, emit_run
-    )
-    for registration in prefix_registrations:
+    repeat(report, "redaction_near_miss_run", MATCHER_RECORDS, HEAVY_REPEATS, emit_run)
+    for registration in near_miss_registrations:
         registration.release()
     rounds = iter(range(10**9))
 

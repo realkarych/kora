@@ -212,7 +212,9 @@ def test_usage_and_exit_text_on_stderr_are_escaped_and_bounded() -> None:
     )
     exiting = run_python(["-c", script], {})
 
-    usage_error = usage.stderr_lines()[-1]
+    usage_error = next(
+        line for line in usage.stderr_lines() if line.startswith("Error:")
+    )
     exit_text = [line for line in exiting.stderr_lines() if line.startswith("left")]
     assert usage.code == 2
     assert "\x1b" not in usage.stderr.decode("utf-8")
