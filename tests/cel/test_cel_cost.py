@@ -439,7 +439,7 @@ def test_cel_cost_estimate_refuses_malformed_bounds() -> None:
     )
 
     assert isinstance(unreached, CheckedExpression)
-    with pytest.raises(BoundError, match="not a mapping"):
+    with pytest.raises(BoundError, match="not a plain dict"):
         check("v.a == v.a", {"v": Variable(DYN, proxied)})
     with pytest.raises(BoundError, match="not a plain dict"):
         check(
@@ -462,19 +462,24 @@ def test_cel_cost_estimate_refuses_malformed_bounds() -> None:
     ):
         with pytest.raises(BoundError, match="not a CEL type"):
             check("v + v", {"v": Variable(cast("CelType", cel_type), leaf)})
+    nested_nullable = Nullable(Nullable(STRING))
+    with pytest.raises(BoundError, match="wraps another nullable"):
+        check("v + v", {"v": Variable(nested_nullable, leaf)})
+    with pytest.raises(BoundError, match="not a plain dict"):
+        check("1 == 1", cast("dict[str, Variable]", MappingProxyType({})))
     broken_record = Record(cast("dict[str, RecordField]", {"a": 1}))
     with pytest.raises(BoundError, match="not a CEL type"):
         check("v.a == 1", {"v": Variable(broken_record, leaf)})
     for malformed in (bad_field, bad_name, derived_field):
         with pytest.raises(BoundError, match="not a value bound"):
             check("v == v", {"v": Variable(DYN, malformed)})
-    with pytest.raises(BoundError, match="not a mapping"):
+    with pytest.raises(BoundError, match="not a plain dict"):
         check("v == v", {"v": Variable(DYN, custom_fields)})
     with pytest.raises(BoundError, match="not a variable"):
         check("v == v", entries)
     with pytest.raises(BoundError, match="not a value bound"):
         check("v == v", {"v": Variable(DYN, bad_element)})
-    with pytest.raises(BoundError, match="not a mapping"):
+    with pytest.raises(BoundError, match="not a plain dict"):
         check("v == v", {"v": Variable(DYN, bad_fields)})
     with pytest.raises(BoundError, match="not a value bound"):
         check("v == v", {"v": bad_root})

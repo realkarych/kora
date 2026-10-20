@@ -368,6 +368,8 @@ def type_children(cel_type: object) -> list[object]:
     if kind is MapOf and isinstance(cel_type, MapOf):
         return [cel_type.key, cel_type.value]
     if kind is Nullable and isinstance(cel_type, Nullable):
+        if type(cel_type.inner) is Nullable:
+            raise BoundError("a nullable type wraps another nullable type")
         return [cel_type.inner]
     if kind is Record and isinstance(cel_type, Record):
         return record_children(cel_type)
@@ -411,7 +413,7 @@ def take_snapshot(bound: object) -> Snapshot:
     fields = bound.fields
     element = bound.element
     if not is_plain_mapping(fields):
-        raise BoundError("a bound's fields are not a mapping")
+        raise BoundError("a bound's fields are not a plain dict")
     pairs: list[tuple[str, ValueBound]] = []
     for name, child in fields.items():
         if not is_text(name) or not is_exact_bound(child):
