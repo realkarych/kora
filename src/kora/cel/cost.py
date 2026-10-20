@@ -322,34 +322,74 @@ class BoundShapes:
         return replace(shape, type=cel_type)
 
     def convert(self, root: ValueBound) -> None:
-        visiting: set[int] = set()
-        stack: list[tuple[ValueBound, bool]] = [(root, False)]
-        while stack:
-            bound, expanded = stack.pop()
-            if id(bound) in self.memo:
+        if id(root) in self.memo:
+            return
+        order: dict[int, int] = {}
+        low: dict[int, int] = {}
+        edges: dict[int, list[ValueBound]] = {}
+        component: list[ValueBound] = []
+        open_ids: set[int] = set()
+        work: list[tuple[ValueBound, int]] = [(root, 0)]
+        while work:
+            bound, position = work.pop()
+            key = id(bound)
+            if position == 0:
+                order[key] = low[key] = len(order)
+                edges[key] = children_of(bound)
+                component.append(bound)
+                open_ids.add(key)
+            children = edges[key]
+            if position < len(children):
+                work.append((bound, position + 1))
+                child = children[position]
+                child_key = id(child)
+                if child_key in self.memo:
+                    continue
+                if child_key not in order:
+                    work.append((child, 0))
+                elif child_key in open_ids:
+                    low[key] = min(low[key], order[child_key])
                 continue
-            if expanded:
-                visiting.discard(id(bound))
-                self.finish(bound)
-                continue
-            if id(bound) in visiting:
-                continue
-            visiting.add(id(bound))
-            stack.append((bound, True))
-            stack.extend(
-                (child, False)
-                for child in children_of(bound)
-                if id(child) not in self.memo and id(child) not in visiting
-            )
+            if low[key] == order[key]:
+                self.close_component(bound, component, open_ids, edges)
+            if work:
+                parent = id(work[-1][0])
+                low[parent] = min(low[parent], low[key])
 
-    def finish(self, bound: ValueBound) -> None:
+    def close_component(
+        self,
+        head: ValueBound,
+        component: list[ValueBound],
+        open_ids: set[int],
+        edges: dict[int, list[ValueBound]],
+    ) -> None:
+        members: list[ValueBound] = []
+        while True:
+            member = component.pop()
+            open_ids.discard(id(member))
+            members.append(member)
+            if member is head:
+                break
+        member_ids = {id(member) for member in members}
+        cyclic = len(members) > 1 or any(
+            id(child) in member_ids for child in edges[id(head)]
+        )
+        for member in members:
+            self.finish(member, cyclic)
+
+    def finish(self, bound: ValueBound, cyclic: bool) -> None:
         self.meter.tick(1 + len(bound.fields))
-        element = self.converted(bound.element)
-        fields = {
-            name: converted
-            for name, child in bound.fields.items()
-            if (converted := self.converted(child)) is not None
-        }
+        check_bound(bound)
+        element = None if cyclic else self.converted(bound.element)
+        fields = (
+            {}
+            if cyclic
+            else {
+                name: converted
+                for name, child in bound.fields.items()
+                if (converted := self.converted(child)) is not None
+            }
+        )
         heights = [
             part.height for part in (element, *fields.values()) if part is not None
         ]
@@ -373,6 +413,21 @@ class BoundShapes:
         if bound is None:
             return None
         return self.memo.get(id(bound))
+
+
+class BoundError(ValueError):
+    pass
+
+
+def check_bound(bound: ValueBound) -> None:
+    sizes = (bound.bytes, bound.values, bound.items, bound.string_bytes)
+    if any(size < 0 for size in sizes):
+        raise BoundError("a value bound is negative")
+    for child in children_of(bound):
+        if child.bytes > bound.bytes or child.values > bound.values:
+            raise BoundError("a child bound is larger than its parent")
+        if child.items > DATA_ITEMS or child.string_bytes > DATA_STRING_BYTES:
+            raise BoundError("a child bound exceeds the data bounds")
 
 
 def children_of(bound: ValueBound) -> list[ValueBound]:
@@ -571,6 +626,8 @@ class Estimator:
         if not concatenates:
             return NodeCost(scalar(left.shape.type), steps, peak)
         shape = concatenated(left.shape, right.shape)
+        if not (is_concatenable(left.shape.type) and is_concatenable(right.shape.type)):
+            shape = replace(shape, bytes=shape.bytes.join(Affine.of(SCALAR_BYTES)))
         steps = steps.plus(shape.bytes.times(self.weights.concat_byte))
         steps = steps.plus(shape.values.times(self.weights.concat_value))
         allocated = self.allocation(shape.bytes)

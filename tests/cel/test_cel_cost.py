@@ -1,6 +1,9 @@
 from dataclasses import replace
 
+import pytest
+
 from kora.cel import (
+    BoundError,
     Budget,
     CheckedExpression,
     Code,
@@ -309,3 +312,48 @@ def test_cel_cost_estimate_does_not_depend_on_operand_order() -> None:
     assert isinstance(first, CheckedExpression)
     assert isinstance(second, CheckedExpression)
     assert first.estimate.steps == second.estimate.steps
+
+
+def cyclic_pair(first_bytes: int, second_bytes: int) -> dict[str, Variable]:
+    first_fields: dict[str, ValueBound] = {}
+    second_fields: dict[str, ValueBound] = {}
+    first = ValueBound(
+        bytes=first_bytes, values=100, items=5, string_bytes=0, fields=first_fields
+    )
+    second = ValueBound(
+        bytes=second_bytes, values=100, items=3, string_bytes=0, fields=second_fields
+    )
+    first_fields["b"] = second
+    second_fields["a"] = first
+    return {"p": Variable(DYN, first), "q": Variable(DYN, second)}
+
+
+def test_cel_cost_estimate_cuts_whole_cycles_regardless_of_order() -> None:
+    environment = cyclic_pair(1000, 1000)
+
+    forward = check("p == p && q.a == q.a", environment)
+    backward = check("q.a == q.a && p == p", environment)
+
+    assert isinstance(forward, CheckedExpression)
+    assert isinstance(backward, CheckedExpression)
+    assert forward.estimate.steps == backward.estimate.steps
+    assert forward.estimate.memory == backward.estimate.memory
+
+
+def test_cel_cost_estimate_refuses_inconsistent_bounds() -> None:
+    larger_child = cyclic_pair(60_000, 10)
+    oversized = ValueBound(
+        bytes=60_000,
+        values=30_000,
+        items=1,
+        string_bytes=0,
+        element=ValueBound(bytes=100, values=10, items=50_000, string_bytes=0),
+    )
+    negative = ValueBound(bytes=-1, values=1, items=0, string_bytes=0)
+
+    with pytest.raises(BoundError, match="larger than its parent"):
+        check("p == p", larger_child)
+    with pytest.raises(BoundError, match="exceeds the data bounds"):
+        check("v[0] == 1", {"v": Variable(DYN, oversized)})
+    with pytest.raises(BoundError, match="negative"):
+        check("v == 1", {"v": Variable(DYN, negative)})
