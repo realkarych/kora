@@ -182,7 +182,12 @@ ALLOWED_WARNING_DEFINITIONS: dict[str, frozenset[str]] = {
 ALWAYS_ACTION: str = "always"
 SIMPLE_FILTER: str = "simplefilter"
 MESSAGE_FILTER: str = "filterwarnings"
+CONTEXT_FILTER: str = "catch_warnings"
 MESSAGE_FILTER_ARGUMENTS: int = 3
+EXPRESSION_INDEX_PATTERN_NAME: str = "EXPRESSION_INDEX_WARNING"
+EXPRESSION_INDEX_PATTERN: str = ".*expression-based index.*"
+MATCH_EVERYTHING: str = ".*"
+ALLOWED_WARNING_CATEGORIES: frozenset[str] = frozenset({"SAWarning", "UserWarning"})
 ALLOWED_WARNING_IMPORTS: dict[str, frozenset[str]] = {
     WARNING_FILTERS_MODULE: frozenset(
         {
@@ -551,6 +556,16 @@ def call_violations(source: SourceFile, node: ast.Call) -> Iterator[Violation]:
         target = guarded_dynamic_import(node)
         if target is not None:
             yield Violation(source.relative, line, f"dynamic import of {target}")
+    if name == "get" and isinstance(node.func, ast.Attribute):
+        receiver = node.func.value
+        module = first_string_argument(node)
+        if (
+            isinstance(receiver, ast.Attribute)
+            and receiver.attr == MODULES_ATTRIBUTE
+            and module is not None
+            and top_level_module(module) in GUARDED_DYNAMIC_MODULES
+        ):
+            yield Violation(source.relative, line, f"dynamic import of {module}")
     if name == GETATTR and len(node.args) > 1:
         attribute = string_value(node.args[1])
         if attribute in BANNED_ATTRIBUTES:
@@ -624,15 +639,38 @@ def warning_import_violations(
                 )
 
 
+def is_narrow_message(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == EXPRESSION_INDEX_PATTERN_NAME
+    message = string_value(node)
+    return message not in (None, "", MATCH_EVERYTHING)
+
+
+def is_allowed_category(node: ast.expr) -> bool:
+    return isinstance(node, ast.Name) and node.id in ALLOWED_WARNING_CATEGORIES
+
+
 def is_blanket_filter(node: ast.Call) -> bool:
     name = call_name(node)
+    if name == CONTEXT_FILTER:
+        return bool(node.args or node.keywords)
     if name == SIMPLE_FILTER:
         return first_string_argument(node) != ALWAYS_ACTION
     if name == MESSAGE_FILTER:
-        if len(node.args) < MESSAGE_FILTER_ARGUMENTS:
+        if len(node.args) < MESSAGE_FILTER_ARGUMENTS or node.keywords:
             return True
-        return string_value(node.args[1]) == ""
+        return not (
+            is_narrow_message(node.args[1]) and is_allowed_category(node.args[2])
+        )
     return False
+
+
+def changes_pattern(node: ast.stmt) -> bool:
+    if not isinstance(node, ast.AnnAssign | ast.Assign) or node.value is None:
+        return False
+    if EXPRESSION_INDEX_PATTERN_NAME not in bound_names(node):
+        return False
+    return string_value(node.value) != EXPRESSION_INDEX_PATTERN
 
 
 def warning_definition_violations(
@@ -647,6 +685,8 @@ def warning_definition_violations(
                 yield Violation(
                     source.relative, node.lineno, f"definition of {name} is not allowed"
                 )
+        if changes_pattern(node):
+            yield Violation(source.relative, node.lineno, "filter pattern changed")
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and is_blanket_filter(node):
             yield Violation(source.relative, node.lineno, "blanket warning filter")
@@ -684,7 +724,24 @@ def target_names(target: ast.expr) -> Iterator[str]:
         yield from target_names(target.value)
 
 
+def walrus_names(node: ast.stmt) -> Iterator[str]:
+    pending: list[ast.AST] = [
+        value for value in ast.iter_child_nodes(node) if isinstance(value, ast.expr)
+    ]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, ast.Lambda):
+            continue
+        if isinstance(current, ast.NamedExpr):
+            yield current.target.id
+        pending.extend(ast.iter_child_nodes(current))
+
+
 def bound_names(node: ast.stmt) -> list[str]:
+    return [*direct_bound_names(node), *walrus_names(node)]
+
+
+def direct_bound_names(node: ast.stmt) -> list[str]:
     if isinstance(node, ast.Assign):
         return [name for target in node.targets for name in target_names(target)]
     if isinstance(node, ast.AnnAssign | ast.AugAssign):
@@ -1078,6 +1135,7 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "    pkgutil.resolve_name('pytest:skip')\n"
         "    getattr(pytest, 'skip')('x')\n"
         "    sys.modules['pytest'].skip('x')\n"
+        "    sys.modules.get('pytest').skip('x')\n"
         "    with warnings.catch_warnings(action='ignore'):\n"
         "        pass\n"
         "    try:\n"
@@ -1118,7 +1176,8 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "    def pytest_runtest_setup() -> None:\n"
         "        return None\n"
         "    pytest_runtest_call, other = _report, None\n"
-        "import tests.hooks as pytest_runtest_teardown\n",
+        "import tests.hooks as pytest_runtest_teardown\n"
+        "(pytest_runtest_logreport := _report)\n",
     )
     write(
         tmp_path,
@@ -1153,7 +1212,12 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "    from . import helpers\n"
         "    warnings.simplefilter('ignore')\n"
         "    warnings.filterwarnings('ignore')\n"
-        "    warnings.filterwarnings('ignore', '', Warning)\n",
+        "    warnings.filterwarnings('ignore', '', Warning)\n"
+        "    warnings.filterwarnings('ignore', '.*', SAWarning)\n"
+        "    warnings.filterwarnings('ignore', 'x', Warning)\n"
+        "    with warnings.catch_warnings(action='ignore'):\n"
+        "        pass\n"
+        "EXPRESSION_INDEX_WARNING: str = ''\n",
     )
     write(tmp_path, "tests/measurements/test_slow.py", "# measured\nx = 1\n")
     write(tmp_path, "tests/bom.py", "\ufeff# after a byte order mark\nx = 1\n")
@@ -1191,9 +1255,10 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "src/kora/module.py:28: dynamic import of pytest:skip",
         "src/kora/module.py:29: dynamic access to skip",
         "src/kora/module.py:30: dynamic import of pytest",
-        "src/kora/module.py:31: warning filter",
-        "src/kora/module.py:35: blind exception handler",
-        "src/kora/module.py:41: blind exception handler",
+        "src/kora/module.py:31: dynamic import of pytest",
+        "src/kora/module.py:32: warning filter",
+        "src/kora/module.py:36: blind exception handler",
+        "src/kora/module.py:42: blind exception handler",
         "src/kora/observability/sink.py:1: 0 blind exception handlers, 1 allowed",
         "tests/bom.py:1: comment",
         "tests/conftest.py:2: unlisted pytest hook pytest_configure",
@@ -1209,6 +1274,7 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "tests/conftest.py:18: unlisted pytest hook pytest_runtest_setup",
         "tests/conftest.py:20: unlisted pytest hook pytest_runtest_call",
         "tests/conftest.py:21: unlisted pytest hook pytest_runtest_teardown",
+        "tests/conftest.py:22: unlisted pytest hook pytest_runtest_logreport",
         "tests/measurements/test_slow.py:1: comment",
         f"{WARNING_FILTERS_MODULE}:2: import of pytest is not allowed",
         f"{WARNING_FILTERS_MODULE}:3: import of warnings is not allowed",
@@ -1222,6 +1288,10 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         f"{WARNING_FILTERS_MODULE}:11: blanket warning filter",
         f"{WARNING_FILTERS_MODULE}:12: blanket warning filter",
         f"{WARNING_FILTERS_MODULE}:13: blanket warning filter",
+        f"{WARNING_FILTERS_MODULE}:14: blanket warning filter",
+        f"{WARNING_FILTERS_MODULE}:15: blanket warning filter",
+        f"{WARNING_FILTERS_MODULE}:16: blanket warning filter",
+        f"{WARNING_FILTERS_MODULE}:18: filter pattern changed",
         "tests/test_things.py:2: string marker",
         "tests/test_things.py:4: unittest skip method",
         "tests/test_things.py:5: collection override pytest_plugins",
@@ -1286,9 +1356,11 @@ def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> N
         "from collections.abc import Generator\n"
         "from contextlib import contextmanager\n"
         "from sqlalchemy.exc import SAWarning\n"
-        "with warnings.catch_warnings(action='always'):\n"
+        "EXPRESSION_INDEX_WARNING: str = '.*expression-based index.*'\n"
+        "with warnings.catch_warnings():\n"
         "    warnings.simplefilter('always')\n"
-        "    warnings.filterwarnings('ignore', '.*skipped.*', SAWarning)\n",
+        "    warnings.filterwarnings('ignore', EXPRESSION_INDEX_WARNING, SAWarning)\n"
+        "    warnings.filterwarnings('ignore', '.*skipped.*', UserWarning)\n",
     )
     write(
         tmp_path,
