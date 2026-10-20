@@ -371,9 +371,10 @@ class Database:
         except TimeoutError:
             if self._in_flight > 0:
                 self._record_close_timed_out()
-        self._lifecycle = Lifecycle.CLOSED
-        if self._in_flight == 0:
-            await self._dispose()
+        finally:
+            self._lifecycle = Lifecycle.CLOSED
+            if self._in_flight == 0:
+                await complete(self._dispose())
 
     def _record_close_timed_out(self) -> None:
         logger = self._logger()

@@ -7,7 +7,7 @@ import threading
 import time
 import tracemalloc
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -70,6 +70,8 @@ POOL_WAIT_TIMEOUT_SECONDS: float = 0.05
 CLOSE_CYCLES: int = 50
 CLOSE_DEADLINE_SECONDS: float = 0.01
 CLOSE_WAIT_SECONDS: float = 10.0
+CLOSE_SCENARIO_SECONDS: float = 10.0
+HEAP_SAMPLES_PER_CLOSE_SCENARIO: int = 3
 WARM_UP_CYCLES: int = 1
 MARKED_RUNS: int = 1_000
 PAGE_SIZE: int = 100
@@ -426,19 +428,22 @@ class CloseScenario:
 async def close_past_deadline(database: Database) -> list[str]:
     writer_entered = asyncio.Event()
     reader_entered = asyncio.Event()
-    release = asyncio.Event()
+    release_writer = asyncio.Event()
+    release_reader = asyncio.Event()
     holding = asyncio.create_task(
-        hold_writer(database, "outlived", writer_entered, release)
+        hold_writer(database, "outlived", writer_entered, release_writer)
     )
     await asyncio.wait_for(writer_entered.wait(), CLOSE_WAIT_SECONDS)
-    reading = asyncio.create_task(hold_reader(database, reader_entered, release))
+    reading = asyncio.create_task(hold_reader(database, reader_entered, release_reader))
     await asyncio.wait_for(reader_entered.wait(), CLOSE_WAIT_SECONDS)
     queued = asyncio.create_task(write(database, "queued"))
     await until(lambda: database.units_in_flight() == 3)
     await database.close(deadline_seconds=CLOSE_DEADLINE_SECONDS)
-    release.set()
-    results = await asyncio.gather(holding, reading, queued, return_exceptions=True)
-    return failure_messages(results)
+    release_writer.set()
+    writer_results = await asyncio.gather(holding, queued, return_exceptions=True)
+    release_reader.set()
+    reader_results = await asyncio.gather(reading, return_exceptions=True)
+    return failure_messages([*writer_results, *reader_results])
 
 
 async def close_during_handoff(database: Database) -> list[str]:
@@ -498,16 +503,19 @@ async def close_scenario_cycles(
     name = scenario.name
     heap_samples: list[int] = []
     durations: list[float] = []
-    outcomes_as_expected = True
-    connections_released = True
-    threads_released = True
-    leftovers: list[str] = []
+    cycles = CloseCycleOutcome()
     for index in range(WARM_UP_CYCLES + CLOSE_CYCLES):
         threads_before = threading.active_count()
         database = Database(narrow_settings(settings, scenario.pool_size))
         ledger = ConnectionLedger(database)
         started = time.perf_counter()
-        messages = await scenario.run(database)
+        try:
+            messages = await asyncio.wait_for(
+                scenario.run(database), CLOSE_SCENARIO_SECONDS
+            )
+        except TimeoutError:
+            cycles.completed = False
+            break
         elapsed = time.perf_counter() - started
         released = (
             ledger.closed == ledger.opened
@@ -516,51 +524,78 @@ async def close_scenario_cycles(
         )
         companions = sqlite_companions(database)
         threads_back = await threads_returned_to(threads_before)
+        cycles.outcomes_as_expected = cycles.outcomes_as_expected and (
+            messages == [CLOSED_BEFORE_FINISHING] * scenario.failing_units
+        )
+        cycles.connections_released = cycles.connections_released and released
+        cycles.threads_released = cycles.threads_released and threads_back
+        cycles.leftovers.extend(companions)
+        if not cycles.passing():
+            break
         if index < WARM_UP_CYCLES:
             heap_samples.append(heap_bytes())
             continue
         durations.append(elapsed)
-        outcomes_as_expected = outcomes_as_expected and (
-            messages == [CLOSED_BEFORE_FINISHING] * scenario.failing_units
-        )
-        connections_released = connections_released and released
-        threads_released = threads_released and threads_back
-        leftovers.extend(companions)
         if index == WARM_UP_CYCLES + CLOSE_CYCLES // 2:
             heap_samples.append(heap_bytes())
     heap_samples.append(heap_bytes())
-    written = await namespace_names(settings)
-    gate(report, f"{name}_units_failed", kind, outcomes_as_expected)
+    written = await namespace_names(settings) if cycles.passing() else []
+    gate(report, f"{name}_completed", kind, cycles.completed)
+    gate(report, f"{name}_units_failed", kind, cycles.outcomes_as_expected)
     gate(
         report,
         f"{name}_writes_as_expected",
         kind,
-        not CUT_SHORT_NAMES.intersection(written)
+        cycles.passing()
+        and not CUT_SHORT_NAMES.intersection(written)
         and sum(1 for each in written if each.startswith(HANDED_OFF_PREFIX))
         == scenario.committed_per_cycle * (WARM_UP_CYCLES + CLOSE_CYCLES),
     )
-    gate(report, f"{name}_connections_closed_each_cycle", kind, connections_released)
-    gate(report, f"{name}_threads_returned_each_cycle", kind, threads_released)
-    gate(report, f"{name}_no_temporary_files", kind, not leftovers)
+    gate(
+        report,
+        f"{name}_connections_closed_each_cycle",
+        kind,
+        cycles.connections_released,
+    )
+    gate(report, f"{name}_threads_returned_each_cycle", kind, cycles.threads_released)
+    gate(report, f"{name}_no_temporary_files", kind, not cycles.leftovers)
     gate(
         report,
         f"{name}_heap_growth_bounded",
         kind,
-        heap_samples[-1] - heap_samples[1] <= HEAP_SLOPE_ALLOWANCE_BYTES
+        len(heap_samples) == HEAP_SAMPLES_PER_CLOSE_SCENARIO
+        and heap_samples[-1] - heap_samples[1] <= HEAP_SLOPE_ALLOWANCE_BYTES
         and heap_samples[-1] - heap_samples[0] < HEAP_GROWTH_ALLOWANCE_BYTES,
     )
     record(
         report,
         name,
-        CLOSE_CYCLES,
+        len(durations),
         sum(durations),
         kind,
-        p50_ms=percentile(durations, 0.5) * 1_000,
-        p95_ms=percentile(durations, 0.95) * 1_000,
-        max_ms=max(durations) * 1_000,
-        heap_growth_first_half_bytes=heap_samples[1] - heap_samples[0],
-        heap_growth_second_half_bytes=heap_samples[-1] - heap_samples[1],
+        p50_ms=percentile(durations, 0.5) * 1_000 if durations else None,
+        p95_ms=percentile(durations, 0.95) * 1_000 if durations else None,
+        max_ms=max(durations) * 1_000 if durations else None,
+        heap_samples=len(heap_samples),
     )
+
+
+@dataclass
+class CloseCycleOutcome:
+    completed: bool = True
+    outcomes_as_expected: bool = True
+    connections_released: bool = True
+    threads_released: bool = True
+    leftovers: list[str] = field(default_factory=list[str])
+
+    def passing(self) -> bool:
+        return (
+            self.completed
+            and self.outcomes_as_expected
+            and self.connections_released
+            and self.threads_released
+            and not self.leftovers
+        )
 
 
 async def threads_returned_to(count: int) -> bool:
