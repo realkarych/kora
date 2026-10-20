@@ -94,6 +94,8 @@ Directive patterns, case-insensitive and whitespace-tolerant: `noqa`, `type: ign
 | Form | Status |
 |---|---|
 | names built from strings (`getattr(pytest, "sk" + "ip")`, `import_module("py" + "test")`, `import_module(name)`) | not detected; visible in review |
+| literal-name dynamic access through another door (`pytest.__dict__["skip"]`, `vars(pytest)["skip"]`, `operator.attrgetter("skip")(pytest)`, `pytest.mark.__getattr__("skip")`) | not detected by `TID251` or the repository test, which cover `getattr`, `sys.modules` subscripts and `sys.modules.get`; visible in review |
+| a `[tool.pytest]` table beside `[tool.pytest.ini_options]` | not reported by the configuration check; pytest 9.1.1 refuses the file with a usage error, so the run fails closed |
 | an extensionless script whose shebang is `#!/usr/bin/env -S uv run --script` or names `dash` | not classified, so not scanned; the repository has no such script |
 | a shell here-document body or a dollar-quoted SQL body containing `#` or `--` | reported as a comment (a false positive to look at) |
 | a source file that is not valid UTF-8, or a `tsconfig` with a JSONC comment | the test fails on the decoding or parsing error (fail closed) |
