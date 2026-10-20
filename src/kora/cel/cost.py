@@ -304,42 +304,80 @@ def scalar(cel_type: CelType, size: int = SCALAR_BYTES) -> Shape:
     return Shape(cel_type, Affine.of(size), Affine.of(1), 0, 0)
 
 
+@dataclass(frozen=True)
+class Converted:
+    bound: ValueBound
+    shape: Shape
+    height: int
+
+
 class BoundShapes:
     def __init__(self, meter: Meter) -> None:
         self.meter: Meter = meter
-        self.memo: dict[tuple[int, int], tuple[ValueBound, CelType, Shape]] = {}
+        self.memo: dict[int, Converted] = {}
 
-    def shape(self, cel_type: CelType, bound: ValueBound, depth: int = 0) -> Shape:
-        key = (id(bound), id(cel_type))
-        known = self.memo.get(key)
-        if known is not None:
-            return known[2]
+    def shape(self, cel_type: CelType, bound: ValueBound) -> Shape:
+        self.convert(bound)
+        shape = self.memo[id(bound)].shape
+        return replace(shape, type=cel_type)
+
+    def convert(self, root: ValueBound) -> None:
+        visiting: set[int] = set()
+        stack: list[tuple[ValueBound, bool]] = [(root, False)]
+        while stack:
+            bound, expanded = stack.pop()
+            if id(bound) in self.memo:
+                continue
+            if expanded:
+                visiting.discard(id(bound))
+                self.finish(bound)
+                continue
+            if id(bound) in visiting:
+                continue
+            visiting.add(id(bound))
+            stack.append((bound, True))
+            stack.extend(
+                (child, False)
+                for child in children_of(bound)
+                if id(child) not in self.memo and id(child) not in visiting
+            )
+
+    def finish(self, bound: ValueBound) -> None:
         self.meter.tick(1 + len(bound.fields))
-        declared = depth < DATA_DEPTH
-        element = (
-            self.shape(element_type(cel_type), bound.element, depth + 1)
-            if bound.element is not None and declared
-            else None
-        )
-        fields = (
-            {
-                name: self.shape(member_type(cel_type, name), child, depth + 1)
-                for name, child in bound.fields.items()
-            }
-            if declared
-            else {}
-        )
-        result = Shape(
-            cel_type,
+        element = self.converted(bound.element)
+        fields = {
+            name: converted
+            for name, child in bound.fields.items()
+            if (converted := self.converted(child)) is not None
+        }
+        heights = [
+            part.height for part in (element, *fields.values()) if part is not None
+        ]
+        height = 1 + max(heights, default=0)
+        if height > DATA_DEPTH:
+            element = None
+            fields = {}
+            height = 1
+        shape = Shape(
+            DYN,
             Affine.of(bound.bytes),
             Affine.of(bound.values),
             bound.items,
             bound.string_bytes,
-            element,
-            fields,
+            element.shape if element is not None else None,
+            {name: part.shape for name, part in fields.items()},
         )
-        self.memo[key] = (bound, cel_type, result)
-        return result
+        self.memo[id(bound)] = Converted(bound, shape, height)
+
+    def converted(self, bound: ValueBound | None) -> Converted | None:
+        if bound is None:
+            return None
+        return self.memo.get(id(bound))
+
+
+def children_of(bound: ValueBound) -> list[ValueBound]:
+    element = [bound.element] if bound.element is not None else []
+    return [*element, *bound.fields.values()]
 
 
 @dataclass(frozen=True)

@@ -20,8 +20,8 @@ UNSUPPORTED: list[tuple[str, Reason]] = [
     ("a.`b-c` == 1", Reason.QUOTED_FIELD),
     ("l.all(i, v, true)", Reason.TWO_VARIABLE_COMPREHENSION),
     ("l.exists(i, v, true)", Reason.TWO_VARIABLE_COMPREHENSION),
-    ("l.exists_one(i, v, true)", Reason.TWO_VARIABLE_COMPREHENSION),
-    ("l.filter(i, v, true)", Reason.TWO_VARIABLE_COMPREHENSION),
+    ("l.exists_one(i, v, true)", Reason.MALFORMED_MACRO),
+    ("l.filter(i, v, true)", Reason.MALFORMED_MACRO),
     ("if == 1", Reason.RESERVED_IDENTIFIER),
     ("while + 1", Reason.RESERVED_IDENTIFIER),
     ("x.in == 1", Reason.UNEXPECTED_INPUT),
@@ -109,6 +109,14 @@ def test_cel_accepts_every_table_entry(name: str, arity: int, form: Form) -> Non
     assert f"{name}(" in rendering
 
 
+THREE_ARGUMENT_REASONS: dict[str, Reason] = {
+    "all": Reason.TWO_VARIABLE_COMPREHENSION,
+    "exists": Reason.TWO_VARIABLE_COMPREHENSION,
+    "exists_one": Reason.MALFORMED_MACRO,
+    "filter": Reason.MALFORMED_MACRO,
+}
+
+
 @pytest.mark.parametrize("macro", sorted(MACRO_NAMES))
 def test_cel_accepts_every_macro_form(macro: str) -> None:
     two_arguments = f"l.{macro}(v, v == 1)"
@@ -122,7 +130,7 @@ def test_cel_accepts_every_macro_form(macro: str) -> None:
         assert not isinstance(longer, Diagnostic)
     else:
         assert isinstance(longer, Diagnostic)
-        assert longer.reason is Reason.TWO_VARIABLE_COMPREHENSION
+        assert longer.reason is THREE_ARGUMENT_REASONS[macro]
 
 
 @pytest.mark.parametrize("source", STANDARD)

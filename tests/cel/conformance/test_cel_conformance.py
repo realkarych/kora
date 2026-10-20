@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from kora.cel import Diagnostic
+from kora.cel.characters import is_rejected
 from tests.cel.conformance.cases import (
     BoolValue,
     BytesValue,
@@ -225,18 +226,15 @@ def called_function(expression: str, offset: int) -> str:
     return expression[offset:end]
 
 
-def has_control_character(expression: str) -> bool:
-    return any(
-        ord(character) < 0x20 and character not in "\t\n\f\r"
-        for character in expression
-    )
+def has_control_character(expression: str, offset: int) -> bool:
+    return offset < len(expression) and is_rejected(expression[offset])
 
 
 def feature_holds(rejection: Rejection, case: Case, outcome: Diagnostic) -> bool:
     if outcome.reason not in FEATURE_REASONS[rejection.feature]:
         return False
     if rejection.feature is Feature.RAW_CONTROL_CHARACTERS:
-        return has_control_character(case.expression)
+        return has_control_character(case.expression, outcome.offset)
     if rejection.feature is Feature.QUOTED_FIELDS:
         return "`" in case.expression
     if rejection.feature is Feature.NARROWED_FUNCTIONS:

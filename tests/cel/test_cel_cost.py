@@ -243,7 +243,16 @@ def test_cel_cost_estimate_survives_deep_shared_and_cyclic_environments() -> Non
     second_fields["next"] = RecordField(cyclic_second, True)
     bound = ValueBound(bytes=60_000, values=30_000, items=2, string_bytes=0)
 
+    chained = chained_shared_bounds(16)
+    looped_fields: dict[str, ValueBound] = {}
+    looped = ValueBound(
+        bytes=60_000, values=30_000, items=2, string_bytes=0, fields=looped_fields
+    )
+    looped_fields["self"] = looped
+
     nested = check("v[0][0] == 1", {"v": Variable(DYN, deep)})
+    chain = check("[" + ", ".join(sorted(chained)) + "]", chained)
+    loop = check("v.self.self == 1", {"v": Variable(DYN, looped)})
     shared = check(
         "[v, w]", {"v": Variable(first, bound), "w": Variable(second, bound)}
     )
@@ -253,6 +262,8 @@ def test_cel_cost_estimate_survives_deep_shared_and_cyclic_environments() -> Non
     )
 
     assert isinstance(nested, CheckedExpression)
+    assert isinstance(chain, CheckedExpression | Diagnostic)
+    assert isinstance(loop, CheckedExpression)
     assert isinstance(shared, CheckedExpression)
     assert isinstance(cyclic, CheckedExpression)
 
@@ -264,3 +275,37 @@ def shared_record(depth: int) -> CelType:
             {"a": RecordField(cel_type, True), "b": RecordField(cel_type, True)}
         )
     return cel_type
+
+
+def chained_shared_bounds(count: int) -> dict[str, Variable]:
+    previous = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    variables: dict[str, Variable] = {}
+    for index in range(count):
+        bound = previous
+        for _ in range(31):
+            bound = ValueBound(
+                bytes=60_000, values=30_000, items=1, string_bytes=0, element=bound
+            )
+        variables[f"v{index}"] = Variable(DYN, bound)
+        previous = bound
+    return variables
+
+
+def test_cel_cost_estimate_does_not_depend_on_operand_order() -> None:
+    inner = ValueBound(bytes=100, values=10, items=10, string_bytes=0)
+    shallow = ValueBound(
+        bytes=1000, values=100, items=10, string_bytes=0, element=inner
+    )
+    deep = shallow
+    for _ in range(32):
+        deep = ValueBound(
+            bytes=60_000, values=30_000, items=1, string_bytes=0, element=deep
+        )
+    environment = {"a": Variable(DYN, shallow), "b": Variable(DYN, deep)}
+
+    first = check("a[0].map(x, x) == [] && b == b", environment)
+    second = check("b == b && a[0].map(x, x) == []", environment)
+
+    assert isinstance(first, CheckedExpression)
+    assert isinstance(second, CheckedExpression)
+    assert first.estimate.steps == second.estimate.steps

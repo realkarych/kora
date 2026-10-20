@@ -91,7 +91,7 @@ def test_cel_estimate_is_linear_in_the_environment() -> None:
     deep = [shared_depth_steps(depth) for depth in depths]
 
     for width, count in zip(widths, wide, strict=True):
-        assert count <= STEPS_PER_CODE_POINT * (width + 4096)
+        assert width <= count <= STEPS_PER_CODE_POINT * (width + 4096)
     for smaller, larger in zip(wide, wide[1:], strict=False):
         assert larger <= 2.5 * smaller
     assert deep[-1] <= 4 * deep[0]

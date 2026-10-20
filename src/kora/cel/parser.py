@@ -290,7 +290,7 @@ class Parser:
     ) -> Parsed:
         macro = Macro(str(name.value))
         count = len(arguments)
-        if macro is not Macro.MAP and count == 3:
+        if macro in (Macro.ALL, Macro.EXISTS) and count == 3:
             raise fail(Reason.TWO_VARIABLE_COMPREHENSION, name.offset)
         allowed = (2, 3) if macro is Macro.MAP else (2,)
         if count not in allowed:
