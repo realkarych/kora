@@ -270,12 +270,23 @@ Branch conditions and reasons, retry predicates, `approve_when`, event `match` a
 
 ### 7.2 Parser, limits and canonical rendering
 
-kora's own lexer and recursive-descent parser follow the CEL grammar of cel-spec. Positions are zero-based offsets in Unicode code points into the decoded field value. Message construction, optional syntax (`.?`, `[?`) and functions outside the standard library are rejected (`IR011`).
+kora's own lexer and recursive-descent parser follow the CEL grammar of cel-spec, without backtracking. Positions are zero-based offsets in Unicode code points into the decoded field value.
+
+**Characters and literals** (`IR011`):
+
+- Identifiers, digits and whitespace are ASCII: an identifier is `[_a-zA-Z][_a-zA-Z0-9]*`, whitespace is space, tab, line feed, form feed and carriage return, and any other character outside a string or bytes literal is rejected. kora never accepts a character that CEL's grammar rejects and then rewrites it in the rendering.
+- These code points are rejected anywhere in the expression, inside literals and comments too: C0 controls other than tab, line feed, form feed and carriage return; DEL and the C1 controls; U+00AD, U+061C, U+180E, U+200B to U+200F, U+2028 to U+202E, U+2060 to U+206F, U+FEFF and U+FFF9 to U+FFFB (bidirectional, zero-width and other format controls); and surrogate code points. An author who needs one of them in a string writes its `\u` escape.
+- Escapes are those of the cel-spec grammar. An escape denoting a surrogate or a code point beyond U+10FFFF is rejected.
+- An `int` literal beyond the signed 64-bit range, a `uint` literal beyond 64 bits and a `double` literal whose value is not finite are rejected. A `-` directly before an `int` or `double` literal that no selection or index follows is part of the literal, as in the cel-spec grammar, so `-9223372036854775808` is a literal and `-1.f` is the negation of `1.f`.
+
+**Constructs** (`IR011`): message construction; optional syntax (`.?`, `[?`, `{?`); leading-dot qualified names, which have no meaning without containers; backtick-quoted field selection; two-variable comprehensions; a `has()` argument that is not a field selection; a macro iteration variable that is not a simple identifier; a reserved word as an identifier (reserved words stay valid as field names after a dot); and functions outside the standard function table.
+
+**Standard function table.** The global functions `size`, `int`, `uint`, `double`, `string`, `bytes`, `type`, `dyn`, `duration` and `timestamp` with one argument; the methods `size()`, `contains`, `startsWith`, `endsWith` and `matches` with one argument; and the timestamp and duration accessors `getDate`, `getDayOfMonth`, `getDayOfWeek`, `getDayOfYear`, `getFullYear`, `getHours`, `getMilliseconds`, `getMinutes`, `getMonth` and `getSeconds` without arguments. The table is the cel-spec standard library narrowed to what binding 0.10.0 executes: it lacks `bool()`, the global form `matches(s, p)` and the time-zone forms of the accessors, so they are rejected. Gaps that depend on argument types (`int(timestamp)`, `timestamp(int)`, date accessors on durations) are left to the schema-driven checker. Every entry is verified by evaluation in the binding, and every pin change repeats that verification.
 
 Static limits. An expression or path over any of them is `IR027`, including a `maxLength` violation found by schema validation:
 
 - At most **4,096 code points**, checked before lexing. `ir.schema.json` carries the same `maxLength`.
-- Syntax-tree depth at most **32**. Depth is measured on the built tree: each binary-operator link, conditional `?:` branch, selection, index, call receiver or argument, unary operator, parenthesis, list or map literal and macro body adds one level. It is checked on every descent of the parser, before recursing, and as each node is built, so prefix nesting (`((((`, `!!!!`, `----`) stops with `IR027` before any recursion limit and chains a parser builds in a loop (`a + a + …`, `a.b.b…`) count fully.
+- Syntax-tree depth at most **32**. Depth is measured on the built tree: a leaf has depth 0, and every edge from a node to a child adds one level, so each binary-operator operand, conditional `?:` condition and branch, selection, index operand and index, call receiver and argument, unary operand, list element, map key and value, and macro range and body adds one level. Each explicit parenthesis adds one level too, and a macro body counts once. It is checked on every descent of the parser, before recursing, and as each node is built, so prefix nesting (`((((`, `!!!!`, `----`) stops with `IR027` before any recursion limit and chains a parser builds in a loop (`a + a + …`, `a.b.b…`) count fully.
 - At most **4 comprehension macros** (`all`, `exists`, `exists_one`, `map`, `filter`) per expression, nested at most **2** deep. A macro nests in another when it appears in that macro's body; a macro in another macro's receiver, as in a chain `l.map(…).map(…)`, does not nest.
 
 Lexing, parsing, checking and the cost estimate are linear in the size of the tree. Checking stops at an expression's first error.
@@ -288,7 +299,7 @@ The probe measured these thresholds on one macOS machine:
 
 The limits keep a wide margin below them on the evaluation thread of section 7.6. Every change of the binding pin re-measures them, separately for compile and for evaluation, under the pin rule above.
 
-**Canonical rendering.** From the checked tree kora writes a canonical text: every operator parenthesized, string literals as double-quoted non-raw literals with only the escapes `\\`, `\"`, `\n`, `\r`, `\t` and `\u`/`\U` for other control and non-ASCII characters, bytes literals the same with `\x` for every byte outside printable ASCII, no comments, single spaces. Validation parses the rendering again with kora's parser and requires the same tree, ignoring grouping parentheses, otherwise `IR011`; this uses only kora's parser, so `kora compile` runs it too. The rendering is not held to the author-text limits: its length is at most a fixed multiple of the source's, and its parenthesis nesting follows the tree depth of at most 32, below the binding's bracket limit of 96. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked. The IR keeps the author's text.
+**Canonical rendering.** From the checked tree kora writes a canonical text: every operator parenthesized, string literals as double-quoted non-raw literals with only the escapes `\\`, `\"`, `\n`, `\r`, `\t` and `\u`/`\U` for other control and non-ASCII characters, bytes literals the same with `\x` for every byte outside printable ASCII, no comments, single spaces. Validation parses the rendering again with kora's parser and requires the same tree, ignoring grouping parentheses, otherwise `IR011`; this uses only kora's parser, so `kora compile` runs it too. Each node puts at most one pair of brackets around its children, except that a unary operator applied to a numeric literal renders the literal in parentheses, `(-(1))`, so that it does not fold into a negative literal, and a negative literal used as the operand of a selection, index or method is parenthesized. Doubles are rendered in their shortest round-trip form and integers in decimal. The rendering is not held to the author-text limits: its length is at most 10 times the source's, and its re-parse runs under a depth bound of 2 × 32 + 1 levels, checked before recursion, which keeps its bracket nesting below the binding's bracket limit of 96; the boundary tests compile the maximal rendering of each shape in the binding. The binding compiles only this rendering, never the author's text, so it evaluates exactly the tree kora checked. The IR keeps the author's text.
 
 **Where the binding runs.** Server-side validation (`/validate`, `/plan`, deployment, and `kora_compile` through `/validate`) compiles every rendering with the binding, deduplicated by rendering, and compiles each distinct `matches()` pattern once; a rejection is `IR011`, reported without the binding's message. `kora compile` runs on the author's machine with kora's parser and checker only and never imports the binding ([dsl.md](dsl.md) section 2). Deployment stores the rendering, the projection path sets (section 7.5) and the cost estimate with the graph version, and evaluation never recomputes them.
 
@@ -296,7 +307,8 @@ The limits keep a wide margin below them on the evaluation thread of section 7.6
 
 `inputs[*].path`, `binds.vcs_ref`, `binds.gate_digests`, `workspace.from_ref`, `human_input` `context` and `graph.target.key.path` are member-access chains restricted to field selection and indexing, such as `inputs.bundle.facts.change` or `artifacts['implement.change']`. They contain no operators and no calls. This is the one path notation in the IR.
 
-- **Parsing.** Paths use the parser and the length and depth limits of section 7.2: `IR011` for syntax, `IR027` for limits. Resolution keeps its existing codes (`IR002`, `IR003`, `IR005`, `IR020`).
+- **Parsing.** Paths use the lexer and the length and depth limits of section 7.2: `IR011` for syntax, `IR027` for limits. An index is a non-negative decimal integer literal or a string literal; a negative, hexadecimal or unsigned index, or an index expression, is `IR011`. A relative path starts with a field name, so a key that is not an identifier cannot start one. Resolution keeps its existing codes (`IR002`, `IR003`, `IR005`, `IR020`).
+- **Walking.** The walker treats a missing key, an index beyond the list, and a field or index on a value of another JSON type as absent. It never applies negative indexing.
 - **Resolution.** kora resolves paths with its own walker; a path never reaches the binding.
 - **Roots.** `inputs[*].path` and `graph.target.key.path` are relative to their source value. `binds.*`, `workspace.from_ref` and `context` start at `inputs.`.
 
@@ -346,7 +358,13 @@ These rules give `IR011`, reported at the expression's YAML path and offset:
   - The parent of a `has()` operand must itself be present or guarded, as in `has(a.b) && has(a.b.c) && a.b.c`.
 - **Null.** A comparison with `null` yields `bool`. Selection, ordering, arithmetic or a call on a `null` value is an evaluation error.
 - **`size()`** on a `string` or a `dyn` value is rejected while the binding counts UTF-8 bytes instead of code points.
-- **`matches()`** takes a string-literal pattern only. kora parses the pattern in the binding's regular-expression syntax, which has no backreferences, with group nesting at most 32, checked before the parser recurses, and computes a deterministic size estimate from it: each atom is weighted by its compiled size, from class-size tables for `.`, `\w`, `\d`, `\s`, `\p{…}`, their negations and case-insensitive literals pinned under `kora.execution.v1`, a bracketed class or any class the tables lack is charged at the tables' maximum, and the weights are multiplied by repetition bounds. A pattern over the nesting limit or over the cap of that estimate is `IR027`. The cap, like the budget, is fixed by the first implementation from measurements. The server-side compile also compiles the pattern in the binding.
+- **`matches()`** takes a string-literal pattern only, checked by the parser of section 7.2. kora parses the pattern in a closed subset of the binding's regular-expression syntax:
+  - **Supported:** literal characters and escaped ASCII punctuation; the escapes `\n`, `\t`, `\r`, `\f`, `\v`, `\a`, `\xHH` and `\x{H…}`; `.`; the class escapes `\d`, `\D`, `\w`, `\W`, `\s` and `\S`; `\p{…}` and `\P{…}`, or their one-letter forms, for the Unicode classes of the class-size table (`L`, `Lu`, `Ll`, `N`, `Nd`, `P`, `S`, `Z`, `Greek`, `Latin`, `Han`, `Cyrillic`); bracketed classes, negated or not, with ranges and nested bracketed classes; the anchors `^`, `$`, `\b`, `\B`, `\A` and `\z`; capturing, non-capturing and named groups; the flags `i`, `m` and `s`; alternation; and the repetitions `*`, `+`, `?`, `{n}`, `{n,}` and `{n,m}`, each optionally lazy.
+  - **Rejected** (`IR011`): every other construct, among them verbose mode `(?x)`, the flags `U`, `u` and `R`, look-around, backreferences, `\Q…\E`, POSIX classes, class set operations (`&&`, `--`, `~~`) and Unicode classes outside the table.
+  - **Nesting.** Groups and bracketed classes share one nesting counter of at most 32, checked before the parser recurses.
+  - **Size estimate.** Each atom is weighted by its compiled size from class-size tables pinned under `kora.execution.v1`. An `i` flag anywhere in the pattern applies the case-insensitive weights to the whole pattern. A bracketed class is charged the sum of its members' weights, and a negated one at least the weight of `.`. A repetition multiplies by its upper bound, or by its lower bound plus one when it is unbounded, and adds a fixed overhead.
+
+  A pattern over the nesting limit or over the cap of its estimate is `IR027`. The tables and the cap are set by the calibration of section 7.6. The server-side compile also compiles the pattern in the binding.
 - **Result type.** The result must have the field's type from section 7.1.
 
 A child type must keep the CEL type of every parent property: assignability (`IR003`, section 2.1) rejects a child that narrows `number` to `integer`.
@@ -431,21 +449,29 @@ An expression over either dimension of the budget is `IR027`. The charges follow
 
 | charge | proportional to |
 |---|---|
-| each evaluation | a fixed base, plus the bound size of every variable it binds (the binding converts all bound data on every call) |
+| each evaluation | a fixed base, plus the bound size and value count of every top-level variable the expression references; the evaluator binds exactly those (the binding converts all bound data on every call) |
 | a node visit | one unit |
 | `all`, `exists`, `exists_one` | the range's bound length times the body's charge; nested macros multiply |
 | `map`, `filter` | the square of the range's bound length (binding 0.10.0), plus the range length times the body's charge |
-| `+` on strings, bytes and lists; list and map literals | the result size and element count, the sums over the operands, which propagate to every consumer |
+| `+` on an operand that may be a string, bytes, list or `dyn` value; list and map literals | the result size and value count, the sums over the operands, which propagate to every consumer |
 | result size and element count of `map` and `filter` | the range length times the body's result size; the element count is the range length |
-| `==`, `!=`, `in` | the operand sizes |
+| comparisons: `==`, `!=`, `<`, `<=`, `>`, `>=`, `in` | the operand sizes and value counts |
 | conversions and string functions | the operand size |
 | `matches()` | kora's size estimate of its literal pattern, for compiling on every call, plus that estimate times the subject length for matching; the compiled pattern also counts toward memory |
 | a compile on a cache miss | the canonical rendering's length |
 | projection work in a scheduler transaction (re-cutting a collection, projecting an event); charged to the allowance only, not to an expression | the bytes read and written |
 
+**Bounds and arithmetic.**
+
+- **Hereditary bounds.** Each variable carries a bound: its total size in bytes of canonical JSON, its value count, its element count, its string length, and a bound for its elements or for each declared field. An element or field without its own bound inherits its parent's. The default bound of a variable is the data bounds below, with a value count of at most half the byte bound plus one.
+- **Affine results.** A size computed inside a comprehension is affine in the iteration variable's size, so the total over the range is bounded by the range's own total rather than by the element count times the largest element: `l.map(x, x)` is bounded by the size of `l`.
+- **Typed charges.** A charge follows the value's type: `+` on two typed numbers is a node visit, and on anything that may be a string, bytes, list or `dyn` value it is a concatenation.
+- **Arithmetic.** The estimate is one post-order pass in exact integer arithmetic. Memory is checked before steps, so an expression over both reports the memory dimension. Memory counts the converted bound data once and every value an operation allocates; a reference to a variable or to part of a value allocates nothing.
+
 **Calibration.**
 
-- The budget targets 10 ms and 16 MiB per evaluation on a named reference CI runner.
+- The budget targets 10 ms and 16 MiB per evaluation on a named reference CI runner. The memory dimension is in bytes.
+- Until a deployment first stores an estimate with a graph version, the weights, the steps budget in estimate units and the pattern class tables are provisional values set from the probe measurements, and changing them needs no new semantics identity.
 - The first implementation fixes, from registered measurements, the budget in estimate units, the weight of each charge and the reference runner, and a golden corpus pins the estimate. The evaluator does not ship without them.
 - The weights belong to `kora.execution.v1`, under the pin rule at the start of section 7.
 
@@ -531,13 +557,23 @@ A node that fails because of an evaluation error fails with `config_error`, reas
 The cel-spec conformance suite runs in CI against the binding, through a hand-written reader of the textproto subset its selected files use, with no protobuf dependency.
 
 - **Vendoring.** The files are vendored under `tests/` at a pinned cel-spec commit, with the upstream licence. Their source URL, full commit SHA and digest are recorded in `knowledge/research/` when the suite is added.
-- **Selection.** Explicit include and exclude lists name the files. Sections outside kora's subset (messages, optional syntax, extensions) are excluded.
+- **Selection.** Explicit include and exclude lists name the files. Excluded are `dynamic` and `namespace` (message types and containers), `macros2` (two-variable comprehensions), `proto2`, `proto3`, `wrappers` and `enums` (message types), `optionals`, `unknowns`, `type_deduction` and every extension file. Within the included files, explicit entries name each case, or a whole section, that kora rejects, with the feature it needs and the diagnostic reason kora gives: message types and qualified type names, backtick-quoted fields, unescaped control characters in literals, the narrowed standard functions and functions outside the standard library.
+- **Integrity.** The files are byte-identical to the upstream commit, and a test checks them and the licence against a manifest of SHA-256 digests.
 - **Known deviations.** The known deviations so far are string `size()` counting UTF-8 bytes and the unsupported optional syntax. Each is asserted as the binding's exact current outcome, so the test fails when the deviation disappears; a deviation is never skipped.
-- **Reader and parser.** The reader fails on any construct outside its subset. The same cases also run through kora's parser.
+- **Reader and parser.** The reader has two layers: a closed generic textproto syntax that parses whole files, and a typed case model that fails on any field outside the subset the selected files use. Every included case also runs through kora's parser and canonical rendering: a case without an entry must be accepted, a listed case must give exactly its listed reason, and every entry must match a case.
 
 ### 7.9 Future contracts
 
-The parser, checker, cost estimate and textproto reader are unit-tested, as AGENTS.md allows for parsers, checkers and arithmetic. Every test that touches the metadata database runs on PostgreSQL and SQLite. All are `pending implementation` and deterministic; anything that measures time or memory is a measurement below, not a test.
+The parser, checker, cost estimate and textproto reader are unit-tested, as AGENTS.md allows for parsers, checkers and arithmetic. Every test that touches the metadata database runs on PostgreSQL and SQLite. All are deterministic; anything that measures time or memory is a measurement below, not a test.
+
+**Status.** The parser, limits, rendering, paths, pattern subset, cost estimate and conformance reader landed under [issue #161](https://github.com/realkarych/kora/issues/161) in `kora.cel` and `tests/cel/`. These tests are active in full: `test_cel_rejects_expression_over_depth_limit`, `test_cel_rejects_comprehension_over_limits`, `test_cel_canonical_rendering_matches_author_text` (its re-parse leg over the corpus, the included conformance cases and expressions generated from a fixed seed), `test_cel_paths_obey_limits_and_never_reach_binding` and the rows added below for `kora.cel`. These are active in part:
+
+- `test_cel_rejects_expression_over_length_limit`: the expression leg; the schema-validation leg waits for the `ir` validator.
+- `test_cel_rejects_non_literal_regex_pattern`: the literal rule; the backreference leg at server-side validation waits for the API.
+- `test_cel_regex_compile_cost_bounded`: the nesting and cap legs in `kora.cel`; the `kora compile` and `/validate` legs and compiling each distinct pattern once wait for the DSL and the API.
+- `test_cel_cost_estimate_rejects_compounding_concatenation`: with the bounds given directly; the `maxItems` leg waits for the schema-driven checker.
+
+The binding legs, the evaluator tests, the golden corpus and the conformance suite through the binding wait for [issue #162](https://github.com/realkarych/kora/issues/162); the checker, projection, API, scheduler and DSL legs stay `pending implementation` with the work items that own them in the implementation plan.
 
 | Test | Required result |
 |---|---|
@@ -594,6 +630,23 @@ The parser, checker, cost estimate and textproto reader are unit-tested, as AGEN
 | `test_cel_evaluating_entry_points_refuse_without_binding` | the API, scheduler and standalone refuse to start without `kora[cel]`, and `kora test` and `kora_test` return a structured error naming the extra, through an injected binding loader; `kora doctor` reports the missing extra |
 | `test_cel_evaluating_entry_points_refuse_mismatched_binding_version` | a binding other than the pinned version, or a `cel` module from another distribution, prevents start |
 | `test_cel_conformance_suite` | the vendored suite passes, with every known deviation asserted exactly |
+| `test_cel_depth_rule_matches_conformance_boundaries` | the cel-spec `nest` and `repeat` cases at the limit are accepted, and mixed parenthesis and operator nesting counts both |
+| `test_cel_lexer_rejects_what_cel_rejects` | non-ASCII digits, letters and spaces outside literals, the rejected control and format code points anywhere, surrogates, out-of-range escapes and literals, and unterminated literals are `IR011` with their reason |
+| `test_cel_rejects_unsupported_constructs` | message construction, optional syntax, leading-dot names, backtick fields, two-variable comprehensions and reserved identifiers are `IR011` with their reason |
+| `test_cel_rejects_unknown_functions_and_malformed_macros` | functions outside the table, the narrowed standard functions and malformed `has()` and comprehension calls are `IR011`; every table entry and macro form is accepted |
+| `test_cel_reports_code_point_offsets` | offsets count code points, also after a character outside the Basic Multilingual Plane |
+| `test_cel_work_is_linear_in_steps` | lexing, parsing, the pattern parser and the estimate take at most a fixed number of counted steps per code point on hostile and maximal input up to the length limit |
+| `test_cel_rendering_reparse_is_bounded` | the rendering of every nesting shape at depth 32 re-parses under the bound of 2 × 32 + 1 levels, and a deeper rendering is refused |
+| `test_cel_paths_walker_follows_cel_indexing` | the walker resolves fields and non-negative positions and treats missing keys, positions beyond the list and type mismatches as absent |
+| `test_cel_regex_rejects_constructs_outside_subset` | every construct outside the supported pattern subset is `IR011`, and every supported construct is accepted |
+| `test_cel_regex_subset_agrees_with_binding` | every pattern kora accepts compiles in the binding, and `''.matches(p)` evaluates over the pattern corpus |
+| `test_cel_function_table_executes_in_binding` | every entry of the standard function table evaluates in the binding |
+| `test_cel_cost_estimate_bounds_comprehension_results` | the result of `map` and `filter` is bounded by its range's total size, and a variable leaving its comprehension leaves no unbounded term |
+| `test_cel_cost_estimate_charges_follow_the_table` | with one weight set at a time, each charge of the table contributes exactly its formula, and only top-level variables are charged for conversion |
+| `test_cel_diagnostics_exclude_author_text` | no diagnostic message, field or exception carries an identifier, literal, pattern or invalid token from the expression |
+| `test_cel_textproto_reader` | the reader parses the syntax the vendored files use and refuses unknown fields and malformed input |
+| `test_cel_conformance_data_matches_manifest` | every vendored file and the licence match their recorded SHA-256 |
+| `test_cel_conformance_cases_parse` | every included case parses and renders with kora, or gives exactly the reason of its listed rejection |
 
 Measurements, `pending implementation`, register with the first parser, checker and evaluator. Peak native memory is measured as RSS per fresh process, because Python heap tracing misses it; accumulation is measured in one long-lived process.
 
