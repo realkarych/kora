@@ -2,6 +2,7 @@ from typing import Final
 
 from kora.cel.characters import PRINTABLE_ASCII
 from kora.cel.diagnostics import Reason, fail
+from kora.cel.meter import Meter
 from kora.cel.parser import RENDERING_LIMITS, parse
 from kora.cel.tree import (
     Binary,
@@ -33,7 +34,7 @@ SHORT_ESCAPES: Final[dict[int, str]] = {
     0x09: "\\t",
 }
 
-RENDERING_EXPANSION: Final[int] = 10
+RENDERING_EXPANSION: Final[int] = 16
 
 
 def render_string(value: str) -> str:
@@ -140,8 +141,8 @@ def render(node: Node) -> str:
             return f"{render_operand(range_)}.{macro.value}({joined})"
 
 
-def canonical_rendering(node: Node) -> str:
+def canonical_rendering(node: Node, meter: Meter | None = None) -> str:
     rendering = render(node)
-    if parse(rendering, RENDERING_LIMITS) != node:
+    if parse(rendering, RENDERING_LIMITS, meter) != node:
         raise fail(Reason.RENDERING_MISMATCH, 0)
     return rendering

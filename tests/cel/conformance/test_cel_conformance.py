@@ -1,5 +1,6 @@
 import hashlib
 import math
+import re
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from kora.cel import Diagnostic
 from tests.cel.conformance.cases import (
     BoolValue,
     BytesValue,
+    Case,
     CaseModelError,
     DoubleValue,
     ExpectedError,
@@ -17,6 +19,7 @@ from tests.cel.conformance.cases import (
     MapType,
     MapValue,
     NullValue,
+    ObjectValue,
     PrimitiveType,
     StringValue,
     read_cases,
@@ -24,9 +27,12 @@ from tests.cel.conformance.cases import (
 )
 from tests.cel.conformance.manifest import COMMIT, FILES, LICENSE_SHA256
 from tests.cel.conformance.selection import (
+    CEL_STANDARD_FUNCTIONS,
     EXCLUDED_FILES,
     INCLUDED_FILES,
     KORA_REJECTIONS,
+    Feature,
+    Rejection,
     rejection_for,
 )
 from tests.cel.conformance.textproto import (
@@ -78,6 +84,15 @@ section {
   }
   test { name: "default" expr: "true" }
   test { name: "bytes" expr: "b''" value: { bytes_value: "\\377" } }
+  test { name: "astral" expr: "x" value: { string_value: "\\U0001F600" } }
+  test { name: "infinite" expr: "x" value: { double_value: Infinity } }
+  test {
+    name: "object"
+    expr: "x"
+    value: { object_value {
+      [type.googleapis.com/google.protobuf.Duration] { seconds: 1 }
+    } }
+  }
 }
 """
 
@@ -110,6 +125,14 @@ def test_cel_textproto_reader() -> None:
     assert by_name["error"].expected == ExpectedError(("divide by zero",))
     assert by_name["default"].expected == ExpectedValue(BoolValue(True))
     assert by_name["bytes"].expected == ExpectedValue(BytesValue(b"\xff"))
+    assert by_name["astral"].expected == ExpectedValue(StringValue("\U0001f600"))
+    infinite = by_name["infinite"].expected
+    assert isinstance(infinite, ExpectedValue)
+    assert isinstance(infinite.value, DoubleValue)
+    assert infinite.value.value == math.inf
+    assert by_name["object"].expected == ExpectedValue(
+        ObjectValue("type.googleapis.com/google.protobuf.Duration")
+    )
 
 
 @pytest.mark.parametrize(
@@ -123,6 +146,20 @@ def test_cel_textproto_reader() -> None:
         "section { test { name: 'a' value: { int64_value: 1 bool_value: true } } }",
         "section {",
         "name 'missing colon'",
+        "section { test { name: 'a' value: { uint64_value: -1 } } }",
+        "section { test { name: 'a' value: { int64_value: 9223372036854775808 } } }",
+        "section { test { name: 'a' value: { uint64_value: 18446744073709551616 } } }",
+        "section { test { name: 'a' value: { int64_value: 0b101 } } }",
+        "section { test { name: 'a' value: { int64_value: 017 } } }",
+        "section { test { name: 'a' value: { double_value: 1.5f } } }",
+        "section { test { name: 'a' value: { string_value: '\\377' } } }",
+        "section { test { name: 'a' description { anything: 1 } } }",
+        "section { description: 1.5 test { name: 'a' } }",
+        "description: 7",
+        "section { test { name: 'a' value: { object_value { [] {} } } } }",
+        "section { test { name: 'a' "
+        "bindings { key: 'x' value { value { int64_value: 1 } } } "
+        "bindings { key: 'x' value { value { int64_value: 2 } } } } }",
     ],
 )
 def test_cel_textproto_reader_refuses_unknown_input(text: str) -> None:
@@ -157,7 +194,44 @@ def test_cel_conformance_data_matches_manifest() -> None:
     assert hashlib.sha256(licence).hexdigest() == LICENSE_SHA256
     assert {name.removesuffix(".textproto") for name in files} == set(INCLUDED_FILES)
     assert not {excluded.name for excluded in EXCLUDED_FILES} & set(INCLUDED_FILES)
-    assert len(COMMIT) == 40
+    assert re.fullmatch("[0-9a-f]{40}", COMMIT)
+
+
+def test_cel_conformance_cases_decode_their_values() -> None:
+    files = {path.stem: path for path in vendored_files()}
+
+    cases = {
+        (case.file, case.section, case.name): case
+        for name in ("basic", "fields")
+        for case in read_cases(name, files[name].read_text(encoding="utf-8")).cases
+    }
+
+    zero = cases[("basic", "self_eval_zeroish", "self_eval_int_zero")]
+    assert zero.expected == ExpectedValue(IntValue(0))
+    bound = cases[("basic", "variables", "self_eval_bound_lookup")]
+    assert bound.bindings == (("x", IntValue(123)),)
+    assert bound.declarations[0].type == PrimitiveType("INT64")
+    assert bound.expected == ExpectedValue(IntValue(123))
+
+
+def called_function(expression: str, offset: int) -> str:
+    end = offset
+    while end < len(expression) and (
+        expression[end].isalnum() or expression[end] == "_"
+    ):
+        end += 1
+    return expression[offset:end]
+
+
+def feature_holds(rejection: Rejection, case: Case, outcome: Diagnostic) -> bool:
+    if rejection.feature is Feature.NARROWED_FUNCTIONS:
+        return (
+            called_function(case.expression, outcome.offset) in CEL_STANDARD_FUNCTIONS
+        )
+    if rejection.feature is Feature.UNDECLARED_FUNCTIONS:
+        name = called_function(case.expression, outcome.offset)
+        return bool(name) and name not in CEL_STANDARD_FUNCTIONS
+    return True
 
 
 def test_cel_conformance_cases_parse() -> None:
@@ -166,22 +240,33 @@ def test_cel_conformance_cases_parse() -> None:
         for path in vendored_files()
         for case in read_cases(path.stem, path.read_text(encoding="utf-8")).cases
     ]
-    used: set[tuple[str, str, str | None]] = set()
 
     outcomes = [(case, checked_syntax(case.expression)) for case in cases]
 
-    for case, outcome in outcomes:
-        rejection = rejection_for(case.file, case.section, case.name)
-        if rejection is None:
-            assert not isinstance(outcome, Diagnostic), (
-                case.file,
-                case.section,
-                case.name,
-            )
-            continue
-        used.add((rejection.file, rejection.section, rejection.test))
-        assert isinstance(outcome, Diagnostic), (case.file, case.section, case.name)
-        assert outcome.reason is rejection.reason, (case.file, case.section, case.name)
+    wrongly_rejected = [
+        case.name
+        for case, outcome in outcomes
+        if rejection_for(case.file, case.section, case.name) is None
+        and isinstance(outcome, Diagnostic)
+    ]
+    listed = [
+        (case, outcome, rejection)
+        for case, outcome in outcomes
+        if (rejection := rejection_for(case.file, case.section, case.name)) is not None
+    ]
+    mismatched = [
+        case.name
+        for case, outcome, rejection in listed
+        if not isinstance(outcome, Diagnostic)
+        or outcome.reason is not rejection.reason
+        or not feature_holds(rejection, case, outcome)
+    ]
+    used = {
+        (rejection.file, rejection.section, rejection.test)
+        for _, _, rejection in listed
+    }
+    assert wrongly_rejected == []
+    assert mismatched == []
     assert used == {
         (rejection.file, rejection.section, rejection.test)
         for rejection in KORA_REJECTIONS

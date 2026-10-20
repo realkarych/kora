@@ -44,6 +44,7 @@ from kora.cel.types import (
     CelType,
     ListOf,
     MapOf,
+    Record,
     element_type,
     is_concatenable,
     iteration_type,
@@ -85,7 +86,6 @@ class Weights:
     compare_byte: int
     compare_value: int
     function_byte: int
-    literal_value: int
     pattern_compile: int
     pattern_match: int
     rendering_character: int
@@ -110,7 +110,6 @@ PROVISIONAL_WEIGHTS: Final[Weights] = Weights(
     compare_byte=100_000,
     compare_value=30_000_000,
     function_byte=200_000,
-    literal_value=30_000_000,
     pattern_compile=2_400_000,
     pattern_match=40,
     rendering_character=1_000_000_000,
@@ -236,9 +235,24 @@ class Shape:
     string_bytes: int
     element: "Shape | None" = None
     fields: Mapping[str, "Shape"] = field(default_factory=lambda: {})
+    free: bool = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        free = (
+            not self.bytes.terms
+            and not self.values.terms
+            and (self.element is None or self.element.free)
+            and all(child.free for child in self.fields.values())
+        )
+        object.__setattr__(self, "free", free)
 
     def hereditary(self, child_type: CelType) -> "Shape":
-        return Shape(child_type, self.bytes, self.values, self.items, self.string_bytes)
+        return Shape(child_type, self.bytes, self.values, DATA_ITEMS, DATA_STRING_BYTES)
+
+    def member(self) -> "Shape":
+        if self.element is not None:
+            return self.element
+        return self.hereditary(element_type(self.type))
 
     def child(self, child_type: CelType, name: str | None) -> "Shape":
         declared = self.fields.get(name) if name is not None else None
@@ -249,6 +263,8 @@ class Shape:
         return declared if child_type == DYN else replace(declared, type=child_type)
 
     def substituted(self, key: Key, replacement: Affine) -> "Shape":
+        if self.free:
+            return self
         element = (
             self.element.substituted(key, replacement)
             if self.element is not None
@@ -268,35 +284,53 @@ class Shape:
             fields,
         )
 
+    def key(self) -> "Shape":
+        return Shape(STRING, self.bytes, Affine.of(1), 0, DATA_STRING_BYTES)
+
     def iterated(self) -> "Shape":
-        if isinstance(unwrap(self.type), ListOf):
-            return self.child(iteration_type(self.type), None)
-        return self.hereditary(iteration_type(self.type))
+        inner = unwrap(self.type)
+        if isinstance(inner, ListOf):
+            return self.child(inner.element, None)
+        if isinstance(inner, MapOf | Record):
+            return replace(self.key(), type=iteration_type(self.type))
+        return join_shapes(self.member(), self.key())
 
 
 def scalar(cel_type: CelType, size: int = SCALAR_BYTES) -> Shape:
     return Shape(cel_type, Affine.of(size), Affine.of(1), 0, 0)
 
 
-def from_bound(cel_type: CelType, bound: ValueBound) -> Shape:
-    element = (
-        from_bound(element_type(cel_type), bound.element)
-        if bound.element is not None
-        else None
-    )
-    fields = {
-        name: from_bound(member_type(cel_type, name), child)
-        for name, child in bound.fields.items()
-    }
-    return Shape(
-        cel_type,
-        Affine.of(bound.bytes),
-        Affine.of(bound.values),
-        bound.items,
-        bound.string_bytes,
-        element,
-        fields,
-    )
+class BoundShapes:
+    def __init__(self, meter: Meter) -> None:
+        self.meter: Meter = meter
+        self.memo: dict[tuple[int, int], tuple[ValueBound, CelType, Shape]] = {}
+
+    def shape(self, cel_type: CelType, bound: ValueBound) -> Shape:
+        key = (id(bound), id(cel_type))
+        known = self.memo.get(key)
+        if known is not None:
+            return known[2]
+        self.meter.tick()
+        element = (
+            self.shape(element_type(cel_type), bound.element)
+            if bound.element is not None
+            else None
+        )
+        fields = {
+            name: self.shape(member_type(cel_type, name), child)
+            for name, child in bound.fields.items()
+        }
+        result = Shape(
+            cel_type,
+            Affine.of(bound.bytes),
+            Affine.of(bound.values),
+            bound.items,
+            bound.string_bytes,
+            element,
+            fields,
+        )
+        self.memo[key] = (bound, cel_type, result)
+        return result
 
 
 @dataclass(frozen=True)
@@ -377,7 +411,9 @@ class Estimator:
         self.weights: Weights = weights
         self.scopes: dict[str, ScopeVariable] = {}
         self.next_scope: int = 0
-        self.variables: dict[str, None] = {}
+        self.variables: dict[str, Shape] = {}
+        self.default: Variable = Variable(DYN)
+        self.bounds: BoundShapes = BoundShapes(meter)
         self.visits: int = 0
 
     def node_steps(self, *parts: Affine) -> Affine:
@@ -457,10 +493,16 @@ class Estimator:
                 values=Affine.term((scoped.scope, Quantity.VALUES)),
             )
             return NodeCost(shape, self.node_steps(), ZERO)
-        self.variables[name] = None
-        variable = self.environment.get(name, Variable(DYN))
-        shape = from_bound(variable.type, variable.bound)
-        return NodeCost(shape, self.node_steps(), ZERO)
+        return NodeCost(self.variable_shape(name), self.node_steps(), ZERO)
+
+    def variable_shape(self, name: str) -> Shape:
+        known = self.variables.get(name)
+        if known is not None:
+            return known
+        variable = self.environment.get(name, self.default)
+        shape = self.bounds.shape(variable.type, variable.bound)
+        self.variables[name] = shape
+        return shape
 
     def binary(self, node: Binary) -> NodeCost:
         left = self.visit(node.left)
@@ -492,13 +534,14 @@ class Estimator:
     ) -> tuple[list[NodeCost], Affine, Affine, Affine]:
         costs = [self.visit(child) for child in nodes]
         steps = self.node_steps(*(cost.steps for cost in costs))
-        steps = steps.plus(Affine.of(self.weights.literal_value * len(costs)))
         held, peak = held_while(costs)
         return costs, steps, held, peak
 
     def collection(
         self, shape: Shape, steps: Affine, held: Affine, peak: Affine
     ) -> NodeCost:
+        steps = steps.plus(shape.bytes.times(self.weights.concat_byte))
+        steps = steps.plus(shape.values.times(self.weights.concat_value))
         allocated = self.allocation(shape.bytes)
         return NodeCost(shape, steps, peak.join(held.plus(allocated)), allocated)
 
@@ -634,10 +677,14 @@ def across_range(
     )
 
 
+def members(left: Shape, right: Shape) -> Shape | None:
+    if left.element is None and right.element is None:
+        return None
+    return join_shapes(left.member(), right.member())
+
+
 def concatenated(left: Shape, right: Shape) -> Shape:
-    element = join_all(
-        [shape for shape in (left.element, right.element) if shape is not None]
-    )
+    element = members(left, right)
     cel_type = left.type if left.type == right.type else DYN
     return Shape(
         cel_type,
@@ -650,9 +697,7 @@ def concatenated(left: Shape, right: Shape) -> Shape:
 
 
 def join_shapes(left: Shape, right: Shape) -> Shape:
-    element = join_all(
-        [shape for shape in (left.element, right.element) if shape is not None]
-    )
+    element = members(left, right)
     cel_type = left.type if left.type == right.type else DYN
     return Shape(
         cel_type,
@@ -684,13 +729,7 @@ def estimate(
     estimator = Estimator(environment, weights, meter if meter is not None else Meter())
     cost = estimator.visit(node)
     variables = tuple(sorted(estimator.variables))
-    bound = [
-        from_bound(
-            estimator.environment.get(name, Variable(DYN)).type,
-            estimator.environment.get(name, Variable(DYN)).bound,
-        )
-        for name in variables
-    ]
+    bound = [estimator.variables[name] for name in variables]
     converted_bytes = sum(shape.bytes.concrete() for shape in bound)
     converted_values = sum(shape.values.concrete() for shape in bound)
     base = (

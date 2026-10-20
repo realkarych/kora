@@ -1,3 +1,4 @@
+import subprocess
 import sys
 
 import pytest
@@ -50,6 +51,8 @@ DOCUMENT: JsonValue = {
         ("a + b", Reason.INVALID_PATH),
         ("a.", Reason.INVALID_PATH),
         ("['k'].a", Reason.INVALID_PATH),
+        ("a[99999999999999999999]", Reason.INVALID_LITERAL),
+        ("if.b", Reason.RESERVED_IDENTIFIER),
     ],
 )
 def test_cel_paths_obey_limits_and_never_reach_binding(
@@ -58,7 +61,24 @@ def test_cel_paths_obey_limits_and_never_reach_binding(
     diagnostic = rejected_path(source)
 
     assert diagnostic.reason is reason
-    assert "cel" not in sys.modules
+
+
+PATH_PROCESS = """
+import sys
+from kora.cel import check_path, resolve
+path = check_path("bundle.facts['change'].items[0]")
+resolve({"bundle": {"facts": {"change": {"items": [1]}}}}, path.steps)
+check_path("a[-1]")
+print("cel" in sys.modules)
+"""
+
+
+def test_cel_paths_never_load_the_binding() -> None:
+    command = [sys.executable, "-I", "-c", PATH_PROCESS]
+
+    completed = subprocess.run(command, capture_output=True, text=True, check=True)
+
+    assert completed.stdout.strip() == "False"
 
 
 def test_cel_paths_accept_selection_and_literal_indexes() -> None:

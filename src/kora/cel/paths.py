@@ -2,8 +2,9 @@ from dataclasses import dataclass
 from typing import Final, TypeAlias
 
 from kora.cel.diagnostics import Reason, fail
-from kora.cel.limits import MAX_CODE_POINTS, MAX_DEPTH
+from kora.cel.limits import MAX_CODE_POINTS, MAX_DEPTH, MAX_INT
 from kora.cel.meter import Meter
+from kora.cel.reserved import RESERVED_IDENTIFIERS
 from kora.cel.tokens import Token, TokenKind, lex
 
 JsonValue: TypeAlias = (
@@ -63,6 +64,8 @@ class PathParser:
         first = self.advance()
         if first.kind is not TokenKind.IDENTIFIER:
             raise fail(Reason.INVALID_PATH, first.offset)
+        if first.value in RESERVED_IDENTIFIERS:
+            raise fail(Reason.RESERVED_IDENTIFIER, first.offset)
         steps: list[PathStep] = [Field(str(first.value))]
         while self.current().kind is not TokenKind.END:
             steps.append(self.step())
@@ -86,6 +89,8 @@ class PathParser:
             return Field(key.value)
         is_decimal = not self.text.startswith(HEX_PREFIXES, key.offset)
         if key.kind is TokenKind.INT and isinstance(key.value, int) and is_decimal:
+            if key.value > MAX_INT:
+                raise fail(Reason.INVALID_LITERAL, key.offset)
             return Position(key.value)
         raise fail(Reason.INVALID_PATH, key.offset)
 

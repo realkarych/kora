@@ -1,6 +1,5 @@
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
 from typing import Final
 
 from kora.cel.cost import Estimate, Variable, estimate
@@ -12,28 +11,41 @@ from kora.cel.render import canonical_rendering
 from kora.cel.tree import Node
 
 
-class Seal:
-    pass
-
-
-SEAL: Final[Seal] = Seal()
-
-
-@dataclass(frozen=True)
 class CheckedExpression:
-    tree: Node
-    rendering: str
-    digest: str
-    estimate: Estimate
-    seal: Seal = field(repr=False, compare=False)
+    __slots__ = ("_digest", "_estimate", "_rendering", "_tree")
 
-    def __post_init__(self) -> None:
-        if self.seal is not SEAL:
+    def __init__(
+        self, seal: object, tree: Node, rendering: str, digest: str, estimate: Estimate
+    ) -> None:
+        if seal is not SEAL:
             raise TypeError("checked expressions come only from kora.cel.check")
+        self._tree: Node = tree
+        self._rendering: str = rendering
+        self._digest: str = digest
+        self._estimate: Estimate = estimate
+
+    @property
+    def tree(self) -> Node:
+        return self._tree
+
+    @property
+    def rendering(self) -> str:
+        return self._rendering
+
+    @property
+    def digest(self) -> str:
+        return self._digest
+
+    @property
+    def estimate(self) -> Estimate:
+        return self._estimate
 
     @property
     def variables(self) -> tuple[str, ...]:
-        return self.estimate.variables
+        return self._estimate.variables
+
+
+SEAL: Final[object] = object()
 
 
 def check(
@@ -44,12 +56,12 @@ def check(
     used = meter if meter is not None else Meter()
     try:
         tree = parse(source, meter=used)
-        rendering = canonical_rendering(tree)
+        rendering = canonical_rendering(tree, used)
         cost = estimate(tree, len(rendering), environment or {}, meter=used)
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
-    return CheckedExpression(tree, rendering, digest, cost, SEAL)
+    return CheckedExpression(SEAL, tree, rendering, digest, cost)
 
 
 def check_path(source: str) -> Path | Diagnostic:

@@ -31,7 +31,6 @@ ZERO_WEIGHTS = Weights(
     compare_byte=0,
     compare_value=0,
     function_byte=0,
-    literal_value=0,
     pattern_compile=0,
     pattern_match=0,
     rendering_character=0,
@@ -181,6 +180,27 @@ def test_cel_cost_estimate_closes_every_comprehension_scope() -> None:
     outcomes = [check(source) for source in generated]
 
     assert all(isinstance(result, CheckedExpression) for result in results)
-    assert all(
-        isinstance(outcome, CheckedExpression | Diagnostic) for outcome in outcomes
+    assert len(outcomes) == len(generated)
+
+
+def test_cel_cost_estimate_keeps_element_bounds_through_literals() -> None:
+    nested = ValueBound(bytes=60_000, values=30_001, items=1000, string_bytes=0)
+    lists = Variable(
+        ListOf(ListOf(INT)),
+        ValueBound(
+            bytes=60_000, values=30_001, items=30, string_bytes=0, element=nested
+        ),
     )
+    wrapped = "dyn([" + ", ".join(["l"] * 80) + "]).map(x, x.map(y, 1)).size() > 0"
+    sources = [
+        wrapped,
+        "([l] + [1]).map(x, x.map(y, 1))",
+        "(true ? [l] : [1]).map(x, x.map(y, 1))",
+    ]
+
+    untyped = [check(source) for source in sources]
+    typed = check("([[1]] + l).all(x, x.map(y, 1).size() > 0)", {"l": lists})
+
+    for diagnostic in [*untyped, typed]:
+        assert isinstance(diagnostic, Diagnostic)
+        assert diagnostic.reason is Reason.STEPS

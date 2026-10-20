@@ -33,6 +33,8 @@ CORPUS: tuple[str, ...] = (
     "a in [1, 2, 3] && !(b in {'k': 1})",
     "'\\x00\\x7f\\u0080\\uffff\\U00010000'",
     "b'\\x00\\x7f\\x80\\xff\\'\\\"'",
+    "b'\U0001f600\u4e2d\u00e9'",
+    "!-1 || --1 == -(-1)",
 )
 
 NESTED_AT_LIMIT: dict[str, Callable[[], str]] = {
@@ -41,6 +43,7 @@ NESTED_AT_LIMIT: dict[str, Callable[[], str]] = {
     "negation": lambda: "!" * 32 + "x",
     "minus_on_literal": lambda: "-" * 31 + "(1)",
     "negative_literal_under_minus": lambda: "-" * 32 + "1",
+    "negation_of_negative_literal": lambda: "!" * 31 + "-1",
     "selection_of_negative": lambda: "(-1)" + ".b" * 31,
     "index": lambda: "a" + "[-1]" * 32,
     "call_argument": lambda: "size(" * 32 + "x" + ")" * 32,
@@ -100,11 +103,21 @@ def test_cel_rendering_reparse_is_bounded(shape: str) -> None:
     source = NESTED_AT_LIMIT[shape]()
 
     tree = parse(source)
-
     rendering = canonical_rendering(tree)
 
-    assert parse(rendering, RENDERING_LIMITS) == tree
+    reparsed = parse(rendering, RENDERING_LIMITS)
+
+    assert reparsed == tree
     assert bracket_depth(rendering) <= MAX_RENDERING_DEPTH
+
+
+def test_cel_rendering_expansion_is_at_most_sixteen() -> None:
+    source = "b'" + "\U0001f600" * 4093 + "'"
+
+    rendering = canonical_rendering(parse(source))
+
+    assert len(source) == 4096
+    assert 15 * len(source) < len(rendering) <= RENDERING_EXPANSION * len(source)
 
 
 def test_cel_rendering_beyond_the_reparse_bound_is_refused() -> None:

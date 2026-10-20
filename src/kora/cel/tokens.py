@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Final
 
 from kora.cel.characters import (
+    COMMENT_END,
     DIGITS,
     HEX_DIGITS,
     IDENTIFIER_PART,
@@ -151,10 +152,15 @@ class Lexer:
             if character in WHITESPACE:
                 self.advance()
             elif character == "/" and self.peek(1) == "/":
-                while self.position < len(self.text) and self.peek() not in NEWLINES:
-                    self.advance()
+                self.comment()
             else:
                 return
+
+    def comment(self) -> None:
+        while self.position < len(self.text) and self.peek() != COMMENT_END:
+            if self.peek() == "\r" and self.peek(1) != COMMENT_END:
+                raise fail(Reason.INVALID_CHARACTER, self.position)
+            self.advance()
 
     def next_token(self) -> Token:
         start = self.position
@@ -204,7 +210,7 @@ class Lexer:
         return self.text[begin : self.position]
 
     def number(self, start: int) -> Token:
-        if self.peek() == "0" and self.peek(1) in ("x", "X"):
+        if self.peek() == "0" and self.peek(1) == "x":
             self.advance()
             self.advance()
             hexadecimal = self.digits(HEX_DIGITS)
@@ -288,6 +294,8 @@ class Lexer:
             return [SIMPLE_ESCAPES[selector]]
         if selector in ("x", "X"):
             return [self.fixed_digits(start, 2, HEX_DIGITS, 16)]
+        if selector in ("u", "U") and is_bytes:
+            raise fail(Reason.INVALID_ESCAPE, start)
         if selector == "u":
             return self.code_point(
                 start, self.fixed_digits(start, 4, HEX_DIGITS, 16), is_bytes

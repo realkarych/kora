@@ -1,8 +1,13 @@
 import pytest
 
-from kora.cel import Code, Reason
-from kora.cel.functions import NARROWED_FUNCTIONS, Form
-from tests.cel.support import accepted, rejected
+from kora.cel import Code, Diagnostic, Reason
+from kora.cel.functions import (
+    MACRO_NAMES,
+    NARROWED_FUNCTIONS,
+    STANDARD_FUNCTIONS,
+    Form,
+)
+from tests.cel.support import accepted, checked_syntax, rejected
 
 UNSUPPORTED: list[tuple[str, Reason]] = [
     ("Foo{}", Reason.MESSAGE_CONSTRUCTION),
@@ -90,6 +95,30 @@ def test_cel_rejects_functions_the_binding_lacks(
     diagnostic = rejected(source)
 
     assert diagnostic.reason is Reason.UNKNOWN_FUNCTION
+
+
+@pytest.mark.parametrize(
+    ("name", "arity", "form"),
+    [(function.name, function.arity, function.form) for function in STANDARD_FUNCTIONS],
+)
+def test_cel_accepts_every_table_entry(name: str, arity: int, form: Form) -> None:
+    source = narrowed_source(name, arity, form)
+
+    rendering = accepted(source)
+
+    assert f"{name}(" in rendering
+
+
+@pytest.mark.parametrize("macro", sorted(MACRO_NAMES))
+def test_cel_accepts_every_macro_form(macro: str) -> None:
+    two_arguments = f"l.{macro}(v, v == 1)"
+    three_arguments = f"l.{macro}(v, v > 1, v * 2)"
+
+    rendering = accepted(two_arguments)
+    longer = checked_syntax(three_arguments)
+
+    assert rendering == f"l.{macro}(v, (v == 1))"
+    assert isinstance(longer, Diagnostic) == (macro != "map")
 
 
 @pytest.mark.parametrize("source", STANDARD)

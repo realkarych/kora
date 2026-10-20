@@ -1,4 +1,5 @@
 import math
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,12 @@ FLOAT_WORDS: Final[dict[str, float]] = {
     "-Infinity": -math.inf,
     "nan": math.nan,
 }
+INTEGER_TEXT: Final[re.Pattern[str]] = re.compile(r"-?(0|[1-9][0-9]*|0x[0-9a-fA-F]+)")
+FLOAT_TEXT: Final[re.Pattern[str]] = re.compile(
+    r"-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?"
+)
+INT64_RANGE: Final[range] = range(-(2**63), 2**63)
+UINT64_RANGE: Final[range] = range(0, 2**64)
 PRIMITIVES: Final[frozenset[str]] = frozenset(
     {"BOOL", "INT64", "UINT64", "DOUBLE", "STRING", "BYTES"}
 )
@@ -209,7 +216,10 @@ class Fields:
 def as_text(value: FieldValue, context: str) -> str:
     if not isinstance(value, Text):
         raise CaseModelError(f"{context}: expected a string")
-    return value.data.decode("utf-8")
+    try:
+        return value.data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CaseModelError(f"{context}: a string is not UTF-8") from None
 
 
 def as_message(value: FieldValue, context: str) -> Message:
@@ -218,16 +228,19 @@ def as_message(value: FieldValue, context: str) -> Message:
     return value
 
 
-def as_integer(value: FieldValue, context: str) -> int:
-    if not isinstance(value, Number):
-        raise CaseModelError(f"{context}: expected an integer")
-    return int(value.text, 0)
+def as_integer(value: FieldValue, context: str, allowed: range) -> int:
+    if not isinstance(value, Number) or not INTEGER_TEXT.fullmatch(value.text):
+        raise CaseModelError(f"{context}: expected a decimal or hexadecimal integer")
+    number = int(value.text, 0)
+    if number not in allowed:
+        raise CaseModelError(f"{context}: integer out of range")
+    return number
 
 
 def as_float(value: FieldValue, context: str) -> float:
     if isinstance(value, Word | Number) and value.text in FLOAT_WORDS:
         return FLOAT_WORDS[value.text]
-    if not isinstance(value, Number):
+    if not isinstance(value, Number) or not FLOAT_TEXT.fullmatch(value.text):
         raise CaseModelError(f"{context}: expected a number")
     return float(value.text)
 
@@ -265,9 +278,9 @@ def read_value(message: Message, context: str) -> Value:
     if name == "bool_value":
         return BoolValue(Fields(Message((entry,)), VALUE_FIELDS, context).flag(name))
     if name == "int64_value":
-        return IntValue(as_integer(raw, context))
+        return IntValue(as_integer(raw, context, INT64_RANGE))
     if name == "uint64_value":
-        return UintValue(as_integer(raw, context))
+        return UintValue(as_integer(raw, context, UINT64_RANGE))
     if name == "double_value":
         return DoubleValue(as_float(raw, context))
     if name == "string_value":
@@ -303,7 +316,10 @@ def read_value(message: Message, context: str) -> Value:
     body = as_message(raw, context)
     if len(body.fields) != 1 or not body.fields[0].name.startswith("["):
         raise CaseModelError(f"{context}: an object value names its type")
-    return ObjectValue(body.fields[0].name.strip("[]"))
+    type_url = body.fields[0].name.strip("[]")
+    if not type_url:
+        raise CaseModelError(f"{context}: an object value names its type")
+    return ObjectValue(type_url)
 
 
 def read_type(message: Message, context: str) -> DeclaredType:
@@ -399,6 +415,13 @@ def read_case(file: str, section: str, message: Message) -> Case:
     fields = Fields(message, TEST_FIELDS, f"{file}/{section}")
     name = fields.text("name")
     context = f"{file}/{section}/{name}"
+    fields.text("description")
+    bindings = tuple(
+        read_binding(as_message(item, context), context)
+        for item in fields.repeated("bindings")
+    )
+    if len({key for key, _ in bindings}) != len(bindings):
+        raise CaseModelError(f"{context}: a binding key repeats")
     return Case(
         file=file,
         section=section,
@@ -410,10 +433,7 @@ def read_case(file: str, section: str, message: Message) -> Case:
             read_declaration(as_message(item, context), context)
             for item in fields.repeated("type_env")
         ),
-        bindings=tuple(
-            read_binding(as_message(item, context), context)
-            for item in fields.repeated("bindings")
-        ),
+        bindings=bindings,
         expected=read_expected(fields, context),
     )
 
@@ -430,10 +450,12 @@ def read_cases(name: str, text: str) -> CaseFile:
             name,
         )
         section_name = section.text("name")
+        section.text("description")
         cases.extend(
             read_case(name, section_name, as_message(item, name))
             for item in section.repeated("test")
         )
+    document.text("description")
     return CaseFile(document.text("name"), tuple(cases))
 
 

@@ -15,6 +15,7 @@ from kora.cel.limits import (
 )
 from kora.cel.meter import Meter
 from kora.cel.regex import PatternError, parse_pattern
+from kora.cel.reserved import RESERVED_IDENTIFIERS
 from kora.cel.tokens import Token, TokenKind, lex
 from kora.cel.tree import (
     Binary,
@@ -71,27 +72,6 @@ BINARY_LEVELS: Final[dict[TokenKind, tuple[int, BinaryOperator]]] = {
     TokenKind.PERCENT: (5, BinaryOperator.MODULO),
 }
 
-RESERVED_IDENTIFIERS: Final[frozenset[str]] = frozenset(
-    {
-        "as",
-        "break",
-        "const",
-        "continue",
-        "else",
-        "for",
-        "function",
-        "if",
-        "import",
-        "let",
-        "loop",
-        "namespace",
-        "package",
-        "return",
-        "var",
-        "void",
-        "while",
-    }
-)
 
 MEMBER_SUFFIXES: Final[frozenset[TokenKind]] = frozenset(
     {TokenKind.DOT, TokenKind.LEFT_BRACKET}
@@ -196,16 +176,15 @@ class Parser:
         operators: list[Token] = []
         while self.current().kind is kind:
             operators.append(self.advance())
-        fold = (
-            kind is TokenKind.MINUS
-            and self.current().kind in FOLDABLE
-            and self.kind_ahead(1) not in MEMBER_SUFFIXES
-        )
-        levels = len(operators) - 1 if fold else len(operators)
+        literal_minus = self.foldable_minus()
+        fold = kind is TokenKind.MINUS and len(operators) == 1 and self.foldable()
+        levels = 0 if fold else len(operators)
         if depth + levels > self.limits.depth:
             raise fail(Reason.DEPTH, operators[self.limits.depth - depth].offset)
         if fold:
             operand = Parsed(self.negative_literal(operators[-1]), 0)
+        elif kind is TokenKind.BANG and literal_minus:
+            operand = Parsed(self.negative_literal(self.advance()), 0)
         else:
             operand = self.member(depth + levels)
         operator = UnaryOperator.NOT if kind is TokenKind.BANG else UnaryOperator.NEGATE
@@ -216,6 +195,19 @@ class Parser:
             height += 1
             self.meter.tick()
         return Parsed(node, height)
+
+    def foldable(self) -> bool:
+        return (
+            self.current().kind in FOLDABLE
+            and self.kind_ahead(1) not in MEMBER_SUFFIXES
+        )
+
+    def foldable_minus(self) -> bool:
+        return (
+            self.current().kind is TokenKind.MINUS
+            and self.kind_ahead(1) in FOLDABLE
+            and self.kind_ahead(2) not in MEMBER_SUFFIXES
+        )
 
     def negative_literal(self, minus: Token) -> Node:
         token = self.advance()

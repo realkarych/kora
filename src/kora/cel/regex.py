@@ -53,10 +53,10 @@ ALLOWED_FLAGS: Final[frozenset[str]] = frozenset("ims")
 KNOWN_FLAGS: Final[frozenset[str]] = frozenset("imsxuUR")
 ANCHOR_ESCAPES: Final[frozenset[str]] = frozenset("bBAz")
 SET_OPERATORS: Final[tuple[str, ...]] = ("&&", "--", "~~")
-PUNCTUATION: Final[frozenset[str]] = frozenset(string.punctuation)
-NAME_CHARACTERS: Final[frozenset[str]] = frozenset(
-    string.ascii_letters + string.digits + "_"
-)
+PUNCTUATION: Final[frozenset[str]] = frozenset(string.punctuation) - {"<", ">"}
+NAME_START: Final[frozenset[str]] = frozenset(string.ascii_letters + "_")
+NAME_CHARACTERS: Final[frozenset[str]] = NAME_START | frozenset(string.digits)
+WIDE_RANGE_START: Final[int] = 0x80
 
 
 class PatternError(Exception):
@@ -148,8 +148,7 @@ class PatternParser:
         return weight
 
     def simple_quantifier(self) -> int:
-        self.advance()
-        return 1
+        return 2 if self.advance() == "+" else 1
 
     def number(self) -> int:
         start = self.position
@@ -217,6 +216,8 @@ class PatternParser:
 
     def group_name(self) -> None:
         start = self.position
+        if self.peek() not in NAME_START:
+            raise PatternError(Reason.INVALID_PATTERN)
         while self.peek() in NAME_CHARACTERS:
             self.advance()
         if self.position == start or self.advance() != ">":
@@ -224,16 +225,21 @@ class PatternParser:
 
     def flags(self) -> bool:
         seen = False
+        negated = False
+        pending = False
         while True:
             character = self.advance()
-            if character == ")":
-                if not seen:
+            if character in (")", ":"):
+                if not seen or pending:
                     raise PatternError(Reason.INVALID_PATTERN)
-                return True
-            if character == ":":
-                return False
+                return character == ")"
             if character == "-":
+                if negated:
+                    raise PatternError(Reason.INVALID_PATTERN)
+                negated = True
+                pending = True
                 continue
+            pending = False
             if character in KNOWN_FLAGS and character not in ALLOWED_FLAGS:
                 raise PatternError(Reason.UNSUPPORTED_PATTERN)
             if character not in ALLOWED_FLAGS:
@@ -269,6 +275,8 @@ class PatternParser:
         if character == "\\":
             escaped = self.escape(in_class=True)
             if escaped.literal is None:
+                if self.peek() == "-" and self.peek(1) not in ("]", ""):
+                    raise PatternError(Reason.INVALID_PATTERN)
                 return escaped.weight
             start = escaped.literal
         else:
@@ -280,6 +288,8 @@ class PatternParser:
             end = self.range_end()
             if ord(end) < ord(start):
                 raise PatternError(Reason.INVALID_PATTERN)
+            if ord(end) >= WIDE_RANGE_START:
+                return max(self.range_weight, ANY_WEIGHT)
             return self.range_weight
         return self.literal_weight
 
@@ -298,8 +308,10 @@ class PatternParser:
         character = self.advance()
         if character in CLASS_WEIGHTS:
             return Escaped(CLASS_WEIGHTS[character], None, True)
-        if character in ("p", "P"):
+        if character == "p":
             return Escaped(self.unicode_class(), None, True)
+        if character == "P":
+            return Escaped(max(self.unicode_class(), ANY_WEIGHT), None, True)
         if character in ANCHOR_ESCAPES:
             if in_class:
                 raise PatternError(Reason.INVALID_PATTERN)

@@ -6,7 +6,12 @@ REJECTED_RANGES: Final[tuple[tuple[int, int], ...]] = (
     (0x000E, 0x001F),
     (0x007F, 0x009F),
     (0x00AD, 0x00AD),
+    (0x0600, 0x0605),
     (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
     (0x180E, 0x180E),
     (0x200B, 0x200F),
     (0x2028, 0x202E),
@@ -14,6 +19,13 @@ REJECTED_RANGES: Final[tuple[tuple[int, int], ...]] = (
     (0xD800, 0xDFFF),
     (0xFEFF, 0xFEFF),
     (0xFFF9, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0001, 0xE0001),
+    (0xE0020, 0xE007F),
 )
 
 REJECTED: Final[frozenset[int]] = frozenset(
@@ -21,6 +33,7 @@ REJECTED: Final[frozenset[int]] = frozenset(
 )
 WHITESPACE: Final[frozenset[str]] = frozenset(" \t\n\f\r")
 NEWLINES: Final[frozenset[str]] = frozenset("\n\r")
+COMMENT_END: Final[str] = "\n"
 DIGITS: Final[frozenset[str]] = frozenset("0123456789")
 HEX_DIGITS: Final[frozenset[str]] = frozenset("0123456789abcdefABCDEF")
 OCTAL_DIGITS: Final[frozenset[str]] = frozenset("01234567")

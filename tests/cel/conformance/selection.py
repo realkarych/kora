@@ -189,6 +189,37 @@ KORA_REJECTIONS: Final[tuple[Rejection, ...]] = (
 )
 
 
+CEL_STANDARD_FUNCTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "size",
+        "int",
+        "uint",
+        "double",
+        "string",
+        "bytes",
+        "bool",
+        "type",
+        "dyn",
+        "duration",
+        "timestamp",
+        "contains",
+        "endsWith",
+        "startsWith",
+        "matches",
+        "getDate",
+        "getDayOfMonth",
+        "getDayOfWeek",
+        "getDayOfYear",
+        "getFullYear",
+        "getHours",
+        "getMilliseconds",
+        "getMinutes",
+        "getMonth",
+        "getSeconds",
+    }
+)
+
+
 def rejection_for(file: str, section: str, test: str) -> Rejection | None:
     for rejection in KORA_REJECTIONS:
         if (rejection.file, rejection.section) != (file, section):

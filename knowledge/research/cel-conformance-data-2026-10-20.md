@@ -4,7 +4,7 @@ Checked: 2026-10-20, for [issue #161](https://github.com/realkarych/kora/issues/
 
 ## Vendored cel-spec files
 
-Source: [google/cel-spec](https://github.com/google/cel-spec), directory `tests/simple/testdata`, at commit `40a3c9007a9305d1f2638d5f538a4e011732cace` (committed 2026-09-16; the latest commit touching that directory on 2026-10-20). The files are copied byte for byte into `tests/cel/conformance/testdata/`. Their git blob identifiers equal the upstream ones, and `tests/cel/conformance/manifest.py` holds their SHA-256 values.
+Source: [google/cel-spec](https://github.com/google/cel-spec), directory `tests/simple/testdata`, at commit `40a3c9007a9305d1f2638d5f538a4e011732cace` (committed 2026-09-16 as the squash merge of upstream pull request 530, carrying GitHub's verified web-flow signature; the latest commit touching that directory on 2026-10-20). The files are copied byte for byte into `tests/cel/conformance/testdata/`. Their git blob identifiers equal the upstream ones, and `tests/cel/conformance/manifest.py` holds their SHA-256 values.
 
 | File | Bytes | Upstream git blob | SHA-256 |
 |---|---|---|---|

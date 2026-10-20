@@ -1,6 +1,7 @@
 import pytest
 
 from kora.cel import Code, Reason
+from kora.cel.regex import parse_pattern
 from tests.cel.support import accepted, rejected
 
 OUTSIDE_SUBSET: list[str] = [
@@ -23,9 +24,26 @@ OUTSIDE_SUBSET: list[str] = [
     "\\\\k<n>",
     "\\\\h",
     "\\\\y",
+    "a\\\\<",
+    "\\\\>a",
 ]
 
-INVALID: list[str] = ["(", "a)", "a{,3}", "*a", "a{3,1}", "[a", "\\\\", "(?)", "a{x}"]
+INVALID: list[str] = [
+    "(",
+    "a)",
+    "a{,3}",
+    "*a",
+    "a{3,1}",
+    "[a",
+    "\\\\",
+    "(?)",
+    "a{x}",
+    "(?i-)a",
+    "(?-)a",
+    "(?i-m-s)a",
+    "(?P<1a>a)",
+    "[\\\\d-z]",
+]
 
 SUPPORTED: list[str] = [
     "^[a-z0-9-]{1,63}$",
@@ -44,6 +62,8 @@ SUPPORTED: list[str] = [
     "\\\\d\\\\D\\\\w\\\\W\\\\s\\\\S\\\\b\\\\B\\\\A\\\\z",
     "\\\\.\\\\*\\\\+\\\\?\\\\(\\\\)\\\\[\\\\]\\\\{\\\\}\\\\|\\\\^\\\\$\\\\#\\\\&\\\\-\\\\~",
     "",
+    "(?i-m)a",
+    "[\\\\d-]",
 ]
 
 OVER_CAP: list[str] = [
@@ -95,8 +115,7 @@ def test_cel_regex_accepts_the_supported_subset(pattern: str) -> None:
     assert rendering.startswith("x.matches(")
 
 
-@pytest.mark.parametrize("pattern", OVER_CAP)
-def test_cel_regex_compile_cost_bounded(pattern: str) -> None:
+def test_cel_regex_compile_cost_bounded() -> None:
     groups_at_limit = "(" * 32 + "a" + ")" * 32
     groups_over_limit = "(" * 33 + "a" + ")" * 33
     classes_over_limit = "[" * 33 + "a" + "]" * 33
@@ -106,10 +125,25 @@ def test_cel_regex_compile_cost_bounded(pattern: str) -> None:
     nested = rejected(matching(groups_over_limit))
     nested_classes = rejected(matching(classes_over_limit))
     flooded = rejected(matching(flood))
-    oversized = rejected(matching(pattern))
+    oversized = [rejected(matching(pattern)) for pattern in OVER_CAP]
 
     assert nested.reason is Reason.PATTERN_NESTING
     assert nested_classes.reason is Reason.PATTERN_NESTING
     assert flooded.reason is Reason.PATTERN_NESTING
-    assert oversized.code is Code.LIMIT
-    assert oversized.reason is Reason.PATTERN_SIZE
+    assert all(diagnostic.code is Code.LIMIT for diagnostic in oversized)
+    assert all(diagnostic.reason is Reason.PATTERN_SIZE for diagnostic in oversized)
+
+
+def test_cel_regex_estimate_floors_wide_classes() -> None:
+    any_character = parse_pattern(".")
+
+    wide_range = parse_pattern("[\\x{0}-\\x{10FFFF}]")
+    negated_class = parse_pattern("\\P{Z}")
+    plus = parse_pattern("a+")
+    counted = parse_pattern("a{1,}")
+    star = parse_pattern("a*")
+
+    assert wide_range >= any_character
+    assert negated_class >= any_character
+    assert plus == counted
+    assert star < plus

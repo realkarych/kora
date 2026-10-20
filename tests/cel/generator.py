@@ -12,9 +12,9 @@ STRING_PIECES: tuple[str, ...] = (
     "\\101",
     "\\u00e9",
     "\\U0001f600",
-    "é",
+    "\u00e9",
     "\U0001f600",
-    "中",
+    "\u4e2d",
 )
 IDENTIFIERS: tuple[str, ...] = ("a", "b", "inputs", "response", "x_1")
 FIELDS: tuple[str, ...] = ("b", "decision", "exit_code", "as", "if")
@@ -97,7 +97,7 @@ class ExpressionGenerator:
         if choice == 3:
             return self.string_literal()
         if choice == 4:
-            return "b'" + self.random.choice(("ab", "\\xff", "\\000", "é")) + "'"
+            return "b'" + self.random.choice(("ab", "\\xff", "\\000", "\u00e9")) + "'"
         if choice == 5:
             return self.random.choice(("true", "false", "null"))
         if choice == 6:
