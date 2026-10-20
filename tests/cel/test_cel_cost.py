@@ -384,3 +384,48 @@ def test_cel_cost_estimate_never_charges_dyn_additions_below_typed_ones() -> Non
     assert isinstance(untyped, CheckedExpression)
     assert isinstance(typed, CheckedExpression)
     assert untyped.estimate.memory >= typed.estimate.memory
+
+
+class DerivedBound(ValueBound):
+    pass
+
+
+def test_cel_cost_estimate_refuses_malformed_bounds() -> None:
+    leaf = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    bad_element = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    object.__setattr__(bad_element, "element", 5)
+    bad_fields = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    object.__setattr__(bad_fields, "fields", [leaf])
+    bad_root = Variable(DYN, leaf)
+    object.__setattr__(bad_root, "bound", 5)
+    derived = DerivedBound(bytes=10, values=1, items=0, string_bytes=0)
+    first_fields: dict[str, ValueBound] = {}
+    second_fields: dict[str, ValueBound] = {}
+    first = ValueBound(bytes=10, values=1, items=0, string_bytes=0, fields=first_fields)
+    second = ValueBound(
+        bytes=10, values=1, items=0, string_bytes=0, fields=second_fields
+    )
+    first_fields["b"] = second
+    second_fields["a"] = first
+    object.__setattr__(first, "bytes", "10")
+    negative = ValueBound(bytes=-1, values=1, items=0, string_bytes=0)
+
+    unreached = check(
+        "v == v", {"v": Variable(DYN, leaf), "w": Variable(DYN, negative)}
+    )
+
+    assert isinstance(unreached, CheckedExpression)
+    with pytest.raises(BoundError, match="not a value bound"):
+        check("v == v", {"v": Variable(DYN, bad_element)})
+    with pytest.raises(BoundError, match="not a mapping"):
+        check("v == v", {"v": Variable(DYN, bad_fields)})
+    with pytest.raises(BoundError, match="not a value bound"):
+        check("v == v", {"v": bad_root})
+    with pytest.raises(BoundError, match="not a value bound"):
+        check("v == v", {"v": Variable(DYN, derived)})
+    for name in ("p", "q"):
+        with pytest.raises(BoundError, match="not an integer"):
+            check(
+                f"{name} == {name}",
+                {"p": Variable(DYN, first), "q": Variable(DYN, second)},
+            )

@@ -304,6 +304,68 @@ def scalar(cel_type: CelType, size: int = SCALAR_BYTES) -> Shape:
     return Shape(cel_type, Affine.of(size), Affine.of(1), 0, 0)
 
 
+class BoundError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    bytes: int
+    values: int
+    items: int
+    string_bytes: int
+    element: ValueBound | None
+    fields: tuple[tuple[str, ValueBound], ...]
+
+    def children(self) -> list[ValueBound]:
+        element = [self.element] if self.element is not None else []
+        return [*element, *(child for _, child in self.fields)]
+
+
+def is_integer(value: object) -> bool:
+    return type(value) is int
+
+
+def is_exact_bound(value: object) -> bool:
+    return type(value) is ValueBound
+
+
+def is_mapping(value: object) -> bool:
+    return isinstance(value, Mapping)
+
+
+def is_text(value: object) -> bool:
+    return type(value) is str
+
+
+def take_snapshot(bound: object) -> Snapshot:
+    if not isinstance(bound, ValueBound) or not is_exact_bound(bound):
+        raise BoundError("a bound is not a value bound")
+    sizes = (bound.bytes, bound.values, bound.items, bound.string_bytes)
+    if not all(map(is_integer, sizes)):
+        raise BoundError("a value bound size is not an integer")
+    if any(size < 0 for size in sizes):
+        raise BoundError("a value bound is negative")
+    if not is_mapping(bound.fields):
+        raise BoundError("a bound's fields are not a mapping")
+    pairs: list[tuple[str, ValueBound]] = []
+    for name, child in bound.fields.items():
+        if not is_text(name) or not is_exact_bound(child):
+            raise BoundError("a bound is not a value bound")
+        pairs.append((name, child))
+    if bound.element is not None and not is_exact_bound(bound.element):
+        raise BoundError("a bound is not a value bound")
+    bytes_size, values, items, string_bytes = sizes
+    return Snapshot(
+        bytes_size,
+        values,
+        items,
+        string_bytes,
+        bound.element,
+        tuple(pairs),
+    )
+
+
 @dataclass(frozen=True)
 class Converted:
     bound: ValueBound
@@ -315,11 +377,21 @@ class BoundShapes:
     def __init__(self, meter: Meter) -> None:
         self.meter: Meter = meter
         self.memo: dict[int, Converted] = {}
+        self.snapshots: dict[int, tuple[ValueBound, Snapshot]] = {}
 
     def shape(self, cel_type: CelType, bound: ValueBound) -> Shape:
         self.convert(bound)
         shape = self.memo[id(bound)].shape
         return replace(shape, type=cel_type)
+
+    def snapshot(self, bound: ValueBound) -> Snapshot:
+        known = self.snapshots.get(id(bound))
+        if known is not None:
+            return known[1]
+        taken = take_snapshot(bound)
+        self.meter.tick(1 + len(taken.fields))
+        self.snapshots[id(bound)] = (bound, taken)
+        return taken
 
     def convert(self, root: ValueBound) -> None:
         if id(root) in self.memo:
@@ -335,7 +407,7 @@ class BoundShapes:
             key = id(bound)
             if position == 0:
                 order[key] = low[key] = len(order)
-                edges[key] = children_of(bound)
+                edges[key] = self.snapshot(bound).children()
                 component.append(bound)
                 open_ids.add(key)
             children = edges[key]
@@ -375,18 +447,28 @@ class BoundShapes:
             id(child) in member_ids for child in edges[id(head)]
         )
         for member in members:
+            self.check_children(member)
+        for member in members:
             self.finish(member, cyclic)
 
+    def check_children(self, bound: ValueBound) -> None:
+        parent = self.snapshot(bound)
+        for child in parent.children():
+            taken = self.snapshot(child)
+            if taken.bytes > parent.bytes or taken.values > parent.values:
+                raise BoundError("a child bound is larger than its parent")
+            if taken.items > DATA_ITEMS or taken.string_bytes > DATA_STRING_BYTES:
+                raise BoundError("a child bound exceeds the data bounds")
+
     def finish(self, bound: ValueBound, cyclic: bool) -> None:
-        self.meter.tick(1 + len(bound.fields))
-        check_bound(bound)
+        taken = self.snapshot(bound)
         element = (
-            None if cyclic or bound.element is None else self.required(bound.element)
+            None if cyclic or taken.element is None else self.memo[id(taken.element)]
         )
         fields = (
             {}
             if cyclic
-            else {name: self.required(child) for name, child in bound.fields.items()}
+            else {name: self.memo[id(child)] for name, child in taken.fields}
         )
         heights = [
             part.height for part in (element, *fields.values()) if part is not None
@@ -398,52 +480,14 @@ class BoundShapes:
             height = 1
         shape = Shape(
             DYN,
-            Affine.of(bound.bytes),
-            Affine.of(bound.values),
-            bound.items,
-            bound.string_bytes,
+            Affine.of(taken.bytes),
+            Affine.of(taken.values),
+            taken.items,
+            taken.string_bytes,
             element.shape if element is not None else None,
             {name: part.shape for name, part in fields.items()},
         )
         self.memo[id(bound)] = Converted(bound, shape, height)
-
-    def required(self, bound: ValueBound) -> Converted:
-        converted = self.memo.get(id(bound))
-        if converted is None:
-            raise BoundError("a bound changed while it was converted")
-        return converted
-
-
-class BoundError(ValueError):
-    pass
-
-
-def is_integer(value: object) -> bool:
-    return type(value) is int
-
-
-def is_bound(value: object) -> bool:
-    return isinstance(value, ValueBound)
-
-
-def check_bound(bound: ValueBound) -> None:
-    sizes = (bound.bytes, bound.values, bound.items, bound.string_bytes)
-    if not all(map(is_integer, sizes)):
-        raise BoundError("a value bound size is not an integer")
-    if any(size < 0 for size in sizes):
-        raise BoundError("a value bound is negative")
-    for child in children_of(bound):
-        if not is_bound(child):
-            raise BoundError("a child bound is not a value bound")
-        if child.bytes > bound.bytes or child.values > bound.values:
-            raise BoundError("a child bound is larger than its parent")
-        if child.items > DATA_ITEMS or child.string_bytes > DATA_STRING_BYTES:
-            raise BoundError("a child bound exceeds the data bounds")
-
-
-def children_of(bound: ValueBound) -> list[ValueBound]:
-    element = [bound.element] if bound.element is not None else []
-    return [*element, *bound.fields.values()]
 
 
 @dataclass(frozen=True)
