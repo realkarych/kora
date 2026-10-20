@@ -5,7 +5,11 @@ from typing import cast
 
 import pytest
 import structlog.contextvars
+from sqlalchemy.exc import IntegrityError
 
+from kora.db import DB_COMPONENT
+from kora.db.connection import Database
+from kora.db.reads import token_by_digest
 from kora.observability import (
     EventSpec,
     Level,
@@ -14,6 +18,7 @@ from kora.observability import (
     RenderFormat,
     SecretAdmissionError,
 )
+from tests.db.seed import Seeder
 from tests.observability.conftest import (
     LEVEL_EVENTS,
     NOTE,
@@ -26,6 +31,18 @@ REGISTERED_VALUE: str = "canary-registered-value-0001"
 UNREGISTERED_MARKER: str = "UNREGISTERED-MARKER-7731"
 MASK: str = "[redacted]"
 TRUNCATION_MARKER: str = "[truncated]"
+BRIDGED_RECORD_KEYS: frozenset[str] = frozenset(
+    {
+        "schema_version",
+        "timestamp",
+        "level",
+        "event",
+        "message",
+        "component",
+        "logger",
+        "instance_id",
+    }
+)
 
 
 def raise_chained(marker: str) -> None:
@@ -325,3 +342,44 @@ def test_unregistered_event_specifications_are_rejected(
     assert "testing.rogue" not in events
     assert events.count("testing.note") == 1
     assert rejected[(TEST_COMPONENT, "INFO", LossReason.UNKNOWN_EVENT.value)] == 1
+
+
+@pytest.mark.asyncio
+async def test_sql_parameters_and_statements_never_appear_in_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    settings = LoggingSettings(
+        level=Level.DEBUG,
+        component_levels={DB_COMPONENT: Level.DEBUG},
+        third_party={"sqlalchemy": Level.DEBUG},
+    )
+    diagnostics = configure(settings, pipe.write_end)
+    pipe.reader.start()
+
+    async with database.transaction() as connection:
+        await Seeder(connection).namespace(UNREGISTERED_MARKER)
+    with pytest.raises(IntegrityError):
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace(UNREGISTERED_MARKER)
+    async with database.read_transaction() as connection:
+        found = await token_by_digest(connection, UNREGISTERED_MARKER)
+    diagnostics.shutdown()
+    output = finished_output(None, pipe)
+
+    records = pipe.reader.records()
+    assert found is None
+    assert UNREGISTERED_MARKER not in output
+    assert "INSERT INTO" not in output
+    assert "SELECT" not in output
+    failed = [
+        record for record in records if record["event"] == "db.transaction.failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0]["dialect"] == database.dialect.value
+    chain = cast(list[dict[str, object]], failed[0]["exception"])
+    assert chain[0]["type"] == "IntegrityError"
+    assert all(set(entry) <= {"type", "module", "frames"} for entry in chain)
+    bridged = [record for record in records if record["event"] == "thirdparty.record"]
+    assert bridged
+    assert all(str(record["logger"]).startswith("sqlalchemy") for record in bridged)
+    assert all(set(record) <= BRIDGED_RECORD_KEYS | {"exception"} for record in bridged)

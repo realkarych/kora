@@ -13,3 +13,7 @@ web/.vite/
 src/kora/api/static/
 .superpowers/
 /measurements/
+*.db
+*.db-wal
+*.db-shm
+.kora-data/

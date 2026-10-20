@@ -11,6 +11,9 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
+    "aiosqlite==0.22.1",
+    "alembic==1.20.0",
+    "sqlalchemy[asyncio]==2.1.5",
     "structlog==26.1.0",
     "typer==0.27.3",
 ]
@@ -30,6 +33,11 @@ kora = "kora.__main__:main"
 Homepage = "https://github.com/realkarych/kora"
 Repository = "https://github.com/realkarych/kora"
 Issues = "https://github.com/realkarych/kora/issues"
+
+[project.optional-dependencies]
+postgres = [
+    "asyncpg==0.32.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kora"]
@@ -57,6 +65,9 @@ exclude = [
     "/web/dist",
     "/web/build",
 ]
+
+[tool.uv]
+no-build-package = ["asyncpg", "greenlet", "sqlalchemy", "markupsafe", "wrapt"]
 
 [tool.pyright]
 include = ["src", "hatch_build.py", "tests"]
@@ -100,4 +111,5 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "ruff==0.17.1",
+    "testcontainers==4.15.0",
 ]

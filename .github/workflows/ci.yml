@@ -25,13 +25,19 @@ jobs:
         include:
           - os: ubuntu-24.04
             python: 3.11.17
+            databases: sqlite,postgresql
           - os: ubuntu-24.04
             python: 3.15.0
+            databases: sqlite,postgresql
           - os: macos-15
             python: 3.11.17
+            databases: sqlite
     defaults:
       run:
         shell: bash
+    env:
+      KORA_TEST_DATABASES: ${{ matrix.databases }}
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -55,7 +61,7 @@ jobs:
           cache-suffix: scaffold-${{ matrix.python }}
       - name: Install locked dependencies
         run: |
-          uv sync --locked --group build --no-install-project
+          uv sync --locked --no-build --group build --extra postgres --no-install-project
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
           uv export --locked --only-group build --no-emit-project \
             --format requirements.txt \
@@ -94,6 +100,20 @@ jobs:
           name: logging-overhead-measurement
           path: measurements/logging-overhead.json
           if-no-files-found: error
+      - name: Measure metadata database lifetime
+        id: database_measurement
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
+            uv run --no-sync pytest -q -m measurement tests/measurements/test_metadata_database_lifetime.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: ${{ !cancelled() && steps.database_measurement.outcome != 'skipped' }}
+        with:
+          name: metadata-database-lifetime-measurement
+          path: measurements/metadata-database-lifetime.json
+          if-no-files-found: error
       - name: Build isolated distributions offline
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
@@ -102,7 +122,7 @@ jobs:
             --require-hashes --clear
       - name: Check the synced environment and unchanged dependency files
         run: |
-          uv sync --locked --group build
+          uv sync --locked --no-build --group build --extra postgres
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 

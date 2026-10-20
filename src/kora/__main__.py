@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import threading
@@ -17,6 +18,7 @@ from kora.cli import (
     THREAD_FAILED,
     build_app,
 )
+from kora.db import DB_COMPONENT
 from kora.observability import (
     CATALOG,
     ComponentLogger,
@@ -37,6 +39,8 @@ STDERR_DESCRIPTOR: int = 2
 STDOUT_DESCRIPTOR: int = 1
 PROGRAM: str = "kora"
 CONFIGURATION_PREFIX: str = "kora: invalid logging configuration"
+DATABASE_CONFIGURATION_PREFIX: str = "kora: invalid database configuration"
+DATABASE_GROUP: str = DB_COMPONENT
 MISSING_COMMAND: str = "a command or --version is required"
 
 
@@ -65,6 +69,48 @@ def utc_now() -> datetime:
 
 def new_instance_id() -> str:
     return uuid.uuid4().hex
+
+
+def build_database_app(environment: Mapping[str, str]) -> typer.Typer:
+    database_app = typer.Typer(
+        name=DATABASE_GROUP,
+        help="Metadata database operations.",
+        add_completion=False,
+        pretty_exceptions_enable=False,
+        rich_markup_mode=None,
+    )
+
+    @database_app.callback(invoke_without_command=True)
+    def database_root(context: typer.Context) -> None:
+        if context.invoked_subcommand is None:
+            write_usage(context.get_usage(), MISSING_COMMAND)
+            raise typer.Exit(EXIT_USAGE)
+
+    @database_app.command(help="Apply every pending migration.")
+    def upgrade() -> None:
+        from kora.db.connection import (
+            DatabaseConfigurationError,
+            read_database_settings,
+        )
+        from kora.db.migrations import upgrade_database
+
+        try:
+            settings = read_database_settings(environment)
+        except DatabaseConfigurationError as error:
+            write_stderr(
+                f"{DATABASE_CONFIGURATION_PREFIX}: {error.variable}: {error.reason}\n"
+            )
+            raise typer.Exit(EXIT_CONFIGURATION) from None
+        report = asyncio.run(upgrade_database(settings))
+        typer.echo(report.to_revision)
+
+    return database_app
+
+
+def compose_application(environment: Mapping[str, str]) -> typer.Typer:
+    app = build_app()
+    app.add_typer(build_database_app(environment), name=DATABASE_GROUP)
+    return app
 
 
 def run_application(app: typer.Typer, argv: Sequence[str]) -> int:
@@ -162,7 +208,9 @@ def main(
     try:
         with ThreadFailureHook(log):
             try:
-                exit_code = run_application(application or build_app(), arguments)
+                exit_code = run_application(
+                    application or compose_application(environment), arguments
+                )
             except KeyboardInterrupt:
                 exit_code = EXIT_INTERRUPT
             except SystemExit as request:

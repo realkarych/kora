@@ -1,9 +1,7 @@
 import gc
 import hashlib
-import json
 import logging
 import os
-import statistics
 import string
 import subprocess
 import sys
@@ -11,9 +9,6 @@ import threading
 import time
 import tracemalloc
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 
@@ -28,8 +23,23 @@ from kora.observability import (
     bound_scope,
     configure_process,
 )
+from tests.measurements.harness import (
+    Report,
+    Sample,
+    current_rss_bytes,
+    report_lifecycle,
+    settled_counts,
+    timed,
+    utc_now,
+)
 
 pytestmark = pytest.mark.measurement
+
+
+@pytest.fixture
+def report() -> Iterator[Report]:
+    yield from report_lifecycle()
+
 
 MEASUREMENT_COMPONENT: str = CATALOG.register_component("measurement")
 SIXTEEN_FIELDS: dict[str, FieldKind] = {
@@ -86,8 +96,6 @@ IDLE_SHUTDOWN_SECONDS: float = 0.5
 HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
 HEAP_SLOPE_ALLOWANCE_BYTES: int = 65_536
 RSS_GROWTH_ALLOWANCE_BYTES: int = 16_777_216
-OUTPUT_VARIABLE: str = "KORA_MEASUREMENT_OUTPUT"
-REVISION_VARIABLE: str = "KORA_MEASUREMENT_REVISION"
 
 FULL_PIPE_SCRIPT: str = """
 import datetime
@@ -108,91 +116,6 @@ started = time.monotonic()
 diagnostics.shutdown()
 sys.stdout.write("%.3f" % (time.monotonic() - started))
 """
-
-
-def utc_now() -> datetime:
-    return datetime.now(UTC)
-
-
-def new_extra() -> dict[str, float | int | bool | str | None]:
-    return {}
-
-
-@dataclass
-class Sample:
-    workload: str
-    repeat: int
-    count: int
-    seconds: float
-    extra: dict[str, float | int | bool | str | None] = field(default_factory=new_extra)
-
-    def microseconds_per_record(self) -> float:
-        return self.seconds / self.count * 1_000_000 if self.count else 0.0
-
-
-def new_samples() -> list["Sample"]:
-    return []
-
-
-def new_gates() -> dict[str, bool]:
-    return {}
-
-
-def new_durations() -> dict[str, float]:
-    return {}
-
-
-@dataclass
-class Report:
-    started_at: str
-    platform: str
-    python: str
-    revision: str
-    samples: list[Sample] = field(default_factory=new_samples)
-    gates: dict[str, bool] = field(default_factory=new_gates)
-    durations: dict[str, float] = field(default_factory=new_durations)
-
-    def summary(self) -> dict[str, dict[str, float]]:
-        grouped: dict[str, list[float]] = {}
-        for sample in self.samples:
-            grouped.setdefault(sample.workload, []).append(
-                sample.microseconds_per_record()
-            )
-        return {
-            workload: {
-                "median_us_per_record": statistics.median(values),
-                "p95_us_per_record": sorted(values)[
-                    max(0, int(len(values) * 0.95) - 1)
-                ],
-                "repeats": len(values),
-            }
-            for workload, values in grouped.items()
-        }
-
-    def to_json(self) -> str:
-        return json.dumps(
-            {
-                "started_at": self.started_at,
-                "platform": self.platform,
-                "python": self.python,
-                "revision": self.revision,
-                "summary": self.summary(),
-                "gates": self.gates,
-                "durations_seconds": self.durations,
-                "samples": [
-                    {
-                        "workload": s.workload,
-                        "repeat": s.repeat,
-                        "count": s.count,
-                        "seconds": s.seconds,
-                        "us_per_record": s.microseconds_per_record(),
-                        **s.extra,
-                    }
-                    for s in self.samples
-                ],
-            },
-            indent=2,
-        )
 
 
 class Sink:
@@ -217,36 +140,6 @@ class Sink:
         if self._thread is not None:
             self._thread.join(5)
         os.close(self.read_end)
-
-
-def timed(action: Callable[[], None]) -> float:
-    started = time.perf_counter()
-    action()
-    return time.perf_counter() - started
-
-
-def open_descriptors() -> int:
-    return len(os.listdir("/dev/fd"))
-
-
-def settled_counts(deadline_seconds: float = 5.0) -> tuple[int, int]:
-    deadline = time.monotonic() + deadline_seconds
-    previous = (threading.active_count(), open_descriptors())
-    while time.monotonic() < deadline:
-        time.sleep(0.05)
-        current = (threading.active_count(), open_descriptors())
-        if current == previous:
-            return current
-        previous = current
-    return previous
-
-
-def current_rss_bytes() -> int | None:
-    statm = Path("/proc/self/statm")
-    if not statm.exists():
-        return None
-    resident_pages = int(statm.read_text().split()[1])
-    return resident_pages * os.sysconf("SC_PAGE_SIZE")
 
 
 def configured(settings: LoggingSettings, sink: Sink) -> ProcessDiagnostics:
@@ -312,22 +205,6 @@ def near_miss_values() -> list[str]:
     return [
         family + "x" * length for family in ("ab", "cb") for length in range(6, 133)
     ]
-
-
-@pytest.fixture
-def report() -> Iterator[Report]:
-    created = Report(
-        utc_now().isoformat(),
-        sys.platform,
-        sys.version.split()[0],
-        os.environ.get(REVISION_VARIABLE, ""),
-    )
-    yield created
-    output = os.environ.get(OUTPUT_VARIABLE)
-    if output:
-        path = Path(output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(created.to_json(), encoding="utf-8")
 
 
 def test_logging_overhead_and_resource_lifetime(report: Report) -> None:

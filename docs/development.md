@@ -8,7 +8,9 @@ Import-layer test amendment dated 2026-10-19: the pytest source check added unde
 
 Logging and scanner amendment dated 2026-10-20: the measurement step, the Ruff `S` family and the scanner commands added under [issue #147](https://github.com/realkarych/kora/issues/147); wording pending line-by-line owner review.
 
-The repository contains an importable typed Python package with the logging bootstrap and the `kora` entry point (`kora --version`), a minimal React shell and distribution builds. The execution engine, HTTP API, the CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
+Metadata database amendment dated 2026-10-20: the `postgres` extra, wheel-only installation, the database test selection, the PostgreSQL container, `kora db upgrade` and the database measurement added under [issue #153](https://github.com/realkarych/kora/issues/153); wording pending line-by-line owner review.
+
+The repository contains an importable typed Python package with the logging bootstrap, the metadata database package with its migrations, the `kora` entry point (`kora --version`, `kora db upgrade`), a minimal React shell and distribution builds. The execution engine, HTTP API, the other CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup
 
@@ -33,7 +35,7 @@ pnpm --version
 Run the following commands from the repository root in the same shell. Dependency setup may access package registries; retain the uv cache, pnpm store and temporary build constraints for the subsequent offline distribution build. The setup commands preserve both lockfiles:
 
 ```sh
-uv sync --locked --group build --no-install-project
+uv sync --locked --no-build --group build --extra postgres --no-install-project
 KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
 uv export --locked --only-group build --no-emit-project \
   --format requirements.txt \
@@ -69,16 +71,39 @@ KORA_BUILD_OFFLINE=1 uv build --offline \
   --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
   --require-hashes --clear
 
-uv sync --locked --group build
+uv sync --locked --no-build --group build --extra postgres
 git diff --exit-code -- pyproject.toml uv.lock web/package.json \
   web/pnpm-lock.yaml web/pnpm-workspace.yaml
 ```
+
+`--no-build` refuses to compile a dependency from source, so a platform or interpreter without a published wheel for a native package fails at setup instead of building on the machine; `--extra postgres` installs the PostgreSQL driver on every platform, because the dialect is registered whether or not a PostgreSQL test runs.
+
+The default test run needs a reachable Docker daemon: `tests/conftest.py` runs every database test on SQLite and on PostgreSQL, and the PostgreSQL parameter starts one container per session from the image pinned by digest in `tests/support/databases.py`, migrates a template database once and clones it for each test. `KORA_TEST_DATABASES` selects the parameters as a comma-separated subset of `sqlite` and `postgresql`; the selection is printed in the pytest header, an unknown name is a usage error, and a selected PostgreSQL without a daemon is an error, never a skip. The macOS lanes and a machine without Docker run:
+
+```sh
+KORA_TEST_DATABASES=sqlite uv run --no-sync pytest -q
+```
+
+The container runs without the reaper container that `testcontainers` starts by default, because the session fixture removes it; set `TESTCONTAINERS_RYUK_DISABLED=true` in your shell to keep local runs identical to CI. The container publishes a random host port with a password generated for the session, reachable from the host for the duration of the run.
 
 The default pytest run excludes the `measurement` marker. The logging overhead and resource-lifetime measurement runs serially, writes its samples to the path in `KORA_MEASUREMENT_OUTPUT` (with the commit named by `KORA_MEASUREMENT_REVISION`, which CI sets to the pull request's head) and gates only the contract-derived criteria (queue bounds, bounded heap and resident-memory growth with threads and descriptors back at baseline over repeated configure-and-shutdown cycles, bounded process exit and idle shutdown); CI runs it in the Linux 3.11 lane after the parallel checks and uploads the artifact `logging-overhead-measurement`:
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
+```
+
+The metadata database lifetime measurement runs under the same marker, on every database that `KORA_TEST_DATABASES` selects, with its own step budget and contract-derived gates (balanced pool checkouts, a free SQLite writer, no open transaction and no temporary file after every ending path, threads, descriptors and server connections back at baseline, bounded heap growth over repeated migrate, connect and transaction cycles, one statement per read call, every marked run visited once per sweep); CI runs it after the logging measurement in the same lane and uploads the artifact `metadata-database-lifetime-measurement`:
+
+```sh
+KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
+  uv run --no-sync pytest -q -m measurement tests/measurements/test_metadata_database_lifetime.py
+```
+
+`kora db upgrade` applies every pending migration to the database named by `KORA_DATABASE_URL` and prints the head revision; the accepted forms are `sqlite+aiosqlite:///<path>` (relative paths resolve against the working directory, and a new file is created with mode 0600) and a complete `postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>`. A missing, malformed or incomplete URL exits 78 with one line on stderr that never repeats the value; an unreachable database is an unhandled error (code 70) with content-free records. There is no command-line option for the URL, so it never appears in a process listing.
+
+```sh
+KORA_DATABASE_URL=sqlite+aiosqlite:///./.kora-data/kora.db uv run --no-sync kora db upgrade
 ```
 
 Ruff's `S` family runs inside `ruff check`. The dependency and secret scanners run in CI through the workflows `osv-scanner.yml` and `gitleaks.yml`; contributors who install the same releases locally (OSV-Scanner 2.7.0, Gitleaks 8.30.1) run the equivalent scans with the commands below. On a pull request Gitleaks scans the first 30 first-parent, non-merge commits of the pull request and OSV-Scanner reports only newly introduced vulnerabilities; on a push to `master` Gitleaks scans the pushed range and OSV-Scanner both lockfiles in full; weekly, and on dispatch for Gitleaks, OSV-Scanner scans both lockfiles in full and Gitleaks the whole history. CodeQL (`codeql.yml`) runs in CI only, because its analysis needs the hosted toolchain, and uploads its alerts to the repository's code-scanning view. The [logging and scanner research](../knowledge/research/logging-stack-and-ci-scanners-2026-10-20.md) records the pinned versions and what each scanner covers.

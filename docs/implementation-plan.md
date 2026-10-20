@@ -4,6 +4,8 @@ Scope and implementation plan approved by the project owner under [issue #127](h
 
 Work item 1 amendment dated 2026-10-20: landed under [issue #147](https://github.com/realkarych/kora/issues/147); wording pending line-by-line owner review.
 
+Work item 5 amendment dated 2026-10-20: landed under [issue #153](https://github.com/realkarych/kora/issues/153); the rows of freeze steps 2 and 3, the lock-order gap and the timeout-discovery question record [#102](https://github.com/realkarych/kora/issues/102) and [#103](https://github.com/realkarych/kora/issues/103) as landed; wording pending line-by-line owner review.
+
 This page orders the work of the first implementation slice so that two developers can work in parallel with little overlap. It records no decisions of its own. The decisions are in [decisions/](decisions/README.md), and the contracts are in the [specifications](../knowledge/README.md).
 
 Where a contract is still open, the page names the issue that settles it, marked *pending*. Until that issue lands, the merged text governs and the work that depends on it waits. The page does not restate what a pending issue proposes.
@@ -55,7 +57,7 @@ Until #140 lands, the ADR-0001 amendment and the [roadmap](roadmap.md#what-the-d
 
   The connect and scripted-model layers run on the Linux job inside a container without an external network, and each case asserts that no outbound connection was attempted. A case the tested version cannot run that way moves to the manual layer, and the gap is reported.
 - Git runs for real against local repositories.
-- `tick` runs with an injected clock ([issue #103](https://github.com/realkarych/kora/issues/103), pending).
+- `tick` runs with an injected clock ([issue #103](https://github.com/realkarych/kora/issues/103), landed in [PR #146](https://github.com/realkarych/kora/pull/146)).
 - PostgreSQL runs through containers on the Linux job, and SQLite runs everywhere.
 - A slice-1 graph example is checked by the IR example job.
 
@@ -74,8 +76,8 @@ A step is frozen when its specification text is merged. The work item in the las
 | Step | Contract | Settled in | Owning side | Models land in |
 |---|---|---|---|---|
 | 1 | Package layers and the import-layer test, including the placement of shared protocol types, logging and the CEL packages | [#104](https://github.com/realkarych/kora/issues/104) (pending) | server | #104 itself |
-| 2 | Shared transition functions, `tick` and the lock order, including how a claim takes the run lock | [#103](https://github.com/realkarych/kora/issues/103) (pending) | server | work item 9 |
-| 3 | Run outcome | [#102](https://github.com/realkarych/kora/issues/102) (pending) | server | work item 9 |
+| 2 | Shared transition functions, `tick` and the lock order, including how a claim takes the run lock | [#103](https://github.com/realkarych/kora/issues/103), landed in [PR #146](https://github.com/realkarych/kora/pull/146) | server | work item 9 |
+| 3 | Run outcome | [#102](https://github.com/realkarych/kora/issues/102), landed in [PR #145](https://github.com/realkarych/kora/pull/145) | server | work item 9 |
 | 4 | Built-in artifact types, revision 1, and the names of implicit outputs | [#138](https://github.com/realkarych/kora/issues/138), [#137](https://github.com/realkarych/kora/issues/137) (pending) | server | work item 2 |
 | 5a | Runtime, harness, VCS, policy and secrets models, the transfer channel, the harness launcher and its directories, command inputs | [#123](https://github.com/realkarych/kora/issues/123), [#106](https://github.com/realkarych/kora/issues/106), [#134](https://github.com/realkarych/kora/issues/134) (pending); the `claude` adapter text is merged in [protocols.md section 3](../knowledge/specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27) | execution | work item 6 |
 | 5b | Authentication, artifact storage, artifact type and approval-channel protocols | merged in [protocols.md](../knowledge/specs/protocols.md) sections 5, 7, 8 and 10; section 10 changes under [#135](https://github.com/realkarych/kora/issues/135) and section 8 under [#138](https://github.com/realkarych/kora/issues/138) (pending) | server | work item 8 |
@@ -92,7 +94,7 @@ On 2026-10-19 a check of the specifications against slice 1 found the gaps below
 | Gap | Settled in |
 |---|---|
 | A successful attempt cannot record runtime quiescence and dispatcher closure before its terminal status, as [ADR-0017](decisions/0017-execution-uncertainty-and-safe-replacement.md) requires. A failed command gate cannot reach `command_failed`, and a failure before submit has no transition | [#139](https://github.com/realkarych/kora/issues/139) and [#123](https://github.com/realkarych/kora/issues/123) (pending) |
-| A claim through `SELECT … FOR UPDATE SKIP LOCKED` locks the attempt row before the run lock, against the lock order of [scheduler.md section 6](../knowledge/specs/scheduler.md#6-concurrency-limits-fr-610) | [#103](https://github.com/realkarych/kora/issues/103) (pending) |
+| A claim through `SELECT … FOR UPDATE SKIP LOCKED` locks the attempt row before the run lock, against the lock order of [scheduler.md section 6](../knowledge/specs/scheduler.md#6-concurrency-limits-fr-610) | [#103](https://github.com/realkarych/kora/issues/103), landed in [PR #146](https://github.com/realkarych/kora/pull/146) |
 | The built-in types `VcsRef`, `CommandResult`, `AgentSession` and `StructuredOutput` have no published schemas or digest fields | [#138](https://github.com/realkarych/kora/issues/138) (pending) |
 | `approve_when` is optional and has no default | [#137](https://github.com/realkarych/kora/issues/137) (pending) |
 | There is no rule for naming outputs | [#137](https://github.com/realkarych/kora/issues/137) (pending), which also records where the rule for the DSL is settled |
@@ -108,7 +110,7 @@ Rows that name a work item are settled in that work item's issue before its code
 | Question | Settled in |
 |---|---|
 | Price ownership, needed for the run cost on approval requests and the runner's usage relay; with it, token semantics across harnesses | [#142](https://github.com/realkarych/kora/issues/142) (pending) |
-| Timeout discovery and locking | [#103](https://github.com/realkarych/kora/issues/103) (pending) |
+| Timeout discovery and locking | [#103](https://github.com/realkarych/kora/issues/103), landed in [PR #146](https://github.com/realkarych/kora/pull/146) |
 | Shape of client transport failures | [#135](https://github.com/realkarych/kora/issues/135) (pending) |
 | Exposure of the unauthenticated health and metrics routes | [#135](https://github.com/realkarych/kora/issues/135) and [#140](https://github.com/realkarych/kora/issues/140) (pending) |
 | Evidence that a candidate process group is still the original one before fallback retirement ([owner comment](https://github.com/realkarych/kora/issues/123#issuecomment-6270810525)) | [#123](https://github.com/realkarych/kora/issues/123) (pending), then work item 14 |
@@ -146,7 +148,7 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 | 2 | `ir` models of the whole IR and the built-in artifact types of revision 1; the generated `ir.schema.json` replaces the hand-written draft, with a check that the committed schema matches the models | server | steps 1, 4 |
 | 3 | `ir` validator: collected diagnostics, the refusal of features outside the slice per #140, a slice-1 graph example. It needs the provider models of work item 6, so this server item waits for an execution item | server | 2, 4, 6; step 7; #140 |
 | 4 | CEL parser, checker, projections and evaluation per [ir.md section 7](../knowledge/specs/ir.md#7-expressions-and-templates), with the packaging, CI and development obligations of the "Expression language" row of the [stack table](../knowledge/architecture/detailed.md#stack-per-component) | server | step 1; 2 for the schema-driven checker |
-| 5 | `db`: tables, migrations, repositories and the two-database fixture; the claim and lock statements land with work item 9, and later work items add their own migrations | server | 1; step 1 |
+| 5 | `db`: tables, migrations, repositories and the two-database fixture; the claim and lock statements land with work item 9, and later work items add their own migrations. Landed under [issue #153](https://github.com/realkarych/kora/issues/153): the tables of data-model.md section 2, migration 0001, the identifier generator, the connection layer, the registry, discovery and occupancy read functions, `kora db upgrade`, the two-database fixture and the database lifetime measurement | server | 1; step 1 |
 | 6 | `protocols` for runtime, harness, VCS, policy and secrets; provider loading; conformance-suite skeletons; the terminal-report types | execution | 1, 2; step 5a; step 6 for the terminal-report types |
 | 7 | Fake harness, fake runtime and the directory-backed fake VCS | execution | 6, 13; step 8 |
 | 8 | Server providers: static-token authentication, local artifact storage, the CLI approval channel, the artifact-type provider | server | 5, 6; steps 5b, 7; #141 |
