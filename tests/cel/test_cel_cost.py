@@ -471,7 +471,7 @@ def test_cel_cost_estimate_reads_declared_fields_through_indexes_and_joins() -> 
         "l.map(x, r[x] + r[x])",
         "l.map(x, dyn(r)['a'] + dyn(r)['a'])",
         "l.map(x, r.map(k, r[k]) + r.map(k, r[k]))",
-        "l.map(x, [r][0].a + [r][0].a)",
+        "l.map(x, [r, r][0].a + [r, r][0].a)",
         "l.map(x, (x == 1 ? r : r).a + (x == 1 ? r : r).a)",
     ]
     forms = [
