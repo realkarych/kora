@@ -18,7 +18,16 @@ from kora.cel import (
 from kora.cel.cost import estimate
 from kora.cel.parser import parse
 from kora.cel.render import canonical_rendering
-from kora.cel.types import DYN, INT, STRING, CelType, ListOf, Record, RecordField
+from kora.cel.types import (
+    DOUBLE,
+    DYN,
+    INT,
+    STRING,
+    CelType,
+    ListOf,
+    Record,
+    RecordField,
+)
 from tests.cel.generator import generated_expressions
 from tests.cel.support import accepted
 
@@ -331,8 +340,8 @@ def cyclic_pair(first_bytes: int, second_bytes: int) -> dict[str, Variable]:
 def test_cel_cost_estimate_cuts_whole_cycles_regardless_of_order() -> None:
     environment = cyclic_pair(1000, 1000)
 
-    forward = check("p == p && q.a == q.a", environment)
-    backward = check("q.a == q.a && p == p", environment)
+    forward = check("p.all(x, true) && q.a.all(x, true)", environment)
+    backward = check("q.a.all(x, true) && p.all(x, true)", environment)
 
     assert isinstance(forward, CheckedExpression)
     assert isinstance(backward, CheckedExpression)
@@ -350,6 +359,8 @@ def test_cel_cost_estimate_refuses_inconsistent_bounds() -> None:
         element=ValueBound(bytes=100, values=10, items=50_000, string_bytes=0),
     )
     negative = ValueBound(bytes=-1, values=1, items=0, string_bytes=0)
+    not_a_number = ValueBound(bytes=1, values=1, items=0, string_bytes=0)
+    object.__setattr__(not_a_number, "bytes", float("nan"))
 
     with pytest.raises(BoundError, match="larger than its parent"):
         check("p == p", larger_child)
@@ -357,3 +368,19 @@ def test_cel_cost_estimate_refuses_inconsistent_bounds() -> None:
         check("v[0] == 1", {"v": Variable(DYN, oversized)})
     with pytest.raises(BoundError, match="negative"):
         check("v == 1", {"v": Variable(DYN, negative)})
+    with pytest.raises(BoundError, match="not an integer"):
+        check("v == 1", {"v": Variable(DYN, not_a_number)})
+
+
+def test_cel_cost_estimate_never_charges_dyn_additions_below_typed_ones() -> None:
+    small = ValueBound(bytes=3, values=1, items=0, string_bytes=0)
+    additions = "[" + ", ".join(["a + b"] * 50) + "] == [a]"
+
+    untyped = check(additions, {"a": Variable(DYN, small), "b": Variable(DYN, small)})
+    typed = check(
+        additions, {"a": Variable(DOUBLE, small), "b": Variable(DOUBLE, small)}
+    )
+
+    assert isinstance(untyped, CheckedExpression)
+    assert isinstance(typed, CheckedExpression)
+    assert untyped.estimate.memory >= typed.estimate.memory

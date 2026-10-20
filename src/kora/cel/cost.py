@@ -380,15 +380,13 @@ class BoundShapes:
     def finish(self, bound: ValueBound, cyclic: bool) -> None:
         self.meter.tick(1 + len(bound.fields))
         check_bound(bound)
-        element = None if cyclic else self.converted(bound.element)
+        element = (
+            None if cyclic or bound.element is None else self.required(bound.element)
+        )
         fields = (
             {}
             if cyclic
-            else {
-                name: converted
-                for name, child in bound.fields.items()
-                if (converted := self.converted(child)) is not None
-            }
+            else {name: self.required(child) for name, child in bound.fields.items()}
         )
         heights = [
             part.height for part in (element, *fields.values()) if part is not None
@@ -409,21 +407,34 @@ class BoundShapes:
         )
         self.memo[id(bound)] = Converted(bound, shape, height)
 
-    def converted(self, bound: ValueBound | None) -> Converted | None:
-        if bound is None:
-            return None
-        return self.memo.get(id(bound))
+    def required(self, bound: ValueBound) -> Converted:
+        converted = self.memo.get(id(bound))
+        if converted is None:
+            raise BoundError("a bound changed while it was converted")
+        return converted
 
 
 class BoundError(ValueError):
     pass
 
 
+def is_integer(value: object) -> bool:
+    return type(value) is int
+
+
+def is_bound(value: object) -> bool:
+    return isinstance(value, ValueBound)
+
+
 def check_bound(bound: ValueBound) -> None:
     sizes = (bound.bytes, bound.values, bound.items, bound.string_bytes)
+    if not all(map(is_integer, sizes)):
+        raise BoundError("a value bound size is not an integer")
     if any(size < 0 for size in sizes):
         raise BoundError("a value bound is negative")
     for child in children_of(bound):
+        if not is_bound(child):
+            raise BoundError("a child bound is not a value bound")
         if child.bytes > bound.bytes or child.values > bound.values:
             raise BoundError("a child bound is larger than its parent")
         if child.items > DATA_ITEMS or child.string_bytes > DATA_STRING_BYTES:
@@ -626,7 +637,9 @@ class Estimator:
         if not concatenates:
             return NodeCost(scalar(left.shape.type), steps, peak)
         shape = concatenated(left.shape, right.shape)
-        if not (is_concatenable(left.shape.type) and is_concatenable(right.shape.type)):
+        if not (
+            is_typed_sequence(left.shape.type) and is_typed_sequence(right.shape.type)
+        ):
             shape = replace(shape, bytes=shape.bytes.join(Affine.of(SCALAR_BYTES)))
         steps = steps.plus(shape.bytes.times(self.weights.concat_byte))
         steps = steps.plus(shape.values.times(self.weights.concat_value))
@@ -779,6 +792,13 @@ def across_range(
         .plus(source.bytes.times(bytes_coefficient))
         .plus(source.values.times(values_coefficient))
     )
+
+
+def is_typed_sequence(cel_type: CelType) -> bool:
+    inner = unwrap(cel_type)
+    if isinstance(inner, Primitive):
+        return inner.kind in (STRING.kind, BYTES.kind)
+    return isinstance(inner, ListOf)
 
 
 def same_type(left: CelType, right: CelType) -> bool:
