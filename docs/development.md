@@ -10,6 +10,8 @@ Logging and scanner amendment dated 2026-10-20: the measurement step, the Ruff `
 
 Metadata database amendment dated 2026-10-20: the `postgres` extra, wheel-only installation, the database test selection, the PostgreSQL container, `kora db upgrade` and the database measurement added under [issue #153](https://github.com/realkarych/kora/issues/153); wording pending line-by-line owner review.
 
+No-suppression amendment dated 2026-10-20: `--ignore-noqa`, the Ruff families and banned-API table, the ESLint comment rule and the no-suppression architecture test added under [issue #155](https://github.com/realkarych/kora/issues/155); wording pending line-by-line owner review.
+
 The repository contains an importable typed Python package with the logging bootstrap, the metadata database package with its migrations, the `kora` entry point (`kora --version`, `kora db upgrade`), a minimal React shell and distribution builds. The execution engine, HTTP API, the other CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup
@@ -59,7 +61,7 @@ Run every source check, then build the sdist and build a wheel from that sdist u
 ```sh
 uv lock --check
 uv run --no-sync ruff format --check .
-uv run --no-sync ruff check .
+uv run --no-sync ruff check --ignore-noqa .
 uv run --no-sync pyright
 uv run --no-sync pytest -q
 pnpm --dir web run typecheck
@@ -106,7 +108,7 @@ KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
 KORA_DATABASE_URL=sqlite+aiosqlite:///./.kora-data/kora.db uv run --no-sync kora db upgrade
 ```
 
-Ruff's `S` family runs inside `ruff check`. The dependency and secret scanners run in CI through the workflows `osv-scanner.yml` and `gitleaks.yml`; contributors who install the same releases locally (OSV-Scanner 2.7.0, Gitleaks 8.30.1) run the equivalent scans with the commands below. On a pull request Gitleaks scans the first 30 first-parent, non-merge commits of the pull request and OSV-Scanner reports only newly introduced vulnerabilities; on a push to `master` Gitleaks scans the pushed range and OSV-Scanner both lockfiles in full; weekly, and on dispatch for Gitleaks, OSV-Scanner scans both lockfiles in full and Gitleaks the whole history. CodeQL (`codeql.yml`) runs in CI only, because its analysis needs the hosted toolchain, and uploads its alerts to the repository's code-scanning view. The [logging and scanner research](../knowledge/research/logging-stack-and-ci-scanners-2026-10-20.md) records the pinned versions and what each scanner covers.
+Ruff runs with `--ignore-noqa`, so a `# noqa` comment suppresses nothing, and selects, besides `E`, `F`, `I`, `UP`, `B`, `ANN` and `S`, the families `BLE` (blind `except`), `PT` (pytest style, including `pytest.raises` without `match` on broad types), `PGH` (blanket `noqa` and `type: ignore`), `ERA` (commented-out code), `T20` (`print`) and `TID` with a banned-API table that names every skip, xfail, mock and warning-filter API of `pytest`, `unittest` and `warnings`, plus `contextlib.suppress` and `os._exit`. Pyright runs with `enableTypeIgnoreComments = false`. ESLint carries the local rule `kora/no-comments`, `noInlineConfig` (inline `eslint-disable` comments have no effect and are reported) and `@typescript-eslint/ban-ts-comment` for every `@ts-*` form. `tests/architecture/test_no_suppression.py` scans every hand-written Python, shell, SQL, template, TypeScript and JavaScript file for comments, docstrings and directives, flags string markers, `monkeypatch` and `mocker` fixtures, dynamic imports of `pytest` or `warnings`, unlisted `conftest.py` hooks and blind handlers beyond the pinned counts of `kora.__main__`, `kora.observability.bootstrap` and `kora.observability.sink`, and compares the `[tool.ruff]`, `[tool.pyright]` and `[tool.pytest.ini_options]` tables, the TypeScript `strict` flags and the absence of shadowing configuration files (`pytest.ini`, `ruff.toml`, `pyrightconfig.json` and the like) against the recorded values, so any allowance or configuration change edits that test. The [no-suppression research](../knowledge/research/no-suppression-checks-2026-10-20.md) records every family, allowance and residual. The dependency and secret scanners run in CI through the workflows `osv-scanner.yml` and `gitleaks.yml`; contributors who install the same releases locally (OSV-Scanner 2.7.0, Gitleaks 8.30.1) run the equivalent scans with the commands below. On a pull request Gitleaks scans the first 30 first-parent, non-merge commits of the pull request and OSV-Scanner reports only newly introduced vulnerabilities; on a push to `master` Gitleaks scans the pushed range and OSV-Scanner both lockfiles in full; weekly, and on dispatch for Gitleaks, OSV-Scanner scans both lockfiles in full and Gitleaks the whole history. CodeQL (`codeql.yml`) runs in CI only, because its analysis needs the hosted toolchain, and uploads its alerts to the repository's code-scanning view. The [logging and scanner research](../knowledge/research/logging-stack-and-ci-scanners-2026-10-20.md) records the pinned versions and what each scanner covers.
 
 ```sh
 osv-scanner --lockfile=uv.lock --lockfile=web/pnpm-lock.yaml

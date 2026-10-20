@@ -1,14 +1,13 @@
 import ast
 import asyncio
 import shutil
-import warnings
 from pathlib import Path
 
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, inspect, select, text
-from sqlalchemy.exc import DBAPIError, SAWarning
+from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.migrations import (
@@ -19,15 +18,13 @@ from kora.db.migrations import (
 )
 from kora.db.migrations import environment as environment_module
 from kora.db.tables import metadata
+from tests.support.warning_filters import expression_index_warnings_ignored
 
 HEAD_REVISION: str = "0001"
-EXPRESSION_INDEX_WARNING: str = ".*expression-based index.*"
 
 
 def differences_ignoring_expression_indexes(connection: Connection) -> list[str]:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", EXPRESSION_INDEX_WARNING, SAWarning)
-        warnings.filterwarnings("ignore", EXPRESSION_INDEX_WARNING, UserWarning)
+    with expression_index_warnings_ignored():
         return list(schema_differences(connection))
 
 

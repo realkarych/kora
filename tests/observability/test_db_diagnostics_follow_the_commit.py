@@ -107,6 +107,12 @@ async def upgrade_refusing_commit(settings: DatabaseSettings) -> None:
     await upgrade_database(settings, refusing_commits)
 
 
+async def faulting_unit(database: Database) -> None:
+    async with database.transaction() as connection:
+        await Seeder(connection).namespace("faulty")
+        raise BodyFault()
+
+
 @pytest.mark.asyncio
 async def test_body_faults_are_recorded_once_and_cancellations_never(
     configure: Configure, pipe: Pipe, database: Database
@@ -119,9 +125,7 @@ async def test_body_faults_are_recorded_once_and_cancellations_never(
     entered = asyncio.Event()
 
     with pytest.raises(BodyFault):
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("faulty")
-            raise BodyFault()
+        await faulting_unit(database)
 
     async def cancelled_unit() -> None:
         async with database.transaction() as connection:
@@ -160,13 +164,10 @@ async def test_close_after_the_deadline_is_recorded(
     release = asyncio.Event()
 
     async def holder() -> None:
-        try:
-            async with database.transaction() as connection:
-                await Seeder(connection).namespace("outlived")
-                entered.set()
-                await asyncio.wait_for(release.wait(), 10)
-        except Exception:
-            return
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("outlived")
+            entered.set()
+            await asyncio.wait_for(release.wait(), 10)
 
     holding = asyncio.create_task(holder())
     await asyncio.wait_for(entered.wait(), 10)

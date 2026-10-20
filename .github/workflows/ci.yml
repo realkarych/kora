@@ -79,7 +79,7 @@ jobs:
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
-          uv run --no-sync ruff check .
+          uv run --no-sync ruff check --ignore-noqa .
           uv run --no-sync pyright
           pnpm --dir web run typecheck
           pnpm --dir web run lint

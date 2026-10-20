@@ -21,6 +21,8 @@ The `flake8-bandit` family `S` is selected project-wide. Two configuration entri
 - `S603` is allowed in `hatch_build.py` and under `tests/`, the only places that start subprocesses today. It fires on every `subprocess` call regardless of its arguments; these calls pass fixed argument lists (`hatch_build.py` resolves `pnpm` through `shutil.which`, which also satisfies `S607`; the tests start `sys.executable`). The rule stays live under `src/`, where a future subprocess site built from user-influenced data must be reviewed.
 - `S101` (the `assert` statement) is allowed under `tests/`, where assertions are the test mechanism.
 
+The current list of every Ruff allowance, with the families added later, is the [no-suppression record](no-suppression-checks-2026-10-20.md) of [issue #155](https://github.com/realkarych/kora/issues/155).
+
 ## Scanners
 
 | Scanner | Candidate alternatives | Chosen release | Pinned commit | What it covers | What it does not cover |

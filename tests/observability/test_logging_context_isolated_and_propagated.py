@@ -75,7 +75,7 @@ async def test_context_resets_after_exit_exception_and_cancellation() -> None:
         assert current_context() == {"run_id": "run-exit"}
     assert current_context() == {}
 
-    with pytest.raises(ValueError), bound_scope(run_id="run-error"):
+    with pytest.raises(ValueError, match="expected"), bound_scope(run_id="run-error"):
         raise ValueError("expected")
     assert current_context() == {}
 

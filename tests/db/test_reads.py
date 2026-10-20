@@ -97,7 +97,8 @@ async def test_marked_run_sweep_wraps_behind_the_cursor(database: Database) -> N
         .limit(PAGE_SIZE),
     )
 
-    assert late_id is not None and late_id < first_page.run_ids[0]
+    assert late_id is not None
+    assert late_id < first_page.run_ids[0]
     assert sorted(visited) == sorted(marked)
     assert len(visited) == MARKED_RUNS
     assert after_wrap.wrapped
@@ -149,7 +150,8 @@ async def test_marked_run_sweep_discovers_commit_behind_scan(
 
     assert sorted(page.run_ids) == sorted(marked)
     assert behind not in page.run_ids
-    assert behind in next_sweep.run_ids and next_sweep.wrapped
+    assert behind in next_sweep.run_ids
+    assert next_sweep.wrapped
 
 
 @pytest.mark.asyncio
@@ -329,13 +331,19 @@ async def test_registry_reads_are_namespace_scoped(database: Database) -> None:
         .limit(100),
     )
 
-    assert own[0] is not None and own[0].id == namespace_id
-    assert own[1] is not None and own[1].policy == {"max_pending_runs": 1000}
-    assert own[2] is not None and own[2].id == graph_id
-    assert own[3] is not None and own[3].id == version_id
-    assert own[4] is not None and own[4].id == run_id
+    assert own[0] is not None
+    assert own[0].id == namespace_id
+    assert own[1] is not None
+    assert own[1].policy == {"max_pending_runs": 1000}
+    assert own[2] is not None
+    assert own[2].id == graph_id
+    assert own[3] is not None
+    assert own[3].id == version_id
+    assert own[4] is not None
+    assert own[4].id == run_id
     assert [node.id for node in own[5]] == [node_id]
-    assert own[6] is not None and own[6].token_id == token_id
+    assert own[6] is not None
+    assert own[6].token_id == token_id
     assert foreign == (None, None, None, [], [])
     assert [row.id for row in first_page + second_page + third_page] == event_ids
     assert [row.payload for row in third_page][-1] == {"index": EVENTS - 1}

@@ -1,11 +1,9 @@
 import asyncio
 import json
-import warnings
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, inspect, text
-from sqlalchemy.exc import SAWarning
 
 from kora.db.connection import Database, DatabaseSettings
 from tests.observability.conftest import ProcessResult, run_kora
@@ -15,9 +13,9 @@ from tests.support.databases import (
     PostgresServer,
     sqlite_settings,
 )
+from tests.support.warning_filters import expression_index_warnings_ignored
 
 LEVELS: tuple[str, ...] = ("ERROR", "DEBUG")
-EXPRESSION_INDEX_WARNING: str = ".*expression-based index.*"
 
 
 def upgrade_process(settings: DatabaseSettings, level: str) -> ProcessResult:
@@ -41,8 +39,7 @@ def schema_snapshot(connection: Connection) -> dict[str, object]:
             (str(column["name"]), str(column["type"]), bool(column["nullable"]))
             for column in inspector.get_columns(table_name)
         ]
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", EXPRESSION_INDEX_WARNING, SAWarning)
+        with expression_index_warnings_ignored():
             reflected = inspector.get_indexes(table_name)
         indexes = sorted(
             (str(index["name"]), list(index["column_names"]), bool(index["unique"]))

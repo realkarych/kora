@@ -69,11 +69,15 @@ async def commit_path(database: Database) -> None:
         await Seeder(connection).namespace("committed")
 
 
+async def faulting_transaction(database: Database) -> None:
+    async with database.transaction() as connection:
+        await Seeder(connection).namespace("rolled-back")
+        raise Fault()
+
+
 async def rollback_path(database: Database) -> None:
     with pytest.raises(Fault):
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("rolled-back")
-            raise Fault()
+        await faulting_transaction(database)
 
 
 class StatementWatch:
@@ -379,15 +383,11 @@ async def test_close_after_the_deadline_fails_the_unit_and_releases(
     outcomes: list[str] = []
 
     async def holder() -> None:
-        try:
-            async with database.transaction() as connection:
-                await Seeder(connection).namespace("outlived")
-                entered.set()
-                await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-        except Exception as error:
-            outcomes.append(type(error).__name__)
-        else:
-            outcomes.append("committed")
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("outlived")
+            entered.set()
+            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+        outcomes.append("committed")
 
     holding = asyncio.create_task(holder())
     await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)

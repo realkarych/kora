@@ -109,7 +109,8 @@ def test_recovery_after_a_stopped_reader_reports_drops_once(
     assert 0 < int(str(recovery["dropped"])) <= dropped_before
     assert all(json.dumps(record) for record in records)
     assert snapshot.sink_recoveries >= 1
-    assert (reason.value in str(snapshot.dropped)) and snapshot.dropped_total() > 0
+    assert reason.value in str(snapshot.dropped)
+    assert snapshot.dropped_total() > 0
 
 
 def test_a_writer_blocked_past_its_deadline_keeps_the_stream(

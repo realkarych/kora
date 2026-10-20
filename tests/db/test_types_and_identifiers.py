@@ -201,7 +201,8 @@ def test_identifiers_are_sortable_monotonic_and_injected() -> None:
     assert timestamp_of(third) == START + timedelta(milliseconds=1)
     assert timestamp_of(fourth) == START + timedelta(milliseconds=1)
     assert encode(decode(third)) == third
-    assert is_identifier(first) and not is_identifier(first.lower())
+    assert is_identifier(first)
+    assert not is_identifier(first.lower())
     assert not is_identifier("8" * 26)
     with pytest.raises(IdentifierError):
         IdentifierGenerator(lambda: datetime(2026, 1, 1)).new()

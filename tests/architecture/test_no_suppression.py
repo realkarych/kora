@@ -1,0 +1,949 @@
+import ast
+import io
+import json
+import re
+import tokenize
+import tomllib
+from collections.abc import Iterator
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+from typing import TypeGuard, cast
+
+REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
+PYPROJECT: str = "pyproject.toml"
+GENERATED_FILES: tuple[str, ...] = ("uv.lock", "web/pnpm-lock.yaml")
+SKIPPED_PATHS: frozenset[str] = frozenset(
+    {
+        "measurements",
+        "dist",
+        "build",
+        "web/dist",
+        "web/build",
+        "web/node_modules",
+        "src/kora/api/static",
+    }
+)
+SKIPPED_DIRECTORY_NAMES: frozenset[str] = frozenset({"__pycache__", "node_modules"})
+ROOT_SHADOWS: tuple[str, ...] = (
+    "pytest.ini",
+    ".pytest.ini",
+    "tox.ini",
+    "setup.cfg",
+    "pyrightconfig.json",
+)
+NESTED_SHADOWS: frozenset[str] = frozenset({"ruff.toml", ".ruff.toml", PYPROJECT})
+ESLINT_SHADOW_PREFIX: str = ".eslintrc"
+WEB_DIRECTORY: str = "web"
+TSCONFIGS: tuple[str, ...] = ("web/tsconfig.app.json", "web/tsconfig.node.json")
+SHEBANG: str = "#!"
+SHELL_INTERPRETERS: tuple[str, ...] = ("sh", "bash", "zsh", "ksh")
+PYTHON_INTERPRETER: str = "python"
+DIRECTIVE: re.Pattern[str] = re.compile(
+    r"noqa|type\s*:\s*ignore|pyright\s*:|pragma\s*:|fmt\s*:|ruff\s*:|isort\s*:"
+    r"|mypy\s*:|pylint\s*:|flake8\s*:|coverage\s*:|nosec"
+    r"|eslint-(disable|enable|env)|@ts-(ignore|expect-error|nocheck|check)"
+    r"|prettier-ignore|biome-ignore",
+    re.IGNORECASE,
+)
+QUOTED: re.Pattern[str] = re.compile(
+    r"'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\\n])*`"
+)
+SHELL_COMMENT_PRECEDERS: str = " \t;(&|"
+MOCK_FIXTURES: frozenset[str] = frozenset({"monkeypatch", "mocker"})
+STRING_MARKER_CALLS: frozenset[str] = frozenset({"add_marker", "applymarker"})
+RUNTIME_CONFIGURATION_CALLS: frozenset[str] = frozenset({"addinivalue_line"})
+WARNING_FILTER_CALLS: frozenset[str] = frozenset({"catch_warnings"})
+DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
+    {"__import__", "import_module", "resolve_name"}
+)
+GUARDED_DYNAMIC_MODULES: frozenset[str] = frozenset(
+    {"pytest", "_pytest", "warnings", "unittest"}
+)
+BROAD_EXCEPTIONS: frozenset[str] = frozenset({"Exception", "BaseException"})
+COLLECTION_OVERRIDES: frozenset[str] = frozenset(
+    {"collect_ignore", "collect_ignore_glob", "pytest_plugins"}
+)
+HOOK_PREFIX: str = "pytest_"
+CONFTEST: str = "conftest.py"
+WARNINGS_MODULE: str = "warnings"
+
+ALLOWED_BLIND_HANDLERS: dict[str, int] = {
+    "src/kora/__main__.py": 1,
+    "src/kora/observability/bootstrap.py": 2,
+    "src/kora/observability/sink.py": 1,
+}
+ALLOWED_WARNING_NAMES: dict[str, frozenset[str]] = {
+    "tests/support/warning_filters.py": frozenset(
+        {"catch_warnings", "filterwarnings", "simplefilter"}
+    )
+}
+ALLOWED_HOOKS: dict[str, frozenset[str]] = {
+    "tests/conftest.py": frozenset({"pytest_report_header", "pytest_generate_tests"}),
+    "tests/observability/conftest.py": frozenset(),
+}
+
+BANNED_API: dict[str, dict[str, str]] = {
+    "pytest.skip": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "pytest.xfail": {"msg": "AGENTS.md Testing: no expected failures"},
+    "pytest.importorskip": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "pytest.mark.skip": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "pytest.mark.skipif": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "pytest.mark.xfail": {"msg": "AGENTS.md Testing: no expected failures"},
+    "pytest.mark.filterwarnings": {"msg": "AGENTS.md Testing: warnings are errors"},
+    "pytest.MonkeyPatch": {"msg": "AGENTS.md Testing: no mocks or patching"},
+    "_pytest": {"msg": "AGENTS.md Testing: no pytest internals"},
+    "unittest.SkipTest": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "unittest.skip": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "unittest.skipIf": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "unittest.skipUnless": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "unittest.expectedFailure": {"msg": "AGENTS.md Testing: no expected failures"},
+    "unittest.mock": {"msg": "AGENTS.md Testing: no mocks"},
+    "mock": {"msg": "AGENTS.md Testing: no mocks"},
+    "pytest_mock": {"msg": "AGENTS.md Testing: no mocks"},
+    "warnings.filterwarnings": {"msg": "AGENTS.md Testing: warnings are errors"},
+    "warnings.simplefilter": {"msg": "AGENTS.md Testing: warnings are errors"},
+    "warnings.catch_warnings": {"msg": "AGENTS.md Testing: warnings are errors"},
+    "warnings.resetwarnings": {"msg": "AGENTS.md Testing: warnings are errors"},
+    "warnings.filters": {"msg": "AGENTS.md Testing: warnings are errors"},
+    "contextlib.suppress": {"msg": "AGENTS.md Code: fail fast, no blind suppression"},
+    "os._exit": {"msg": "AGENTS.md Testing: a test process reports its result"},
+}
+RUFF_TABLE: dict[str, object] = {
+    "target-version": "py311",
+    "include": [
+        "*.py",
+        "*.pyi",
+        "*.ipynb",
+        "**/pyproject.toml",
+        "**/ruff.toml",
+        "**/.ruff.toml",
+    ],
+    "line-length": 88,
+    "lint": {
+        "select": [
+            "E",
+            "F",
+            "I",
+            "UP",
+            "B",
+            "ANN",
+            "S",
+            "BLE",
+            "PT",
+            "PGH",
+            "ERA",
+            "T20",
+            "TID",
+            "RUF100",
+        ],
+        "per-file-ignores": {
+            "hatch_build.py": ["S603"],
+            "tests/**": ["S101", "S603"],
+            "src/kora/__main__.py": ["BLE001"],
+            "src/kora/observability/bootstrap.py": ["BLE001"],
+            "src/kora/observability/sink.py": ["BLE001"],
+            "tests/support/warning_filters.py": ["TID251"],
+        },
+        "flake8-tidy-imports": {"banned-api": BANNED_API},
+    },
+}
+PYRIGHT_TABLE: dict[str, object] = {
+    "include": ["src", "hatch_build.py", "tests"],
+    "typeCheckingMode": "strict",
+    "pythonVersion": "3.11",
+    "venvPath": ".",
+    "venv": ".venv",
+    "enableTypeIgnoreComments": False,
+}
+PYTEST_TABLE: dict[str, object] = {
+    "testpaths": ["tests"],
+    "addopts": [
+        "--strict-config",
+        "--strict-markers",
+        "--import-mode=importlib",
+        "-m",
+        "not measurement",
+    ],
+    "filterwarnings": ["error"],
+    "markers": ["measurement: serial performance and resource-lifetime measurement"],
+    "asyncio_mode": "strict",
+    "asyncio_default_fixture_loop_scope": "function",
+}
+STRICT_ADDOPTS: frozenset[str] = frozenset({"--strict-config", "--strict-markers"})
+WARNINGS_AS_ERRORS: str = "error"
+
+
+class Language(Enum):
+    PYTHON = "python"
+    SHELL = "shell"
+    SQL = "sql"
+    TEMPLATE = "template"
+    SCRIPT = "script"
+
+
+LANGUAGES: dict[str, Language] = {
+    ".py": Language.PYTHON,
+    ".pyi": Language.PYTHON,
+    ".sh": Language.SHELL,
+    ".bash": Language.SHELL,
+    ".zsh": Language.SHELL,
+    ".ksh": Language.SHELL,
+    ".sql": Language.SQL,
+    ".psql": Language.SQL,
+    ".pgsql": Language.SQL,
+    ".mako": Language.TEMPLATE,
+    ".ts": Language.SCRIPT,
+    ".tsx": Language.SCRIPT,
+    ".mts": Language.SCRIPT,
+    ".cts": Language.SCRIPT,
+    ".js": Language.SCRIPT,
+    ".jsx": Language.SCRIPT,
+    ".mjs": Language.SCRIPT,
+    ".cjs": Language.SCRIPT,
+}
+
+
+@dataclass(frozen=True)
+class SourceFile:
+    path: Path
+    relative: str
+    language: Language
+
+
+@dataclass(frozen=True)
+class Violation:
+    relative: str
+    line: int
+    reason: str
+
+    def describe(self) -> str:
+        return f"{self.relative}:{self.line}: {self.reason}"
+
+
+def relative_to(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def is_skipped(root: Path, directory: Path) -> bool:
+    name = directory.name
+    if name.startswith(".") or name in SKIPPED_DIRECTORY_NAMES:
+        return True
+    return relative_to(root, directory) in SKIPPED_PATHS
+
+
+def walk_files(root: Path) -> Iterator[Path]:
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        for entry in sorted(directory.iterdir()):
+            if entry.is_symlink():
+                continue
+            if entry.is_dir():
+                if not is_skipped(root, entry):
+                    pending.append(entry)
+            elif entry.is_file():
+                yield entry
+
+
+def shebang_language(path: Path) -> Language | None:
+    with path.open("rb") as handle:
+        head = handle.readline(256)
+    if not head.startswith(SHEBANG.encode("ascii")):
+        return None
+    interpreter = head.decode("utf-8", errors="replace").split()
+    program = Path(interpreter[-1]).name if interpreter else ""
+    if program.startswith(PYTHON_INTERPRETER):
+        return Language.PYTHON
+    if program in SHELL_INTERPRETERS:
+        return Language.SHELL
+    return None
+
+
+def classify(path: Path) -> Language | None:
+    if path.suffix:
+        return LANGUAGES.get(path.suffix)
+    return shebang_language(path)
+
+
+def source_files(root: Path) -> list[SourceFile]:
+    generated = set(GENERATED_FILES)
+    found: list[SourceFile] = []
+    for path in walk_files(root):
+        relative = relative_to(root, path)
+        if relative in generated:
+            continue
+        language = classify(path)
+        if language is not None:
+            found.append(SourceFile(path, relative, language))
+    return found
+
+
+def is_shebang(line: int, column: int, text: str) -> bool:
+    return line == 1 and column == 0 and text.startswith(SHEBANG)
+
+
+def comment_reason(text: str) -> str:
+    return "tool directive" if DIRECTIVE.search(text) else "comment"
+
+
+def python_comment_violations(source: SourceFile, text: str) -> Iterator[Violation]:
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        if token.type != tokenize.COMMENT:
+            continue
+        line, column = token.start
+        if is_shebang(line, column, token.string):
+            continue
+        yield Violation(source.relative, line, comment_reason(token.string))
+
+
+def is_string_statement(node: ast.AST) -> TypeGuard[ast.Expr]:
+    if not isinstance(node, ast.Expr):
+        return False
+    value = node.value
+    if isinstance(value, ast.JoinedStr):
+        return True
+    return isinstance(value, ast.Constant) and isinstance(value.value, str)
+
+
+def call_name(node: ast.Call) -> str:
+    function = node.func
+    if isinstance(function, ast.Attribute):
+        return function.attr
+    if isinstance(function, ast.Name):
+        return function.id
+    return ""
+
+
+def first_string_argument(node: ast.Call) -> str | None:
+    if not node.args:
+        return None
+    first = node.args[0]
+    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+        return first.value
+    return None
+
+
+def keyword_names(node: ast.Call) -> set[str]:
+    return {keyword.arg for keyword in node.keywords if keyword.arg is not None}
+
+
+def is_broad_exception(node: ast.expr | None) -> bool:
+    if node is None:
+        return True
+    if isinstance(node, ast.Tuple):
+        return any(is_broad_exception(element) for element in node.elts)
+    if isinstance(node, ast.Name):
+        return node.id in BROAD_EXCEPTIONS
+    if isinstance(node, ast.Attribute):
+        return node.attr in BROAD_EXCEPTIONS
+    return False
+
+
+def reraises(handler: ast.ExceptHandler) -> bool:
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.Raise):
+            continue
+        if node.exc is None:
+            return True
+        if isinstance(node.exc, ast.Name) and node.exc.id == handler.name:
+            return True
+    return False
+
+
+def is_blind_handler(node: ast.AST) -> TypeGuard[ast.ExceptHandler]:
+    return (
+        isinstance(node, ast.ExceptHandler)
+        and is_broad_exception(node.type)
+        and not reraises(node)
+    )
+
+
+def call_violations(source: SourceFile, node: ast.Call) -> Iterator[Violation]:
+    name = call_name(node)
+    line = node.lineno
+    if name in STRING_MARKER_CALLS and first_string_argument(node) is not None:
+        yield Violation(source.relative, line, "string marker")
+    if name in RUNTIME_CONFIGURATION_CALLS:
+        yield Violation(source.relative, line, "runtime configuration change")
+    if (
+        name in WARNING_FILTER_CALLS
+        and "action" in keyword_names(node)
+        and source.relative not in ALLOWED_WARNING_NAMES
+    ):
+        yield Violation(source.relative, line, "warning filter")
+    if name in DYNAMIC_IMPORT_CALLS:
+        target = first_string_argument(node)
+        if target is not None and target.split(".")[0] in GUARDED_DYNAMIC_MODULES:
+            yield Violation(source.relative, line, f"dynamic import of {target}")
+
+
+def function_violations(
+    source: SourceFile, node: ast.FunctionDef | ast.AsyncFunctionDef
+) -> Iterator[Violation]:
+    arguments = node.args
+    for argument in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]:
+        if argument.arg in MOCK_FIXTURES:
+            yield Violation(
+                source.relative, argument.lineno, f"mock fixture {argument.arg}"
+            )
+
+
+def blind_handler_violations(
+    source: SourceFile, tree: ast.Module
+) -> Iterator[Violation]:
+    handlers = [node for node in ast.walk(tree) if is_blind_handler(node)]
+    allowed = ALLOWED_BLIND_HANDLERS.get(source.relative)
+    if allowed is None:
+        for handler in handlers:
+            yield Violation(source.relative, handler.lineno, "blind exception handler")
+    elif len(handlers) != allowed:
+        yield Violation(
+            source.relative,
+            1,
+            f"{len(handlers)} blind exception handlers, {allowed} allowed",
+        )
+
+
+def warning_name_violations(
+    source: SourceFile, tree: ast.Module
+) -> Iterator[Violation]:
+    allowed = ALLOWED_WARNING_NAMES.get(source.relative)
+    if allowed is None:
+        return
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == WARNINGS_MODULE
+            and node.attr not in allowed
+        ):
+            yield Violation(
+                source.relative,
+                node.lineno,
+                f"warnings.{node.attr} is not allowed",
+            )
+
+
+def assigned_names(node: ast.stmt) -> list[str]:
+    if isinstance(node, ast.Assign):
+        return [target.id for target in node.targets if isinstance(target, ast.Name)]
+    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        return [node.target.id]
+    return []
+
+
+def conftest_violations(source: SourceFile, tree: ast.Module) -> Iterator[Violation]:
+    if Path(source.relative).name != CONFTEST:
+        return
+    allowed = ALLOWED_HOOKS.get(source.relative, frozenset())
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if node.name.startswith(HOOK_PREFIX) and node.name not in allowed:
+                yield Violation(
+                    source.relative, node.lineno, f"unlisted pytest hook {node.name}"
+                )
+        for name in assigned_names(node):
+            if name in COLLECTION_OVERRIDES:
+                yield Violation(
+                    source.relative, node.lineno, f"collection override {name}"
+                )
+
+
+def python_violations(source: SourceFile, text: str) -> Iterator[Violation]:
+    yield from python_comment_violations(source, text)
+    tree = ast.parse(text, filename=source.relative)
+    for node in ast.walk(tree):
+        if is_string_statement(node):
+            yield Violation(source.relative, node.lineno, "string statement")
+        if isinstance(node, ast.Call):
+            yield from call_violations(source, node)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            yield from function_violations(source, node)
+    yield from blind_handler_violations(source, tree)
+    yield from warning_name_violations(source, tree)
+    yield from conftest_violations(source, tree)
+
+
+def strip_quotes(line: str) -> str:
+    return QUOTED.sub("", line)
+
+
+def shell_comment(line: str) -> str | None:
+    stripped = strip_quotes(line)
+    for index, character in enumerate(stripped):
+        if character != "#":
+            continue
+        if index == 0 or stripped[index - 1] in SHELL_COMMENT_PRECEDERS:
+            return stripped[index:]
+    return None
+
+
+def marker_comment(line: str, markers: tuple[str, ...]) -> str | None:
+    stripped = strip_quotes(line)
+    positions = [stripped.find(marker) for marker in markers]
+    found = [position for position in positions if position >= 0]
+    if not found:
+        return None
+    return stripped[min(found) :]
+
+
+def line_comment(language: Language, line: str) -> str | None:
+    if language is Language.SHELL:
+        return shell_comment(line)
+    if language is Language.SQL:
+        return marker_comment(line, ("--", "/*"))
+    if language is Language.TEMPLATE:
+        return marker_comment(line, ("#", "<%doc>"))
+    return marker_comment(line, ("//", "/*"))
+
+
+def line_violations(source: SourceFile, text: str) -> Iterator[Violation]:
+    for number, line in enumerate(text.splitlines(), start=1):
+        if is_shebang(number, 0, line):
+            continue
+        comment = line_comment(source.language, line)
+        if comment is None:
+            continue
+        reason = comment_reason(comment)
+        if source.language is Language.SCRIPT and reason == "comment":
+            continue
+        yield Violation(source.relative, number, reason)
+
+
+def file_violations(source: SourceFile) -> Iterator[Violation]:
+    text = source.path.read_text(encoding="utf-8")
+    if source.language is Language.PYTHON:
+        yield from python_violations(source, text)
+    else:
+        yield from line_violations(source, text)
+
+
+def describe(violations: set[Violation]) -> list[str]:
+    ordered = sorted(violations, key=lambda v: (v.relative, v.line, v.reason))
+    return [violation.describe() for violation in ordered]
+
+
+def source_violations(root: Path) -> list[str]:
+    return describe(
+        {
+            violation
+            for source in source_files(root)
+            for violation in file_violations(source)
+        }
+    )
+
+
+def as_table(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return cast(dict[str, object], value)
+    return {}
+
+
+def table(document: dict[str, object], *keys: str) -> dict[str, object]:
+    current = document
+    for key in keys:
+        current = as_table(current.get(key))
+    return current
+
+
+def string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    items = cast(list[object], value)
+    return [item for item in items if isinstance(item, str)]
+
+
+def pyproject_violations(root: Path) -> Iterator[Violation]:
+    path = root / PYPROJECT
+    if not path.is_file():
+        yield Violation(PYPROJECT, 1, "missing")
+        return
+    with path.open("rb") as handle:
+        document: dict[str, object] = tomllib.load(handle)
+    ruff = table(document, "tool", "ruff")
+    pyright = table(document, "tool", "pyright")
+    pytest_options = table(document, "tool", "pytest", "ini_options")
+    if ruff != RUFF_TABLE:
+        yield Violation(PYPROJECT, 1, "[tool.ruff] differs from the recorded table")
+    if string_list(table(ruff, "lint").get("ignore")):
+        yield Violation(PYPROJECT, 1, "[tool.ruff.lint] ignore is not empty")
+    if pyright != PYRIGHT_TABLE:
+        yield Violation(PYPROJECT, 1, "[tool.pyright] differs from the recorded table")
+    if pyright.get("typeCheckingMode") != "strict":
+        yield Violation(PYPROJECT, 1, "[tool.pyright] typeCheckingMode is not strict")
+    if pyright.get("enableTypeIgnoreComments") is not False:
+        yield Violation(PYPROJECT, 1, "[tool.pyright] honours type: ignore comments")
+    if pytest_options != PYTEST_TABLE:
+        yield Violation(
+            PYPROJECT, 1, "[tool.pytest.ini_options] differs from the recorded table"
+        )
+    for entry in string_list(pytest_options.get("filterwarnings")):
+        if entry != WARNINGS_AS_ERRORS and not entry.startswith(
+            f"{WARNINGS_AS_ERRORS}:"
+        ):
+            yield Violation(PYPROJECT, 1, f"filterwarnings {entry!r} is not error")
+    missing = STRICT_ADDOPTS - set(string_list(pytest_options.get("addopts")))
+    for option in sorted(missing):
+        yield Violation(PYPROJECT, 1, f"addopts lacks {option}")
+
+
+def shadow_violations(root: Path) -> Iterator[Violation]:
+    for name in ROOT_SHADOWS:
+        if (root / name).exists():
+            yield Violation(name, 1, "shadows pyproject.toml")
+    for path in walk_files(root):
+        relative = relative_to(root, path)
+        if path.name in NESTED_SHADOWS and relative != PYPROJECT:
+            yield Violation(relative, 1, "shadows pyproject.toml")
+        if path.name.startswith(ESLINT_SHADOW_PREFIX) and relative.startswith(
+            f"{WEB_DIRECTORY}/"
+        ):
+            yield Violation(relative, 1, "shadows eslint.config.mjs")
+
+
+def tsconfig_violations(root: Path) -> Iterator[Violation]:
+    for relative in TSCONFIGS:
+        path = root / relative
+        if not path.is_file():
+            yield Violation(relative, 1, "missing")
+            continue
+        document: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
+        if table(document, "compilerOptions").get("strict") is not True:
+            yield Violation(relative, 1, "compilerOptions.strict is not true")
+
+
+def generated_file_violations(root: Path) -> Iterator[Violation]:
+    for relative in GENERATED_FILES:
+        if not (root / relative).is_file():
+            yield Violation(relative, 1, "listed generated file is missing")
+
+
+def configuration_violations(root: Path) -> list[str]:
+    return describe(
+        {
+            *pyproject_violations(root),
+            *shadow_violations(root),
+            *tsconfig_violations(root),
+            *generated_file_violations(root),
+        }
+    )
+
+
+def write(root: Path, relative: str, text: str) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def copy_configuration(root: Path) -> None:
+    for relative in (PYPROJECT, *TSCONFIGS):
+        write(root, relative, (REPOSITORY_ROOT / relative).read_text(encoding="utf-8"))
+    for relative in GENERATED_FILES:
+        write(root, relative, "# noqa\n")
+
+
+def test_hand_written_sources_carry_no_suppression() -> None:
+    root = REPOSITORY_ROOT
+
+    violations = source_violations(root)
+
+    assert violations == []
+
+
+def test_check_configuration_is_not_weakened() -> None:
+    root = REPOSITORY_ROOT
+
+    violations = configuration_violations(root)
+
+    assert violations == []
+
+
+def test_checker_flags_directives_in_every_language(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        "src/kora/module.py",
+        "import os  # noqa: F401\n"
+        "value: int = 'x'  # type: ignore[assignment]\n"
+        "other = value  #pyright: ignore[reportUnknownVariableType]\n"
+        "def f() -> None:  # pragma: no cover\n"
+        "    return None\n"
+        "# fmt: off\n"
+        "# ruff: noqa: E501\n"
+        "# isort: skip_file\n"
+        "x = os.system('ls')  # nosec\n"
+        "# mypy: ignore-errors\n"
+        "text = '# noqa inside a string is fine'\n",
+    )
+    write(tmp_path, "scripts/run.sh", "#!/bin/sh\nset -e # shellcheck disable=SC1\n")
+    write(tmp_path, "scripts/deploy", "#!/usr/bin/env bash\necho ok # noqa\n")
+    write(tmp_path, "db/query.sql", "SELECT 1; -- noqa\n/* nosec */ SELECT 2;\n")
+    write(tmp_path, "db/script.py.mako", "import sqlalchemy as sa  # noqa\n")
+    write(
+        tmp_path,
+        "web/src/App.tsx",
+        "// eslint-disable-next-line no-console\n"
+        "/* @ts-ignore */\n"
+        "const a = 1 // prettier-ignore\n"
+        "const b = '@ts-ignore'\n"
+        "const c = /https?:\\/\\//\n"
+        "const d = `// eslint-disable`\n"
+        "export { a, b, c, d }\n",
+    )
+    write(tmp_path, "web/vite.config.mts", "// @ts-expect-error\nexport default {}\n")
+
+    violations = source_violations(tmp_path)
+
+    assert violations == [
+        "db/query.sql:1: tool directive",
+        "db/query.sql:2: tool directive",
+        "db/script.py.mako:1: tool directive",
+        "scripts/deploy:2: tool directive",
+        "scripts/run.sh:2: comment",
+        "src/kora/module.py:1: tool directive",
+        "src/kora/module.py:2: tool directive",
+        "src/kora/module.py:3: tool directive",
+        "src/kora/module.py:4: tool directive",
+        "src/kora/module.py:6: tool directive",
+        "src/kora/module.py:7: tool directive",
+        "src/kora/module.py:8: tool directive",
+        "src/kora/module.py:9: tool directive",
+        "src/kora/module.py:10: tool directive",
+        "web/src/App.tsx:1: tool directive",
+        "web/src/App.tsx:2: tool directive",
+        "web/src/App.tsx:3: tool directive",
+        "web/vite.config.mts:1: tool directive",
+    ]
+
+
+def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> None:
+    write(
+        tmp_path,
+        "src/kora/module.py",
+        '"""Module docstring."""\n'
+        "import importlib\n"
+        "import warnings\n"
+        "# a comment\n"
+        "class Thing:\n"
+        "    'class docstring'\n"
+        "    value: int = 1\n"
+        "    'attribute docstring'\n"
+        "def f(monkeypatch: object, *, mocker: object) -> None:\n"
+        '    """Function docstring."""\n'
+        "    f'{monkeypatch} as a statement'\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception:\n"
+        "        return None\n"
+        "    try:\n"
+        "        pass\n"
+        "    except (ValueError, BaseException) as error:\n"
+        "        raise error\n"
+        "    try:\n"
+        "        pass\n"
+        "    except:\n"
+        "        pass\n"
+        "    __import__('pytest').skip('x')\n"
+        "    importlib.import_module('warnings').simplefilter('ignore')\n"
+        "    with warnings.catch_warnings(action='ignore'):\n"
+        "        pass\n",
+    )
+    write(
+        tmp_path,
+        "tests/conftest.py",
+        "import pytest\n"
+        "collect_ignore = ['slow_test.py']\n"
+        "pytest_plugins: list[str] = ['extra']\n"
+        "def pytest_report_header() -> str:\n"
+        "    return 'ok'\n"
+        "def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:\n"
+        "    for item in items:\n"
+        "        item.add_marker('skip')\n"
+        "def pytest_configure(config: pytest.Config) -> None:\n"
+        "    config.addinivalue_line('filterwarnings', 'ignore')\n",
+    )
+    write(
+        tmp_path,
+        "tests/test_things.py",
+        "def test_it(request: object) -> None:\n"
+        "    request.applymarker('xfail')\n"
+        "    request.applymarker(marker)\n",
+    )
+    write(
+        tmp_path,
+        "src/kora/__main__.py",
+        "try:\n    pass\nexcept Exception:\n    pass\n"
+        "try:\n    pass\nexcept BaseException:\n    pass\n",
+    )
+    write(tmp_path, "src/kora/observability/sink.py", "x = 1\n")
+    write(
+        tmp_path,
+        "tests/support/warning_filters.py",
+        "import warnings\nwarnings.resetwarnings()\nwarnings.filters.clear()\n",
+    )
+    write(tmp_path, "tests/measurements/test_slow.py", "# measured\nx = 1\n")
+    write(tmp_path, "scripts/run.sh", '#!/bin/bash\n# a comment\necho "# not" ;# yes\n')
+    write(tmp_path, "db/view.sql", "SELECT 1; -- a comment\nSELECT '-- not';\n")
+    write(tmp_path, "db/script.py.mako", "## template comment\n<%doc>block</%doc>\n")
+
+    violations = source_violations(tmp_path)
+
+    assert violations == [
+        "db/script.py.mako:1: comment",
+        "db/script.py.mako:2: comment",
+        "db/view.sql:1: comment",
+        "scripts/run.sh:2: comment",
+        "scripts/run.sh:3: comment",
+        "src/kora/__main__.py:1: 2 blind exception handlers, 1 allowed",
+        "src/kora/module.py:1: string statement",
+        "src/kora/module.py:4: comment",
+        "src/kora/module.py:6: string statement",
+        "src/kora/module.py:8: string statement",
+        "src/kora/module.py:9: mock fixture mocker",
+        "src/kora/module.py:9: mock fixture monkeypatch",
+        "src/kora/module.py:10: string statement",
+        "src/kora/module.py:11: string statement",
+        "src/kora/module.py:14: blind exception handler",
+        "src/kora/module.py:22: blind exception handler",
+        "src/kora/module.py:24: dynamic import of pytest",
+        "src/kora/module.py:25: dynamic import of warnings",
+        "src/kora/module.py:26: warning filter",
+        "src/kora/observability/sink.py:1: 0 blind exception handlers, 1 allowed",
+        "tests/conftest.py:2: collection override collect_ignore",
+        "tests/conftest.py:3: collection override pytest_plugins",
+        "tests/conftest.py:6: unlisted pytest hook pytest_collection_modifyitems",
+        "tests/conftest.py:8: string marker",
+        "tests/conftest.py:9: unlisted pytest hook pytest_configure",
+        "tests/conftest.py:10: runtime configuration change",
+        "tests/measurements/test_slow.py:1: comment",
+        "tests/support/warning_filters.py:2: warnings.resetwarnings is not allowed",
+        "tests/support/warning_filters.py:3: warnings.filters is not allowed",
+        "tests/test_things.py:2: string marker",
+    ]
+
+
+def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> None:
+    copy_configuration(tmp_path)
+    write(tmp_path, "scripts/run.py", "#!/usr/bin/env python3\nprint('ok')\n")
+    write(tmp_path, "scripts/run.sh", "#!/bin/sh\necho \"${x#y}\" $# '#'\n")
+    write(tmp_path, "scripts/deploy", "#!/usr/bin/env bash\necho ok\n")
+    write(tmp_path, "scripts/notes", "plain text # not scanned\n")
+    write(
+        tmp_path,
+        "src/kora/module.py",
+        "text = '# noqa'\n"
+        'other = """\n# type: ignore\n"""\n'
+        "def f() -> None:\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception:\n"
+        "        raise\n"
+        "    try:\n"
+        "        pass\n"
+        "    except BaseException as error:\n"
+        "        raise error\n"
+        "    request.applymarker(marker)\n",
+    )
+    write(
+        tmp_path,
+        "src/kora/__main__.py",
+        "try:\n    pass\nexcept Exception:\n    pass\n",
+    )
+    write(
+        tmp_path,
+        "src/kora/observability/bootstrap.py",
+        "try:\n    pass\nexcept Exception:\n    pass\n"
+        "try:\n    pass\nexcept Exception:\n    pass\n",
+    )
+    write(
+        tmp_path,
+        "src/kora/observability/sink.py",
+        "try:\n    pass\nexcept BaseException:\n    pass\n",
+    )
+    write(
+        tmp_path,
+        "tests/support/warning_filters.py",
+        "import warnings\n"
+        "with warnings.catch_warnings(action='always'):\n"
+        "    warnings.simplefilter('always')\n"
+        "    warnings.filterwarnings('ignore')\n",
+    )
+    write(
+        tmp_path,
+        "tests/conftest.py",
+        "def pytest_report_header() -> str:\n    return 'ok'\n"
+        "def pytest_generate_tests(metafunc: object) -> None:\n    return None\n",
+    )
+    write(tmp_path, "tests/observability/conftest.py", "x = 1\n")
+    write(tmp_path, "db/view.sql", "SELECT '-- not a comment', \"/* nor this */\";\n")
+    write(tmp_path, "db/script.py.mako", "revision: str = ${repr(up_revision)}\n")
+    write(
+        tmp_path,
+        "web/src/App.tsx",
+        "const a = /https?:\\/\\/ noqa/\n"
+        "const b = '@ts-ignore'\n"
+        "const c = <a>http://example.test</a>\n"
+        "export { a, b, c }\n",
+    )
+    write(tmp_path, "measurements/out.py", "# generated output\n")
+    write(tmp_path, "web/node_modules/pkg/index.js", "// eslint-disable\n")
+    write(tmp_path, "web/dist/bundle.js", "/* @ts-nocheck */\n")
+    write(tmp_path, "src/kora/api/static/app.js", "// @ts-ignore\n")
+    write(tmp_path, ".venv/lib/site.py", "# noqa\n")
+    write(tmp_path, ".claude/worktrees/copy/module.py", "# noqa\n")
+    write(tmp_path, "src/kora/__pycache__/cached.py", "# noqa\n")
+
+    violations = [*source_violations(tmp_path), *configuration_violations(tmp_path)]
+
+    assert violations == []
+
+
+def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
+    copy_configuration(tmp_path)
+    pyproject = (tmp_path / PYPROJECT).read_text(encoding="utf-8")
+    pyproject = pyproject.replace('    "BLE",\n', "")
+    pyproject = pyproject.replace(
+        "[tool.ruff.lint.per-file-ignores]\n",
+        '[tool.ruff.lint.extend-per-file-ignores]\n"tests/**" = ["BLE001"]\n\n'
+        "[tool.ruff.lint.per-file-ignores]\n",
+    )
+    pyproject = pyproject.replace(
+        'filterwarnings = ["error"]\n',
+        'filterwarnings = ["error", "ignore::DeprecationWarning"]\n',
+    )
+    pyproject = pyproject.replace(
+        '    "--strict-markers",\n', '    "-p",\n    "no:warnings",\n'
+    )
+    pyproject = pyproject.replace(
+        'typeCheckingMode = "strict"\nenableTypeIgnoreComments = false\n',
+        'typeCheckingMode = "basic"\nenableTypeIgnoreComments = true\n',
+    )
+    write(tmp_path, PYPROJECT, pyproject)
+    write(tmp_path, "pytest.ini", "[pytest]\nfilterwarnings = ignore\n")
+    write(tmp_path, "pyrightconfig.json", '{"typeCheckingMode": "basic"}\n')
+    write(tmp_path, "src/ruff.toml", "[lint]\nselect = []\n")
+    write(tmp_path, "tests/pyproject.toml", "[tool.ruff]\n")
+    write(tmp_path, "web/.eslintrc.json", "{}\n")
+    write(
+        tmp_path, "web/tsconfig.node.json", '{"compilerOptions": {"strict": false}}\n'
+    )
+    (tmp_path / "web/pnpm-lock.yaml").unlink()
+
+    violations = configuration_violations(tmp_path)
+
+    assert violations == [
+        "pyproject.toml:1: [tool.pyright] differs from the recorded table",
+        "pyproject.toml:1: [tool.pyright] honours type: ignore comments",
+        "pyproject.toml:1: [tool.pyright] typeCheckingMode is not strict",
+        "pyproject.toml:1: [tool.pytest.ini_options] differs from the recorded table",
+        "pyproject.toml:1: [tool.ruff] differs from the recorded table",
+        "pyproject.toml:1: addopts lacks --strict-markers",
+        "pyproject.toml:1: filterwarnings 'ignore::DeprecationWarning' is not error",
+        "pyrightconfig.json:1: shadows pyproject.toml",
+        "pytest.ini:1: shadows pyproject.toml",
+        "src/ruff.toml:1: shadows pyproject.toml",
+        "tests/pyproject.toml:1: shadows pyproject.toml",
+        "web/.eslintrc.json:1: shadows eslint.config.mjs",
+        "web/pnpm-lock.yaml:1: listed generated file is missing",
+        "web/tsconfig.node.json:1: compilerOptions.strict is not true",
+    ]

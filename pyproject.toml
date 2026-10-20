@@ -72,6 +72,7 @@ no-build-package = ["asyncpg", "greenlet", "sqlalchemy", "markupsafe", "wrapt"]
 [tool.pyright]
 include = ["src", "hatch_build.py", "tests"]
 typeCheckingMode = "strict"
+enableTypeIgnoreComments = false
 pythonVersion = "3.11"
 venvPath = "."
 venv = ".venv"
@@ -82,11 +83,56 @@ include = ["*.py", "*.pyi", "*.ipynb", "**/pyproject.toml", "**/ruff.toml", "**/
 line-length = 88
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "ANN", "S"]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "ANN",
+    "S",
+    "BLE",
+    "PT",
+    "PGH",
+    "ERA",
+    "T20",
+    "TID",
+    "RUF100",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "hatch_build.py" = ["S603"]
 "tests/**" = ["S101", "S603"]
+"src/kora/__main__.py" = ["BLE001"]
+"src/kora/observability/bootstrap.py" = ["BLE001"]
+"src/kora/observability/sink.py" = ["BLE001"]
+"tests/support/warning_filters.py" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pytest.skip".msg = "AGENTS.md Testing: no skipped tests"
+"pytest.xfail".msg = "AGENTS.md Testing: no expected failures"
+"pytest.importorskip".msg = "AGENTS.md Testing: no skipped tests"
+"pytest.mark.skip".msg = "AGENTS.md Testing: no skipped tests"
+"pytest.mark.skipif".msg = "AGENTS.md Testing: no skipped tests"
+"pytest.mark.xfail".msg = "AGENTS.md Testing: no expected failures"
+"pytest.mark.filterwarnings".msg = "AGENTS.md Testing: warnings are errors"
+"pytest.MonkeyPatch".msg = "AGENTS.md Testing: no mocks or patching"
+"_pytest".msg = "AGENTS.md Testing: no pytest internals"
+"unittest.SkipTest".msg = "AGENTS.md Testing: no skipped tests"
+"unittest.skip".msg = "AGENTS.md Testing: no skipped tests"
+"unittest.skipIf".msg = "AGENTS.md Testing: no skipped tests"
+"unittest.skipUnless".msg = "AGENTS.md Testing: no skipped tests"
+"unittest.expectedFailure".msg = "AGENTS.md Testing: no expected failures"
+"unittest.mock".msg = "AGENTS.md Testing: no mocks"
+"mock".msg = "AGENTS.md Testing: no mocks"
+"pytest_mock".msg = "AGENTS.md Testing: no mocks"
+"warnings.filterwarnings".msg = "AGENTS.md Testing: warnings are errors"
+"warnings.simplefilter".msg = "AGENTS.md Testing: warnings are errors"
+"warnings.catch_warnings".msg = "AGENTS.md Testing: warnings are errors"
+"warnings.resetwarnings".msg = "AGENTS.md Testing: warnings are errors"
+"warnings.filters".msg = "AGENTS.md Testing: warnings are errors"
+"contextlib.suppress".msg = "AGENTS.md Code: fail fast, no blind suppression"
+"os._exit".msg = "AGENTS.md Testing: a test process reports its result"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -26,6 +26,7 @@ from tests.observability.conftest import (
     Configure,
     Pipe,
 )
+from tests.support.warning_filters import every_warning_raised
 
 REGISTERED_VALUE: str = "canary-registered-value-0001"
 UNREGISTERED_MARKER: str = "UNREGISTERED-MARKER-7731"
@@ -140,8 +141,7 @@ def test_unregistered_markers_in_exceptions_and_third_party_output_never_appear(
         raise OSError(UNREGISTERED_MARKER)
     except OSError:
         vendor.warning("failed %s", UNREGISTERED_MARKER, exc_info=True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("always")
+    with every_warning_raised():
         warnings.warn(UNREGISTERED_MARKER, stacklevel=1)
     diagnostics.shutdown()
     output = finished_output(None, pipe)
