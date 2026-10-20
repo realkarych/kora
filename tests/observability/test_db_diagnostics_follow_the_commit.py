@@ -18,6 +18,7 @@ DB_EVENTS: frozenset[str] = frozenset(
         "db.migration.finished",
         "db.migration.failed",
         "db.transaction.failed",
+        "db.close.timed_out",
     }
 )
 

@@ -40,6 +40,8 @@ class ConnectionLedger:
     def __init__(self, database: Database) -> None:
         self.opened = 0
         self.closed = 0
+        self.closed_while_checked_out = 0
+        self.checkouts = 0
         self.outstanding = 0
         for engine in {database.writer_engine, database.reader_engine}:
             sync_engine = engine.sync_engine
@@ -54,21 +56,30 @@ class ConnectionLedger:
 
     def _close(self, *arguments: object) -> None:
         self.closed += 1
+        if self.outstanding > 0:
+            self.closed_while_checked_out += 1
 
     def _checkout(self, *arguments: object) -> None:
+        self.checkouts += 1
         self.outstanding += 1
 
     def _checkin(self, *arguments: object) -> None:
         self.outstanding -= 1
 
 
-async def until(condition: Callable[[], bool]) -> None:
+async def reached(condition: Callable[[], bool]) -> bool:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + CONDITION_DEADLINE_SECONDS
     while not condition():
         if loop.time() > deadline:
-            raise TimeoutError("the condition was not met before the deadline")
+            return False
         await asyncio.sleep(0)
+    return True
+
+
+async def until(condition: Callable[[], bool]) -> None:
+    if not await reached(condition):
+        raise TimeoutError("the condition was not met before the deadline")
 
 
 def sqlite_companions(database: Database) -> list[str]:

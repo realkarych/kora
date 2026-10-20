@@ -7,7 +7,7 @@ import threading
 import time
 import tracemalloc
 from collections.abc import Awaitable, Callable, Iterator
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -31,6 +31,7 @@ from tests.db.closing import (
     hold_reader,
     hold_writer,
     narrow_settings,
+    reached,
     sqlite_companions,
     until,
     write,
@@ -408,7 +409,18 @@ async def connect_cycles(
     await factory.discard(settings)
 
 
-CloseScenario = Callable[[Database], Awaitable[list[str]]]
+CloseScenarioRun = Callable[[Database], Awaitable[list[str]]]
+HANDED_OFF_PREFIX: str = "handed-off-"
+CUT_SHORT_NAMES: frozenset[str] = frozenset({"outlived", "queued", "behind"})
+
+
+@dataclass(frozen=True)
+class CloseScenario:
+    name: str
+    run: CloseScenarioRun
+    pool_size: int
+    failing_units: int
+    committed_per_cycle: int
 
 
 async def close_past_deadline(database: Database) -> list[str]:
@@ -444,7 +456,7 @@ async def close_during_handoff(database: Database) -> list[str]:
     first = asyncio.create_task(
         hold_writer(
             database,
-            f"handed-off-{time.perf_counter_ns()}",
+            f"{HANDED_OFF_PREFIX}{time.perf_counter_ns()}",
             first_entered,
             release_first,
         )
@@ -462,32 +474,28 @@ async def close_during_handoff(database: Database) -> list[str]:
     return failure_messages(results)
 
 
-CLOSE_SCENARIOS: dict[str, tuple[CloseScenario, int]] = {
-    "close_past_deadline": (close_past_deadline, 3),
-    "close_during_handoff": (close_during_handoff, 1),
-}
+CLOSE_SCENARIOS: tuple[CloseScenario, ...] = (
+    CloseScenario("close_past_deadline", close_past_deadline, 2, 3, 0),
+    CloseScenario("close_during_handoff", close_during_handoff, 1, 1, 1),
+)
 
 
 async def close_cycles(
     report: Report, kind: DatabaseKind, factory: DatabaseFactory
 ) -> None:
-    settings = await factory.migrated()
-    for name, (scenario, failing_units) in CLOSE_SCENARIOS.items():
-        await close_scenario_cycles(
-            report, kind, factory, settings, name, scenario, failing_units
-        )
-    await factory.discard(settings)
+    for scenario in CLOSE_SCENARIOS:
+        settings = await factory.migrated()
+        await close_scenario_cycles(report, kind, settings, scenario)
+        await factory.discard(settings)
 
 
 async def close_scenario_cycles(
     report: Report,
     kind: DatabaseKind,
-    factory: DatabaseFactory,
     settings: DatabaseSettings,
-    name: str,
     scenario: CloseScenario,
-    failing_units: int,
 ) -> None:
+    name = scenario.name
     heap_samples: list[int] = []
     durations: list[float] = []
     outcomes_as_expected = True
@@ -496,21 +504,24 @@ async def close_scenario_cycles(
     leftovers: list[str] = []
     for index in range(WARM_UP_CYCLES + CLOSE_CYCLES):
         threads_before = threading.active_count()
-        database = Database(narrow_settings(settings))
+        database = Database(narrow_settings(settings, scenario.pool_size))
         ledger = ConnectionLedger(database)
         started = time.perf_counter()
-        messages = await scenario(database)
+        messages = await scenario.run(database)
         elapsed = time.perf_counter() - started
-        released = ledger.closed == ledger.opened and ledger.outstanding == 0
+        released = (
+            ledger.closed == ledger.opened
+            and ledger.outstanding == 0
+            and ledger.closed_while_checked_out == 0
+        )
         companions = sqlite_companions(database)
-        await until_threads_return(threads_before)
-        threads_back = threading.active_count() == threads_before
+        threads_back = await threads_returned_to(threads_before)
         if index < WARM_UP_CYCLES:
             heap_samples.append(heap_bytes())
             continue
         durations.append(elapsed)
         outcomes_as_expected = outcomes_as_expected and (
-            messages == [CLOSED_BEFORE_FINISHING] * failing_units
+            messages == [CLOSED_BEFORE_FINISHING] * scenario.failing_units
         )
         connections_released = connections_released and released
         threads_released = threads_released and threads_back
@@ -518,7 +529,16 @@ async def close_scenario_cycles(
         if index == WARM_UP_CYCLES + CLOSE_CYCLES // 2:
             heap_samples.append(heap_bytes())
     heap_samples.append(heap_bytes())
+    written = await namespace_names(settings)
     gate(report, f"{name}_units_failed", kind, outcomes_as_expected)
+    gate(
+        report,
+        f"{name}_writes_as_expected",
+        kind,
+        not CUT_SHORT_NAMES.intersection(written)
+        and sum(1 for each in written if each.startswith(HANDED_OFF_PREFIX))
+        == scenario.committed_per_cycle * (WARM_UP_CYCLES + CLOSE_CYCLES),
+    )
     gate(report, f"{name}_connections_closed_each_cycle", kind, connections_released)
     gate(report, f"{name}_threads_returned_each_cycle", kind, threads_released)
     gate(report, f"{name}_no_temporary_files", kind, not leftovers)
@@ -543,8 +563,18 @@ async def close_scenario_cycles(
     )
 
 
-async def until_threads_return(count: int) -> None:
-    await until(lambda: threading.active_count() <= count)
+async def threads_returned_to(count: int) -> bool:
+    return await reached(lambda: threading.active_count() <= count)
+
+
+async def namespace_names(settings: DatabaseSettings) -> list[str]:
+    database = Database(settings)
+    try:
+        async with database.read_transaction() as connection:
+            rows = (await connection.execute(select(namespace.c.name))).all()
+    finally:
+        await database.close()
+    return [str(row[0]) for row in rows]
 
 
 def slow_statement(kind: DatabaseKind) -> str:

@@ -3,10 +3,11 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 
 import pytest
-from sqlalchemy import event, select, text
+from sqlalchemy import Connection, event, select, text
 from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
+from sqlalchemy.util import await_
 
 from kora.db.connection import Database, DatabaseClosedError, Dialect, Lifecycle
 from kora.db.tables import namespace
@@ -403,6 +404,7 @@ async def test_close_after_the_deadline_fails_every_unit_in_flight_and_writes_no
     queued = asyncio.create_task(write(closing, "queued"))
     await until(lambda: closing.units_in_flight() == 3)
     opened_before_close = ledger.opened
+    checkouts_before_close = ledger.checkouts
 
     await closing.close(deadline_seconds=0.2)
     release.set()
@@ -412,18 +414,55 @@ async def test_close_after_the_deadline_fails_every_unit_in_flight_and_writes_no
     assert failure_messages(results) == [CLOSED_BEFORE_FINISHING] * 3
     assert await names_after_close(closing) == []
     assert ledger.opened == opened_before_close
+    assert ledger.checkouts - checkouts_before_close == checkouts_of_a_queued_writer(
+        closing
+    )
     assert ledger.closed == ledger.opened
+    assert ledger.closed_while_checked_out == 0
     assert ledger.outstanding == 0
     assert companions == []
     assert closing.units_in_flight() == 0
     assert closing.writer_is_free()
 
 
+def checkouts_of_a_queued_writer(database: Database) -> int:
+    if database.dialect is Dialect.SQLITE:
+        return 0
+    return 1
+
+
 @pytest.mark.asyncio
-async def test_close_during_a_commit_lets_it_finish_and_fails_the_unit_behind_it(
+async def test_close_while_a_commit_is_under_way_lets_the_commit_finish(
     database: Database,
 ) -> None:
     closing = narrow_database(database)
+    ledger = ConnectionLedger(closing)
+    lifecycles_at_commit: list[Lifecycle] = []
+    closes: list[asyncio.Future[None]] = []
+
+    def close_during_commit(connection: Connection) -> None:
+        closes.append(asyncio.ensure_future(closing.close(deadline_seconds=0)))
+        await_(until(lambda: closing.lifecycle is Lifecycle.CLOSED))
+        lifecycles_at_commit.append(closing.lifecycle)
+
+    event.listen(closing.writer_engine.sync_engine, "commit", close_during_commit)
+
+    await write(closing, "committed-at-the-deadline")
+    await closes[0]
+
+    assert lifecycles_at_commit == [Lifecycle.CLOSED]
+    assert await names_after_close(closing) == ["committed-at-the-deadline"]
+    assert ledger.closed == ledger.opened
+    assert ledger.closed_while_checked_out == 0
+    assert ledger.outstanding == 0
+    assert closing.units_in_flight() == 0
+
+
+@pytest.mark.asyncio
+async def test_close_during_the_checkin_of_a_committed_unit_fails_the_unit_behind_it(
+    database: Database,
+) -> None:
+    closing = narrow_database(database, pool_size=1)
     ledger = ConnectionLedger(closing)
     first_entered = asyncio.Event()
     second_entered = asyncio.Event()
@@ -455,6 +494,7 @@ async def test_close_during_a_commit_lets_it_finish_and_fails_the_unit_behind_it
     assert failure_messages(results) == [CLOSED_BEFORE_FINISHING]
     assert await names_after_close(closing) == ["handed-off"]
     assert ledger.closed == ledger.opened
+    assert ledger.closed_while_checked_out == 0
     assert ledger.outstanding == 0
     assert companions == []
     assert closing.units_in_flight() == 0
@@ -487,4 +527,5 @@ async def test_close_is_shared_by_every_caller_and_survives_their_cancellation(
     assert failure_messages(results) == [CLOSED_BEFORE_FINISHING]
     assert await names_after_close(closing) == []
     assert ledger.closed == ledger.opened
+    assert ledger.closed_while_checked_out == 0
     assert ledger.outstanding == 0

@@ -369,7 +369,8 @@ class Database:
         try:
             await asyncio.wait_for(self._idle.wait(), deadline_seconds)
         except TimeoutError:
-            self._record_close_timed_out()
+            if self._in_flight > 0:
+                self._record_close_timed_out()
         self._lifecycle = Lifecycle.CLOSED
         if self._in_flight == 0:
             await self._dispose()
@@ -387,6 +388,8 @@ class Database:
         if self._disposed:
             return
         self._disposed = True
-        await self._writer.dispose()
-        if self._reader is not self._writer:
-            await self._reader.dispose()
+        try:
+            await self._writer.dispose()
+        finally:
+            if self._reader is not self._writer:
+                await self._reader.dispose()
