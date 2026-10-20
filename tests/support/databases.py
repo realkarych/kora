@@ -1,6 +1,5 @@
 import asyncio
 import enum
-import os
 import re
 import secrets
 import shutil
@@ -13,6 +12,7 @@ import pytest
 from sqlalchemy import URL, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.community.postgres import PostgresContainer
+from testcontainers.core.config import testcontainers_config
 
 from kora.db.connection import (
     POSTGRESQL_DRIVER,
@@ -169,7 +169,7 @@ def quote(identifier: str) -> str:
 
 def start_postgres(environ: Mapping[str, str]) -> Iterator[PostgresServer]:
     if environ.get(RYUK_VARIABLE) is None:
-        os.environ[RYUK_VARIABLE] = "true"
+        testcontainers_config.ryuk_disabled = True
     password = secrets.token_urlsafe(24)
     container = PostgresContainer(
         image=POSTGRES_IMAGE,

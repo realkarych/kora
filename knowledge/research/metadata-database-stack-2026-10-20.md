@@ -14,9 +14,9 @@ Checked: 2026-10-20, for [issue #153](https://github.com/realkarych/kora/issues/
 
 SQLAlchemy 2.1 is taken as the current line of the ADR-0013 decision "SQLAlchemy 2.0": the Core and async engine interfaces that `kora.db` uses are unchanged between the lines, 2.1.5 ships `cp315` wheels, and the only behavioural difference met during implementation is that `greenlet` is no longer a base dependency, which the `asyncio` extra restores. The previous line, 2.0.55 (released 2026-10-16), remains the fallback with the same code.
 
-Transitive additions to `uv.lock` (17 distributions in all, from 23 to 40 packages): `greenlet` 3.5.6 (MIT and PSF-2.0, no attestation) through the `asyncio` extra; `Mako` 1.4.3 (MIT, no attestation) and `MarkupSafe` 3.0.4 (BSD-3-Clause) through Alembic; `docker` 7.2.0 (Apache-2.0, no attestation), `requests` 2.34.2, `urllib3` 2.8.0, `charset-normalizer` 3.5.2, `idna` 3.20, `certifi` 2026.10.19, `wrapt` 2.5.1 (BSD-2-Clause), `python-dotenv` 1.2.4 (BSD-3-Clause) and `typing-extensions` 4.16.0 through `testcontainers`. Every package is hash-locked; `uv` verifies hashes, not attestations, so provenance for the four unattested packages rests on their PyPI accounts.
+Transitive additions to `uv.lock` (17 distributions in all, from 23 to 40 packages): `greenlet` 3.5.6 (MIT and PSF-2.0, no attestation) through the `asyncio` extra; `Mako` 1.4.3 (MIT, no attestation) and `MarkupSafe` 3.0.4 (BSD-3-Clause) through Alembic; `docker` 7.2.0 (Apache-2.0, no attestation), `requests` 2.34.2, `urllib3` 2.8.0, `charset-normalizer` 3.5.2, `idna` 3.20, `certifi` 2026.10.19, `wrapt` 2.5.1 (BSD-2-Clause), `python-dotenv` 1.2.4 (BSD-3-Clause) and, under a `sys_platform == 'win32'` marker that never applies on supported platforms, `pywin32` 312 (PSF-2.0, no attestation) through `testcontainers`; `requests` is Apache-2.0, `urllib3` and `charset-normalizer` MIT, `idna` BSD-3-Clause and `certifi` MPL-2.0, the only weak-copyleft licence in the lock, reached only through the development group (`testcontainers`, `docker`, `requests`). `typing-extensions` was already locked before this change. Every package is hash-locked; `uv` verifies hashes, not attestations, so provenance for the four unattested packages rests on their PyPI accounts.
 
-Wheel availability on the CI lanes, from PyPI metadata on 2026-10-20: `asyncpg`, `sqlalchemy` and `greenlet` publish `cp311` and `cp315` wheels for `manylinux` x86_64 and macOS arm64 (`greenlet` as `universal2`); `MarkupSafe` and `wrapt` publish `cp315` wheels (`wrapt` also a pure wheel); `alembic`, `aiosqlite`, `testcontainers`, `Mako`, `docker`, `requests`, `urllib3`, `python-dotenv` and the rest are pure. `pyproject.toml` lists `asyncpg`, `greenlet`, `sqlalchemy`, `markupsafe` and `wrapt` in `[tool.uv] no-build-package`, and CI and the development instructions install with `uv sync --no-build`, so a future interpreter or platform without a wheel fails at setup instead of compiling on the runner; this extends the wheel-only rule the CEL row already states to every native dependency. `asyncpg` ships no `py.typed`; `kora.db` reaches it only through the SQLAlchemy URL, never by import.
+Wheel availability on the CI lanes, from PyPI metadata on 2026-10-20: `asyncpg`, `sqlalchemy` and `greenlet` publish `cp311` and `cp315` wheels for `manylinux` x86_64 and macOS arm64 (`greenlet` as `universal2`); `MarkupSafe` and `wrapt` publish `cp315` wheels (`wrapt` also a pure wheel); `charset-normalizer` publishes compiled wheels with a pure fallback; `alembic`, `aiosqlite`, `testcontainers`, `Mako`, `docker`, `requests`, `urllib3`, `python-dotenv` and the rest are pure. `pyproject.toml` lists `asyncpg`, `greenlet`, `sqlalchemy`, `markupsafe` and `wrapt` in `[tool.uv] no-build-package`, and CI and the development instructions install with `uv sync --no-build`, so a future interpreter or platform without a wheel fails at setup instead of compiling on the runner; this extends the wheel-only rule the CEL row already states to every native dependency. `asyncpg` ships no `py.typed`; `kora.db` reaches it only through the SQLAlchemy URL, never by import.
 
 ## Database behaviour that shaped the implementation
 
@@ -48,20 +48,22 @@ The container listens on every host interface for the duration of a run; the ran
 
 `tests/measurements/test_metadata_database_lifetime.py` declares its workloads and gates before running and writes every sample to the artifact `metadata-database-lifetime-measurement`. Workloads per selected database: 20 migrate-from-empty cycles with a no-op re-run each; 200 connect-and-dispose cycles; 2,000 commit and 2,000 rollback cycles, 200 cancellations of a statement in flight and, on SQLite, 200 cancellations while waiting for the writer; one sweep over 1,000 marked runs beside 1,000 unmarked ones in pages of 100; 200 run finish checks on a run with 10 top-level and 1,000 body instances; the event page over 5,000 events; and 100,000 identifiers. Gates: migration re-run is a no-op and leaves no temporary file; pool checkouts balanced, writer free, no open transaction and no temporary file after every ending path; heap growth over the second half of each cycle set within 64 KiB and under 1 MiB in all; threads, descriptors and server connections back at baseline; every marked run visited once per sweep; one statement per finish check; every event row read. Durations are recorded, not gated. The step budget is 120 s.
 
-Laptop figures (Apple Silicon, macOS, Python 3.11.17, SQLite 3.53.1), one run on 2026-10-20 before the pull request's CI run:
+Laptop figures (Apple Silicon, macOS, Python 3.11.17, SQLite 3.53.1, PostgreSQL 16.15 in the pinned container on Docker Desktop), one run per database on 2026-10-20 before the pull request's CI run:
 
-| Workload | Count | Figure |
-|---|---|---|
-| migrate from empty | 20 | 93 ms per migration (87 to 107 ms) |
-| connect and dispose | 200 | 16.6 ms per cycle |
-| transaction commit | 2,000 | 1.11 ms per cycle, 2,002 checkouts |
-| transaction rollback | 2,000 | 1.09 ms per cycle |
-| marked-run sweep | 11 pages | 12 statements, 1,000 runs visited, 0.9 ms per page |
-| run finish check | 200 | 0.54 ms per call, one statement each |
-| event timeline page | 51 pages | 9.9 ms per page, 5,000 rows |
-| identifier generation | 100,000 | 1.6 µs per identifier |
+| Workload | Count | SQLite | PostgreSQL |
+|---|---|---|---|
+| migrate from empty | 20 | 95 ms per migration (87 to 107 ms) | 215 ms per migration (204 to 231 ms) |
+| connect and dispose | 200 | 17.5 ms per cycle | 36.3 ms per cycle |
+| transaction commit | 2,000 | 1.27 ms per cycle, 2,002 checkouts | 1.85 ms per cycle, 2,002 checkouts |
+| transaction rollback | 2,000 | 1.14 ms per cycle | 2.27 ms per cycle |
+| statement cancelled in flight | 200 | 0.68 ms per cycle, no invalidation | 0.47 ms per cycle, no invalidation |
+| cancelled while waiting for the writer | 200 | 0.84 ms per cycle | not applicable |
+| marked-run sweep | 11 pages | 12 statements, 1,000 runs visited, 1.0 ms per page | 12 statements, 1.2 ms per page |
+| run finish check | 200 | 0.56 ms per call, one statement each | 0.70 ms per call, one statement each |
+| event timeline page | 51 pages | 10.3 ms per page, 5,000 rows | 4.3 ms per page, 5,000 rows |
+| identifier generation | 100,000 | 1.6 µs per identifier | same process |
 
-The whole step took 11.5 s on SQLite. PostgreSQL figures and the hosted-runner figures are added from the pull request's artifact once CI has run on the final revision.
+Threads, descriptors and server connections returned to their baselines; the heap grew by less than 25 KiB over the first half of any cycle set and did not grow over the second half. The whole step took 12.4 s on SQLite and 24.2 s on PostgreSQL. Hosted-runner figures are added from the pull request's artifact once CI has run on the final revision.
 
 ## Limits of this record
 

@@ -81,7 +81,7 @@ class DatabaseSettings:
 def parse_database_url(text: str) -> DatabaseSettings:
     try:
         url = make_url(text)
-    except ArgumentError as error:
+    except (ArgumentError, ValueError) as error:
         raise DatabaseConfigurationError(ACCEPTED_FORMS) from error
     if url.drivername == SQLITE_DRIVER:
         if not url.database or url.database == MEMORY_DATABASE:
@@ -92,7 +92,7 @@ def parse_database_url(text: str) -> DatabaseSettings:
     if url.drivername == POSTGRESQL_DRIVER:
         complete = (
             bool(url.username)
-            and url.password is not None
+            and bool(url.password)
             and bool(url.host)
             and url.port is not None
             and bool(url.database)

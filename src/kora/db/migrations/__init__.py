@@ -54,8 +54,9 @@ def upgrade_with_diagnostics(connection: Connection) -> MigrationReport:
 
 
 async def upgrade_database(settings: DatabaseSettings) -> MigrationReport:
-    database = Database(settings)
+    database: Database | None = None
     try:
+        database = Database(settings)
         async with database.transaction() as connection:
             return await connection.run_sync(upgrade_with_diagnostics)
     except Exception as error:
@@ -64,7 +65,8 @@ async def upgrade_database(settings: DatabaseSettings) -> MigrationReport:
             log.emit(MIGRATION_FAILED, dialect=str(settings.dialect), exception=error)
         raise
     finally:
-        await database.close()
+        if database is not None:
+            await database.close()
 
 
 __all__ = [

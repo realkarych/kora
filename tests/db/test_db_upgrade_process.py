@@ -1,5 +1,5 @@
+import asyncio
 import json
-import os
 import sqlite3
 import stat
 from collections.abc import Mapping
@@ -9,7 +9,8 @@ from typing import cast
 
 import pytest
 
-from kora.db.connection import DatabaseSettings
+from kora.db.connection import Database, parse_database_url
+from tests.db.seed import Seeder
 from tests.observability.conftest import ProcessResult, run_kora
 
 HEAD_REVISION: str = "0001"
@@ -84,6 +85,9 @@ def test_db_upgrade_succeeds_and_reruns_as_a_no_op(tmp_path: Path) -> None:
         f"sqlite+aiosqlite://{HOST_MARKER}/path.db",
         f"postgresql+asyncpg://{USER_MARKER}:{HIDDEN_MARKER}@{HOST_MARKER}/db",
         f"postgresql+asyncpg://{USER_MARKER}@{HOST_MARKER}:5432/db",
+        f"postgresql+asyncpg://{USER_MARKER}:@{HOST_MARKER}:5432/db",
+        f"postgresql+asyncpg://{USER_MARKER}:{HIDDEN_MARKER}@{HOST_MARKER}:abc/db",
+        f"postgresql+asyncpg://{USER_MARKER}:{HIDDEN_MARKER}@{HOST_MARKER}:/db",
         f"postgresql://{USER_MARKER}:{HIDDEN_MARKER}@{HOST_MARKER}:5432/db",
     ],
 )
@@ -138,23 +142,34 @@ def test_db_upgrade_without_a_command_prints_usage() -> None:
     assert result.stderr_lines()[0].startswith("Usage: kora db")
 
 
-def test_sqlite_files_are_private(
-    database_settings: DatabaseSettings, tmp_path: Path
-) -> None:
-    if database_settings.dialect.value != "sqlite":
-        return
-    path = database_settings.sqlite_path
+def test_sqlite_files_are_private(tmp_path: Path) -> None:
+    path = tmp_path / "private.db"
     environment = {"KORA_DATABASE_URL": sqlite_url(path)}
 
     result = upgrade(environment)
+    modes_while_writing = asyncio.run(companion_modes_during_a_write(path))
 
     assert result.code == 0
-    companions = sorted(
-        candidate.name
-        for candidate in path.parent.iterdir()
-        if candidate.name.startswith(path.name)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert sorted(modes_while_writing) == [
+        "private.db",
+        "private.db-shm",
+        "private.db-wal",
+    ]
+    assert all(mode == 0o600 for mode in modes_while_writing.values()), (
+        modes_while_writing
     )
-    modes = {
-        name: stat.S_IMODE(os.stat(path.parent / name).st_mode) for name in companions
-    }
-    assert all(mode == 0o600 for mode in modes.values()), modes
+
+
+async def companion_modes_during_a_write(path: Path) -> dict[str, int]:
+    database = Database(parse_database_url(sqlite_url(path)))
+    try:
+        async with database.transaction() as connection:
+            await Seeder(connection).namespace("private")
+            return {
+                candidate.name: stat.S_IMODE(candidate.stat().st_mode)
+                for candidate in path.parent.iterdir()
+                if candidate.name.startswith(path.name)
+            }
+    finally:
+        await database.close()
