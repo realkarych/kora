@@ -20,7 +20,7 @@ Wheel availability on the CI lanes, from PyPI metadata on 2026-10-20: `asyncpg`,
 
 ## Database behaviour that shaped the implementation
 
-- `sqlite3` connections hold one transaction state, so a read beside a writer on the same connection either fails to begin or joins the writer's transaction. The connection layer therefore owns one writer connection (a static pool of one, `isolation_level=None`, `BEGIN IMMEDIATE` from the `begin` event) under an `asyncio` lock, and a small pool of read-only connections (`PRAGMA query_only=ON`) for read functions; WAL mode gives readers a consistent snapshot while the writer holds an open transaction, which `test_sqlite_reads_proceed_while_the_writer_is_held` proves.
+- `sqlite3` connections hold one transaction state, so a read beside a writer on the same connection either fails to begin or joins the writer's transaction. The connection layer therefore owns one writer connection (a static pool of one, `isolation_level=None`, `BEGIN IMMEDIATE` from the `begin` event) under an `asyncio` lock, and a small pool of read-only connections (`PRAGMA query_only=ON`) for read functions; in WAL mode a reader sees the committed state while the writer holds an uncommitted transaction, which `test_sqlite_reads_proceed_while_the_writer_is_held` proves; the readers issue no `BEGIN`, so a read transaction sees per-statement snapshots, as PostgreSQL's read-committed default does, and multi-statement consistency belongs inside the writer transaction.
 - SQLite matches a partial index only when the query repeats the index predicate literally. SQLAlchemy renders a bare boolean column on SQLite as `needs_scheduling = 1`, so the partial index on `run (id)` is declared `WHERE needs_scheduling = 1` on SQLite and `WHERE needs_scheduling` on PostgreSQL, and the sweep compares with `== true()`; `test_marked_run_sweep_wraps_behind_the_cursor` asserts the index in the query plan on both databases.
 - SQLite cannot reflect expression-based indexes, so Alembic's autogenerate skips the unique index over `(coalesce(namespace_id, ''), name)` of `artifact_type` with a warning; the schema comparison test filters that one warning and the index is created explicitly in migration 0001.
 - `jsonb` reorders keys and refuses `\u0000`; the JSON decorator refuses `\u0000` on both databases, stores canonical text on SQLite, maps Python `None` to SQL NULL on both, and tests compare parsed structures. Digests are computed over canonical JSON before storage.
@@ -57,14 +57,15 @@ Laptop figures (Apple Silicon, macOS, Python 3.11.17, SQLite 3.53.1, PostgreSQL 
 | connect and dispose | 200 | 17.5 ms per cycle | 36.3 ms per cycle |
 | transaction commit | 2,000 | 1.27 ms per cycle, 2,002 checkouts | 1.85 ms per cycle, 2,002 checkouts |
 | transaction rollback | 2,000 | 1.14 ms per cycle | 2.27 ms per cycle |
-| statement cancelled in flight | 200 | 0.68 ms per cycle, no invalidation | 0.47 ms per cycle, no invalidation |
+| statement cancelled in flight, synchronised on the running statement | 200 | the cancelled caller waits for the statement and the queued rollback, no invalidation | the driver cancels the query server-side and SQLAlchemy replaces the pooled connection, one invalidation per cycle |
+| cancelled while waiting for a one-connection pool | 50 | not applicable | the shielded checkout waits for the pool timeout, then the caller sees its cancellation |
 | cancelled while waiting for the writer | 200 | 0.84 ms per cycle | not applicable |
 | marked-run sweep | 11 pages | 12 statements, 1,000 runs visited, 1.0 ms per page | 12 statements, 1.2 ms per page |
 | run finish check | 200 | 0.56 ms per call, one statement each | 0.70 ms per call, one statement each |
 | event timeline page | 51 pages | 10.3 ms per page, 5,000 rows | 4.3 ms per page, 5,000 rows |
 | identifier generation | 100,000 | 1.6 µs per identifier | same process |
 
-Threads, descriptors and server connections returned to their baselines; the heap grew by less than 25 KiB over the first half of any cycle set and did not grow over the second half. The whole step took 12.4 s on SQLite and 24.2 s on PostgreSQL. Hosted-runner figures are added from the pull request's artifact once CI has run on the final revision.
+Threads, descriptors and server connections returned to their baselines; the heap grew by less than 25 KiB over the first half of any cycle set and did not grow over the second half. The transaction cycles record their per-cycle minimum, median, 95th percentile and maximum and the peak traced memory, and the figures are taken with `tracemalloc` active, which inflates allocation-heavy paths. The container start, readiness and template migration are timed separately from the step. The whole step took 12.4 s on SQLite and 24.2 s on PostgreSQL. Hosted-runner figures are added from the pull request's artifact once CI has run on the final revision.
 
 ## Limits of this record
 

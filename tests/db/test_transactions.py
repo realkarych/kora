@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import event, select, text
@@ -129,6 +130,43 @@ async def cancelled_twice_path(database: Database) -> None:
         await task
 
 
+async def cancelled_waiting_for_the_pool_path(database: Database) -> None:
+    if database.dialect is not Dialect.POSTGRESQL:
+        return
+    narrow = Database(
+        replace(
+            database.settings, pool_size=1, max_overflow=0, pool_timeout_seconds=0.2
+        )
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    try:
+
+        async def holder() -> None:
+            async with narrow.transaction() as connection:
+                await Seeder(connection).namespace("pool-holder")
+                entered.set()
+                await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+
+        async def waiter() -> None:
+            async with narrow.transaction() as connection:
+                await Seeder(connection).namespace("pool-waiter")
+
+        holding = asyncio.create_task(holder())
+        await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+        waiting = asyncio.create_task(waiter())
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert waiting.cancelled()
+        release.set()
+        await holding
+        assert narrow.units_in_flight() == 0
+    finally:
+        await narrow.close()
+
+
 async def cancelled_while_waiting_path(database: Database) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -163,6 +201,7 @@ PATHS: list[Callable[[Database], Awaitable[None]]] = [
     cancelled_in_flight_path,
     cancelled_twice_path,
     cancelled_while_waiting_path,
+    cancelled_waiting_for_the_pool_path,
 ]
 
 
@@ -184,7 +223,7 @@ async def test_transaction_releases_connection_and_writer_on_every_path(
 
     expected = ["committed", "holder"]
     if database.dialect is Dialect.POSTGRESQL:
-        expected.append("waiter")
+        expected.extend(["pool-holder", "waiter"])
     assert await names(database) == expected
     assert counter.checkouts >= len(PATHS)
 
@@ -329,3 +368,33 @@ async def names_through(connection: AsyncConnection) -> list[str]:
         await connection.execute(select(namespace.c.name).order_by(namespace.c.name))
     ).all()
     return [str(row[0]) for row in rows]
+
+
+@pytest.mark.asyncio
+async def test_close_after_the_deadline_fails_the_unit_and_releases(
+    database: Database,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    outcomes: list[str] = []
+
+    async def holder() -> None:
+        try:
+            async with database.transaction() as connection:
+                await Seeder(connection).namespace("outlived")
+                entered.set()
+                await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
+        except Exception as error:
+            outcomes.append(type(error).__name__)
+        else:
+            outcomes.append("committed")
+
+    holding = asyncio.create_task(holder())
+    await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
+    await database.close(deadline_seconds=0.2)
+    release.set()
+    await holding
+
+    assert len(outcomes) == 1
+    assert database.units_in_flight() == 0
+    assert database.writer_is_free()

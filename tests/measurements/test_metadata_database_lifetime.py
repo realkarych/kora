@@ -6,6 +6,7 @@ import sqlite3
 import time
 import tracemalloc
 from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
@@ -27,7 +28,6 @@ from tests.measurements.harness import (
     Report,
     Sample,
     current_rss_bytes,
-    open_descriptors,
     report_lifecycle,
     settled_counts,
     timed,
@@ -52,6 +52,8 @@ MIGRATION_CYCLES: int = 20
 CONNECT_CYCLES: int = 200
 TRANSACTION_CYCLES: int = 2_000
 CANCELLATION_CYCLES: int = 200
+POOL_WAIT_CYCLES: int = 50
+POOL_WAIT_TIMEOUT_SECONDS: float = 0.05
 WARM_UP_CYCLES: int = 1
 MARKED_RUNS: int = 1_000
 PAGE_SIZE: int = 100
@@ -202,11 +204,16 @@ def test_metadata_database_lifetime(
     tracemalloc.start()
     try:
         for kind in selected_databases(os.environ):
+            fixture_started = time.perf_counter()
             server = (
                 postgres_server_for(request)
                 if kind is DatabaseKind.POSTGRESQL
                 else None
             )
+            report.durations[f"{kind.value}_fixture"] = (
+                time.perf_counter() - fixture_started
+            )
+            step_started += report.durations[f"{kind.value}_fixture"]
             if server is not None:
                 report.environment["asyncpg"] = version("asyncpg")
                 report.environment["postgres_image"] = (
@@ -400,13 +407,25 @@ async def transaction_cycles(
     try:
         await run_path(report, kind, database, "commit", TRANSACTION_CYCLES, commit)
         await run_path(report, kind, database, "rollback", TRANSACTION_CYCLES, rollback)
+        watch = StatementWatch(
+            database, "pg_sleep" if kind is DatabaseKind.POSTGRESQL else "counter"
+        )
         await run_path(
             report,
             kind,
             database,
             "cancel_in_flight",
             CANCELLATION_CYCLES,
-            lambda db: cancel_in_flight(db, slow_statement(kind)),
+            cancel_in_flight(watch, slow_statement(kind)),
+            expected_invalidations=0
+            if kind is DatabaseKind.SQLITE
+            else CANCELLATION_CYCLES + WARM_UP_CYCLES,
+        )
+        gate(
+            report,
+            "cancel_in_flight_statements_observed",
+            kind,
+            watch.observed == CANCELLATION_CYCLES + WARM_UP_CYCLES,
         )
         if kind is DatabaseKind.SQLITE:
             await run_path(
@@ -417,6 +436,26 @@ async def transaction_cycles(
                 CANCELLATION_CYCLES,
                 cancel_while_waiting,
             )
+        else:
+            narrow = Database(
+                replace(
+                    settings,
+                    pool_size=1,
+                    max_overflow=0,
+                    pool_timeout_seconds=POOL_WAIT_TIMEOUT_SECONDS,
+                )
+            )
+            try:
+                await run_path(
+                    report,
+                    kind,
+                    narrow,
+                    "cancel_waiting_for_the_pool",
+                    POOL_WAIT_CYCLES,
+                    cancel_waiting_for_the_pool,
+                )
+            finally:
+                await narrow.close()
         async with database.read_transaction() as connection:
             rows = (await connection.execute(select(namespace.c.id))).all()
         gate(
@@ -447,6 +486,11 @@ async def transaction_cycles(
 Path_ = Callable[[Database], Awaitable[None]]
 
 
+def percentile(values: list[float], fraction: float) -> float:
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * fraction))]
+
+
 async def run_path(
     report: Report,
     kind: DatabaseKind,
@@ -454,22 +498,34 @@ async def run_path(
     name: str,
     cycles: int,
     path: Path_,
+    expected_invalidations: int = 0,
 ) -> None:
     checkouts = CheckoutBalance(database)
     heap_samples: list[int] = []
+    durations: list[float] = []
     await path(database)
     heap_samples.append(heap_bytes())
+    tracemalloc.reset_peak()
     started = time.perf_counter()
     for index in range(cycles):
+        cycle_started = time.perf_counter()
         await path(database)
+        durations.append(time.perf_counter() - cycle_started)
         if index == cycles // 2:
             heap_samples.append(heap_bytes())
     seconds = time.perf_counter() - started
+    _, peak = tracemalloc.get_traced_memory()
     heap_samples.append(heap_bytes())
     in_transaction = await open_transaction(database)
     gate(report, f"{name}_checkouts_balanced", kind, checkouts.outstanding == 0)
     gate(report, f"{name}_writer_free", kind, database.writer_is_free())
     gate(report, f"{name}_no_open_transaction", kind, not in_transaction)
+    gate(
+        report,
+        f"{name}_invalidations_as_expected",
+        kind,
+        checkouts.invalidations == expected_invalidations,
+    )
     gate(
         report,
         f"{name}_heap_growth_bounded",
@@ -485,8 +541,14 @@ async def run_path(
         kind,
         checkouts=checkouts.checkouts,
         invalidations=checkouts.invalidations,
+        min_us=min(durations) * 1_000_000,
+        p50_us=percentile(durations, 0.5) * 1_000_000,
+        p95_us=percentile(durations, 0.95) * 1_000_000,
+        max_us=max(durations) * 1_000_000,
+        peak_traced_bytes=peak,
         heap_growth_first_half_bytes=heap_samples[1] - heap_samples[0],
         heap_growth_second_half_bytes=heap_samples[-1] - heap_samples[1],
+        timed_under_tracemalloc=True,
     )
 
 
@@ -539,6 +601,7 @@ class StatementWatch:
     def __init__(self, database: Database, fragment: str) -> None:
         self.fragment = fragment
         self.started = asyncio.Event()
+        self.observed = 0
         event.listen(
             database.writer_engine.sync_engine, "before_cursor_execute", self._observe
         )
@@ -547,25 +610,53 @@ class StatementWatch:
         self, connection: object, cursor: object, statement: str, *arguments: object
     ) -> None:
         if self.fragment in statement:
+            self.observed += 1
             self.started.set()
 
 
-async def cancel_in_flight(database: Database, statement: str) -> None:
-    watch = StatementWatch(
-        database, "pg_sleep" if "pg_sleep" in statement else "counter"
-    )
+def cancel_in_flight(watch: StatementWatch, statement: str) -> Path_:
+    async def path(database: Database) -> None:
+        watch.started.clear()
 
-    async def work() -> None:
-        async with database.transaction() as connection:
-            await connection.execute(text(statement))
+        async def work() -> None:
+            async with database.transaction() as connection:
+                await connection.execute(text(statement))
 
-    task = asyncio.create_task(work())
-    await asyncio.wait_for(watch.started.wait(), 10)
-    task.cancel()
+        task = asyncio.create_task(work())
+        await asyncio.wait_for(watch.started.wait(), 10)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return
+
+    return path
+
+
+async def cancel_waiting_for_the_pool(database: Database) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        async with database.transaction():
+            entered.set()
+            await release.wait()
+
+    async def waiter() -> None:
+        async with database.transaction():
+            return None
+
+    holding = asyncio.create_task(holder())
+    await entered.wait()
+    waiting = asyncio.create_task(waiter())
+    await asyncio.sleep(0)
+    waiting.cancel()
     try:
-        await task
+        await waiting
     except asyncio.CancelledError:
-        return
+        pass
+    release.set()
+    await holding
 
 
 async def cancel_while_waiting(database: Database) -> None:
@@ -700,4 +791,3 @@ async def read_workloads(
     finally:
         await database.close()
     await factory.discard(settings)
-    assert open_descriptors() >= 0

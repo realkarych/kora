@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import URL, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.config import testcontainers_config
@@ -119,19 +120,27 @@ class PostgresServer:
         finally:
             await engine.dispose()
 
-    async def _ready(self) -> bool:
+    async def _probe(self) -> None:
         engine = create_async_engine(self.admin_url())
         try:
             async with engine.connect() as connection:
                 await connection.execute(text("SELECT 1"))
-        except Exception:
-            return False
         finally:
             await engine.dispose()
-        return True
 
     def wait_ready(self) -> None:
-        wait_until(lambda: asyncio.run(self._ready()), READINESS_DEADLINE_SECONDS)
+        deadline = time.monotonic() + READINESS_DEADLINE_SECONDS
+        while True:
+            try:
+                asyncio.run(self._probe())
+            except (OSError, DBAPIError) as error:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        "the database did not accept a connection before the deadline"
+                    ) from error
+                time.sleep(READINESS_INTERVAL_SECONDS)
+            else:
+                return
 
     async def create_database_in_loop(self, name: str, template: str) -> None:
         quoted_name = quote(valid_database_name(name))

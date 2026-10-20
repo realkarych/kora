@@ -188,9 +188,11 @@ async def wait_through_cancellations(task: asyncio.Future[Result]) -> int:
     cancellations = 0
     while not task.done():
         try:
-            await asyncio.shield(task)
+            await asyncio.shield(asyncio.wait({task}))
         except asyncio.CancelledError:
             cancellations += 1
+    if not task.cancelled():
+        task.exception()
     return cancellations
 
 

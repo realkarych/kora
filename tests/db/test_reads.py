@@ -103,6 +103,10 @@ async def test_marked_run_sweep_wraps_behind_the_cursor(database: Database) -> N
     assert after_wrap.wrapped
     assert after_wrap.run_ids[0] == late_id
     assert SWEEP_INDEX in plan
+    assert any(
+        "id<" in line or "id <" in line or "id)::text <" in line
+        for line in plan.splitlines()
+    )
     with pytest.raises(PageSizeError):
         MarkedRunSweep(0)
 
@@ -194,7 +198,12 @@ async def test_run_finish_check_uses_top_level_instances(database: Database) -> 
     assert finished_with_live_body
     assert other_unfinished
     assert unfinished_after_change
-    assert FINISH_INDEX in plan
+    index_lines = [line for line in plan.splitlines() if FINISH_INDEX in line]
+    assert index_lines
+    condition = "\n".join(
+        line for line in plan.splitlines() if "run_id" in line and "top_level" in line
+    )
+    assert condition
 
 
 @pytest.mark.asyncio
