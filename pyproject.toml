@@ -79,6 +79,7 @@ venv = ".venv"
 
 [tool.ruff]
 target-version = "py311"
+respect-gitignore = false
 include = ["*.py", "*.pyi", "*.ipynb", "**/pyproject.toml", "**/ruff.toml", "**/.ruff.toml"]
 line-length = 88
 
@@ -111,6 +112,7 @@ select = [
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "pytest.skip".msg = "AGENTS.md Testing: no skipped tests"
 "pytest.xfail".msg = "AGENTS.md Testing: no expected failures"
+"pytest.exit".msg = "AGENTS.md Testing: a test process reports its result"
 "pytest.importorskip".msg = "AGENTS.md Testing: no skipped tests"
 "pytest.mark.skip".msg = "AGENTS.md Testing: no skipped tests"
 "pytest.mark.skipif".msg = "AGENTS.md Testing: no skipped tests"
@@ -119,6 +121,7 @@ select = [
 "pytest.MonkeyPatch".msg = "AGENTS.md Testing: no mocks or patching"
 "_pytest".msg = "AGENTS.md Testing: no pytest internals"
 "unittest.SkipTest".msg = "AGENTS.md Testing: no skipped tests"
+"unittest.case".msg = "AGENTS.md Testing: no skipped tests"
 "unittest.skip".msg = "AGENTS.md Testing: no skipped tests"
 "unittest.skipIf".msg = "AGENTS.md Testing: no skipped tests"
 "unittest.skipUnless".msg = "AGENTS.md Testing: no skipped tests"
@@ -144,6 +147,7 @@ addopts = [
     "not measurement",
 ]
 filterwarnings = ["error"]
+empty_parameter_set_mark = "fail_at_collect"
 markers = ["measurement: serial performance and resource-lifetime measurement"]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"

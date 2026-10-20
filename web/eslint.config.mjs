@@ -59,6 +59,10 @@ export default defineConfig([
     },
   },
   {
+    files: ['**/*.jsx'],
+    languageOptions: { parserOptions: { ecmaFeatures: { jsx: true } } },
+  },
+  {
     files: ['src/**/*.{ts,tsx}'],
     extends: [reactHooks.configs.flat.recommended, reactRefresh.configs.vite],
     languageOptions: {

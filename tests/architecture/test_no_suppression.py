@@ -25,20 +25,79 @@ SKIPPED_PATHS: frozenset[str] = frozenset(
     }
 )
 SKIPPED_DIRECTORY_NAMES: frozenset[str] = frozenset({"__pycache__", "node_modules"})
-ROOT_SHADOWS: tuple[str, ...] = (
-    "pytest.ini",
-    ".pytest.ini",
-    "tox.ini",
-    "setup.cfg",
-    "pyrightconfig.json",
+SHADOW_NAMES: frozenset[str] = frozenset(
+    {
+        "pytest.ini",
+        ".pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "pyrightconfig.json",
+        "ruff.toml",
+        ".ruff.toml",
+        PYPROJECT,
+    }
 )
-NESTED_SHADOWS: frozenset[str] = frozenset({"ruff.toml", ".ruff.toml", PYPROJECT})
-ESLINT_SHADOW_PREFIX: str = ".eslintrc"
 WEB_DIRECTORY: str = "web"
-TSCONFIGS: tuple[str, ...] = ("web/tsconfig.app.json", "web/tsconfig.node.json")
+ESLINT_CONFIG: str = "web/eslint.config.mjs"
+ESLINT_CONFIG_PREFIXES: tuple[str, ...] = (".eslintrc", "eslint.config.")
+WEB_PACKAGE: str = "web/package.json"
+WEB_SCRIPTS: dict[str, str] = {
+    "dev": "vite",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint . --max-warnings 0",
+    "build": "pnpm typecheck && vite build",
+}
+STRICT_TSCONFIGS: tuple[str, ...] = ("web/tsconfig.app.json", "web/tsconfig.node.json")
+SHARED_COMPILER_OPTIONS: dict[str, object] = {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "verbatimModuleSyntax": True,
+    "moduleDetection": "force",
+    "noEmit": True,
+    "strict": True,
+    "noUnusedLocals": True,
+    "noUnusedParameters": True,
+    "erasableSyntaxOnly": True,
+    "noFallthroughCasesInSwitch": True,
+    "noUncheckedIndexedAccess": True,
+    "noUncheckedSideEffectImports": True,
+}
+TSCONFIG_TABLES: dict[str, dict[str, object]] = {
+    "web/tsconfig.json": {
+        "files": [],
+        "references": [
+            {"path": "./tsconfig.app.json"},
+            {"path": "./tsconfig.node.json"},
+        ],
+    },
+    "web/tsconfig.app.json": {
+        "compilerOptions": {
+            "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+            "target": "ES2022",
+            "lib": ["ES2022", "DOM", "DOM.Iterable"],
+            "types": ["vite/client"],
+            "jsx": "react-jsx",
+            **SHARED_COMPILER_OPTIONS,
+        },
+        "include": ["src"],
+    },
+    "web/tsconfig.node.json": {
+        "compilerOptions": {
+            "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+            "target": "ES2023",
+            "lib": ["ES2023"],
+            "types": ["node"],
+            **SHARED_COMPILER_OPTIONS,
+        },
+        "include": ["vite.config.ts"],
+    },
+}
+WEB_CONFIGURATION: tuple[str, ...] = (*TSCONFIG_TABLES, WEB_PACKAGE)
 SHEBANG: str = "#!"
-SHELL_INTERPRETERS: tuple[str, ...] = ("sh", "bash", "zsh", "ksh")
+ENV_PROGRAM: str = "env"
+SHELL_INTERPRETERS: frozenset[str] = frozenset({"sh", "bash", "zsh", "ksh"})
 PYTHON_INTERPRETER: str = "python"
+VERSION_CHARACTERS: str = "0123456789."
 DIRECTIVE: re.Pattern[str] = re.compile(
     r"noqa|type\s*:\s*ignore|pyright\s*:|pragma\s*:|fmt\s*:|ruff\s*:|isort\s*:"
     r"|mypy\s*:|pylint\s*:|flake8\s*:|coverage\s*:|nosec"
@@ -49,11 +108,14 @@ DIRECTIVE: re.Pattern[str] = re.compile(
 QUOTED: re.Pattern[str] = re.compile(
     r"'(?:\\.|[^'\\\n])*'|\"(?:\\.|[^\"\\\n])*\"|`(?:\\.|[^`\\\n])*`"
 )
-SHELL_COMMENT_PRECEDERS: str = " \t;(&|"
+SHELL_COMMENT_PRECEDERS: str = " \t;()&|"
 MOCK_FIXTURES: frozenset[str] = frozenset({"monkeypatch", "mocker"})
 STRING_MARKER_CALLS: frozenset[str] = frozenset({"add_marker", "applymarker"})
+SKIP_METHOD_CALLS: frozenset[str] = frozenset({"skipTest"})
+PACKAGE_KEYWORD: str = "package"
 RUNTIME_CONFIGURATION_CALLS: frozenset[str] = frozenset({"addinivalue_line"})
 WARNING_FILTER_CALLS: frozenset[str] = frozenset({"catch_warnings"})
+PLUGIN_MANAGER: str = "pluginmanager"
 DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
     {"__import__", "import_module", "resolve_name"}
 )
@@ -64,6 +126,14 @@ BROAD_EXCEPTIONS: frozenset[str] = frozenset({"Exception", "BaseException"})
 COLLECTION_OVERRIDES: frozenset[str] = frozenset(
     {"collect_ignore", "collect_ignore_glob", "pytest_plugins"}
 )
+SCOPE_NODES: tuple[type[ast.AST], ...] = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.Try,
+    ast.TryStar,
+)
 HOOK_PREFIX: str = "pytest_"
 CONFTEST: str = "conftest.py"
 WARNINGS_MODULE: str = "warnings"
@@ -73,9 +143,20 @@ ALLOWED_BLIND_HANDLERS: dict[str, int] = {
     "src/kora/observability/bootstrap.py": 2,
     "src/kora/observability/sink.py": 1,
 }
+WARNING_FILTERS_MODULE: str = "tests/support/warning_filters.py"
 ALLOWED_WARNING_NAMES: dict[str, frozenset[str]] = {
-    "tests/support/warning_filters.py": frozenset(
+    WARNING_FILTERS_MODULE: frozenset(
         {"catch_warnings", "filterwarnings", "simplefilter"}
+    )
+}
+ALLOWED_WARNING_IMPORTS: dict[str, frozenset[str]] = {
+    WARNING_FILTERS_MODULE: frozenset(
+        {
+            WARNINGS_MODULE,
+            "collections.abc.Generator",
+            "contextlib.contextmanager",
+            "sqlalchemy.exc.SAWarning",
+        }
     )
 }
 ALLOWED_HOOKS: dict[str, frozenset[str]] = {
@@ -86,6 +167,7 @@ ALLOWED_HOOKS: dict[str, frozenset[str]] = {
 BANNED_API: dict[str, dict[str, str]] = {
     "pytest.skip": {"msg": "AGENTS.md Testing: no skipped tests"},
     "pytest.xfail": {"msg": "AGENTS.md Testing: no expected failures"},
+    "pytest.exit": {"msg": "AGENTS.md Testing: a test process reports its result"},
     "pytest.importorskip": {"msg": "AGENTS.md Testing: no skipped tests"},
     "pytest.mark.skip": {"msg": "AGENTS.md Testing: no skipped tests"},
     "pytest.mark.skipif": {"msg": "AGENTS.md Testing: no skipped tests"},
@@ -94,6 +176,7 @@ BANNED_API: dict[str, dict[str, str]] = {
     "pytest.MonkeyPatch": {"msg": "AGENTS.md Testing: no mocks or patching"},
     "_pytest": {"msg": "AGENTS.md Testing: no pytest internals"},
     "unittest.SkipTest": {"msg": "AGENTS.md Testing: no skipped tests"},
+    "unittest.case": {"msg": "AGENTS.md Testing: no skipped tests"},
     "unittest.skip": {"msg": "AGENTS.md Testing: no skipped tests"},
     "unittest.skipIf": {"msg": "AGENTS.md Testing: no skipped tests"},
     "unittest.skipUnless": {"msg": "AGENTS.md Testing: no skipped tests"},
@@ -111,6 +194,7 @@ BANNED_API: dict[str, dict[str, str]] = {
 }
 RUFF_TABLE: dict[str, object] = {
     "target-version": "py311",
+    "respect-gitignore": False,
     "include": [
         "*.py",
         "*.pyi",
@@ -166,6 +250,7 @@ PYTEST_TABLE: dict[str, object] = {
         "not measurement",
     ],
     "filterwarnings": ["error"],
+    "empty_parameter_set_mark": "fail_at_collect",
     "markers": ["measurement: serial performance and resource-lifetime measurement"],
     "asyncio_mode": "strict",
     "asyncio_default_fixture_loop_scope": "function",
@@ -246,16 +331,28 @@ def walk_files(root: Path) -> Iterator[Path]:
                 yield entry
 
 
+def shebang_program(head: str) -> str:
+    tokens = head[len(SHEBANG) :].split()
+    if not tokens:
+        return ""
+    program = Path(tokens[0]).name
+    if program != ENV_PROGRAM:
+        return program
+    for token in tokens[1:]:
+        if not token.startswith("-"):
+            return Path(token).name
+    return ""
+
+
 def shebang_language(path: Path) -> Language | None:
     with path.open("rb") as handle:
         head = handle.readline(256)
     if not head.startswith(SHEBANG.encode("ascii")):
         return None
-    interpreter = head.decode("utf-8", errors="replace").split()
-    program = Path(interpreter[-1]).name if interpreter else ""
+    program = shebang_program(head.decode("utf-8", errors="replace"))
     if program.startswith(PYTHON_INTERPRETER):
         return Language.PYTHON
-    if program in SHELL_INTERPRETERS:
+    if program.rstrip(VERSION_CHARACTERS) in SHELL_INTERPRETERS:
         return Language.SHELL
     return None
 
@@ -315,12 +412,41 @@ def call_name(node: ast.Call) -> str:
     return ""
 
 
+def string_value(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = [string_value(value) for value in node.values]
+        if all(part is not None for part in parts):
+            return "".join(part for part in parts if part is not None)
+    return None
+
+
+def positional_or_keyword(node: ast.Call, index: int, keyword: str) -> ast.expr | None:
+    if len(node.args) > index:
+        return node.args[index]
+    for item in node.keywords:
+        if item.arg == keyword:
+            return item.value
+    return None
+
+
 def first_string_argument(node: ast.Call) -> str | None:
-    if not node.args:
-        return None
-    first = node.args[0]
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value
+    return string_value(node.args[0]) if node.args else None
+
+
+def top_level_module(name: str) -> str:
+    return re.split(r"[.:]", name.lstrip("."), maxsplit=1)[0]
+
+
+def guarded_dynamic_import(node: ast.Call) -> str | None:
+    target = first_string_argument(node)
+    package = string_value(positional_or_keyword(node, 1, PACKAGE_KEYWORD))
+    for candidate in (package, target):
+        if candidate is not None and top_level_module(candidate) in (
+            GUARDED_DYNAMIC_MODULES
+        ):
+            return candidate
     return None
 
 
@@ -340,13 +466,25 @@ def is_broad_exception(node: ast.expr | None) -> bool:
     return False
 
 
+def raises_within(node: ast.AST) -> Iterator[ast.Raise]:
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.Raise):
+            yield child
+        elif not isinstance(child, SCOPE_NODES):
+            yield from raises_within(child)
+
+
+def names_handler(node: ast.expr | None, handler: ast.ExceptHandler) -> bool:
+    return isinstance(node, ast.Name) and node.id == handler.name
+
+
 def reraises(handler: ast.ExceptHandler) -> bool:
-    for node in ast.walk(handler):
-        if not isinstance(node, ast.Raise):
-            continue
-        if node.exc is None:
+    for statement in raises_within(handler):
+        if statement.exc is None:
             return True
-        if isinstance(node.exc, ast.Name) and node.exc.id == handler.name:
+        if names_handler(statement.exc, handler):
+            return True
+        if names_handler(statement.cause, handler):
             return True
     return False
 
@@ -364,6 +502,8 @@ def call_violations(source: SourceFile, node: ast.Call) -> Iterator[Violation]:
     line = node.lineno
     if name in STRING_MARKER_CALLS and first_string_argument(node) is not None:
         yield Violation(source.relative, line, "string marker")
+    if name in SKIP_METHOD_CALLS:
+        yield Violation(source.relative, line, "unittest skip method")
     if name in RUNTIME_CONFIGURATION_CALLS:
         yield Violation(source.relative, line, "runtime configuration change")
     if (
@@ -373,8 +513,8 @@ def call_violations(source: SourceFile, node: ast.Call) -> Iterator[Violation]:
     ):
         yield Violation(source.relative, line, "warning filter")
     if name in DYNAMIC_IMPORT_CALLS:
-        target = first_string_argument(node)
-        if target is not None and target.split(".")[0] in GUARDED_DYNAMIC_MODULES:
+        target = guarded_dynamic_import(node)
+        if target is not None:
             yield Violation(source.relative, line, f"dynamic import of {target}")
 
 
@@ -405,12 +545,39 @@ def blind_handler_violations(
         )
 
 
+def imported_names(node: ast.stmt) -> Iterator[tuple[str, str | None]]:
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            yield alias.name, alias.asname
+    if isinstance(node, ast.ImportFrom):
+        source = "." * node.level + (node.module or "")
+        for alias in node.names:
+            yield f"{source}.{alias.name}", alias.asname
+
+
+def warning_import_violations(
+    source: SourceFile, tree: ast.Module
+) -> Iterator[Violation]:
+    allowed = ALLOWED_WARNING_IMPORTS.get(source.relative)
+    if allowed is None:
+        return
+    for node in tree.body:
+        for qualified, alias in imported_names(node):
+            if qualified not in allowed or alias is not None:
+                yield Violation(
+                    source.relative,
+                    node.lineno,
+                    f"import of {qualified} is not allowed",
+                )
+
+
 def warning_name_violations(
     source: SourceFile, tree: ast.Module
 ) -> Iterator[Violation]:
     allowed = ALLOWED_WARNING_NAMES.get(source.relative)
     if allowed is None:
         return
+    yield from warning_import_violations(source, tree)
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Attribute)
@@ -425,11 +592,15 @@ def warning_name_violations(
             )
 
 
-def assigned_names(node: ast.stmt) -> list[str]:
+def bound_names(node: ast.stmt) -> list[str]:
     if isinstance(node, ast.Assign):
         return [target.id for target in node.targets if isinstance(target, ast.Name)]
     if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
         return [node.target.id]
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        return [node.name]
+    if isinstance(node, ast.ImportFrom):
+        return [alias.asname or alias.name for alias in node.names]
     return []
 
 
@@ -438,24 +609,25 @@ def conftest_violations(source: SourceFile, tree: ast.Module) -> Iterator[Violat
         return
     allowed = ALLOWED_HOOKS.get(source.relative, frozenset())
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            if node.name.startswith(HOOK_PREFIX) and node.name not in allowed:
-                yield Violation(
-                    source.relative, node.lineno, f"unlisted pytest hook {node.name}"
-                )
-        for name in assigned_names(node):
+        for name in bound_names(node):
             if name in COLLECTION_OVERRIDES:
                 yield Violation(
                     source.relative, node.lineno, f"collection override {name}"
                 )
+            elif name.startswith(HOOK_PREFIX) and name not in allowed:
+                yield Violation(
+                    source.relative, node.lineno, f"unlisted pytest hook {name}"
+                )
 
 
 def python_violations(source: SourceFile, text: str) -> Iterator[Violation]:
-    yield from python_comment_violations(source, text)
     tree = ast.parse(text, filename=source.relative)
+    yield from python_comment_violations(source, text)
     for node in ast.walk(tree):
         if is_string_statement(node):
             yield Violation(source.relative, node.lineno, "string statement")
+        if isinstance(node, ast.Attribute) and node.attr == PLUGIN_MANAGER:
+            yield Violation(source.relative, node.lineno, "plugin manager access")
         if isinstance(node, ast.Call):
             yield from call_violations(source, node)
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -512,7 +684,7 @@ def line_violations(source: SourceFile, text: str) -> Iterator[Violation]:
 
 
 def file_violations(source: SourceFile) -> Iterator[Violation]:
-    text = source.path.read_text(encoding="utf-8")
+    text = source.path.read_text(encoding="utf-8-sig")
     if source.language is Language.PYTHON:
         yield from python_violations(source, text)
     else:
@@ -588,29 +760,46 @@ def pyproject_violations(root: Path) -> Iterator[Violation]:
         yield Violation(PYPROJECT, 1, f"addopts lacks {option}")
 
 
+def shadows_eslint_config(relative: str) -> bool:
+    name = Path(relative).name
+    return (
+        relative.startswith(f"{WEB_DIRECTORY}/")
+        and relative != ESLINT_CONFIG
+        and name.startswith(ESLINT_CONFIG_PREFIXES)
+    )
+
+
 def shadow_violations(root: Path) -> Iterator[Violation]:
-    for name in ROOT_SHADOWS:
-        if (root / name).exists():
-            yield Violation(name, 1, "shadows pyproject.toml")
     for path in walk_files(root):
         relative = relative_to(root, path)
-        if path.name in NESTED_SHADOWS and relative != PYPROJECT:
+        if path.name in SHADOW_NAMES and relative != PYPROJECT:
             yield Violation(relative, 1, "shadows pyproject.toml")
-        if path.name.startswith(ESLINT_SHADOW_PREFIX) and relative.startswith(
-            f"{WEB_DIRECTORY}/"
-        ):
+        if shadows_eslint_config(relative):
             yield Violation(relative, 1, "shadows eslint.config.mjs")
 
 
-def tsconfig_violations(root: Path) -> Iterator[Violation]:
-    for relative in TSCONFIGS:
+def json_document(path: Path) -> dict[str, object]:
+    return as_table(json.loads(path.read_text(encoding="utf-8")))
+
+
+def web_configuration_violations(root: Path) -> Iterator[Violation]:
+    for relative, recorded in TSCONFIG_TABLES.items():
         path = root / relative
         if not path.is_file():
             yield Violation(relative, 1, "missing")
             continue
-        document: dict[str, object] = json.loads(path.read_text(encoding="utf-8"))
-        if table(document, "compilerOptions").get("strict") is not True:
+        document = json_document(path)
+        if document != recorded:
+            yield Violation(relative, 1, "differs from the recorded document")
+        if relative in STRICT_TSCONFIGS and (
+            table(document, "compilerOptions").get("strict") is not True
+        ):
             yield Violation(relative, 1, "compilerOptions.strict is not true")
+    package = root / WEB_PACKAGE
+    if not package.is_file():
+        yield Violation(WEB_PACKAGE, 1, "missing")
+    elif table(json_document(package), "scripts") != WEB_SCRIPTS:
+        yield Violation(WEB_PACKAGE, 1, "scripts differ from the recorded table")
 
 
 def generated_file_violations(root: Path) -> Iterator[Violation]:
@@ -624,7 +813,7 @@ def configuration_violations(root: Path) -> list[str]:
         {
             *pyproject_violations(root),
             *shadow_violations(root),
-            *tsconfig_violations(root),
+            *web_configuration_violations(root),
             *generated_file_violations(root),
         }
     )
@@ -637,7 +826,7 @@ def write(root: Path, relative: str, text: str) -> None:
 
 
 def copy_configuration(root: Path) -> None:
-    for relative in (PYPROJECT, *TSCONFIGS):
+    for relative in (PYPROJECT, *WEB_CONFIGURATION):
         write(root, relative, (REPOSITORY_ROOT / relative).read_text(encoding="utf-8"))
     for relative in GENERATED_FILES:
         write(root, relative, "# noqa\n")
@@ -677,6 +866,9 @@ def test_checker_flags_directives_in_every_language(tmp_path: Path) -> None:
     )
     write(tmp_path, "scripts/run.sh", "#!/bin/sh\nset -e # shellcheck disable=SC1\n")
     write(tmp_path, "scripts/deploy", "#!/usr/bin/env bash\necho ok # noqa\n")
+    write(tmp_path, "scripts/strict", "#!/usr/bin/env -S bash -eu\necho ok # noqa\n")
+    write(tmp_path, "scripts/plain", "#!/bin/sh -e\necho ok # noqa\n")
+    write(tmp_path, "scripts/tool", "#!/usr/bin/env python3.11\nx = 1  # noqa\n")
     write(tmp_path, "db/query.sql", "SELECT 1; -- noqa\n/* nosec */ SELECT 2;\n")
     write(tmp_path, "db/script.py.mako", "import sqlalchemy as sa  # noqa\n")
     write(
@@ -691,6 +883,7 @@ def test_checker_flags_directives_in_every_language(tmp_path: Path) -> None:
         "export { a, b, c, d }\n",
     )
     write(tmp_path, "web/vite.config.mts", "// @ts-expect-error\nexport default {}\n")
+    write(tmp_path, "web/src/Old.jsx", "// a comment\n// eslint-disable\n")
 
     violations = source_violations(tmp_path)
 
@@ -699,7 +892,10 @@ def test_checker_flags_directives_in_every_language(tmp_path: Path) -> None:
         "db/query.sql:2: tool directive",
         "db/script.py.mako:1: tool directive",
         "scripts/deploy:2: tool directive",
+        "scripts/plain:2: tool directive",
         "scripts/run.sh:2: comment",
+        "scripts/strict:2: tool directive",
+        "scripts/tool:2: tool directive",
         "src/kora/module.py:1: tool directive",
         "src/kora/module.py:2: tool directive",
         "src/kora/module.py:3: tool directive",
@@ -712,6 +908,7 @@ def test_checker_flags_directives_in_every_language(tmp_path: Path) -> None:
         "web/src/App.tsx:1: tool directive",
         "web/src/App.tsx:2: tool directive",
         "web/src/App.tsx:3: tool directive",
+        "web/src/Old.jsx:2: tool directive",
         "web/vite.config.mts:1: tool directive",
     ]
 
@@ -722,6 +919,7 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "src/kora/module.py",
         '"""Module docstring."""\n'
         "import importlib\n"
+        "import pkgutil\n"
         "import warnings\n"
         "# a comment\n"
         "class Thing:\n"
@@ -745,29 +943,52 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "        pass\n"
         "    __import__('pytest').skip('x')\n"
         "    importlib.import_module('warnings').simplefilter('ignore')\n"
+        "    importlib.import_module('.outcomes', package='_pytest')\n"
+        "    pkgutil.resolve_name('pytest:skip')\n"
         "    with warnings.catch_warnings(action='ignore'):\n"
-        "        pass\n",
+        "        pass\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as error:\n"
+        "        def later() -> None:\n"
+        "            raise error\n"
+        "        return None\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as error:\n"
+        "        try:\n"
+        "            pass\n"
+        "        except ValueError:\n"
+        "            raise\n"
+        "        return None\n",
     )
     write(
         tmp_path,
         "tests/conftest.py",
         "import pytest\n"
+        "from tests.hooks import configure as pytest_configure\n"
+        "from tests.hooks import plugins as pytest_plugins\n"
         "collect_ignore = ['slow_test.py']\n"
-        "pytest_plugins: list[str] = ['extra']\n"
         "def pytest_report_header() -> str:\n"
         "    return 'ok'\n"
         "def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:\n"
         "    for item in items:\n"
         "        item.add_marker('skip')\n"
-        "def pytest_configure(config: pytest.Config) -> None:\n"
-        "    config.addinivalue_line('filterwarnings', 'ignore')\n",
+        "        item.add_marker(f'xfail')\n"
+        "def _report() -> None:\n"
+        "    return None\n"
+        "pytest_runtest_makereport = _report\n"
+        "def pytest_sessionstart(session: pytest.Session) -> None:\n"
+        "    session.config.addinivalue_line('filterwarnings', 'ignore')\n"
+        "    session.config.pluginmanager.register(object())\n",
     )
     write(
         tmp_path,
         "tests/test_things.py",
         "def test_it(request: object) -> None:\n"
         "    request.applymarker('xfail')\n"
-        "    request.applymarker(marker)\n",
+        "    request.applymarker(marker)\n"
+        "    request.skipTest('x')\n",
     )
     write(
         tmp_path,
@@ -778,11 +999,22 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
     write(tmp_path, "src/kora/observability/sink.py", "x = 1\n")
     write(
         tmp_path,
-        "tests/support/warning_filters.py",
-        "import warnings\nwarnings.resetwarnings()\nwarnings.filters.clear()\n",
+        WARNING_FILTERS_MODULE,
+        "import warnings\n"
+        "import pytest\n"
+        "import warnings as w\n"
+        "from warnings import resetwarnings\n"
+        "from contextlib import suppress\n"
+        "warnings.resetwarnings()\n"
+        "warnings.filters.clear()\n",
     )
     write(tmp_path, "tests/measurements/test_slow.py", "# measured\nx = 1\n")
-    write(tmp_path, "scripts/run.sh", '#!/bin/bash\n# a comment\necho "# not" ;# yes\n')
+    write(tmp_path, "tests/bom.py", "\ufeff# after a byte order mark\nx = 1\n")
+    write(
+        tmp_path,
+        "scripts/run.sh",
+        '#!/bin/bash\n# a comment\necho "# not" ;# yes\ncase $1 in a)# tail\nesac\n',
+    )
     write(tmp_path, "db/view.sql", "SELECT 1; -- a comment\nSELECT '-- not';\n")
     write(tmp_path, "db/script.py.mako", "## template comment\n<%doc>block</%doc>\n")
 
@@ -794,40 +1026,57 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "db/view.sql:1: comment",
         "scripts/run.sh:2: comment",
         "scripts/run.sh:3: comment",
+        "scripts/run.sh:4: comment",
         "src/kora/__main__.py:1: 2 blind exception handlers, 1 allowed",
         "src/kora/module.py:1: string statement",
-        "src/kora/module.py:4: comment",
-        "src/kora/module.py:6: string statement",
-        "src/kora/module.py:8: string statement",
-        "src/kora/module.py:9: mock fixture mocker",
-        "src/kora/module.py:9: mock fixture monkeypatch",
-        "src/kora/module.py:10: string statement",
+        "src/kora/module.py:5: comment",
+        "src/kora/module.py:7: string statement",
+        "src/kora/module.py:9: string statement",
+        "src/kora/module.py:10: mock fixture mocker",
+        "src/kora/module.py:10: mock fixture monkeypatch",
         "src/kora/module.py:11: string statement",
-        "src/kora/module.py:14: blind exception handler",
-        "src/kora/module.py:22: blind exception handler",
-        "src/kora/module.py:24: dynamic import of pytest",
-        "src/kora/module.py:25: dynamic import of warnings",
-        "src/kora/module.py:26: warning filter",
+        "src/kora/module.py:12: string statement",
+        "src/kora/module.py:15: blind exception handler",
+        "src/kora/module.py:23: blind exception handler",
+        "src/kora/module.py:25: dynamic import of pytest",
+        "src/kora/module.py:26: dynamic import of warnings",
+        "src/kora/module.py:27: dynamic import of _pytest",
+        "src/kora/module.py:28: dynamic import of pytest:skip",
+        "src/kora/module.py:29: warning filter",
+        "src/kora/module.py:33: blind exception handler",
+        "src/kora/module.py:39: blind exception handler",
         "src/kora/observability/sink.py:1: 0 blind exception handlers, 1 allowed",
-        "tests/conftest.py:2: collection override collect_ignore",
+        "tests/bom.py:1: comment",
+        "tests/conftest.py:2: unlisted pytest hook pytest_configure",
         "tests/conftest.py:3: collection override pytest_plugins",
-        "tests/conftest.py:6: unlisted pytest hook pytest_collection_modifyitems",
-        "tests/conftest.py:8: string marker",
-        "tests/conftest.py:9: unlisted pytest hook pytest_configure",
-        "tests/conftest.py:10: runtime configuration change",
+        "tests/conftest.py:4: collection override collect_ignore",
+        "tests/conftest.py:7: unlisted pytest hook pytest_collection_modifyitems",
+        "tests/conftest.py:9: string marker",
+        "tests/conftest.py:10: string marker",
+        "tests/conftest.py:13: unlisted pytest hook pytest_runtest_makereport",
+        "tests/conftest.py:14: unlisted pytest hook pytest_sessionstart",
+        "tests/conftest.py:15: runtime configuration change",
+        "tests/conftest.py:16: plugin manager access",
         "tests/measurements/test_slow.py:1: comment",
-        "tests/support/warning_filters.py:2: warnings.resetwarnings is not allowed",
-        "tests/support/warning_filters.py:3: warnings.filters is not allowed",
+        f"{WARNING_FILTERS_MODULE}:2: import of pytest is not allowed",
+        f"{WARNING_FILTERS_MODULE}:3: import of warnings is not allowed",
+        f"{WARNING_FILTERS_MODULE}:4: import of warnings.resetwarnings is not allowed",
+        f"{WARNING_FILTERS_MODULE}:5: import of contextlib.suppress is not allowed",
+        f"{WARNING_FILTERS_MODULE}:6: warnings.resetwarnings is not allowed",
+        f"{WARNING_FILTERS_MODULE}:7: warnings.filters is not allowed",
         "tests/test_things.py:2: string marker",
+        "tests/test_things.py:4: unittest skip method",
     ]
 
 
 def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> None:
     copy_configuration(tmp_path)
     write(tmp_path, "scripts/run.py", "#!/usr/bin/env python3\nprint('ok')\n")
-    write(tmp_path, "scripts/run.sh", "#!/bin/sh\necho \"${x#y}\" $# '#'\n")
+    write(tmp_path, "scripts/marked.py", "\ufeff#!/usr/bin/env python3\nprint('ok')\n")
+    write(tmp_path, "scripts/run.sh", "#!/bin/sh\necho \"${x#y}\" $# '#' $(cmd)\n")
     write(tmp_path, "scripts/deploy", "#!/usr/bin/env bash\necho ok\n")
     write(tmp_path, "scripts/notes", "plain text # not scanned\n")
+    write(tmp_path, "scripts/other", "#!/usr/bin/env perl\n# perl is not scanned\n")
     write(
         tmp_path,
         "src/kora/module.py",
@@ -842,7 +1091,17 @@ def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> N
         "        pass\n"
         "    except BaseException as error:\n"
         "        raise error\n"
-        "    request.applymarker(marker)\n",
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as error:\n"
+        "        raise RuntimeError('wrapped') from error\n"
+        "    try:\n"
+        "        pass\n"
+        "    except Exception as error:\n"
+        "        if error:\n"
+        "            raise\n"
+        "    request.applymarker(marker)\n"
+        "    importlib.import_module('kora.plugins', package='kora')\n",
     )
     write(
         tmp_path,
@@ -862,15 +1121,19 @@ def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> N
     )
     write(
         tmp_path,
-        "tests/support/warning_filters.py",
+        WARNING_FILTERS_MODULE,
         "import warnings\n"
+        "from collections.abc import Generator\n"
+        "from contextlib import contextmanager\n"
+        "from sqlalchemy.exc import SAWarning\n"
         "with warnings.catch_warnings(action='always'):\n"
         "    warnings.simplefilter('always')\n"
-        "    warnings.filterwarnings('ignore')\n",
+        "    warnings.filterwarnings('ignore', '', SAWarning)\n",
     )
     write(
         tmp_path,
         "tests/conftest.py",
+        "import pytest_asyncio\n"
         "def pytest_report_header() -> str:\n    return 'ok'\n"
         "def pytest_generate_tests(metafunc: object) -> None:\n    return None\n",
     )
@@ -920,13 +1183,28 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
     )
     write(tmp_path, PYPROJECT, pyproject)
     write(tmp_path, "pytest.ini", "[pytest]\nfilterwarnings = ignore\n")
+    write(tmp_path, "tests/.pytest.ini", "[pytest]\n")
+    write(tmp_path, "tests/db/tox.ini", "[pytest]\n")
+    write(tmp_path, "src/setup.cfg", "[tool:pytest]\n")
     write(tmp_path, "pyrightconfig.json", '{"typeCheckingMode": "basic"}\n')
     write(tmp_path, "src/ruff.toml", "[lint]\nselect = []\n")
+    write(tmp_path, "src/kora/.ruff.toml", "[lint]\nselect = []\n")
     write(tmp_path, "tests/pyproject.toml", "[tool.ruff]\n")
     write(tmp_path, "web/.eslintrc.json", "{}\n")
+    write(tmp_path, "web/eslint.config.js", "export default []\n")
+    write(tmp_path, "web/src/eslint.config.mjs", "export default []\n")
     write(
-        tmp_path, "web/tsconfig.node.json", '{"compilerOptions": {"strict": false}}\n'
+        tmp_path,
+        "web/tsconfig.node.json",
+        '{"compilerOptions": {"strict": false}, "include": ["vite.config.ts"]}\n',
     )
+    app = json_document(tmp_path / "web/tsconfig.app.json")
+    table(app, "compilerOptions")["strictNullChecks"] = False
+    write(tmp_path, "web/tsconfig.app.json", json.dumps(app))
+    write(tmp_path, "web/tsconfig.json", '{"files": [], "references": []}\n')
+    package = json_document(tmp_path / WEB_PACKAGE)
+    table(package, "scripts")["lint"] = "eslint src/App.tsx"
+    write(tmp_path, WEB_PACKAGE, json.dumps(package))
     (tmp_path / "web/pnpm-lock.yaml").unlink()
 
     violations = configuration_violations(tmp_path)
@@ -941,9 +1219,19 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
         "pyproject.toml:1: filterwarnings 'ignore::DeprecationWarning' is not error",
         "pyrightconfig.json:1: shadows pyproject.toml",
         "pytest.ini:1: shadows pyproject.toml",
+        "src/kora/.ruff.toml:1: shadows pyproject.toml",
         "src/ruff.toml:1: shadows pyproject.toml",
+        "src/setup.cfg:1: shadows pyproject.toml",
+        "tests/.pytest.ini:1: shadows pyproject.toml",
+        "tests/db/tox.ini:1: shadows pyproject.toml",
         "tests/pyproject.toml:1: shadows pyproject.toml",
         "web/.eslintrc.json:1: shadows eslint.config.mjs",
+        "web/eslint.config.js:1: shadows eslint.config.mjs",
+        "web/package.json:1: scripts differ from the recorded table",
         "web/pnpm-lock.yaml:1: listed generated file is missing",
+        "web/src/eslint.config.mjs:1: shadows eslint.config.mjs",
+        "web/tsconfig.app.json:1: differs from the recorded document",
+        "web/tsconfig.json:1: differs from the recorded document",
         "web/tsconfig.node.json:1: compilerOptions.strict is not true",
+        "web/tsconfig.node.json:1: differs from the recorded document",
     ]
