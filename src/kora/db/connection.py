@@ -363,7 +363,11 @@ class Database:
         if self._closing is None:
             self._lifecycle = Lifecycle.CLOSING
             self._closing = asyncio.ensure_future(self._close(deadline_seconds))
+            self._closing.add_done_callback(self._mark_closed)
         await asyncio.shield(self._closing)
+
+    def _mark_closed(self, closing: asyncio.Future[None]) -> None:
+        self._lifecycle = Lifecycle.CLOSED
 
     async def _close(self, deadline_seconds: float) -> None:
         try:

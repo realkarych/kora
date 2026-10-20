@@ -21,11 +21,11 @@ from kora.db.tables import namespace
 from tests.db.closing import (
     CLOSED_BEFORE_FINISHING,
     ConnectionLedger,
+    ShutdownDuringClose,
     failure_messages,
     hold_reader,
     hold_writer,
     narrow_database,
-    narrow_settings,
     sqlite_companions,
     until,
     write,
@@ -480,9 +480,10 @@ async def test_a_unit_started_after_close_was_called_is_refused_while_closing(
     closer = asyncio.create_task(closing.close(deadline_seconds=BARRIER_SECONDS))
     late_writer = asyncio.create_task(write(closing, "late"))
     late_reader = asyncio.create_task(read_one_namespace(closing))
-    late = await asyncio.gather(late_writer, late_reader, return_exceptions=True)
+    await until(lambda: late_writer.done() and late_reader.done())
     lifecycle_while_refusing = closing.lifecycle
     release.set()
+    late = await asyncio.gather(late_writer, late_reader, return_exceptions=True)
     await holding
     await closer
 
@@ -502,44 +503,24 @@ async def read_one_namespace(database: Database) -> None:
         await connection.execute(select(namespace.c.id).limit(1))
 
 
+@pytest.mark.parametrize(
+    "close_started", [True, False], ids=["close-waiting", "close-not-started"]
+)
 def test_close_cancelled_by_loop_shutdown_still_releases_every_connection(
-    database_settings: DatabaseSettings,
+    database_settings: DatabaseSettings, close_started: bool
 ) -> None:
     shutdown = ShutdownDuringClose(database_settings)
 
-    asyncio.run(shutdown.leave_a_close_pending())
+    asyncio.run(shutdown.leave_a_close_pending(close_started))
     written = asyncio.run(shutdown.names_written())
+    companions = sqlite_companions(shutdown.database)
 
     assert shutdown.lifecycle_after_shutdown() is Lifecycle.CLOSED
     assert shutdown.ledger.closed == shutdown.ledger.opened
     assert shutdown.ledger.closed_while_checked_out == 0
     assert shutdown.ledger.outstanding == 0
+    assert companions == []
     assert written == []
-
-
-class ShutdownDuringClose:
-    def __init__(self, settings: DatabaseSettings) -> None:
-        self.settings = settings
-        self.database = Database(narrow_settings(settings))
-        self.ledger = ConnectionLedger(self.database)
-
-    async def leave_a_close_pending(self) -> None:
-        entered = asyncio.Event()
-        release = asyncio.Event()
-        asyncio.ensure_future(hold_writer(self.database, "outlived", entered, release))
-        await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-        asyncio.ensure_future(self.database.close(deadline_seconds=BARRIER_SECONDS))
-        await until(lambda: self.database.lifecycle is Lifecycle.CLOSING)
-
-    async def names_written(self) -> list[str]:
-        reopened = Database(self.settings)
-        try:
-            return await names(reopened)
-        finally:
-            await reopened.close()
-
-    def lifecycle_after_shutdown(self) -> Lifecycle:
-        return self.database.lifecycle
 
 
 def checkouts_of_a_queued_writer(database: Database) -> int:

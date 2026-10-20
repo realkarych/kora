@@ -10,6 +10,7 @@ from kora.db.connection import (
     DatabaseClosedError,
     DatabaseSettings,
     Dialect,
+    Lifecycle,
 )
 from kora.db.tables import namespace
 from tests.db.seed import Seeder
@@ -118,3 +119,33 @@ def failure_messages(results: Sequence[object]) -> list[str]:
         str(result) if isinstance(result, DatabaseClosedError) else repr(result)
         for result in results
     ]
+
+
+class ShutdownDuringClose:
+    def __init__(self, settings: DatabaseSettings) -> None:
+        self.settings = settings
+        self.database = Database(narrow_settings(settings))
+        self.ledger = ConnectionLedger(self.database)
+
+    async def leave_a_close_pending(self, close_started: bool) -> None:
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        asyncio.ensure_future(hold_writer(self.database, "outlived", entered, release))
+        await asyncio.wait_for(entered.wait(), CONDITION_DEADLINE_SECONDS)
+        asyncio.ensure_future(
+            self.database.close(deadline_seconds=CONDITION_DEADLINE_SECONDS)
+        )
+        if close_started:
+            await until(lambda: self.database.lifecycle is Lifecycle.CLOSING)
+
+    async def names_written(self) -> list[str]:
+        reopened = Database(self.settings)
+        try:
+            async with reopened.read_transaction() as connection:
+                rows = (await connection.execute(select(namespace.c.name))).all()
+        finally:
+            await reopened.close()
+        return sorted(str(row[0]) for row in rows)
+
+    def lifecycle_after_shutdown(self) -> Lifecycle:
+        return self.database.lifecycle
