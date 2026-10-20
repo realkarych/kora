@@ -18,6 +18,7 @@ from tests.db.seed import Seeder
 NARROW_POOL_SIZE: int = 2
 NARROW_POOL_TIMEOUT_SECONDS: float = 30.0
 CONDITION_DEADLINE_SECONDS: float = 10.0
+REFUSAL_DEADLINE_SECONDS: float = 1.0
 SQLITE_COMPANION_SUFFIXES: tuple[str, ...] = ("-wal", "-shm")
 CLOSED_BEFORE_FINISHING: str = "the database closed before the unit finished"
 
@@ -68,9 +69,12 @@ class ConnectionLedger:
         self.outstanding -= 1
 
 
-async def reached(condition: Callable[[], bool]) -> bool:
+async def reached(
+    condition: Callable[[], bool],
+    deadline_seconds: float = CONDITION_DEADLINE_SECONDS,
+) -> bool:
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + CONDITION_DEADLINE_SECONDS
+    deadline = loop.time() + deadline_seconds
     while not condition():
         if loop.time() > deadline:
             return False

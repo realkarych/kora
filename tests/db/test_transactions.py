@@ -20,12 +20,14 @@ from kora.db.connection import (
 from kora.db.tables import namespace
 from tests.db.closing import (
     CLOSED_BEFORE_FINISHING,
+    REFUSAL_DEADLINE_SECONDS,
     ConnectionLedger,
     ShutdownDuringClose,
     failure_messages,
     hold_reader,
     hold_writer,
     narrow_database,
+    reached,
     sqlite_companions,
     until,
     write,
@@ -480,13 +482,16 @@ async def test_a_unit_started_after_close_was_called_is_refused_while_closing(
     closer = asyncio.create_task(closing.close(deadline_seconds=BARRIER_SECONDS))
     late_writer = asyncio.create_task(write(closing, "late"))
     late_reader = asyncio.create_task(read_one_namespace(closing))
-    await until(lambda: late_writer.done() and late_reader.done())
+    refused_in_time = await reached(
+        lambda: late_writer.done() and late_reader.done(), REFUSAL_DEADLINE_SECONDS
+    )
     lifecycle_while_refusing = closing.lifecycle
     release.set()
     late = await asyncio.gather(late_writer, late_reader, return_exceptions=True)
     await holding
     await closer
 
+    assert refused_in_time
     assert failure_messages(late) == ["the database is closed"] * 2
     assert lifecycle_while_refusing is Lifecycle.CLOSING
     assert await names_after_close(closing) == ["held"]

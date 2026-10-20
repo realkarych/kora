@@ -292,8 +292,14 @@ async def write_one(database: Database) -> None:
         await Seeder(connection).namespace("before-close")
 
 
+@pytest.mark.parametrize(
+    "close_started", [True, False], ids=["close-waiting", "close-not-started"]
+)
 def test_a_close_cancelled_by_loop_shutdown_records_nothing(
-    configure: Configure, pipe: Pipe, database_settings: DatabaseSettings
+    configure: Configure,
+    pipe: Pipe,
+    database_settings: DatabaseSettings,
+    close_started: bool,
 ) -> None:
     settings = LoggingSettings(
         level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
@@ -302,7 +308,7 @@ def test_a_close_cancelled_by_loop_shutdown_records_nothing(
     pipe.reader.start()
     shutdown = ShutdownDuringClose(database_settings)
 
-    asyncio.run(shutdown.leave_a_close_pending(close_started=True))
+    asyncio.run(shutdown.leave_a_close_pending(close_started))
     diagnostics.shutdown()
     finished_output(pipe)
 
