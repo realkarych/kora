@@ -145,6 +145,13 @@ class PipeReader:
                     raise TimeoutError("the pipe was not closed")
                 self._condition.wait(remaining)
 
+    def join(self, deadline_seconds: float = WAIT_SECONDS) -> None:
+        if self._thread.ident is None:
+            return
+        self._thread.join(deadline_seconds)
+        if self._thread.is_alive():
+            raise TimeoutError("the pipe reader did not stop")
+
 
 @dataclass
 class Pipe:
@@ -169,6 +176,7 @@ def pipe() -> Iterator[Pipe]:
     created = Pipe(read_end, write_end, PipeReader(read_end))
     yield created
     created.close_write_end()
+    created.reader.join()
     created.close_read_end()
 
 
