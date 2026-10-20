@@ -24,6 +24,7 @@ from kora.observability import (
     configure_process,
     read_logging_settings,
 )
+from kora.observability.policy import escape_controls, truncate
 
 EXIT_SUCCESS: int = 0
 EXIT_FAILURE: int = 1
@@ -54,7 +55,7 @@ def write_usage(usage: str, message: str) -> None:
     lines = [usage] if usage else []
     lines.append(f"Try '{PROGRAM} --help' for help.")
     lines.append("")
-    lines.append(f"Error: {message}")
+    lines.append(f"Error: {truncate(escape_controls(message))}")
     write_stderr("\n".join(lines) + "\n")
 
 
@@ -75,7 +76,7 @@ def run_application(app: typer.Typer, argv: Sequence[str]) -> int:
                 write_usage(context.get_usage(), MISSING_COMMAND)
                 return EXIT_USAGE
     except typer.Exit as exit_request:
-        return exit_request.exit_code
+        return exit_request.exit_code & EXIT_STATUS_MASK
     except typer.Abort:
         return EXIT_FAILURE
     except typer.TyperException as error:

@@ -42,6 +42,7 @@ class SecretRegistry:
         self._next_handle = 1
         self._retained_bytes = 0
         self._pattern: re.Pattern[str] | None = None
+        self._longest = 0
 
     def register(self, value: str) -> SecretRegistration:
         size = len(value.encode("utf-8"))
@@ -70,16 +71,46 @@ class SecretRegistry:
     def _recompile(self) -> None:
         if not self._values:
             self._pattern = None
+            self._longest = 0
             return
         literals = sorted(set(self._values.values()), key=len, reverse=True)
         self._pattern = re.compile("|".join(re.escape(literal) for literal in literals))
+        self._longest = len(literals[0])
         re.purge()
 
-    def mask(self, text: str) -> str:
+    def mask(self, text: str, retained: int | None = None) -> str:
         pattern = self._pattern
         if pattern is None:
             return text
-        return pattern.sub(MASK, text)
+        if retained is None or len(text) <= retained + self._longest:
+            return pattern.sub(MASK, text)
+        return self._mask_prefix(pattern, text, retained)
+
+    def _mask_prefix(self, pattern: re.Pattern[str], text: str, retained: int) -> str:
+        window = retained + self._longest
+        tail = self._longest - 1
+        parts: list[str] = []
+        produced = 0
+        position = 0
+        while position < len(text) and produced < retained:
+            end = min(len(text), position + window)
+            chunk = text[position:end]
+            consumed = 0
+            for match in pattern.finditer(chunk):
+                parts.append(chunk[consumed : match.start()])
+                parts.append(MASK)
+                produced += match.start() - consumed + len(MASK)
+                consumed = match.end()
+            if end == len(text):
+                parts.append(chunk[consumed:])
+                produced += len(chunk) - consumed
+                position = end
+                continue
+            safe_end = max(consumed, len(chunk) - tail)
+            parts.append(chunk[consumed:safe_end])
+            produced += safe_end - consumed
+            position += safe_end
+        return "".join(parts)
 
     def count(self) -> int:
         with self._lock:

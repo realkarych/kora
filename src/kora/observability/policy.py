@@ -93,7 +93,7 @@ class ContentPolicy:
         budget.take_value()
         budget.take_string(len(encoded))
         text = encoded.decode("utf-8")
-        return truncate(escape_controls(self._registry.mask(text)))
+        return truncate(escape_controls(self._registry.mask(text, MAX_STRING_BYTES)))
 
     def safe_scalar(self, value: object, budget: Budget) -> SafeValue:
         if isinstance(value, str):

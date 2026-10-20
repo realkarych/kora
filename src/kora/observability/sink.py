@@ -3,6 +3,7 @@ import os
 import select
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from kora.observability.catalog import LossReason
@@ -183,10 +184,12 @@ class StreamWriter:
         descriptor: int,
         queue: BoundedQueue,
         state: DiagnosticsState,
+        on_exit: Callable[[], None],
     ) -> None:
         self._descriptor = descriptor
         self._queue = queue
         self._state = state
+        self._on_exit = on_exit
         self._stop = threading.Event()
         self._idle = threading.Event()
         self._idle.set()
@@ -213,6 +216,8 @@ class StreamWriter:
                     self._idle.set()
         except BaseException:
             self._fail()
+        finally:
+            self._on_exit()
 
     def _write_all(self, item: bytes) -> bool:
         view = memoryview(item)

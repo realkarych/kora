@@ -33,7 +33,7 @@ pnpm --version
 Run the following commands from the repository root in the same shell. Dependency setup may access package registries; retain the uv cache, pnpm store and temporary build constraints for the subsequent offline distribution build. The setup commands preserve both lockfiles:
 
 ```sh
-uv sync --locked --group build
+uv sync --locked --group build --no-install-project
 KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
 uv export --locked --only-group build --no-emit-project \
   --format requirements.txt \
@@ -42,6 +42,9 @@ uv pip install --python "$PWD/.venv/bin/python" \
   --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
   --require-hashes \
   --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+  --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+  --editable .
 pnpm --dir web install --frozen-lockfile
 ```
 
@@ -89,7 +92,7 @@ The build writes both archives to `dist/`. No test inspects the archives or inst
 
 Vite generates `src/kora/api/static/THIRD_PARTY_LICENSES.md` from the bundled frontend dependencies. The wheel includes this inventory and their license text alongside the generated assets. The project's Apache-2.0 metadata and license remain separate. The [dated packaging record](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#packaging-implementation-record) links the generation and upstream license references.
 
-The first sync installs kora as editable for Python development, so that the tests can import the package and start the `kora` entry point; the final sync only confirms that the environment and the dependency files are unchanged. Editable setup requires Python and uv, skips the frontend hook and does not package production assets. For frontend development, use `pnpm --dir web run dev`. A normal wheel build requires Node and pnpm: its hook performs a frozen install, type-checks and builds the frontend, then embeds `src/kora/api/static/`. The sdist carries those source inputs and toolchain files, so building a wheel from an sdist has the same Node and pnpm requirements. Installing an already-built wheel requires only supported Python; it does not invoke frontend tools.
+The first sync installs the locked dependencies without the project; the editable install of kora that follows, under the locked build constraints, lets the tests import the package and start the `kora` entry point with a build backend resolved from the lock; the final sync only confirms that the environment and the dependency files are unchanged. Editable setup requires Python and uv, skips the frontend hook and does not package production assets. For frontend development, use `pnpm --dir web run dev`. A normal wheel build requires Node and pnpm: its hook performs a frozen install, type-checks and builds the frontend, then embeds `src/kora/api/static/`. The sdist carries those source inputs and toolchain files, so building a wheel from an sdist has the same Node and pnpm requirements. Installing an already-built wheel requires only supported Python; it does not invoke frontend tools.
 
 `KORA_BUILD_OFFLINE=1` makes the hook's pnpm install offline, while `uv build --offline` makes Python build dependency resolution offline. Complete the dependency setup, including registry metadata priming, first. The hook accepts only an unset value, `0` or `1`; a missing tool, install failure, build failure or missing frontend asset aborts a normal wheel build. Build output is generated and ignored, and should never be committed.
 

@@ -55,7 +55,7 @@ jobs:
           cache-suffix: scaffold-${{ matrix.python }}
       - name: Install locked dependencies
         run: |
-          uv sync --locked --group build
+          uv sync --locked --group build --no-install-project
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
           uv export --locked --only-group build --no-emit-project \
             --format requirements.txt \
@@ -64,6 +64,9 @@ jobs:
             --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
             --require-hashes \
             --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --editable .
           printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
           pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources

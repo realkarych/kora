@@ -1,8 +1,10 @@
 import gc
+import hashlib
 import json
 import logging
 import os
 import statistics
+import string
 import subprocess
 import sys
 import threading
@@ -290,6 +292,25 @@ def registered_values(count: int) -> list[str]:
     ]
 
 
+def scattered_registry_values(count: int, length: int) -> list[str]:
+    alphabet = string.ascii_lowercase + string.digits
+    values: list[str] = []
+    for index in range(count):
+        digest = b""
+        while len(digest) < length:
+            digest += hashlib.sha256(
+                f"registry-{index}-{len(digest)}".encode()
+            ).digest()
+        values.append(
+            "".join(alphabet[byte % len(alphabet)] for byte in digest[:length])
+        )
+    return values
+
+
+def shared_prefix_values(count: int) -> list[str]:
+    return ["shared-prefix-" + "p" * length for length in range(1, count + 1)]
+
+
 @pytest.fixture
 def report() -> Iterator[Report]:
     created = Report(
@@ -454,6 +475,33 @@ def redaction_workloads(report: Report) -> None:
         emit_hits,
     )
     for registration in registrations:
+        registration.release()
+    random_registrations = [
+        diagnostics.register_secret(value)
+        for value in scattered_registry_values(256, 255)
+    ]
+    repeat(
+        report,
+        "redaction_scattered_registry_miss",
+        HEAVY_RECORDS,
+        HEAVY_REPEATS,
+        emit_miss,
+    )
+    for registration in random_registrations:
+        registration.release()
+    prefix_registrations = [
+        diagnostics.register_secret(value) for value in shared_prefix_values(255)
+    ]
+    run = {"s00": "shared-prefix-" + "p" * 16_000, "exception": miss["exception"]}
+
+    def emit_run() -> None:
+        for _ in range(HEAVY_RECORDS):
+            log.emit(MAXIMAL, **run)
+
+    repeat(
+        report, "redaction_shared_prefix_run", HEAVY_RECORDS, HEAVY_REPEATS, emit_run
+    )
+    for registration in prefix_registrations:
         registration.release()
     rounds = iter(range(10**9))
 

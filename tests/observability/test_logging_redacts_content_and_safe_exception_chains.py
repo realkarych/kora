@@ -63,16 +63,20 @@ def test_registered_values_are_masked_everywhere(
     log.emit(NOTE, text=f"before {REGISTERED_VALUE} after")
     log.emit(NOTE, items=["plain", f"item {REGISTERED_VALUE}"])
     log.emit(NOTE, detail={"nested": {"deep": f"map {REGISTERED_VALUE}"}})
-    log.emit(NOTE, text="a" * 1020 + REGISTERED_VALUE)
+    log.emit(NOTE, text="a" * 1005 + REGISTERED_VALUE)
+    log.emit(NOTE, text="a" * 1000 + REGISTERED_VALUE * 3 + "b" * 40)
     log.emit(LEVEL_EVENTS[Level.DEBUG], text=REGISTERED_VALUE)
     diagnostics.shutdown()
     output = finished_output(None, pipe)
     registration.release()
 
-    expected_lines = 4 if level is Level.INFO else 6
+    expected_lines = 5 if level is Level.INFO else 7
     assert len(pipe.reader.lines()) == expected_lines
     assert REGISTERED_VALUE not in output
-    assert output.count(MASK) >= 3
+    assert REGISTERED_VALUE[:4] not in output
+    assert "a" * 1005 + MASK[:8] in output
+    assert "a" * 1000 + MASK + MASK[:3] in output
+    assert output.count(MASK) >= 5
     assert TRUNCATION_MARKER in output
 
 

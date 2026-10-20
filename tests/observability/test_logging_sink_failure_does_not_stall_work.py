@@ -5,7 +5,9 @@ import subprocess
 import sys
 import time
 
-from kora.observability import LoggingSettings, LossReason
+import pytest
+
+from kora.observability import AlreadyConfiguredError, LoggingSettings, LossReason
 from tests.observability.conftest import (
     NOTE,
     TEST_COMPONENT,
@@ -17,9 +19,14 @@ from tests.observability.conftest import (
 SMALL_QUEUE: LoggingSettings = LoggingSettings(
     queue_records=64, queue_bytes=65_536, max_record_bytes=4096
 )
+SMALL_BYTES_QUEUE: LoggingSettings = LoggingSettings(
+    queue_records=10_000, queue_bytes=8500, max_record_bytes=4096
+)
+WIDE_RECORD_TEXT: str = "w" * 3800
 FILL_RECORDS: int = 5000
 RECORD_TEXT: str = "x" * 200
 DRAIN_MARGIN_SECONDS: float = 2.0
+BLOCKING_RECORDS: int = 100
 
 FULL_PIPE_SCRIPT: str = """
 import datetime, sys
@@ -63,13 +70,25 @@ def test_producers_keep_going_while_the_reader_is_stopped(
     assert not snapshot.sink_failed
 
 
+@pytest.mark.parametrize(
+    ("settings", "text", "reason", "drop_reports"),
+    [
+        (SMALL_QUEUE, RECORD_TEXT, LossReason.QUEUE_RECORDS, {0, 1}),
+        (SMALL_BYTES_QUEUE, WIDE_RECORD_TEXT, LossReason.QUEUE_BYTES, {1}),
+    ],
+)
 def test_recovery_after_a_stopped_reader_reports_drops_once(
-    configure: Configure, pipe: Pipe
+    configure: Configure,
+    pipe: Pipe,
+    settings: LoggingSettings,
+    text: str,
+    reason: LossReason,
+    drop_reports: set[int],
 ) -> None:
-    diagnostics = configure(SMALL_QUEUE, pipe.write_end)
+    diagnostics = configure(settings, pipe.write_end)
     log = diagnostics.logger(TEST_COMPONENT)
     for _ in range(FILL_RECORDS):
-        log.emit(NOTE, text=RECORD_TEXT)
+        log.emit(NOTE, text=text)
     dropped_before = diagnostics.snapshot().dropped_total()
 
     pipe.reader.start()
@@ -81,12 +100,38 @@ def test_recovery_after_a_stopped_reader_reports_drops_once(
 
     records = pipe.reader.records()
     events = [record["event"] for record in records]
-    assert events.count("logging.records_dropped") <= 1
+    snapshot = diagnostics.snapshot()
+    assert events.count("logging.records_dropped") in drop_reports
     assert events.count("logging.sink_recovered") == 1
+    dropped = [r for r in records if r["event"] == "logging.records_dropped"]
+    assert all(record["reason"] == reason.value for record in dropped)
     recovery = next(r for r in records if r["event"] == "logging.sink_recovered")
     assert 0 < int(str(recovery["dropped"])) <= dropped_before
     assert all(json.dumps(record) for record in records)
-    assert diagnostics.snapshot().sink_recoveries >= 1
+    assert snapshot.sink_recoveries >= 1
+    assert (reason.value in str(snapshot.dropped)) and snapshot.dropped_total() > 0
+
+
+def test_a_writer_blocked_past_its_deadline_keeps_the_stream(
+    configure: Configure, pipe: Pipe
+) -> None:
+    settings = LoggingSettings(drain_seconds=0.1, max_record_bytes=65_536)
+    diagnostics = configure(settings, pipe.write_end)
+    log = diagnostics.logger(TEST_COMPONENT)
+    for _ in range(BLOCKING_RECORDS):
+        log.emit(NOTE, text="y" * 4000)
+    wait_until(lambda: not diagnostics.writer_is_idle())
+
+    drained = diagnostics.shutdown()
+    with pytest.raises(AlreadyConfiguredError):
+        configure(settings, pipe.write_end)
+    pipe.reader.start()
+    wait_until(lambda: not diagnostics.writer_is_alive())
+    reconfigured = configure(settings, pipe.write_end)
+
+    assert not drained
+    assert reconfigured is not diagnostics
+    assert reconfigured.writer_is_alive()
 
 
 def test_records_larger_than_pipe_buf_parse_under_a_slow_reader(

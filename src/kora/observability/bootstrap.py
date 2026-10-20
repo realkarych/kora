@@ -229,7 +229,9 @@ class ProcessDiagnostics:
         self._queue = BoundedQueue(
             settings.queue_records, settings.queue_bytes, self.state
         )
-        self._writer = StreamWriter(descriptor, self._queue, self.state)
+        self._writer = StreamWriter(
+            descriptor, self._queue, self.state, self._release_after_shutdown
+        )
         self._incidents = IncidentTracker(clock, SUPPRESSION_WINDOW_SECONDS)
         self._reentrancy = threading.local()
         self._pending = threading.local()
@@ -336,6 +338,8 @@ class ProcessDiagnostics:
                 self._dropped_since_recovery += 1
             self._report_loss(RECORDS_DROPPED, emission, reason)
             return
+        if getattr(self._reentrancy, "active", False):
+            return
         with self._loss_lock:
             recovered = self._loss_pending
             self._loss_pending = False
@@ -439,6 +443,13 @@ class ProcessDiagnostics:
     def is_active(self) -> bool:
         return self._active
 
+    def is_shut_down(self) -> bool:
+        return not self._active
+
+    def _release_after_shutdown(self) -> None:
+        if not self._active:
+            release_current(self)
+
     def shutdown(self, deadline_seconds: float | None = None) -> bool:
         if not self._active:
             return True
@@ -468,11 +479,15 @@ class ProcessDiagnostics:
         self._queue.seal()
         drained = self._writer.stop(deadline)
         self._queue.close()
-        release_current(self)
+        if not self._writer.is_alive():
+            release_current(self)
         return drained
 
     def writer_is_alive(self) -> bool:
         return self._writer.is_alive()
+
+    def writer_is_idle(self) -> bool:
+        return self._writer.is_idle()
 
 
 _current: ProcessDiagnostics | None = None
@@ -501,6 +516,10 @@ def configure_process(
     with _current_LOCK:
         current = _current
         if current is not None:
+            if current.is_shut_down():
+                raise AlreadyConfiguredError(
+                    "the previous writer still owns the stream after its drain deadline"
+                )
             if current.settings == settings and current.component == component:
                 return current
             raise AlreadyConfiguredError(
