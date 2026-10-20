@@ -734,16 +734,27 @@ def target_names(target: ast.expr) -> Iterator[str]:
         yield from target_names(target.value)
 
 
+def expression_bound_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.NamedExpr):
+        return node.target.id
+    if isinstance(node, ast.MatchAs | ast.MatchStar):
+        return node.name
+    if isinstance(node, ast.MatchMapping):
+        return node.rest
+    return None
+
+
 def walrus_names(node: ast.stmt) -> Iterator[str]:
     pending: list[ast.AST] = [
-        value for value in ast.iter_child_nodes(node) if isinstance(value, ast.expr)
+        child for child in ast.iter_child_nodes(node) if not isinstance(child, ast.stmt)
     ]
     while pending:
         current = pending.pop()
-        if isinstance(current, ast.Lambda):
+        if isinstance(current, ast.Lambda | ast.stmt):
             continue
-        if isinstance(current, ast.NamedExpr):
-            yield current.target.id
+        name = expression_bound_name(current)
+        if name is not None:
+            yield name
         pending.extend(ast.iter_child_nodes(current))
 
 
@@ -794,18 +805,24 @@ def module_scope_statements(statements: list[ast.stmt]) -> Iterator[ast.stmt]:
             yield from module_scope_statements(block)
 
 
+def module_bindings(tree: ast.Module) -> Iterator[tuple[ast.AST, str]]:
+    for statement in module_scope_statements(tree.body):
+        for name in bound_names(statement):
+            yield statement, name
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            for name in node.names:
+                yield node, name
+
+
 def hook_violations(source: SourceFile, tree: ast.Module) -> Iterator[Violation]:
     allowed = ALLOWED_HOOKS.get(source.relative, frozenset())
-    for node in module_scope_statements(tree.body):
-        for name in bound_names(node):
-            if name in COLLECTION_OVERRIDES:
-                yield Violation(
-                    source.relative, node.lineno, f"collection override {name}"
-                )
-            elif name.startswith(HOOK_PREFIX) and name not in allowed:
-                yield Violation(
-                    source.relative, node.lineno, f"unlisted pytest hook {name}"
-                )
+    for node, name in module_bindings(tree):
+        line = getattr(node, "lineno", 1)
+        if name in COLLECTION_OVERRIDES:
+            yield Violation(source.relative, line, f"collection override {name}")
+        elif name.startswith(HOOK_PREFIX) and name not in allowed:
+            yield Violation(source.relative, line, f"unlisted pytest hook {name}")
 
 
 def python_violations(source: SourceFile, text: str) -> Iterator[Violation]:
@@ -1004,6 +1021,9 @@ def generated_file_violations(root: Path) -> Iterator[Violation]:
     for relative in GENERATED_FILES:
         if not (root / relative).is_file():
             yield Violation(relative, 1, "listed generated file is missing")
+    for relative in ALLOWED_WARNING_DIGESTS:
+        if not (root / relative).is_file():
+            yield Violation(relative, 1, "listed allowance file is missing")
 
 
 def configuration_violations(root: Path) -> list[str]:
@@ -1024,7 +1044,7 @@ def write(root: Path, relative: str, text: str) -> None:
 
 
 def copy_configuration(root: Path) -> None:
-    for relative in (PYPROJECT, *WEB_CONFIGURATION):
+    for relative in (PYPROJECT, *WEB_CONFIGURATION, *ALLOWED_WARNING_DIGESTS):
         write(root, relative, (REPOSITORY_ROOT / relative).read_text(encoding="utf-8"))
     for relative in GENERATED_FILES:
         write(root, relative, "# noqa\n")
@@ -1187,7 +1207,15 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "        return None\n"
         "    pytest_runtest_call, other = _report, None\n"
         "import tests.hooks as pytest_runtest_teardown\n"
-        "(pytest_runtest_logreport := _report)\n",
+        "(pytest_runtest_logreport := _report)\n"
+        "def helper(_: object = (pytest_collection_finish := _report)) -> None:\n"
+        "    global pytest_sessionfinish\n"
+        "    pytest_sessionfinish = _report\n"
+        "with nullcontext(pytest_runtest_protocol := _report):\n"
+        "    pass\n"
+        "match _report:\n"
+        "    case pytest_keyboard_interrupt:\n"
+        "        pass\n",
     )
     write(
         tmp_path,
@@ -1285,6 +1313,10 @@ def test_checker_flags_comments_docstrings_and_mock_fixtures(tmp_path: Path) -> 
         "tests/conftest.py:20: unlisted pytest hook pytest_runtest_call",
         "tests/conftest.py:21: unlisted pytest hook pytest_runtest_teardown",
         "tests/conftest.py:22: unlisted pytest hook pytest_runtest_logreport",
+        "tests/conftest.py:23: unlisted pytest hook pytest_collection_finish",
+        "tests/conftest.py:24: unlisted pytest hook pytest_sessionfinish",
+        "tests/conftest.py:26: unlisted pytest hook pytest_runtest_protocol",
+        "tests/conftest.py:28: unlisted pytest hook pytest_keyboard_interrupt",
         "tests/measurements/test_slow.py:1: comment",
         f"{WARNING_FILTERS_MODULE}:1: content differs from the recorded digest",
         f"{WARNING_FILTERS_MODULE}:2: import of pytest is not allowed",
@@ -1444,6 +1476,7 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
     table(package, "scripts")["lint"] = "eslint src/App.tsx"
     write(tmp_path, WEB_PACKAGE, json.dumps(package))
     (tmp_path / "web/pnpm-lock.yaml").unlink()
+    (tmp_path / WARNING_FILTERS_MODULE).unlink()
 
     violations = configuration_violations(tmp_path)
 
@@ -1465,6 +1498,7 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
         "tests/.pytest.ini:1: shadows pyproject.toml",
         "tests/db/tox.ini:1: shadows pyproject.toml",
         "tests/pyproject.toml:1: shadows pyproject.toml",
+        f"{WARNING_FILTERS_MODULE}:1: listed allowance file is missing",
         "web/.eslintrc.json:1: shadows eslint.config.mjs",
         "web/eslint.config.js:1: shadows eslint.config.mjs",
         "web/eslint.config.mjs:1: missing",
