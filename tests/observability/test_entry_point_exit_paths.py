@@ -205,7 +205,7 @@ sys.exit(main(["close"], {"KORA_LOG_LEVEL": "DEBUG"}, app))
 
 
 @pytest.mark.parametrize(
-    ("request", "exit_code"),
+    ("exit_request", "exit_code"),
     [
         ("SystemExit(3)", 3),
         ("SystemExit(-1)", 255),
@@ -214,9 +214,9 @@ sys.exit(main(["close"], {"KORA_LOG_LEVEL": "DEBUG"}, app))
     ],
 )
 def test_system_exit_from_a_command_keeps_its_code(
-    request: str, exit_code: int
+    exit_request: str, exit_code: int
 ) -> None:
-    script = EXITING_APPLICATION_SCRIPT.replace("EXIT_REQUEST", request)
+    script = EXITING_APPLICATION_SCRIPT.replace("EXIT_REQUEST", exit_request)
 
     result = run_python(["-c", script], {})
 
