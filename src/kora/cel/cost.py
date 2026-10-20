@@ -3,7 +3,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
-from types import MappingProxyType
 from typing import Final
 
 from kora.cel.diagnostics import Reason, fail
@@ -45,10 +44,13 @@ from kora.cel.types import (
     UINT,
     CelType,
     Dyn,
+    Kind,
     ListOf,
     MapOf,
+    Nullable,
     Primitive,
     Record,
+    RecordField,
     element_type,
     is_concatenable,
     iteration_type,
@@ -332,7 +334,62 @@ def is_exact_bound(value: object) -> bool:
 
 
 def is_plain_mapping(value: object) -> bool:
-    return type(value) in (dict, MappingProxyType)
+    return type(value) is dict
+
+
+def check_environment(environment: Mapping[str, Variable]) -> None:
+    if not is_plain_mapping(environment):
+        raise BoundError("the environment is not a plain dict")
+    if not all(map(is_text, environment)):
+        raise BoundError("an environment name is not a string")
+
+
+def check_type(root: object) -> None:
+    seen: set[int] = set()
+    pending: list[object] = [root]
+    while pending:
+        cel_type = pending.pop()
+        if id(cel_type) in seen:
+            continue
+        seen.add(id(cel_type))
+        pending.extend(type_children(cel_type))
+
+
+def type_children(cel_type: object) -> list[object]:
+    kind = type(cel_type)
+    if kind is Primitive and isinstance(cel_type, Primitive):
+        if type(cel_type.kind) is not Kind:
+            raise BoundError("a variable type is not a CEL type")
+        return []
+    if kind is Dyn:
+        return []
+    if kind is ListOf and isinstance(cel_type, ListOf):
+        return [cel_type.element]
+    if kind is MapOf and isinstance(cel_type, MapOf):
+        return [cel_type.key, cel_type.value]
+    if kind is Nullable and isinstance(cel_type, Nullable):
+        return [cel_type.inner]
+    if kind is Record and isinstance(cel_type, Record):
+        return record_children(cel_type)
+    raise BoundError("a variable type is not a CEL type")
+
+
+def record_children(record: Record) -> list[object]:
+    fields = record.fields
+    if not is_plain_mapping(fields):
+        raise BoundError("a variable type is not a CEL type")
+    children: list[object] = []
+    for name, declared in fields.items():
+        if not is_text(name) or not is_record_field(declared):
+            raise BoundError("a variable type is not a CEL type")
+        if type(declared.required) is not bool:
+            raise BoundError("a variable type is not a CEL type")
+        children.append(declared.type)
+    return children
+
+
+def is_record_field(value: object) -> bool:
+    return type(value) is RecordField
 
 
 def is_variable(value: object) -> bool:
@@ -659,6 +716,7 @@ class Estimator:
         variable = self.environment.get(name, self.default)
         if not is_variable(variable):
             raise BoundError("an environment entry is not a variable")
+        check_type(variable.type)
         shape = self.bounds.shape(variable.type, variable.bound)
         self.variables[name] = shape
         return shape
@@ -904,6 +962,7 @@ def estimate(
     budget: Budget = PROVISIONAL_BUDGET,
     meter: Meter | None = None,
 ) -> Estimate:
+    check_environment(environment)
     estimator = Estimator(environment, weights, meter if meter is not None else Meter())
     cost = estimator.visit(node)
     variables = tuple(sorted(estimator.variables))

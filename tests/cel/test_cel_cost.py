@@ -27,7 +27,10 @@ from kora.cel.types import (
     INT,
     STRING,
     CelType,
+    Kind,
     ListOf,
+    Nullable,
+    Primitive,
     Record,
     RecordField,
 )
@@ -434,10 +437,34 @@ def test_cel_cost_estimate_refuses_malformed_bounds() -> None:
     unreached = check(
         "v == v", {"v": Variable(DYN, leaf), "w": Variable(DYN, negative)}
     )
-    proxy = check("v.a == v.a", {"v": Variable(DYN, proxied)})
 
     assert isinstance(unreached, CheckedExpression)
-    assert isinstance(proxy, CheckedExpression)
+    with pytest.raises(BoundError, match="not a mapping"):
+        check("v.a == v.a", {"v": Variable(DYN, proxied)})
+    with pytest.raises(BoundError, match="not a plain dict"):
+        check(
+            "v == v",
+            cast("dict[str, Variable]", MappingProxyType({"v": Variable(DYN, leaf)})),
+        )
+    with pytest.raises(BoundError, match="not a string"):
+        check(
+            "v == v",
+            cast(
+                "dict[str, Variable]",
+                {"v": Variable(DYN, leaf), 1: Variable(DYN, leaf)},
+            ),
+        )
+    for cel_type in (
+        "string",
+        7,
+        Primitive(cast("Kind", "string")),
+        Nullable(cast("CelType", "string")),
+    ):
+        with pytest.raises(BoundError, match="not a CEL type"):
+            check("v + v", {"v": Variable(cast("CelType", cel_type), leaf)})
+    broken_record = Record(cast("dict[str, RecordField]", {"a": 1}))
+    with pytest.raises(BoundError, match="not a CEL type"):
+        check("v.a == 1", {"v": Variable(broken_record, leaf)})
     for malformed in (bad_field, bad_name, derived_field):
         with pytest.raises(BoundError, match="not a value bound"):
             check("v == v", {"v": Variable(DYN, malformed)})
