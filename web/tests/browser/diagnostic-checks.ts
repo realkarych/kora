@@ -2,10 +2,11 @@ import assert from 'node:assert/strict'
 import { fork } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { closeSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
+import { setImmediate } from 'node:timers/promises'
 import { inspectArtifacts, MarkerScanner } from './diagnostic-inspection.ts'
 import { artifactBytes, directoryLimit, shardLimit, SnapshotShards, writeSnapshot } from './diagnostic-snapshot.ts'
 
@@ -76,8 +77,12 @@ export async function diagnosticChecks(): Promise<void> {
     assert.equal(readFileSync(occupied).byteLength, 0)
 
     const controller = new AbortController()
-    function* interrupted(): Generator<Buffer> {
+    const partialPath = join(root, 'cancelled-0.heapsnapshot.part')
+    async function* interrupted(): AsyncGenerator<Buffer> {
       yield Buffer.from('partial')
+      const deadline = performance.now() + 5000
+      while (!existsSync(partialPath) && performance.now() < deadline) await setImmediate()
+      assert(existsSync(partialPath), 'Partial snapshot was not written')
       controller.abort()
       yield Buffer.from('forbidden')
     }
@@ -86,6 +91,7 @@ export async function diagnosticChecks(): Promise<void> {
     await assert.rejects(writeSnapshot(stream, root, 'cancelled', controller.signal))
 
     assert(stream.destroyed)
+    assert.equal(readFileSync(partialPath, 'utf8'), 'partial')
     const partial: unknown = JSON.parse(readFileSync(join(root, 'cancelled.manifest.json'), 'utf8'))
     assert(partial !== null && typeof partial === 'object' && 'complete' in partial && partial.complete === false)
     assert(artifactBytes(root) <= directoryLimit)

@@ -12,6 +12,10 @@ const environmentKeys = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'PLAYWRIGHT
 
 export function diagnosticEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { NODE_ENV: 'production', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }
+  if (process.platform === 'darwin') {
+    assert(process.getuid)
+    environment.__CF_USER_TEXT_ENCODING = `0x${process.getuid().toString(16).toUpperCase()}:0:0`
+  }
   for (const key of environmentKeys) if (source[key] !== undefined) environment[key] = source[key]
   return environment
 }
