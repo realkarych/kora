@@ -31,8 +31,8 @@ SAMPLE_EVERY: int = 10
 @dataclass(frozen=True)
 class Point:
     cycle: int
-    heap: int
-    peak: int
+    heap: int | None
+    peak: int | None
     rss: int | None
     peak_rss: int
     image_peak_rss: int | None
@@ -45,6 +45,8 @@ class Point:
     payload_bytes: int
     cache_entries: int
     cache_characters: int
+    tracer_bytes: int
+    allocated_blocks: int
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,8 @@ class Measurements:
     stack_restored: bool
     persistent_workers: int
     terminal_workers: int | None = None
+    startup_hash: int = 0
+    traced: bool = True
 
 
 def workers() -> int:
@@ -79,8 +83,8 @@ def sample(cycle: int, evaluator: Evaluator, tasks: int | None = None) -> Point:
     tasks_path = Path("/proc/self/task")
     return Point(
         cycle=cycle,
-        heap=heap,
-        peak=peak,
+        heap=heap if tracemalloc.is_tracing() else None,
+        peak=peak if tracemalloc.is_tracing() else None,
         rss=current_rss_bytes(),
         peak_rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         * (1024 if sys.platform == "linux" else 1),
@@ -94,6 +98,8 @@ def sample(cycle: int, evaluator: Evaluator, tasks: int | None = None) -> Point:
         payload_bytes=state.bytes,
         cache_entries=state.cache_entries,
         cache_characters=state.cache_characters,
+        tracer_bytes=tracemalloc.get_tracemalloc_memory(),
+        allocated_blocks=sys.getallocatedblocks(),
     )
 
 
@@ -102,7 +108,7 @@ def quiesce(owner: EvaluationThread) -> None:
         assert owner.condition.wait_for(lambda: owner.snapshot().diagnostics == 0, 5)
 
 
-async def native() -> Measurements:
+async def native(traced: bool = True) -> Measurements:
     cases: list[tuple[str, dict[str, object]]] = [
         ("true", {}),
         ("false", {}),
@@ -123,8 +129,9 @@ async def native() -> Measurements:
     initial = Evaluator(clock)
     await initial.close()
     points: list[Point] = []
-    tracemalloc.start()
-    retained = tracemalloc.take_snapshot()
+    if traced:
+        tracemalloc.start()
+    retained = tracemalloc.take_snapshot() if traced else None
     started = time.perf_counter()
     for cycle in range(-WARMUP, CYCLES):
         evaluator = Evaluator(clock)
@@ -159,9 +166,13 @@ async def native() -> Measurements:
         assert evaluator.snapshot().handles == 0
         if cycle >= 0 and (cycle + 1) % SAMPLE_EVERY == 0:
             points.append(sample(cycle + 1, evaluator))
-            if cycle + 1 == 100:
+            if cycle + 1 == 100 and traced:
                 retained = tracemalloc.take_snapshot()
-    top = tracemalloc.take_snapshot().compare_to(retained, "lineno")[:10]
+    top = (
+        tracemalloc.take_snapshot().compare_to(retained, "lineno")[:10]
+        if retained is not None
+        else []
+    )
     tracemalloc.stop()
     return Measurements(
         mode="native",
@@ -171,6 +182,8 @@ async def native() -> Measurements:
         retaining_paths=[str(entry) for entry in top],
         stack_restored=threading.stack_size() == previous_stack,
         persistent_workers=workers(),
+        startup_hash=hash("kora-cel-native-rss"),
+        traced=traced,
     )
 
 
@@ -371,11 +384,11 @@ def loops() -> Measurements:
     )
 
 
-def run(mode: str) -> str:
+def run(mode: str, traced: bool = True) -> str:
     if mode == "loops":
         result = loops()
     elif mode == "native":
-        result = asyncio.run(native())
+        result = asyncio.run(native(traced))
     elif mode == "lifetime":
         result = asyncio.run(lifetime())
     else:

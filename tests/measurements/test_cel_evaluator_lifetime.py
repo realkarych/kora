@@ -6,7 +6,8 @@ from typing import TypedDict
 
 import pytest
 
-from tests.cel_eval.children import ROOT, full_path, run_child
+from tests.cel_eval.children import ROOT, ChildResult, full_path, run_child
+from tests.measurements.cel_native_pair import run_native
 from tests.measurements.harness import Report, Sample, new_report, write_report
 
 pytestmark = pytest.mark.measurement
@@ -40,6 +41,8 @@ class Payload(TypedDict):
     stack_restored: bool
     persistent_workers: int
     terminal_workers: int | None
+    startup_hash: int
+    traced: bool
 
 
 class SinkPayload(TypedDict):
@@ -111,6 +114,47 @@ def report() -> Iterator[Report]:
 
 def test_cel_evaluator_resource_lifetime(report: Report) -> None:
     started = time.perf_counter()
+    native_results: dict[tuple[bool, int], Payload] = {}
+    native_children: dict[tuple[bool, int], tuple[ChildResult, float]] = {}
+    for traced, repeat in (
+        (True, 0),
+        (False, 0),
+        (False, 1),
+        (True, 1),
+        (True, 2),
+        (False, 2),
+    ):
+        before = time.perf_counter()
+        result = run_native(traced, repeat)
+        elapsed = time.perf_counter() - before
+        name = f"native_{'traced' if traced else 'untraced'}_{repeat}"
+        report.environment[f"{name}_stdout"] = result.stdout
+        report.environment[f"{name}_stderr"] = result.stderr
+        report.environment[f"{name}_exit"] = result.code
+        report.samples.append(Sample(name + "_process_exit", repeat, 1, elapsed))
+        native_children[traced, repeat] = result, elapsed
+    assert all(
+        child.code == 0 and child.stderr == "" for child, _ in native_children.values()
+    )
+    for key, (child, _) in native_children.items():
+        native_results[key] = json.loads(child.stdout)
+    for repeat in range(REPEATS):
+        traced_payload = native_results[True, repeat]
+        untraced_payload = native_results[False, repeat]
+        assert traced_payload["startup_hash"] == untraced_payload["startup_hash"]
+        for payload in (traced_payload, untraced_payload):
+            assert len(payload["points"]) == 20
+            assert payload["persistent_workers"] == 1
+            assert payload["stack_restored"]
+            for point in payload["points"]:
+                assert point["handles"] == 0
+                assert point["outstanding"] == 0
+                assert point["payload_bytes"] == 0
+                assert point["tasks"] == 1
+                assert (point["heap"] is not None) == payload["traced"]
+                assert (point["peak"] is not None) == payload["traced"]
+            for resource in ("descriptors", "threads", "os_threads", "tasks"):
+                assert len({point[resource] for point in payload["points"]}) == 1
     for mode in ("native", "lifetime", "loops", "idle", "busy"):
         for repeat in range(REPEATS):
             code = (
@@ -119,12 +163,15 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
             )
             before = time.perf_counter()
 
-            result = run_child(code, full_path(ROOT))
-            elapsed = time.perf_counter() - before
-
-            assert result.code == 0, result.stderr
-            assert result.stderr == ""
-            payload: Payload = json.loads(result.stdout)
+            if mode == "native":
+                payload = native_results[True, repeat]
+                elapsed = native_children[True, repeat][1]
+            else:
+                result = run_child(code, full_path(ROOT))
+                elapsed = time.perf_counter() - before
+                assert result.code == 0, result.stderr
+                assert result.stderr == ""
+                payload = json.loads(result.stdout)
             report.samples.append(Sample(mode + "_process_exit", repeat, 1, elapsed))
             for index, seconds in enumerate(payload["timings"]):
                 report.samples.append(Sample(mode, repeat * 200 + index, 1, seconds))
