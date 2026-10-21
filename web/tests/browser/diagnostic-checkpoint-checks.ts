@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, truncateSync, writeFile
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
+import { ArtifactLimit } from './artifacts.ts'
+import { finalizeDiagnostic } from './diagnostic-finalization.ts'
 import { setImmediate } from 'node:timers/promises'
 import { getHeapCodeStatistics } from 'node:v8'
 import { checkpointBoundaries, diagnosticPlan, persistCheckpoint, verifyCheckpoints } from './diagnostic-checkpoint.ts'
@@ -115,4 +117,35 @@ export async function checkpointEvidenceChecks(): Promise<void> {
 
     assert.throws(() => { verifyCheckpoints(root) })
   } finally { rmSync(root, { recursive: true, force: true }) }
+}
+
+export async function diagnosticFinalizationChecks(): Promise<void> {
+  for (const scenario of ['late-cancellation', 'workload-failure', 'marker-rejection', 'inspection-interrupted'] as const) {
+    const root = mkdtempSync(join(tmpdir(), 'kora-diagnostic-finalization-'))
+    try {
+      const workload = new AbortController()
+      const inspection = new AbortController()
+      const limits = new ArtifactLimit(root, () => { workload.abort() })
+      const evidence = { status: scenario === 'workload-failure' ? 'failed' : 'diagnostic complete; performance unverified', originalFailure: scenario === 'workload-failure' }
+      writeFileSync(join(root, 'partial.part'), scenario === 'marker-rejection' ? 'excluded-marker' : 'partial')
+      const scanned = (): Promise<void> => {
+        if (scenario === 'late-cancellation') workload.abort()
+        if (scenario === 'inspection-interrupted') inspection.abort()
+        return Promise.resolve()
+      }
+
+      await assert.rejects(finalizeDiagnostic(root, 'excluded-marker', workload.signal, limits, evidence, inspection.signal, scanned))
+
+      const result = readEvidence(join(root, 'launcher.json'))
+      assert(result !== null && typeof result === 'object' && 'status' in result && result.status === 'failed')
+      assert('interrupted' in result && result.interrupted === (scenario === 'late-cancellation'))
+      assert('artifactLimitCleanup' in result && result.artifactLimitCleanup === 'fulfilled')
+      assert('originalFailure' in result && result.originalFailure === (scenario === 'workload-failure'))
+      assert('inspection' in result)
+      assert.deepEqual(result.inspection, scenario === 'marker-rejection'
+        ? { status: 'failed', reason: 'rejected' }
+        : scenario === 'inspection-interrupted' ? { status: 'unverified', reason: 'interrupted' } : { status: 'passed', reason: 'complete' })
+      assert.equal('excludedMarker' in result, scenario === 'late-cancellation' || scenario === 'workload-failure')
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
 }

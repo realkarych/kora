@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { writeFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { diagnosticChecks } from './diagnostic-checks.ts'
 import { diagnosticChild } from './diagnostic-process.ts'
 import { ArtifactLimit } from './artifacts.ts'
-import { inspectRetainedArtifacts } from './diagnostic-inspection.ts'
-import { checkpointChecks, checkpointEvidenceChecks } from './diagnostic-checkpoint-checks.ts'
+import { finalizeDiagnostic } from './diagnostic-finalization.ts'
+import { checkpointChecks, checkpointEvidenceChecks, diagnosticFinalizationChecks } from './diagnostic-checkpoint-checks.ts'
 import { diagnosticPlan } from './diagnostic-plan.ts'
 
 const environmentKeys = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'PLAYWRIGHT_BROWSERS_PATH', 'KORA_BROWSER_BASE', 'KORA_BROWSER_REVISION', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB', 'RUNNER_NAME', 'ImageOS', 'ImageVersion']
@@ -30,6 +29,7 @@ async function run(): Promise<void> {
   await diagnosticChecks()
   await checkpointChecks()
   await checkpointEvidenceChecks()
+  await diagnosticFinalizationChecks()
   const parent = resolve(process.env.KORA_BROWSER_OUTPUT ?? join(repository, 'measurements/browser'))
   await mkdir(parent, { recursive: true })
   const output = await mkdtemp(join(parent, 'diagnostic-'))
@@ -72,19 +72,11 @@ async function run(): Promise<void> {
     evidence.workloadFailure = error instanceof Error ? error.name : 'UnknownError'
     throw error
   } finally {
-    limits.close()
-    evidence.artifactLimitFailed = limits.failed
-    evidence.interrupted = cancellation.signal.aborted
-    if (cancellation.signal.aborted || limits.failed) evidence.status = 'failed'
-    const inspection = await inspectRetainedArtifacts(output, marker)
-    evidence.inspection = inspection
-    if (inspection.status === 'passed') evidence.excludedMarker = 'absent'
-    else evidence.status = 'failed'
-    writeFileSync(join(output, 'launcher.json'), JSON.stringify(evidence))
-    process.removeListener('SIGTERM', stop)
-    process.removeListener('SIGINT', stop)
-    assert.equal(inspection.status, 'passed', 'Retained diagnostic artifact inspection failed')
-    cancellation.signal.throwIfAborted()
+    try { await finalizeDiagnostic(output, marker, cancellation.signal, limits, evidence) }
+    finally {
+      process.removeListener('SIGTERM', stop)
+      process.removeListener('SIGINT', stop)
+    }
   }
 }
 
