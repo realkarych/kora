@@ -101,4 +101,3 @@ export function evidenceChecks(output: string, budgetRoot = output): void {
     assert(!existsSync(join(current, 'outer-bound.json')))
   } finally { rmSync(isolated, { recursive: true, force: true }) }
 }
-
