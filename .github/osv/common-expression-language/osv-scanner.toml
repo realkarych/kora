@@ -1,0 +1,6 @@
+[[PackageOverrides]]
+name = "cel"
+version = "0.10.0"
+ecosystem = "crates.io"
+ignore = true
+reason = "The source-less root crate of the common-expression-language 0.10.0 Python binding, which shares the name and version of the unrelated crates.io package that GHSA-wxwx-9fh7-5mrw names; the binding's interpreter crate cel 0.14.5 stays scanned."
