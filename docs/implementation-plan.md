@@ -18,12 +18,14 @@ The page's own content is the order of work: when each shared contract freezes, 
 - an issue it cites lands. Each design issue opened for this plan (#134 to #142) carries the update of its row, its named contracts (section 7) and its threat-model evidence (section 8) as an acceptance criterion. For the other cited issues, the pull request that lands them updates the page, because documents and their dependents change together;
 - the owner changes the order.
 
+Harness-scope amendment dated 2026-10-21: both Claude and Codex are required in the first slice; scope and implementation plan approved by the project owner under [issue #172](https://github.com/realkarych/kora/issues/172); wording pending line-by-line owner review.
+
 ## 1. Slice 1
 
-**Scope.** The [ADR-0001 amendment of 2026-10-19](decisions/0001-own-control-plane.md) defines the slice:
+**Scope.** The [ADR-0001 amendments of 2026-10-19 and 2026-10-21](decisions/0001-own-control-plane.md) define the slice:
 
 - `kora standalone` on SQLite as the only deployment it ships;
-- one agent node on the Claude Agent SDK and one command node on the local runtime;
+- one agent node selectable between the `claude` adapter through the Claude Agent SDK and the `codex` adapter through Codex app-server, and one command node on the local runtime; both adapters are required, with the same minimal topology accepted independently for each;
 - a manual trigger, a git `VcsRef` output and an approval that a person answers through the CLI;
 - every integration test that touches the metadata database runs on PostgreSQL and on SQLite;
 - a restarted worker adopts a live session;
@@ -36,14 +38,14 @@ The page's own content is the order of work: when each shared contract freezes, 
 
 - what it refuses at deploy time, and how;
 - which operations and MCP transports it ships;
-- which harness, code-host and credential contracts it carries.
+- the remaining code-host and credential contracts it carries. Both harnesses and their required real policy-hook evidence are already part of the slice under #172.
 
 Until #140 lands, the ADR-0001 amendment and the [roadmap](roadmap.md#what-the-documents-cannot-settle) govern.
 
 **What it proves.** It proves items 1 to 3 of "What the documents cannot settle" in the roadmap, to the extent the slice contains them:
 
 - the lifecycle behaviour of [ADR-0016](decisions/0016-trusted-execution-and-publication.md) and [ADR-0017](decisions/0017-execution-uncertainty-and-safe-replacement.md) on the local runtime, in a trusted environment, with no claim of OS isolation;
-- the Claude Agent SDK paths of the `claude` adapter;
+- the Claude Agent SDK paths of the `claude` adapter and the Codex app-server paths of the `codex` adapter, each with its own real-interface evidence;
 - the CEL binding, through `approve_when` ([ir.md section 7](../knowledge/specs/ir.md#7-expressions-and-templates));
 - the fake harness and fake runtime passing the same conformance suites as real implementations. Fakes prove core decisions, composition and recovery only, with no OS isolation or real harness interception claim ([threat model](threat-model.md#deployment-and-runtime-applicability)).
 
@@ -52,16 +54,17 @@ Until #140 lands, the ADR-0001 amendment and the [roadmap](roadmap.md#what-the-d
 - Integration tests run on the real API, scheduler and worker, with the fake harness and fake runtime (NFR-10.1 and the [testing rules](../AGENTS.md#testing)).
 - The `claude` adapter is tested through the evidence layers of [protocols.md section 13](../knowledge/specs/protocols.md#claude-adapter-contracts-issue-125):
   - replay, which proves normalisation, not interception;
-  - scripted model, the deterministic driver for interception, not yet observed to work with the tested CLI. What the slice does if it cannot carry the policy cases is settled in #140 (pending);
+  - scripted model, the deterministic driver for interception, not yet observed to work with the tested CLI. Missing reproducible real policy-hook evidence blocks slice readiness under #172;
   - connect;
   - runtime, through the launcher on local, for the constructed environment, the binary digest and the release of resources;
   - manual, outside CI, which records the real-session, provider-limit and internal-retry traces.
 
-  The connect and scripted-model layers run on the Linux job inside a container without an external network, and each case asserts that no outbound connection was attempted. A case the tested version cannot run that way moves to the manual layer, and the gap is reported.
+  The connect and scripted-model layers run on the Linux job inside a container without an external network, and each case asserts that no outbound connection was attempted. A case the tested version cannot run that way moves to the manual layer, and the gap is reported; this does not waive the required reproducible real policy-hook matrix.
+- The `codex` adapter must be tested with its own deterministic driver through the real app-server interface for the policy side-effect matrix, managed-hook loading, hermetic configuration, launcher argv/env/cwd, interruption, nested tool/helper processes, event and usage normalisation, installed-version checks and resource release. Its implementing issue in work item 15 defines the driver and named cases before code; it does not assume that the Claude scripted-model driver works for Codex. No-model CI cases exclude external network access and assert that no outbound connection was attempted. Replay proves normalisation only. Manual experiments outside CI record real-session, provider-limit and internal-retry traces with the tested version; a manual smoke trace does not replace the reproducible real policy-hook matrix. If either harness cannot supply that matrix, slice readiness is blocked.
 - Git runs for real against local repositories.
 - `tick` runs with an injected clock ([issue #103](https://github.com/realkarych/kora/issues/103), landed in [PR #146](https://github.com/realkarych/kora/pull/146)).
 - PostgreSQL runs through containers on the Linux job, and SQLite runs everywhere.
-- A slice-1 graph example is checked by the IR example job.
+- The IR example job checks the slice-1 topology with each harness selection. Work item 21 runs the same topology end to end independently with each real adapter; fake runs alone cannot establish either adapter's readiness.
 
 **What it does not owe.**
 
@@ -131,7 +134,7 @@ Dry-run placement, skill delivery and the error class of a digest mismatch stay 
 | Side | Packages and providers | Shared contracts it owns |
 |---|---|---|
 | Server | `ir`, the CEL parser, checker and evaluator in the packages #104 assigns, `db`, `engine`, `scheduler`, the public routes of `api` and their `models`, `client`, `cli`, `mcp`, the logging bootstrap; the static-token authenticator, local artifact storage, the CLI approval channel, the artifact-type provider, the observation dispatcher, `kora standalone` | steps 1, 2, 3, 4, 5b, 7 |
-| Execution | `protocols` with provider loading; the fake harness and fake runtime; `runner`; the local runtime with the env secrets provider; `executor` with git; the `allow_deny` policy; the `claude` adapter; `worker`, the worker routes, their `models` and their client methods | steps 5a, 6, 8 |
+| Execution | `protocols` with provider loading; the fake harness and fake runtime; `runner`; the local runtime with the env secrets provider; `executor` with git; the `allow_deny` policy; the `claude` and `codex` adapters; `worker`, the worker routes, their `models` and their client methods | steps 5a, 6, 8 |
 
 The worker routes are handlers in the API application that call the shared transition functions. The execution side writes them, and the server side reviews every change to a transition function. People take a side as issue assignees.
 
@@ -160,19 +163,19 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 | 12 | Run operations: trigger, run reads, events, nodes and attempts, logs, artifacts and cancel | server | 7, 11 |
 | 13 | `executor` and the git provider, with head reads against a local repository | execution | 6; #140 |
 | 14 | `runner` and the local runtime: registry, control channel, journal, transfer, retirement, adoption evidence and the harness launcher; the env secrets provider and redaction; the `allow_deny` policy | execution | 6, 7, 13; #123, #140, #141, #142 |
-| 15 | `claude` adapter | execution | 7, 14; #140, #142 |
+| 15 | `claude` and `codex` adapters, each with independent conformance, real policy-hook and launcher evidence, observability and resource-lifetime measurements. They may land in separate implementing issues and PRs, but both are required for slice acceptance | execution | 7, 14; #140, #142 |
 | 16 | Observation dispatcher: CLI channel delivery and the head reads of VCS-bound approvals | server | 8, 10, 13 |
 | 17 | `worker`, the worker routes and their client methods, request sealing with template rendering | execution | 7, 9, 11, 14; steps 6, 7, 8 |
 | 18 | Approval operations and reconcile | server | 10, 12, 16; 17 for the end-to-end reconcile cases |
 | 19 | Run-read wait ([api-and-agent-surface.md](../knowledge/specs/api-and-agent-surface.md#bounded-run-read-wait-adr-0002)); its process-exit cases run once work item 20 exists | server | 10, 12, 17, 18 |
-| 20 | `kora standalone`: composition, token issuance per #141 and health through the API process | server | 17, 18, 19; step 8; #135, #140, #141 |
-| 21 | Slice-1 acceptance: end-to-end tests through the CLI and the HTTP API, worker-restart adoption, `test_partitioned_live_host_is_not_assumed_stopped`, the manual `claude` traces and the end-to-end NFR-3.1 measurement | execution | 15, 20 |
+| 20 | `kora standalone`: composition with both adapters registered and configurable, token issuance per #141 and health through the API process | server | 15, 17, 18, 19; step 8; #135, #140, #141 |
+| 21 | Slice-1 acceptance: the same minimal graph through the CLI and the HTTP API independently with `claude` and `codex`, worker-restart adoption for each, `test_partitioned_live_host_is_not_assumed_stopped`, separate manual real-session, provider-limit and internal-retry traces for both adapters, and the end-to-end NFR-3.1 measurement | execution | 15, 20 |
 
 ## 7. Named contracts by work item
 
 Every executable contract that the specifications name for a slice-1 component belongs to the work items below. A contract, or one leg of it, that needs a component outside the slice is pending until the trigger in the last column lands; the component gates stay with the slice that implements the component.
 
-The ADR-0001 amendment places Docker, Codex, the trigger kinds other than manual, and the node kinds other than agent, command and human input outside slice 1. Every other trigger below follows the slice boundaries settled in [#140](https://github.com/realkarych/kora/issues/140) (pending): retry, DSL, code host, target, skills, budgets, notifications, mounted MCP, the web console, the artifact-type routes, the cost and policy reads, and `/plan`. Until #140 lands, those contracts are listed here as pending, and [ADR-0009](decisions/0009-target-repository-trust-boundary.md), [ADR-0024](decisions/0024-provider-limits-as-non-agent-failures.md) and items 1 and 5 of the roadmap still place the Codex confirmation, a trace per harness and the code-host contracts in the first slice.
+The ADR-0001 amendments place Docker, the trigger kinds other than manual, and the node kinds other than agent, command and human input outside slice 1. Both Claude and Codex, including their policy-hook and launcher evidence and separate traces, are required in slice 1 under #172. Every other trigger below follows the slice boundaries settled in [#140](https://github.com/realkarych/kora/issues/140) (pending): retry, DSL, code host, target, skills, budgets, notifications, mounted MCP, the web console, the artifact-type routes, the cost and policy reads, and `/plan`. Until #140 lands, those remaining contracts are listed here as pending; item 5 of the roadmap still places the code-host contracts in the first slice. The harness gates of [ADR-0009](decisions/0009-target-repository-trust-boundary.md), [ADR-0024](decisions/0024-provider-limits-as-non-agent-failures.md) and roadmap item 1 apply to both adapters now, independently of those pending decisions.
 
 The triggers are abbreviated as follows:
 
@@ -188,18 +191,19 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | Section | Work items | Pending in slice 1 |
 |---|---|---|
 | [protocols.md section 3](../knowledge/specs/protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27) | 14, 15 | `test_skill_directory_digest_mismatch_prevents_session_start` (skills) |
-| [protocols.md section 13](../knowledge/specs/protocols.md#13-conformance-suites-nfr-102) | runtime 6, 7, 14; harness 7, 15; VCS 7, 13, and 14 for the local-runtime legs of `test_vcs_runtime_cross_product`; approval channel 8, 16; secrets 14; artifact storage and artifact type 8, with the built-in schemas of 2; authentication 8; policy 14, and 15 for the `claude` hook legs; `test_workspace_preparation_recovers_after_worker_crash` 7, 13, 14, 17 | `test_publish_and_open_change_request_are_idempotent` (code host); the change-request leg of `test_publish_reconciles_after_response_loss` (code host); the Docker legs of `test_vcs_runtime_cross_product`; the local-Git fake VCS with its in-process code-host fake (code host); the Codex leg of `test_required_policy_is_enforced_or_rejected`; the sensor suite (starts, `wait_event`); the end-to-end canonical-graph suite (branch, fan-out, sub-graph, `wait_event`, timer, code host) |
+| [protocols.md section 13](../knowledge/specs/protocols.md#13-conformance-suites-nfr-102) | runtime 6, 7, 14; harness 7, 15; VCS 7, 13, and 14 for the local-runtime legs of `test_vcs_runtime_cross_product`; approval channel 8, 16; secrets 14; artifact storage and artifact type 8, with the built-in schemas of 2; authentication 8; policy 14, and 15 for both real harness hook legs; `test_workspace_preparation_recovers_after_worker_crash` 7, 13, 14, 17 | `test_publish_and_open_change_request_are_idempotent` (code host); the change-request leg of `test_publish_reconciles_after_response_loss` (code host); the Docker legs of `test_vcs_runtime_cross_product`; the local-Git fake VCS with its in-process code-host fake (code host); the sensor suite (starts, `wait_event`); the end-to-end canonical-graph suite (branch, fan-out, sub-graph, `wait_event`, timer, code host) |
 | [External observation gates](../knowledge/specs/protocols.md#external-observation-conformance-gates) | 8, 13, 14, 16 | sensor references (starts); channel references (code host) |
-| [Publication authority and recovery](../knowledge/specs/protocols.md#publication-authority-and-recovery-contracts) | 13, 14, 17; `test_non_git_inspection_stream_scans_intermediate_history` 7, 13; `test_harness_launcher_preserves_control_boundary` 14, 15; `test_required_execution_protection_rejects_local` is in the #140 list below | `test_candidate_cannot_forge_runner_journal` and `test_agent_descendants_cannot_access_publication_credentials` (Docker); `test_publication_authorization_is_late` (code host); the protected leg of `test_publication_sealing_rejects_mutable_aliases` (Docker); the Codex leg of the launcher test |
+| [Publication authority and recovery](../knowledge/specs/protocols.md#publication-authority-and-recovery-contracts) | 13, 14, 17; `test_non_git_inspection_stream_scans_intermediate_history` 7, 13; `test_harness_launcher_preserves_control_boundary` 14, 15; `test_required_execution_protection_rejects_local` is in the #140 list below | `test_candidate_cannot_forge_runner_journal` and `test_agent_descendants_cannot_access_publication_credentials` (Docker); `test_publication_authorization_is_late` (code host); the protected leg of `test_publication_sealing_rejects_mutable_aliases` (Docker) |
 | [Command-resource contracts](../knowledge/specs/protocols.md#command-resource-contracts-issue-45) | 3, 8, 11, 14, 17 | `test_compile_exit_then_deploy` and the compiler leg of `test_resource_set_digest_vector` (DSL); `test_graph_runs_on_repository_without_gates` (branch, fan-out, sub-graph, `wait_event`, timer); `test_candidate_cannot_alter_resources` (Docker) |
 | [Agent-secret contracts](../knowledge/specs/protocols.md#agent-secret-contracts-adr-0009-amended-2026-10-18) | 3, 9, 11, 12, 14 | `test_agent_cannot_read_mcp_server_secret` and `test_docker_egress_blocks_unlisted_host` (Docker); the rerun leg of `test_unenforced_secrets_require_explicit_option` (retry) |
 | [Scenario contracts](../knowledge/specs/protocols.md#scenario-contracts-issue-46) | — | all (DSL) |
 | [Code-host identity contracts](../knowledge/specs/protocols.md#code-host-identity-contracts-adr-0023) | — | all (code host) |
-| [Provider-limit contracts](../knowledge/specs/protocols.md#provider-limit-contracts-adr-0024) | `test_internal_retry_is_liveness_not_stall` 7, 14, 15; the recorded `claude` trace 21 | the Codex trace; the other provider-limit contracts, in the #140 list below |
+| [Provider-limit contracts](../knowledge/specs/protocols.md#provider-limit-contracts-adr-0024) | `test_internal_retry_is_liveness_not_stall` 7, 14, 15; the separate recorded `claude` and `codex` provider-limit and internal-retry traces 21 | the other provider-limit contracts, in the #140 list below |
 | [Notification contracts](../knowledge/specs/protocols.md#notification-contracts-adr-0025) | — | all (notifications) |
 | [Execution-recovery gates](../knowledge/specs/protocols.md#execution-recovery-implementation-gates-adr-0017) | 9, 10, 12, 13, 14, 17, 18; `test_partitioned_live_host_is_not_assumed_stopped` 21 | `test_clear_downstream_waits_for_execution_retirement` (retry); the retry legs of `test_reconnected_old_execution_cannot_publish_current_result` and `test_uncertain_execution_retains_reservations_after_cancel`; the runtime-level retry legs of `test_submit_crash_recovers_in_original_execution_domain` and `test_execution_replacement_requires_declared_authority`, in the #140 list below; the code-host legs of `test_recovery_retains_every_dispatcher_generation` and `test_runtime_stop_does_not_imply_publication_quiescence`; the target, cost-read and console legs of `test_uncertain_usage_and_recovery_surface_parity`; the Docker leg of `test_recovery_fences_survive_release` |
 | [Immutable execution-history contracts](../knowledge/specs/protocols.md#immutable-execution-history-contracts) | as data-model.md section 11.4 | as data-model.md section 11.4 |
 | [Claude adapter contracts](../knowledge/specs/protocols.md#claude-adapter-contracts-issue-125) | 3, 14, 15 | `test_claude_skills_delivered_as_plugin` (skills); the Docker leg of `test_claude_session_receives_only_constructed_environment`; the `budget_usd` leg of `test_claude_usage_from_stream_events`, listed below |
+| Codex adapter evidence through the real app-server interface | 14, 15: `test_required_policy_is_enforced_or_rejected`, `test_harness_launcher_preserves_control_boundary`, `test_codex_session_receives_only_constructed_environment` and `test_codex_binary_digest_mismatch_prevents_session_start`; work item 15 defines its remaining named cases before code | Docker evidence and skills; the `budget_usd` leg follows #140 as for Claude; no local policy-hook, launcher or version-check leg is deferred |
 | [Inherited-deadline gates](../knowledge/specs/protocols.md#15-inherited-deadline-conformance-gates-adr-0022) | 10, 13, 14, 17 | nested-wrapper cases (sub-graph, fan-out); scope retry (retry); Docker evidence |
 | [Durable scheduling marker](../knowledge/specs/data-model.md#21-durable-run-scheduling-marker) | 5, 10; the latency case also 21 | `test_settled_failed_retry_reenters_discovery` (retry) |
 | [Current branch selection](../knowledge/specs/data-model.md#51-current-branch-selection) | — | all (branch) |
@@ -292,13 +296,13 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | Logging infrastructure, the shared bootstrap and the common tests | 1 |
 | DSL/compiler/IR | 2, 3; the compiler part is pending: DSL |
 | Metadata/migrations/retention | 5 |
-| Runtime, harness adapter and VCS provider rows | 7 for the fakes; 13, 14 and 15 add the evidence of the real implementations |
+| Runtime, harness adapter and VCS provider rows | 7 for the fakes; 13 and 14 for real VCS/runtime; 15 adds independent evidence for both `claude` and `codex` |
 | Authentication, artifact storage, artifact type and approval channel provider rows | 8 |
 | Scheduler/admission/retries | 10 |
 | API and webhooks; shared clients/CLI/MCP | 11 |
 | Runtime supervisor/common executor | 13 for the common executor, 14 for the runner |
 | Secrets provider row | 14 |
-| Session runner/harness bridge | 14, 15 |
+| Session runner/harness bridge | 14, 15 for both `claude` and `codex`; each adapter proves safe normalisation, correlation, redaction, stream separation and bounded failure behavior |
 | Policy provider row | 14 |
 | Sensors and observation dispatcher | 16 |
 | Worker | 17 |
@@ -310,19 +314,20 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | Threats | Evidence and work item |
 |---|---|
 | TM-01, TM-02 | Denied access and service and user separation: 11 (route-authorization coverage), 12, 17, 18 and 20 (tokens). Authentication and approval-channel conformance: 8 and 16. Authorization during the run-read wait: 19. Pending: the session, CSRF, webhook and mounted-MCP cases (the web console, webhooks, mounted MCP) |
-| TM-03, TM-04 | `test_required_policy_is_enforced_or_rejected` and `test_harness_launcher_preserves_control_boundary`: 14 and 15; the `claude` scripted-model cases: 15. Closed type contracts (`IR022`): 2 and 3. Expression bounds and the CEL function restriction: 4. The template sandbox: 17. Pending: the Codex legs, the namespace-pattern legs and the scripted-model fallback (#140), the compiler leg of the closed type contracts (DSL) |
-| TM-05, TM-11 | `test_candidate_git_configuration_cannot_execute_in_publisher`, `test_publication_destination_is_trusted`, `test_publication_preserves_candidate_commits` and the local legs of `test_publication_sealing_rejects_mutable_aliases`: 13, 14 and 17. `test_claude_session_receives_only_constructed_environment`: 15. Stored references and the worker's artifact upload: 8 and 17. Pending: `test_candidate_cannot_forge_runner_journal` and `test_agent_descendants_cannot_access_publication_credentials` (Docker); late authorization and the publication-credential legs (code host); target-source upload replay (target) |
-| TM-06, TM-07 | `test_claude_session_receives_only_constructed_environment` on local: 15. `IR007`: 3. Secret-prefix rejection and redaction: 14. Retained-projection authorization: 12. Pending: the Docker leg and runtime network-capability conformance (Docker), sensor destinations (starts), payload expiry (the retention task, #140) and the browser checks (web console) |
+| TM-03, TM-04 | `test_required_policy_is_enforced_or_rejected` and `test_harness_launcher_preserves_control_boundary`: 14 and 15; the `claude` scripted-model cases and the `codex` real app-server deterministic-driver cases: 15. Each real policy matrix covers every declared call kind and supported permission/sandbox mode, checks the side effect, namespace-deny precedence, rejection of unsupported namespace kinds (`IR019`), repository-hook exclusion in hermetic mode and protected paths, preserving the `trust_repo_config: true` residual limits of ADR-0009. Closed type contracts (`IR022`): 2 and 3. Expression bounds and the CEL function restriction: 4. The template sandbox: 17. Pending: the seeded/changed namespace-policy legs (#140), the compiler leg of the closed type contracts (DSL) |
+| TM-05, TM-11 | `test_candidate_git_configuration_cannot_execute_in_publisher`, `test_publication_destination_is_trusted`, `test_publication_preserves_candidate_commits` and the local legs of `test_publication_sealing_rejects_mutable_aliases`: 13, 14 and 17. `test_claude_session_receives_only_constructed_environment` and `test_codex_session_receives_only_constructed_environment`: 15. Stored references and the worker's artifact upload: 8 and 17. Pending: `test_candidate_cannot_forge_runner_journal` and `test_agent_descendants_cannot_access_publication_credentials` (Docker); late authorization and the publication-credential legs (code host); target-source upload replay (target) |
+| TM-06, TM-07 | `test_claude_session_receives_only_constructed_environment` and `test_codex_session_receives_only_constructed_environment` on local: 15. `IR007`: 3. Secret-prefix rejection and redaction: 14. Retained-projection authorization: 12. Pending: the Docker leg and runtime network-capability conformance (Docker), sensor destinations (starts), payload expiry (the retention task, #140) and the browser checks (web console) |
 | TM-08, TM-09 | Stale approvals, changed digests and the CEL approval cases on the API path: 9 and 18. Unknown execution and dispatcher closure: 9, 14 and 17. Pending: replaced waits and late results that need retry or wait events, and the channel-path legs (code host) |
-| TM-10 | Admission races on both databases: 9. Deadline enforcement: 10, 13, 14 and 17. Bounded malformed inputs and provider results: `test_claude_stream_volume_is_bounded` (15) and the external observation gates (13, 14). The bounded run-read wait: 19 |
-| TM-12 | `test_claude_binary_digest_mismatch_prevents_session_start`: 15. Installed-provider discovery: 6; its third-party conformance leg is in the #140 list. The CEL binding's packaging cases and the scheduled scan of its bundled crates: 4; its entry-point cases: 4, 10, 11 and 20. Dependency, secret and static-analysis scanning in CI: 1. What a serving process may select, per #136 (pending): 17 and 20 |
+| TM-10 | Admission races on both databases: 9. Deadline enforcement: 10, 13, 14 and 17. Bounded malformed inputs and provider results: `test_claude_stream_volume_is_bounded` and `test_codex_stream_volume_is_bounded` (15) and the external observation gates (13, 14). The bounded run-read wait: 19 |
+| TM-12 | `test_claude_binary_digest_mismatch_prevents_session_start` and `test_codex_binary_digest_mismatch_prevents_session_start`: 15; each verifies its own installed version and binary identity. Installed-provider discovery: 6; its third-party conformance leg is in the #140 list. The CEL binding's packaging cases and the scheduled scan of its bundled crates: 4; its entry-point cases: 4, 10, 11 and 20. Dependency, secret and static-analysis scanning in CI: 1. What a serving process may select, per #136 (pending): 17 and 20 |
 
 **Measurements:**
 
 | Measurement | Work item |
 |---|---|
 | The run-read wait measurements of [api-and-agent-surface.md](../knowledge/specs/api-and-agent-surface.md#bounded-run-read-wait-adr-0002); their process-exit leg runs once work item 20 exists | 19; the retry, fan-out and mounted-MCP legs are pending |
-| `test_claude_stream_volume_is_bounded` and `test_claude_session_releases_resources` | 15 |
+| `test_claude_stream_volume_is_bounded` and `test_claude_session_releases_resources` | 15, Claude evidence only |
+| `test_codex_stream_volume_is_bounded` and `test_codex_session_releases_resources` | 15, separate Codex evidence through real app-server |
 | CEL validation time, the cost model and the crash thresholds ([ir.md section 7](../knowledge/specs/ir.md#7-expressions-and-templates)) | 4 |
 | CEL lifetime: repeated compile and evaluate cycles with cancellation and shutdown, and the compiled-program cache over its bound | 4 |
 | CEL validation of a 1,000-node IR and of a maximal `/validate` body | 3, 11 |
@@ -333,3 +338,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | NFR-3.1 scheduling latency: the scheduler part | 10 |
 | NFR-3.1 scheduling latency: end to end | 21 |
 | Logging overhead and bounded output ([observability.md section 8](../knowledge/specs/observability.md#8-future-executable-evidence)) | 1 |
+
+Both adapters' executable evidence remains **pending implementation**. Work item 15 opens an owning issue for each adapter before code and records its named cases, workloads, bounds and artifacts; work item 21 owns their combined acceptance gate. Claude probe results do not establish Codex behavior. Neither missing tooling nor an unobserved hook is a passing check.
+
+For Codex, the stream-volume and lifetime measurements cover the app-server process, stdio buffers and descriptors, RPC reader/writer tasks, queues and pending requests, managed policy-hook/MCP/helper subprocesses, and per-attempt configuration, temporary directories, workspaces and transcript handles. Repeat successful and failed sessions, failed initialization, cancellation, an unacknowledged interrupt followed by runtime escalation, worker-restart adoption and shutdown, including slow or broken output. Measure peak and settled memory, tasks, descriptors and subprocesses after an explicit quiescence condition; verify release of per-session resources and no unexplained retained growth across cycles while preserving required durable recovery evidence. The same lifecycle method applies independently to Claude. Measurements retain existing protocol/output bounds and the ten-minute CI budget; these amendments neither supply observed results nor relax limits.

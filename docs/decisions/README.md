@@ -6,13 +6,15 @@ Ownership-index amendment dated 2026-10-18: scope approved under issue #95; word
 
 Slice-scope amendment dated 2026-10-19: ADR-0001 status updated under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
 
+Harness-scope amendment dated 2026-10-21: ADR-0001 requires both Claude and Codex in the first slice under [issue #172](https://github.com/realkarych/kora/issues/172); scope and implementation plan approved by the project owner, wording pending line-by-line owner review.
+
 MCP long-operation amendment dated 2026-10-19: ADR-0002 and ADR-0020 statuses updated, and ADR-0014 and ADR-0017 carry dated tool-count amendments, under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
 
 Each record lists the identifiers it absorbs: `DD-n` from the flat register [knowledge/reviews/design-decisions-2026-10-15.md](../../knowledge/reviews/design-decisions-2026-10-15.md), which the specifications cite and which stays as the historical "where applied" index, and "requirements decision n" from section 13 of [requirements/functional.md](../requirements/functional.md). `DD-36` (implementation defaults) and `DD-37` (small mechanisms kept or dropped) point to their component specification owners through the register; it preserves identifiers and dispositions without overriding those current contracts.
 
 | record | decision | status |
 |---|---|---|
-| [ADR-0001](0001-own-control-plane.md) | Own control plane, with a Temporal-backed execution backend kept possible | accepted, amended 2026-10-16 and 2026-10-19 |
+| [ADR-0001](0001-own-control-plane.md) | Own control plane, with a Temporal-backed execution backend kept possible | accepted, amended 2026-10-16, 2026-10-19 and 2026-10-21 |
 | [ADR-0002](0002-ai-first-api-and-thin-clients.md) | AI-first: the HTTP API is the single implementation, every surface is a thin client, agent nodes never operate kora | accepted, amended 2026-10-16 and 2026-10-19 |
 | [ADR-0003](0003-scheduler-and-workers-over-http.md) | Scheduler and workers are separate processes; workers reach the control plane only through the HTTP API | accepted |
 | [ADR-0004](0004-harness-adapters-over-vendor-sdks.md) | Harness adapters drive harnesses through vendor interfaces (Claude Agent SDK, Codex app-server; an ACP adapter after MVP), not CLI output; harness versions are fixed per installation; kora enforces the limits | accepted, amended 2026-10-16 |
