@@ -4,9 +4,7 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy import Connection, event, select, text
-from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.ext.asyncio import AsyncConnection
-from sqlalchemy.pool import ConnectionPoolEntry, PoolProxiedConnection
 from sqlalchemy.util import await_
 
 from kora.db.connection import (
@@ -50,30 +48,6 @@ def slow_statement(database: Database) -> str:
     if database.dialect is Dialect.SQLITE:
         return SLOW_SQLITE_STATEMENT
     return SLOW_POSTGRESQL_STATEMENT
-
-
-class CheckoutCounter:
-    def __init__(self, database: Database) -> None:
-        self.outstanding = 0
-        self.checkouts = 0
-        engines = {database.writer_engine, database.reader_engine}
-        for engine in engines:
-            event.listen(engine.sync_engine, "checkout", self._checkout)
-            event.listen(engine.sync_engine, "checkin", self._checkin)
-
-    def _checkout(
-        self,
-        raw_connection: DBAPIConnection,
-        record: ConnectionPoolEntry,
-        proxy: PoolProxiedConnection,
-    ) -> None:
-        self.outstanding += 1
-        self.checkouts += 1
-
-    def _checkin(
-        self, raw_connection: DBAPIConnection | None, record: ConnectionPoolEntry
-    ) -> None:
-        self.outstanding -= 1
 
 
 async def names(database: Database) -> list[str]:
@@ -235,7 +209,7 @@ PATHS: list[Callable[[Database], Awaitable[None]]] = [
 async def test_transaction_releases_connection_and_writer_on_every_path(
     database: Database,
 ) -> None:
-    counter = CheckoutCounter(database)
+    counter = ConnectionLedger(database)
     for path in PATHS:
         await path(database)
 
