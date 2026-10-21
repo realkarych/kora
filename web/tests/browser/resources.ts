@@ -73,7 +73,17 @@ export async function nativeResources(roots: number[]): Promise<NativeResources>
       rss += Number(resident) * 1024
       descriptors += entries.length
     } catch (error) {
-      if (!missing(error)) throw error
+      if (missing(error)) continue
+      if (error instanceof Error && 'code' in error && (error.code === 'EACCES' || error.code === 'EPERM')) {
+        try {
+          const status = await readFile(`/proc/${String(pid)}/status`, 'utf8')
+          if (/^State:\s+[ZXx]\b/mu.test(status)) continue
+        } catch (observation) {
+          if (missing(observation)) continue
+          throw observation
+        }
+      }
+      throw error
     }
   }
   return { pids: [...seen].sort((a, b) => a - b), rss, descriptors, processes: seen.size }
