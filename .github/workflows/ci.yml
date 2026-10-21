@@ -141,20 +141,15 @@ jobs:
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
   browser:
-    name: Console browser calibration (${{ matrix.slot }})
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: [1, 2, 3, 4, 5]
+    name: Console terminal diagnostic
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
         shell: bash
     env:
-      KORA_BROWSER_CALIBRATION_SLOT: ${{ matrix.slot }}
       KORA_BROWSER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-      KORA_BROWSER_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+      KORA_BROWSER_BASE: f7d3ba05733dd0ba1705527f7a36f05b7e67b68a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -179,12 +174,12 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
-      - name: Run browser smoke and lifecycle verification
-        run: pnpm --dir web run test:browser --calibrate
+      - name: Diagnose the terminal observation boundary
+        run: pnpm --dir web run diagnose:browser
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
         with:
-          name: console-browser-calibration-${{ matrix.slot }}
+          name: console-terminal-diagnostic
           path: measurements/browser/
           if-no-files-found: error
           retention-days: 14

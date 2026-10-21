@@ -11,7 +11,7 @@ import { nativeResources } from './resources.ts'
 import type { NativeResources } from './resources.ts'
 import type { Trial } from './trial.ts'
 import { measurementProtocol } from './protocol.ts'
-import { diagnosticSnapshot } from './diagnostic-snapshot.ts'
+import { checkpointMemory, persistCheckpoint } from './diagnostic-checkpoint.ts'
 
 export async function collectRunner(): Promise<void> {
   assert(globalThis.gc, 'Runner requires --expose-gc')
@@ -39,10 +39,9 @@ export async function snapshot(session: CDPSession, path: string): Promise<void>
 
 export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void, diagnostic?: AbortSignal): Promise<void> {
   await collectRunner()
-  if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(artifacts, 'node-before', diagnostic)
   const owner = new Ownership(artifacts)
   const diagnostics = new Diagnostics()
-  const trial: Trial = { protocol: measurementProtocol, arm, repeat, runnerBefore: process.memoryUsage(), phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
+  const trial: Trial = { protocol: measurementProtocol, arm, repeat, runnerBefore: diagnostic ? checkpointMemory(artifacts, arm, repeat, 'before', process.env.KORA_BROWSER_OUTPUT ?? artifacts) : process.memoryUsage(), phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
   const phase = async (name: string): Promise<void> => {
     trial.phases.push({ phase: name, native: await nativeResources([process.pid]), runner: process.memoryUsage() })
   }
@@ -112,7 +111,7 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
       trial.serverOutput = owner.logs
       trial.cleanup = await owner.close()
       trial.runnerReleasedBeforeGC = process.memoryUsage()
-      if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(artifacts, 'node-closed', diagnostic)
+      if (diagnostic) persistCheckpoint(artifacts, arm, repeat, 'natural', trial.runnerReleasedBeforeGC, getHeapCodeStatistics(), process.env.KORA_BROWSER_OUTPUT ?? artifacts)
       trial.retainedEvidenceBytes = Buffer.byteLength(JSON.stringify(trial))
     } finally { save(trial) }
   }

@@ -6,6 +6,7 @@ import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { arch, cpus, platform, release, tmpdir, totalmem } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { getHeapCodeStatistics } from 'node:v8'
 import { build } from 'vite'
 import { assetHashes, buildBase, git, repository, webRoot } from './build.ts'
 import { failureChecks, runnerCancellation } from './negative.ts'
@@ -22,9 +23,10 @@ import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
 import { artifactLimits } from './limits.ts'
 import { diagnosticSnapshot } from './diagnostic-snapshot.ts'
+import { diagnosticPlan, persistCheckpoint, verifyCheckpoints } from './diagnostic-checkpoint.ts'
 
 const diagnostic = process.argv.includes('--diagnostic')
-if (diagnostic) assert.equal(process.env.KORA_BROWSER_DIAGNOSTIC, 'collector-diagnostic-v1', 'Use the sanitized diagnostic launcher')
+if (diagnostic) assert.equal(process.env.KORA_BROWSER_DIAGNOSTIC, diagnosticPlan, 'Use the sanitized diagnostic launcher')
 const calibration = process.argv.includes('--calibrate')
 const smokeOnly = process.argv.includes('--smoke')
 const cancelProbe = process.env.KORA_BROWSER_CANCEL_PROBE === '1'
@@ -44,7 +46,7 @@ const trials: TrialSummary[] = []
 const report: Record<string, unknown> = {
   output, protocol: measurementProtocol, status: 'running', mode: diagnostic ? 'collector-diagnostic-v1' : calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
   diagnosticEnvironmentKeys: diagnostic ? Object.keys(process.env).sort() : undefined,
-  eligibleForCalibration: !diagnostic,
+  eligibleForCalibration: !diagnostic, diagnosticPlan: diagnostic ? diagnosticPlan : undefined,
   command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
   cpuModels: [...new Set(cpus().map(cpu => cpu.model))], totalMemory: totalmem(),
   runner: { runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB, slot: process.env.KORA_BROWSER_CALIBRATION_SLOT, name: process.env.RUNNER_NAME, image: process.env.ImageOS, imageVersion: process.env.ImageVersion },
@@ -124,11 +126,14 @@ try {
       } finally {
         await collectRunner()
         const runnerAfter = process.memoryUsage()
+        if (diagnostic) {
+          persistCheckpoint(output, arm, repeat, 'terminal', runnerAfter, getHeapCodeStatistics(), evidenceRoot)
+          if (arm === 'head' && repeat === 0) await diagnosticSnapshot(output, 'node-terminal', cancellation.signal)
+        }
         const after = await nativeResources([process.pid])
         const phase = { phase: 'released', native: await nativeResources([process.pid]), runner: process.memoryUsage() }
         const terminal: Terminal = { protocol: measurementProtocol, arm, repeat, runnerAfter, after, phase }
         persistTerminal(output, terminal, evidenceRoot)
-        if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(output, 'node-returned', cancellation.signal)
         trials.push(finalizeTrial(output, terminal, cancellation.signal, evidenceRoot))
       }
     }
@@ -143,6 +148,8 @@ try {
     assert(browser && trials.every(trial => trial.browserVersion === browser))
     const reference = { platform: process.platform, arch: process.arch, node: process.version, browser }
     if (diagnostic) {
+      verifyCheckpoints(output)
+      report.checkpoints = 'passed'
       protocolChecks()
       report.status = 'diagnostic complete; calibration and performance unverified'
     } else if (calibration) {

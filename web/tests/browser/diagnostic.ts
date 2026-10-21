@@ -6,7 +6,9 @@ import { join, resolve } from 'node:path'
 import { diagnosticChecks } from './diagnostic-checks.ts'
 import { diagnosticChild } from './diagnostic-process.ts'
 import { ArtifactLimit } from './artifacts.ts'
-import { inspectArtifacts } from './diagnostic-inspection.ts'
+import { inspectRetainedArtifacts } from './diagnostic-inspection.ts'
+import { checkpointChecks, checkpointEvidenceChecks } from './diagnostic-checkpoint-checks.ts'
+import { diagnosticPlan } from './diagnostic-plan.ts'
 
 const environmentKeys = ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'PLAYWRIGHT_BROWSERS_PATH', 'KORA_BROWSER_BASE', 'KORA_BROWSER_REVISION', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_JOB', 'RUNNER_NAME', 'ImageOS', 'ImageVersion']
 
@@ -26,6 +28,8 @@ async function run(): Promise<void> {
   const repository = resolve(web, '..')
   for (const root of [repository, web]) assert((await readdir(root)).every(name => name !== '.env' && !name.startsWith('.env.')), 'Diagnostic builds cannot load environment files')
   await diagnosticChecks()
+  await checkpointChecks()
+  await checkpointEvidenceChecks()
   const parent = resolve(process.env.KORA_BROWSER_OUTPUT ?? join(repository, 'measurements/browser'))
   await mkdir(parent, { recursive: true })
   const output = await mkdtemp(join(parent, 'diagnostic-'))
@@ -33,13 +37,13 @@ async function run(): Promise<void> {
   const environment = diagnosticEnvironment({ ...process.env, KORA_DIAGNOSTIC_EXCLUDED: marker })
   assert(!Object.values(environment).includes(marker))
   environment.KORA_BROWSER_OUTPUT = output
-  environment.KORA_BROWSER_DIAGNOSTIC = 'collector-diagnostic-v1'
+  environment.KORA_BROWSER_DIAGNOSTIC = diagnosticPlan
   const cancellation = new AbortController()
   const stop = (): void => { cancellation.abort() }
   process.once('SIGTERM', stop)
   process.once('SIGINT', stop)
   const limits = new ArtifactLimit(output, stop)
-  const evidence: Record<string, unknown> = { protocol: 'collector-diagnostic-v1', eligibleForCalibration: false, environmentKeys: Object.keys({ ...environment, TMPDIR: '' }).sort(), diagnosticChecks: 'passed', status: 'running' }
+  const evidence: Record<string, unknown> = { protocol: 'collector-diagnostic-v1', diagnosticPlan, eligibleForCalibration: false, checkpointChecks: 'passed', environmentKeys: Object.keys({ ...environment, TMPDIR: '' }).sort(), diagnosticChecks: 'passed', status: 'running' }
   try {
     cancellation.signal.throwIfAborted()
     const result = await diagnosticChild(environment, output, cancellation.signal, marker)
@@ -54,27 +58,32 @@ async function run(): Promise<void> {
       if (fixture === 'cancel') assert.equal(result.code, 1)
       else assert.equal(result.signal, 'SIGKILL')
     }
-    await inspectArtifacts(output, marker, cancellation.signal)
     const runs = (await readdir(output)).filter(name => name.startsWith('run-'))
     assert.equal(runs.length, 1)
     const report: unknown = JSON.parse(await readFile(join(output, runs[0] ?? '', 'report.json'), 'utf8'))
     assert(report !== null && typeof report === 'object' && 'diagnosticEnvironmentKeys' in report)
     assert.deepEqual(report.diagnosticEnvironmentKeys, evidence.environmentKeys)
+    assert('diagnosticPlan' in report && report.diagnosticPlan === diagnosticPlan)
     assert.equal(result.code, 0, 'Diagnostic child failed')
     cancellation.signal.throwIfAborted()
-    evidence.excludedMarker = 'absent'
     evidence.status = 'diagnostic complete; performance unverified'
   } catch (error) {
     evidence.status = 'failed'
+    evidence.workloadFailure = error instanceof Error ? error.name : 'UnknownError'
     throw error
   } finally {
     limits.close()
     evidence.artifactLimitFailed = limits.failed
     evidence.interrupted = cancellation.signal.aborted
-    if (cancellation.signal.aborted) evidence.status = 'failed'
+    if (cancellation.signal.aborted || limits.failed) evidence.status = 'failed'
+    const inspection = await inspectRetainedArtifacts(output, marker)
+    evidence.inspection = inspection
+    if (inspection.status === 'passed') evidence.excludedMarker = 'absent'
+    else evidence.status = 'failed'
     writeFileSync(join(output, 'launcher.json'), JSON.stringify(evidence))
     process.removeListener('SIGTERM', stop)
     process.removeListener('SIGINT', stop)
+    assert.equal(inspection.status, 'passed', 'Retained diagnostic artifact inspection failed')
     cancellation.signal.throwIfAborted()
   }
 }

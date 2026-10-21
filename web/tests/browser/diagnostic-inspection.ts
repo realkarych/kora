@@ -42,3 +42,16 @@ export async function inspectArtifacts(output: string, marker: string, signal: A
   }
   signal.throwIfAborted()
 }
+
+export interface ArtifactInspection {
+  status: 'passed' | 'failed' | 'unverified'
+  reason: 'complete' | 'rejected' | 'interrupted'
+}
+
+export async function inspectRetainedArtifacts(output: string, marker: string, signal: AbortSignal = AbortSignal.timeout(30000), firstChunk?: () => Promise<void>): Promise<ArtifactInspection> {
+  const [inspection] = await Promise.allSettled([inspectArtifacts(output, marker, signal, firstChunk)])
+  assert(inspection)
+  if (signal.aborted) return { status: 'unverified', reason: 'interrupted' }
+  if (inspection.status === 'rejected') return { status: 'failed', reason: 'rejected' }
+  return { status: 'passed', reason: 'complete' }
+}

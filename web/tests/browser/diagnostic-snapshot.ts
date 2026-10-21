@@ -4,6 +4,7 @@ import { closeSync, openSync, readdirSync, statSync, writeSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Readable } from 'node:stream'
 import { getHeapSnapshot } from 'node:v8'
+import { diagnosticPlan } from './diagnostic-plan.ts'
 
 export const shardLimit = 32 * 1024 * 1024
 export const directoryLimit = 512 * 1024 * 1024
@@ -59,7 +60,7 @@ export class SnapshotShards {
 
   finish(complete: boolean): void {
     this.finishShard()
-    const payload = Buffer.from(JSON.stringify({ protocol: 'collector-diagnostic-v1', name: this.name, complete, shards: this.shards }))
+    const payload = Buffer.from(JSON.stringify({ protocol: 'collector-diagnostic-v1', diagnosticPlan, name: this.name, complete, shards: this.shards }))
     assert(payload.byteLength <= 65536)
     assert(artifactBytes(this.budgetRoot) + payload.byteLength <= directoryLimit - 4 * 1024 * 1024 - 65536)
     const descriptor = openSync(join(this.root, `${this.name}.manifest.json`), 'wx', 0o600)
