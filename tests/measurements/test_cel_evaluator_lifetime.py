@@ -1,6 +1,7 @@
 import json
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import TypedDict
 
 import pytest
@@ -10,6 +11,24 @@ from tests.measurements.harness import Report, Sample, new_report, write_report
 
 pytestmark = pytest.mark.measurement
 REPEATS: int = 3
+
+
+@dataclass(frozen=True)
+class ResourceBudget:
+    heap_growth: int
+    late_heap_growth: int
+    peak_heap: int
+    rss_growth: int
+    late_rss_span: int
+
+
+SINK_BUDGET: ResourceBudget = ResourceBudget(32768, 16384, 196608, 524288, 262144)
+RESOURCE_BUDGETS: dict[str, ResourceBudget] = {
+    "native": ResourceBudget(73728, 20480, 327680, 655360, 327680),
+    "lifetime": ResourceBudget(24576, 12288, 720896, 262144, 196608),
+    "loops": ResourceBudget(16384, 8192, 65536, 32768, 24576),
+}
+HOP_P95_SECONDS: dict[str, float] = {"idle": 0.000175, "busy": 0.0016}
 
 
 class Payload(TypedDict):
@@ -29,6 +48,55 @@ class SinkPayload(TypedDict):
     retaining_paths: list[str]
 
 
+def gate(report: Report, name: str, passed: bool) -> None:
+    report.gates[name] = passed
+    assert passed, name
+
+
+def resource_gates(
+    report: Report,
+    name: str,
+    points: list[dict[str, int | None]],
+    budget: ResourceBudget,
+) -> None:
+    for resource in ("descriptors", "threads", "os_threads", "tasks"):
+        gate(report, f"{name}_{resource}", len({p[resource] for p in points}) == 1)
+    for resource, whole, late in (
+        ("heap", budget.heap_growth, budget.late_heap_growth),
+        ("rss", budget.rss_growth, budget.late_rss_span),
+    ):
+        values = [point[resource] for point in points]
+        if values[0] is None:
+            assert report.platform != "linux"
+            assert all(value is None for value in values)
+            continue
+        measured = [value for value in values if value is not None]
+        assert len(measured) == len(points)
+        gate(
+            report, f"{name}_{resource}_growth", max(measured) - min(measured) <= whole
+        )
+        change = max(measured[9:]) - min(measured[9:])
+        gate(report, f"{name}_{resource}_late_growth", change <= late)
+    peaks = [p["peak"] for p in points if p["peak"] is not None]
+    gate(report, f"{name}_peak_heap", max(peaks) <= budget.peak_heap)
+    image_peaks = [
+        p["image_peak_rss"] for p in points if p["image_peak_rss"] is not None
+    ]
+    if report.platform == "linux":
+        assert len(image_peaks) == len(points)
+    if image_peaks:
+        gate(report, f"{name}_image_peak_rss", max(image_peaks) <= 134217728)
+
+
+def sink_gates(report: Report, name: str, payload: SinkPayload, blocked: bool) -> None:
+    stats = payload["stats"]
+    gate(report, f"{name}_shutdown", stats["shutdown_seconds"] <= 0.05)
+    gate(report, f"{name}_writer", stats["writer_alive_at_exit"] == blocked)
+    gate(report, f"{name}_drained", stats["drained"] == (not blocked))
+    if blocked:
+        gate(report, f"{name}_pipe_full", stats["filled_pipe_bytes"] > 0)
+
+
 @pytest.fixture(scope="module")
 def report() -> Iterator[Report]:
     started = time.perf_counter()
@@ -36,7 +104,9 @@ def report() -> Iterator[Report]:
     created.environment.update(warmup=20, cycles=200, independent_processes=REPEATS)
     yield created
     created.durations["whole_suite"] = time.perf_counter() - started
+    created.gates["whole_suite_budget"] = created.durations["whole_suite"] <= 180
     write_report(created)
+    assert created.gates["whole_suite_budget"]
 
 
 def test_cel_evaluator_resource_lifetime(report: Report) -> None:
@@ -70,6 +140,10 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                         dict(point),
                     )
                 )
+            report.environment[f"{mode}_{repeat}_retainers"] = "\n".join(
+                payload["retaining_paths"]
+            )
+            for point in payload["points"]:
                 assert point["handles"] == 0
                 assert point["outstanding"] == 0
                 assert point["payload_bytes"] == 0
@@ -79,9 +153,6 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                 assert characters is not None
                 assert entries <= (128 if mode == "native" else 8)
                 assert characters <= (131072 if mode == "native" else 64)
-            report.environment[f"{mode}_{repeat}_retainers"] = "\n".join(
-                payload["retaining_paths"]
-            )
             report.gates[f"{mode}_{repeat}_stack"] = payload["stack_restored"]
             report.gates[f"{mode}_{repeat}_worker"] = payload["persistent_workers"] == 1
             assert payload["stack_restored"]
@@ -90,9 +161,19 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                 assert payload["terminal_workers"] == 0
             if payload["points"]:
                 points = payload["points"]
-                for resource in ("descriptors", "threads", "os_threads", "tasks"):
-                    assert len({point[resource] for point in points}) == 1
+                resource_gates(
+                    report, f"{mode}_{repeat}", points, RESOURCE_BUDGETS[mode]
+                )
+            if payload["timings"]:
+                timings = sorted(payload["timings"])
+                assert len(timings) == 200
+                gate(
+                    report,
+                    f"{mode}_{repeat}_hop_p95",
+                    timings[189] <= HOP_P95_SECONDS[mode],
+                )
     report.durations["whole_step"] = time.perf_counter() - started
+    gate(report, "whole_step_budget", report.durations["whole_step"] <= 150)
 
 
 @pytest.mark.parametrize("repeat", range(REPEATS))
@@ -112,12 +193,14 @@ def test_cel_diagnostics_do_not_delay_exit(
     assert result.code == 0, result.stderr
     assert result.stderr == ""
     payload: SinkPayload = json.loads(result.stdout)
+    elapsed = time.perf_counter() - started
+    name = f"sink_{sink}_{level}_{repeat}"
     report.samples.append(
         Sample(
             f"sink_{sink}_{level}",
             repeat,
             200,
-            time.perf_counter() - started,
+            elapsed,
             dict(payload["stats"]),
         )
     )
@@ -127,6 +210,13 @@ def test_cel_diagnostics_do_not_delay_exit(
         report.samples.append(
             Sample(f"sink_resources_{sink}_{level}", repeat, cycle, 0, dict(point))
         )
+    report.environment[f"sink_{sink}_{level}_{repeat}_retainers"] = "\n".join(
+        payload["retaining_paths"]
+    )
+    gate(report, f"{name}_exit", elapsed <= 1.0)
+    sink_gates(report, name, payload, sink == "blocked" and level != "CRITICAL")
+    resource_gates(report, name, payload["points"], SINK_BUDGET)
+    for point in payload["points"]:
         assert point["outstanding"] == 0
         assert point["payload_bytes"] == 0
         assert point["handles"] == 0
@@ -137,9 +227,6 @@ def test_cel_diagnostics_do_not_delay_exit(
         assert queue_bytes is not None
         assert queue_records <= 16
         assert queue_bytes <= 65536
-    report.environment[f"sink_{sink}_{level}_{repeat}_retainers"] = "\n".join(
-        payload["retaining_paths"]
-    )
     if sink == "blocked" and level != "CRITICAL":
         assert payload["stats"]["dropped"] > 0
     if sink == "broken" and level != "CRITICAL":
@@ -160,6 +247,12 @@ def test_cel_process_exits_with_evaluator_work_in_flight(
     result = run_child(code, full_path(ROOT))
 
     assert result.code == 0, result.stderr
+    assert result.stderr == ""
+    payload: SinkPayload = json.loads(result.stdout)
+    elapsed = time.perf_counter() - started
+    name = f"inflight_exit_{sink}_{repeat}"
     report.samples.append(
-        Sample(f"inflight_exit_{sink}", repeat, 1, time.perf_counter() - started)
+        Sample(f"inflight_exit_{sink}", repeat, 1, elapsed, dict(payload["stats"]))
     )
+    gate(report, f"{name}_exit", elapsed <= 1.0)
+    sink_gates(report, name, payload, sink == "blocked")

@@ -39,24 +39,26 @@ class CountingReader:
         assert not self.thread.is_alive()
 
 
-def fill(descriptor: int) -> None:
+def fill(descriptor: int) -> int:
     os.set_blocking(descriptor, False)
+    written = 0
     while True:
         try:
-            os.write(descriptor, b"x" * 4096)
+            written += os.write(descriptor, b"x" * 4096)
         except BlockingIOError:
             os.set_blocking(descriptor, True)
-            return
+            return written
 
 
 def run(sink: str, level: str, exit_running: bool = False) -> str:
     baseline_descriptors = open_descriptors()
     read_end, write_end = os.pipe()
     reader: CountingReader | None = None
+    filled_pipe_bytes = 0
     if sink == "draining":
         reader = CountingReader(read_end)
     elif sink == "blocked":
-        fill(write_end)
+        filled_pipe_bytes = fill(write_end)
     elif sink == "broken":
         os.close(read_end)
     settings = LoggingSettings(level=Level[level], queue_records=16, queue_bytes=65536)
@@ -144,6 +146,7 @@ def run(sink: str, level: str, exit_running: bool = False) -> str:
                 "drained": drained,
                 "running": exit_running,
                 "writer_alive_at_exit": diagnostics.writer_is_alive(),
+                "filled_pipe_bytes": filled_pipe_bytes,
             },
             "points": points,
             "retaining_paths": retaining_paths,

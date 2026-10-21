@@ -297,7 +297,7 @@ def control_exception_releases_cache() -> None:
 
     owner = EvaluationThread(FailureBinding(SystemExit).binding())
     loop = asyncio.new_event_loop()
-    identifier, _ = owner.open(loop)
+    identifier, handle = owner.open(loop)
     request = Prepared(
         expression("true"), BoundValues({}, 0, 0), ErrorContext("when"), ResultType.BOOL
     )
@@ -305,6 +305,7 @@ def control_exception_releases_cache() -> None:
 
     owner.worker.join(5)
     loop.close()
+    owner.timed_out(handle)
 
     assert not owner.worker.is_alive()
     assert owner.snapshot().outstanding == 0

@@ -35,6 +35,7 @@ class Point:
     peak: int
     rss: int | None
     peak_rss: int
+    image_peak_rss: int | None
     descriptors: int
     threads: int
     os_threads: int | None
@@ -62,6 +63,15 @@ def workers() -> int:
     return sum(t.name == "kora-cel-evaluator" for t in threading.enumerate())
 
 
+def image_peak_rss_bytes() -> int | None:
+    if sys.platform != "linux":
+        return None
+    for line in Path("/proc/self/status").read_text().splitlines():
+        if line.startswith("VmHWM:"):
+            return int(line.split()[1]) * 1024
+    raise RuntimeError("Linux process high-water RSS is unavailable")
+
+
 def sample(cycle: int, evaluator: Evaluator, tasks: int | None = None) -> Point:
     gc.collect()
     heap, peak = tracemalloc.get_traced_memory()
@@ -74,6 +84,7 @@ def sample(cycle: int, evaluator: Evaluator, tasks: int | None = None) -> Point:
         rss=current_rss_bytes(),
         peak_rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         * (1024 if sys.platform == "linux" else 1),
+        image_peak_rss=image_peak_rss_bytes(),
         descriptors=open_descriptors(),
         threads=threading.active_count(),
         os_threads=len(os.listdir(tasks_path)) if tasks_path.is_dir() else None,

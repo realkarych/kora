@@ -373,7 +373,7 @@ class EvaluationThread:
 
     def timed_out(self, handle: Handle) -> None:
         with self.condition:
-            if not handle.timeout_reported:
+            if not self._failed and not handle.timeout_reported:
                 handle.timeout_reported = True
                 self._events.append((True, 0))
                 self.condition.notify_all()
