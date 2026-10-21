@@ -82,7 +82,7 @@ try {
   report.headTree = await git(['rev-parse', `${prHead}^{tree}`])
   report.prHead = prHead
   report.dirty = await git(['status', '--porcelain', '--untracked-files=normal'])
-  if (!smokeOnly) assert.equal(report.dirty, '', 'Reference measurements require a clean committed tree')
+  if (!smokeOnly && !cancelProbe) assert.equal(report.dirty, '', 'Reference measurements require a clean committed tree')
   const require = createRequire(import.meta.url)
   const playwrightPackage = require.resolve('playwright/package.json')
   const corePackage = createRequire(playwrightPackage).resolve('playwright-core/package.json')
@@ -98,6 +98,10 @@ try {
   const readyForCancellation = async (pids: number[]): Promise<void> => {
     if (diagnostic) process.send?.({ event: 'owned', pids })
     if (!cancelProbe) return
+    if (control) {
+      retention.allocate('cycle')
+      writeEvidence(output, 'retention-acquired.json', retention.evidence(), 4096)
+    }
     const cancelled = once(process, 'SIGTERM')
     process.send?.({ event: 'ready', pids })
     await cancelled
@@ -108,6 +112,9 @@ try {
   report.failureChecks = await failureChecks(webRoot, output)
   await runnerCancellation(output)
   await runnerCancellation(output, true)
+  await runnerCancellation(output, false, 'cancel')
+  await runnerCancellation(output, false, 'report-collision')
+  report.retainedRunnerCancellation = 'passed'
   report.runnerCancellation = 'passed'
   await artifactLimits(webRoot, output)
   report.artifactLimits = 'passed'
@@ -200,8 +207,9 @@ try {
       const invocationGates = heapGates(growth, budgets.heap)
       report.invocationGates = invocationGates
       if (control) {
-        if (control === 'intertrial') await recoveryFixture(output, retention, budgets.heap)
-        const classification = classifyControl(control, comparison.gates, invocationGates, true, true)
+        const recovery = control === 'intertrial' ? await recoveryFixture(output, retention, budgets.heap) : { passed: true, gates: {} }
+        report.recovery = recovery
+        const classification = classifyControl(control, comparison.gates, invocationGates, true, recovery.passed)
         report.controlResult = classification
         save()
         assert(classification.valid, 'invalid-retention-control-result')
@@ -215,6 +223,7 @@ try {
   } else report.status = 'smoke passed; performance unverified'
 } catch (error) {
   report.status = 'failed'
+  if (control && report.controlResult === undefined) report.controlResult = classifyControl(control, {}, {}, false, false)
   report.failure = { code: error instanceof SyntaxError ? 'invalid-json' : error instanceof assert.AssertionError ? 'invalid-evidence' : 'operation-failed' }
   process.exitCode = 1
 } finally {
@@ -226,6 +235,7 @@ try {
   report.artifactLimitFailed = limits.failed
   report.seconds = (performance.now() - started) / 1000
   await rm(temporary, { recursive: true, force: true })
+  writeEvidence(output, 'retention-cleanup.json', report.retentionCleanup, 4096, evidenceRoot)
   save()
   process.removeListener('SIGTERM', stop)
   process.removeListener('SIGINT', stop)

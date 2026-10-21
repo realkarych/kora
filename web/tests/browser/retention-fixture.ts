@@ -11,7 +11,7 @@ interface RecoveryPoint {
   retention: ReturnType<Retention['evidence']>
 }
 
-export function verifyRecovery(value: unknown, limits: HeapLimits): void {
+export function verifyRecovery(value: unknown, limits: HeapLimits): { passed: boolean; gates: Record<string, boolean> } {
   assert(Array.isArray(value) && value.length === 8, 'invalid-recovery-observations')
   const points = (value as unknown[]).map(value => {
     const point = closedRecord(value, ['memory', 'retention'])
@@ -25,14 +25,18 @@ export function verifyRecovery(value: unknown, limits: HeapLimits): void {
   assert(baseline.retention.arrays === 0 && baseline.retention.nominalBytes === 0 && baseline.retention.allocations === 0 && !baseline.retention.released, 'invalid-recovery-baseline')
   for (const point of points.slice(1, 7)) assert(point.retention.arrays === 1 && point.retention.nominalBytes === 245760 && point.retention.allocations === 1 && !point.retention.released, 'invalid-recovery-held')
   assert(released.retention.arrays === 0 && released.retention.nominalBytes === 0 && released.retention.allocations === 1 && released.retention.released, 'invalid-recovery-release')
-  assert(Object.values(heapGates(heapGrowth(points.slice(1, 7).map(point => point.memory.heapUsed)), limits)).every(Boolean), 'bounded-plateau-failed')
-  assert(first.memory.heapUsed - baseline.memory.heapUsed >= 245760 - limits.terminal, 'bounded-allocation-not-observed')
-  assert(last.memory.heapUsed - released.memory.heapUsed >= 245760 - limits.terminal, 'bounded-release-not-observed')
-  assert(released.memory.heapUsed - baseline.memory.heapUsed <= limits.terminal, 'bounded-heap-recovery-failed')
-  assert(released.memory.external <= baseline.memory.external && released.memory.arrayBuffers <= baseline.memory.arrayBuffers, 'bounded-buffer-recovery-failed')
+  const gates = {
+    ...heapGates(heapGrowth(points.slice(1, 7).map(point => point.memory.heapUsed)), limits),
+    allocation: first.memory.heapUsed - baseline.memory.heapUsed >= 245760 - limits.terminal,
+    release: last.memory.heapUsed - released.memory.heapUsed >= 245760 - limits.terminal,
+    recovery: released.memory.heapUsed - baseline.memory.heapUsed <= limits.terminal,
+    external: released.memory.external <= baseline.memory.external,
+    arrayBuffers: released.memory.arrayBuffers <= baseline.memory.arrayBuffers,
+  }
+  return { gates, passed: Object.values(gates).every(Boolean) }
 }
 
-export async function recoveryFixture(root: string, primary: Retention, limits: HeapLimits): Promise<void> {
+export async function recoveryFixture(root: string, primary: Retention, limits: HeapLimits): Promise<ReturnType<typeof verifyRecovery>> {
   const prior = primary.evidence()
   assert(prior.released && prior.arrays === 0 && prior.nominalBytes === 0, 'primary-retention-not-released')
   const owner = new Retention('intertrial')
@@ -56,5 +60,5 @@ export async function recoveryFixture(root: string, primary: Retention, limits: 
     owner.release()
     writeEvidence(root, 'retention-recovery.json', points.slice(0, captured), 65536)
   }
-  verifyRecovery(points, limits)
+  return verifyRecovery(points, limits)
 }

@@ -15,6 +15,7 @@ import { invocationGrowth, parseInvocationPoint, parseRetention } from './invoca
 import type { InvocationPoint } from './invocation.ts'
 import { classifyControl, controls } from './retention.ts'
 import type { Control } from './retention.ts'
+import { validateWorkflowTransition } from './invocation-workflow.ts'
 import { verifyRecovery } from './retention-fixture.ts'
 
 interface Job {
@@ -173,7 +174,7 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
     diagnostics(smoke.diagnostics)
     released(smoke.cleanup)
   }
-  for (const key of ['runnerCancellation', 'artifactLimits', 'networkChecks', 'evidenceChecks', 'invocationChecks']) assert.equal(report[key], 'passed')
+  for (const key of ['runnerCancellation', 'artifactLimits', 'networkChecks', 'evidenceChecks', 'invocationChecks', 'retainedRunnerCancellation']) assert.equal(report[key], 'passed')
   const failures = array(report.failureChecks, 6).map(record)
   assert.deepEqual(failures.map(failure => failure.scenario), scenarios)
   for (const failure of failures) {
@@ -361,8 +362,10 @@ export function validateArchiveEntries(entries: string[], reportPath: string): v
     required.push(`${mode}-smoke.json`)
     for (const width of [1280, 768, 375]) required.push(`${mode}-${String(width)}.png`, `${mode}-${String(width)}-terminal.png`, `${mode}-${String(width)}.zip`)
   }
-  for (const name of [...scenarios.map(scenario => `failure-${scenario}`), 'runner', 'runner-forced']) required.push(`${name}-termination.json`)
-  required.push('retention-release.json', ...Array.from({ length: 7 }, (_, index) => `invocation-${String(index)}.json`))
+  for (const name of [...scenarios.map(scenario => `failure-${scenario}`), 'runner', 'runner-forced', 'runner-retained-cancel', 'runner-retained-report-collision']) required.push(`${name}-termination.json`)
+  required.push('retention-release.json', 'retention-cleanup.json', 'runner-retained-cancel-cancellation.json', 'runner-retained-report-collision-cancellation.json', ...Array.from({ length: 7 }, (_, index) => `invocation-${String(index)}.json`))
+  const invocationEntries = entries.filter(entry => entry.startsWith(`${prefix}invocation-`) && !entry.slice(prefix.length).includes('/'))
+  assert.deepEqual(invocationEntries.sort(), Array.from({ length: 7 }, (_, index) => `${prefix}invocation-${String(index)}.json`), 'Unexpected invocation checkpoint inventory')
   for (const name of required) assert(entries.includes(`${prefix}${name}`), 'Missing required evidence entry')
 }
 
@@ -392,7 +395,7 @@ async function loadDataset(manifest: Manifest, job: Job): Promise<Dataset> {
       assert.deepEqual(await readArchive(job, `${name}-summary.json`, 65536), { arm, repeat, browserVersion: dataset.reference.browser, metrics: dataset[arm][repeat] })
     }
   }
-  for (const name of [...scenarios.map(scenario => `failure-${scenario}`), 'runner', 'runner-forced']) {
+  for (const name of [...scenarios.map(scenario => `failure-${scenario}`), 'runner', 'runner-forced', 'runner-retained-cancel', 'runner-retained-report-collision']) {
     const termination = record(await readArchive(job, `${prefix}${name}-termination.json`, 64 * 1024))
     array(termination.failures, 0)
     assert.equal(termination.ownershipConfirmed, true)
@@ -406,6 +409,22 @@ async function loadDataset(manifest: Manifest, job: Job): Promise<Dataset> {
     assert.deepEqual(point, dataset.points[sequence], 'Raw invocation does not match report')
   }
   assert.deepEqual(await readArchive(job, `${prefix}retention-release.json`, 4096), dataset.report.retention)
+  assert.deepEqual(await readArchive(job, `${prefix}retention-cleanup.json`, 4096), dataset.report.retentionCleanup)
+  for (const name of ['cancel', 'report-collision']) {
+    const proof = record(await readArchive(job, `${prefix}runner-retained-${name}-cancellation.json`, 65536))
+    assert.equal(proof.code, 1)
+    assert.equal(proof.deadline, false)
+    assert.deepEqual(proof.acquired, { allocations: 1, arrays: 1, nominalBytes: 8192, released: false })
+    assert.deepEqual(proof.released, { allocations: 1, arrays: 0, nominalBytes: 0, released: true })
+    if (name === 'cancel') {
+      assert.equal(proof.bytes, 0)
+      assert.equal(record(proof.report).status, 'failed')
+      assert.deepEqual(record(proof.report).retentionCleanup, proof.released)
+    } else {
+      assert(number(proof.bytes) > 0 && number(proof.bytes) <= 65536)
+      assert.equal(proof.failure, 'report-path-collision')
+    }
+  }
   return dataset
 }
 
@@ -430,6 +449,9 @@ async function validateStage(manifest: Manifest, datasets: Dataset[], frozenPath
   await execute('git', ['merge-base', '--is-ancestor', training.head, manifest.head])
   const { stdout } = await execute('git', ['diff', '--name-only', training.head, manifest.head])
   validateStageChanges(stdout.trim().split('\n'))
+  const trainingWorkflow = await execute('git', ['show', `${training.head}:.github/workflows/ci.yml`], { maxBuffer: 1024 * 1024 })
+  const validationWorkflow = await execute('git', ['show', `${manifest.head}:.github/workflows/ci.yml`], { maxBuffer: 1024 * 1024 })
+  validateWorkflowTransition(trainingWorkflow.stdout, validationWorkflow.stdout)
   assert.equal(new Set(datasets.map(dataset => record(dataset.report.runner).name)).size, 9, 'Runner identities must be distinct')
   const first = trainingDatasets[0]
   assert(first)
@@ -448,11 +470,13 @@ async function validateStage(manifest: Manifest, datasets: Dataset[], frozenPath
       results.push({ slot: job.slot, comparison, invocation })
     } else {
       assert(job.kind !== 'training')
+      let recovery = { passed: true, gates: {} }
       if (job.kind === 'intertrial') {
         const prefix = job.reportPath.slice(0, -'report.json'.length)
-        verifyRecovery(await readArchive(job, `${prefix}retention-recovery.json`, 65536), budgets.heap)
+        recovery = verifyRecovery(await readArchive(job, `${prefix}retention-recovery.json`, 65536), budgets.heap)
       }
-      const classification = classifyControl(job.kind, comparison.gates, invocation, true, true)
+      assert.deepEqual(dataset.report.recovery, recovery)
+      const classification = classifyControl(job.kind, comparison.gates, invocation, true, recovery.passed)
       assert.deepEqual(dataset.report.controlResult, classification)
       assert(classification.valid, 'Invalid sensitivity control')
       results.push({ slot: job.slot, comparison, invocation, classification })

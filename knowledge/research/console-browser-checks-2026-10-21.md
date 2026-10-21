@@ -234,3 +234,7 @@ Independent browser artifact review confirms production/development smoke at 128
 Favicon PR #177 was subsequently squash-merged as `b3aa12eea8a27fc22643e88bb5a82939481f42bc`, and PR #180 was retargeted to master. The diagnostic remains evidence for its preregistered fixed base and tested tree; it does not establish final integration readiness against the advanced master. No new diagnostic was dispatched after that retargeting.
 
 The result is complete diagnostic evidence with inconclusive causal attribution. The approved one-run procedure is consumed and its stop condition applies. No corrective implementation, retry, subtraction, threshold change or calibration follows from this result. Both failed five-job batches remain rejected; no new aggregate or budgets exist. Browser numerical readiness and dependent CEL integration remain blocked. Any later correction and measurement sequence require a separately reviewed plan.
+
+## Approved complete-invocation heap method
+
+The owner subsequently approved [the bounded tolerance and sensitivity amendment](https://github.com/realkarych/kora/issues/179#issuecomment-6327372790). It supersedes the diagnostic stop condition only for one declared five-runner training batch and, if admitted, one five-holdout/four-control validation stage. All historical failures above remain rejected. The [dated method record](browser-heap-tolerance-2026-10-22.md) defines protocol `invocation-heap-v3`, the 60 KiB ceiling, invocation coverage and required retained-payload sensitivity. No v3 threshold is yet frozen.

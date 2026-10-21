@@ -1,17 +1,17 @@
 import assert from 'node:assert/strict'
 import { fork, type ChildProcess, type ForkOptions } from 'node:child_process'
 import { once } from 'node:events'
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { Ownership } from './ownership.ts'
+import { childEnvironment } from './ownership.ts'
 import { nativeResources, verifyReleased } from './resources.ts'
 
 async function forkFixture(module: string, args: string[], options: ForkOptions): Promise<{ child: ChildProcess; temporary: string }> {
   const temporary = await mkdtemp(join(tmpdir(), 'kora-browser-fixture-'))
   try {
-    const child = fork(module, args, { ...options, env: { ...new Ownership().environment(), ...options.env, TMPDIR: temporary } })
+    const child = fork(module, args, { ...options, env: { ...childEnvironment(), ...options.env, TMPDIR: temporary } })
     await once(child, 'spawn')
     return { child, temporary }
   } catch (error) {
@@ -122,9 +122,11 @@ export async function failureChecks(root: string, output: string): Promise<unkno
   return results
 }
 
-export async function runnerCancellation(output: string, forced = false): Promise<void> {
-  const directory = join(output, forced ? 'stalled-runner' : 'cancelled-runner')
-  const { child, temporary } = await forkFixture(fileURLToPath(new URL('./run.ts', import.meta.url)), ['--smoke'], {
+export async function runnerCancellation(output: string, forced = false, retentionProbe?: 'cancel' | 'report-collision'): Promise<void> {
+  assert(!forced || retentionProbe === undefined)
+  const name = retentionProbe ? `runner-retained-${retentionProbe}` : forced ? 'runner-forced' : 'runner'
+  const directory = join(output, `${name}-probe`)
+  const { child, temporary } = await forkFixture(fileURLToPath(new URL('./run.ts', import.meta.url)), [retentionProbe ? '--control=cycle-8' : '--smoke'], {
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'], detached: true,
     env: { NODE_ENV: 'production', KORA_BROWSER_CANCEL_PROBE: '1', KORA_BROWSER_OUTPUT: directory },
   })
@@ -155,14 +157,21 @@ export async function runnerCancellation(output: string, forced = false): Promis
     const resources = await nativeResources(owned)
     owned.push(...resources.pids)
     ownershipConfirmed = true
-    await writeFile(join(output, forced ? 'runner-forced-ownership.json' : 'runner-ownership.json'), JSON.stringify({ owned }))
+    await writeFile(join(output, `${name}-ownership.json`), JSON.stringify({ owned }))
+    if (retentionProbe === 'report-collision') {
+      const runs = await readdir(directory)
+      assert.equal(runs.length, 1)
+      const run = runs[0]
+      assert(run)
+      await mkdir(join(directory, run, 'report.json'))
+    }
     clearTimeout(timer)
     timer = setTimeout(() => { controller.abort() }, forced ? 1000 : 30000)
     child.kill(forced ? 'SIGSTOP' : 'SIGTERM')
     deadline = await Promise.race([exited.then(() => false), aborted.then(() => true)])
   } finally {
     clearTimeout(timer)
-    await terminateOwned(owned, join(output, forced ? 'runner-forced-termination.json' : 'runner-termination.json'), temporary, ownershipConfirmed)
+    await terminateOwned(owned, join(output, `${name}-termination.json`), temporary, ownershipConfirmed)
     await exited
   }
   if (forced) {
@@ -177,8 +186,23 @@ export async function runnerCancellation(output: string, forced = false): Promis
   assert.equal(directories.length, 1)
   const run = directories[0]
   assert(run)
+  let retentionEvidence: { acquired: unknown; released: unknown } | undefined
+  if (retentionProbe) {
+    const acquired: unknown = JSON.parse(await readFile(join(directory, run, 'retention-acquired.json'), 'utf8'))
+    const released: unknown = JSON.parse(await readFile(join(directory, run, 'retention-cleanup.json'), 'utf8'))
+    retentionEvidence = { acquired, released }
+    assert.deepEqual(acquired, { allocations: 1, arrays: 1, nominalBytes: 8192, released: false })
+    assert.deepEqual(released, { allocations: 1, arrays: 0, nominalBytes: 0, released: true })
+    assert(!deadline && child.exitCode === 1)
+    if (retentionProbe === 'report-collision') {
+      assert(bytes > 0 && bytes <= 65536)
+      assert(stderr.join('').includes('EISDIR'))
+      await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, bytes, deadline, acquired, released, failure: 'report-path-collision' }))
+      return
+    }
+  }
   const report: unknown = JSON.parse(await readFile(join(directory, run, 'report.json'), 'utf8'))
-  await writeFile(join(output, 'runner-cancellation.json'), JSON.stringify({ code: child.exitCode, stderr, bytes, deadline, report }))
+  await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, stderr, bytes, deadline, report, ...retentionEvidence }))
   assert(!deadline)
   assert.equal(child.exitCode, 1)
   assert.equal(bytes, 0)

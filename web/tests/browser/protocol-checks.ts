@@ -143,14 +143,14 @@ export function protocolChecks(): void {
     order: [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]],
     assets: { base: { asset: 'e'.repeat(64) }, head: { asset: 'e'.repeat(64) } }, headAssetsBeforeFixtures: { asset: 'e'.repeat(64) },
     productionSmoke: { diagnostics: { events: [], overflow: false }, cleanup }, developmentSmoke: { diagnostics: { events: [], overflow: false }, cleanup },
-    invocationChecks: 'passed', evidenceChecks: 'passed', runnerCancellation: 'passed', artifactLimits: 'passed', networkChecks: 'passed',
+    retainedRunnerCancellation: 'passed', invocationChecks: 'passed', evidenceChecks: 'passed', runnerCancellation: 'passed', artifactLimits: 'passed', networkChecks: 'passed',
     failureChecks: ['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition'].map(scenario => ({ scenario, code: 0, payload: { expected: true, cleanup } })),
     playwright: { name: 'playwright', version: '1.64.1' }, browserDistribution: { browsers: [{ name: 'chromium', revision: '1248', browserVersion: template.reference.browser }] },
     viewport: { width: 1280, height: 900 }, throttling: 'none', cache: 'fresh context for cold loads; request routing disables HTTP cache',
     reference: template.reference, invocation: { points, growth }, retention: { beforeRelease: points[6]?.retention, afterRelease: { allocations: 0, arrays: 0, nominalBytes: 0, released: true } }, retentionCleanup: { allocations: 0, arrays: 0, nominalBytes: 0, released: true }, summaries: { base: zeros, head: zeros },
   }
   const prefix = 'run-fixture/'
-  const evidence = ['report.json', 'retention-release.json', ...Array.from({ length: 7 }, (_, index) => `invocation-${String(index)}.json`), 'cancelled-runner/run-nested/report.json', ...['base', 'head'].flatMap(arm => [0, 1, 2].flatMap(repeat => [`${arm}-${String(repeat)}.json`, `${arm}-${String(repeat)}-pending.json`, `${arm}-${String(repeat)}-terminal.json`, `${arm}-${String(repeat)}-summary.json`, `${arm}-${String(repeat)}-baseline.heapsnapshot`, `${arm}-${String(repeat)}-end.heapsnapshot`])), ...['production', 'development'].flatMap(mode => [`${mode}-smoke.json`, ...[1280, 768, 375].flatMap(width => [`${mode}-${String(width)}.png`, `${mode}-${String(width)}-terminal.png`, `${mode}-${String(width)}.zip`])]), ...['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition'].map(scenario => `failure-${scenario}-termination.json`), 'runner-termination.json', 'runner-forced-termination.json'].map(name => `${prefix}${name}`)
+  const evidence = ['report.json', 'retention-release.json', 'retention-cleanup.json', 'runner-retained-cancel-cancellation.json', 'runner-retained-report-collision-cancellation.json', ...Array.from({ length: 7 }, (_, index) => `invocation-${String(index)}.json`), 'cancelled-runner/run-nested/report.json', ...['base', 'head'].flatMap(arm => [0, 1, 2].flatMap(repeat => [`${arm}-${String(repeat)}.json`, `${arm}-${String(repeat)}-pending.json`, `${arm}-${String(repeat)}-terminal.json`, `${arm}-${String(repeat)}-summary.json`, `${arm}-${String(repeat)}-baseline.heapsnapshot`, `${arm}-${String(repeat)}-end.heapsnapshot`])), ...['production', 'development'].flatMap(mode => [`${mode}-smoke.json`, ...[1280, 768, 375].flatMap(width => [`${mode}-${String(width)}.png`, `${mode}-${String(width)}-terminal.png`, `${mode}-${String(width)}.zip`])]), ...['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition'].map(scenario => `failure-${scenario}-termination.json`), 'runner-termination.json', 'runner-forced-termination.json', 'runner-retained-cancel-termination.json', 'runner-retained-report-collision-termination.json'].map(name => `${prefix}${name}`)
 
   const validated = validateDataset(report, parsed, job)
   validateArchiveEntries(evidence, `${prefix}report.json`)
@@ -169,4 +169,5 @@ export function protocolChecks(): void {
   for (const key of ['playwright', 'browserDistribution', 'viewport', 'throttling', 'cache']) assert.throws(() => validateDataset({ ...report, [key]: undefined }, parsed, job))
   assert.throws(() => { validateArchiveEntries(evidence.filter(entry => !entry.endsWith('base-0-baseline.heapsnapshot')), `${prefix}report.json`) })
   assert.throws(() => { validateArchiveEntries([...evidence, `${prefix}report.json`], `${prefix}report.json`) })
+  for (const extra of ['invocation-7.json', 'invocation-extra.json']) assert.throws(() => { validateArchiveEntries([...evidence, `${prefix}${extra}`], `${prefix}report.json`) })
 }

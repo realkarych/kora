@@ -1,4 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { childEnvironment } from './ownership.ts'
+import { verifyRecovery } from './retention-fixture.ts'
+import { validateWorkflowTransition, validationWorkflow } from './invocation-workflow.ts'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -33,6 +38,23 @@ export function heapChecks(): void {
   assert.deepEqual(parseHeapLimits(limits), limits)
   for (const invalid of [{ ...limits, terminal: 61441 }, { ...limits, slope: 32768 }, { ...limits, full: Infinity }, { ...limits, extra: 0 }]) assert.throws(() => parseHeapLimits(invalid))
 
+  const workflow = 'permissions: read\nactions/checkout@pinned\nname: Console browser calibration (${{ matrix.slot }})\n        slot: [1, 2, 3, 4, 5]\nrun: pnpm --dir web run test:browser --calibrate\nname: console-browser-calibration-${{ matrix.slot }}'
+
+  const validation = validationWorkflow(workflow)
+
+  validateWorkflowTransition(workflow, validation)
+  for (const changed of [validation.replace('permissions: read', 'permissions: write'), validation.replace('checkout@pinned', 'checkout@other'), validation + '\nrun: bypass-checks']) assert.throws(() => { validateWorkflowTransition(workflow, changed) })
+
+  const recovery = Array.from({ length: 8 }, (_, index) => ({ memory: { rss: 1000000, heapTotal: 1000000, heapUsed: index > 0 && index < 7 ? 345760 : 100000, external: 0, arrayBuffers: 0 }, retention: { allocations: index === 0 ? 0 : 1, arrays: index > 0 && index < 7 ? 1 : 0, nominalBytes: index > 0 && index < 7 ? 245760 : 0, released: index === 7 } }))
+  const failedRecovery = recovery.map((point, index) => index === 7 ? { ...point, memory: { ...point.memory, heapUsed: 345760 } } : point)
+
+  const recoveryResult = verifyRecovery(recovery, limits)
+  const failedRecoveryResult = verifyRecovery(failedRecovery, limits)
+
+  assert(recoveryResult.passed)
+  assert(!failedRecoveryResult.passed && !failedRecoveryResult.gates.release && !failedRecoveryResult.gates.recovery)
+  assert.throws(() => verifyRecovery(recovery.slice(1), limits))
+
   const summary = Object.fromEntries(measurementMetrics.map(key => [key, 0]))
   const ordinary = compare([summary, summary, summary], [summary, summary, summary], { protocol: measurementProtocol, reference: { platform: 'linux', arch: 'x64', node: 'fixture', browser: 'fixture' }, heap: limits, absolute: summary, pairedMargin: summary }).gates
   const pass = { 'invocation-full': true, 'invocation-late': true, 'invocation-slope': true }
@@ -43,6 +65,9 @@ export function heapChecks(): void {
 
   assert(lower.valid && !lower.detected)
   assert(required.valid && required.detected)
+  assert.equal(classifyControl('intertrial', ordinary, detected, true, false).outcome, 'recovery-failed')
+  assert.equal(classifyControl('intertrial', ordinary, detected, false, false).outcome, 'invalid-evidence')
+  assert.equal(classifyControl('intertrial', { ...ordinary, 'loadMedian-paired': false }, detected, true, true).outcome, 'unrelated-failure')
   assert(!classifyControl('cycle-8', { ...ordinary, 'runnerheapUsedPeak-absolute-head-0': false }, pass, true, true).valid)
   assert(!classifyControl('cycle-8', { ...ordinary, 'runnerexternalReleasedGrowth-paired': false }, detected, true, true).valid)
   assert(!classifyControl('cycle-8', ordinary, detected, false, true).valid)
@@ -83,6 +108,25 @@ export function invocationChecks(): void {
     rmSync(last, { recursive: true })
     writeFileSync(last, '{"marker-secret":')
     assert.throws(() => readInvocation(root))
+    const argumentsFailure = spawnSync(process.execPath, [fileURLToPath(new URL('./run.ts', import.meta.url)), '--control=argument-marker-secret'], { env: childEnvironment(), encoding: 'utf8', timeout: 10000, maxBuffer: 65536 })
+    assert.equal(argumentsFailure.error, undefined)
+    assert.equal(argumentsFailure.status, 1)
+    assert(!`${argumentsFailure.stdout}${argumentsFailure.stderr}`.includes('argument-marker-secret'))
+    const manifest = join(root, 'manifest.json')
+    const destination = join(root, 'aggregate.json')
+    const jobs = Array.from({ length: 5 }, (_, index) => ({ slot: index + 1, kind: 'training', conclusion: 'success', name: 'assertion-marker-secret' }))
+    for (const [content, marker, failure] of [['{"json-marker-secret":', 'json-marker-secret', 'invalid-json'], [JSON.stringify({ stage: 'training', attempt: '1', jobs }), 'assertion-marker-secret', 'invalid-evidence']]) {
+      assert(content && marker && failure)
+      writeFileSync(manifest, content)
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('./calibration.ts', import.meta.url)), manifest, destination], { env: childEnvironment(), encoding: 'utf8', timeout: 10000, maxBuffer: 65536 })
+      assert.equal(result.error, undefined)
+      assert.equal(result.status, 1)
+      assert.equal(result.stdout, '')
+      assert(!result.stderr.includes(marker))
+      const payload: unknown = JSON.parse(result.stderr)
+      assert(payload !== null && typeof payload === 'object' && 'failure' in payload)
+      assert.equal(payload.failure, failure)
+    }
     truncateSync(last, 4097)
     assert.throws(() => readEvidence(last, 4096))
   } finally {

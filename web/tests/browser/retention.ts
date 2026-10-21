@@ -54,9 +54,11 @@ export class Retention {
 
 const ancillary = ['runnerheapUsedSpan', 'runnerheapUsedLateSpan', 'runnerheapUsedMedianGrowth', 'runnerheapUsedPeak', 'runnerheapUsedReleasedGrowth']
 
-export function classifyControl(mode: Control, ordinary: Record<string, boolean>, invocation: Record<string, boolean>, complete: boolean, recovered: boolean): { detected: boolean; unrelatedPassed: boolean; valid: boolean } {
+export function classifyControl(mode: Control, ordinary: Record<string, boolean>, invocation: Record<string, boolean>, complete: boolean, recovered: boolean): { detected: boolean; unrelatedPassed: boolean; valid: boolean; outcome: string; recovery: string } {
   const detected = ['invocation-full', 'invocation-late', 'invocation-slope'].some(key => invocation[key] === false)
   const unrelatedPassed = Object.entries(ordinary).every(([key, passed]) => passed || ancillary.some(metric => key.startsWith(`${metric}-`)))
-  const valid = complete && recovered && Object.keys(ordinary).length === 336 && Object.keys(invocation).sort().join(',') === 'invocation-full,invocation-late,invocation-slope' && unrelatedPassed && (mode === 'cycle-1' || detected)
-  return { detected, unrelatedPassed, valid }
+  const admitted = complete && Object.keys(ordinary).length === 336 && Object.keys(invocation).sort().join(',') === 'invocation-full,invocation-late,invocation-slope'
+  const valid = admitted && recovered && unrelatedPassed && (mode === 'cycle-1' || detected)
+  const outcome = !admitted ? 'invalid-evidence' : !recovered ? 'recovery-failed' : !unrelatedPassed ? 'unrelated-failure' : detected ? 'detected' : mode === 'cycle-1' ? 'lower-probe-missed' : 'required-control-missed'
+  return { detected, unrelatedPassed, valid, outcome, recovery: !admitted ? 'unverified' : !recovered ? 'failed' : mode === 'intertrial' ? 'passed' : 'not-applicable' }
 }

@@ -179,7 +179,7 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
-      - name: Collect the fixed heap-tolerance training batch
+      - name: Run the declared browser stage
         run: pnpm --dir web run test:browser --calibrate
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
