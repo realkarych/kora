@@ -191,27 +191,3 @@ Node = (
     | Has
     | Comprehension
 )
-
-
-def children(node: Node) -> tuple[Node, ...]:
-    match node:
-        case Select(operand=operand) | Unary(operand=operand):
-            return (operand,)
-        case Index(operand=operand, index=index):
-            return (operand, index)
-        case Call(receiver=receiver, arguments=arguments):
-            return arguments if receiver is None else (receiver, *arguments)
-        case ListLiteral(elements=elements):
-            return elements
-        case MapLiteral(entries=entries):
-            return tuple(part for entry in entries for part in (entry.key, entry.value))
-        case Binary(left=left, right=right):
-            return (left, right)
-        case Conditional(condition=condition, then=then, otherwise=otherwise):
-            return (condition, then, otherwise)
-        case Has(target=target):
-            return (target,)
-        case Comprehension(range=range_, arguments=arguments):
-            return (range_, *arguments)
-        case _:
-            return ()
