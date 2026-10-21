@@ -2,6 +2,8 @@
 
 Scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); document accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18. Claude harness amendment dated 2026-10-19 (TM-03, TM-05, TM-06, TM-12 and their evidence): scope and implementation plan approved under [issue #125](https://github.com/realkarych/kora/issues/125); accepted by the project owner on 2026-10-19.
 
+CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording pending line-by-line owner review.
+
 Held-read amendment dated 2026-10-19: the TM-10 scenario names callers that hold reads open and its boundary the API read path, its remaining limit names the bounded run-read wait and `?follow=true` streams, the TM-01, TM-02 and TM-10 evidence rows name the run-read wait and mounted-credential contracts, and the maintenance section records the merge of PR #109; direction and implementation plan approved by the project owner under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
 
 CEL amendment dated 2026-10-19 (TM-02, TM-04, TM-10, TM-12 and the TM-03/TM-04, TM-08/TM-09, TM-10 and TM-12 evidence rows): decisions taken and implementation plan approved by the project owner under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review.
@@ -23,6 +25,8 @@ No-suppression amendment dated 2026-10-20 (TM-12 evidence row): implementation p
 CEL binding amendment dated 2026-10-21 (TM-04 and TM-12 rows, TM-03/TM-04 and TM-12 evidence rows): implementation plan approved by the project owner under [issue #165](https://github.com/realkarych/kora/issues/165), with the decisions recorded on [issue #162](https://github.com/realkarych/kora/issues/162); wording pending line-by-line owner review.
 
 Three facts remain separate: owner review of this text, acceptance of a design decision, and evidence that an implementation enforces it. Some cited ADRs record accepted direction with wording still pending owner review; this synthesis does not upgrade that status. Deployment conditions are independent of all three. The [source comparison](../knowledge/research/threat-model-document-structure-2026-10-18.md) explains the document structure; external projects are not evidence for kora's protection.
+
+CEL evaluator evidence for TM-04 and TM-12 is active under [issue #166](https://github.com/realkarych/kora/issues/166): exact JSON conversion, pre-allocation bounds, detached snapshots, bounded outstanding ownership and cache, safe error records and diagnostics, narrow native failure mapping and a single pinned terminal worker guard. `test_cel_native_compilation_requires_checked_expression` rejects production raw-compilation access outside the binding loader. The evaluator lifetime artifact covers resource retention and real diagnostic sink failure. Calibration, schema-driven checking/projections and correction of minimum-int negation block the first product consumer. The new `CEL evaluator lifetime` CI status requires owner activation in merge protection after it first exists; adding the workflow alone does not make it required. [Evidence and activation limits](../knowledge/research/cel-evaluator-lifetime-2026-10-21.md).
 
 ## Assets, actors and assumptions
 

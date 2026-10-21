@@ -474,7 +474,7 @@ An expression over either dimension of the budget is `IR027`. The charges follow
 
 - The budget targets 10 ms and 16 MiB per evaluation on a named reference CI runner. The memory dimension is in bytes.
 - Until a deployment first stores an estimate with a graph version, the weights, the steps budget in estimate units and the pattern class tables are provisional values set from the probe measurements, and changing them needs no new semantics identity. The case-insensitive weights of Unicode classes and of ranges beyond ASCII are part of that calibration.
-- The first implementation fixes, from registered measurements, the budget in estimate units, the weight of each charge and the reference runner, and a golden corpus pins the estimate. The evaluator does not ship without them.
+- The first implementation fixes, from registered measurements, the budget in estimate units, the weight of each charge and the reference runner, and a golden corpus pins the estimate. No API, scheduler or standalone consumer may execute author expressions before they land; the independently tested evaluator infrastructure lands under [issue #166](https://github.com/realkarych/kora/issues/166), before that activation gate.
 - The weights belong to `kora.execution.v1`, under the pin rule at the start of section 7.
 
 Two consequences follow:
@@ -488,8 +488,14 @@ Two consequences follow:
   - It runs one job at a time.
   - Evaluations requested from inside a transaction take priority over server-side compile jobs. Compile work is submitted one expression at a time, so an evaluation waits for at most one compile, whose length and pattern size the static limits bound.
   - At shutdown, queued jobs are rejected and the job in flight finishes, since it holds the GIL and cannot be interrupted; the per-evaluation budget bounds the wait, and an external supervisor's kill is the hard limit. Stopping an embedded standalone (`kora test`, `run_scenario`, `kora_test`) waits for that job the same way and never exits the host process. A cancelled caller discards its result.
-- **The compiled-program cache.** Compiled programs live in a cache bounded by count, with least-recently-used eviction, keyed by deployment digest and the expression's YAML path. A compile on a miss is charged to the allowance.
+- **The compiled-program cache.** The process worker owns a least-recently-used cache keyed by the canonical rendering digest and expression YAML path. Defaults are 128 entries and 131,072 summed rendering characters. A hit verifies the stored rendering; a miss reparses the canonical rendering before `Binding.compile(checked)`. Validation compiles return a small outcome without entering the cache. A compile on a miss is charged to the allowance.
 - **No interruption.** The binding holds the GIL while it parses or evaluates and cannot be interrupted (probe). These bounds, not a timeout, keep evaluation short.
+
+**Evaluator infrastructure admission.** Each process accepts at most 32 evaluation jobs and 32 validation compiles, including in-flight work and completed results awaiting delivery. A batch contains at most 16 evaluations. The shared outstanding charge is at most 8 MiB; it accounts for detached converted values, renderings, bounded metadata and result retention. Result growth that cannot fit the shared charge returns the operational `busy` refusal. This charge is an ownership bound, not a measurement of native memory. At most 128 handles or pending lifecycle reports are admitted. YAML paths are bounded to 1,024 characters and event identifiers to 128; checked renderings to 65,536. These internal limits precede the first product consumer and are configurable through `Settings`.
+
+Before conversion, an iterative walk checks exact JSON types, finite numbers, Unicode scalar values, 32 levels of nesting, 1,000 entries per list or map, 16 KiB UTF-8 strings and 64 KiB of canonical JSON. Conversion copies only referenced variables; the converted representation must fit the same aggregate byte bound. Integer schema fields bind as signed 64-bit integers, accepting integral JSON floats; number and schema-less numeric values bind as finite doubles. Missing `outputs` binds as an empty map; another missing referenced projection is `projection_unavailable`. The caller supplies the saved, validated schema types and projection bounds. The current `Record` type cannot express typed `additionalProperties`; checker/projection integration owns that extension.
+
+An `Evaluator` belongs to its creating event loop. Closing a handle rejects its queued jobs, waits for its in-flight and undelivered work, and leaves other handles and the shared worker usable. Its default one-second close deadline returns `close_timed_out`; it cannot interrupt native work. A cancelled queued job never executes; an in-flight cancellation discards the result. Closed loops release their retained jobs; stopped open loops remain charged until delivery or close. An unmapped worker fault closes admission permanently, settles waiting callers and releases the cache. The worker starts in an empty context, and the process owner loads the binding without the creating request's context.
 
 **Evaluation allowance.** The installation limits the sum of charges evaluated in one scheduler transaction; by default the sum may reach the equivalent of 50 ms, and it may never be set below the per-evaluation budget.
 
@@ -517,6 +523,7 @@ Two consequences follow:
 - Raised by kora itself:
   - `bound_exceeded`;
   - `number_out_of_range`;
+  - `invalid_value` for values outside exact JSON types or Unicode scalar strings;
   - `wrong_result_type`: anything that is not exactly `bool`, or `string` for reasons; Python truthiness never applies;
   - `projection_unavailable`.
 - `internal_fault`, logged at ERROR, covers everything the checker should already have prevented: a `ValueError` or `RuntimeError` at execution, and the binding's parser panic.
@@ -533,7 +540,8 @@ Two consequences follow:
 - **`offset`**: set only when kora itself locates the fault, null for kinds the binding raises.
 - **`event_id`**: for a `match` error, the inbound event's identifier.
 - **`observed_at`**: for an `until` error, the time of the observation.
-- **`at`**: when the error was recorded.
+- **`at`**: when the error was recorded, from the injected clock.
+- **`fault`**: null except for `internal_fault`, where it is one of the closed classes `value_error`, `runtime_error`, `panic` or `unmapped`; never a native message or an arbitrary exception type.
 
 A node that fails because of an evaluation error fails with `config_error`, reason `cel_evaluation_error`, and carries this record in its details.
 
@@ -552,7 +560,7 @@ A node that fails because of an evaluation error fails with `config_error`, reas
 - **Recording external errors.** The last `match` or `until` error is stored on the wait or the start binding and is visible in the API and the console.
 - **Unavailable inputs.** `projection_unavailable` fails the owning node with `config_error` for every kind, waits included, because an expired or missing projection never becomes available again. The one exception is `retry.predicate`, where it means no retry and the node keeps its original class, like any predicate error.
 
-**Safe content.** Error records stored on a node failure, a wait, a start binding, an approval request or an event, and every error the API returns, carry only the fields above. They never carry expression text, bound values, binding messages, chained exceptions or panic payloads. Diagnostics follow the same rule ([observability.md](observability.md) section 5), including at DEBUG. The evaluating component emits them, the scheduler or the API, and deduplicates them on the wait, binding or node, the field and the kind.
+**Safe content.** Error records stored on a node failure, a wait, a start binding, an approval request or an event, and every error the API returns, carry only the fields above. The evaluator returns frozen error values across the thread boundary; operational refusals are raised on the caller loop with both cause and context cleared, including when called from inside another exception handler. They never carry expression text, bound values, binding messages, chained exceptions or panic payloads. Diagnostics follow the same rule ([observability.md](observability.md) section 5), including at DEBUG. The evaluating component emits them, the scheduler or the API, and deduplicates them on the wait, binding or node, the field and the kind.
 
 ### 7.8 Conformance
 
@@ -590,7 +598,7 @@ The parser, checker, cost estimate and textproto reader are unit-tested, as AGEN
 - `test_cel_regex_compile_cost_bounded`: the nesting and cap legs in `kora.cel`; the `kora compile` and `/validate` legs and compiling each distinct pattern once wait for the DSL and the API.
 - `test_cel_cost_estimate_rejects_compounding_concatenation`: with the bounds given directly; the `maxItems` leg waits for the schema-driven checker.
 
-The evaluator tests wait for [issue #166](https://github.com/realkarych/kora/issues/166), and the golden corpus and the calibrated cap leg for [issue #167](https://github.com/realkarych/kora/issues/167); the checker, projection, API, scheduler and DSL legs stay `pending implementation` with the work items that own them in the implementation plan.
+The evaluator conversion, native error mapping, exact result types, thread priority/cancellation/close, bounded cache, safe diagnostics and resource-lifetime legs are active under [issue #166](https://github.com/realkarych/kora/issues/166). The golden corpus and calibrated cap leg wait for [issue #167](https://github.com/realkarych/kora/issues/167); the checker, projection, API, scheduler and DSL legs stay `pending implementation` with the work items that own them in the implementation plan.
 
 | Test | Required result |
 |---|---|
@@ -731,6 +739,8 @@ Measurements, `pending implementation`, register with the evaluator under [issue
   - `kora_test` cancellation with a queued and an in-flight job, and host exit;
   - the compiled-program cache with more versions than its bound;
   - metadata growth and listing latency with maximal inline projections on both databases.
+
+Before the first author-expression consumer, calibration (#167), schema-driven checking/projections and correction of native minimum-int unary negation (including dynamically computed minimum integers) must land. This infrastructure retains the documented binding deviations; it does not claim that the native wrapping negation has been corrected. Persistence, scheduler/API decisions, surface parity and consumer diagnostic deduplication remain pending their implementing work items. The local/CI lifetime command and evidence are in [development](../../docs/development.md) and the [evaluator research record](../research/cel-evaluator-lifetime-2026-10-21.md).
 
 ### 7.10 Prompt templates
 

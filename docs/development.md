@@ -2,6 +2,8 @@
 
 Scope and implementation plan approved by the project owner under [issue #86](https://github.com/realkarych/kora/issues/86) on 2026-10-18; wording pending line-by-line owner review.
 
+CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording pending line-by-line owner review.
+
 Packaging-test removal amendment dated 2026-10-19: removal decided by the project owner under [issue #112](https://github.com/realkarych/kora/issues/112); wording pending line-by-line owner review.
 
 Import-layer test amendment dated 2026-10-19: the pytest source check added under [issue #104](https://github.com/realkarych/kora/issues/104); wording pending line-by-line owner review.
@@ -95,6 +97,13 @@ The default pytest run excludes the `measurement` marker. The logging overhead a
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
+```
+
+The CEL evaluator lifetime suite runs serially in its own `cel-measurements` Linux 3.11.17 job, retaining three independent processes per main workload, all cycle samples and retaining paths in `cel-evaluator-lifetime-measurement`. It measures native success/errors, cache turnover, repeated handles, cancellation, terminal failure, idle/busy thread hops, and exit with draining, blocked and broken diagnostics at disabled/INFO/DEBUG levels. Its first baseline and gates are recorded in [the evaluator lifetime record](../knowledge/research/cel-evaluator-lifetime-2026-10-21.md). This does not replace the cost/crash calibration of #167. Run on an otherwise idle machine:
+
+```sh
+KORA_MEASUREMENT_OUTPUT=measurements/cel-evaluator-lifetime.json \
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_evaluator_lifetime.py
 ```
 
 The metadata database lifetime measurement runs under the same marker, on every database that `KORA_TEST_DATABASES` selects, with its own step budget and contract-derived gates (balanced pool checkouts, a free SQLite writer, no open transaction and no temporary file after every ending path, threads, descriptors and server connections back at baseline, bounded heap growth over repeated migrate, connect and transaction cycles, one statement per read call, every marked run visited once per sweep); CI runs it after the logging measurement in the same lane and uploads the artifact `metadata-database-lifetime-measurement`:

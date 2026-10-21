@@ -163,6 +163,7 @@ WARNINGS_MODULE: str = "warnings"
 ALLOWED_BLIND_HANDLERS: dict[str, int] = {
     "src/kora/__main__.py": 1,
     "src/kora/observability/bootstrap.py": 2,
+    "src/kora/cel_eval/thread.py": 1,
     "src/kora/observability/sink.py": 1,
 }
 WARNING_FILTERS_MODULE: str = "tests/support/warning_filters.py"
@@ -273,6 +274,7 @@ RUFF_TABLE: dict[str, object] = {
             "tests/**": ["S101", "S603"],
             "src/kora/__main__.py": ["BLE001"],
             "src/kora/observability/bootstrap.py": ["BLE001"],
+            "src/kora/cel_eval/thread.py": ["BLE001"],
             "src/kora/observability/sink.py": ["BLE001"],
             "tests/support/warning_filters.py": ["TID251"],
         },

@@ -126,6 +126,42 @@ jobs:
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
+  cel-measurements:
+    name: CEL evaluator lifetime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src
+      KORA_TEST_DATABASES: sqlite
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_MEASUREMENT_OUTPUT: measurements/cel-evaluator-lifetime.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: cel-measurements
+      - name: Install locked wheel dependencies
+        run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+      - name: Record checked-out revision
+        run: git rev-parse HEAD > measurements-checkout-revision.txt
+      - name: Measure evaluator lifetime and diagnostics
+        id: measurement
+        run: uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_evaluator_lifetime.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
+        with:
+          name: cel-evaluator-lifetime-measurement
+          path: |
+            measurements/cel-evaluator-lifetime.json
+            measurements-checkout-revision.txt
+          if-no-files-found: error
+
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest

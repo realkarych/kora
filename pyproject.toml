@@ -118,6 +118,7 @@ select = [
 "tests/**" = ["S101", "S603"]
 "src/kora/__main__.py" = ["BLE001"]
 "src/kora/observability/bootstrap.py" = ["BLE001"]
+"src/kora/cel_eval/thread.py" = ["BLE001"]
 "src/kora/observability/sink.py" = ["BLE001"]
 "tests/support/warning_filters.py" = ["TID251"]
 

@@ -2,6 +2,8 @@
 
 Scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127) on 2026-10-19; wording pending line-by-line owner review.
 
+CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording pending line-by-line owner review.
+
 Work item 1 amendment dated 2026-10-20: landed under [issue #147](https://github.com/realkarych/kora/issues/147); wording pending line-by-line owner review.
 
 Work item 4 amendment dated 2026-10-20: split by the owner under [issue #160](https://github.com/realkarych/kora/issues/160); its first part, `kora.cel`, landed under [issue #161](https://github.com/realkarych/kora/issues/161); wording pending line-by-line owner review.
@@ -167,6 +169,8 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 | 19 | Run-read wait ([api-and-agent-surface.md](../knowledge/specs/api-and-agent-surface.md#bounded-run-read-wait-adr-0002)); its process-exit cases run once work item 20 exists | server | 10, 12, 17, 18 |
 | 20 | `kora standalone`: composition, token issuance per #141 and health through the API process | server | 17, 18, 19; step 8; #135, #140, #141 |
 | 21 | Slice-1 acceptance: end-to-end tests through the CLI and the HTTP API, worker-restart adoption, `test_partitioned_live_host_is_not_assumed_stopped`, the manual `claude` traces and the end-to-end NFR-3.1 measurement | execution | 15, 20 |
+
+The CEL work item is split under #160: parser/cost infrastructure (#161) and pinned binding/conformance (#165) are on `master`; evaluator infrastructure (#166) adds conversion, queues, cache, errors and lifetime evidence. Continue with calibration and the golden corpus (#167), then schema-driven checking/projections and the first consumers. Native minimum-int negation must be corrected before those consumers execute author expressions.
 
 ## 7. Named contracts by work item
 
