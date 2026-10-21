@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { closeSync, openSync, writeSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { setImmediate } from 'node:timers/promises'
+import { getHeapCodeStatistics } from 'node:v8'
 import type { CDPSession } from 'playwright'
 import { checkCleanup, Ownership } from './ownership.ts'
 import type { Cleanup } from './ownership.ts'
@@ -17,7 +19,9 @@ export interface Cycle {
   afterGC: Heap
   native: NativeResources
   owned: NativeResources
+  runnerBeforeGC: NodeJS.MemoryUsage
   runner: NodeJS.MemoryUsage
+  runnerCode: ReturnType<typeof getHeapCodeStatistics>
   contexts: number
   pages: number
 }
@@ -26,6 +30,9 @@ export interface Trial {
   arm: 'base' | 'head'
   repeat: number
   phases: { phase: string; native: NativeResources; runner: NodeJS.MemoryUsage }[]
+  runnerBefore: NodeJS.MemoryUsage
+  runnerAfter?: NodeJS.MemoryUsage
+  runnerReleasedBeforeGC?: NodeJS.MemoryUsage
   retainedEvidenceBytes?: number
   warmLoads: Load[]
   warmCycles: Cycle[]
@@ -37,6 +44,14 @@ export interface Trial {
   before: NativeResources
   cleanup?: Cleanup
   failure?: string
+}
+
+async function collectRunner(): Promise<void> {
+  assert(globalThis.gc, 'Runner requires --expose-gc')
+  globalThis.gc()
+  await setImmediate()
+  globalThis.gc()
+  await setImmediate()
 }
 
 export async function snapshot(session: CDPSession, path: string): Promise<void> {
@@ -56,9 +71,10 @@ export async function snapshot(session: CDPSession, path: string): Promise<void>
 }
 
 export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void): Promise<Trial> {
+  await collectRunner()
   const owner = new Ownership(artifacts)
   const diagnostics = new Diagnostics()
-  const trial: Trial = { arm, repeat, phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
+  const trial: Trial = { arm, repeat, runnerBefore: process.memoryUsage(), phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
   const phase = async (name: string): Promise<void> => {
     trial.phases.push({ phase: name, native: await nativeResources([process.pid]), runner: process.memoryUsage() })
   }
@@ -102,9 +118,13 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
         } finally { await temporary.close() }
         const beforeGCNative = await nativeResources([process.pid])
         const beforeGC = await heap(session)
+        const runnerBeforeGC = process.memoryUsage()
         await session.send('HeapProfiler.collectGarbage')
         const afterGC = await heap(session)
-        const point = { cycle: cycle + 1, active, beforeGCNative, beforeGC, afterGC, native: await nativeResources([process.pid]), owned: await owner.sample(), runner: process.memoryUsage(), contexts: browser.contexts().length, pages: context.pages().length }
+        await collectRunner()
+        const runner = process.memoryUsage()
+        const runnerCode = getHeapCodeStatistics()
+        const point = { cycle: cycle + 1, active, beforeGCNative, beforeGC, afterGC, native: await nativeResources([process.pid]), runnerBeforeGC, owned: await owner.sample(), runner, runnerCode, contexts: browser.contexts().length, pages: context.pages().length }
         if (cycle >= 0) trial.cycles.push(point)
         else trial.warmCycles.push(point)
         if (cycle === -1 || cycle === 29) await snapshot(session, join(artifacts, `${arm}-${String(repeat)}-${cycle === -1 ? 'baseline' : 'end'}.heapsnapshot`))
@@ -121,6 +141,9 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
   } finally {
     try {
       trial.cleanup = await owner.close()
+      trial.runnerReleasedBeforeGC = process.memoryUsage()
+      await collectRunner()
+      trial.runnerAfter = process.memoryUsage()
       trial.after = await nativeResources([process.pid])
       await phase('released')
       trial.retainedEvidenceBytes = Buffer.byteLength(JSON.stringify(trial))
@@ -214,6 +237,9 @@ export function summarize(trial: Trial): Record<string, number> {
   }
   for (const metric of ['heapUsed', 'external', 'arrayBuffers'] as const) {
     const values = trial.cycles.map(cycle => cycle.runner[metric])
+    result[`runner${metric}Peak`] = Math.max(...trial.cycles.map(cycle => cycle.runnerBeforeGC[metric]), ...trial.phases.map(phase => phase.runner[metric]))
+    assert(trial.runnerAfter)
+    result[`runner${metric}ReleasedGrowth`] = trial.runnerAfter[metric] - trial.runnerBefore[metric]
     result[`runner${metric}Span`] = span(values)
     result[`runner${metric}LateSpan`] = span(values.slice(15))
     result[`runner${metric}MedianGrowth`] = percentile(values.slice(-10), 0.5) - percentile(values.slice(0, 10), 0.5)

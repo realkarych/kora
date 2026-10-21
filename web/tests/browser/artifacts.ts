@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { statSync, watch, readdirSync, truncateSync, writeFileSync } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { join } from 'node:path'
@@ -51,6 +52,13 @@ export class ArtifactLimit {
       if (retained < size) { this.fail(); this.oversized.add(path); truncateSync(path, retained) }
       remaining -= retained
     }
-    if (this.failed) writeFileSync(join(this.root, 'artifact-limit.json'), JSON.stringify({ failed: true, truncatedCount: this.oversized.size, truncated: [...this.oversized].slice(0, 100).map(path => path.slice(0, 512)) }))
+    if (this.failed) {
+      const truncated = [...this.oversized].slice(0, 100).map(path => path.slice(0, 512))
+      const serialize = (): string => JSON.stringify({ failed: true, truncatedCount: this.oversized.size, truncated })
+      while (Buffer.byteLength(serialize()) > 65536 && truncated.length > 0) truncated.pop()
+      const marker = serialize()
+      assert(Buffer.byteLength(marker) <= 65536)
+      writeFileSync(join(this.root, 'artifact-limit.json'), marker)
+    }
   }
 }

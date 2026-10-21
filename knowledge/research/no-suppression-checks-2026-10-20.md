@@ -119,3 +119,5 @@ The probes show what the pinned tool versions catch on 2026-10-20; a Ruff, Pyrig
 ## Browser-check configuration amendment
 
 The owner approved [issue #179](https://github.com/realkarych/kora/issues/179#issuecomment-6320728472) on 2026-10-21. Its exact `test:browser` script and `tsconfig.browser.json` are added to the architecture test's pinned tables, with a third root reference. The browser runner uses the same strict/no-unused/unchecked-index/erasable-syntax checks, Node and DOM types, and TypeScript extension imports for Node's native TypeScript execution. Existing source coverage and rule settings remain unchanged; no suppression or exclusion is added.
+
+The issue #179 browser script uses `node --expose-gc tests/browser/run.ts` so the approved natural/post-GC lifecycle protocol also measures runner buffer release. Natural peaks remain recorded and gated; exposing collection does not suppress diagnostics or remove a check. The exact script stays pinned in the architecture test.
