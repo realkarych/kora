@@ -28,7 +28,7 @@ async function temporaryIsRemoved(temporary: string): Promise<boolean> {
   }
 }
 
-async function terminateOwned(roots: number[], output: string, temporary: string): Promise<void> {
+async function terminateOwned(roots: number[], output: string, temporary: string, ownershipConfirmed: boolean): Promise<void> {
   const discoveries = await Promise.allSettled([nativeResources(roots)])
   const discovery = discoveries[0]
   assert(discovery)
@@ -49,7 +49,7 @@ async function terminateOwned(roots: number[], output: string, temporary: string
   const listing = listings[0]
   assert(listing)
   const temporaryBefore = listing.status === 'fulfilled' ? listing.value : null
-  const removals = discovery.status === 'fulfilled' && release.status === 'fulfilled' && release.value.processes === 0
+  const removals = ownershipConfirmed && discovery.status === 'fulfilled' && release.status === 'fulfilled' && release.value.processes === 0
     ? await Promise.allSettled([rm(temporary, { recursive: true, force: true })])
     : []
   const observations = await Promise.allSettled([temporaryIsRemoved(temporary)])
@@ -61,7 +61,8 @@ async function terminateOwned(roots: number[], output: string, temporary: string
     const error: unknown = result.reason
     return [error instanceof Error ? error.message.slice(0, 1024) : 'UnknownError']
   })
-  const evidence = { roots, discovered, signals, temporaryBefore, temporaryRemoved, remaining: release.status === 'fulfilled' ? release.value : null, failures }
+  if (!ownershipConfirmed) failures.push('Complete fixture ownership was not confirmed')
+  const evidence = { roots, discovered, signals, ownershipConfirmed, temporary, temporaryBefore, temporaryRemoved, remaining: release.status === 'fulfilled' ? release.value : null, failures }
   await writeFile(output, JSON.stringify(evidence))
   assert.deepEqual(failures, [])
   assert(temporaryRemoved, 'Owned temporary directory remains')
@@ -96,6 +97,7 @@ export async function failureChecks(root: string, output: string): Promise<unkno
     const controller = new AbortController()
     const aborted = once(controller.signal, 'abort').then(() => { throw new Error('Failure fixture deadline exceeded') })
     const timer = setTimeout(() => { controller.abort() }, 30000)
+    let ownershipConfirmed = false
     try {
       if (scenario === 'cancellation') {
         await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Cancellation child exited before readiness') }), aborted])
@@ -110,9 +112,10 @@ export async function failureChecks(root: string, output: string): Promise<unkno
       assert.equal(stderr, '')
       assert.equal(captured, 0)
       await verifyReleased([...owned])
+      ownershipConfirmed = true
     } finally {
       clearTimeout(timer)
-      await terminateOwned([...owned], join(output, `failure-${scenario}-termination.json`), temporary)
+      await terminateOwned([...owned], join(output, `failure-${scenario}-termination.json`), temporary, ownershipConfirmed)
       await exited
     }
   }
@@ -139,6 +142,7 @@ export async function runnerCancellation(output: string, forced = false): Promis
   const aborted = once(controller.signal, 'abort').then(() => 'deadline')
   let timer = setTimeout(() => { controller.abort() }, 30000)
   let deadline: boolean
+  let ownershipConfirmed = false
   try {
     const values: unknown = await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Runner exited before cancellation readiness') }), aborted])
     assert(Array.isArray(values), 'Runner startup deadline exceeded')
@@ -150,6 +154,7 @@ export async function runnerCancellation(output: string, forced = false): Promis
     }
     const resources = await nativeResources(owned)
     owned.push(...resources.pids)
+    ownershipConfirmed = true
     await writeFile(join(output, forced ? 'runner-forced-ownership.json' : 'runner-ownership.json'), JSON.stringify({ owned }))
     clearTimeout(timer)
     timer = setTimeout(() => { controller.abort() }, forced ? 1000 : 30000)
@@ -157,7 +162,7 @@ export async function runnerCancellation(output: string, forced = false): Promis
     deadline = await Promise.race([exited.then(() => false), aborted.then(() => true)])
   } finally {
     clearTimeout(timer)
-    await terminateOwned(owned, join(output, forced ? 'runner-forced-termination.json' : 'runner-termination.json'), temporary)
+    await terminateOwned(owned, join(output, forced ? 'runner-forced-termination.json' : 'runner-termination.json'), temporary, ownershipConfirmed)
     await exited
   }
   if (forced) {
