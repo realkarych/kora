@@ -12,6 +12,7 @@ import { failureChecks, runnerCancellation } from './negative.ts'
 import { measure, smoke, summarize } from './measure.ts'
 import type { Trial } from './measure.ts'
 import { calibrate, compare, parseBudgets } from './protocol.ts'
+import { protocolChecks } from './protocol-checks.ts'
 import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
@@ -114,11 +115,14 @@ try {
     if (calibration) {
       assert.equal(process.platform, 'linux', 'Reference calibration requires Linux')
       assert.equal(process.arch, 'x64', 'Reference calibration requires x86_64')
-      report.proposedBudgets = calibrate(baseSummary, reference)
+      const proposed = calibrate(baseSummary, reference)
+      protocolChecks(proposed)
+      report.proposedBudgets = proposed
       report.status = 'calibrated; frozen budgets and independent verification still required'
     } else {
       const input: unknown = JSON.parse(await readFile(join(import.meta.dirname, 'budgets.json'), 'utf8'))
       const budgets = parseBudgets(input)
+      protocolChecks(budgets)
       assert.deepEqual(reference, budgets.reference, 'Reference environment mismatch')
       const comparison = compare(baseSummary, headSummary, budgets)
       report.comparison = comparison

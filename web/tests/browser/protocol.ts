@@ -79,8 +79,8 @@ export function compare(base: Record<string, number>[], head: Record<string, num
       const before = base[index]?.[metric]
       const after = head[index]?.[metric]
       assert(before !== undefined && after !== undefined)
-      baseValues.push(before)
-      headValues.push(after)
+      baseValues.push(Math.max(0, before))
+      headValues.push(Math.max(0, after))
       gates[`${metric}-absolute-base-${String(index)}`] = before <= limit
       gates[`${metric}-absolute-head-${String(index)}`] = after <= limit
     }
