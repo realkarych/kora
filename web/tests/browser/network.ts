@@ -77,6 +77,21 @@ export async function networkChecks(output: string): Promise<void> {
     assert(diagnostics.events.some(event => event.kind === 'console' && event.detail === 'Service Worker registration blocked by Playwright'))
     assert.equal(destinationRequests, 0)
     assert(owner.proxy.denied > 0)
+    assert(!diagnostics.overflow)
+    const blocked = (protocol: string): { kind: string; detail: string }[] => [
+      { kind: 'external_request', detail: protocol },
+      { kind: 'requestfailed', detail: 'net::ERR_BLOCKED_BY_CLIENT.Inspector' },
+      { kind: 'console', detail: 'Failed to load resource: net::ERR_BLOCKED_BY_CLIENT.Inspector' },
+    ]
+    assert.deepEqual(diagnostics.events, [
+      ...blocked('http:'),
+      { kind: 'console', detail: `Access to fetch at '${deniedOrigin}/' (redirected from '${origin}/redirect') from origin '${origin}' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.` },
+      { kind: 'requestfailed', detail: 'net::ERR_FAILED' },
+      { kind: 'console', detail: 'Failed to load resource: net::ERR_FAILED' },
+      { kind: 'external_websocket', detail: 'http:' },
+      ...blocked('https:'),
+      { kind: 'console', detail: 'Service Worker registration blocked by Playwright' },
+    ])
     evidence.results = { direct, redirected, websocket, secure, workers, destinationRequests, diagnostics: diagnostics.events, proxyDenied: owner.proxy.denied }
     await context.close()
   } catch (error) {

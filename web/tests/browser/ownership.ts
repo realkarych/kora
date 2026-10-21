@@ -36,7 +36,9 @@ export class Ownership {
   overflow = false
   origin: string | undefined
   readonly proxy = new LocalProxy()
+  readonly lifecycle = new EventTarget()
   private closing: Promise<Cleanup> | undefined
+  private readonly acquiring = new Set<Promise<unknown>>()
   readonly traceDirectory: string | undefined
 
   constructor(traceDirectory?: string) {
@@ -44,7 +46,14 @@ export class Ownership {
     activeOwners.add(this)
   }
 
-  async startServer(mode: 'production' | 'development', root: string, port = 0): Promise<string> {
+  startServer(mode: 'production' | 'development', root: string, port = 0): Promise<string> {
+    assert(!this.isClosing(), 'Owner is closing')
+    const pending = this.acquireServer(mode, root, port)
+    this.acquiring.add(pending)
+    return pending.finally(() => { this.acquiring.delete(pending) })
+  }
+
+  private async acquireServer(mode: 'production' | 'development', root: string, port: number): Promise<string> {
     assert(this.server === undefined)
     const server = fork(fileURLToPath(new URL('./server.ts', import.meta.url)), [mode, root, String(port)], {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
@@ -91,14 +100,25 @@ export class Ownership {
     return env
   }
 
-  async startBrowser(): Promise<Browser> {
+  startBrowser(): Promise<Browser> {
+    assert(!this.isClosing(), 'Owner is closing')
+    const pending = this.acquireBrowser()
+    this.acquiring.add(pending)
+    return pending.finally(() => { this.acquiring.delete(pending) })
+  }
+
+  private async acquireBrowser(): Promise<Browser> {
     assert(this.browserServer === undefined)
     assert(this.origin)
     const proxy = await this.proxy.listen(this.origin)
-    this.browserServer = await chromium.launchServer({ headless: true, timeout: 15000, env: this.environment(), proxy: { server: proxy, bypass: '<-loopback>' }, tracesDir: this.traceDirectory })
+    assert(!this.isClosing(), 'Owner is closing')
+    const launching = chromium.launchServer({ headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false, timeout: 15000, env: this.environment(), proxy: { server: proxy, bypass: '<-loopback>' }, tracesDir: this.traceDirectory })
+    this.lifecycle.dispatchEvent(new Event('launching'))
+    this.browserServer = await launching
     const pid = this.browserServer.process().pid
     assert(pid)
     this.pids.add(pid)
+    assert(!this.isClosing(), 'Owner is closing')
     this.browser = await chromium.connect(this.browserServer.wsEndpoint(), { timeout: 15000 })
     return this.browser
   }
@@ -107,6 +127,10 @@ export class Ownership {
     const result = await nativeResources([...this.pids])
     for (const pid of result.pids) this.pids.add(pid)
     return result
+  }
+
+  private isClosing(): boolean {
+    return this.closing !== undefined
   }
 
   close(): Promise<Cleanup> {
@@ -125,6 +149,7 @@ export class Ownership {
         }
       }
     }
+    await Promise.allSettled([...this.acquiring])
     collect(await Promise.allSettled([this.sample()]))
     let forced = false
     const browserProcess = this.browserServer?.process()

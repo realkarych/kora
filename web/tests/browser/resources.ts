@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { readFile, readdir } from 'node:fs/promises'
 import { setImmediate } from 'node:timers/promises'
 
@@ -15,8 +17,17 @@ function missing(error: unknown): boolean {
 
 async function children(pid: number): Promise<number[]> {
   try {
-    const raw = await readFile(`/proc/${String(pid)}/task/${String(pid)}/children`, 'utf8')
-    return raw.trim() === '' ? [] : raw.trim().split(/\s+/u).map(Number)
+    const directory = `/proc/${String(pid)}/task`
+    const descendants = new Set<number>()
+    for (const thread of await readdir(directory)) {
+      try {
+        const raw = await readFile(`${directory}/${thread}/children`, 'utf8')
+        if (raw.trim() !== '') for (const child of raw.trim().split(/\s+/u)) descendants.add(Number(child))
+      } catch (error) {
+        if (!missing(error)) throw error
+      }
+    }
+    return [...descendants]
   } catch (error) {
     if (missing(error)) return []
     throw error
@@ -25,7 +36,24 @@ async function children(pid: number): Promise<number[]> {
 
 export async function nativeResources(roots: number[]): Promise<NativeResources> {
   if (process.platform !== 'linux') {
-    return { pids: roots, rss: null, descriptors: null, processes: null }
+    const { stdout } = await promisify(execFile)('/bin/ps', ['-Ao', 'pid=,ppid=,state='], { maxBuffer: 4 * 1024 * 1024 })
+    const entries = stdout.trim().split('\n').map(line => {
+      const fields = line.trim().split(/\s+/u)
+      assert(fields.length === 3 && fields[2])
+      return { pid: Number(fields[0]), parent: Number(fields[1]), live: !fields[2].startsWith('Z') }
+    })
+    const seen = new Set<number>()
+    const pending = [...roots]
+    while (pending.length > 0) {
+      const pid = pending.pop()
+      assert(pid)
+      if (seen.has(pid)) continue
+      const entry = entries.find(item => item.pid === pid && item.live)
+      if (!entry) continue
+      seen.add(pid)
+      pending.push(...entries.filter(item => item.parent === pid && item.live).map(item => item.pid))
+    }
+    return { pids: [...seen].sort((a, b) => a - b), rss: null, descriptors: null, processes: seen.size }
   }
   const seen = new Set<number>()
   const pending = [...roots]

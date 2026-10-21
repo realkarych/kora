@@ -15,6 +15,7 @@ import { calibrate, compare, parseBudgets } from './protocol.ts'
 import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
+import { artifactLimits } from './limits.ts'
 
 const calibration = process.argv.includes('--calibrate')
 const smokeOnly = process.argv.includes('--smoke')
@@ -70,7 +71,10 @@ try {
   report.developmentSmoke = await smoke(webRoot, 'development', output)
   report.failureChecks = await failureChecks(webRoot, output)
   await runnerCancellation(output)
+  await runnerCancellation(output, true)
   report.runnerCancellation = 'passed'
+  await artifactLimits(webRoot, output)
+  report.artifactLimits = 'passed'
   await networkChecks(output)
   report.networkChecks = 'passed'
   save()

@@ -8,10 +8,14 @@ export interface Budgets {
 }
 
 const floors: Record<string, number> = {
-  loadMedian: 2, loadP95: 2, fcpMedian: 4, fcpP95: 4, lcpMedian: 4, lcpP95: 4,
-  usedSpan: 16384, usedLateSpan: 16384, usedMedianGrowth: 16384,
-  rssSpan: 16777216, rssLateSpan: 16777216, rssMedianGrowth: 16777216,
-  cleanupSeconds: 0.1,
+  loadMedian: 0, loadP95: 0, fcpMedian: 0, fcpP95: 0, lcpMedian: 0, lcpP95: 0,
+  usedSpan: 0, usedLateSpan: 0, usedMedianGrowth: 0,
+  rssSpan: 0, rssLateSpan: 0, rssMedianGrowth: 0,
+  cleanupSeconds: 0,
+  runnerheapUsedSpan: 0, runnerheapUsedLateSpan: 0, runnerheapUsedMedianGrowth: 0,
+  runnerexternalSpan: 0, runnerexternalLateSpan: 0, runnerexternalMedianGrowth: 0,
+  runnerarrayBuffersSpan: 0, runnerarrayBuffersLateSpan: 0, runnerarrayBuffersMedianGrowth: 0,
+  usedPeak: 0, rssPeak: 0,
   documentsSpan: 0, documentsLateSpan: 0, documentsMedianGrowth: 0,
   nodesSpan: 0, nodesLateSpan: 0, nodesMedianGrowth: 0,
   listenersSpan: 0, listenersLateSpan: 0, listenersMedianGrowth: 0,

@@ -7,6 +7,13 @@ import { fileURLToPath } from 'node:url'
 import { Ownership } from './ownership.ts'
 import { nativeResources, verifyReleased } from './resources.ts'
 
+function terminateProcess(pid: number, signal: NodeJS.Signals): void {
+  try { process.kill(pid, signal) }
+  catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error
+  }
+}
+
 function terminateGroup(pid: number): void {
   try { process.kill(-pid, 'SIGTERM') }
   catch (error) {
@@ -16,7 +23,7 @@ function terminateGroup(pid: number): void {
 
 export async function failureChecks(root: string, output: string): Promise<unknown[]> {
   const results: unknown[] = []
-  for (const scenario of ['startup', 'navigation', 'assertion', 'deadline', 'cancellation']) {
+  for (const scenario of ['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition']) {
     const destination = join(output, `failure-${scenario}.json`)
     const child = fork(fileURLToPath(new URL('./failure.ts', import.meta.url)), [scenario, root, destination], {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: new Ownership().environment(), detached: true,
@@ -47,7 +54,10 @@ export async function failureChecks(root: string, output: string): Promise<unkno
       controller.abort()
       void nativeResources([pid]).then(resources => {
         for (const value of resources.pids) owned.add(value)
-        process.kill(-pid, 'SIGKILL')
+        for (const value of [...new Set(owned)].reverse()) {
+          terminateProcess(-value, 'SIGKILL')
+          terminateProcess(value, 'SIGKILL')
+        }
       })
     }, 30000)
     try {
@@ -68,14 +78,19 @@ export async function failureChecks(root: string, output: string): Promise<unkno
       clearTimeout(timer)
       controller.abort()
       terminateGroup(pid)
+      const remaining = await nativeResources([...owned])
+      for (const value of remaining.pids.reverse()) {
+        terminateProcess(-value, 'SIGKILL')
+        terminateProcess(value, 'SIGKILL')
+      }
       await verifyReleased([...owned])
     }
   }
   return results
 }
 
-export async function runnerCancellation(output: string): Promise<void> {
-  const directory = join(output, 'cancelled-runner')
+export async function runnerCancellation(output: string, forced = false): Promise<void> {
+  const directory = join(output, forced ? 'stalled-runner' : 'cancelled-runner')
   const child = fork(fileURLToPath(new URL('./run.ts', import.meta.url)), ['--smoke'], {
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'], detached: true,
     env: { ...new Ownership().environment(), KORA_BROWSER_CANCEL_PROBE: '1', KORA_BROWSER_OUTPUT: directory },
@@ -91,7 +106,14 @@ export async function runnerCancellation(output: string): Promise<void> {
   })
   const exited = once(child, 'close')
   const controller = new AbortController()
-  const timer = setTimeout(() => { controller.abort(); terminateGroup(pid) }, 30000)
+  const killOwned = (): void => {
+    for (const value of [...new Set(owned)].reverse()) {
+      terminateProcess(-value, 'SIGKILL')
+      terminateProcess(value, 'SIGKILL')
+    }
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const startupTimer = setTimeout(() => { controller.abort(); killOwned() }, 30000)
   try {
     const values: unknown = await Promise.race([once(child, 'message', { signal: controller.signal }), exited.then(() => { throw new Error('Runner exited before cancellation readiness') })])
     assert(Array.isArray(values))
@@ -103,8 +125,18 @@ export async function runnerCancellation(output: string): Promise<void> {
     }
     const resources = await nativeResources(owned)
     owned.push(...resources.pids)
-    child.kill('SIGTERM')
+    clearTimeout(startupTimer)
+    await writeFile(join(output, forced ? 'runner-forced-ownership.json' : 'runner-ownership.json'), JSON.stringify({ owned }))
+    timer = setTimeout(() => { controller.abort(); killOwned() }, forced ? 1000 : 30000)
+    child.kill(forced ? 'SIGSTOP' : 'SIGTERM')
     await exited
+    if (forced) {
+      const remaining = await verifyReleased(owned)
+      await writeFile(join(output, 'runner-forced-cancellation.json'), JSON.stringify({ code: child.exitCode, signal: child.signalCode, stderr, bytes, owned, remaining }))
+      assert.equal(child.signalCode, 'SIGKILL')
+      assert.equal(bytes, 0)
+      return
+    }
     const directories = await readdir(directory)
     assert.equal(directories.length, 1)
     const run = directories[0]
@@ -116,9 +148,10 @@ export async function runnerCancellation(output: string): Promise<void> {
     assert(report !== null && typeof report === 'object' && 'status' in report && report.status === 'failed')
     await verifyReleased(owned)
   } finally {
+    clearTimeout(startupTimer)
     clearTimeout(timer)
     controller.abort()
-    terminateGroup(pid)
+    killOwned()
     await verifyReleased(owned)
   }
 }

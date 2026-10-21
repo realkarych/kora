@@ -9,9 +9,10 @@ const scenario = process.argv[2]
 const root = process.argv[3]
 const output = process.argv[4]
 assert(root && output)
-assert(['startup', 'navigation', 'assertion', 'deadline', 'cancellation'].includes(scenario ?? ''))
+assert(['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition'].includes(scenario ?? ''))
 const owner = new Ownership()
 const blocker = createServer()
+const diagnostics = new Diagnostics()
 let expected = false
 let failure: string | undefined
 try {
@@ -23,8 +24,16 @@ try {
     await owner.startServer('production', root, address.port)
   } else {
     const origin = await owner.startServer('production', root)
+    if (scenario === 'acquisition') {
+      const started = once(owner.lifecycle, 'launching')
+      const pending = owner.startBrowser()
+      await started
+      const closing = owner.close()
+      await assert.rejects(pending, /Owner is closing/u)
+      await closing
+      throw new Error('Expected acquisition cancellation')
+    }
     const browser = await owner.startBrowser()
-    const diagnostics = new Diagnostics()
     const context = await contextFor(browser, origin, diagnostics)
     const page = await context.newPage()
     await page.goto(origin)
@@ -54,13 +63,18 @@ try {
     assertion: /Expected assertion path/u,
     deadline: /Timeout 1ms exceeded/u,
     cancellation: /Expected cancellation path/u,
+    acquisition: /Expected acquisition cancellation/u,
   }
   const pattern = scenario === undefined ? undefined : patterns[scenario]
   expected = pattern !== undefined && pattern.test(error.message)
 } finally {
   const cleanup = await owner.close()
   if (blocker.listening) await new Promise<void>((resolve, reject) => { blocker.close(error => { if (error) reject(error); else resolve() }) })
-  await writeFile(output, JSON.stringify({ scenario, expected, failure, cleanup, logs: owner.logs }))
+  await writeFile(output, JSON.stringify({ scenario, expected, failure, cleanup, diagnostics, logs: owner.logs }))
+  assert(!diagnostics.overflow)
+  if (scenario === 'navigation') {
+    assert.deepEqual(diagnostics.events, [{ kind: 'requestfailed', detail: 'net::ERR_EMPTY_RESPONSE' }])
+  } else diagnostics.check()
   checkCleanup(cleanup)
 }
 assert(expected, 'Failure did not match its intended scenario')

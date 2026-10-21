@@ -11,9 +11,12 @@ import type { NativeResources } from './resources.ts'
 
 export interface Cycle {
   cycle: number
+  active: NativeResources
+  beforeGCNative: NativeResources
   beforeGC: Heap
   afterGC: Heap
   native: NativeResources
+  owned: NativeResources
   runner: NodeJS.MemoryUsage
   contexts: number
   pages: number
@@ -22,6 +25,8 @@ export interface Cycle {
 export interface Trial {
   arm: 'base' | 'head'
   repeat: number
+  phases: { phase: string; native: NativeResources; runner: NodeJS.MemoryUsage }[]
+  retainedEvidenceBytes?: number
   warmLoads: Load[]
   warmCycles: Cycle[]
   after?: NativeResources
@@ -53,10 +58,16 @@ export async function snapshot(session: CDPSession, path: string): Promise<void>
 export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void): Promise<Trial> {
   const owner = new Ownership(artifacts)
   const diagnostics = new Diagnostics()
-  const trial: Trial = { arm, repeat, warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
+  const trial: Trial = { arm, repeat, phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
+  const phase = async (name: string): Promise<void> => {
+    trial.phases.push({ phase: name, native: await nativeResources([process.pid]), runner: process.memoryUsage() })
+  }
   try {
+    await phase('before-server')
     const origin = await owner.startServer('production', root)
+    await phase('server-ready')
     const browser = await owner.startBrowser()
+    await phase('browser-ready')
     trial.browserVersion = browser.version()
     for (let iteration = -2; iteration < 20; iteration++) {
       const context = await contextFor(browser, origin, diagnostics)
@@ -64,6 +75,7 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
       try {
         await page.goto(origin)
         const load = await ready(page)
+        await phase(`cold-load-${String(iteration)}`)
         if (iteration >= 0) trial.loads.push(load)
         else trial.warmLoads.push(load)
         diagnostics.check()
@@ -81,15 +93,18 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
         await page.reload()
         await ready(page)
         const temporary = await contextFor(browser, origin, diagnostics)
+        let active: NativeResources
         try {
           const temporaryPage = await temporary.newPage()
           await temporaryPage.goto(origin)
           await ready(temporaryPage)
+          active = await nativeResources([process.pid])
         } finally { await temporary.close() }
+        const beforeGCNative = await nativeResources([process.pid])
         const beforeGC = await heap(session)
         await session.send('HeapProfiler.collectGarbage')
         const afterGC = await heap(session)
-        const point = { cycle: cycle + 1, beforeGC, afterGC, native: await owner.sample(), runner: process.memoryUsage(), contexts: browser.contexts().length, pages: context.pages().length }
+        const point = { cycle: cycle + 1, active, beforeGCNative, beforeGC, afterGC, native: await nativeResources([process.pid]), owned: await owner.sample(), runner: process.memoryUsage(), contexts: browser.contexts().length, pages: context.pages().length }
         if (cycle >= 0) trial.cycles.push(point)
         else trial.warmCycles.push(point)
         if (cycle === -1 || cycle === 29) await snapshot(session, join(artifacts, `${arm}-${String(repeat)}-${cycle === -1 ? 'baseline' : 'end'}.heapsnapshot`))
@@ -107,10 +122,15 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
     try {
       trial.cleanup = await owner.close()
       trial.after = await nativeResources([process.pid])
+      await phase('released')
+      trial.retainedEvidenceBytes = Buffer.byteLength(JSON.stringify(trial))
     } finally { save(trial) }
   }
   assert(trial.cleanup)
   checkCleanup(trial.cleanup)
+  assert(trial.after)
+  if (trial.before.descriptors !== null && trial.after.descriptors !== null) assert(trial.after.descriptors <= trial.before.descriptors, 'Runner descriptors did not return to baseline')
+  if (trial.before.processes !== null && trial.after.processes !== null) assert.equal(trial.after.processes, trial.before.processes, 'Runner processes did not return to baseline')
   return trial
 }
 
@@ -127,6 +147,7 @@ export async function smoke(root: string, mode: 'production' | 'development', ar
       const context = await contextFor(browser, origin, diagnostics, width)
       await context.tracing.start({ screenshots: false, snapshots: false, sources: false })
       const page = await context.newPage()
+      let primaryFailure = false
       try {
         await page.goto(origin)
         await ready(page)
@@ -136,11 +157,22 @@ export async function smoke(root: string, mode: 'production' | 'development', ar
         await semantics(page)
         await page.screenshot({ path: join(artifacts, `${mode}-${String(width)}.png`) })
         diagnostics.check()
+      } catch (error) {
+        primaryFailure = true
+        throw error
       } finally {
-        try {
-          await page.screenshot({ path: join(artifacts, `${mode}-${String(width)}-terminal.png`), timeout: 5000 })
-          await context.tracing.stop({ path: join(artifacts, `${mode}-${String(width)}.zip`) })
-        } finally { await context.close() }
+        const captured = await Promise.allSettled([
+          page.screenshot({ path: join(artifacts, `${mode}-${String(width)}-terminal.png`), timeout: 5000 }),
+          context.tracing.stop({ path: join(artifacts, `${mode}-${String(width)}.zip`) }),
+        ])
+        const closed = await Promise.allSettled([context.close()])
+        const failures = [...captured, ...closed].flatMap(result => {
+          if (result.status === 'fulfilled') return []
+          const error: unknown = result.reason
+          return [error instanceof Error ? error.message.slice(0, 1024) : 'UnknownError']
+        })
+        evidence[`capture-${String(width)}`] = failures
+        if (!primaryFailure) assert.deepEqual(failures, [])
       }
     }
   } catch (error) {
@@ -176,7 +208,15 @@ export function summarize(trial: Trial): Record<string, number> {
     result[`${metric}Span`] = span(numbers)
     result[`${metric}LateSpan`] = span(numbers.slice(15))
     result[`${metric}MedianGrowth`] = percentile(numbers.slice(-10), 0.5) - percentile(numbers.slice(0, 10), 0.5)
-    result[`${metric}Peak`] = Math.max(...numbers)
+    const active = trial.cycles.flatMap(cycle => [cycle.active[metric], cycle.beforeGCNative[metric]]).filter(value => value !== null)
+    const phases = trial.phases.map(phase => phase.native[metric]).filter(value => value !== null)
+    result[`${metric}Peak`] = Math.max(...numbers, ...active, ...phases)
+  }
+  for (const metric of ['heapUsed', 'external', 'arrayBuffers'] as const) {
+    const values = trial.cycles.map(cycle => cycle.runner[metric])
+    result[`runner${metric}Span`] = span(values)
+    result[`runner${metric}LateSpan`] = span(values.slice(15))
+    result[`runner${metric}MedianGrowth`] = percentile(values.slice(-10), 0.5) - percentile(values.slice(0, 10), 0.5)
   }
   assert(trial.cleanup)
   result.cleanupSeconds = trial.cleanup.seconds
