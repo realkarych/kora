@@ -17,11 +17,15 @@ import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
 import { artifactLimits } from './limits.ts'
+import { diagnosticSnapshot } from './diagnostic-snapshot.ts'
 
+const diagnostic = process.argv.includes('--diagnostic')
+if (diagnostic) assert.equal(process.env.KORA_BROWSER_DIAGNOSTIC, 'collector-diagnostic-v1', 'Use the sanitized diagnostic launcher')
 const calibration = process.argv.includes('--calibrate')
 const smokeOnly = process.argv.includes('--smoke')
 const cancelProbe = process.env.KORA_BROWSER_CANCEL_PROBE === '1'
-assert(process.argv.slice(2).every(argument => ['--calibrate', '--smoke'].includes(argument)))
+assert(process.argv.slice(2).every(argument => ['--calibrate', '--smoke', '--diagnostic'].includes(argument)))
+assert(Number(calibration) + Number(smokeOnly) + Number(diagnostic) <= 1)
 const outputRoot = resolve(process.env.KORA_BROWSER_OUTPUT ?? join(repository, 'measurements', 'browser'))
 await mkdir(outputRoot, { recursive: true })
 const output = await mkdtemp(join(outputRoot, 'run-'))
@@ -33,7 +37,9 @@ process.once('SIGTERM', stop)
 process.once('SIGINT', stop)
 const trials: Trial[] = []
 const report: Record<string, unknown> = {
-  output, status: 'running', mode: calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
+  output, status: 'running', mode: diagnostic ? 'collector-diagnostic-v1' : calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
+  diagnosticEnvironmentKeys: diagnostic ? Object.keys(process.env).sort() : undefined,
+  eligibleForCalibration: !diagnostic,
   command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
   cpuModels: [...new Set(cpus().map(cpu => cpu.model))], totalMemory: totalmem(),
   runner: { runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB, slot: process.env.KORA_BROWSER_CALIBRATION_SLOT, name: process.env.RUNNER_NAME, image: process.env.ImageOS, imageVersion: process.env.ImageVersion },
@@ -76,6 +82,7 @@ try {
   const headAssets = await assetHashes(webRoot)
   report.headAssetsBeforeFixtures = headAssets
   const readyForCancellation = async (pids: number[]): Promise<void> => {
+    if (diagnostic) process.send?.({ event: 'owned', pids })
     if (!cancelProbe) return
     const cancelled = once(process, 'SIGTERM')
     process.send?.({ event: 'ready', pids })
@@ -100,14 +107,15 @@ try {
     report.base = base
     const baseRoot = await buildBase(base, temporary)
     report.assets = { base: await assetHashes(baseRoot), head: await assetHashes(webRoot) }
-    const order: ['base' | 'head', number][] = calibration
+    const order: ['base' | 'head', number][] = calibration || diagnostic
       ? [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]]
       : [['head', 0], ['base', 0], ['base', 1], ['head', 1], ['head', 2], ['base', 2]]
     report.order = order
     save()
     for (const [arm, repeat] of order) {
       assert(!cancellation.signal.aborted, 'Browser runner interrupted')
-      trials.push(await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial))
+      trials.push(await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial, diagnostic ? cancellation.signal : undefined))
+      if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(output, 'node-returned', cancellation.signal)
     }
     assert.equal(trials.length, 6)
     const grouped = (arm: 'base' | 'head'): Record<string, number>[] => trials.filter(trial => trial.arm === arm).sort((a, b) => a.repeat - b.repeat).map(summarize)
@@ -117,7 +125,9 @@ try {
     const browser = trials[0]?.browserVersion
     assert(browser && trials.every(trial => trial.browserVersion === browser))
     const reference = { platform: process.platform, arch: process.arch, node: process.version, browser }
-    if (calibration) {
+    if (diagnostic) {
+      report.status = 'diagnostic complete; calibration and performance unverified'
+    } else if (calibration) {
       assert.equal(process.platform, 'linux', 'Reference calibration requires Linux')
       assert.equal(process.arch, 'x64', 'Reference calibration requires x86_64')
       requireReleased([...baseSummary, ...headSummary])

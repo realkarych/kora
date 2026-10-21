@@ -10,6 +10,7 @@ import { contextFor, Diagnostics, heap, ready, semantics } from './page.ts'
 import type { Heap, Load } from './page.ts'
 import { nativeResources, percentile, span } from './resources.ts'
 import type { NativeResources } from './resources.ts'
+import { diagnosticSnapshot } from './diagnostic-snapshot.ts'
 
 export interface Cycle {
   cycle: number
@@ -71,8 +72,9 @@ export async function snapshot(session: CDPSession, path: string): Promise<void>
   assert(!overflow, 'Heap snapshot exceeded 32 MiB bound')
 }
 
-export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void): Promise<Trial> {
+export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void, diagnostic?: AbortSignal): Promise<Trial> {
   await collectRunner()
+  if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(artifacts, 'node-before', diagnostic)
   const owner = new Ownership(artifacts)
   const diagnostics = new Diagnostics()
   const trial: Trial = { arm, repeat, runnerBefore: process.memoryUsage(), phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
@@ -84,6 +86,7 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
     const origin = await owner.startServer('production', root)
     await phase('server-ready')
     const browser = await owner.startBrowser()
+    if (diagnostic) process.send?.({ event: 'owned', pids: [...owner.pids] })
     await phase('browser-ready')
     trial.browserVersion = browser.version()
     for (let iteration = -2; iteration < 20; iteration++) {
@@ -146,6 +149,7 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
       trial.runnerReleasedBeforeGC = process.memoryUsage()
       await collectRunner()
       trial.runnerAfter = process.memoryUsage()
+      if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(artifacts, 'node-closed', diagnostic)
       trial.after = await nativeResources([process.pid])
       await phase('released')
       trial.retainedEvidenceBytes = Buffer.byteLength(JSON.stringify(trial))

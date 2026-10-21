@@ -28,7 +28,7 @@ async function temporaryIsRemoved(temporary: string): Promise<boolean> {
   }
 }
 
-async function terminateOwned(roots: number[], output: string, temporary: string, ownershipConfirmed: boolean): Promise<void> {
+export async function terminateOwned(roots: number[], output: string, temporary: string, ownershipConfirmed: boolean): Promise<void> {
   const discoveries = await Promise.allSettled([nativeResources(roots)])
   const discovery = discoveries[0]
   assert(discovery)

@@ -126,3 +126,8 @@ The issue #179 browser script uses `node --expose-gc tests/browser/run.ts` so th
 ## Five-runner browser calibration command
 
 The owner approved the five-job calibration amendment in [issue #179](https://github.com/realkarych/kora/issues/179#issuecomment-6323884382). The exact frontend script guard now also registers `calibrate:browser` as `node tests/browser/calibration.ts`. This bounded data-processing command reads five authenticated artifact ZIPs and emits the proposed aggregate and every comparison; it does not replace the browser workload or its final verification command. It adds no suppression, dependency, retry or metric floor. TypeScript and ESLint cover the new source under the existing strict configuration. The terminal heap/external/ArrayBuffer budgets are additionally constrained to zero when parsing committed budgets.
+
+
+## Collector diagnostic command
+
+The owner-approved [#179 collector-boundary plan](https://github.com/realkarych/kora/issues/179#issuecomment-6324582569) adds the exact frontend script `diagnose:browser`: `node tests/browser/diagnostic.ts`. The architecture guard pins that command alongside the existing verification and aggregation commands. It launches the existing browser workload in a sanitized child and captures bounded Node snapshots. Its explicit diagnostic report mode is ineligible for calibration and performance readiness. The temporary Linux diagnostic CI stage preserves all other checks; ordinary browser verification returns after the approved evidence and calibration sequence. No assertion, type-check, linter rule or numeric threshold is relaxed.
