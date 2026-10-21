@@ -117,7 +117,7 @@ export function protocolChecks(): void {
     protocol: measurementProtocol, eligibleForCalibration: true,
     status: 'calibrated; frozen budgets and independent verification still required', mode: 'calibration',
     prHead: parsed.head, base: parsed.base, checkout: parsed.checkout, checkoutParents: [parsed.base, parsed.head],
-    checkoutTree: 'd'.repeat(40), headTree: 'd'.repeat(40), dirty: '', platform: 'linux', arch: 'x64',
+    checkoutTree: 'd'.repeat(40), headTree: 'd'.repeat(40), dirty: '', platform: 'linux', arch: 'x64', release: '6.17.0-parser-fixture',
     node: template.reference.node, referenceCounters: 'available', artifactLimitFailed: false,
     seconds: 100, cpus: 4, totalMemory: 1000000000, cpuModels: ['parser-fixture'], lockSha256: 'e'.repeat(64), nodeFlags: ['--expose-gc'],
     runner: { runId: parsed.runId, attempt: parsed.attempt, job: 'browser', slot: String(job.slot), name: 'runner-1', image: 'ubuntu24', imageVersion: 'fixture' },
@@ -138,6 +138,7 @@ export function protocolChecks(): void {
   validateArchiveEntries(evidence, `${prefix}report.json`)
 
   assert.equal(validated.base.length, 3)
+  for (const release of [undefined, null, '', 7, 'x'.repeat(257), 'kernel\nextra']) assert.throws(() => validateDataset({ ...report, release }, parsed, job))
   assert.throws(() => parseBudgets({ ...template, protocol: 'collector-internal-v1' }))
   for (const protocol of [undefined, 'collector-internal-v1', 'collector-diagnostic-v1']) assert.throws(() => validateDataset({ ...report, protocol }, parsed, job))
   assert.throws(() => validateDataset({ ...report, mode: 'collector-diagnostic-v1' }, parsed, job))

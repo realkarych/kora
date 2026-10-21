@@ -116,6 +116,7 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
   assert.equal(report.dirty, '')
   assert.equal(report.platform, 'linux')
   assert.equal(report.arch, 'x64')
+  string(report.release, /^[^\r\n\0]{1,256}$/u)
   assert.equal(report.referenceCounters, 'available')
   assert.equal(report.artifactLimitFailed, false)
   assert(number(report.seconds) > 0 && number(report.seconds) < 600)
