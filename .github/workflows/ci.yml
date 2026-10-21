@@ -177,7 +177,7 @@ jobs:
       - name: Run browser smoke and reference calibration
         run: pnpm --dir web run test:browser --calibrate
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: ${{ !cancelled() }}
+        if: ${{ always() }}
         with:
           name: console-browser-checks
           path: measurements/browser/

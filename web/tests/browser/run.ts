@@ -48,9 +48,15 @@ const saveTrial = (trial: Trial): void => {
 }
 const started = performance.now()
 try {
-  report.checkout = await git(['rev-parse', 'HEAD'])
-  report.prHead = process.env.KORA_BROWSER_REVISION ?? report.checkout
-  report.dirty = await git(['status', '--porcelain', '--untracked-files=no'])
+  const checkout = await git(['rev-parse', 'HEAD'])
+  const prHead = process.env.KORA_BROWSER_REVISION ?? checkout
+  assert(/^[a-f0-9]{40}$/u.test(prHead), 'Invalid PR revision')
+  const revisions = (await git(['rev-list', '--parents', '-n', '1', checkout])).split(' ')
+  assert(revisions.includes(prHead), 'PR revision does not match checkout or its merge parents')
+  report.checkout = checkout
+  report.prHead = prHead
+  report.dirty = await git(['status', '--porcelain', '--untracked-files=normal'])
+  if (!smokeOnly) assert.equal(report.dirty, '', 'Reference measurements require a clean committed tree')
   const require = createRequire(import.meta.url)
   const playwrightPackage = require.resolve('playwright/package.json')
   const corePackage = createRequire(playwrightPackage).resolve('playwright-core/package.json')
@@ -59,7 +65,10 @@ try {
   report.playwright = metadata
   report.browserDistribution = distribution
   report.lockSha256 = createHash('sha256').update(await readFile(join(webRoot, 'pnpm-lock.yaml'))).digest('hex')
-  await build({ root: webRoot, configFile: join(webRoot, 'vite.config.ts'), logLevel: 'error' })
+  assert(process.env.NODE_ENV === undefined || process.env.NODE_ENV === 'production', 'Browser measurements require a production build environment')
+  if (!cancelProbe) await build({ root: webRoot, configFile: join(webRoot, 'vite.config.ts'), logLevel: 'error' })
+  const headAssets = await assetHashes(webRoot)
+  report.headAssetsBeforeFixtures = headAssets
   const readyForCancellation = async (pids: number[]): Promise<void> => {
     if (!cancelProbe) return
     const cancelled = once(process, 'SIGTERM')
@@ -77,6 +86,7 @@ try {
   report.artifactLimits = 'passed'
   await networkChecks(output)
   report.networkChecks = 'passed'
+  assert.deepEqual(await assetHashes(webRoot), headAssets, 'Browser fixtures changed the measured head assets')
   save()
   if (!smokeOnly) {
     const base = process.env.KORA_BROWSER_BASE

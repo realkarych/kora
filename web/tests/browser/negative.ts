@@ -8,8 +8,11 @@ import { Ownership } from './ownership.ts'
 import { nativeResources, verifyReleased } from './resources.ts'
 
 async function terminateOwned(roots: number[], output: string): Promise<void> {
-  const discovered = await nativeResources(roots)
-  const pids = [...new Set([...roots, ...discovered.pids])].reverse()
+  const discoveries = await Promise.allSettled([nativeResources(roots)])
+  const discovery = discoveries[0]
+  assert(discovery)
+  const discovered = discovery.status === 'fulfilled' ? discovery.value.pids : []
+  const pids = [...new Set([...roots, ...discovered])].reverse()
   const signals: { pid: number; code: string }[] = []
   for (const pid of pids.flatMap(value => [-value, value])) {
     try { process.kill(pid, 'SIGKILL'); signals.push({ pid, code: 'sent' }) }
@@ -18,10 +21,17 @@ async function terminateOwned(roots: number[], output: string): Promise<void> {
       signals.push({ pid, code })
     }
   }
-  const evidence = { roots, discovered, signals, remaining: await nativeResources(pids) }
+  const releases = await Promise.allSettled([verifyReleased(pids)])
+  const release = releases[0]
+  assert(release)
+  const failures = [...discoveries, ...releases].flatMap(result => {
+    if (result.status === 'fulfilled') return []
+    const error: unknown = result.reason
+    return [error instanceof Error ? error.message.slice(0, 1024) : 'UnknownError']
+  })
+  const evidence = { roots, discovered, signals, remaining: release.status === 'fulfilled' ? release.value : null, failures }
   await writeFile(output, JSON.stringify(evidence))
-  evidence.remaining = await verifyReleased(pids)
-  await writeFile(output, JSON.stringify(evidence))
+  assert.deepEqual(failures, [])
   assert(signals.every(signal => ['sent', 'ESRCH', 'EPERM'].includes(signal.code)), 'Unexpected process signalling failure')
 }
 
@@ -80,7 +90,7 @@ export async function runnerCancellation(output: string, forced = false): Promis
   const directory = join(output, forced ? 'stalled-runner' : 'cancelled-runner')
   const child = fork(fileURLToPath(new URL('./run.ts', import.meta.url)), ['--smoke'], {
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'], detached: true,
-    env: { ...new Ownership().environment(), KORA_BROWSER_CANCEL_PROBE: '1', KORA_BROWSER_OUTPUT: directory },
+    env: { ...new Ownership().environment(), NODE_ENV: 'production', KORA_BROWSER_CANCEL_PROBE: '1', KORA_BROWSER_OUTPUT: directory },
   })
   const pid = child.pid
   assert(pid)
