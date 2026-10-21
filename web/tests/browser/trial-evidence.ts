@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { constants, closeSync, fstatSync, linkSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { artifactBytes, directoryLimit } from './diagnostic-snapshot.ts'
+import { artifactBytes, directoryLimit } from './artifacts.ts'
 import { checkCleanup } from './ownership.ts'
 import { measurementProtocol } from './protocol.ts'
 import type { NativeResources } from './resources.ts'
@@ -13,7 +13,6 @@ export interface Terminal {
   protocol: typeof measurementProtocol
   arm: 'base' | 'head'
   repeat: number
-  runnerAfter: NodeJS.MemoryUsage
   after: NativeResources
   phase: Trial['phases'][number]
 }
@@ -66,10 +65,8 @@ export function finalizeTrial(root: string, terminal: Terminal, signal: AbortSig
   assert.deepEqual(trial, input, 'Trial parser changed raw evidence')
   assert.equal(trial.arm, terminal.arm)
   assert.equal(trial.repeat, terminal.repeat)
-  assert.equal(trial.runnerAfter, undefined)
   assert.equal(trial.after, undefined)
   assert.equal(terminal.phase.phase, 'released')
-  trial.runnerAfter = terminal.runnerAfter
   trial.after = terminal.after
   trial.phases.push(terminal.phase)
   writeEvidence(root, `${name}-complete.json`, trial, 4 * 1024 * 1024, budgetRoot)

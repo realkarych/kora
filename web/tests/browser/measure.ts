@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict'
 import { closeSync, openSync, writeSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { getHeapCodeStatistics } from 'node:v8'
 import type { CDPSession } from 'playwright'
-import { collectRunner } from './invocation-gc.ts'
-import type { Retention } from './retention.ts'
-export { collectRunner } from './invocation-gc.ts'
 import { checkCleanup, Ownership } from './ownership.ts'
 import type { Cleanup } from './ownership.ts'
 import { contextFor, Diagnostics, heap, ready, semantics } from './page.ts'
@@ -13,7 +9,6 @@ import { nativeResources } from './resources.ts'
 import type { NativeResources } from './resources.ts'
 import type { Trial } from './trial.ts'
 import { measurementProtocol } from './protocol.ts'
-import { checkpointMemory, persistCheckpoint } from './diagnostic-checkpoint.ts'
 
 export async function snapshot(session: CDPSession, path: string): Promise<void> {
   const descriptor = openSync(path, 'wx')
@@ -31,20 +26,18 @@ export async function snapshot(session: CDPSession, path: string): Promise<void>
   assert(!overflow, 'Heap snapshot exceeded 32 MiB bound')
 }
 
-export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void, retention: Retention, diagnostic?: AbortSignal): Promise<void> {
-  await collectRunner()
+export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void): Promise<void> {
   const owner = new Ownership(artifacts)
   const diagnostics = new Diagnostics()
-  const trial: Trial = { protocol: measurementProtocol, arm, repeat, runnerBefore: diagnostic ? checkpointMemory(artifacts, arm, repeat, 'before', process.env.KORA_BROWSER_OUTPUT ?? artifacts) : process.memoryUsage(), phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
+  const trial: Trial = { protocol: measurementProtocol, arm, repeat, phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
   const phase = async (name: string): Promise<void> => {
-    trial.phases.push({ phase: name, native: await nativeResources([process.pid]), runner: process.memoryUsage() })
+    trial.phases.push({ phase: name, native: await nativeResources([process.pid]) })
   }
   try {
     await phase('before-server')
     const origin = await owner.startServer('production', root)
     await phase('server-ready')
     const browser = await owner.startBrowser()
-    if (diagnostic) process.send?.({ event: 'owned', pids: [...owner.pids] })
     await phase('browser-ready')
     trial.browserVersion = browser.version()
     for (let iteration = -2; iteration < 20; iteration++) {
@@ -78,16 +71,11 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
           await ready(temporaryPage)
           active = await nativeResources([process.pid])
         } finally { await temporary.close() }
-        if (cycle >= 0) retention.allocate('cycle')
         const beforeGCNative = await nativeResources([process.pid])
         const beforeGC = await heap(session)
-        const runnerBeforeGC = process.memoryUsage()
         await session.send('HeapProfiler.collectGarbage')
         const afterGC = await heap(session)
-        await collectRunner()
-        const runner = process.memoryUsage()
-        const runnerCode = getHeapCodeStatistics()
-        const point = { cycle: cycle + 1, active, beforeGCNative, beforeGC, afterGC, native: await nativeResources([process.pid]), runnerBeforeGC, owned: await owner.sample(), runner, runnerCode, contexts: browser.contexts().length, pages: context.pages().length }
+        const point = { cycle: cycle + 1, active, beforeGCNative, beforeGC, afterGC, native: await nativeResources([process.pid]), owned: await owner.sample(), contexts: browser.contexts().length, pages: context.pages().length }
         if (cycle >= 0) trial.cycles.push(point)
         else trial.warmCycles.push(point)
         if (cycle === -1 || cycle === 29) await snapshot(session, join(artifacts, `${arm}-${String(repeat)}-${cycle === -1 ? 'baseline' : 'end'}.heapsnapshot`))
@@ -105,9 +93,6 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
     try {
       trial.serverOutput = owner.logs
       trial.cleanup = await owner.close()
-      trial.runnerReleasedBeforeGC = process.memoryUsage()
-      if (diagnostic) persistCheckpoint(artifacts, arm, repeat, 'natural', trial.runnerReleasedBeforeGC, getHeapCodeStatistics(), process.env.KORA_BROWSER_OUTPUT ?? artifacts)
-      trial.retainedEvidenceBytes = Buffer.byteLength(JSON.stringify(trial))
     } finally { save(trial) }
   }
   assert(trial.cleanup)

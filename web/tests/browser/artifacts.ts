@@ -3,6 +3,15 @@ import { statSync, watch, readdirSync, truncateSync, writeFileSync } from 'node:
 import type { FSWatcher } from 'node:fs'
 import { join } from 'node:path'
 
+export const directoryLimit = 512 * 1024 * 1024
+
+export function artifactBytes(root: string): number {
+  return readdirSync(root, { recursive: true, withFileTypes: true }).reduce((total, entry) => {
+    assert(!entry.isSymbolicLink(), 'Artifacts cannot contain symbolic links')
+    return total + (entry.isFile() ? statSync(join(entry.parentPath, entry.name)).size : 0)
+  }, 0)
+}
+
 export class ArtifactLimit {
   readonly root: string
   readonly watcher: FSWatcher
@@ -36,13 +45,13 @@ export class ArtifactLimit {
         if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
       }
     }
-    if (bytes > 512 * 1024 * 1024) this.fail()
+    if (bytes > directoryLimit) this.fail()
   }
 
   close(): void {
     this.watcher.close()
     this.check()
-    let remaining = 512 * 1024 * 1024 - 4 * 1024 * 1024 - 65536
+    let remaining = directoryLimit - 4 * 1024 * 1024 - 65536
     const files = readdirSync(this.root, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile())
     files.sort((left, right) => Number(right.name.endsWith('.json')) - Number(left.name.endsWith('.json')))
     for (const entry of files) {

@@ -1,8 +1,34 @@
 # Console browser checks
 
+## Current console-lifecycle-v4 protocol
+
+The owner approved the [runner self-memory removal amendment](https://github.com/realkarych/kora/issues/179#issuecomment-6328536178) on 2026-10-22. Current source removes all fifteen dedicated Node heap/external/ArrayBuffer metric families, V8 code counters/snapshots, forced Node collection, invocation trends and real retention controls. The historical v3 growth is unresolved; deletion is a deliberate reduction of the test controller's guarantees, not evidence of leak freedom. The previous v1/v2/v3 artifacts and budgets cannot train this layout.
+
+The remaining 33 families are loading median/p95, FCP/LCP median/p95, CLS/long-task/transfer p95; Chromium used-heap span/late-span/median-growth/peak; documents/nodes/listeners span/late-span/median-growth; native RSS span/late-span/median-growth/peak; descriptor/process span/late-span/median-growth; and cleanup time. The raw summaries also retain diagnostic median/peak values, totaling 41 independently recomputed fields per trial. Each family has six absolute decisions and one paired decision, totaling 231 per invocation.
+
+Every invocation retains three serial browser-process pairs, 2/20 cold loads, 3/30 lifecycle cycles and 26 phases per trial, including the released phase captured after the collector returns. Chromium GC and baseline/end snapshots remain. Native RSS covers the whole process tree including Node; descriptor/PID baselines and exact owned-child/proxy/temp release remain. Acquisition tracking and idempotent ownership are required on success, six real failure scenarios, ordinary/forced cancellation and a real final-report path collision. There is no separate Node self-memory acceptance predicate.
+
+Production/development smoke retains six viewport journeys and bounded traces/screenshots. Deterministic arithmetic, manifest, workflow and actual CLI marker-exclusion checks run in preflight, including smoke. Independent raw-finalization fixtures remain registered on real ordinary-CI records; a transformed historical dataset may exercise only their new codec/failure behavior before training and is explicitly ineligible for fitting or performance acceptance. The raw writer retains pending, terminal, final and compact-summary records, exclusive publication, nofollow/nonblocking regular-file reads and nested-fixture cumulative bounds. Its independent archive summarizer does not call the collector's summary function.
+
+Artifact limits remain 32 MiB per file and 512 MiB cumulative with bounded JSON/report reserves. The shared size helper lives in artifacts.ts; deleting Node snapshot machinery does not delete this protection. The runner owns safe CLI failure classes and completion records; Diagnostics/Ownership own bounded synthetic browser capture. TM-12 covers this contributor-tooling/evidence change. Product TM-06/TM-07/TM-10 contracts are unchanged. Exact-origin routing and proxy controls retain their HTTP/WebSocket boundary; they neither contain hostile PR code nor provide a general firewall.
+
+The fixed comparison base is b3aa12eea8a27fc22643e88bb5a82939481f42bc. Accepted master f6920f891dd1099473fd5f6e921d6558255819fd adds only accepted CEL/test maintenance relative to the previously integrated master and leaves console assets/toolchain unchanged. CI checkout parent identity is authenticated separately and its tree must equal the candidate tree. Pinned tools and read-only workflow permissions remain unchanged.
+
+One preregistered attempt with five named independent Linux training jobs supplies fifteen base summaries. For every retained family, preserve signed observations and apply x+=max(0,x) before fitting. The absolute limit is maximum plus max(2*span, 20%*maximum, existing floor), over all fifteen base values. All remaining floors are zero. The paired margin is the maximum of the five corresponding within-runner three-base margins. Pairing gates use the median positive-part head/base difference <= margin and maximum <= 2*margin; both arms' absolute decisions remain. Every training set must pass all 1,155 prospective decisions before freezing. These are engineering margins and sampled peaks, not confidence guarantees or continuously observed maxima.
+
+Only successful training plus independent provenance/raw reconstruction permits a separate five-runner reversed-order holdout attempt. Bind run/attempt/job/artifact IDs and archive digests before respective numerical inspection. Preserve all samples and distinguish Ubuntu 24.04 image class from revisions. Freeze the aggregate once; all holdout reports bind its full digest. Independent admission rebuilds the training aggregate from its original archives, confirms source allowlisting, and compares complete workflow bytes against exactly three field changes: job name, command and artifact name. The five-slot matrix is identical across stages; there are no control label/argument entries. Collector/evaluator/toolchain/product inputs cannot change between stages. All five holdouts must pass all 231 decisions each.
+
+Any failed/incomplete job, remaining gate failure, missing/mismatched evidence or total pipeline >=600 seconds stops the authorized sequence without retry, substitution, new diagnostics or threshold increase. Failed historical results remain failed. The final single ordinary browser job and every other required CI lane must pass on the final revision. Required-status activation and owner line review of docs remain explicit landing obligations. Automated accessibility scanning is unverified; interactive/API-backed journeys remain pending their implementation issues and do not become passing through this removal.
+
+Current status: implementation and preflight are in progress; no v4 training or holdout has been dispatched, and no v4 budget has been frozen. Independent planning reviews passed. New source/runtime reviews and authenticated final evidence remain pending.
+
+## Historical protocols and results
+
+The following sections preserve prior protocols and outcomes. Their removed Node-memory commands and numerical obligations are historical, superseded by the current protocol above.
+
 Checked on 2026-10-21 under [issue #179](https://github.com/realkarych/kora/issues/179). The owner approved the [implementation plan](https://github.com/realkarych/kora/issues/179#issuecomment-6320728472). This record distinguishes the calibration protocol from completed measurements; no reference baseline is claimed before its artifact exists.
 
-## Dependency and execution boundary
+### Dependency and execution boundary
 
 Playwright 1.64.1 is a development-only dependency, pinned through pnpm with its matching core package and integrity hashes. It drives real Chromium, traces and browser resource counters; the standard library cannot supply browser automation. No application dependency or API contract changes. The package metadata selects Chromium revision 1248, Chrome for Testing 156.0.8078.4. Installation uses the Playwright distribution CDN; the lock hashes the npm packages, not the downloaded browser archive. Runtime version and distribution metadata are recorded in every report. The [Playwright source](https://github.com/microsoft/playwright/tree/v1.64.1) defines the automation and distribution behavior.
 
@@ -12,7 +38,7 @@ A fresh profile and context run against loopback-only servers. An exact-origin H
 
 Diagnostics retain at most 100 records of 512 characters; child output is limited to 64 KiB. Reports are limited to 4 MiB, heap snapshots to 32 MiB each, and an artifact-directory watcher requests termination when a file exceeds 32 MiB or the directory exceeds 512 MiB. These are detection thresholds, not instantaneous filesystem quotas. Finalization reserves 4 MiB for the final report and 64 KiB for a bounded truncation manifest; any truncation fails the run, including the reserve-boundary case. Finalization truncates overflow evidence within both bounds and records a marker; real file/directory overflow fixtures verify cleanup and retained limits. Oversized files are retained as truncated failure evidence with a marker, never treated as valid traces. Traces omit source files, DOM snapshots and embedded screenshots; separate viewport screenshots cover first failure. Only local synthetic shell content is used. Each invocation creates a new output directory so calibration, failures and final verification cannot overwrite each other.
 
-## Preregistered measurement protocol
+### Preregistered measurement protocol
 
 The same head harness and production build configuration drive base and head. The base is the explicit forty-character Git revision in `KORA_BROWSER_BASE`; the checked-out revision and PR head are recorded separately. Base tracked web files are copied into an owned temporary directory and built using the same locked head toolchain, Vite configuration and dependency tree. Asset SHA-256 values are retained. No live API/database/scheduler exists behind this static shell. API-backed journeys remain pending implementation-plan work items 11, 12 and 20 and later console scope under #140; their implementing issues have not yet been opened. #135 is a design prerequisite, not an implementation issue.
 
@@ -26,13 +52,13 @@ Before calibration, the budget formula is fixed in `web/tests/browser/protocol.t
 
 Calibration writes proposed budgets without claiming final verification. Freeze them only after checking valid workload completion, resource ownership and any unexplained retaining paths. A separate complete run verifies the committed limits. Missing paint/counters, unexpected traffic/diagnostics, revision or environment mismatch, incomplete samples or unsuccessful cleanup invalidate the comparison. Preserve failures and the cause of any replacement run; never select favorable samples or rerun unchanged until green. Budget increases require owner approval.
 
-## Activation and evidence
+### Activation and evidence
 
 The local command is `pnpm --dir web run test:browser`; `--smoke` is a supplemental functional-only run and never satisfies performance. Install the exact browser first with `pnpm --dir web exec playwright install chromium` (CI additionally installs system dependencies). `--calibrate` is the initial reference measurement mode, not a substitute for final gating. Ordinary verification uses the parallel `Console browser checks` job and `console-browser-checks` artifact. The collector investigation used `Console collector diagnostic` and `console-collector-diagnostic`. After its independently reviewed Linux ownership proof, the current temporary CI stage is the approved fresh five-job `Console browser calibration` matrix, preserving the other CI jobs and ten-minute whole-pipeline limit. Diagnostic results cannot satisfy numerical readiness.
 
 The initial Linux baseline is recorded below. Its subsequent verification failed; the approved collector investigation and replacement calibration must complete before separate reversed-order verification and final-revision reviews can establish readiness. The visible React shell is unchanged; no API mutation, authentication or fake backend journey is added.
 
-## First Linux attempt
+### First Linux attempt
 
 [Run 39640184514](https://github.com/realkarych/kora/actions/runs/39640184514) on head `e577b3eacc5289d6334b6bef93befcd541e91bc2` stopped during the cancellation fixture before measuring base/head. Playwright's default process signal handler closed Chromium before the runner's explicit cleanup, which returned an error despite no remaining processes. No calibration was obtained. The subsequent implementation disables Playwright's signal handlers and keeps termination under the runner's owner, tracks pending acquisition, enumerates children of every Linux task, and includes runner/proxy resources plus active-context native checkpoints. The original failed artifact remains evidence, never a baseline or final pass.
 
@@ -40,35 +66,35 @@ Local smoke after the ownership changes passed at `/tmp/kora-179-smoke-15`. An e
 
 The forced-cleanup implementation collects every signal outcome and attempts every target through an awaited path, discovering descendants even before readiness. Permission errors are retained and can only coexist with successful cleanup after terminal liveness checks prove no owned processes remain. A zombie-only process group can explain macOS `EPERM` ([XNU signal implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c)); the exact target of the earlier local failure was not captured. File, directory and final-report-reserve boundary fixtures pass in the subsequent local smoke; they do not substitute for committed Linux evidence.
 
-## Invalid build comparison
+### Invalid build comparison
 
 [Run 39642321900](https://github.com/realkarych/kora/actions/runs/39642321900) on `6b5c01bb1e6af4d77b43cf8b264d53922f7af788` completed calibration and uploaded [artifact 12365911622](https://github.com/realkarych/kora/actions/runs/39642321900/artifacts/12365911622) before workflow cancellation after a new source revision. Its numerical baseline is invalid: a cancellation subprocess inherited `NODE_ENV=test` and rebuilt the shared head output, while base used production mode. The unchanged application sources therefore produced different JavaScript hashes and transfer sizes (69,583 versus 130,540 bytes). No budgets are frozen from this comparison. Cancellation probes now reuse the existing production output, their environment is explicitly production, and the parent verifies unchanged head asset hashes across all fixtures. Artifact upload also runs after cancellation when evidence exists.
 
-## Runner collection-phase attribution
+### Runner collection-phase attribution
 
 [Run 39643439246](https://github.com/realkarych/kora/actions/runs/39643439246) at `9e3f376ef920b8c702047d37c01cfc98e133d9be` produced matching base/head asset hashes and complete workloads ([artifact 12366497033](https://github.com/realkarych/kora/actions/runs/39643439246/artifacts/12366497033), ZIP SHA-256 `2c01e6e27f0d050d42f5dce1a8a41ce02221f0a8fcc3f41f587764cff86b560d`). Natural runner buffer accounting differs with collection phase: one head median external/ArrayBuffer growth is 6,966,572 B while all base medians are nonpositive. These proposed budgets are not frozen. A separate real-workload macOS diagnostic retained before/after Node heap snapshots; terminal ArrayBuffers decreased from 10,403,318 B to 287,310 B after collection and external accounting stabilized at 11,150,903 B on the second turn. This supports collection-phase attribution, not a Linux pass.
 
 The replacement method completes the approved natural/pre-GC and post-GC requirement for the runner: the registered Node command exposes GC, retains natural memory/aggregate peaks, and collects twice with an event-loop turn before post-quiescence counters. Browser GC, all original raw samples, sample counts, native gates and explicit release conditions remain. Natural runner peaks and terminal post-GC growth are additional gates. No frozen threshold is increased. A fresh complete Linux pilot must establish the revised baseline before the separate verification run.
 
-## Linux process-exit observation
+### Linux process-exit observation
 
 [Run 39645120640](https://github.com/realkarych/kora/actions/runs/39645120640) on `e326b7c4a8964bb8d09c79519421fdf141f60328` retained four complete trials and then failed cleanup with only the generic name `Error`. Browser/server exit codes were zero, no owned live processes or proxy sockets remained, and runner descriptors/processes returned to baseline. This artifact cannot identify the exact failing cleanup stage and is not a baseline. Reports now retain bounded stage, error code and message, plus bounded server output.
 
 A deterministic real Linux diagnostic opened a child status file, terminated/reaped the child, then read the open descriptor and received `ESRCH`. The [Linux proc implementation](https://github.com/torvalds/linux/blob/master/fs/proc/base.c) documents this behavior in `proc_single_show`. Process observation now treats `ESRCH`, like `ENOENT`, as disappearance; other errors still fail. This fixes a concrete sampling race but does not retrospectively prove the generic failure was that race. The complete workload must pass again with diagnostic evidence. Peak aggregation also now includes every retained warm-up, post-GC and terminal checkpoint; margins are unchanged.
 
-## Complete pilot and live runner retainers
+### Complete pilot and live runner retainers
 
 [Run 39646348920](https://github.com/realkarych/kora/actions/runs/39646348920) at `e31a6238caa91b4bb104a7c354a4f10f1f551eb2` completed all six trials in 128.533 seconds; the full workflow finished in 6 minutes 20 seconds. [Artifact 12368126178](https://github.com/realkarych/kora/actions/runs/39646348920/artifacts/12368126178) has ZIP SHA-256 `67c483438ab378faca872b3db8bfbadca44185ad931bdf26772fbfe2fbccedb9`. Both builds have identical asset hashes. Independent recomputation matches all 48 metric formulas and raw sample counts. Every terminal heap/external delta is nonpositive, but two paired checks fail because calibration clamps negative growth to zero while comparison used raw signed deltas. Comparison now consistently measures positive retained growth; original signed summaries remain in the report, and zero limits stay zero. Deterministic arithmetic checks cover release, positive retention, median regression and an individual outlier.
 
 A separate real-workload macOS diagnostic captured Node snapshots at the lifecycle baseline and end while the browser remained open. It found thirty retained readiness JSHandles and FrameExecutionContexts: the caller ignored the handle returned by `page.waitForFunction`. Readiness now explicitly disposes that handle. This changes measured runner ownership, so the pilot above is preserved for diagnosis and a complete replacement calibration is required. The same snapshots identify request/response/route records retained by Playwright's connection dispatcher maps. In the pinned SDK these histories have a 10,000-entry per-bucket limit, evicting the oldest ten percent at capacity, and are released when their context/browser closes. The fixed thirty-cycle workload measures this bounded harness history; it does not establish a live-runner plateau or application leak. Private SDK limits are unchanged. Browser DOM counts remain stable, and terminal process/descriptor/socket release is independently checked.
 
-## Permission race during forced process exit
+### Permission race during forced process exit
 
 The integrated CEL revision `7e46ceef712f548c9f8541b3a406836be8315f83` failed its [browser job](https://github.com/realkarych/kora/actions/runs/39649466444/job/119393672419) in forced cancellation, before calibration. [Artifact 12368966436](https://github.com/realkarych/kora/actions/runs/39649466444/artifacts/12368966436), SHA-256 `cb4227017a23fca8b7d3100b635ebaa58bd29039236c2bfafe5c0d17b2394536`, records SIGKILL and then `EACCES` when enumerating the runner's `/proc` descriptors. A deterministic non-root Linux container diagnostic confirms readable descriptors for a normal live child and `EACCES` after `waitid(WEXITED | WNOWAIT)` establishes an unreaped zombie. A separate live nondumpable child also returns `EACCES`, so permission failures cannot be ignored generally.
 
 The observer now re-reads process status after `EACCES` or `EPERM` and treats it as disappearance only for explicit zombie/dead states or subsequent `ENOENT`/`ESRCH`. Permission failures for live processes remain fatal. This closes the exit observation race without relaxing cleanup or pretending unavailable live counters are zero. The original failed run remains evidence; complete replacement CI is required.
 
-## Approved transport identifier allowance
+### Approved transport identifier allowance
 
 The complete [replacement pilot](https://github.com/realkarych/kora/actions/runs/39647725893) at `ef196382f02a47e0d1c028236a0a9b047d262874` retained valid complete workloads and passed CI in 6 minutes 7 seconds. Its [artifact 12368172535](https://github.com/realkarych/kora/actions/runs/39647725893/artifacts/12368172535), SHA-256 `ea4bc2dceba7d45b5146b43c691bc42a7aef5fce768ce6a1c741ee1bd11f99d2`, remains diagnostic: independent recomputation found 324 of 336 prospective gates passing. A one-byte step in external/ArrayBuffer memory at head repetition 1 cycle 24 failed six absolute and six paired checks against zero base growth. All terminal buffer deltas were zero and explicit cleanup passed.
 
@@ -76,13 +102,13 @@ A separate 240-cycle diagnostic inspected real retained buffer backing stores th
 
 The owner approved the [narrow initial-margin amendment](https://github.com/realkarych/kora/issues/179#issuecomment-6322983004). Exactly six in-run metrics have a two-byte floor: external and ArrayBuffer full span, late span and median growth. This is empirical instrumentation tolerance for the pinned fixed workload, not a universal maximum or a general memory allowance. Every other floor remains zero, including terminal external/ArrayBuffer growth. Raw counters, sample counts, native/browser gates and natural peaks remain unchanged. Arithmetic checks use zero base summaries to prove two bytes pass and three fail for every affected metric, while one terminal byte still fails. Toolchain or workload changes require renewed attribution and calibration. A new complete calibration under this approved formula and separate reversed-order verification are required; earlier pilots are not retroactively promoted to passing.
 
-## Forced subprocess temporary ownership
+### Forced subprocess temporary ownership
 
 Independent runner security review found that forced cancellation terminated the runner before its own temporary-workspace cleanup or Playwright's profile/artifact cleanup could execute. Process release alone did not prove filesystem release. The complete [approved-margin pilot](https://github.com/realkarych/kora/actions/runs/39650784339) at `734a431680f9d8c7868cf9e7751fb64eb282db88` therefore remains diagnostic rather than a frozen baseline.
 
 The parent now creates a separate temporary root for every failure/cancellation subprocess and supplies it through `TMPDIR`. It reclaims that directory only after successful ownership discovery and verified zero live owned processes, including forced cancellation, while retained evidence stays outside that root. Failed subprocess acquisition also removes the parent-owned directory. If a fixture dies before confirming cleanup or providing its ready ownership inventory, the parent attempts known cleanup but retains the temporary root and records ownership as unverified; an absent parent PID alone cannot establish detached-browser release. Termination evidence records the pre-removal entries and confirms absence afterward; listing, removal and observation errors remain explicit failures in that evidence. Local smoke reproduced the forced child's remaining runner workspace, Chromium profile and Playwright artifacts, then confirmed all three were removed. Normal cancellation and all six failure scenarios also confirmed removal. A complete committed Linux calibration and separate verification must confirm the final implementation.
 
-## Frozen initial Linux baseline
+### Frozen initial Linux baseline
 
 The complete [calibration run 39652926466](https://github.com/realkarych/kora/actions/runs/39652926466) measures head `cb7097cd3690b93030527aaafa372221008bc0c3` against base `f7d3ba05733dd0ba1705527f7a36f05b7e67b68a`. Its clean checkout `14ac9c456c5e686a38d250ccfa329fc5de7c99ca` has those two parents and the same tree as the head. [Artifact 12370885498](https://github.com/realkarych/kora/actions/runs/39652926466/artifacts/12370885498) has ZIP SHA-256 `19c5211516426046d9f322d9e4839eae22a837085d41e6ca348cd6c0c11575fd`. The reference environment is Linux x86_64 with four reported CPUs, Node 24.22.0, Playwright 1.64.1 and Chromium 156.0.8078.4. Both production builds and the pre-fixture head have identical asset hashes; the locked dependency file has SHA-256 `7ea83a4dc454f8d3ee5acdffec596323752d3a048d33563d3a054b5e98ae274f`.
 
@@ -92,8 +118,7 @@ The committed [budgets.json](../../web/tests/browser/budgets.json) is the exact 
 
 The complete CI workflow passed in five minutes including queue time (job execution span 4 minutes 16 seconds); Linux Python 3.11/3.15 with SQLite/PostgreSQL, macOS Python 3.11, static checks, packaging and documentation checks all passed. CodeQL, Gitleaks and OSV also passed on that head. This establishes calibration eligibility, not final verification: the next complete run must use the committed budgets and reversed arm order. Earlier failed, invalid or superseded pilots remain diagnostic evidence and do not contribute selected samples to this baseline.
 
-
-## Failed verification of the initial baseline
+### Failed verification of the initial baseline
 
 The separate reversed-order [verification 39654414091](https://github.com/realkarych/kora/actions/runs/39654414091), head `cfe65b767896bb735214055f6a5b8e46706cedc7`, passed 329 of 336 gates. [Artifact 12371096579](https://github.com/realkarych/kora/actions/runs/39654414091/artifacts/12371096579) has ZIP SHA-256 `6f902d253dc646dc1a934cc67737be4174ed5c42c4cf8985fa9cedd034abbcad`. Both identical builds shifted from about 40–42 ms during calibration to 49–51 ms. All six absolute load-median observations exceeded 49.32 ms; one head p95 was 63.3 ms against 62.9 ms. Paired timing checks passed with median differences 0, +0.4 and +0.5 ms. This supports between-job variation, without identifying a physical cause: CPU model and image identity were not yet recorded.
 
@@ -101,7 +126,7 @@ The combined CEL [verification 39654428500](https://github.com/realkarych/kora/a
 
 Independent recomputation confirms both failures. All workload counts, builds/tool identities, process/descriptor/socket/temporary release, terminal memory and six two-byte transport allowances pass. Both complete workflows failed only browser verification, within seven minutes. CEL's separate lifetime suite passed on the integrated head. Neither failed browser verification contributes calibration samples or becomes a passing run retroactively.
 
-## Approved calibration across five runner jobs
+### Approved calibration across five runner jobs
 
 The owner approved [the revised method](https://github.com/realkarych/kora/issues/179#issuecomment-6323884382) on 2026-10-21. Exactly five independent Linux jobs use one head/base/toolchain and workflow attempt, with the existing three process pairs per job, two warm-up and twenty measured cold loads, three warm-up and thirty lifecycle cycles. These are five runner clusters containing fifteen base processes.
 
@@ -113,8 +138,7 @@ Reports now retain CPU models, total memory, runner name/image/version and workf
 
 Five jobs improve the empirical envelope but do not guarantee future hosted-runner stability. Persistent instability requires a fixed reference-runner class or another separately reviewed method. That fixed batch failed as recorded below. A replacement batch and final verification remain pending under the later approved collector amendment; source-level arithmetic and parser checks are not measurement evidence.
 
-
-## Rejected five-job batch and collector ownership diagnosis
+### Rejected five-job batch and collector ownership diagnosis
 
 The fixed [batch 39659003130](https://github.com/realkarych/kora/actions/runs/39659003130) at head `61ec7e032875abb18cafdac4ee361e2f3268f3d0` is rejected in full. All five jobs belong to the same attempt and comparison base. Slots 2 and 4 retain +15,224 B and +1,976 B of terminal Node heap in head repetition 0. The other twenty-eight heap deltas and all external/ArrayBuffer deltas are nonpositive. All thirty trial process/descriptor/socket checks and forty fixture temporary-root checks pass. Independent recomputation matches all 1,680 raw summary fields. Successful jobs cannot be selected as a replacement baseline. The authenticated artifact IDs and SHA-256 digests are preserved in [the complete failure record](https://github.com/realkarych/kora/pull/180#issuecomment-6324499030).
 
@@ -128,11 +152,9 @@ The temporary CI job is explicitly `Console collector diagnostic`. Its report mo
 
 The same amendment approves different hosted Ubuntu 24.04 image revisions across the five job clusters while retaining Linux x64, the Ubuntu image class, pinned tools, lock/build identities and identical within-job pairing. Image/kernel/CPU/memory fingerprints remain mandatory. Only cross-job image-version equality changes; all forty-eight metrics, all raw observations, six two-byte transport floors and zero terminal limits remain. Reports and budgets will be versioned with the new measurement boundary before fresh calibration. Prior measurements are never reused or reclassified as passing.
 
-
 The first bounded macOS diagnostic at `bc13b4d343b706c72e131aaa61e3e76c273dbea9` completed all six trials in 73.513 seconds, retained three complete hashed Node snapshots and verified normal, cancelled and forcibly stopped launcher-child cleanup. Its final environment equality check failed because `__CF_USER_TEXT_ENCODING` appeared after native imports despite being absent from the supplied environment. The launcher now explicitly supplies that macOS field from the process UID with fixed encoding/region values, instead of copying the inherited value or ignoring extra keys. Exact child environment equality remains mandatory. This failed local invocation is retained as diagnostic evidence and does not establish a Linux result.
 
-
-## Linux proof of collector and evidence retention
+### Linux proof of collector and evidence retention
 
 The first approved [Linux diagnostic run 39665555329](https://github.com/realkarych/kora/actions/runs/39665555329) measures clean head `de05a2d2a951ff93d391326c49eb858fd65147fb` against `f7d3ba05733dd0ba1705527f7a36f05b7e67b68a`. Its merge checkout `dcfab9d4fdd4e5117f32380970fef675d8a33ad1` has those parents and the head tree `68f8643d508612970295f01b20c5e4f2d4331399`. [Artifact 12376079474](https://github.com/realkarych/kora/actions/runs/39665555329/artifacts/12376079474) has authenticated ZIP SHA-256 `9ec44304be6437a07afd99a7ed46f8cf79eba54998773c35a1c0d5fbb2cc3ecc`. Its Linux x64 Node 24.22.0 workload completes in 131.645 seconds. The complete CI passes with a 372-second job execution span; CodeQL also passes and marks the proxy request-forgery finding fixed.
 
@@ -144,7 +166,7 @@ New closed owner `1016177`, local proxy `1023213`, Playwright connection `102159
 
 This establishes the planned Linux ownership defect: the existing observation occurs before collector-local references end, and the outer runner retains full evidence objects afterward. It does not attribute the exact +15,224 B or +1,976 B from the rejected batch, prove code-cache variation absent, or promote any previous failed reading to passing. The approved correction must still prove root release and complete evidence preservation in a separate post-fix Linux diagnostic before any fresh calibration.
 
-## Collector completion boundary
+### Collector completion boundary
 
 Measurement protocol `collector-released-v2` persists each collector's observations to a bounded `base-N-pending.json` or `head-N-pending.json` before returning `void`. The pending record preserves all loads, cycles, natural post-close memory, diagnostics, cleanup, code counters and twenty-five acquisition/load phases. No full Trial enters the runner's result array. After the collector returns, the runner performs the same existing two explicit GC calls separated by event-loop turns, samples terminal memory, and records native release counters plus the twenty-sixth phase. There is no additional warm-up, GC round or subtraction.
 
@@ -154,8 +176,7 @@ Real-file fixtures exercise successful reconstruction, cancellation, duplicate p
 
 The post-fix diagnostic retains the same three probes. Its closed probe now precedes the moved terminal GC sequence; its returned probe follows collector return and terminal sampling, before any raw evidence is read back. These instrumentation effects remain excluded from numerical calibration. Local fixture checks pass; full post-fix Linux evidence and independent reviews are required before the fresh fixed five-job batch.
 
-
-## Post-fix Linux ownership proof and fresh calibration stage
+### Post-fix Linux ownership proof and fresh calibration stage
 
 The [post-fix diagnostic workflow 39668923873](https://github.com/realkarych/kora/actions/runs/39668923873) passed every job at head `173014f004102ac685ad95129c2750c518174414`, within a 373-second execution span. Its [diagnostic artifact 12379820630](https://github.com/realkarych/kora/actions/runs/39668923873/artifacts/12379820630) has ZIP SHA-256 `c3414d7d4028b7c2a60793f94bdb5e1e886b710a4bf3a0761710b46974e6937e`. Authenticated job and artifact metadata bind it to clean merge checkout `ae5df1daa3ef7eff8f7afa1813a82f28670288b9`, whose tree `d47f485bfee1ffc8a98ff3264155332eb8febb3e` equals the reviewed head. The browser workload completed in 135.340709007 seconds on Linux x64, Ubuntu image `20261018.339.1`, kernel `7.0.0-1017-azure` and pinned Node `v24.22.0`.
 
@@ -169,7 +190,7 @@ The intermediate workflow at `a558e47` was cancelled by the subsequent kernel-ad
 
 The next authorized stage restores exactly five independent calibration jobs with the unchanged workload and protocol v2, one fixed head/base and one workflow attempt. No Node diagnostic probes run in this batch. All fifteen base summaries, thirty terminal observations and 1,680 comparisons must pass; historical data, replacements and favorable subsets remain forbidden. Any failure is preserved and diagnosed before further action. Frozen budgets and separate reversed-order verification remain pending.
 
-## Rejected calibration after collector release
+### Rejected calibration after collector release
 
 The approved replacement [batch 39670462595](https://github.com/realkarych/kora/actions/runs/39670462595), attempt 1, completed at head `f4609c6b97329103bc0752cb952524f3854d11bd` against base `f7d3ba05733dd0ba1705527f7a36f05b7e67b68a`. Its runtime measurement code is unchanged from the independently reviewed post-fix diagnostic revision `173014f`. Slots 3 and 5 failed the unchanged zero terminal heap limit. The entire replacement batch is rejected; no subset supplies calibration values or frozen budgets.
 
@@ -191,7 +212,7 @@ The prior diagnostic establishes release of full Trial/Cycle and collector wrapp
 
 The approved fixed replacement batch has been consumed. It remains failed, with all original numerical constraints preserved. Any further diagnostic procedure or replacement measurement requires a concrete reviewed plan; there is no authorization for an unchanged retry, extra warm-up/GC, byte allowance, subtraction or favorable-run selection. Numerical readiness and dependent CEL integration remain blocked.
 
-## Approved terminal-boundary diagnostic
+### Approved terminal-boundary diagnostic
 
 The owner approved [one terminal-attribution diagnostic](https://github.com/realkarych/kora/issues/179#issuecomment-6326172579). Its diagnostic-plan identity is `terminal-attribution-v1`, separate from measurement protocol `collector-released-v2` and historical collector probes. All diagnostic reports remain calibration-ineligible. Normal comparison arithmetic, workloads, metric floors, terminal limits and legacy budgets remain unchanged.
 
@@ -201,8 +222,7 @@ The launcher inspects retained artifacts after child cleanup on success, failure
 
 The temporary workflow has one `Console terminal diagnostic` job with fixed base `f7d3ba05733dd0ba1705527f7a36f05b7e67b68a`, retaining every other CI job and the whole-pipeline ten-minute limit. The exact head, run, attempt and sole job are preregistered before result inspection. This diagnostic is not a replacement calibration. If incomplete, non-reproducing or inconclusive, it ends with that disclosed result; no retry, relaxed limit, extra collection/warm-up or further calibration is authorized. Implementation and exact-revision runtime results follow below.
 
-
-## Terminal-boundary diagnostic result
+### Terminal-boundary diagnostic result
 
 The single authorized [diagnostic run 39675344484](https://github.com/realkarych/kora/actions/runs/39675344484), attempt 1, completed at head `5ac7045935c27d3960a97d5a2f392b47d23d8a33` against fixed base `f7d3ba05733dd0ba1705527f7a36f05b7e67b68a`. [Preregistration](https://github.com/realkarych/kora/pull/180#issuecomment-6326479760) identifies the sole [diagnostic job 119483618404](https://github.com/realkarych/kora/actions/runs/39675344484/job/119483618404) before its diagnostic step starts. Authenticated merge checkout `07cfdad2218cba113e2e8b7fb576b67a115972be` has the declared base/head parents and the same tree as the head, `028d47d6e70068d1d32502fbd7ef976329f47f23`.
 
@@ -235,6 +255,6 @@ Favicon PR #177 was subsequently squash-merged as `b3aa12eea8a27fc22643e88bb5a82
 
 The result is complete diagnostic evidence with inconclusive causal attribution. The approved one-run procedure is consumed and its stop condition applies. No corrective implementation, retry, subtraction, threshold change or calibration follows from this result. Both failed five-job batches remain rejected; no new aggregate or budgets exist. Browser numerical readiness and dependent CEL integration remain blocked. Any later correction and measurement sequence require a separately reviewed plan.
 
-## Approved complete-invocation heap method
+### Approved complete-invocation heap method
 
 The owner subsequently approved [the bounded tolerance and sensitivity amendment](https://github.com/realkarych/kora/issues/179#issuecomment-6327372790). It supersedes the diagnostic stop condition only for one declared five-runner training batch and, if admitted, one five-holdout/four-control validation stage. All historical failures above remain rejected. The [dated method record](browser-heap-tolerance-2026-10-22.md) defines protocol `invocation-heap-v3`, the 60 KiB ceiling, invocation coverage and required retained-payload sensitivity. No v3 threshold is yet frozen.

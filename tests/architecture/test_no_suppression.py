@@ -46,9 +46,8 @@ WEB_SCRIPTS: dict[str, str] = {
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings 0",
     "build": "pnpm typecheck && vite build",
-    "test:browser": "node --expose-gc tests/browser/run.ts",
+    "test:browser": "node tests/browser/run.ts",
     "calibrate:browser": "node tests/browser/calibration.ts",
-    "diagnose:browser": "node tests/browser/diagnostic.ts",
 }
 STRICT_TSCONFIGS: tuple[str, ...] = (
     "web/tsconfig.app.json",

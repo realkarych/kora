@@ -122,11 +122,11 @@ export async function failureChecks(root: string, output: string): Promise<unkno
   return results
 }
 
-export async function runnerCancellation(output: string, forced = false, retentionProbe?: 'cancel' | 'report-collision'): Promise<void> {
-  assert(!forced || retentionProbe === undefined)
-  const name = retentionProbe ? `runner-retained-${retentionProbe}` : forced ? 'runner-forced' : 'runner'
+export async function runnerCancellation(output: string, forced = false, reportCollision = false): Promise<void> {
+  assert(!forced || !reportCollision)
+  const name = reportCollision ? 'runner-report-collision' : forced ? 'runner-forced' : 'runner'
   const directory = join(output, `${name}-probe`)
-  const { child, temporary } = await forkFixture(fileURLToPath(new URL('./run.ts', import.meta.url)), [retentionProbe ? '--control=cycle-8' : '--smoke'], {
+  const { child, temporary } = await forkFixture(fileURLToPath(new URL('./run.ts', import.meta.url)), ['--smoke'], {
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'], detached: true,
     env: { NODE_ENV: 'production', KORA_BROWSER_CANCEL_PROBE: '1', KORA_BROWSER_OUTPUT: directory },
   })
@@ -158,7 +158,7 @@ export async function runnerCancellation(output: string, forced = false, retenti
     owned.push(...resources.pids)
     ownershipConfirmed = true
     await writeFile(join(output, `${name}-ownership.json`), JSON.stringify({ owned }))
-    if (retentionProbe === 'report-collision') {
+    if (reportCollision) {
       const runs = await readdir(directory)
       assert.equal(runs.length, 1)
       const run = runs[0]
@@ -186,23 +186,15 @@ export async function runnerCancellation(output: string, forced = false, retenti
   assert.equal(directories.length, 1)
   const run = directories[0]
   assert(run)
-  let retentionEvidence: { acquired: unknown; released: unknown } | undefined
-  if (retentionProbe) {
-    const acquired: unknown = JSON.parse(await readFile(join(directory, run, 'retention-acquired.json'), 'utf8'))
-    const released: unknown = JSON.parse(await readFile(join(directory, run, 'retention-cleanup.json'), 'utf8'))
-    retentionEvidence = { acquired, released }
-    assert.deepEqual(acquired, { allocations: 1, arrays: 1, nominalBytes: 8192, released: false })
-    assert.deepEqual(released, { allocations: 1, arrays: 0, nominalBytes: 0, released: true })
+  if (reportCollision) {
     assert(!deadline && child.exitCode === 1)
-    if (retentionProbe === 'report-collision') {
-      assert(bytes > 0 && bytes <= 65536)
-      assert(stderr.join('').includes('EISDIR'))
-      await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, bytes, deadline, acquired, released, failure: 'report-path-collision' }))
-      return
-    }
+    assert(bytes > 0 && bytes <= 65536)
+    assert(stderr.join('').includes('EISDIR'))
+    await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, bytes, deadline, failure: 'report-path-collision' }))
+    return
   }
   const report: unknown = JSON.parse(await readFile(join(directory, run, 'report.json'), 'utf8'))
-  await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, stderr, bytes, deadline, report, ...retentionEvidence }))
+  await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, stderr, bytes, deadline, report }))
   assert(!deadline)
   assert.equal(child.exitCode, 1)
   assert.equal(bytes, 0)

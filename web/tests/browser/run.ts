@@ -6,52 +6,39 @@ import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { arch, cpus, platform, release, tmpdir, totalmem } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { getHeapCodeStatistics } from 'node:v8'
 import { build } from 'vite'
 import { assetHashes, buildBase, git, repository, webRoot } from './build.ts'
 import { failureChecks, runnerCancellation } from './negative.ts'
-import { collectRunner, measure, smoke } from './measure.ts'
+import { measure, smoke } from './measure.ts'
 import type { Trial } from './trial.ts'
-import { finalizeTrial, persistTerminal, persistTrial, readSummary, readEvidence, writeEvidence } from './trial-evidence.ts'
+import { finalizeTrial, persistTerminal, persistTrial, readSummary, readEvidence } from './trial-evidence.ts'
 import type { Terminal } from './trial-evidence.ts'
 import { nativeResources } from './resources.ts'
 import { evidenceChecks } from './trial-evidence-checks.ts'
-import { compare, measurementProtocol, parseBudgets, requireCandidateHeap } from './protocol.ts'
+import { compare, measurementProtocol, parseBudgets } from './protocol.ts'
 import { protocolChecks } from './protocol-checks.ts'
-import { invocationChecks } from './invocation-checks.ts'
-import { heapGates } from './invocation-heap.ts'
-import { invocationGrowth, persistInvocation, readInvocation } from './invocation.ts'
-import { classifyControl, isControl, parseRunnerMode, Retention } from './retention.ts'
-import { recoveryFixture } from './retention-fixture.ts'
+import { runnerChecks } from './runner-checks.ts'
+import { parseRunnerMode } from './runner-mode.ts'
 import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
 import { artifactLimits } from './limits.ts'
-import { diagnosticSnapshot } from './diagnostic-snapshot.ts'
-import { diagnosticPlan, persistCheckpoint, verifyCheckpoints } from './diagnostic-checkpoint.ts'
-
 const mode = parseRunnerMode(process.argv.slice(2))
-const diagnostic = mode === 'diagnostic'
-if (diagnostic) assert.equal(process.env.KORA_BROWSER_DIAGNOSTIC, diagnosticPlan, 'Use the sanitized diagnostic launcher')
 const calibration = mode === 'calibration'
 const smokeOnly = mode === 'smoke'
-const control = isControl(mode) ? mode : undefined
 const cancelProbe = process.env.KORA_BROWSER_CANCEL_PROBE === '1'
 const outputRoot = resolve(process.env.KORA_BROWSER_OUTPUT ?? join(repository, 'measurements', 'browser'))
 await mkdir(outputRoot, { recursive: true })
 const output = await mkdtemp(join(outputRoot, 'run-'))
-const evidenceRoot = diagnostic ? outputRoot : output
 const temporary = await mkdtemp(join(tmpdir(), 'kora-browser-'))
 const cancellation = new AbortController()
 const stop = (): void => { cancellation.abort(); void closeOwners() }
 const limits = new ArtifactLimit(output, stop)
 process.once('SIGTERM', stop)
 process.once('SIGINT', stop)
-const retention = new Retention(control ?? 'none')
 const report: Record<string, unknown> = {
-  output, protocol: measurementProtocol, status: 'running', mode: diagnostic ? 'collector-diagnostic-v1' : control ? 'control' : mode, control,
-  diagnosticEnvironmentKeys: diagnostic ? Object.keys(process.env).sort() : undefined,
-  eligibleForCalibration: calibration, diagnosticPlan: diagnostic ? diagnosticPlan : undefined,
+  output, protocol: measurementProtocol, status: 'running', mode,
+  eligibleForCalibration: calibration,
   command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
   cpuModels: [...new Set(cpus().map(cpu => cpu.model))], totalMemory: totalmem(),
   runner: { runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB, slot: process.env.KORA_BROWSER_CALIBRATION_SLOT, name: process.env.RUNNER_NAME, image: process.env.ImageOS, imageVersion: process.env.ImageVersion },
@@ -65,12 +52,13 @@ const save = (): void => {
   writeFileSync(join(output, 'report.json'), data)
 }
 const saveTrial = (trial: Trial): void => {
-  persistTrial(output, trial, evidenceRoot)
+  persistTrial(output, trial)
 }
 const started = performance.now()
 try {
-  invocationChecks()
-  report.invocationChecks = 'passed'
+  protocolChecks()
+  runnerChecks()
+  report.preflightChecks = 'passed'
   const checkout = await git(['rev-parse', 'HEAD'])
   const prHead = process.env.KORA_BROWSER_REVISION ?? checkout
   assert(/^[a-f0-9]{40}$/u.test(prHead), 'Invalid PR revision')
@@ -96,12 +84,7 @@ try {
   const headAssets = await assetHashes(webRoot)
   report.headAssetsBeforeFixtures = headAssets
   const readyForCancellation = async (pids: number[]): Promise<void> => {
-    if (diagnostic) process.send?.({ event: 'owned', pids })
     if (!cancelProbe) return
-    if (control) {
-      retention.allocate('cycle')
-      writeEvidence(output, 'retention-acquired.json', retention.evidence(), 4096)
-    }
     const cancelled = once(process, 'SIGTERM')
     process.send?.({ event: 'ready', pids })
     await cancelled
@@ -112,9 +95,8 @@ try {
   report.failureChecks = await failureChecks(webRoot, output)
   await runnerCancellation(output)
   await runnerCancellation(output, true)
-  await runnerCancellation(output, false, 'cancel')
-  await runnerCancellation(output, false, 'report-collision')
-  report.retainedRunnerCancellation = 'passed'
+  await runnerCancellation(output, false, true)
+  report.reportCollision = 'passed'
   report.runnerCancellation = 'passed'
   await artifactLimits(webRoot, output)
   report.artifactLimits = 'passed'
@@ -128,49 +110,28 @@ try {
     report.base = base
     const baseRoot = await buildBase(base, temporary)
     report.assets = { base: await assetHashes(baseRoot), head: await assetHashes(webRoot) }
-    const order: ['base' | 'head', number][] = calibration || diagnostic
+    const order: ['base' | 'head', number][] = calibration
       ? [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]]
       : [['head', 0], ['base', 0], ['base', 1], ['head', 1], ['head', 2], ['base', 2]]
     report.order = order
     save()
     const completeTrial = async (arm: 'base' | 'head', repeat: number): Promise<void> => {
       try {
-        await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial, retention, diagnostic ? cancellation.signal : undefined)
+        await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial)
       } finally {
-        await collectRunner()
-        const runnerAfter = process.memoryUsage()
-        if (diagnostic) {
-          persistCheckpoint(output, arm, repeat, 'terminal', runnerAfter, getHeapCodeStatistics(), evidenceRoot)
-          if (arm === 'head' && repeat === 0) await diagnosticSnapshot(output, 'node-terminal', cancellation.signal)
-        }
         const after = await nativeResources([process.pid])
-        const phase = { phase: 'released', native: await nativeResources([process.pid]), runner: process.memoryUsage() }
-        const terminal: Terminal = { protocol: measurementProtocol, arm, repeat, runnerAfter, after, phase }
-        persistTerminal(output, terminal, evidenceRoot)
-        retention.allocate('finalization')
-        finalizeTrial(output, terminal, cancellation.signal, evidenceRoot)
+        const terminal: Terminal = { protocol: measurementProtocol, arm, repeat, after, phase: { phase: 'released', native: await nativeResources([process.pid]) } }
+        persistTerminal(output, terminal)
+        finalizeTrial(output, terminal, cancellation.signal)
       }
     }
-    await collectRunner()
-    persistInvocation(output, 0, 'start', 0, process.memoryUsage(), retention.evidence(), evidenceRoot)
-    for (const [index, [arm, repeat]] of order.entries()) {
-      assert(!cancellation.signal.aborted, 'Browser runner interrupted')
-      await completeTrial(arm, repeat)
-      await collectRunner()
+    for (const [arm, repeat] of order) {
       cancellation.signal.throwIfAborted()
-      persistInvocation(output, index + 1, arm, repeat, process.memoryUsage(), retention.evidence(), evidenceRoot)
+      await completeTrial(arm, repeat)
     }
-    const retained = retention.evidence()
-    retention.release()
-    report.retention = { beforeRelease: retained, afterRelease: retention.evidence() }
-    writeEvidence(output, 'retention-release.json', report.retention, 4096, evidenceRoot)
-    assert(retained.allocations === retention.maximum, 'incomplete-retention-control')
-    const invocation = readInvocation(output)
-    const growth = invocationGrowth(invocation, order)
-    report.invocation = { points: invocation, growth }
     const trials = order.map(([arm, repeat]) => readSummary(output, arm, repeat))
     assert.equal(trials.length, 6)
-    evidenceChecks(output, evidenceRoot)
+    evidenceChecks(output)
     report.evidenceChecks = 'passed'
     const grouped = (arm: 'base' | 'head'): Record<string, number>[] => trials.filter(trial => trial.arm === arm).sort((a, b) => a.repeat - b.repeat).map(trial => trial.metrics)
     const baseSummary = grouped('base')
@@ -180,16 +141,9 @@ try {
     assert(browser && trials.every(trial => trial.browserVersion === browser))
     const reference = { platform: process.platform, arch: process.arch, node: process.version, browser }
     report.reference = reference
-    if (diagnostic) {
-      verifyCheckpoints(output)
-      report.checkpoints = 'passed'
-      protocolChecks()
-      report.status = 'diagnostic complete; calibration and performance unverified'
-    } else if (calibration) {
+    if (calibration) {
       assert.equal(process.platform, 'linux', 'Reference calibration requires Linux')
       assert.equal(process.arch, 'x64', 'Reference calibration requires x86_64')
-      requireCandidateHeap([...baseSummary, ...headSummary])
-      protocolChecks()
       report.reference = reference
       report.status = 'awaiting five-runner batch aggregation'
     } else {
@@ -200,42 +154,25 @@ try {
       assert(frozen !== null && typeof frozen === 'object' && 'budgets' in frozen, 'invalid-frozen-training')
       assert.deepEqual(parseBudgets(frozen.budgets), budgets, 'frozen-budget-mismatch')
       report.frozenAggregate = createHash('sha256').update(await readFile(frozenPath)).digest('hex')
-      protocolChecks()
       assert.deepEqual(reference, budgets.reference, 'Reference environment mismatch')
       const comparison = compare(baseSummary, headSummary, budgets)
       report.comparison = comparison
-      const invocationGates = heapGates(growth, budgets.heap)
-      report.invocationGates = invocationGates
-      if (control) {
-        const recovery = control === 'intertrial' ? await recoveryFixture(output, retention, budgets.heap) : { passed: true, gates: {} }
-        report.recovery = recovery
-        const classification = classifyControl(control, comparison.gates, invocationGates, true, recovery.passed)
-        report.controlResult = classification
-        save()
-        assert(classification.valid, 'invalid-retention-control-result')
-        report.status = 'control validated'
-      } else {
-        save()
-        assert(Object.values(comparison.gates).every(Boolean) && Object.values(invocationGates).every(Boolean), 'Browser measurement gate failed')
-        report.status = 'passed'
-      }
+      save()
+      assert(Object.keys(comparison.gates).length === 231 && Object.values(comparison.gates).every(Boolean), 'Browser measurement gate failed')
+      report.status = 'passed'
     }
   } else report.status = 'smoke passed; performance unverified'
 } catch (error) {
   report.status = 'failed'
-  if (control && report.controlResult === undefined) report.controlResult = classifyControl(control, {}, {}, false, false)
   report.failure = { code: error instanceof SyntaxError ? 'invalid-json' : error instanceof assert.AssertionError ? 'invalid-evidence' : 'operation-failed' }
   process.exitCode = 1
 } finally {
-  retention.release()
-  report.retentionCleanup = retention.evidence()
   await closeOwners()
   limits.close()
   if (cancellation.signal.aborted || limits.failed) { report.status = 'failed'; process.exitCode = 1 }
   report.artifactLimitFailed = limits.failed
   report.seconds = (performance.now() - started) / 1000
   await rm(temporary, { recursive: true, force: true })
-  writeEvidence(output, 'retention-cleanup.json', report.retentionCleanup, 4096, evidenceRoot)
   save()
   process.removeListener('SIGTERM', stop)
   process.removeListener('SIGINT', stop)

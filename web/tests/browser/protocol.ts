@@ -1,14 +1,11 @@
 import assert from 'node:assert/strict'
 import { percentile, span } from './resources.ts'
-import { heapCeiling, parseHeapLimits } from './invocation-heap.ts'
-import type { HeapLimits } from './invocation-heap.ts'
 
-export const measurementProtocol = 'invocation-heap-v3'
+export const measurementProtocol = 'console-lifecycle-v4'
 
 export interface Budgets {
   protocol: typeof measurementProtocol
   reference: { platform: string; arch: string; node: string; browser: string }
-  heap: HeapLimits
   absolute: Record<string, number>
   pairedMargin: Record<string, number>
 }
@@ -18,12 +15,6 @@ const floors: Record<string, number> = {
   usedSpan: 0, usedLateSpan: 0, usedMedianGrowth: 0,
   rssSpan: 0, rssLateSpan: 0, rssMedianGrowth: 0,
   cleanupSeconds: 0,
-  runnerheapUsedSpan: 0, runnerheapUsedLateSpan: 0, runnerheapUsedMedianGrowth: 0,
-  runnerexternalSpan: 2, runnerexternalLateSpan: 2, runnerexternalMedianGrowth: 2,
-  runnerarrayBuffersSpan: 2, runnerarrayBuffersLateSpan: 2, runnerarrayBuffersMedianGrowth: 2,
-  runnerheapUsedPeak: 0, runnerheapUsedReleasedGrowth: 0,
-  runnerexternalPeak: 0, runnerexternalReleasedGrowth: 0,
-  runnerarrayBuffersPeak: 0, runnerarrayBuffersReleasedGrowth: 0,
   usedPeak: 0, rssPeak: 0,
   documentsSpan: 0, documentsLateSpan: 0, documentsMedianGrowth: 0,
   nodesSpan: 0, nodesLateSpan: 0, nodesMedianGrowth: 0,
@@ -35,27 +26,7 @@ const floors: Record<string, number> = {
 
 export const measurementMetrics = Object.keys(floors)
 
-const terminalMetrics = ['runnerexternalReleasedGrowth', 'runnerarrayBuffersReleasedGrowth']
-
-export function requireReleased(summaries: Record<string, number>[]): void {
-  for (const summary of summaries) {
-    for (const metric of terminalMetrics) {
-      const value = summary[metric]
-      assert(value !== undefined && Number.isFinite(value) && value <= 0, `Positive terminal retention: ${metric}`)
-    }
-  }
-}
-
-export function requireCandidateHeap(summaries: Record<string, number>[]): void {
-  requireReleased(summaries)
-  for (const summary of summaries) {
-    const value = summary.runnerheapUsedReleasedGrowth
-    assert(value !== undefined && Number.isFinite(value) && value <= heapCeiling, 'heap-budget-exceeds-ceiling')
-  }
-}
-
 function estimate(base: Record<string, number>[], reference: Budgets['reference']): Budgets {
-  requireCandidateHeap(base)
   const absolute: Record<string, number> = {}
   const pairedMargin: Record<string, number> = {}
   for (const [metric, floor] of Object.entries(floors)) {
@@ -66,10 +37,10 @@ function estimate(base: Record<string, number>[], reference: Budgets['reference'
     })
     const maximum = Math.max(...values)
     const margin = Math.max(floor, span(values) * 2, maximum * 0.2)
-    pairedMargin[metric] = metric === 'runnerheapUsedReleasedGrowth' ? 0 : margin
-    absolute[metric] = metric === 'runnerheapUsedReleasedGrowth' ? 0 : maximum + margin
+    pairedMargin[metric] = margin
+    absolute[metric] = maximum + margin
   }
-  return { protocol: measurementProtocol, reference, heap: { terminal: 0, full: 0, late: 0, slope: 0 }, absolute, pairedMargin }
+  return { protocol: measurementProtocol, reference, absolute, pairedMargin }
 }
 
 export function calibrate(base: Record<string, number>[], reference: Budgets['reference']): Budgets {
@@ -94,9 +65,7 @@ export function calibrateBatch(groups: Record<string, number>[][], reference: Bu
 export function parseBudgets(value: unknown): Budgets {
   assert(value !== null && typeof value === 'object' && 'reference' in value && 'absolute' in value && 'pairedMargin' in value)
   assert('protocol' in value && value.protocol === measurementProtocol, 'Incompatible browser measurement protocol')
-  assert(Object.keys(value).sort().join(',') === 'absolute,heap,pairedMargin,protocol,reference', 'Invalid budget keys')
-  assert('heap' in value)
-  const heap = parseHeapLimits(value.heap)
+  assert(Object.keys(value).sort().join(',') === 'absolute,pairedMargin,protocol,reference', 'Invalid budget keys')
   const reference = value.reference
   assert(reference !== null && typeof reference === 'object')
   assert('platform' in reference && typeof reference.platform === 'string')
@@ -111,11 +80,9 @@ export function parseBudgets(value: unknown): Budgets {
       output[key] = item
     }
     assert.deepEqual(Object.keys(output).sort(), Object.keys(floors).sort())
-    for (const metric of terminalMetrics) assert.equal(output[metric], 0, `Terminal budget must be zero: ${metric}`)
-    assert.equal(output.runnerheapUsedReleasedGrowth, heap.terminal, 'Terminal heap budget mismatch')
     return output
   }
-  return { protocol: measurementProtocol, heap, reference: { platform: reference.platform, arch: reference.arch, node: reference.node, browser: reference.browser }, absolute: numbers(value.absolute), pairedMargin: numbers(value.pairedMargin) }
+  return { protocol: measurementProtocol, reference: { platform: reference.platform, arch: reference.arch, node: reference.node, browser: reference.browser }, absolute: numbers(value.absolute), pairedMargin: numbers(value.pairedMargin) }
 }
 
 export function compare(base: Record<string, number>[], head: Record<string, number>[], budgets: Budgets): { gates: Record<string, boolean>; paired: Record<string, number[]>; variability: Record<string, number> } {
