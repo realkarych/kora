@@ -190,8 +190,12 @@ def test_cel_evaluating_entry_points_refuse_mismatched_binding_version(
 ) -> None:
     sites = fake_sites(tmp_path, leg)
 
-    result = run_child(LOAD_OUTCOME + LOAD_OUTCOME, isolated_path(sites[0], *sites[1:]))
-    restore_sites(sites, leg)
+    try:
+        result = run_child(
+            LOAD_OUTCOME + LOAD_OUTCOME, isolated_path(sites[0], *sites[1:])
+        )
+    finally:
+        restore_sites(sites, leg)
 
     assert result.code == 0, result.stderr
     assert result.lines() == [refused_line(leg.refusal)] * 2
@@ -207,9 +211,11 @@ def test_cel_loader_refuses_unchecked_code_before_it_runs(
     marker = tmp_path / MARKER_NAME
     control = tmp_path / "control.marker"
 
-    result = run_child(LOAD_OUTCOME, isolated_path(*sites), str(marker))
-    imported = run_child("import cel\n", isolated_path(*sites), str(control))
-    restore_sites(sites, leg)
+    try:
+        result = run_child(LOAD_OUTCOME, isolated_path(*sites), str(marker))
+        imported = run_child("import cel\n", isolated_path(*sites), str(control))
+    finally:
+        restore_sites(sites, leg)
 
     assert result.code == 0, result.stderr
     assert result.lines() == [refused_line(leg.refusal)]
