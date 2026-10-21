@@ -8,6 +8,8 @@ Import-layer test amendment dated 2026-10-19: the pytest source check added unde
 
 Logging and scanner amendment dated 2026-10-20: the measurement step, the Ruff `S` family and the scanner commands added under [issue #147](https://github.com/realkarych/kora/issues/147); wording pending line-by-line owner review.
 
+Provider-loading amendment dated 2026-10-21: the provider loading measurement added under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
+
 Metadata database amendment dated 2026-10-20: the `postgres` extra, wheel-only installation, the database test selection, the PostgreSQL container, `kora db upgrade` and the database measurement added under [issue #153](https://github.com/realkarych/kora/issues/153); wording pending line-by-line owner review.
 
 CEL binding amendment dated 2026-10-21: the `cel` extra, the `wcwidth` constraint, the binding's crate lock in the OSV scans and the local scan command added under [issue #165](https://github.com/realkarych/kora/issues/165); wording pending line-by-line owner review.
@@ -102,6 +104,13 @@ The metadata database lifetime measurement runs under the same marker, on every 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
   uv run --no-sync pytest -q -m measurement tests/measurements/test_metadata_database_lifetime.py
+```
+
+The provider loading measurement runs under the same marker in three fresh `python -I` child processes over the installed environment plus 52 generated distributions (50 with one entry point, one with 50, one whose factory raises). Each child records one cold `load_provider`, then 5 warm-up and 50 measured calls of `load_provider`, of a missing and a raising provider, and of `discover_providers`. It gates only the contract-derived criteria: no module added, descriptors back at baseline and bounded heap growth over the measured calls, and every generated provider discovered. The timings are a baseline with no time gate. CI runs it after the database measurement in the same lane and uploads the artifact `provider-loading-cost-measurement`:
+
+```sh
+KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
 ```
 
 `kora db upgrade` applies every pending migration to the database named by `KORA_DATABASE_URL` and prints the head revision; the accepted forms are `sqlite+aiosqlite:///<path>` (relative paths resolve against the working directory, and a new file is created with mode 0600) and a complete `postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>`, whose query string, if any, carries the driver's connection options such as the TLS mode (`?ssl=require`); the driver's `PGSSL*` variables apply only when the URL sets no `ssl` option, and no other `PG*` variable or password file is consulted. A missing, malformed or incomplete URL exits 78 with one line on stderr that never repeats the value; an unreachable database is an unhandled error (code 70) with content-free records. There is no command-line option for the URL, so it never appears in a process listing.

@@ -6,6 +6,8 @@ Work item 1 amendment dated 2026-10-20: landed under [issue #147](https://github
 
 Work item 4 amendment dated 2026-10-20: split by the owner under [issue #160](https://github.com/realkarych/kora/issues/160); its first part, `kora.cel`, landed under [issue #161](https://github.com/realkarych/kora/issues/161); wording pending line-by-line owner review.
 
+Work item 6 amendment dated 2026-10-21: split into two issues; its first part, provider loading, the JSON and error types, `RuntimeCapabilities`, `ExecutionDeadline`, the local deadline thresholds, `Clock` and `ActivityReporter`, landed under [issue #150](https://github.com/realkarych/kora/issues/150), and the rest is [issue #156](https://github.com/realkarych/kora/issues/156); wording pending line-by-line owner review.
+
 Work item 5 amendment dated 2026-10-20: landed under [issue #153](https://github.com/realkarych/kora/issues/153); the rows of freeze steps 2 and 3, the lock-order gap and the timeout-discovery question record [#102](https://github.com/realkarych/kora/issues/102) and [#103](https://github.com/realkarych/kora/issues/103) as landed; wording pending line-by-line owner review.
 
 This page orders the work of the first implementation slice so that two developers can work in parallel with little overlap. It records no decisions of its own. The decisions are in [decisions/](decisions/README.md), and the contracts are in the [specifications](../knowledge/README.md).
@@ -154,7 +156,7 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 | 3 | `ir` validator: collected diagnostics, the refusal of features outside the slice per #140, a slice-1 graph example. It needs the provider models of work item 6, so this server item waits for an execution item | server | 2, 4, 6; step 7; #140 |
 | 4 | CEL parser, checker, projections and evaluation per [ir.md section 7](../knowledge/specs/ir.md#7-expressions-and-templates), with the packaging, CI and development obligations of the "Expression language" row of the [stack table](../knowledge/architecture/detailed.md#stack-per-component). Split under [#160](https://github.com/realkarych/kora/issues/160): the parser, limits, rendering, paths, pattern subset and cost estimate in `kora.cel` landed under [#161](https://github.com/realkarych/kora/issues/161); the binding, evaluator, conformance through the binding, calibration and measurements follow under [#162](https://github.com/realkarych/kora/issues/162); the schema-driven checker and projections wait for work item 2 | server | step 1; 2 for the schema-driven checker |
 | 5 | `db`: tables, migrations, repositories and the two-database fixture; the claim and lock statements land with work item 9, and later work items add their own migrations. Landed under [issue #153](https://github.com/realkarych/kora/issues/153): the tables of data-model.md section 2, migration 0001, the identifier generator, the connection layer, the registry, discovery and occupancy read functions, `kora db upgrade`, the two-database fixture and the database lifetime measurement | server | 1; step 1 |
-| 6 | `protocols` for runtime, harness, VCS, policy and secrets; provider loading; conformance-suite skeletons; the terminal-report types | execution | 1, 2; step 5a; step 6 for the terminal-report types |
+| 6 | `protocols` for runtime, harness, VCS, policy and secrets; provider loading; conformance-suite skeletons; the terminal-report types. Provider loading, the JSON and error types, the runtime capabilities and deadline types, the local deadline thresholds, `Clock` and `ActivityReporter` landed under [issue #150](https://github.com/realkarych/kora/issues/150); the rest is [issue #156](https://github.com/realkarych/kora/issues/156) | execution | 1, 2; step 5a; step 6 for the terminal-report types |
 | 7 | Fake harness, fake runtime and the directory-backed fake VCS | execution | 6, 13; step 8 |
 | 8 | Server providers: static-token authentication, local artifact storage, the CLI approval channel, the artifact-type provider | server | 5, 6; steps 5b, 7; #141 |
 | 9 | `engine`: canonical start, admission, approval and cancel transitions, worker-report transitions with the terminal report, completion and reconcile intent | server | 2, 4, 5, 7, 8; steps 2, 3, 6, 7; #142, #123 |
@@ -294,6 +296,7 @@ Other triggers are named directly. A "leg" is the part of a test that needs the 
 | Row | Work item |
 |---|---|
 | Logging infrastructure, the shared bootstrap and the common tests | 1 |
+| Provider registry | 6, under [issue #150](https://github.com/realkarych/kora/issues/150) |
 | DSL/compiler/IR | 2, 3; the compiler part is pending: DSL |
 | Metadata/migrations/retention | 5 |
 | Runtime, harness adapter and VCS provider rows | 7 for the fakes; 13 and 14 for real VCS/runtime; 15 adds independent evidence for both `claude` and `codex` |

@@ -7,6 +7,7 @@
 - Absorbs: DD-2, DD-21, DD-22, the protocol part of DD-29; NFR section 5; requirements decision 14, the "policy protocol in MVP" part of requirements decision 19 and the "OTel as the only MVP exporter" part of requirements decision 20
 - Related: [ADR-0001](0001-own-control-plane.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0011](0011-namespaces-and-personal-tokens.md)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
+- Provider-loading amendment dated 2026-10-21: entry-point names encode the protocol and loading is selective, decided by the project owner under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
 
 ## Context
 
@@ -28,7 +29,7 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 10. **sensor**: `observe(config) → Observation` for `wait_event` nodes and sensor triggers, stateless between polls. MVP: `change_request_status`, `ci_status`, `http`.
 11. **policy**: `decide(request, policy, protected_paths) → allow | deny` from the harness's pre-tool-call hook. MVP: `allow_deny`.
 
-**One entry point.** Implementations are discovered through the entry-point group `kora.provider`; each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`. `kora plugins list` prints what is installed; the names are then used in the intermediate representation (IR, for example `runtime.runtime: docker`) or in deployment configuration.
+**One entry point.** Implementations are discovered through the entry-point group `kora.provider`; each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`. `kora plugins list` prints what is installed; the names are then used in the intermediate representation (IR, for example `runtime.runtime: docker`) or in deployment configuration. Amended 2026-10-21 ([issue #150](https://github.com/realkarych/kora/issues/150)): an entry point is named `<protocol>.<name>`, for example `runtime.inhouse_ci = "kora_inhouse:runtime_provider"`, because provider names repeat across protocols (`local` is a runtime and an artifact storage). A process loads only the providers it is configured with, by that name, importing only the requested entry point's module and its parent packages; the name `fake` and kora's test and conformance modules are refused, because kora's fakes are constructed by injection only ([provider loading](../../knowledge/specs/protocols.md#provider-loading-issue-150)).
 
 **Capability flags instead of promises.** A runtime declares, among others, `supports_resume`, `enforces_network_policy`, `credential_proxy`, `protected_execution` and `plan_executors`; `kora validate` emits warning `IR009` when a node requests a capability its runtime lacks. Network policy is enforced by the runtime with the harness sandbox as a second layer (DD-21); when a namespace sets `require_network_enforcement`, a secret-bearing node on a non-enforcing runtime becomes error `IR015`.
 
