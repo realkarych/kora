@@ -49,7 +49,7 @@ async function terminateOwned(roots: number[], output: string, temporary: string
   const listing = listings[0]
   assert(listing)
   const temporaryBefore = listing.status === 'fulfilled' ? listing.value : null
-  const removals = release.status === 'fulfilled' && release.value.processes === 0
+  const removals = discovery.status === 'fulfilled' && release.status === 'fulfilled' && release.value.processes === 0
     ? await Promise.allSettled([rm(temporary, { recursive: true, force: true })])
     : []
   const observations = await Promise.allSettled([temporaryIsRemoved(temporary)])
