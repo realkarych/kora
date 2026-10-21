@@ -61,6 +61,9 @@ def resource_gates(
     name: str,
     points: list[dict[str, int | None]],
     budget: ResourceBudget,
+    *,
+    native_traced: bool = False,
+    native_untraced: bool = False,
 ) -> None:
     for resource in ("descriptors", "threads", "os_threads", "tasks"):
         gate(report, f"{name}_{resource}", len({p[resource] for p in points}) == 1)
@@ -69,6 +72,9 @@ def resource_gates(
         ("rss", budget.rss_growth, budget.late_rss_span),
     ):
         values = [point[resource] for point in points]
+        if resource == "heap" and native_untraced:
+            assert all(value is None for value in values)
+            continue
         if values[0] is None:
             assert report.platform != "linux"
             assert all(value is None for value in values)
@@ -79,9 +85,13 @@ def resource_gates(
             report, f"{name}_{resource}_growth", max(measured) - min(measured) <= whole
         )
         change = max(measured[9:]) - min(measured[9:])
-        gate(report, f"{name}_{resource}_late_growth", change <= late)
+        if resource != "rss" or not native_traced:
+            gate(report, f"{name}_{resource}_late_growth", change <= late)
     peaks = [p["peak"] for p in points if p["peak"] is not None]
-    gate(report, f"{name}_peak_heap", max(peaks) <= budget.peak_heap)
+    if native_untraced:
+        assert not peaks
+    else:
+        gate(report, f"{name}_peak_heap", max(peaks) <= budget.peak_heap)
     image_peaks = [
         p["image_peak_rss"] for p in points if p["image_peak_rss"] is not None
     ]
@@ -151,10 +161,35 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                 assert point["outstanding"] == 0
                 assert point["payload_bytes"] == 0
                 assert point["tasks"] == 1
+                entries, characters = point["cache_entries"], point["cache_characters"]
+                assert entries is not None
+                assert entries <= 128
+                assert characters is not None
+                assert characters <= 131072
                 assert (point["heap"] is not None) == payload["traced"]
                 assert (point["peak"] is not None) == payload["traced"]
             for resource in ("descriptors", "threads", "os_threads", "tasks"):
                 assert len({point[resource] for point in payload["points"]}) == 1
+        for point in untraced_payload["points"]:
+            cycle = point["cycle"]
+            assert cycle is not None
+            report.samples.append(
+                Sample(
+                    "native_untraced_resources",
+                    repeat,
+                    cycle,
+                    untraced_payload["seconds"],
+                    dict(point),
+                )
+            )
+        resource_gates(
+            report,
+            f"native_untraced_{repeat}",
+            untraced_payload["points"],
+            RESOURCE_BUDGETS["native"],
+            native_untraced=True,
+        )
+    report.environment["native_late_rss_basis"] = "untraced paired workload"
     for mode in ("native", "lifetime", "loops", "idle", "busy"):
         for repeat in range(REPEATS):
             code = (
@@ -209,7 +244,11 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
             if payload["points"]:
                 points = payload["points"]
                 resource_gates(
-                    report, f"{mode}_{repeat}", points, RESOURCE_BUDGETS[mode]
+                    report,
+                    f"{mode}_{repeat}",
+                    points,
+                    RESOURCE_BUDGETS[mode],
+                    native_traced=mode == "native",
                 )
             if payload["timings"]:
                 timings = sorted(payload["timings"])
