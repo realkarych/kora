@@ -20,7 +20,7 @@ Only successful training plus independent provenance/raw reconstruction permits 
 
 Any failed/incomplete job, remaining gate failure, missing/mismatched evidence or total pipeline >=600 seconds stops the authorized sequence without retry, substitution, new diagnostics or threshold increase. Failed historical results remain failed. The final single ordinary browser job and every other required CI lane must pass on the final revision. Required-status activation and owner line review of docs remain explicit landing obligations. Automated accessibility scanning is unverified; interactive/API-backed journeys remain pending their implementation issues and do not become passing through this removal.
 
-Current status: implementation, deterministic preflight, static checks, both-database tests and separate source reviews passed at the measured revision below. The sole v4 training attempt completed and its registered numerical reconstruction passed. Independent training admission passed and its one aggregate is frozen. The separate five-runner holdout is the next authorized stage; it has not yet been dispatched.
+Current status: implementation, deterministic preflight, static checks, both-database tests and separate source reviews passed at the measured revision below. The sole v4 training attempt completed and its registered numerical reconstruction passed. Independent training admission passed and its one aggregate is frozen, but the sole holdout attempt below failed. The frozen candidate is not validated for ordinary CI. The finite sequence is stopped; no further measurements or ordinary-job restoration are authorized.
 
 ### V4 training evidence
 
@@ -42,7 +42,32 @@ The registered calibration command independently reconstructed all 1,230 summary
 
 The [frozen training aggregate](../../web/tests/browser/frozen-training.json) is the exact reviewed output, including its original archive identities and locations. The [budgets](../../web/tests/browser/budgets.json) are copied directly from that aggregate, without rounding or adjustment. Selected absolute limits are loading p95 131.80000000004657 ms, Chromium used-heap median-growth limit 12 B, native RSS peak 1,490,264,064 B and cleanup 0.10201254999999945 s. The unchanged zero-growth families retain zero limits. These are workload-specific engineering budgets, not product service objectives or leak-freedom claims.
 
-The validation workflow is obtained solely by the three declared stage-field substitutions; its SHA-256 is `332dc7cbcd3a985831f7da99d4a018ca9ecbe4ffef3bd05cbf95c6932cbcc7d2`. Its five independent jobs reverse the arm order and must bind the frozen aggregate digest above. No collector, evaluator, toolchain or product input changes. Holdout admission and final ordinary CI remain pending.
+The validation workflow is obtained solely by the three declared stage-field substitutions; its SHA-256 is `332dc7cbcd3a985831f7da99d4a018ca9ecbe4ffef3bd05cbf95c6932cbcc7d2`. Its five independent jobs reverse the arm order and must bind the frozen aggregate digest above. No collector, evaluator, toolchain or product input changes. At this freeze, holdout admission and final ordinary CI were pending; the subsequent result is recorded below.
+
+### Rejected v4 holdout attempt
+
+The sole reversed-order holdout [run 39695053070](https://github.com/realkarych/kora/actions/runs/39695053070), attempt 1, measured `4085a21e9ec86e423a5882564241d44cae924024`. Authenticated checkout `70f2ebe6435fe281e1aa2ae53d48c673e91874f0` has parents `f6920f891dd1099473fd5f6e921d6558255819fd` and that source, with identical checkout/head tree `ebb1b950e265c9e2b8937ea8f617d1212f269b8d`. All reports bind the unchanged frozen aggregate digest above. [Preregistration](https://github.com/realkarych/kora/pull/180#issuecomment-6329030439), [run/job binding](https://github.com/realkarych/kora/pull/180#issuecomment-6329047841), and [initial](https://github.com/realkarych/kora/pull/180#issuecomment-6329087380) and [final](https://github.com/realkarych/kora/pull/180#issuecomment-6329100089) artifact bindings preceded their respective numerical inspection. Downloaded sizes and SHA-256 digests match authenticated metadata.
+
+| Slot | Job | Artifact | Job conclusion | ZIP SHA-256 |
+| --- | --- | --- | --- | --- |
+| 1 | 119550289026 | 12390428796 | success | `4395144933316f969d67fc49636c525afd7edc385c2503de7b591fff8022453c` |
+| 2 | 119550289136 | 12391045083 | failure | `7d3eee98d15392f399844921fd1bd93a8b5b8246519de0e0ef51f00464f2cbcb` |
+| 3 | 119550289165 | 12391070217 | success | `6e61089f5dca0f7a1b5b65a94109d3ae50c039b2ee72163e096407bb11ead592` |
+| 4 | 119550289191 | 12391025210 | failure | `4968c652cc80b0c7ae0ae29c9ec2b26bf3de6b801a7b4958d7c7a06bafd6130d` |
+| 5 | 119550289235 | 12389494890 | success | `c4098379f484279201b1b9be2281ccac759cffc3c4e47b3e6887c5a14d733802` |
+
+Independent fixed-budget correctness and performance reconstruction matches all thirty trials, 1,230 summary fields and 1,155 gate decisions. Exactly six gates fail, all for Chromium `usedMedianGrowth`, the signed difference between the last ten and first ten post-GC lifecycle sample medians. Its frozen absolute limit is 12 bytes, paired median allowance 8 bytes and paired maximum allowance 16 bytes.
+
+| Slot | Base values, bytes | Head values, bytes | Failed predicates |
+| --- | --- | --- | --- |
+| 2 | 4, 4, 4 | 44, 44, 4 | Head absolute repetitions 0/1; paired median 40 > 8 and maximum 40 > 16 |
+| 4 | −36, 44, 0 | 44, −28, 4 | Head absolute repetition 0 and base repetition 1; paired maximum 44 > 16 |
+
+The remaining 1,149 gates pass. Slots 1/3/5 succeed and slots 2/4 fail, matching CI and report status. All 45 termination proofs and all applicable trial, smoke, failure, artifact-limit, cancellation, network-owner and report-collision cleanup outcomes pass. All other CI lanes, including corrected links, and CodeQL, OSV-Scanner and Gitleaks succeed. Execution takes 299 seconds, or 300 seconds through final workflow status.
+
+Base and head product assets are byte-identical in every runner. One failing absolute observation occurs in the base itself. The four failing raw median pairs are 2,273,504→2,273,548 or 2,280,048→2,280,092 bytes. Their snapshot self-size differences are −60, −250, +139 and +124 bytes, with unchanged DOM/listener structure. These facts neither causally attribute the 44-byte readings nor establish an application leak or its absence. The removed Node-controller checker is not involved in these failures.
+
+The holdout is rejected, not training data. The original budgets remain unchanged and the consumed attempt cannot be retried, replaced, refitted or waived by the historical-link exception. No new diagnostic or measurement is authorized. The single ordinary job is not restored, CEL dependency integration and final readiness remain blocked, and source-removal completion does not establish passing browser verification.
 
 ## Historical protocols and results
 
