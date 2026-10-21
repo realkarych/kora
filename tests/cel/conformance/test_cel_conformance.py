@@ -7,12 +7,14 @@ import pytest
 
 from kora.cel import Diagnostic
 from kora.cel.characters import is_rejected
+from kora.cel_eval.binding import Binding
 from tests.cel.conformance.cases import (
     BoolValue,
     BytesValue,
     Case,
     CaseModelError,
     DoubleValue,
+    DurationValue,
     ExpectedError,
     ExpectedValue,
     IntValue,
@@ -26,7 +28,9 @@ from tests.cel.conformance.cases import (
     read_cases,
     vendored_files,
 )
+from tests.cel.conformance.deviations import DEVIATIONS
 from tests.cel.conformance.manifest import COMMIT, FILES, LICENSE_SHA256
+from tests.cel.conformance.running import run_case
 from tests.cel.conformance.selection import (
     CEL_STANDARD_FUNCTIONS,
     EXCLUDED_FILES,
@@ -95,6 +99,13 @@ section {
       [type.googleapis.com/google.protobuf.Duration] { seconds: 1 }
     } }
   }
+  test {
+    name: "wrapped"
+    expr: "x"
+    value: { object_value {
+      [type.googleapis.com/google.protobuf.Int64Value] { value: 1 }
+    } }
+  }
 }
 """
 
@@ -132,8 +143,9 @@ def test_cel_textproto_reader() -> None:
     assert isinstance(infinite, ExpectedValue)
     assert isinstance(infinite.value, DoubleValue)
     assert infinite.value.value == math.inf
-    assert by_name["object"].expected == ExpectedValue(
-        ObjectValue("type.googleapis.com/google.protobuf.Duration")
+    assert by_name["object"].expected == ExpectedValue(DurationValue(1, 0))
+    assert by_name["wrapped"].expected == ExpectedValue(
+        ObjectValue("type.googleapis.com/google.protobuf.Int64Value")
     )
 
 
@@ -160,6 +172,8 @@ def test_cel_textproto_reader() -> None:
         "description: 7",
         "section { test { name: 'a' value: { null_value: 1.5 } } }",
         "section { test { name: 'a' value: { object_value { [] {} } } } }",
+        "section { test { name: 'a' value: { object_value { "
+        "[type.googleapis.com/google.protobuf.Duration] { days: 1 } } } } }",
         "section { test { name: 'a' "
         "bindings { key: 'x' value { value { int64_value: 1 } } } "
         "bindings { key: 'x' value { value { int64_value: 2 } } } } }",
@@ -285,3 +299,25 @@ def test_cel_conformance_cases_parse() -> None:
         for rejection in KORA_REJECTIONS
     }
     assert len(outcomes) > 1100
+
+
+def test_cel_conformance_suite(cel_binding: Binding) -> None:
+    cases = [
+        case
+        for path in vendored_files()
+        for case in read_cases(path.stem, path.read_text(encoding="utf-8")).cases
+        if rejection_for(case.file, case.section, case.name) is None
+    ]
+
+    runs = {
+        (case.file, case.section, case.name): run_case(cel_binding, case)
+        for case in cases
+    }
+
+    disagreeing = {
+        key: observed for key, (agrees, observed) in runs.items() if not agrees
+    }
+    recorded = {key: observed for key, (_, observed) in DEVIATIONS.items()}
+    assert disagreeing == recorded
+    assert len(runs) == len(cases) > 1000
+    assert len(runs) - len(disagreeing) > 960

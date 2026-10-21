@@ -29,6 +29,8 @@ FLOAT_TEXT: Final[re.Pattern[str]] = re.compile(
 )
 INT64_RANGE: Final[range] = range(-(2**63), 2**63)
 UINT64_RANGE: Final[range] = range(0, 2**64)
+NANOS_RANGE: Final[range] = range(-999_999_999, 1_000_000_000)
+DURATION_TYPE_URL: Final[str] = "type.googleapis.com/google.protobuf.Duration"
 PRIMITIVES: Final[frozenset[str]] = frozenset(
     {"BOOL", "INT64", "UINT64", "DOUBLE", "STRING", "BYTES"}
 )
@@ -93,6 +95,12 @@ class ObjectValue:
     type_url: str
 
 
+@dataclass(frozen=True)
+class DurationValue:
+    seconds: int
+    nanos: int
+
+
 Value = (
     NullValue
     | BoolValue
@@ -105,6 +113,7 @@ Value = (
     | ListValue
     | MapValue
     | ObjectValue
+    | DurationValue
 )
 
 
@@ -319,7 +328,19 @@ def read_value(message: Message, context: str) -> Value:
     type_url = body.fields[0].name.strip("[]")
     if not type_url:
         raise CaseModelError(f"{context}: an object value names its type")
+    if type_url == DURATION_TYPE_URL:
+        return read_duration(as_message(body.fields[0].value, context), context)
     return ObjectValue(type_url)
+
+
+def read_duration(message: Message, context: str) -> DurationValue:
+    fields = Fields(message, frozenset({"seconds", "nanos"}), context)
+    seconds = fields.optional("seconds")
+    nanos = fields.optional("nanos")
+    return DurationValue(
+        0 if seconds is None else as_integer(seconds, context, INT64_RANGE),
+        0 if nanos is None else as_integer(nanos, context, NANOS_RANGE),
+    )
 
 
 def read_type(message: Message, context: str) -> DeclaredType:
