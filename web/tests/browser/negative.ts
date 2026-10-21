@@ -1,13 +1,34 @@
 import assert from 'node:assert/strict'
-import { fork } from 'node:child_process'
+import { fork, type ChildProcess, type ForkOptions } from 'node:child_process'
 import { once } from 'node:events'
-import { readFile, readdir, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Ownership } from './ownership.ts'
 import { nativeResources, verifyReleased } from './resources.ts'
 
-async function terminateOwned(roots: number[], output: string): Promise<void> {
+async function forkFixture(module: string, args: string[], options: ForkOptions): Promise<{ child: ChildProcess; temporary: string }> {
+  const temporary = await mkdtemp(join(tmpdir(), 'kora-browser-fixture-'))
+  try {
+    const child = fork(module, args, { ...options, env: { ...new Ownership().environment(), ...options.env, TMPDIR: temporary } })
+    await once(child, 'spawn')
+    return { child, temporary }
+  } catch (error) {
+    await rm(temporary, { recursive: true, force: true })
+    throw error
+  }
+}
+
+async function temporaryIsRemoved(temporary: string): Promise<boolean> {
+  try { await access(temporary); return false }
+  catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+    return true
+  }
+}
+
+async function terminateOwned(roots: number[], output: string, temporary: string, ownershipConfirmed: boolean): Promise<void> {
   const discoveries = await Promise.allSettled([nativeResources(roots)])
   const discovery = discoveries[0]
   assert(discovery)
@@ -24,14 +45,27 @@ async function terminateOwned(roots: number[], output: string): Promise<void> {
   const releases = await Promise.allSettled([verifyReleased(pids)])
   const release = releases[0]
   assert(release)
-  const failures = [...discoveries, ...releases].flatMap(result => {
+  const listings = await Promise.allSettled([readdir(temporary)])
+  const listing = listings[0]
+  assert(listing)
+  const temporaryBefore = listing.status === 'fulfilled' ? listing.value : null
+  const removals = ownershipConfirmed && discovery.status === 'fulfilled' && release.status === 'fulfilled' && release.value.processes === 0
+    ? await Promise.allSettled([rm(temporary, { recursive: true, force: true })])
+    : []
+  const observations = await Promise.allSettled([temporaryIsRemoved(temporary)])
+  const observation = observations[0]
+  assert(observation)
+  const temporaryRemoved = observation.status === 'fulfilled' ? observation.value : null
+  const failures = [...discoveries, ...releases, ...listings, ...removals, ...observations].flatMap(result => {
     if (result.status === 'fulfilled') return []
     const error: unknown = result.reason
     return [error instanceof Error ? error.message.slice(0, 1024) : 'UnknownError']
   })
-  const evidence = { roots, discovered, signals, remaining: release.status === 'fulfilled' ? release.value : null, failures }
+  if (!ownershipConfirmed) failures.push('Complete fixture ownership was not confirmed')
+  const evidence = { roots, discovered, signals, ownershipConfirmed, temporary, temporaryBefore, temporaryRemoved, remaining: release.status === 'fulfilled' ? release.value : null, failures }
   await writeFile(output, JSON.stringify(evidence))
   assert.deepEqual(failures, [])
+  assert(temporaryRemoved, 'Owned temporary directory remains')
   assert(signals.every(signal => ['sent', 'ESRCH', 'EPERM'].includes(signal.code)), 'Unexpected process signalling failure')
 }
 
@@ -39,8 +73,8 @@ export async function failureChecks(root: string, output: string): Promise<unkno
   const results: unknown[] = []
   for (const scenario of ['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition']) {
     const destination = join(output, `failure-${scenario}.json`)
-    const child = fork(fileURLToPath(new URL('./failure.ts', import.meta.url)), [scenario, root, destination], {
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: new Ownership().environment(), detached: true,
+    const { child, temporary } = await forkFixture(fileURLToPath(new URL('./failure.ts', import.meta.url)), [scenario, root, destination], {
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'], detached: true,
     })
     assert(child.pid)
     const owned = new Set<number>([child.pid])
@@ -63,6 +97,7 @@ export async function failureChecks(root: string, output: string): Promise<unkno
     const controller = new AbortController()
     const aborted = once(controller.signal, 'abort').then(() => { throw new Error('Failure fixture deadline exceeded') })
     const timer = setTimeout(() => { controller.abort() }, 30000)
+    let ownershipConfirmed = false
     try {
       if (scenario === 'cancellation') {
         await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Cancellation child exited before readiness') }), aborted])
@@ -77,9 +112,10 @@ export async function failureChecks(root: string, output: string): Promise<unkno
       assert.equal(stderr, '')
       assert.equal(captured, 0)
       await verifyReleased([...owned])
+      ownershipConfirmed = true
     } finally {
       clearTimeout(timer)
-      await terminateOwned([...owned], join(output, `failure-${scenario}-termination.json`))
+      await terminateOwned([...owned], join(output, `failure-${scenario}-termination.json`), temporary, ownershipConfirmed)
       await exited
     }
   }
@@ -88,9 +124,9 @@ export async function failureChecks(root: string, output: string): Promise<unkno
 
 export async function runnerCancellation(output: string, forced = false): Promise<void> {
   const directory = join(output, forced ? 'stalled-runner' : 'cancelled-runner')
-  const child = fork(fileURLToPath(new URL('./run.ts', import.meta.url)), ['--smoke'], {
+  const { child, temporary } = await forkFixture(fileURLToPath(new URL('./run.ts', import.meta.url)), ['--smoke'], {
     stdio: ['ignore', 'ignore', 'pipe', 'ipc'], detached: true,
-    env: { ...new Ownership().environment(), NODE_ENV: 'production', KORA_BROWSER_CANCEL_PROBE: '1', KORA_BROWSER_OUTPUT: directory },
+    env: { NODE_ENV: 'production', KORA_BROWSER_CANCEL_PROBE: '1', KORA_BROWSER_OUTPUT: directory },
   })
   const pid = child.pid
   assert(pid)
@@ -106,6 +142,7 @@ export async function runnerCancellation(output: string, forced = false): Promis
   const aborted = once(controller.signal, 'abort').then(() => 'deadline')
   let timer = setTimeout(() => { controller.abort() }, 30000)
   let deadline: boolean
+  let ownershipConfirmed = false
   try {
     const values: unknown = await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Runner exited before cancellation readiness') }), aborted])
     assert(Array.isArray(values), 'Runner startup deadline exceeded')
@@ -117,6 +154,7 @@ export async function runnerCancellation(output: string, forced = false): Promis
     }
     const resources = await nativeResources(owned)
     owned.push(...resources.pids)
+    ownershipConfirmed = true
     await writeFile(join(output, forced ? 'runner-forced-ownership.json' : 'runner-ownership.json'), JSON.stringify({ owned }))
     clearTimeout(timer)
     timer = setTimeout(() => { controller.abort() }, forced ? 1000 : 30000)
@@ -124,7 +162,7 @@ export async function runnerCancellation(output: string, forced = false): Promis
     deadline = await Promise.race([exited.then(() => false), aborted.then(() => true)])
   } finally {
     clearTimeout(timer)
-    await terminateOwned(owned, join(output, forced ? 'runner-forced-termination.json' : 'runner-termination.json'))
+    await terminateOwned(owned, join(output, forced ? 'runner-forced-termination.json' : 'runner-termination.json'), temporary, ownershipConfirmed)
     await exited
   }
   if (forced) {
