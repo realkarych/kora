@@ -73,4 +73,40 @@ Planning reviews passed for runtime correctness, performance and security; verif
 
 Real runner cancellation and a parent-created report-path collision each acquire one 8 KiB payload and exercise the production outer-finally release. Both record one allocation with zero remaining arrays/bytes after cleanup; report failure cannot bypass that release. CLI and malformed/assertion-bearing manifest fixtures inspect actual process output for marker exclusion. Recovery reports distinguish invalid evidence, failed recovery, unrelated failures and required detector misses. Local smoke, including all failure/cancellation/network/artifact checks, passed in 13.945 seconds before the final evidence-admission refinement. These are functional/fixture results, not calibration.
 
-Final source re-review, authenticated training, sensitivity/recovery validation, final-revision CI and owner line review of docs remain pending. No tolerance has been frozen.
+Final source re-review passed at the measured revision below. The single authorized training attempt then failed in every runner. Sensitivity/recovery validation was not dispatched. Final readiness and owner line review of docs remain pending; no tolerance has been frozen.
+
+## Rejected invocation-heap-v3 training attempt
+
+The single approved training attempt is consumed. [CI run 39687134851](https://github.com/realkarych/kora/actions/runs/39687134851), attempt 1, measured head `30757cb34bbe74f0582314d75d24870161a07b2d` with checkout `d0d02ebfc512c7122d82c9516e1ceaff744f40bd`. Authenticated checkout parents are `ae70c5aceee5be65d70a0e80be9416191c8cdee8` and the measured head; checkout and head trees both equal `d4cacd371f1718fbe32f9a4d44851737ce04f4ea`. Product comparison base remains `b3aa12eea8a27fc22643e88bb5a82939481f42bc`.
+
+[Source/slot preregistration](https://github.com/realkarych/kora/pull/180#issuecomment-6327993208) preceded the push. [Run/job binding](https://github.com/realkarych/kora/pull/180#issuecomment-6328008625) preceded numerical inspection. All five artifacts were bound and their downloaded digests verified before their respective numerical inspection. The failed-job manifest SHA-256 is `504a66d07a8426c3a9026af64dbd60adf431b1e5a45a459a49a7831fe26b84c5`.
+
+| Slot | Job | Artifact | ZIP SHA-256 |
+| --- | --- | --- | --- |
+| 1 | 119523945184 | 12387386168 | `ec70725ba2d57bb80a3b0ce62254f2dfe63df95bdfd53085097571329e12c49e` |
+| 2 | 119523944971 | 12387012929 | `313462fd1971cb82e08b05ab84605755bb932a6529a3fa64ded23600b8e70480` |
+| 3 | 119523945025 | 12387331116 | `44f09c0e39f50565587ef977e38fe6d9433c58f955054a19b5f2ce590f86643e` |
+| 4 | 119523945160 | 12387346385 | `c91097ae83b58cb5ab65e1cfb87fa650f5c93d9cb139ec192091919365697561` |
+| 5 | 119523945332 | 12386637475 | `9fc75e8ad7d48d5e6820ec598ae515863209419ced9092a0a8aedafbefc62367` |
+
+All five jobs failed after preserving their six full workloads. Independent offline reconstruction matched all thirty pending/terminal/final trials, 1,680 summary fields and thirty-five invocation checkpoints. No artifact was substituted or excluded. The report field `eligibleForCalibration: true` identifies the requested mode; failed status prevents admission.
+
+| Slot | Maximum original terminal heap delta, B | Full excursion D, B | Late excursion L, B | Signed slope S, B/workload |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 914032 | 967848 | 256552 | 128276 |
+| 2 | 906384 | 981536 | 300320 | 150160 |
+| 3 | 980584 | 972728 | 278288 | 139144 |
+| 4 | 944656 | 995064 | 304896 | 152448 |
+| 5 | 923272 | 966912 | 296648 | 148324 |
+
+Twenty-six of thirty original terminal heap deltas are positive, 806,472–980,584 bytes. Four initial trials release 6,230,112–6,269,824 bytes. Every post-finalization H1→H6 transition is positive; late transitions are 107,680–180,824 bytes. There is no observed late plateau. Every runner already exceeds the 61,440-byte terminal and late ceilings and the 30,720-byte/workload slope ceiling, without fitting any budget.
+
+The direct runtime rejection is `requireCandidateHeap` in `protocol.ts`, called after complete summaries in `run.ts`. Its terminal heap assertion fails. The safe `invalid-evidence` error class does not mean the raw records are malformed. Terminal external deltas are −8,518…0 bytes and ArrayBuffer deltas are exactly zero, so those preceding release checks do not explain the rejection.
+
+Resource records provide narrower positive evidence: all thirty trials retain the 2/20 load, 3/30 cycle and twenty-six-phase workloads; fifty termination proofs and eighty exact-cleanup records reconstruct without discrepancies. Owned descendants and proxy sockets reach zero. Each retained cancellation and report-collision probe acquires one 8 KiB array and records release to zero. Browser DOM/document/listener spans are zero; browser post-GC heap spans are 172–228 bytes.
+
+Causal attribution remains unverified. Both arms have identical product assets. Browser snapshots do not provide Node retaining paths, and aggregate Node/RSS counters do not identify a particular application, harness, runtime or cache defect. No larger tolerance is justified by this result.
+
+The registered admission command `pnpm --dir web run calibrate:browser MANIFEST OUTPUT` exits 1 at manifest admission for the actual failed job conclusions; it creates no aggregate. The 336 ordinary gate decisions per runner were not produced or accepted. No v3 budget was fitted or frozen, and no holdout, positive-control, recovery-validation, replacement or additional diagnostic invocation was dispatched. The 8 KiB/cycle detection target remains unverified.
+
+All eight other CI jobs and Gitleaks, OSV-Scanner and CodeQL passed on the measured head. The whole pipeline ran from 22:31:41 to 22:37:49 UTC on 2026-10-21, 368 seconds. Browser functional smoke, source/static checks and independent source reviews do not override the failed numerical result. PR #180 remains a draft; integration into CEL PR #175 and final readiness remain blocked by the approved finite stop rule.
