@@ -63,6 +63,11 @@ MISMATCHED: list[FakeLeg] = [
     ),
     FakeLeg("foreign_file", (fake(FOREIGN_FILE),), Refusal.MODULE_OUTSIDE_RECORD),
     FakeLeg(
+        "non_module_entry",
+        (fake("import sys\nsys.modules['cel'] = 5\n"),),
+        Refusal.MODULE_OUTSIDE_RECORD,
+    ),
+    FakeLeg(
         "import_failed",
         (fake("raise ImportError('UNREGISTERED-MARKER-7731')\n"),),
         Refusal.IMPORT_FAILED,
@@ -139,6 +144,11 @@ UNCHECKED_CODE: list[FakeLeg] = [
                 linked_files={"cel/__pycache__/__init__.cpython-311.pyc": ""},
             ),
         ),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
+        "unlistable_directory",
+        (replace(fake("from . import sub\n"), unlistable={"cel/sub": WRITE_MARKER}),),
         Refusal.FILE_MISMATCH,
     ),
     FakeLeg(

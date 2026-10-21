@@ -3,7 +3,7 @@ from functools import partial
 
 import pytest
 
-from kora.cel import Diagnostic, JsonValue
+from kora.cel import Diagnostic, JsonValue, Reason
 from kora.cel.functions import FUNCTIONS, Form
 from kora.cel.limits import MAX_CODE_POINTS
 from kora.cel_eval.binding import Binding, NativeProgram
@@ -209,7 +209,10 @@ def test_cel_unary_runs_kora_rejects_are_refused_by_the_binding(
     diagnostics = [checked_syntax(source) for source in sources]
     refused = [author_evaluated(cel_binding, source) for source in sources]
 
-    assert all(isinstance(diagnostic, Diagnostic) for diagnostic in diagnostics)
+    assert [
+        diagnostic.reason if isinstance(diagnostic, Diagnostic) else None
+        for diagnostic in diagnostics
+    ] == [Reason.INVALID_LITERAL] * len(sources)
     assert refused == [("error", "ValueError")] * len(sources)
 
 

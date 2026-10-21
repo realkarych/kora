@@ -17,6 +17,7 @@ BASE_PREFIX: Path = Path(sys.base_prefix).resolve()
 DIST_INFO_PREFIX: str = DISTRIBUTION.replace("-", "_")
 CHILD_TIMEOUT_SECONDS: float = 60.0
 MARKER_NAME: str = "imported.marker"
+WRITE_AND_SEARCH: int = 0o300
 PRELUDE: str = "import json, sys\nsys.path[:] = json.loads(sys.argv[1])\n"
 
 
@@ -77,6 +78,7 @@ class FakeDistribution:
     linked_files: Mapping[str, str] = field(default_factory=lambda: {})
     missing: Mapping[str, str] = field(default_factory=lambda: {})
     linked_package: bool = False
+    unlistable: Mapping[str, str] = field(default_factory=lambda: {})
 
 
 def record_line(relative: str, content: bytes, tampered: bool, mode: str) -> str:
@@ -122,6 +124,9 @@ def install_fake(site: Path, fake: FakeDistribution) -> Path:
         lines.append(record_line(relative, text.encode("utf-8"), False, fake.hash_mode))
     for relative, text in sorted(fake.missing.items()):
         lines.append(record_line(relative, text.encode("utf-8"), False, fake.hash_mode))
+    for relative, text in sorted(fake.unlistable.items()):
+        write_text(site / relative / "__init__.py", text)
+        (site / relative).chmod(WRITE_AND_SEARCH)
     if fake.linked_package:
         moved = site.parent / "linked-package"
         (site / MODULE).rename(moved)

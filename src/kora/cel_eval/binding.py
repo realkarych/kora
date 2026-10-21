@@ -1,4 +1,5 @@
 import base64
+import csv
 import enum
 import hashlib
 import importlib.metadata
@@ -9,7 +10,7 @@ import sys
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Protocol
 
@@ -25,6 +26,7 @@ CACHE_DIRECTORY: str = "__pycache__"
 PANIC_MODULE: str = "pyo3_runtime"
 PANIC_NAME: str = "PanicException"
 RECORD_HASH: str = "sha256"
+RECORD_FILE: str = "RECORD"
 
 
 class Refusal(enum.StrEnum):
@@ -127,26 +129,28 @@ def is_cached(parts: tuple[str, ...]) -> bool:
 def recorded_files(
     distribution: importlib.metadata.Distribution,
 ) -> dict[Path, str] | None:
-    files = distribution.files
-    if files is None:
+    record = distribution.read_text(RECORD_FILE)
+    if record is None:
         return None
     recorded: dict[Path, str] = {}
-    for entry in files:
-        if not entry.parts or entry.parts[0] != MODULE or is_cached(entry.parts):
+    for row in csv.reader(record.splitlines()):
+        parts = PurePosixPath(row[0]).parts if row else ()
+        if not parts or parts[0] != MODULE or is_cached(parts):
             continue
-        if entry.hash is None or entry.hash.mode != RECORD_HASH:
+        mode, _, value = (row[1] if len(row) > 1 else "").partition("=")
+        if mode != RECORD_HASH or not value:
             return None
-        recorded[Path(str(distribution.locate_file(entry))).resolve()] = (
-            entry.hash.value
-        )
+        recorded[Path(str(distribution.locate_file(row[0]))).resolve()] = value
     return recorded
 
 
-def present_files(package: Path) -> list[Path] | None:
-    if package.is_symlink():
-        return None
+def unlistable(error: OSError) -> None:
+    raise error
+
+
+def walked_files(package: Path) -> list[Path] | None:
     present: list[Path] = []
-    for directory, subdirectories, names in os.walk(package):
+    for directory, subdirectories, names in os.walk(package, onerror=unlistable):
         base = Path(directory)
         if any((base / name).is_symlink() for name in [*subdirectories, *names]):
             return None
@@ -156,6 +160,25 @@ def present_files(package: Path) -> list[Path] | None:
     return present
 
 
+def present_files(package: Path) -> list[Path] | None:
+    if package.is_symlink():
+        return None
+    try:
+        return walked_files(package)
+    except OSError:
+        return None
+
+
+def digests_match(resolved: Mapping[Path, Path], recorded: Mapping[Path, str]) -> bool:
+    try:
+        return all(
+            record_digest(path.read_bytes()) == recorded[key]
+            for key, path in resolved.items()
+        )
+    except OSError:
+        return False
+
+
 def files_match(package: Path, recorded: Mapping[Path, str]) -> bool:
     present = present_files(package)
     if present is None:
@@ -163,10 +186,7 @@ def files_match(package: Path, recorded: Mapping[Path, str]) -> bool:
     resolved = {path.resolve(): path for path in present}
     if set(resolved) != set(recorded):
         return False
-    return all(
-        record_digest(path.read_bytes()) == recorded[key]
-        for key, path in resolved.items()
-    )
+    return digests_match(resolved, recorded)
 
 
 def locate() -> Located:
@@ -212,7 +232,7 @@ def panic_classes() -> set[type[BaseException]]:
     return found
 
 
-def import_binding() -> ModuleType | None:
+def import_binding() -> object | None:
     try:
         import cel
     except (ImportError, OSError):
@@ -226,12 +246,14 @@ def native_compile() -> NativeCompile:
     return cel.compile
 
 
-def module_file(module: ModuleType) -> Path | None:
+def module_file(module: object) -> Path | None:
+    if not isinstance(module, ModuleType):
+        return None
     loaded = vars(module).get("__file__")
     return Path(loaded).resolve() if isinstance(loaded, str) else None
 
 
-def loaded_files_match(located: Located, package: ModuleType) -> bool:
+def loaded_files_match(located: Located, package: object) -> bool:
     for name in binding_modules():
         loaded = module_file(sys.modules[name])
         if loaded is None or loaded not in located.recorded:

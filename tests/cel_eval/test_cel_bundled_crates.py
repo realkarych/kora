@@ -52,8 +52,9 @@ def wheel_tag(distribution: importlib.metadata.Distribution) -> str:
         for line in metadata.splitlines()
         if line.startswith("Tag: ")
     ]
-    assert len(tags) == 1, "the installed wheel names exactly one tag"
-    return tags[0]
+    known = [tag for tag in tags if tag in WHEELS]
+    assert len(known) == 1, f"no single pin baseline for the wheel tags {tags}"
+    return known[0]
 
 
 def baseline_for(tag: str) -> WheelBaseline:
