@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict'
-import { calibrate, calibrateBatch, compare, measurementMetrics, measurementProtocol, parseBudgets, requireReleased } from './protocol.ts'
-import { aggregate, parseManifest, validateArchiveEntries, validateDataset } from './calibration.ts'
+import { calibrate, calibrateBatch, compare, measurementMetrics, measurementProtocol, parseBudgets, requireCandidateHeap, requireReleased } from './protocol.ts'
+import type { InvocationPoint } from './invocation.ts'
+import { heapChecks } from './invocation-checks.ts'
+import { aggregate, parseManifest, validateArchiveEntries, validateDataset, validateStageChanges } from './calibration.ts'
 
 export function protocolChecks(): void {
+  heapChecks()
   const fixture = Object.fromEntries(measurementMetrics.map(key => [key, 0]))
   const template = calibrate([fixture, fixture, fixture], { platform: 'linux', arch: 'x64', node: 'v24.22.0', browser: '156.0.8078.4' })
   const metric = 'runnerheapUsedReleasedGrowth'
@@ -75,7 +78,7 @@ export function protocolChecks(): void {
   assert.equal(pairedRegression.gates['loadMedian-paired'], false)
   assert.throws(() => calibrateBatch(clusters.slice(1), template.reference))
   assert.throws(() => calibrateBatch([...clusters.slice(1), [zero, zero]], template.reference))
-  for (const key of ['runnerheapUsedReleasedGrowth', 'runnerexternalReleasedGrowth', 'runnerarrayBuffersReleasedGrowth']) {
+  for (const key of ['runnerexternalReleasedGrowth', 'runnerarrayBuffersReleasedGrowth']) {
     const positive = { ...zero, [key]: 1 }
     const invalidBudget = { ...batch, absolute: { ...batch.absolute, [key]: 1 } }
 
@@ -86,18 +89,33 @@ export function protocolChecks(): void {
     assert.equal(batch.pairedMargin[key], 0)
   }
 
+  const candidate = { ...zero, runnerheapUsedReleasedGrowth: 60 * 1024 }
+
+  requireCandidateHeap([candidate])
+
+  assert.throws(() => { requireCandidateHeap([{ ...candidate, runnerheapUsedReleasedGrowth: 60 * 1024 + 1 }]) })
+
   const manifest = {
-    runId: '123', attempt: '1', head: 'a'.repeat(40), base: 'b'.repeat(40), checkout: 'c'.repeat(40),
-    jobs: [1, 2, 3, 4, 5].map(slot => ({ slot, jobId: String(slot), artifactId: String(slot + 10), archive: `/tmp/job-${String(slot)}.zip`, sha256: String(slot).repeat(64), reportPath: 'run-example/report.json', conclusion: 'success', name: `Console browser calibration (${String(slot)})`, artifactName: `console-browser-calibration-${String(slot)}` })),
+    stage: 'training', checkoutBase: 'b'.repeat(40), runId: '123', attempt: '1', head: 'a'.repeat(40), base: 'b'.repeat(40), checkout: 'c'.repeat(40),
+    jobs: [1, 2, 3, 4, 5].map(slot => ({ slot, kind: 'training', jobId: String(slot), artifactId: String(slot + 10), archive: `/tmp/job-${String(slot)}.zip`, sha256: String(slot).repeat(64), reportPath: 'run-example/report.json', conclusion: 'success', name: `Console browser calibration (${String(slot)})`, artifactName: `console-browser-calibration-${String(slot)}` })),
   }
   const incomplete = { ...manifest, jobs: manifest.jobs.slice(1) }
   const duplicate = { ...manifest, jobs: [...manifest.jobs.slice(1), manifest.jobs[1]] }
   const failed = { ...manifest, jobs: manifest.jobs.map(job => ({ ...job, conclusion: 'cancelled' })) }
-  const datasets = clusters.map((base, index) => ({ report: { protocol: measurementProtocol, runner: { name: String(index), image: 'ubuntu24', imageVersion: String(index) }, lockSha256: 'a'.repeat(64) }, base, head: base, reference: template.reference }))
+  const order: ['base' | 'head', number][] = [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]]
+  const points: InvocationPoint[] = [['start', 0] as const, ...order].map(([arm, repeat], sequence) => ({ protocol: measurementProtocol, sequence, arm, repeat, memory: { rss: 100, heapTotal: 100, heapUsed: 100, external: 0, arrayBuffers: 0 }, retention: { allocations: 0, arrays: 0, nominalBytes: 0, released: false } }))
+  const growth = { full: 0, late: 0, slope: 0 }
+  const datasets = clusters.map((base, index) => ({ report: { protocol: measurementProtocol, runner: { name: String(index), image: 'ubuntu24', imageVersion: String(index) }, lockSha256: 'a'.repeat(64) }, points, growth, base, head: base, reference: template.reference }))
 
   const parsed = parseManifest(manifest)
   const aggregated = aggregate(datasets)
 
+  assert.deepEqual(parseManifest(parsed), parsed)
+  assert.throws(() => parseManifest({ ...manifest, attempt: '2' }))
+  assert.throws(() => parseManifest({ ...manifest, jobs: manifest.jobs.map(job => ({ ...job, kind: 'cycle-8' })) }))
+  validateStageChanges(['web/tests/browser/budgets.json', '.github/workflows/ci.yml'])
+  assert.throws(() => { validateStageChanges(['web/tests/browser/measure.ts']) })
+  assert.throws(() => { validateStageChanges(['web/tests/browser/protocol.ts']) })
   assert.equal(parsed.jobs.length, 5)
   assert.equal(aggregated.comparisons.length, 5)
   assert(aggregated.comparisons.every(result => Object.keys(result.gates).length === 336 && Object.values(result.gates).every(Boolean)))
@@ -115,7 +133,7 @@ export function protocolChecks(): void {
   const cleanup = { remaining: { pids: [], rss: 0, descriptors: 0, processes: 0 }, failures: [], proxySockets: 0, forced: false }
   const report = {
     protocol: measurementProtocol, eligibleForCalibration: true,
-    status: 'calibrated; frozen budgets and independent verification still required', mode: 'calibration',
+    status: 'awaiting five-runner batch aggregation', mode: 'calibration',
     prHead: parsed.head, base: parsed.base, checkout: parsed.checkout, checkoutParents: [parsed.base, parsed.head],
     checkoutTree: 'd'.repeat(40), headTree: 'd'.repeat(40), dirty: '', platform: 'linux', arch: 'x64', release: '6.17.0-parser-fixture',
     node: template.reference.node, referenceCounters: 'available', artifactLimitFailed: false,
@@ -125,14 +143,14 @@ export function protocolChecks(): void {
     order: [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]],
     assets: { base: { asset: 'e'.repeat(64) }, head: { asset: 'e'.repeat(64) } }, headAssetsBeforeFixtures: { asset: 'e'.repeat(64) },
     productionSmoke: { diagnostics: { events: [], overflow: false }, cleanup }, developmentSmoke: { diagnostics: { events: [], overflow: false }, cleanup },
-    evidenceChecks: 'passed', runnerCancellation: 'passed', artifactLimits: 'passed', networkChecks: 'passed',
+    invocationChecks: 'passed', evidenceChecks: 'passed', runnerCancellation: 'passed', artifactLimits: 'passed', networkChecks: 'passed',
     failureChecks: ['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition'].map(scenario => ({ scenario, code: 0, payload: { expected: true, cleanup } })),
     playwright: { name: 'playwright', version: '1.64.1' }, browserDistribution: { browsers: [{ name: 'chromium', revision: '1248', browserVersion: template.reference.browser }] },
     viewport: { width: 1280, height: 900 }, throttling: 'none', cache: 'fresh context for cold loads; request routing disables HTTP cache',
-    proposedBudgets: zeroBudgets, summaries: { base: zeros, head: zeros },
+    reference: template.reference, invocation: { points, growth }, retention: { beforeRelease: points[6]?.retention, afterRelease: { allocations: 0, arrays: 0, nominalBytes: 0, released: true } }, retentionCleanup: { allocations: 0, arrays: 0, nominalBytes: 0, released: true }, summaries: { base: zeros, head: zeros },
   }
   const prefix = 'run-fixture/'
-  const evidence = ['report.json', 'cancelled-runner/run-nested/report.json', ...['base', 'head'].flatMap(arm => [0, 1, 2].flatMap(repeat => [`${arm}-${String(repeat)}.json`, `${arm}-${String(repeat)}-pending.json`, `${arm}-${String(repeat)}-terminal.json`, `${arm}-${String(repeat)}-baseline.heapsnapshot`, `${arm}-${String(repeat)}-end.heapsnapshot`])), ...['production', 'development'].flatMap(mode => [`${mode}-smoke.json`, ...[1280, 768, 375].flatMap(width => [`${mode}-${String(width)}.png`, `${mode}-${String(width)}-terminal.png`, `${mode}-${String(width)}.zip`])]), ...['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition'].map(scenario => `failure-${scenario}-termination.json`), 'runner-termination.json', 'runner-forced-termination.json'].map(name => `${prefix}${name}`)
+  const evidence = ['report.json', 'retention-release.json', ...Array.from({ length: 7 }, (_, index) => `invocation-${String(index)}.json`), 'cancelled-runner/run-nested/report.json', ...['base', 'head'].flatMap(arm => [0, 1, 2].flatMap(repeat => [`${arm}-${String(repeat)}.json`, `${arm}-${String(repeat)}-pending.json`, `${arm}-${String(repeat)}-terminal.json`, `${arm}-${String(repeat)}-summary.json`, `${arm}-${String(repeat)}-baseline.heapsnapshot`, `${arm}-${String(repeat)}-end.heapsnapshot`])), ...['production', 'development'].flatMap(mode => [`${mode}-smoke.json`, ...[1280, 768, 375].flatMap(width => [`${mode}-${String(width)}.png`, `${mode}-${String(width)}-terminal.png`, `${mode}-${String(width)}.zip`])]), ...['startup', 'navigation', 'assertion', 'deadline', 'cancellation', 'acquisition'].map(scenario => `failure-${scenario}-termination.json`), 'runner-termination.json', 'runner-forced-termination.json'].map(name => `${prefix}${name}`)
 
   const validated = validateDataset(report, parsed, job)
   validateArchiveEntries(evidence, `${prefix}report.json`)
@@ -142,6 +160,9 @@ export function protocolChecks(): void {
   assert.throws(() => parseBudgets({ ...template, protocol: 'collector-internal-v1' }))
   for (const protocol of [undefined, 'collector-internal-v1', 'collector-diagnostic-v1']) assert.throws(() => validateDataset({ ...report, protocol }, parsed, job))
   assert.throws(() => validateDataset({ ...report, mode: 'collector-diagnostic-v1' }, parsed, job))
+  assert.throws(() => validateDataset({ ...report, mode: 'control', control: 'cycle-8' }, parsed, job))
+  assert.throws(() => validateDataset({ ...report, frozenAggregate: 'a'.repeat(64) }, parsed, job))
+  assert.throws(() => validateDataset({ ...report, invocation: { points: points.slice(1), growth } }, parsed, job))
   assert.throws(() => validateDataset({ ...report, eligibleForCalibration: false }, parsed, job))
   assert.throws(() => aggregate(datasets.map((dataset, index) => index === 0 ? { ...dataset, report: { ...dataset.report, protocol: 'collector-internal-v1' } } : dataset)))
   assert.throws(() => aggregate(datasets.map((dataset, index) => index === 0 ? { ...dataset, report: { ...dataset.report, runner: { name: 'other', image: 'ubuntu22' } } } : dataset)))

@@ -38,11 +38,11 @@ export function writeEvidence(root: string, name: string, value: unknown, maximu
   writeFileSync(join(root, name), data, { flag: 'wx', mode: 0o600 })
 }
 
-export function readEvidence(path: string): unknown {
+export function readEvidence(path: string, maximum = 4 * 1024 * 1024): unknown {
   const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const stats = fstatSync(descriptor)
-    assert(stats.isFile() && stats.size <= 4 * 1024 * 1024, 'Invalid trial evidence file')
+    assert(stats.isFile() && stats.size <= maximum, 'Invalid trial evidence file')
     const value: unknown = JSON.parse(readFileSync(descriptor, 'utf8'))
     return value
   } finally { closeSync(descriptor) }
@@ -56,7 +56,7 @@ export function persistTerminal(root: string, terminal: Terminal, budgetRoot = r
   writeEvidence(root, `${prefix(terminal.arm, terminal.repeat)}-terminal.json`, terminal, 65536, budgetRoot)
 }
 
-export function finalizeTrial(root: string, terminal: Terminal, signal: AbortSignal, budgetRoot = root): TrialSummary {
+export function finalizeTrial(root: string, terminal: Terminal, signal: AbortSignal, budgetRoot = root): void {
   signal.throwIfAborted()
   const name = prefix(terminal.arm, terminal.repeat)
   assert.equal(terminal.protocol, measurementProtocol)
@@ -89,5 +89,20 @@ export function finalizeTrial(root: string, terminal: Terminal, signal: AbortSig
   const metrics = summarize(trial)
   linkSync(join(root, `${name}-complete.json`), join(root, `${name}.json`))
   unlinkSync(join(root, `${name}-complete.json`))
-  return { arm: trial.arm, repeat: trial.repeat, browserVersion: trial.browserVersion, metrics }
+  writeEvidence(root, `${name}-summary.json`, { arm: trial.arm, repeat: trial.repeat, browserVersion: trial.browserVersion, metrics }, 65536, budgetRoot)
+}
+
+export function readSummary(root: string, arm: 'base' | 'head', repeat: number): TrialSummary {
+  const input = readEvidence(join(root, `${prefix(arm, repeat)}-summary.json`), 65536)
+  assert(input !== null && typeof input === 'object' && !Array.isArray(input), 'invalid-summary')
+  assert(Object.keys(input).sort().join(',') === 'arm,browserVersion,metrics,repeat', 'invalid-summary')
+  assert('arm' in input && input.arm === arm && 'repeat' in input && input.repeat === repeat, 'invalid-summary-identity')
+  assert('browserVersion' in input && typeof input.browserVersion === 'string' && /^[0-9.]{1,64}$/u.test(input.browserVersion), 'invalid-summary-browser')
+  assert('metrics' in input && input.metrics !== null && typeof input.metrics === 'object' && !Array.isArray(input.metrics), 'invalid-summary-metrics')
+  const metrics: Record<string, number> = {}
+  for (const [key, value] of Object.entries(input.metrics)) {
+    assert(typeof value === 'number' && Number.isFinite(value), 'invalid-summary-number')
+    metrics[key] = value
+  }
+  return { arm, repeat, browserVersion: input.browserVersion, metrics }
 }

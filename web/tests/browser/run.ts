@@ -12,12 +12,17 @@ import { assetHashes, buildBase, git, repository, webRoot } from './build.ts'
 import { failureChecks, runnerCancellation } from './negative.ts'
 import { collectRunner, measure, smoke } from './measure.ts'
 import type { Trial } from './trial.ts'
-import { finalizeTrial, persistTerminal, persistTrial } from './trial-evidence.ts'
-import type { Terminal, TrialSummary } from './trial-evidence.ts'
+import { finalizeTrial, persistTerminal, persistTrial, readSummary, readEvidence, writeEvidence } from './trial-evidence.ts'
+import type { Terminal } from './trial-evidence.ts'
 import { nativeResources } from './resources.ts'
 import { evidenceChecks } from './trial-evidence-checks.ts'
-import { calibrate, compare, measurementProtocol, parseBudgets, requireReleased } from './protocol.ts'
+import { compare, measurementProtocol, parseBudgets, requireCandidateHeap } from './protocol.ts'
 import { protocolChecks } from './protocol-checks.ts'
+import { invocationChecks } from './invocation-checks.ts'
+import { heapGates } from './invocation-heap.ts'
+import { invocationGrowth, persistInvocation, readInvocation } from './invocation.ts'
+import { classifyControl, isControl, parseRunnerMode, Retention } from './retention.ts'
+import { recoveryFixture } from './retention-fixture.ts'
 import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
@@ -25,13 +30,13 @@ import { artifactLimits } from './limits.ts'
 import { diagnosticSnapshot } from './diagnostic-snapshot.ts'
 import { diagnosticPlan, persistCheckpoint, verifyCheckpoints } from './diagnostic-checkpoint.ts'
 
-const diagnostic = process.argv.includes('--diagnostic')
+const mode = parseRunnerMode(process.argv.slice(2))
+const diagnostic = mode === 'diagnostic'
 if (diagnostic) assert.equal(process.env.KORA_BROWSER_DIAGNOSTIC, diagnosticPlan, 'Use the sanitized diagnostic launcher')
-const calibration = process.argv.includes('--calibrate')
-const smokeOnly = process.argv.includes('--smoke')
+const calibration = mode === 'calibration'
+const smokeOnly = mode === 'smoke'
+const control = isControl(mode) ? mode : undefined
 const cancelProbe = process.env.KORA_BROWSER_CANCEL_PROBE === '1'
-assert(process.argv.slice(2).every(argument => ['--calibrate', '--smoke', '--diagnostic'].includes(argument)))
-assert(Number(calibration) + Number(smokeOnly) + Number(diagnostic) <= 1)
 const outputRoot = resolve(process.env.KORA_BROWSER_OUTPUT ?? join(repository, 'measurements', 'browser'))
 await mkdir(outputRoot, { recursive: true })
 const output = await mkdtemp(join(outputRoot, 'run-'))
@@ -42,17 +47,17 @@ const stop = (): void => { cancellation.abort(); void closeOwners() }
 const limits = new ArtifactLimit(output, stop)
 process.once('SIGTERM', stop)
 process.once('SIGINT', stop)
-const trials: TrialSummary[] = []
+const retention = new Retention(control ?? 'none')
 const report: Record<string, unknown> = {
-  output, protocol: measurementProtocol, status: 'running', mode: diagnostic ? 'collector-diagnostic-v1' : calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
+  output, protocol: measurementProtocol, status: 'running', mode: diagnostic ? 'collector-diagnostic-v1' : control ? 'control' : mode, control,
   diagnosticEnvironmentKeys: diagnostic ? Object.keys(process.env).sort() : undefined,
-  eligibleForCalibration: !diagnostic, diagnosticPlan: diagnostic ? diagnosticPlan : undefined,
+  eligibleForCalibration: calibration, diagnosticPlan: diagnostic ? diagnosticPlan : undefined,
   command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
   cpuModels: [...new Set(cpus().map(cpu => cpu.model))], totalMemory: totalmem(),
   runner: { runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB, slot: process.env.KORA_BROWSER_CALIBRATION_SLOT, name: process.env.RUNNER_NAME, image: process.env.ImageOS, imageVersion: process.env.ImageVersion },
   viewport: { width: 1280, height: 900 }, throttling: 'none', cache: 'fresh context for cold loads; request routing disables HTTP cache',
   repetitions: 3, coldWarmup: 2, coldSamples: 20, lifecycleWarmup: 3, lifecycleSamples: 30,
-  statisticalUnit: 'browser process pair', referenceCounters: process.platform === 'linux' ? 'available' : 'unverified',
+  statisticalUnit: 'Node process with six ordered browser trials', referenceCounters: process.platform === 'linux' ? 'available' : 'unverified',
 }
 const save = (): void => {
   const data = JSON.stringify(report, null, 2)
@@ -64,6 +69,8 @@ const saveTrial = (trial: Trial): void => {
 }
 const started = performance.now()
 try {
+  invocationChecks()
+  report.invocationChecks = 'passed'
   const checkout = await git(['rev-parse', 'HEAD'])
   const prHead = process.env.KORA_BROWSER_REVISION ?? checkout
   assert(/^[a-f0-9]{40}$/u.test(prHead), 'Invalid PR revision')
@@ -119,10 +126,9 @@ try {
       : [['head', 0], ['base', 0], ['base', 1], ['head', 1], ['head', 2], ['base', 2]]
     report.order = order
     save()
-    for (const [arm, repeat] of order) {
-      assert(!cancellation.signal.aborted, 'Browser runner interrupted')
+    const completeTrial = async (arm: 'base' | 'head', repeat: number): Promise<void> => {
       try {
-        await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial, diagnostic ? cancellation.signal : undefined)
+        await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial, retention, diagnostic ? cancellation.signal : undefined)
       } finally {
         await collectRunner()
         const runnerAfter = process.memoryUsage()
@@ -134,9 +140,28 @@ try {
         const phase = { phase: 'released', native: await nativeResources([process.pid]), runner: process.memoryUsage() }
         const terminal: Terminal = { protocol: measurementProtocol, arm, repeat, runnerAfter, after, phase }
         persistTerminal(output, terminal, evidenceRoot)
-        trials.push(finalizeTrial(output, terminal, cancellation.signal, evidenceRoot))
+        retention.allocate('finalization')
+        finalizeTrial(output, terminal, cancellation.signal, evidenceRoot)
       }
     }
+    await collectRunner()
+    persistInvocation(output, 0, 'start', 0, process.memoryUsage(), retention.evidence(), evidenceRoot)
+    for (const [index, [arm, repeat]] of order.entries()) {
+      assert(!cancellation.signal.aborted, 'Browser runner interrupted')
+      await completeTrial(arm, repeat)
+      await collectRunner()
+      cancellation.signal.throwIfAborted()
+      persistInvocation(output, index + 1, arm, repeat, process.memoryUsage(), retention.evidence(), evidenceRoot)
+    }
+    const retained = retention.evidence()
+    retention.release()
+    report.retention = { beforeRelease: retained, afterRelease: retention.evidence() }
+    writeEvidence(output, 'retention-release.json', report.retention, 4096, evidenceRoot)
+    assert(retained.allocations === retention.maximum, 'incomplete-retention-control')
+    const invocation = readInvocation(output)
+    const growth = invocationGrowth(invocation, order)
+    report.invocation = { points: invocation, growth }
+    const trials = order.map(([arm, repeat]) => readSummary(output, arm, repeat))
     assert.equal(trials.length, 6)
     evidenceChecks(output, evidenceRoot)
     report.evidenceChecks = 'passed'
@@ -147,6 +172,7 @@ try {
     const browser = trials[0]?.browserVersion
     assert(browser && trials.every(trial => trial.browserVersion === browser))
     const reference = { platform: process.platform, arch: process.arch, node: process.version, browser }
+    report.reference = reference
     if (diagnostic) {
       verifyCheckpoints(output)
       report.checkpoints = 'passed'
@@ -155,28 +181,45 @@ try {
     } else if (calibration) {
       assert.equal(process.platform, 'linux', 'Reference calibration requires Linux')
       assert.equal(process.arch, 'x64', 'Reference calibration requires x86_64')
-      requireReleased([...baseSummary, ...headSummary])
-      const proposed = calibrate(baseSummary, reference)
+      requireCandidateHeap([...baseSummary, ...headSummary])
       protocolChecks()
-      report.proposedBudgets = proposed
-      report.status = 'calibrated; frozen budgets and independent verification still required'
+      report.reference = reference
+      report.status = 'awaiting five-runner batch aggregation'
     } else {
       const input: unknown = JSON.parse(await readFile(join(import.meta.dirname, 'budgets.json'), 'utf8'))
       const budgets = parseBudgets(input)
+      const frozenPath = join(import.meta.dirname, 'frozen-training.json')
+      const frozen = readEvidence(frozenPath)
+      assert(frozen !== null && typeof frozen === 'object' && 'budgets' in frozen, 'invalid-frozen-training')
+      assert.deepEqual(parseBudgets(frozen.budgets), budgets, 'frozen-budget-mismatch')
+      report.frozenAggregate = createHash('sha256').update(await readFile(frozenPath)).digest('hex')
       protocolChecks()
       assert.deepEqual(reference, budgets.reference, 'Reference environment mismatch')
       const comparison = compare(baseSummary, headSummary, budgets)
       report.comparison = comparison
-      save()
-      assert(Object.values(comparison.gates).every(Boolean), 'Browser measurement gate failed')
-      report.status = 'passed'
+      const invocationGates = heapGates(growth, budgets.heap)
+      report.invocationGates = invocationGates
+      if (control) {
+        if (control === 'intertrial') await recoveryFixture(output, retention, budgets.heap)
+        const classification = classifyControl(control, comparison.gates, invocationGates, true, true)
+        report.controlResult = classification
+        save()
+        assert(classification.valid, 'invalid-retention-control-result')
+        report.status = 'control validated'
+      } else {
+        save()
+        assert(Object.values(comparison.gates).every(Boolean) && Object.values(invocationGates).every(Boolean), 'Browser measurement gate failed')
+        report.status = 'passed'
+      }
     }
   } else report.status = 'smoke passed; performance unverified'
 } catch (error) {
   report.status = 'failed'
-  report.failure = error instanceof Error ? { name: error.name, message: error.message.slice(0, 2048) } : { name: 'UnknownError' }
+  report.failure = { code: error instanceof SyntaxError ? 'invalid-json' : error instanceof assert.AssertionError ? 'invalid-evidence' : 'operation-failed' }
   process.exitCode = 1
 } finally {
+  retention.release()
+  report.retentionCleanup = retention.evidence()
   await closeOwners()
   limits.close()
   if (cancellation.signal.aborted || limits.failed) { report.status = 'failed'; process.exitCode = 1 }

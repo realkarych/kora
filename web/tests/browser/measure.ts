@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import { closeSync, openSync, writeSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { setImmediate } from 'node:timers/promises'
 import { getHeapCodeStatistics } from 'node:v8'
 import type { CDPSession } from 'playwright'
+import { collectRunner } from './invocation-gc.ts'
+import type { Retention } from './retention.ts'
+export { collectRunner } from './invocation-gc.ts'
 import { checkCleanup, Ownership } from './ownership.ts'
 import type { Cleanup } from './ownership.ts'
 import { contextFor, Diagnostics, heap, ready, semantics } from './page.ts'
@@ -12,14 +14,6 @@ import type { NativeResources } from './resources.ts'
 import type { Trial } from './trial.ts'
 import { measurementProtocol } from './protocol.ts'
 import { checkpointMemory, persistCheckpoint } from './diagnostic-checkpoint.ts'
-
-export async function collectRunner(): Promise<void> {
-  assert(globalThis.gc, 'Runner requires --expose-gc')
-  globalThis.gc()
-  await setImmediate()
-  globalThis.gc()
-  await setImmediate()
-}
 
 export async function snapshot(session: CDPSession, path: string): Promise<void> {
   const descriptor = openSync(path, 'wx')
@@ -37,7 +31,7 @@ export async function snapshot(session: CDPSession, path: string): Promise<void>
   assert(!overflow, 'Heap snapshot exceeded 32 MiB bound')
 }
 
-export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void, diagnostic?: AbortSignal): Promise<void> {
+export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void, retention: Retention, diagnostic?: AbortSignal): Promise<void> {
   await collectRunner()
   const owner = new Ownership(artifacts)
   const diagnostics = new Diagnostics()
@@ -84,6 +78,7 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
           await ready(temporaryPage)
           active = await nativeResources([process.pid])
         } finally { await temporary.close() }
+        if (cycle >= 0) retention.allocate('cycle')
         const beforeGCNative = await nativeResources([process.pid])
         const beforeGC = await heap(session)
         const runnerBeforeGC = process.memoryUsage()

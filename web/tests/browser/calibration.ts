@@ -6,12 +6,23 @@ import { readFile, stat, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { calibrateBatch, compare, measurementProtocol, parseBudgets, requireReleased } from './protocol.ts'
+import { calibrateBatch, compare, measurementProtocol, parseBudgets, requireCandidateHeap, requireReleased } from './protocol.ts'
 import type { Budgets } from './protocol.ts'
 import { percentile, span } from './resources.ts'
+import { fitHeapLimits, heapGates } from './invocation-heap.ts'
+import type { HeapGrowth } from './invocation-heap.ts'
+import { invocationGrowth, parseInvocationPoint, parseRetention } from './invocation.ts'
+import type { InvocationPoint } from './invocation.ts'
+import { classifyControl, controls } from './retention.ts'
+import type { Control } from './retention.ts'
+import { verifyRecovery } from './retention-fixture.ts'
 
 interface Job {
   slot: number
+  kind: 'training' | 'holdout' | Control
+  conclusion: 'success'
+  name: string
+  artifactName: string
   jobId: string
   artifactId: string
   archive: string
@@ -20,6 +31,9 @@ interface Job {
 }
 
 interface Manifest {
+  stage: 'training' | 'validation'
+  checkoutBase: string
+  frozenAggregate?: string
   runId: string
   attempt: string
   head: string
@@ -30,6 +44,8 @@ interface Manifest {
 
 interface Dataset {
   report: Record<string, unknown>
+  points: InvocationPoint[]
+  growth: HeapGrowth
   base: Record<string, number>[]
   head: Record<string, number>[]
   reference: Budgets['reference']
@@ -63,22 +79,29 @@ export function parseManifest(value: unknown): Manifest {
   const input = record(value)
   const id = /^[1-9][0-9]{0,19}$/u
   const sha = /^[a-f0-9]{40}$/u
-  const jobs = array(input.jobs, 5).map(value => {
+  assert(input.stage === 'training' || input.stage === 'validation', 'invalid-stage')
+  assert(input.attempt === '1', 'unexpected-attempt')
+  const count = input.stage === 'training' ? 5 : 9
+  const jobs = array(input.jobs, count).map((value): Job => {
     const job = record(value)
     const slot = number(job.slot)
-    assert(Number.isInteger(slot) && slot >= 1 && slot <= 5)
+    assert(Number.isInteger(slot) && slot >= 1 && slot <= count)
     assert.equal(job.conclusion, 'success')
-    assert.equal(job.name, `Console browser calibration (${String(slot)})`)
-    assert.equal(job.artifactName, `console-browser-calibration-${String(slot)}`)
+    const kind = input.stage === 'training' ? 'training' : slot <= 5 ? 'holdout' : controls[slot - 6]
+    assert(kind, 'invalid-stage-slot')
+    assert.equal(job.kind, kind)
+    const label = kind === 'holdout' ? `holdout-${String(slot)}` : kind
+    assert.equal(job.name, input.stage === 'training' ? `Console browser calibration (${String(slot)})` : `Console browser validation (${label})`)
+    assert.equal(job.artifactName, input.stage === 'training' ? `console-browser-calibration-${String(slot)}` : `console-browser-validation-${label}`)
     return {
-      slot, jobId: string(job.jobId, id), artifactId: string(job.artifactId, id),
+      slot, kind, conclusion: 'success', name: string(job.name, /^.{1,128}$/u), artifactName: string(job.artifactName, /^.{1,128}$/u), jobId: string(job.jobId, id), artifactId: string(job.artifactId, id),
       archive: string(job.archive, /^\/[^\0\r\n]+\.zip$/u),
       sha256: string(job.sha256, /^[a-f0-9]{64}$/u),
       reportPath: string(job.reportPath, /^run-[A-Za-z0-9]+\/report\.json$/u),
     }
   })
-  for (const key of ['slot', 'jobId', 'artifactId', 'archive', 'sha256'] as const) assert.equal(new Set(jobs.map(job => job[key])).size, 5, `Duplicate ${key}`)
-  return { runId: string(input.runId, id), attempt: string(input.attempt, id), head: string(input.head, sha), base: string(input.base, sha), checkout: string(input.checkout, sha), jobs }
+  for (const key of ['slot', 'jobId', 'artifactId', 'archive', 'sha256'] as const) assert.equal(new Set(jobs.map(job => job[key])).size, count, `Duplicate ${key}`)
+  return { stage: input.stage, checkoutBase: string(input.checkoutBase, sha), ...(input.stage === 'validation' ? { frozenAggregate: string(input.frozenAggregate, /^[a-f0-9]{64}$/u) } : {}), runId: string(input.runId, id), attempt: string(input.attempt, id), head: string(input.head, sha), base: string(input.base, sha), checkout: string(input.checkout, sha), jobs }
 }
 
 function diagnostics(value: unknown): void {
@@ -103,14 +126,17 @@ function summaries(value: unknown): Record<string, number>[] {
 
 export function validateDataset(value: unknown, manifest: Manifest, job: Job): Dataset {
   const report = record(value)
-  assert.equal(report.status, 'calibrated; frozen budgets and independent verification still required')
-  assert.equal(report.mode, 'calibration')
+  const training = manifest.stage === 'training'
+  assert.equal(report.status, training ? 'awaiting five-runner batch aggregation' : job.kind === 'holdout' ? 'passed' : 'control validated')
+  assert.equal(report.mode, training ? 'calibration' : job.kind === 'holdout' ? 'verification' : 'control')
+  assert.equal(report.control, training || job.kind === 'holdout' ? undefined : job.kind)
+  assert.equal(report.frozenAggregate, manifest.frozenAggregate)
   assert.equal(report.protocol, measurementProtocol)
-  assert.equal(report.eligibleForCalibration, true)
+  assert.equal(report.eligibleForCalibration, training)
   assert.equal(report.prHead, manifest.head)
   assert.equal(report.base, manifest.base)
   assert.equal(report.checkout, manifest.checkout)
-  assert.deepEqual(report.checkoutParents, [manifest.base, manifest.head])
+  assert.deepEqual(report.checkoutParents, [manifest.checkoutBase, manifest.head])
   string(report.headTree, /^[a-f0-9]{40}$/u)
   assert.equal(report.checkoutTree, report.headTree)
   assert.equal(report.dirty, '')
@@ -133,7 +159,8 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
   assert.equal(runner.image, 'ubuntu24')
   for (const key of ['name', 'image', 'imageVersion']) string(runner[key], /^.{1,256}$/u)
   for (const [key, expected] of Object.entries({ repetitions: 3, coldWarmup: 2, coldSamples: 20, lifecycleWarmup: 3, lifecycleSamples: 30 })) assert.equal(report[key], expected)
-  assert.deepEqual(report.order, [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]])
+  const order: ['base' | 'head', number][] = training ? [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]] : [['head', 0], ['base', 0], ['base', 1], ['head', 1], ['head', 2], ['base', 2]]
+  assert.deepEqual(report.order, order)
   const assets = record(report.assets)
   assert.deepEqual(assets.head, report.headAssetsBeforeFixtures)
   for (const arm of ['base', 'head']) {
@@ -146,7 +173,7 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
     diagnostics(smoke.diagnostics)
     released(smoke.cleanup)
   }
-  for (const key of ['runnerCancellation', 'artifactLimits', 'networkChecks', 'evidenceChecks']) assert.equal(report[key], 'passed')
+  for (const key of ['runnerCancellation', 'artifactLimits', 'networkChecks', 'evidenceChecks', 'invocationChecks']) assert.equal(report[key], 'passed')
   const failures = array(report.failureChecks, 6).map(record)
   assert.deepEqual(failures.map(failure => failure.scenario), scenarios)
   for (const failure of failures) {
@@ -167,18 +194,32 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
   assert.deepEqual(report.viewport, { width: 1280, height: 900 })
   assert.equal(report.throttling, 'none')
   assert.equal(report.cache, 'fresh context for cold loads; request routing disables HTTP cache')
-  const proposed = parseBudgets(report.proposedBudgets)
+  const referenceInput = record(report.reference)
+  const reference = { platform: string(referenceInput.platform, /^linux$/u), arch: string(referenceInput.arch, /^x64$/u), node: string(referenceInput.node, /^v[0-9.]+$/u), browser: string(referenceInput.browser, /^[0-9.]+$/u) }
   const chromium = browsers.filter(browser => browser.name === 'chromium')
   assert.equal(chromium.length, 1)
-  assert.equal(chromium[0]?.browserVersion, proposed.reference.browser)
-  assert.equal(proposed.reference.platform, report.platform)
-  assert.equal(proposed.reference.arch, report.arch)
-  assert.equal(proposed.reference.node, report.node)
+  assert.equal(chromium[0]?.browserVersion, reference.browser)
+  assert.equal(reference.platform, report.platform)
+  assert.equal(reference.arch, report.arch)
+  assert.equal(reference.node, report.node)
   const summary = record(report.summaries)
   const base = summaries(summary.base)
   const head = summaries(summary.head)
-  requireReleased([...base, ...head])
-  return { report, base, head, reference: proposed.reference }
+  if (training) requireCandidateHeap([...base, ...head])
+  else requireReleased([...base, ...head])
+  const invocation = record(report.invocation)
+  const points = array(invocation.points, 7).map(parseInvocationPoint)
+  const growth = invocationGrowth(points, order)
+  assert.deepEqual(invocation.growth, growth)
+  const expectedPayload = job.kind === 'cycle-1' ? 1024 : job.kind === 'cycle-8' ? 8192 : job.kind === 'cycle-32' ? 32768 : job.kind === 'intertrial' ? 245760 : 0
+  const perTrial = expectedPayload === 0 ? 0 : job.kind === 'intertrial' ? 1 : 30
+  for (const [index, point] of points.entries()) assert.deepEqual(point.retention, { allocations: index * perTrial, arrays: index * perTrial, nominalBytes: index * perTrial * expectedPayload, released: false })
+  const retention = record(report.retention)
+  assert.deepEqual(retention.beforeRelease, points[6]?.retention)
+  const releasedOwner = { allocations: 6 * perTrial, arrays: 0, nominalBytes: 0, released: true }
+  assert.deepEqual(parseRetention(retention.afterRelease), releasedOwner)
+  assert.deepEqual(parseRetention(report.retentionCleanup), releasedOwner)
+  return { report, base, head, reference, points, growth }
 }
 
 function summarizeRaw(trial: Record<string, unknown>): Record<string, number> {
@@ -247,7 +288,7 @@ function validateTrial(value: unknown, dataset: Dataset, arm: 'base' | 'head', r
   assert.deepEqual(summary, summarizeRaw(trial), 'Raw trial does not match summary')
   for (const key of terminals) {
     const growth = number(record(trial.runnerAfter)[key]) - number(record(trial.runnerBefore)[key])
-    assert(growth <= 0)
+    if (key !== 'heapUsed') assert(growth <= 0)
     assert.equal(summary[`runner${key}ReleasedGrowth`], growth)
   }
 }
@@ -264,7 +305,7 @@ export function validateFinalization(trial: Record<string, unknown>, pending: Re
   assert.deepEqual(trial, { ...pending, runnerAfter: terminal.runnerAfter, after: terminal.after, phases: [...array(pending.phases, 25), terminal.phase] }, 'Finalization changed raw evidence')
 }
 
-export function aggregate(datasets: Dataset[]): { budgets: Budgets; comparisons: ReturnType<typeof compare>[] } {
+export function aggregate(datasets: Dataset[]): { budgets: Budgets; comparisons: ReturnType<typeof compare>[]; invocations: Record<string, boolean>[] } {
   assert.equal(datasets.length, 5)
   const first = datasets[0]
   assert(first)
@@ -275,12 +316,21 @@ export function aggregate(datasets: Dataset[]): { budgets: Budgets; comparisons:
     assert.equal(dataset.report.protocol, measurementProtocol)
     assert.equal(record(dataset.report.runner).image, 'ubuntu24')
     for (const key of ['checkout', 'headTree', 'checkoutParents', 'prHead', 'base', 'node', 'platform', 'arch', 'lockSha256', 'playwright', 'browserDistribution', 'assets', 'viewport', 'throttling', 'cache']) assert.deepEqual(dataset.report[key], first.report[key], `Mismatched ${key}`)
-    requireReleased([...dataset.base, ...dataset.head])
+    requireCandidateHeap([...dataset.base, ...dataset.head])
   }
   const budgets = calibrateBatch(datasets.map(dataset => dataset.base), first.reference)
+  budgets.heap = fitHeapLimits(datasets.map(dataset => [...dataset.base, ...dataset.head].map(summary => {
+    const value = summary.runnerheapUsedReleasedGrowth
+    assert(value !== undefined)
+    return value
+  })), datasets.map(dataset => dataset.growth))
+  budgets.absolute.runnerheapUsedReleasedGrowth = budgets.heap.terminal
+  budgets.pairedMargin.runnerheapUsedReleasedGrowth = budgets.heap.terminal
+  const invocations = datasets.map(dataset => heapGates(dataset.growth, budgets.heap))
+  assert(invocations.every(gates => Object.values(gates).every(Boolean)), 'Training invocation gate failed')
   const comparisons = datasets.map(dataset => compare(dataset.base, dataset.head, budgets))
   assert(comparisons.every(comparison => Object.keys(comparison.gates).length === 336 && Object.values(comparison.gates).every(Boolean)), 'Calibration batch failed prospective gates')
-  return { budgets, comparisons }
+  return { budgets, comparisons, invocations }
 }
 
 async function readBounded(path: string, maximum: number): Promise<unknown> {
@@ -304,7 +354,7 @@ export function validateArchiveEntries(entries: string[], reportPath: string): v
   for (const arm of ['base', 'head']) {
     for (let repeat = 0; repeat < 3; repeat++) {
       const trial = `${arm}-${String(repeat)}`
-      required.push(`${trial}.json`, `${trial}-pending.json`, `${trial}-terminal.json`, `${trial}-baseline.heapsnapshot`, `${trial}-end.heapsnapshot`)
+      required.push(`${trial}.json`, `${trial}-pending.json`, `${trial}-terminal.json`, `${trial}-summary.json`, `${trial}-baseline.heapsnapshot`, `${trial}-end.heapsnapshot`)
     }
   }
   for (const mode of ['production', 'development']) {
@@ -312,6 +362,7 @@ export function validateArchiveEntries(entries: string[], reportPath: string): v
     for (const width of [1280, 768, 375]) required.push(`${mode}-${String(width)}.png`, `${mode}-${String(width)}-terminal.png`, `${mode}-${String(width)}.zip`)
   }
   for (const name of [...scenarios.map(scenario => `failure-${scenario}`), 'runner', 'runner-forced']) required.push(`${name}-termination.json`)
+  required.push('retention-release.json', ...Array.from({ length: 7 }, (_, index) => `invocation-${String(index)}.json`))
   for (const name of required) assert(entries.includes(`${prefix}${name}`), 'Missing required evidence entry')
 }
 
@@ -338,6 +389,7 @@ async function loadDataset(manifest: Manifest, job: Job): Promise<Dataset> {
       const terminal = record(await readArchive(job, `${name}-terminal.json`, 65536))
       validateFinalization(trial, pending, terminal, arm, repeat)
       validateTrial(trial, dataset, arm, repeat)
+      assert.deepEqual(await readArchive(job, `${name}-summary.json`, 65536), { arm, repeat, browserVersion: dataset.reference.browser, metrics: dataset[arm][repeat] })
     }
   }
   for (const name of [...scenarios.map(scenario => `failure-${scenario}`), 'runner', 'runner-forced']) {
@@ -349,27 +401,86 @@ async function loadDataset(manifest: Manifest, job: Job): Promise<Dataset> {
     array(remaining.pids, 0)
     for (const key of ['rss', 'descriptors', 'processes']) assert.equal(remaining[key], 0)
   }
+  for (let sequence = 0; sequence < 7; sequence++) {
+    const point = parseInvocationPoint(await readArchive(job, `${prefix}invocation-${String(sequence)}.json`, 4096))
+    assert.deepEqual(point, dataset.points[sequence], 'Raw invocation does not match report')
+  }
+  assert.deepEqual(await readArchive(job, `${prefix}retention-release.json`, 4096), dataset.report.retention)
   return dataset
+}
+
+export function validateStageChanges(paths: string[]): void {
+  const allowed = ['web/tests/browser/budgets.json', 'web/tests/browser/frozen-training.json', '.github/workflows/ci.yml', 'knowledge/research/console-browser-checks-2026-10-21.md', 'knowledge/research/browser-heap-tolerance-2026-10-22.md']
+  assert(paths.every(path => allowed.includes(path)), 'Changed measurement inputs between stages')
+}
+
+async function validateStage(manifest: Manifest, datasets: Dataset[], frozenPath: string): Promise<unknown> {
+  assert(manifest.stage === 'validation')
+  const frozenBytes = await readFile(frozenPath)
+  assert(frozenBytes.byteLength <= 4 * 1024 * 1024)
+  assert.equal(createHash('sha256').update(frozenBytes).digest('hex'), manifest.frozenAggregate)
+  const frozen = record(JSON.parse(frozenBytes.toString('utf8')))
+  const training = parseManifest(frozen.manifest)
+  assert(training.stage === 'training' && training.base === manifest.base && training.runId !== manifest.runId)
+  const trainingDatasets: Dataset[] = []
+  for (const job of training.jobs) trainingDatasets.push(await loadDataset(training, job))
+  const rebuilt = aggregate(trainingDatasets)
+  assert.deepEqual(frozen, { manifest: training, ...rebuilt }, 'Frozen aggregate does not match training evidence')
+  const budgets = parseBudgets(frozen.budgets)
+  await execute('git', ['merge-base', '--is-ancestor', training.head, manifest.head])
+  const { stdout } = await execute('git', ['diff', '--name-only', training.head, manifest.head])
+  validateStageChanges(stdout.trim().split('\n'))
+  assert.equal(new Set(datasets.map(dataset => record(dataset.report.runner).name)).size, 9, 'Runner identities must be distinct')
+  const first = trainingDatasets[0]
+  assert(first)
+  const results: unknown[] = []
+  for (const [index, dataset] of datasets.entries()) {
+    const job = manifest.jobs[index]
+    assert(job)
+    for (const key of ['base', 'node', 'platform', 'arch', 'lockSha256', 'playwright', 'browserDistribution', 'assets', 'viewport', 'throttling', 'cache']) assert.deepEqual(dataset.report[key], first.report[key], 'Changed measurement inputs between stages')
+    assert.deepEqual(dataset.reference, budgets.reference)
+    const comparison = compare(dataset.base, dataset.head, budgets)
+    const invocation = heapGates(dataset.growth, budgets.heap)
+    assert.deepEqual(dataset.report.comparison, comparison)
+    assert.deepEqual(dataset.report.invocationGates, invocation)
+    if (job.kind === 'holdout') {
+      assert(Object.values(comparison.gates).every(Boolean) && Object.values(invocation).every(Boolean), 'Holdout gate failed')
+      results.push({ slot: job.slot, comparison, invocation })
+    } else {
+      assert(job.kind !== 'training')
+      if (job.kind === 'intertrial') {
+        const prefix = job.reportPath.slice(0, -'report.json'.length)
+        verifyRecovery(await readArchive(job, `${prefix}retention-recovery.json`, 65536), budgets.heap)
+      }
+      const classification = classifyControl(job.kind, comparison.gates, invocation, true, true)
+      assert.deepEqual(dataset.report.controlResult, classification)
+      assert(classification.valid, 'Invalid sensitivity control')
+      results.push({ slot: job.slot, comparison, invocation, classification })
+    }
+  }
+  return { frozenAggregate: manifest.frozenAggregate, results }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   let stage: 'arguments' | 'manifest' | 'archive' | 'aggregate' | 'output' = 'arguments'
   try {
-    assert.equal(process.argv.length, 4)
-    const [manifestPath, outputPath] = process.argv.slice(2)
+    const verify = process.argv[2] === '--verify'
+    assert.equal(process.argv.length, verify ? 6 : 4)
+    const [manifestPath, outputPath, frozenPath] = process.argv.slice(verify ? 3 : 2)
     assert(manifestPath && outputPath)
     stage = 'manifest'
     const manifest = parseManifest(await readBounded(manifestPath, 64 * 1024))
+    assert.equal(manifest.stage, verify ? 'validation' : 'training')
     stage = 'archive'
     const datasets: Dataset[] = []
     for (const job of manifest.jobs) datasets.push(await loadDataset(manifest, job))
     stage = 'aggregate'
-    const result = aggregate(datasets)
+    const result = verify && frozenPath ? await validateStage(manifest, datasets, frozenPath) : aggregate(datasets)
     stage = 'output'
-    const output = JSON.stringify({ manifest, ...result }, null, 2)
+    const output = JSON.stringify({ manifest, ...record(result) }, null, 2)
     assert(Buffer.byteLength(output) <= 4 * 1024 * 1024)
     await writeFile(outputPath, `${output}\n`, { flag: 'wx' })
-    process.stdout.write(`${JSON.stringify({ event: 'browser.calibration.completed', level: 'INFO', jobs: 5, baseSamples: 15, gates: 1680 })}\n`)
+    process.stdout.write(`${JSON.stringify({ event: 'browser.calibration.completed', level: 'INFO', jobs: datasets.length, stage: manifest.stage })}\n`)
   } catch (error) {
     const failure = error instanceof SyntaxError ? 'invalid-json' : error instanceof assert.AssertionError ? 'invalid-evidence' : 'operation-failed'
     process.exitCode = 1

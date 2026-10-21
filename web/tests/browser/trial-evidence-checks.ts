@@ -4,9 +4,10 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { directoryLimit } from './diagnostic-snapshot.ts'
 import { validateFinalization } from './calibration.ts'
-import { finalizeTrial, persistTerminal, persistTrial, readEvidence, writeEvidence } from './trial-evidence.ts'
+import { finalizeTrial, persistTerminal, persistTrial, readEvidence, readSummary, writeEvidence } from './trial-evidence.ts'
 import type { Terminal } from './trial-evidence.ts'
 import { parseTrial } from './trial-parser.ts'
+import { Retention } from './retention.ts'
 import { summarize } from './trial.ts'
 
 function record(value: unknown): Record<string, unknown> {
@@ -31,7 +32,8 @@ export function evidenceChecks(output: string, budgetRoot = output): void {
   }
   const success = fixture('success')
 
-  const summary = finalizeTrial(success, terminal, new AbortController().signal, budgetRoot)
+  finalizeTrial(success, terminal, new AbortController().signal, budgetRoot)
+  const summary = readSummary(success, 'base', 0)
   const actual = readEvidence(join(success, 'base-0.json'))
 
   assert.deepEqual(summary, { arm: completed.arm, repeat: completed.repeat, browserVersion: completed.browserVersion, metrics: summarize(completed) })
@@ -44,9 +46,15 @@ export function evidenceChecks(output: string, budgetRoot = output): void {
 
   const cancelled = fixture('cancelled')
   const controller = new AbortController()
+  const cancelledRetention = new Retention('cycle-8')
+  cancelledRetention.allocate('cycle')
   controller.abort()
 
-  assert.throws(() => finalizeTrial(cancelled, terminal, controller.signal, budgetRoot))
+  try { assert.throws(() => { finalizeTrial(cancelled, terminal, controller.signal, budgetRoot) }) }
+  finally { cancelledRetention.release() }
+
+  assert.deepEqual(cancelledRetention.evidence(), { allocations: 1, arrays: 0, nominalBytes: 0, released: true })
+  assert(!existsSync(join(cancelled, 'base-0-summary.json')))
 
   assert(!existsSync(join(cancelled, 'base-0.json')))
   assert.deepEqual(readEvidence(join(cancelled, 'base-0-pending.json')), pending)
@@ -54,17 +62,31 @@ export function evidenceChecks(output: string, budgetRoot = output): void {
 
   const collision = fixture('collision')
   mkdirSync(join(collision, 'base-0.json'))
+  const failedRetention = new Retention('intertrial')
+  failedRetention.allocate('finalization')
 
-  assert.throws(() => finalizeTrial(collision, terminal, new AbortController().signal, budgetRoot))
+  try { assert.throws(() => { finalizeTrial(collision, terminal, new AbortController().signal, budgetRoot) }) }
+  finally { failedRetention.release() }
+
+  assert.deepEqual(failedRetention.evidence(), { allocations: 1, arrays: 0, nominalBytes: 0, released: true })
+  assert(!existsSync(join(collision, 'base-0-summary.json')))
 
   assert.deepEqual(readEvidence(join(collision, 'base-0-complete.json')), completed)
   assert.deepEqual(readEvidence(join(collision, 'base-0-pending.json')), pending)
   assert.deepEqual(readEvidence(join(collision, 'base-0-terminal.json')), terminal)
 
+  const summaryCollision = fixture('summary-collision')
+  mkdirSync(join(summaryCollision, 'base-0-summary.json'))
+
+  assert.throws(() => { finalizeTrial(summaryCollision, terminal, new AbortController().signal, budgetRoot) })
+
+  assert.deepEqual(readEvidence(join(summaryCollision, 'base-0.json')), completed)
+  assert.throws(() => readSummary(summaryCollision, 'base', 0))
+
   const malformed = fixture('malformed')
   writeFileSync(join(malformed, 'base-0-pending.json'), '{')
 
-  assert.throws(() => finalizeTrial(malformed, terminal, new AbortController().signal, budgetRoot))
+  assert.throws(() => { finalizeTrial(malformed, terminal, new AbortController().signal, budgetRoot) })
 
   assert.equal(readFileSync(join(malformed, 'base-0-pending.json'), 'utf8'), '{')
   assert(!existsSync(join(malformed, 'base-0.json')))
