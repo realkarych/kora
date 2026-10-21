@@ -46,8 +46,13 @@ WEB_SCRIPTS: dict[str, str] = {
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint . --max-warnings 0",
     "build": "pnpm typecheck && vite build",
+    "test:browser": "node tests/browser/run.ts",
 }
-STRICT_TSCONFIGS: tuple[str, ...] = ("web/tsconfig.app.json", "web/tsconfig.node.json")
+STRICT_TSCONFIGS: tuple[str, ...] = (
+    "web/tsconfig.app.json",
+    "web/tsconfig.node.json",
+    "web/tsconfig.browser.json",
+)
 SHARED_COMPILER_OPTIONS: dict[str, object] = {
     "module": "ESNext",
     "moduleResolution": "bundler",
@@ -68,6 +73,7 @@ TSCONFIG_TABLES: dict[str, dict[str, object]] = {
         "references": [
             {"path": "./tsconfig.app.json"},
             {"path": "./tsconfig.node.json"},
+            {"path": "./tsconfig.browser.json"},
         ],
     },
     "web/tsconfig.app.json": {
@@ -90,6 +96,17 @@ TSCONFIG_TABLES: dict[str, dict[str, object]] = {
             **SHARED_COMPILER_OPTIONS,
         },
         "include": ["vite.config.ts"],
+    },
+    "web/tsconfig.browser.json": {
+        "compilerOptions": {
+            "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.browser.tsbuildinfo",
+            "target": "ES2023",
+            "lib": ["ES2023", "DOM", "DOM.Iterable"],
+            "types": ["node"],
+            **SHARED_COMPILER_OPTIONS,
+            "allowImportingTsExtensions": True,
+        },
+        "include": ["tests/browser"],
     },
 }
 WEB_CONFIGURATION: tuple[str, ...] = (*TSCONFIG_TABLES, WEB_PACKAGE, ESLINT_CONFIG)
