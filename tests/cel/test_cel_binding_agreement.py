@@ -3,6 +3,7 @@ from functools import partial
 
 import pytest
 
+from kora.cel import JsonValue
 from kora.cel.functions import FUNCTIONS, Form
 from kora.cel.limits import MAX_CODE_POINTS
 from kora.cel_eval.binding import Binding, NativeProgram
@@ -77,6 +78,23 @@ AT_THE_LIMITS: dict[str, tuple[str, str]] = {
     ),
 }
 PANIC: str = "PanicException"
+UNARY_RUNS: tuple[str, ...] = (
+    "!!x",
+    "!!!x",
+    "--x",
+    "---x",
+    "!!-1",
+    "!!!-1",
+    "--1",
+    "---1",
+    "--1.5",
+    "- - -1",
+    "--1u",
+    "---1.f",
+    "-(-9223372036854775808)",
+    "!!-9223372036854775808",
+)
+UNARY_OPERANDS: tuple[JsonValue, ...] = (7, True, "s")
 
 
 def empty_matching(pattern: str) -> str:
@@ -161,14 +179,33 @@ def test_cel_canonical_rendering_matches_author_text_in_binding(
     assert len(values) >= 1300
 
 
+@pytest.mark.parametrize("operand", UNARY_OPERANDS, ids=repr)
+def test_cel_unary_runs_reduce_as_the_binding_does(
+    cel_binding: Binding, operand: JsonValue
+) -> None:
+    context: dict[str, JsonValue] = {"x": operand}
+
+    pairs = [
+        (
+            author_evaluated(cel_binding, source, context),
+            evaluated(cel_binding, source, context),
+        )
+        for source in UNARY_RUNS
+    ]
+
+    assert [author for author, _ in pairs] == [rendered for _, rendered in pairs]
+
+
 @pytest.mark.parametrize("shape", sorted(NESTED_AT_LIMIT))
 def test_cel_limits_at_boundary_compile_in_binding(
     cel_binding: Binding, shape: str
 ) -> None:
-    source = NESTED_AT_LIMIT[shape]()
+    rendering = accepted(NESTED_AT_LIMIT[shape]())
 
-    result = evaluated(cel_binding, source, CONTEXT)
+    compiled = outcome(cel_binding, partial(cel_binding.native_compile, rendering))
+    result = evaluated(cel_binding, NESTED_AT_LIMIT[shape](), CONTEXT)
 
+    assert is_value(compiled)
     assert result[1] != PANIC
 
 

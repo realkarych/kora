@@ -188,7 +188,7 @@ class Parser:
         for _ in operators:
             self.meter.tick()
         kept = len(operators) % 2 == 1
-        if kind is TokenKind.MINUS and kept and literal:
+        if kind is TokenKind.MINUS and len(operators) == 1 and literal:
             return Parsed(self.negative_literal(operators[0]), levels)
         if kind is TokenKind.BANG and literal_minus:
             operand = Parsed(self.negative_literal(self.advance()), 0)
