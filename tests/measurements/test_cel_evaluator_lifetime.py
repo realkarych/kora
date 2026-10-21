@@ -23,17 +23,25 @@ class Payload(TypedDict):
     terminal_workers: int | None
 
 
+class SinkPayload(TypedDict):
+    stats: dict[str, float | bool | int]
+    points: list[dict[str, int | None]]
+    retaining_paths: list[str]
+
+
 @pytest.fixture(scope="module")
 def report() -> Iterator[Report]:
+    started = time.perf_counter()
     created = new_report()
     created.environment.update(warmup=20, cycles=200, independent_processes=REPEATS)
     yield created
+    created.durations["whole_suite"] = time.perf_counter() - started
     write_report(created)
 
 
 def test_cel_evaluator_resource_lifetime(report: Report) -> None:
     started = time.perf_counter()
-    for mode in ("native", "lifetime", "idle", "busy"):
+    for mode in ("native", "lifetime", "loops", "idle", "busy"):
         for repeat in range(REPEATS):
             code = (
                 "from tests.measurements.cel_workload import run\n"
@@ -65,7 +73,7 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                 assert point["handles"] == 0
                 assert point["outstanding"] == 0
                 assert point["payload_bytes"] == 0
-                assert point["tasks"] == 1
+                assert point["tasks"] == (0 if mode == "loops" else 1)
                 entries, characters = point["cache_entries"], point["cache_characters"]
                 assert entries is not None
                 assert characters is not None
@@ -87,10 +95,11 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
     report.durations["whole_step"] = time.perf_counter() - started
 
 
+@pytest.mark.parametrize("repeat", range(REPEATS))
 @pytest.mark.parametrize("sink", ["draining", "blocked", "broken"])
 @pytest.mark.parametrize("level", ["CRITICAL", "INFO", "DEBUG"])
 def test_cel_diagnostics_do_not_delay_exit(
-    report: Report, sink: str, level: str
+    report: Report, sink: str, level: str, repeat: int
 ) -> None:
     code = (
         "from tests.measurements.cel_sink_workload import run\n"
@@ -102,21 +111,45 @@ def test_cel_diagnostics_do_not_delay_exit(
 
     assert result.code == 0, result.stderr
     assert result.stderr == ""
-    payload: dict[str, float | bool | int] = json.loads(result.stdout)
+    payload: SinkPayload = json.loads(result.stdout)
     report.samples.append(
         Sample(
-            f"sink_{sink}_{level}", 0, 200, time.perf_counter() - started, dict(payload)
+            f"sink_{sink}_{level}",
+            repeat,
+            200,
+            time.perf_counter() - started,
+            dict(payload["stats"]),
         )
     )
+    for point in payload["points"]:
+        cycle = point["cycle"]
+        assert cycle is not None
+        report.samples.append(
+            Sample(f"sink_resources_{sink}_{level}", repeat, cycle, 0, dict(point))
+        )
+        assert point["outstanding"] == 0
+        assert point["payload_bytes"] == 0
+        assert point["handles"] == 0
+        assert point["lifecycle_reports"] == 0
+        assert point["tasks"] == 1
+        queue_records, queue_bytes = point["queue_records"], point["queue_bytes"]
+        assert queue_records is not None
+        assert queue_bytes is not None
+        assert queue_records <= 16
+        assert queue_bytes <= 65536
+    report.environment[f"sink_{sink}_{level}_{repeat}_retainers"] = "\n".join(
+        payload["retaining_paths"]
+    )
     if sink == "blocked" and level != "CRITICAL":
-        assert payload["dropped"] > 0
+        assert payload["stats"]["dropped"] > 0
     if sink == "broken" and level != "CRITICAL":
-        assert payload["sink_failed"]
+        assert payload["stats"]["sink_failed"]
 
 
+@pytest.mark.parametrize("repeat", range(REPEATS))
 @pytest.mark.parametrize("sink", ["draining", "blocked", "broken"])
-def test_cel_process_exits_with_native_work_in_flight(
-    report: Report, sink: str
+def test_cel_process_exits_with_evaluator_work_in_flight(
+    report: Report, sink: str, repeat: int
 ) -> None:
     code = (
         "from tests.measurements.cel_sink_workload import run\n"
@@ -128,5 +161,5 @@ def test_cel_process_exits_with_native_work_in_flight(
 
     assert result.code == 0, result.stderr
     report.samples.append(
-        Sample(f"inflight_exit_{sink}", 0, 1, time.perf_counter() - started)
+        Sample(f"inflight_exit_{sink}", repeat, 1, time.perf_counter() - started)
     )

@@ -2,6 +2,8 @@ import asyncio
 import gc
 import json
 import os
+import resource
+import sys
 import threading
 import time
 import tracemalloc
@@ -9,11 +11,16 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from kora.cel.types import DYN
-from kora.cel_eval.errors import ErrorContext, EvaluatorUnavailable
+from kora.cel_eval.errors import (
+    ErrorContext,
+    ErrorKind,
+    EvaluationError,
+    EvaluatorUnavailable,
+)
 from kora.cel_eval.thread import EvaluationInput, EvaluationThread, Evaluator, Settings
 from tests.cel_eval.test_cel_conversion import expression
 from tests.cel_eval.test_cel_evaluation import clock
-from tests.cel_eval.thread_scenarios import ScriptedBinding, reached, turn
+from tests.cel_eval.thread_scenarios import Panic, ScriptedBinding, reached, turn
 from tests.measurements.harness import current_rss_bytes, open_descriptors
 
 WARMUP: int = 20
@@ -27,6 +34,7 @@ class Point:
     heap: int
     peak: int
     rss: int | None
+    peak_rss: int
     descriptors: int
     threads: int
     os_threads: int | None
@@ -54,7 +62,7 @@ def workers() -> int:
     return sum(t.name == "kora-cel-evaluator" for t in threading.enumerate())
 
 
-def sample(cycle: int, evaluator: Evaluator) -> Point:
+def sample(cycle: int, evaluator: Evaluator, tasks: int | None = None) -> Point:
     gc.collect()
     heap, peak = tracemalloc.get_traced_memory()
     state = evaluator.snapshot()
@@ -64,10 +72,12 @@ def sample(cycle: int, evaluator: Evaluator) -> Point:
         heap=heap,
         peak=peak,
         rss=current_rss_bytes(),
+        peak_rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        * (1024 if sys.platform == "linux" else 1),
         descriptors=open_descriptors(),
         threads=threading.active_count(),
         os_threads=len(os.listdir(tasks_path)) if tasks_path.is_dir() else None,
-        tasks=len(asyncio.all_tasks()),
+        tasks=len(asyncio.all_tasks()) if tasks is None else tasks,
         handles=state.handles,
         outstanding=state.outstanding,
         payload_bytes=state.bytes,
@@ -87,7 +97,7 @@ async def native() -> Measurements:
         "false",
         "inputs.missing == 1",
         "inputs.n.x == 1",
-        "inputs.items[9] == 1",
+        "inputs.items[1000] == 1",
         "1 / 0 == 0",
         "9223372036854775807 + 1 == 0",
         "inputs.items.size() == 1000",
@@ -108,7 +118,25 @@ async def native() -> Measurements:
     started = time.perf_counter()
     for cycle in range(-WARMUP, CYCLES):
         evaluator = Evaluator(clock)
-        await evaluator.evaluate_batch(requests)
+        outcomes = await evaluator.evaluate_batch(requests)
+        expected: tuple[bool | ErrorKind, ...] = (
+            True,
+            False,
+            ErrorKind.MISSING_FIELD,
+            ErrorKind.NO_OVERLOAD,
+            ErrorKind.INDEX_OUT_OF_RANGE,
+            ErrorKind.DIVISION_BY_ZERO,
+            ErrorKind.OVERFLOW,
+            True,
+            True,
+        )
+        assert (
+            tuple(
+                item.kind if isinstance(item, EvaluationError) else item
+                for item in outcomes
+            )
+            == expected
+        )
         assert await evaluator.evaluate(
             turnover[cycle + WARMUP], {}, {}, ErrorContext("turnover")
         )
@@ -137,7 +165,25 @@ async def native() -> Measurements:
 
 
 async def lifetime() -> Measurements:
-    fake = ScriptedBinding(block="true", fail="(99999 == 99999)")
+    failures: tuple[tuple[type[BaseException], ErrorKind], ...] = (
+        (KeyError, ErrorKind.MISSING_FIELD),
+        (TypeError, ErrorKind.NO_OVERLOAD),
+        (IndexError, ErrorKind.INDEX_OUT_OF_RANGE),
+        (ZeroDivisionError, ErrorKind.DIVISION_BY_ZERO),
+        (OverflowError, ErrorKind.OVERFLOW),
+        (ValueError, ErrorKind.INTERNAL_FAULT),
+        (RuntimeError, ErrorKind.INTERNAL_FAULT),
+        (Panic, ErrorKind.INTERNAL_FAULT),
+    )
+    failure_requests = [
+        EvaluationInput(expression(f"{i + 10000} == 0"), {}, {}, ErrorContext("when"))
+        for i in range(len(failures))
+    ]
+    failure_map = {
+        request.checked.rendering: failure[0]
+        for request, failure in zip(failure_requests, failures, strict=True)
+    }
+    fake = ScriptedBinding(block="true", fail="(99999 == 99999)", errors=failure_map)
     previous_stack = threading.stack_size()
     owner = EvaluationThread(
         fake.binding(), Settings(cache_entries=8, cache_characters=64)
@@ -176,6 +222,10 @@ async def lifetime() -> Measurements:
             {},
             ErrorContext("other"),
         )
+        mapped = await other.evaluate_batch(failure_requests)
+        assert tuple(
+            item.kind if isinstance(item, EvaluationError) else item for item in mapped
+        ) == tuple(kind for _, kind in failures)
         await other.close()
         quiesce(owner)
         assert "false" not in fake.executed
@@ -240,8 +290,76 @@ async def hops(busy: bool) -> Measurements:
     )
 
 
+def loops() -> Measurements:
+    from kora.cel_eval.binding import load_binding
+    from kora.cel_eval.evaluate import Compilation
+    from kora.cel_eval.thread import ValidationWork
+
+    previous_stack = threading.stack_size()
+    owner = EvaluationThread(load_binding())
+    checked = expression("true")
+    points: list[Point] = []
+    tracemalloc.start()
+    retained = tracemalloc.take_snapshot()
+    started = time.perf_counter()
+    for cycle in range(-WARMUP, CYCLES):
+        for outcome in ("cancel", "close", "resume"):
+            loop = asyncio.new_event_loop()
+
+            async def create() -> Evaluator:
+                return Evaluator(clock, owner)
+
+            evaluator = loop.run_until_complete(create())
+            pending = owner.submit(
+                evaluator.identifier, ValidationWork(checked), clock, 1024
+            )
+            with owner.condition:
+                assert owner.condition.wait_for(
+                    lambda: owner.snapshot().deliveries == 1, 5
+                )
+            assert owner.snapshot().outstanding == 1
+            if outcome == "close":
+                loop.close()
+                with owner.condition:
+                    assert owner.condition.wait_for(
+                        lambda: owner.snapshot().handles == 0, 5
+                    )
+            else:
+                if outcome == "cancel":
+                    pending.cancel()
+                    loop.run_until_complete(
+                        asyncio.gather(pending, return_exceptions=True)
+                    )
+                else:
+                    result = loop.run_until_complete(pending)
+                    assert isinstance(result, Compilation)
+                    assert result.valid
+                loop.run_until_complete(evaluator.close())
+                loop.close()
+            quiesce(owner)
+            assert owner.snapshot().handles == 0
+            assert owner.snapshot().outstanding == 0
+        if cycle >= 0 and (cycle + 1) % SAMPLE_EVERY == 0:
+            points.append(sample(cycle + 1, evaluator, tasks=0))
+            if cycle + 1 == 100:
+                retained = tracemalloc.take_snapshot()
+    top = tracemalloc.take_snapshot().compare_to(retained, "lineno")[:10]
+    tracemalloc.stop()
+    return Measurements(
+        mode="loops",
+        seconds=time.perf_counter() - started,
+        points=points,
+        timings=[],
+        retaining_paths=[str(entry) for entry in top],
+        stack_restored=threading.stack_size() == previous_stack,
+        persistent_workers=workers(),
+    )
+
+
 def run(mode: str) -> str:
-    if mode == "native":
+    if mode == "loops":
+        result = loops()
+    elif mode == "native":
         result = asyncio.run(native())
     elif mode == "lifetime":
         result = asyncio.run(lifetime())

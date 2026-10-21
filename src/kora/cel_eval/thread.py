@@ -464,6 +464,11 @@ class EvaluationThread:
                 pass
         finally:
             self._fail()
+            with self.condition:
+                self.machine.cache.clear()
+                self._cache_entries = 0
+                self._cache_characters = 0
+                self.condition.notify_all()
 
     def snapshot(self) -> Snapshot:
         with self.condition:

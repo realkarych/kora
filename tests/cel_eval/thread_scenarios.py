@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from collections.abc import Mapping
 
 import pytest
 
@@ -29,13 +30,24 @@ class ScriptedProgram:
             self.controller.started.set()
             if not self.controller.release.wait(5):
                 raise TimeoutError("scripted execution was not released")
+        error = self.controller.errors.get(self.source)
+        if error is not None:
+            raise error("private-native-mapped-error")
         if self.source == self.controller.fail:
             raise UnmappedFault("private-expression-and-payload")
         return self.source != "false"
 
 
 class ScriptedBinding:
-    def __init__(self, block: str | None = None, fail: str | None = None) -> None:
+    def __init__(
+        self,
+        block: str | None = None,
+        fail: str | None = None,
+        errors: Mapping[str, type[BaseException]] | None = None,
+    ) -> None:
+        self.errors: Mapping[str, type[BaseException]] = (
+            {} if errors is None else errors
+        )
         self.block = block
         self.fail = fail
         self.started = threading.Event()
@@ -240,6 +252,7 @@ def run(name: str) -> None:
         "closed_loop": closed_loop,
         "stopped_loop": stopped_loop,
         "fatal_closed_loop": fatal_closed_loop,
+        "control_exception_releases_cache": control_exception_releases_cache,
     }
     if name in synchronous:
         synchronous[name]()
@@ -274,3 +287,25 @@ def fatal_closed_loop() -> None:
     assert owner.snapshot().outstanding == 0
     assert owner.snapshot().handles == 0
     assert owner.snapshot().bytes == 0
+
+
+def control_exception_releases_cache() -> None:
+    from kora.cel_eval.convert import BoundValues
+    from kora.cel_eval.evaluate import Prepared, ResultType
+    from kora.cel_eval.thread import EvaluationThread, EvaluationWork
+    from tests.cel_eval.test_cel_failure_mapping import FailureBinding
+
+    owner = EvaluationThread(FailureBinding(SystemExit).binding())
+    loop = asyncio.new_event_loop()
+    identifier, _ = owner.open(loop)
+    request = Prepared(
+        expression("true"), BoundValues({}, 0, 0), ErrorContext("when"), ResultType.BOOL
+    )
+    owner.submit(identifier, EvaluationWork((request,)), clock, 100)
+
+    owner.worker.join(5)
+    loop.close()
+
+    assert not owner.worker.is_alive()
+    assert owner.snapshot().outstanding == 0
+    assert owner.machine.cache.snapshot().entries == 0

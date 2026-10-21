@@ -76,7 +76,14 @@ def test_cel_evaluation_thread_priority_close_and_cancellation(scenario: str) ->
 
 
 @pytest.mark.parametrize(
-    "scenario", ["fatal_failure", "closed_loop", "stopped_loop", "fatal_closed_loop"]
+    "scenario",
+    [
+        "fatal_failure",
+        "closed_loop",
+        "stopped_loop",
+        "fatal_closed_loop",
+        "control_exception_releases_cache",
+    ],
 )
 def test_cel_evaluation_thread_survives_closed_loops_and_fails_closed(
     scenario: str,
