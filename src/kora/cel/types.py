@@ -71,17 +71,11 @@ DURATION: Primitive = Primitive(Kind.DURATION)
 TYPE: Primitive = Primitive(Kind.TYPE)
 DYN: Dyn = Dyn()
 
-NUMERIC_KINDS: frozenset[Kind] = frozenset({Kind.INT, Kind.UINT, Kind.DOUBLE})
 SEQUENCE_KINDS: frozenset[Kind] = frozenset({Kind.STRING, Kind.BYTES})
 
 
 def unwrap(cel_type: CelType) -> CelType:
     return cel_type.inner if isinstance(cel_type, Nullable) else cel_type
-
-
-def is_numeric(cel_type: CelType) -> bool:
-    inner = unwrap(cel_type)
-    return isinstance(inner, Primitive) and inner.kind in NUMERIC_KINDS
 
 
 def is_concatenable(cel_type: CelType) -> bool:

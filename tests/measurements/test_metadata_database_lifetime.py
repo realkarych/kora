@@ -654,7 +654,7 @@ async def transaction_cycles(
                 database,
                 "cancel_while_waiting",
                 CANCELLATION_CYCLES,
-                cancel_while_waiting,
+                cancel_waiting_transaction,
             )
         else:
             narrow = Database(
@@ -672,7 +672,7 @@ async def transaction_cycles(
                     narrow,
                     "cancel_waiting_for_the_pool",
                     POOL_WAIT_CYCLES,
-                    cancel_waiting_for_the_pool,
+                    cancel_waiting_transaction,
                 )
             finally:
                 await narrow.close()
@@ -853,33 +853,7 @@ def cancel_in_flight(watch: StatementWatch, statement: str) -> Path_:
     return path
 
 
-async def cancel_waiting_for_the_pool(database: Database) -> None:
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def holder() -> None:
-        async with database.transaction():
-            entered.set()
-            await release.wait()
-
-    async def waiter() -> None:
-        async with database.transaction():
-            return None
-
-    holding = asyncio.create_task(holder())
-    await entered.wait()
-    waiting = asyncio.create_task(waiter())
-    await asyncio.sleep(0)
-    waiting.cancel()
-    try:
-        await waiting
-    except asyncio.CancelledError:
-        pass
-    release.set()
-    await holding
-
-
-async def cancel_while_waiting(database: Database) -> None:
+async def cancel_waiting_transaction(database: Database) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
 
