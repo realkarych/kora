@@ -27,8 +27,19 @@ const floors: Record<string, number> = {
   clsP95: 0, longTasksP95: 0, transferP95: 0,
 }
 
-export function calibrate(base: Record<string, number>[], reference: Budgets['reference']): Budgets {
-  assert.equal(base.length, 3)
+const terminalMetrics = ['runnerheapUsedReleasedGrowth', 'runnerexternalReleasedGrowth', 'runnerarrayBuffersReleasedGrowth']
+
+export function requireReleased(summaries: Record<string, number>[]): void {
+  for (const summary of summaries) {
+    for (const metric of terminalMetrics) {
+      const value = summary[metric]
+      assert(value !== undefined && Number.isFinite(value) && value <= 0, `Positive terminal retention: ${metric}`)
+    }
+  }
+}
+
+function estimate(base: Record<string, number>[], reference: Budgets['reference']): Budgets {
+  requireReleased(base)
   const absolute: Record<string, number> = {}
   const pairedMargin: Record<string, number> = {}
   for (const [metric, floor] of Object.entries(floors)) {
@@ -43,6 +54,25 @@ export function calibrate(base: Record<string, number>[], reference: Budgets['re
     absolute[metric] = maximum + margin
   }
   return { reference, absolute, pairedMargin }
+}
+
+export function calibrate(base: Record<string, number>[], reference: Budgets['reference']): Budgets {
+  assert.equal(base.length, 3)
+  return estimate(base, reference)
+}
+
+export function calibrateBatch(groups: Record<string, number>[][], reference: Budgets['reference']): Budgets {
+  assert.equal(groups.length, 5)
+  const within = groups.map(group => calibrate(group, reference))
+  const pooled = estimate(groups.flat(), reference)
+  for (const metric of Object.keys(pooled.pairedMargin)) {
+    pooled.pairedMargin[metric] = Math.max(...within.map(budgets => {
+      const margin = budgets.pairedMargin[metric]
+      assert(margin !== undefined)
+      return margin
+    }))
+  }
+  return pooled
 }
 
 export function parseBudgets(value: unknown): Budgets {
@@ -61,6 +91,7 @@ export function parseBudgets(value: unknown): Budgets {
       output[key] = item
     }
     assert.deepEqual(Object.keys(output).sort(), Object.keys(floors).sort())
+    for (const metric of terminalMetrics) assert.equal(output[metric], 0, `Terminal budget must be zero: ${metric}`)
     return output
   }
   return { reference: { platform: reference.platform, arch: reference.arch, node: reference.node, browser: reference.browser }, absolute: numbers(value.absolute), pairedMargin: numbers(value.pairedMargin) }

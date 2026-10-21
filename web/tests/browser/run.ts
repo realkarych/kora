@@ -4,14 +4,14 @@ import { once } from 'node:events'
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { arch, cpus, platform, release, tmpdir } from 'node:os'
+import { arch, cpus, platform, release, tmpdir, totalmem } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { build } from 'vite'
 import { assetHashes, buildBase, git, repository, webRoot } from './build.ts'
 import { failureChecks, runnerCancellation } from './negative.ts'
 import { measure, smoke, summarize } from './measure.ts'
 import type { Trial } from './measure.ts'
-import { calibrate, compare, parseBudgets } from './protocol.ts'
+import { calibrate, compare, parseBudgets, requireReleased } from './protocol.ts'
 import { protocolChecks } from './protocol-checks.ts'
 import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
@@ -35,6 +35,8 @@ const trials: Trial[] = []
 const report: Record<string, unknown> = {
   output, status: 'running', mode: calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
   command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
+  cpuModels: [...new Set(cpus().map(cpu => cpu.model))], totalMemory: totalmem(),
+  runner: { runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB, slot: process.env.KORA_BROWSER_CALIBRATION_SLOT, name: process.env.RUNNER_NAME, image: process.env.ImageOS, imageVersion: process.env.ImageVersion },
   viewport: { width: 1280, height: 900 }, throttling: 'none', cache: 'fresh context for cold loads; request routing disables HTTP cache',
   repetitions: 3, coldWarmup: 2, coldSamples: 20, lifecycleWarmup: 3, lifecycleSamples: 30,
   statisticalUnit: 'browser process pair', referenceCounters: process.platform === 'linux' ? 'available' : 'unverified',
@@ -55,6 +57,9 @@ try {
   const revisions = (await git(['rev-list', '--parents', '-n', '1', checkout])).split(' ')
   assert(revisions.includes(prHead), 'PR revision does not match checkout or its merge parents')
   report.checkout = checkout
+  report.checkoutParents = revisions.slice(1)
+  report.checkoutTree = await git(['rev-parse', `${checkout}^{tree}`])
+  report.headTree = await git(['rev-parse', `${prHead}^{tree}`])
   report.prHead = prHead
   report.dirty = await git(['status', '--porcelain', '--untracked-files=normal'])
   if (!smokeOnly) assert.equal(report.dirty, '', 'Reference measurements require a clean committed tree')
@@ -115,6 +120,7 @@ try {
     if (calibration) {
       assert.equal(process.platform, 'linux', 'Reference calibration requires Linux')
       assert.equal(process.arch, 'x64', 'Reference calibration requires x86_64')
+      requireReleased([...baseSummary, ...headSummary])
       const proposed = calibrate(baseSummary, reference)
       protocolChecks(proposed)
       report.proposedBudgets = proposed
