@@ -13,6 +13,7 @@ from tests.cel_eval.children import (
     install_fake,
     isolated_path,
     isolated_site,
+    restore_access,
     run_child,
 )
 
@@ -99,6 +100,11 @@ MISMATCHED: list[FakeLeg] = [
         Refusal.MODULE_OUTSIDE_RECORD,
     ),
     FakeLeg(
+        "unreadable_file",
+        (replace(fake(), unreadable={"cel/extra.py": ""}),),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
         "pip_bytecode_cache",
         (replace(fake(), cached=PIP_CACHE),),
         Refusal.PANIC_CLASS_UNRESOLVED,
@@ -169,6 +175,11 @@ def fake_sites(tmp_path: Path, leg: FakeLeg) -> list[Path]:
     return sites
 
 
+def restore_sites(sites: list[Path], leg: FakeLeg) -> None:
+    for site, installed in zip(sites, leg.fakes, strict=True):
+        restore_access(site, installed)
+
+
 def refused_line(refusal: Refusal) -> str:
     return f"{refusal.value} True True"
 
@@ -180,6 +191,7 @@ def test_cel_evaluating_entry_points_refuse_mismatched_binding_version(
     sites = fake_sites(tmp_path, leg)
 
     result = run_child(LOAD_OUTCOME + LOAD_OUTCOME, isolated_path(sites[0], *sites[1:]))
+    restore_sites(sites, leg)
 
     assert result.code == 0, result.stderr
     assert result.lines() == [refused_line(leg.refusal)] * 2
@@ -197,6 +209,7 @@ def test_cel_loader_refuses_unchecked_code_before_it_runs(
 
     result = run_child(LOAD_OUTCOME, isolated_path(*sites), str(marker))
     imported = run_child("import cel\n", isolated_path(*sites), str(control))
+    restore_sites(sites, leg)
 
     assert result.code == 0, result.stderr
     assert result.lines() == [refused_line(leg.refusal)]

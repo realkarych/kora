@@ -18,6 +18,8 @@ DIST_INFO_PREFIX: str = DISTRIBUTION.replace("-", "_")
 CHILD_TIMEOUT_SECONDS: float = 60.0
 MARKER_NAME: str = "imported.marker"
 WRITE_AND_SEARCH: int = 0o300
+WRITE_ONLY: int = 0o200
+OWNER_ACCESS: int = 0o700
 PRELUDE: str = "import json, sys\nsys.path[:] = json.loads(sys.argv[1])\n"
 
 
@@ -79,6 +81,7 @@ class FakeDistribution:
     missing: Mapping[str, str] = field(default_factory=lambda: {})
     linked_package: bool = False
     unlistable: Mapping[str, str] = field(default_factory=lambda: {})
+    unreadable: Mapping[str, str] = field(default_factory=lambda: {})
 
 
 def record_line(relative: str, content: bytes, tampered: bool, mode: str) -> str:
@@ -127,6 +130,11 @@ def install_fake(site: Path, fake: FakeDistribution) -> Path:
     for relative, text in sorted(fake.unlistable.items()):
         write_text(site / relative / "__init__.py", text)
         (site / relative).chmod(WRITE_AND_SEARCH)
+    for relative, text in sorted(fake.unreadable.items()):
+        content = text.encode("utf-8")
+        write_text(site / relative, text)
+        (site / relative).chmod(WRITE_ONLY)
+        lines.append(record_line(relative, content, False, fake.hash_mode))
     if fake.linked_package:
         moved = site.parent / "linked-package"
         (site / MODULE).rename(moved)
@@ -143,6 +151,11 @@ def install_fake(site: Path, fake: FakeDistribution) -> Path:
     lines.append(f"{dist_info}/RECORD,,")
     (site / dist_info / "RECORD").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return site
+
+
+def restore_access(site: Path, fake: FakeDistribution) -> None:
+    for relative in [*fake.unlistable, *fake.unreadable]:
+        (site / relative).chmod(OWNER_ACCESS)
 
 
 @dataclass(frozen=True)
