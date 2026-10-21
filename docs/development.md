@@ -37,7 +37,7 @@ pnpm --version
 Run the following commands from the repository root in the same shell. Dependency setup may access package registries; retain the uv cache, pnpm store and temporary build constraints for the subsequent offline distribution build. The setup commands preserve both lockfiles:
 
 ```sh
-uv sync --locked --no-build --group build --extra postgres --no-install-project
+uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
 KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
 uv export --locked --only-group build --no-emit-project \
   --format requirements.txt \
@@ -73,7 +73,7 @@ KORA_BUILD_OFFLINE=1 uv build --offline \
   --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
   --require-hashes --clear
 
-uv sync --locked --no-build --group build --extra postgres
+uv sync --locked --no-build --group build --extra postgres --extra cel
 git diff --exit-code -- pyproject.toml uv.lock web/package.json \
   web/pnpm-lock.yaml web/pnpm-workspace.yaml
 ```

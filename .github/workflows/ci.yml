@@ -61,7 +61,7 @@ jobs:
           cache-suffix: scaffold-${{ matrix.python }}
       - name: Install locked dependencies
         run: |
-          uv sync --locked --no-build --group build --extra postgres --no-install-project
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
           uv export --locked --only-group build --no-emit-project \
             --format requirements.txt \
@@ -122,7 +122,7 @@ jobs:
             --require-hashes --clear
       - name: Check the synced environment and unchanged dependency files
         run: |
-          uv sync --locked --no-build --group build --extra postgres
+          uv sync --locked --no-build --group build --extra postgres --extra cel
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 

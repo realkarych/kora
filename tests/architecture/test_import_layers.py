@@ -19,7 +19,7 @@ COMPOSITION_ROOTS: frozenset[str] = frozenset(
 NAMESPACE_MODULES: frozenset[str] = frozenset({"kora.plugins"})
 PROVIDER_LOADING_MODULE: str = "kora.protocols.loading"
 CEL_BINDING: str = "cel"
-CEL_BINDING_OWNER: str = "cel_eval"
+CEL_BINDING_OWNER: str = "kora.cel_eval.binding"
 DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
     {"importlib.import_module", "builtins.__import__", "pkgutil.resolve_name"}
 )
@@ -267,8 +267,10 @@ def imported_modules(
                 yield ImportedModule(node.lineno, target, dynamic=True)
 
 
-def third_party_violation(importer_layer: str, target: str) -> str | None:
-    if is_within(target, CEL_BINDING) and importer_layer != CEL_BINDING_OWNER:
+def third_party_violation(
+    importer: str, importer_layer: str, target: str
+) -> str | None:
+    if is_within(target, CEL_BINDING) and importer != CEL_BINDING_OWNER:
         return f"only {CEL_BINDING_OWNER} may import the CEL binding {target}"
     library = target.split(".")[0]
     if library in SERVER_LIBRARIES and importer_layer in SERVER_LIBRARY_FREE:
@@ -295,7 +297,7 @@ def import_violation(
             return None
         return f"dynamically imports {imported.target}"
     if not is_within(imported.target, ROOT_PACKAGE):
-        return third_party_violation(importer_layer, imported.target)
+        return third_party_violation(module.name, importer_layer, imported.target)
     return kora_violation(importer_layer, imported.target)
 
 
@@ -537,13 +539,17 @@ def test_only_cel_eval_imports_cel_binding(tmp_path: Path) -> None:
     write_packages(tmp_path, ["kora", "kora.cel", "kora.cel_eval", "kora.ir"])
     write_module(tmp_path, "kora.ir.conditions", "import cel\nimport kora.cel\n")
     write_module(tmp_path, "kora.cel_eval.binding", "import cel\nfrom cel import x\n")
+    write_module(tmp_path, "kora.cel_eval.evaluate", "import cel.cel\n")
     write_module(tmp_path, "kora.__main__", "import cel\nimport kora.db\n")
 
     violations = find_violations(tmp_path)
 
     assert describe_all(violations, tmp_path) == [
-        "kora/__main__.py:1: only cel_eval may import the CEL binding cel",
-        "kora/ir/conditions.py:1: only cel_eval may import the CEL binding cel",
+        "kora/__main__.py:1: only kora.cel_eval.binding may import the CEL binding cel",
+        "kora/cel_eval/evaluate.py:1: only kora.cel_eval.binding may import the CEL "
+        "binding cel.cel",
+        "kora/ir/conditions.py:1: only kora.cel_eval.binding may import the CEL "
+        "binding cel",
     ]
 
 

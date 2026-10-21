@@ -38,6 +38,9 @@ Issues = "https://github.com/realkarych/kora/issues"
 postgres = [
     "asyncpg==0.32.0",
 ]
+cel = [
+    "common-expression-language==0.10.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kora"]
@@ -67,7 +70,15 @@ exclude = [
 ]
 
 [tool.uv]
-no-build-package = ["asyncpg", "greenlet", "sqlalchemy", "markupsafe", "wrapt"]
+no-build-package = [
+    "asyncpg",
+    "greenlet",
+    "sqlalchemy",
+    "markupsafe",
+    "wrapt",
+    "common-expression-language",
+]
+constraint-dependencies = ["wcwidth==0.8.5"]
 
 [tool.pyright]
 include = ["src", "hatch_build.py", "tests"]
