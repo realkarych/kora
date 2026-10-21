@@ -11,7 +11,7 @@ CRATE_LOCK = COPY_DIRECTORY / "Cargo.lock"
 OVERRIDE = COPY_DIRECTORY / "osv-scanner.toml"
 CRATE_LOCK_SHA256 = "7115bab240a98243c913e2c97c1ba79ba94b501c8f1370f10820ad155ca107cd"
 OVERRIDE_KEYS = frozenset({"name", "version", "ecosystem", "ignore", "reason"})
-UNSCANNED_DIRECTORIES = frozenset({".git", ".venv", "node_modules"})
+UNSCANNED_DIRECTORIES = frozenset({".git", ".venv", "web/node_modules"})
 
 
 @dataclass(frozen=True)
@@ -50,17 +50,20 @@ def locked_packages(path: Path) -> list[LockedPackage]:
     ]
 
 
+def is_unscanned(root: Path, directory: Path) -> bool:
+    return directory.relative_to(root).as_posix() in UNSCANNED_DIRECTORIES
+
+
 def scanner_configurations(root: Path) -> Iterator[Path]:
     pending = [root]
     while pending:
         directory = pending.pop()
         for entry in sorted(directory.iterdir()):
-            if entry.is_symlink():
-                continue
-            if entry.is_dir() and entry.name not in UNSCANNED_DIRECTORIES:
-                pending.append(entry)
-            elif entry.is_file() and entry.name == OVERRIDE.name:
+            if entry.name == OVERRIDE.name:
                 yield entry
+            elif entry.is_dir() and not entry.is_symlink():
+                if not is_unscanned(root, entry):
+                    pending.append(entry)
 
 
 def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:
@@ -76,6 +79,7 @@ def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:
     ]
     digest = hashlib.sha256(CRATE_LOCK.read_bytes()).hexdigest()
     configurations = list(scanner_configurations(ROOT))
+    copy_files = sorted(entry.name for entry in COPY_DIRECTORY.iterdir())
 
     assert set(document) == {"PackageOverrides"}
     assert len(overrides) == 1
@@ -88,3 +92,6 @@ def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:
     assert matching == [LockedPackage("cel", "0.10.0", has_source=False)]
     assert digest == CRATE_LOCK_SHA256
     assert configurations == [OVERRIDE]
+    assert not OVERRIDE.is_symlink()
+    assert not CRATE_LOCK.is_symlink()
+    assert copy_files == [CRATE_LOCK.name, OVERRIDE.name]

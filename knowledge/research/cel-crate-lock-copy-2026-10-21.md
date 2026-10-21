@@ -12,10 +12,14 @@ The `common-expression-language` 0.10.0 Python binding bundles Rust crates in it
 | Size | 19,150 bytes |
 | Git blob | `3d28dc2e7e21162f895c135c44c7ebfd5652ab6a` |
 | SHA-256 | `7115bab240a98243c913e2c97c1ba79ba94b501c8f1370f10820ad155ca107cd` |
-| Upstream | [hardbyte/python-common-expression-language](https://github.com/hardbyte/python-common-expression-language) tag `v0.10.0`; the GitHub contents API reports blob `3d28dc2e…` and 19,150 bytes for `Cargo.lock` at that tag |
+| Upstream | [hardbyte/python-common-expression-language](https://github.com/hardbyte/python-common-expression-language) annotated tag `v0.10.0`, tag object `68591d2c6ea40d19c207e40ad91074fa23d8ec18` (tagged 2026-09-15T08:23:30Z), commit `ce1f991f576b43b34dbf749fd7c0deed9ceb1166`; the GitHub contents API reports blob `3d28dc2e…` and 19,150 bytes for `Cargo.lock` at that tag |
 | Release sdist | `common_expression_language-0.10.0.tar.gz`, 231,354 bytes, SHA-256 `bb2b6a2e50094219e4366cf36d342d74140c97414545912b34a7e8b8b95c92e6` (PyPI JSON API); the planning reviews of #160 and #165 extracted it and found the same `Cargo.lock` blob |
 
-To reproduce: `git hash-object` on the copy, and `gh api "repos/hardbyte/python-common-expression-language/contents/Cargo.lock?ref=v0.10.0" -q .sha`.
+To reproduce:
+
+- `git hash-object` on the copy;
+- `gh api "repos/hardbyte/python-common-expression-language/contents/Cargo.lock?ref=ce1f991f576b43b34dbf749fd7c0deed9ceb1166" -q .sha`, by commit, because a tag can move;
+- download the sdist, check its SHA-256 against the value above (and, once [issue #165](https://github.com/realkarych/kora/issues/165) locks the binding, against `uv.lock`), extract it and run `git hash-object` on `common_expression_language-0.10.0/Cargo.lock`.
 
 The copy lists 83 packages: 82 from the crates.io registry, each with a checksum, and the binding's own root crate, which has no `source`. There are no git sources. Two packages are named `cel`:
 
@@ -26,7 +30,7 @@ The copy lists 83 packages: 82 from the crates.io registry, each with a checksum
 
 [GHSA-wxwx-9fh7-5mrw](https://osv.dev/vulnerability/GHSA-wxwx-9fh7-5mrw) (CVE-2025-62162, "cel-rust May Panic During Parsing of Invalid CEL Expressions") affects the crates.io package `cel` from 0.10.0 up to the fix in 0.11.4 (OSV API, 2026-10-21). The root crate matches it only because its name and version collide with that range; the interpreter crate 0.14.5 is outside it.
 
-`.github/osv/common-expression-language/osv-scanner.toml` holds one `[[PackageOverrides]]` entry: `name = "cel"`, `version = "0.10.0"`, `ecosystem = "crates.io"`, `ignore = true`, with its reason. osv-scanner reads this file only for lockfiles in its own directory. In its matching, an absent `name`, `version` or `ecosystem` matches every package, and `nameIsRegex`, `group`, `effectiveUntil` and `[[IgnoredVulns]]` widen or change the ignore. So `tests/architecture/test_osv_override.py` pins the entry's exact keys and values, requires it to match exactly one package of the copy, and requires that package to have no `source`. It also pins the copy's SHA-256 and requires that no other `osv-scanner.toml` exists in the repository.
+`.github/osv/common-expression-language/osv-scanner.toml` holds one `[[PackageOverrides]]` entry: `name = "cel"`, `version = "0.10.0"`, `ecosystem = "crates.io"`, `ignore = true`, with its reason. osv-scanner reads this file only for lockfiles in its own directory. In its matching, an absent `name`, `version` or `ecosystem` matches every package, and `nameIsRegex`, `group`, `effectiveUntil` and `[[IgnoredVulns]]` widen or change the ignore. So `tests/architecture/test_osv_override.py` pins the entry's exact keys and values, requires it to match exactly one package of the copy, and requires that package to have no `source`. It also pins the copy's SHA-256, requires the copy's directory to hold exactly the two files, both regular files, and requires that no other entry named `osv-scanner.toml` exists, a symbolic link included, outside `.git`, `.venv` and `web/node_modules`. osv-scanner follows a symbolic link with that name, ignores `.osv-scanner.toml`, and never reads a configuration from a parent directory.
 
 ## Local scan evidence
 
