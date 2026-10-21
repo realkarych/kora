@@ -97,7 +97,8 @@ export async function contextFor(browser: Browser, origin: string, diagnostics: 
 export async function ready(page: Page): Promise<Load> {
   await page.getByRole('heading', { level: 1, name: 'kora', exact: true }).waitFor({ state: 'visible' })
   await page.evaluate(async () => { await document.fonts.ready })
-  await page.waitForFunction(() => window.koraBrowserMeasurement.lcp > 0 && performance.getEntriesByName('first-contentful-paint').length === 1)
+  const paintReady = await page.waitForFunction(() => window.koraBrowserMeasurement.lcp > 0 && performance.getEntriesByName('first-contentful-paint').length === 1)
+  await paintReady.dispose()
   return page.evaluate(() => {
     const navigation = performance.getEntriesByType('navigation')[0]
     const fcp = performance.getEntriesByName('first-contentful-paint')[0]
