@@ -141,7 +141,7 @@ jobs:
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
   browser:
-    name: Console browser calibration (${{ matrix.slot }})
+    name: Console browser validation (${{ matrix.slot }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -180,11 +180,11 @@ jobs:
           pnpm --dir web run lint
           pnpm --dir web run build
       - name: Run the declared browser stage
-        run: pnpm --dir web run test:browser --calibrate
+        run: pnpm --dir web run test:browser
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
         with:
-          name: console-browser-calibration-${{ matrix.slot }}
+          name: console-browser-validation-${{ matrix.slot }}
           path: measurements/browser/
           if-no-files-found: error
           retention-days: 14
