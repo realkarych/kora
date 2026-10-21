@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { childEnvironment } from './ownership.ts'
 import { nativeResources, verifyReleased } from './resources.ts'
+import type { NativeResources } from './resources.ts'
 
 async function forkFixture(module: string, args: string[], options: ForkOptions): Promise<{ child: ChildProcess; temporary: string }> {
   const temporary = await mkdtemp(join(tmpdir(), 'kora-browser-fixture-'))
@@ -145,6 +146,9 @@ export async function runnerCancellation(output: string, forced = false, reportC
   let timer = setTimeout(() => { controller.abort() }, 30000)
   let deadline: boolean
   let ownershipConfirmed = false
+  let releasedBeforeFallback: NativeResources | undefined
+  let temporaryBeforeFallback: string[] | undefined
+  let collisionCleanup: unknown
   try {
     const values: unknown = await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Runner exited before cancellation readiness') }), aborted])
     assert(Array.isArray(values), 'Runner startup deadline exceeded')
@@ -169,6 +173,28 @@ export async function runnerCancellation(output: string, forced = false, reportC
     timer = setTimeout(() => { controller.abort() }, forced ? 1000 : 30000)
     child.kill(forced ? 'SIGSTOP' : 'SIGTERM')
     deadline = await Promise.race([exited.then(() => false), aborted.then(() => true)])
+    if (!forced) {
+      assert(!deadline && child.exitCode === 1)
+      releasedBeforeFallback = await verifyReleased(owned)
+      temporaryBeforeFallback = await readdir(temporary)
+      assert.deepEqual(temporaryBeforeFallback, [])
+      if (reportCollision) {
+        const runs = await readdir(directory)
+        assert(runs.length === 1 && runs[0])
+        const smoke: unknown = JSON.parse(await readFile(join(directory, runs[0], 'production-smoke.json'), 'utf8'))
+        assert(smoke !== null && typeof smoke === 'object' && 'cleanup' in smoke)
+        collisionCleanup = smoke.cleanup
+        assert(collisionCleanup !== null && typeof collisionCleanup === 'object')
+        assert('failures' in collisionCleanup && 'remaining' in collisionCleanup && 'proxySockets' in collisionCleanup && 'forced' in collisionCleanup)
+        assert.deepEqual(collisionCleanup.failures, [])
+        assert.equal(collisionCleanup.proxySockets, 0)
+        assert.equal(collisionCleanup.forced, false)
+        const remaining = collisionCleanup.remaining
+        assert(remaining !== null && typeof remaining === 'object' && 'pids' in remaining && 'processes' in remaining)
+        assert.deepEqual(remaining.pids, [])
+        assert.equal(remaining.processes, 0)
+      }
+    }
   } finally {
     clearTimeout(timer)
     await terminateOwned(owned, join(output, `${name}-termination.json`), temporary, ownershipConfirmed)
@@ -190,11 +216,11 @@ export async function runnerCancellation(output: string, forced = false, reportC
     assert(!deadline && child.exitCode === 1)
     assert(bytes > 0 && bytes <= 65536)
     assert(stderr.join('').includes('EISDIR'))
-    await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, bytes, deadline, failure: 'report-path-collision' }))
+    await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, bytes, deadline, failure: 'report-path-collision', releasedBeforeFallback, temporaryBeforeFallback, cleanup: collisionCleanup }))
     return
   }
   const report: unknown = JSON.parse(await readFile(join(directory, run, 'report.json'), 'utf8'))
-  await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, stderr, bytes, deadline, report }))
+  await writeFile(join(output, `${name}-cancellation.json`), JSON.stringify({ code: child.exitCode, stderr, bytes, deadline, report, releasedBeforeFallback, temporaryBeforeFallback }))
   assert(!deadline)
   assert.equal(child.exitCode, 1)
   assert.equal(bytes, 0)

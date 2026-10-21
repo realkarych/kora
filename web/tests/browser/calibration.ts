@@ -359,6 +359,11 @@ async function loadDataset(manifest: Manifest, job: Job): Promise<Dataset> {
   assert.equal(proof.deadline, false)
   assert(number(proof.bytes) > 0 && number(proof.bytes) <= 65536)
   assert.equal(proof.failure, 'report-path-collision')
+  array(proof.temporaryBeforeFallback, 0)
+  const beforeFallback = record(proof.releasedBeforeFallback)
+  array(beforeFallback.pids, 0)
+  for (const key of ['rss', 'descriptors', 'processes']) assert.equal(beforeFallback[key], 0)
+  released(proof.cleanup)
   return dataset
 }
 
