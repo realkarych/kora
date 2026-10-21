@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
+from kora.cel_eval.binding import Binding, load_binding
 from kora.db.connection import Database, DatabaseSettings
 from tests.support.databases import (
     EMPTY_TEMPLATE,
@@ -91,3 +92,8 @@ async def database(database_settings: DatabaseSettings) -> AsyncIterator[Databas
         yield created
     finally:
         await created.close()
+
+
+@pytest.fixture(scope="session")
+def cel_binding() -> Binding:
+    return load_binding()

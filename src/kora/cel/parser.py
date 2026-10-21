@@ -177,24 +177,28 @@ class Parser:
         while self.current().kind is kind:
             operators.append(self.advance())
         literal_minus = self.foldable_minus()
-        fold = kind is TokenKind.MINUS and len(operators) == 1 and self.foldable()
-        levels = 0 if fold else len(operators)
+        literal = self.foldable()
+        levels = (
+            0
+            if kind is TokenKind.MINUS and len(operators) == 1 and literal
+            else len(operators)
+        )
         if depth + levels > self.limits.depth:
             raise fail(Reason.DEPTH, operators[self.limits.depth - depth].offset)
-        if fold:
-            operand = Parsed(self.negative_literal(operators[-1]), 0)
-        elif kind is TokenKind.BANG and literal_minus:
+        for _ in operators:
+            self.meter.tick()
+        kept = len(operators) % 2 == 1
+        if kind is TokenKind.MINUS and kept and literal:
+            return Parsed(self.negative_literal(operators[0]), levels)
+        if kind is TokenKind.BANG and literal_minus:
             operand = Parsed(self.negative_literal(self.advance()), 0)
         else:
             operand = self.member(depth + levels)
+        height = operand.height + levels
+        if not kept:
+            return Parsed(operand.node, height)
         operator = UnaryOperator.NOT if kind is TokenKind.BANG else UnaryOperator.NEGATE
-        node = operand.node
-        height = operand.height
-        for token in reversed(operators[:levels]):
-            node = Unary(operator, node, token.offset)
-            height += 1
-            self.meter.tick()
-        return Parsed(node, height)
+        return Parsed(Unary(operator, operand.node, operators[0].offset), height)
 
     def foldable(self) -> bool:
         return (
