@@ -7,18 +7,69 @@ There are eleven protocols: the nine of the original requirements plus **sensor*
 ## 1. Common rules
 
 - Every protocol has a `name` class attribute, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` (JSON Schema for its deployment configuration, validated at start-up and shown by `kora plugins list`), and a `conformance` marker that the test suite uses to discover it.
-- Implementations are discovered through **one entry-point group**, `kora.provider` (NFR-5.2, current contract [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md)): each entry point returns validated `ProviderMetadata(protocol, name, implementation, config_schema, version)`; `kora plugins list` prints what is installed per protocol; names are then used in the IR (`runtime.runtime: docker`) or in the deployment config:
+- Implementations are discovered through **one entry-point group**, `kora.provider` (NFR-5.2, current contract [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) as amended 2026-10-21). An entry point is named `<protocol>.<name>` and returns a factory of validated `ProviderMetadata(protocol, name, implementation, config_schema, version)` whose protocol and name equal the entry-point name ([provider loading](#provider-loading-issue-150)); `kora plugins list` prints what is installed per protocol; names are then used in the IR (`runtime.runtime: docker`) or in the deployment config:
 
 ```toml
 [project.entry-points."kora.provider"]
-inhouse_ci  = "kora_inhouse:runtime_provider"      # returns ProviderMetadata(protocol="runtime", name="inhouse_ci", …)
-inhouse_vcs = "kora_inhouse:vcs_provider"
+"runtime.inhouse_ci" = "kora_inhouse:runtime_provider"  # returns ProviderMetadata(protocol=ProtocolName.RUNTIME, name="inhouse_ci", …)
+"vcs.inhouse_vcs"    = "kora_inhouse:vcs_provider"
 ```
 
 - I/O methods are `async` and cancellable; every failure is a `KoraProtocolError(code, message, retryable, details)`, and `retryable=True` maps to error class `infrastructure`. Observation/delivery failures use scheduler-owned integration backoff, not runtime/agent-attempt retries ([scheduler section 16](scheduler.md#16-external-observation-dispatch-adr-0021)).
 - Implementations receive a `ProtocolContext` (namespace, run id, attempt id, logger, secrets resolver) and never import the scheduler. For managed execution effects it also binds the API-saved request identity and inherited execution deadline/clock assumption before any workspace allocation/preparation, including host execution (ADR-0022). It grants no authority beyond the authenticated current dispatcher gate.
 
 The logger in `ProtocolContext` is already bound by the caller to authorized operation scope. Every implementation follows [structured diagnostics](observability.md), including its [eleven-provider matrix](observability.md#all-eleven-provider-protocols), without configuring root handlers. Diagnostic output has no execution or event-table authority. Shared conformance covers safe fields, failure ownership, context isolation and the applicable sink/channel obligations alongside each protocol's existing tests.
+
+### Provider loading (issue #150)
+
+**Entry-point names.** An entry point in `kora.provider` is named `<protocol>.<name>`. `<protocol>` is one of the eleven values of `ProtocolName`: `runtime`, `harness`, `vcs`, `approval_channel`, `secrets`, `artifact_storage`, `artifact_type`, `observability_exporter`, `authentication`, `sensor`, `policy`. `<name>` matches `[a-z][a-z0-9_]{0,62}`. Provider names repeat across protocols (`local` is a runtime and an artifact storage, `git` a VCS), so the name alone cannot select an entry point. The harness value `acp:<agent>` of the IR is split at the colon by the harness-binding parser, which loads `harness.acp`; the part after the colon never reaches the loader.
+
+**Metadata.** `ProviderMetadata` is a frozen dataclass whose construction raises `ProviderMetadataError(rule)` for a broken rule:
+
+| field | rule |
+|---|---|
+| `protocol` | a `ProtocolName` |
+| `name` | the name rule above |
+| `implementation` | callable; its signature is typed per protocol |
+| `config_schema` | a JSON object with `"type": "object"`, string keys, JSON scalars, finite floats and nesting depth at most 16, stored as a deep copy; validating a deployment configuration against it belongs to the composition roots that read configuration |
+| `version` | 1 to 64 printable ASCII characters |
+
+**Loading one provider.** `load_provider(protocol, name, diagnostics)` checks, in order:
+
+1. the requested name against the name rule;
+2. the reserved name `fake`, in every protocol;
+3. the entries named exactly `<protocol>.<name>`, without importing anything;
+4. ambiguity: entries from two distributions, or two copies of one distribution with a different value or version, are ambiguous and nothing is imported; an identical copy counts as one;
+5. the entry's value, which must parse as `module:attribute`, and its module against the refused set: `kora.plugins.<family>.fake` for any single segment `<family>`, `kora.testing` and `kora.conformance`, each with its submodules, matched component-wise; nothing is imported;
+6. the import and the factory call: the result must be callable and its zero-argument call must return a `ProviderMetadata`;
+7. the metadata's protocol and name against the entry-point name;
+8. the implementation's `__module__`, and that of the callable a `functools.partial` wraps, against the refused set. This is a best-effort check on the implementation object, consistent with "Not an isolation control" below.
+
+The production source iterates `importlib.metadata.distributions()` and their entry points itself, because `entry_points()` keeps only the first distribution of each normalized name and would hide a second copy. It reads each distribution's `entry_points.txt` itself, reads the distribution's metadata only when it has a `kora.provider` entry point, and constructs an `EntryPoint` only for a value that parses, because newer Python versions refuse a malformed value while listing a distribution's entry points. One malformed entry point therefore fails only itself. The factory must return exactly a `ProviderMetadata`, not a subclass, so construction always runs the rules above. kora's own fakes are constructed by injection only, never discovered (issue #136); their conformance runs by injection, never as `kora conformance … fake`.
+
+**Failures.** Every failure is a `KoraProtocolError` with `retryable=False` and class `config_error`:
+
+| code | cause |
+|---|---|
+| `provider_name_invalid` | a requested or installed name breaks the rule; the details carry only its length |
+| `provider_reserved` | the name `fake`, or a module in the refused set |
+| `provider_not_installed` | no entry point has the name; an unprefixed entry point of the same name adds a hint naming the `<protocol>.<name>` form |
+| `provider_ambiguous` | step 4 |
+| `provider_load_failed` | the import, the factory call or a read of the implementation's module raised; the details carry the qualified exception type name, a dotted identifier of at most 128 characters, falling back to the nearest base class that has one |
+| `provider_metadata_invalid` | an entry-point value that does not parse, a non-callable entry point, a result that is not exactly `ProviderMetadata`, or a `ProviderMetadataError` from one of the rules above; the details carry the rule identifier, and a `ProviderMetadataError` carrying any other text is reported as `provider_load_failed` |
+| `provider_metadata_mismatch` | step 7 |
+
+A `KoraProtocolError` has a bounded identifier as `code`, content-free text as `message` and a JSON object of safe fields as `details`. A loading failure's details carry the protocol and, when it passed the rule, the name; never a distribution name, the entry-point value, a module path or the provider's exception message. The error is raised outside the handler, so neither `__cause__` nor `__context__` holds the provider's exception.
+
+**Listing.** `discover_providers(diagnostics)` loads every entry point and returns what loaded together with one failure for each entry that did not, including malformed or unprefixed names. Only listing commands and conformance sessions call it; `runner`, `executor` and `worker` call only `load_provider`, and `kora conformance <protocol> <name>` maps onto `load_provider`.
+
+**When loading runs.** Loading is synchronous and runs at process composition or start-up, never on the request, scheduling, dispatch or event path, inside a transaction or under a lock. IR and API validation check provider names against the metadata the composition root loaded at start-up and build the same `provider_not_installed` error from that set. The composition root holds the loaded metadata for the process lifetime. Loading owns no closable resource and adds no cache; a failed load is non-retryable. Clients, threads and tasks begin only when a composition root calls the implementation, and that caller closes them.
+
+**Not an isolation control.** The loader imports only the requested entry point's module and its parent packages. That keeps a process from importing providers it did not ask for; it does not contain a hostile provider, and the metadata check runs after the import and its side effects (ADR-0026, TM-12).
+
+**Diagnostics and settings order.** Loading reports under the component `protocols.loading` ([observability](observability.md#7-component-coverage-and-activation)). That component is registered when `kora.protocols.loading` is imported, so a composition root that loads providers imports that module before it reads `KORA_LOG_COMPONENT_LEVELS`; otherwise an override for the component is refused as unregistered.
+
+**Pending.** `test_runner_process_import_footprint` lands with the runner work item: start the real runner entry point under `python -I`, load its configured providers with `load_provider`, and assert that `sys.modules` holds no module of the ADR-0026 server set and none of its checked server libraries.
 
 ### Control-plane observation lifecycle (ADR-0021)
 

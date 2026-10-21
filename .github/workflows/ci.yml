@@ -114,6 +114,20 @@ jobs:
           name: metadata-database-lifetime-measurement
           path: measurements/metadata-database-lifetime.json
           if-no-files-found: error
+      - name: Measure provider loading cost
+        id: provider_loading_measurement
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: ${{ !cancelled() && steps.provider_loading_measurement.outcome != 'skipped' }}
+        with:
+          name: provider-loading-cost-measurement
+          path: measurements/provider-loading-cost.json
+          if-no-files-found: error
       - name: Build isolated distributions offline
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \

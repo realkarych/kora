@@ -4,6 +4,7 @@
 - Deciders: project owner
 - Resolves: issue #104
 - Amends: [ADR-0013](0013-implementation-stack.md) (repository layout)
+- Discovery amendment dated 2026-10-21: the consequence on provider discovery, under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
 - Related: [ADR-0002](0002-ai-first-api-and-thin-clients.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), [ADR-0016](0016-trusted-execution-and-publication.md)
 
 ## Context
@@ -86,7 +87,7 @@ The threat model was checked for TM-05 and TM-12 and needs no change, because la
 - Two developers can work on the server and execution sides along the table, with shared contracts owned on one side (#127).
 - Protocol data types that cross the worker routes live in `protocols`, so `models` imports `protocols`.
 - Only the providers that read their own rows, `static_token` authentication and the `cli` approval channel, may import `db`. No provider writes execution or approval rows.
-- Entry-point discovery imports every registered provider module, so a runner resolving its harness could still load a control-plane provider at run time. The open question "Provider discovery footprint" in `detailed.md` tracks this.
+- Entry-point discovery imported every registered provider module, so a runner resolving its harness could load a control-plane provider at run time. Amended 2026-10-21 ([issue #150](https://github.com/realkarych/kora/issues/150)): entry-point names encode the protocol, and `runner`, `executor` and `worker` load only their configured providers with `load_provider`, which imports only the requested entry point's module and its parent packages. Full discovery runs only for listing commands and conformance sessions. A provider's own import graph remains its responsibility, so this keeps a process from importing providers it did not ask for and does not contain a hostile provider. The pending contract `test_runner_process_import_footprint` of [provider loading](../../knowledge/specs/protocols.md#provider-loading-issue-150) checks the runner process.
 - The real-tree check passes trivially until packages exist. The checker's own tests on small source trees show that each rule fails when broken.
 
 ## Where it is applied
