@@ -468,6 +468,7 @@ class EvaluationThread:
                 self.machine.cache.clear()
                 self._cache_entries = 0
                 self._cache_characters = 0
+                self._events.clear()
                 self.condition.notify_all()
 
     def snapshot(self) -> Snapshot:

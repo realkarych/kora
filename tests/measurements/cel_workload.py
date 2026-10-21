@@ -92,21 +92,20 @@ def quiesce(owner: EvaluationThread) -> None:
 
 
 async def native() -> Measurements:
-    sources = [
-        "true",
-        "false",
-        "inputs.missing == 1",
-        "inputs.n.x == 1",
-        "inputs.items[1000] == 1",
-        "1 / 0 == 0",
-        "9223372036854775807 + 1 == 0",
-        "inputs.items.size() == 1000",
-        "inputs.s.size() == 16384",
+    cases: list[tuple[str, dict[str, object]]] = [
+        ("true", {}),
+        ("false", {}),
+        ("inputs.missing == 1", {"inputs": {}}),
+        ("inputs.n.x == 1", {"inputs": {"n": None}}),
+        ("inputs.items[1000] == 1", {"inputs": {"items": [0] * 1000}}),
+        ("1 / 0 == 0", {}),
+        ("9223372036854775807 + 1 == 0", {}),
+        ("inputs.items.size() == 1000", {"inputs": {"items": [0] * 1000}}),
+        ("inputs.s.size() == 16384", {"inputs": {"s": "a" * 16384}}),
     ]
-    values = {"inputs": {"n": None, "items": [0] * 1000, "s": "a" * 16384}}
     requests = [
         EvaluationInput(expression(s), values, {"inputs": DYN}, ErrorContext("when"))
-        for s in sources
+        for s, values in cases
     ]
     turnover = [expression(f"{i} == {i}") for i in range(CYCLES + WARMUP)]
     previous_stack = threading.stack_size()
@@ -303,6 +302,7 @@ def loops() -> Measurements:
     retained = tracemalloc.take_snapshot()
     started = time.perf_counter()
     for cycle in range(-WARMUP, CYCLES):
+        pending_tasks = 0
         for outcome in ("cancel", "close", "resume"):
             loop = asyncio.new_event_loop()
 
@@ -319,6 +319,8 @@ def loops() -> Measurements:
                 )
             assert owner.snapshot().outstanding == 1
             if outcome == "close":
+                pending_tasks = len(asyncio.all_tasks(loop))
+                assert pending_tasks == 0
                 loop.close()
                 with owner.condition:
                     assert owner.condition.wait_for(
@@ -335,12 +337,14 @@ def loops() -> Measurements:
                     assert isinstance(result, Compilation)
                     assert result.valid
                 loop.run_until_complete(evaluator.close())
+                pending_tasks = len(asyncio.all_tasks(loop))
+                assert pending_tasks == 0
                 loop.close()
             quiesce(owner)
             assert owner.snapshot().handles == 0
             assert owner.snapshot().outstanding == 0
         if cycle >= 0 and (cycle + 1) % SAMPLE_EVERY == 0:
-            points.append(sample(cycle + 1, evaluator, tasks=0))
+            points.append(sample(cycle + 1, evaluator, tasks=pending_tasks))
             if cycle + 1 == 100:
                 retained = tracemalloc.take_snapshot()
     top = tracemalloc.take_snapshot().compare_to(retained, "lineno")[:10]

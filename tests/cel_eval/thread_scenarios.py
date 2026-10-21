@@ -309,3 +309,6 @@ def control_exception_releases_cache() -> None:
     assert not owner.worker.is_alive()
     assert owner.snapshot().outstanding == 0
     assert owner.machine.cache.snapshot().entries == 0
+    assert owner.snapshot().diagnostics == 0
+    assert owner.snapshot().handles == 0
+    assert owner.snapshot().bytes == 0
