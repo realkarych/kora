@@ -11,6 +11,14 @@ CRATE_LOCK = COPY_DIRECTORY / "Cargo.lock"
 OVERRIDE = COPY_DIRECTORY / "osv-scanner.toml"
 CRATE_LOCK_SHA256 = "7115bab240a98243c913e2c97c1ba79ba94b501c8f1370f10820ad155ca107cd"
 OVERRIDE_KEYS = frozenset({"name", "version", "ecosystem", "ignore", "reason"})
+WORKFLOW = ROOT / ".github" / "workflows" / "osv-scanner.yml"
+SCAN_ARGUMENTS = (
+    "--lockfile=uv.lock",
+    "--lockfile=web/pnpm-lock.yaml",
+    "--lockfile=.github/osv/common-expression-language/Cargo.lock",
+)
+SCAN_ARGUMENTS_KEY = "scan-args: |-"
+SCANNING_JOBS = 2
 UNSCANNED_DIRECTORIES = frozenset({".git", ".venv", "web/node_modules"})
 
 
@@ -64,6 +72,31 @@ def scanner_configurations(root: Path) -> Iterator[Path]:
             elif entry.is_dir() and not entry.is_symlink():
                 if not is_unscanned(root, entry):
                     pending.append(entry)
+
+
+def scan_argument_blocks(workflow: str) -> list[tuple[str, ...]]:
+    lines = workflow.splitlines()
+    blocks: list[tuple[str, ...]] = []
+    for index, line in enumerate(lines):
+        if line.strip() != SCAN_ARGUMENTS_KEY:
+            continue
+        indent = len(line) - len(line.lstrip())
+        block: list[str] = []
+        for following in lines[index + 1 :]:
+            if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                break
+            block.append(following.strip())
+        blocks.append(tuple(entry for entry in block if entry))
+    return blocks
+
+
+def test_osv_scans_pass_only_the_three_lockfiles() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    blocks = scan_argument_blocks(workflow)
+
+    assert blocks == [SCAN_ARGUMENTS] * SCANNING_JOBS
+    assert workflow.count("scan-args") == SCANNING_JOBS
 
 
 def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:

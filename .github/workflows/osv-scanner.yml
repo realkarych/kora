@@ -29,6 +29,7 @@ jobs:
       scan-args: |-
         --lockfile=uv.lock
         --lockfile=web/pnpm-lock.yaml
+        --lockfile=.github/osv/common-expression-language/Cargo.lock
       fail-on-vuln: true
 
   full-scan:
@@ -43,4 +44,5 @@ jobs:
       scan-args: |-
         --lockfile=uv.lock
         --lockfile=web/pnpm-lock.yaml
+        --lockfile=.github/osv/common-expression-language/Cargo.lock
       fail-on-vuln: true

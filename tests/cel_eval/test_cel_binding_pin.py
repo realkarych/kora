@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import cast
 
 from kora.cel_eval.binding import DISTRIBUTION, PINNED_VERSION
+from tests.cel_eval.binding_baseline import SDIST_SHA256, WHEEL_PREFIX, WHEEL_SHA256
 
 ROOT: Path = Path(__file__).resolve().parents[2]
 PYPROJECT: Path = ROOT / "pyproject.toml"
@@ -68,6 +69,18 @@ def is_pure_wheel(name: str) -> bool:
     return (abi, platform) == PURE_WHEEL_TAGS
 
 
+def release_hashes(package: dict[str, object]) -> tuple[str, dict[str, str]]:
+    sdist = table(package, "sdist")
+    wheels = {
+        str(wheel["url"])
+        .rsplit("/", 1)[-1]
+        .removeprefix(WHEEL_PREFIX)
+        .removesuffix(".whl"): str(wheel["hash"]).removeprefix("sha256:")
+        for wheel in tables(package["wheels"])
+    }
+    return str(sdist["hash"]).removeprefix("sha256:"), wheels
+
+
 def root_crate_versions(lock: dict[str, object]) -> list[str]:
     return [
         str(package["version"])
@@ -106,3 +119,4 @@ def test_cel_binding_pin_is_consistent() -> None:
     assert packages["wcwidth"]["version"] == "0.8.5"
     assert "wcwidth" in closure
     assert impure == set()
+    assert release_hashes(packages[DISTRIBUTION]) == (SDIST_SHA256, WHEEL_SHA256)
