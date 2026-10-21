@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from kora.cel_eval.binding import DISTRIBUTION, MODULE, PINNED_VERSION
-from tests.cel_eval.binding_baseline import WHEELS
+from tests.cel_eval.binding_baseline import WHEELS, WheelBaseline
 
 ROOT: Path = Path(__file__).resolve().parents[2]
 CRATE_LOCK: Path = (
@@ -55,6 +55,11 @@ def wheel_tag(distribution: importlib.metadata.Distribution) -> str:
     return tags[0]
 
 
+def baseline_for(tag: str) -> WheelBaseline:
+    assert tag in WHEELS, f"no pin baseline for the installed wheel tag {tag}"
+    return WHEELS[tag]
+
+
 def sbom_crate(component: dict[str, object]) -> Crate:
     hashes = [
         entry for entry in as_tables(component["hashes"]) if entry["alg"] == SBOM_HASH
@@ -76,7 +81,7 @@ def locked_crates() -> set[Crate]:
 def test_cel_bundled_crate_lock_covers_installed_wheel() -> None:
     distribution = importlib.metadata.distribution(DISTRIBUTION)
     records = recorded(distribution)
-    baseline = WHEELS[wheel_tag(distribution)]
+    baseline = baseline_for(wheel_tag(distribution))
     sbom_bytes = Path(
         str(distribution.locate_file(f"{distribution_info(distribution)}/{SBOM_ENTRY}"))
     ).read_bytes()

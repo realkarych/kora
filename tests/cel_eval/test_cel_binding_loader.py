@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -38,44 +38,27 @@ class FakeLeg:
     refusal: Refusal
 
 
-def fake(
-    init: str = "",
-    version: str = PINNED_VERSION,
-    extra: dict[str, str] | None = None,
-    unrecorded: dict[str, str] | None = None,
-    tampered: frozenset[str] = frozenset(),
-) -> FakeDistribution:
-    return FakeDistribution(
-        version,
-        {"cel/__init__.py": init, **(extra or {})},
-        unrecorded or {},
-        tampered,
-    )
+def fake(init: str = "", version: str = PINNED_VERSION) -> FakeDistribution:
+    return FakeDistribution(version, {"cel/__init__.py": init})
 
+
+FOREIGN_FILE: str = "__file__ = '/elsewhere/__init__.py'\n"
+PIP_CACHE: dict[str, str] = {"cel/__pycache__/__init__.cpython-311.pyc": ""}
 
 MISMATCHED: list[FakeLeg] = [
     FakeLeg("version", (fake(version="0.9.0"),), Refusal.VERSION_MISMATCH),
     FakeLeg("ambiguous", (fake(), fake()), Refusal.AMBIGUOUS),
     FakeLeg(
-        "tampered",
-        (fake(WRITE_MARKER, tampered=frozenset({"cel/__init__.py"})),),
-        Refusal.FILE_MISMATCH,
+        "stale_dist_info",
+        (replace(fake(), stale_versions=("9.9.9",)),),
+        Refusal.AMBIGUOUS,
     ),
-    FakeLeg(
-        "stray",
-        (
-            fake(
-                "from . import cli\n",
-                extra={"cel/cli.py": ""},
-                unrecorded={"cel/cli/__init__.py": WRITE_MARKER},
-            ),
-        ),
-        Refusal.FILE_MISMATCH,
-    ),
+    FakeLeg("weak_hash", (replace(fake(), hash_mode="md5"),), Refusal.FILE_MISMATCH),
     FakeLeg("ghost_file", (fake(GHOST_WITH_FILE),), Refusal.MODULE_OUTSIDE_RECORD),
     FakeLeg(
         "ghost_without_file", (fake(GHOST_WITHOUT_FILE),), Refusal.MODULE_OUTSIDE_RECORD
     ),
+    FakeLeg("foreign_file", (fake(FOREIGN_FILE),), Refusal.MODULE_OUTSIDE_RECORD),
     FakeLeg(
         "import_failed",
         (fake("raise ImportError('UNREGISTERED-MARKER-7731')\n"),),
@@ -86,6 +69,34 @@ MISMATCHED: list[FakeLeg] = [
         "two_panic_classes",
         (fake(PANIC_DECOY + PANIC_DECOY.replace("decoy", "other")),),
         Refusal.PANIC_CLASS_UNRESOLVED,
+    ),
+    FakeLeg(
+        "pip_bytecode_cache",
+        (replace(fake(), cached=PIP_CACHE),),
+        Refusal.PANIC_CLASS_UNRESOLVED,
+    ),
+]
+UNCHECKED_CODE: list[FakeLeg] = [
+    FakeLeg(
+        "tampered",
+        (replace(fake(WRITE_MARKER), tampered=frozenset({"cel/__init__.py"})),),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
+        "stray",
+        (
+            replace(
+                fake("from . import cli\n"),
+                files={"cel/__init__.py": "from . import cli\n", "cel/cli.py": ""},
+                unrecorded={"cel/cli/__init__.py": WRITE_MARKER},
+            ),
+        ),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
+        "linked_directory",
+        (replace(fake("from . import sub\n"), linked={"cel/sub": WRITE_MARKER}),),
+        Refusal.FILE_MISMATCH,
     ),
 ]
 
@@ -100,18 +111,40 @@ def fake_sites(tmp_path: Path, leg: FakeLeg) -> list[Path]:
     return sites
 
 
+def refused_line(refusal: Refusal) -> str:
+    return f"{refusal.value} True True"
+
+
 @pytest.mark.parametrize("leg", MISMATCHED, ids=[leg.name for leg in MISMATCHED])
 def test_cel_evaluating_entry_points_refuse_mismatched_binding_version(
     tmp_path: Path, leg: FakeLeg
 ) -> None:
     sites = fake_sites(tmp_path, leg)
-    marker = tmp_path / MARKER_NAME
 
-    result = run_child(LOAD_OUTCOME, isolated_path(sites[0], *sites[1:]), str(marker))
+    result = run_child(LOAD_OUTCOME + LOAD_OUTCOME, isolated_path(sites[0], *sites[1:]))
 
     assert result.code == 0, result.stderr
-    assert result.lines() == [leg.refusal.value]
+    assert result.lines() == [refused_line(leg.refusal)] * 2
+
+
+@pytest.mark.parametrize(
+    "leg", UNCHECKED_CODE, ids=[leg.name for leg in UNCHECKED_CODE]
+)
+def test_cel_loader_refuses_unchecked_code_before_it_runs(
+    tmp_path: Path, leg: FakeLeg
+) -> None:
+    sites = fake_sites(tmp_path, leg)
+    marker = tmp_path / MARKER_NAME
+    control = tmp_path / "control.marker"
+
+    result = run_child(LOAD_OUTCOME, isolated_path(*sites), str(marker))
+    imported = run_child("import cel\n", isolated_path(*sites), str(control))
+
+    assert result.code == 0, result.stderr
+    assert result.lines() == [refused_line(leg.refusal)]
     assert not marker.exists()
+    assert imported.code == 0, imported.stderr
+    assert control.exists()
 
 
 def shadow_package(directory: Path) -> Path:
@@ -139,7 +172,7 @@ def test_cel_loader_refuses_a_shadowing_module_before_it_runs(tmp_path: Path) ->
     control = run_child("import cel\n", path, str(control_marker))
 
     assert resolves.lines() == ["True"]
-    assert refused.lines() == ["True", Refusal.ORIGIN_OUTSIDE_RECORD.value]
+    assert refused.lines() == ["True", refused_line(Refusal.ORIGIN_OUTSIDE_RECORD)]
     assert not refused_marker.exists()
     assert control.code == 0, control.stderr
     assert control_marker.exists()
@@ -161,7 +194,11 @@ def with_real_binding(tmp_path: Path) -> list[str]:
     [
         ("", without_distribution, Refusal.MISSING),
         ("import cel\n", with_real_binding, Refusal.ALREADY_IMPORTED),
-        ("import cel.stdlib\n", with_real_binding, Refusal.ALREADY_IMPORTED),
+        (
+            "import types\nsys.modules['cel.x'] = types.ModuleType('cel.x')\n",
+            with_real_binding,
+            Refusal.ALREADY_IMPORTED,
+        ),
     ],
     ids=["missing", "already_imported", "submodule_imported"],
 )
@@ -173,7 +210,7 @@ def test_cel_evaluating_entry_points_refuse_without_binding(
     result = run_child(prefix + LOAD_OUTCOME, path)
 
     assert result.code == 0, result.stderr
-    assert result.lines() == [refusal.value]
+    assert result.lines() == [refused_line(refusal)]
 
 
 REAL_PANIC: str = (

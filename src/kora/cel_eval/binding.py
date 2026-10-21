@@ -87,6 +87,7 @@ class LoadedBinding:
     def __init__(self) -> None:
         self.lock: threading.Lock = threading.Lock()
         self.binding: Binding | None = None
+        self.refusal: Refusal | None = None
 
 
 LOADED: LoadedBinding = LoadedBinding()
@@ -100,17 +101,32 @@ def binding_modules() -> list[str]:
     return sorted(name for name in list(sys.modules) if is_binding_module(name))
 
 
+def search_path() -> list[str]:
+    directories: dict[Path, str] = {}
+    for entry in list(sys.path):
+        directory = Path(entry or os.curdir).resolve()
+        if directory.is_dir():
+            directories.setdefault(directory, str(directory))
+    return list(directories.values())
+
+
 def matching_distributions() -> list[importlib.metadata.Distribution]:
-    found: dict[Path, importlib.metadata.Distribution] = {}
-    for distribution in importlib.metadata.distributions(name=DISTRIBUTION):
-        package = Path(str(distribution.locate_file(PACKAGE_ENTRY))).resolve()
-        found.setdefault(package, distribution)
+    found: dict[tuple[Path, str], importlib.metadata.Distribution] = {}
+    for distribution in importlib.metadata.distributions(
+        name=DISTRIBUTION, path=search_path()
+    ):
+        site = Path(str(distribution.locate_file(""))).resolve()
+        found.setdefault((site, distribution.version), distribution)
     return list(found.values())
 
 
 def record_digest(content: bytes) -> str:
     digest = hashlib.sha256(content).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def is_cached(parts: tuple[str, ...]) -> bool:
+    return CACHE_DIRECTORY in parts
 
 
 def recorded_files(
@@ -121,7 +137,7 @@ def recorded_files(
         return None
     recorded: dict[Path, str] = {}
     for entry in files:
-        if not entry.parts or entry.parts[0] != MODULE:
+        if not entry.parts or entry.parts[0] != MODULE or is_cached(entry.parts):
             continue
         if entry.hash is None or entry.hash.mode != RECORD_HASH:
             return None
@@ -131,19 +147,24 @@ def recorded_files(
     return recorded
 
 
-def present_files(package: Path) -> list[Path]:
+def present_files(package: Path) -> list[Path] | None:
+    if package.is_symlink():
+        return None
     present: list[Path] = []
     for directory, subdirectories, names in os.walk(package):
+        base = Path(directory)
+        if any((base / name).is_symlink() for name in [*subdirectories, *names]):
+            return None
         subdirectories[:] = sorted(
             name for name in subdirectories if name != CACHE_DIRECTORY
         )
-        present.extend(Path(directory) / name for name in sorted(names))
+        present.extend(base / name for name in sorted(names))
     return present
 
 
 def files_match(package: Path, recorded: Mapping[Path, str]) -> bool:
     present = present_files(package)
-    if any(path.is_symlink() for path in present):
+    if present is None:
         return False
     resolved = {path.resolve(): path for path in present}
     if set(resolved) != set(recorded):
@@ -202,7 +223,7 @@ def import_binding() -> bool:
         import cel
     except (ImportError, OSError):
         return False
-    return cel.__name__ == MODULE
+    return sys.modules.get(MODULE) is cel
 
 
 def native_compile() -> NativeCompile:
@@ -253,6 +274,12 @@ def load() -> Binding:
 
 def load_binding() -> Binding:
     with LOADED.lock:
+        if LOADED.refusal is not None:
+            raise BindingUnavailable(LOADED.refusal)
         if LOADED.binding is None:
-            LOADED.binding = load()
+            try:
+                LOADED.binding = load()
+            except BindingUnavailable as refused:
+                LOADED.refusal = refused.refusal
+                raise
         return LOADED.binding

@@ -19,6 +19,7 @@ SCAN_ARGUMENTS = (
 )
 SCAN_ARGUMENTS_KEY = "scan-args: |-"
 SCANNING_JOBS = 2
+SCANNER_WORKFLOW = "uses: google/osv-scanner-action/"
 UNSCANNED_DIRECTORIES = frozenset({".git", ".venv", "web/node_modules"})
 
 
@@ -90,13 +91,16 @@ def scan_argument_blocks(workflow: str) -> list[tuple[str, ...]]:
     return blocks
 
 
-def test_osv_scans_pass_only_the_three_lockfiles() -> None:
+def test_osv_scans_pass_only_the_three_lockfiles_and_fail_on_findings() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     blocks = scan_argument_blocks(workflow)
 
     assert blocks == [SCAN_ARGUMENTS] * SCANNING_JOBS
     assert workflow.count("scan-args") == SCANNING_JOBS
+    assert workflow.count(SCANNER_WORKFLOW) == SCANNING_JOBS
+    assert workflow.count("fail-on-vuln: true") == SCANNING_JOBS
+    assert workflow.count("fail-on-vuln") == SCANNING_JOBS
 
 
 def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:

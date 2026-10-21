@@ -263,7 +263,9 @@ def imported_modules(
             and call_name(node, bindings) in DYNAMIC_IMPORT_CALLS
         ):
             target = dynamic_target(node)
-            if target is not None and is_within(target, ROOT_PACKAGE):
+            if target is not None and (
+                is_within(target, ROOT_PACKAGE) or is_within(target, CEL_BINDING)
+            ):
                 yield ImportedModule(node.lineno, target, dynamic=True)
 
 
@@ -306,7 +308,9 @@ def composition_root_violations(
 ) -> Iterator[Violation]:
     for imported in imported_modules(module, known):
         if is_within(imported.target, CEL_BINDING):
-            reason = f"only {CEL_BINDING_OWNER} may import the CEL binding cel"
+            reason = (
+                f"only {CEL_BINDING_OWNER} may import the CEL binding {imported.target}"
+            )
             yield Violation(module.path, imported.line, reason)
 
 
@@ -535,17 +539,24 @@ def test_checker_flags_server_library_in_server_free_package(tmp_path: Path) -> 
     ]
 
 
-def test_only_cel_eval_imports_cel_binding(tmp_path: Path) -> None:
+def test_only_the_binding_module_imports_cel_binding(tmp_path: Path) -> None:
     write_packages(tmp_path, ["kora", "kora.cel", "kora.cel_eval", "kora.ir"])
     write_module(tmp_path, "kora.ir.conditions", "import cel\nimport kora.cel\n")
     write_module(tmp_path, "kora.cel_eval.binding", "import cel\nfrom cel import x\n")
     write_module(tmp_path, "kora.cel_eval.evaluate", "import cel.cel\n")
-    write_module(tmp_path, "kora.__main__", "import cel\nimport kora.db\n")
+    write_module(
+        tmp_path,
+        "kora.cel_eval.dynamic",
+        "import importlib\nimportlib.import_module('cel')\n",
+    )
+    write_module(tmp_path, "kora.__main__", "import cel.stdlib\nimport kora.db\n")
 
     violations = find_violations(tmp_path)
 
     assert describe_all(violations, tmp_path) == [
-        "kora/__main__.py:1: only kora.cel_eval.binding may import the CEL binding cel",
+        "kora/__main__.py:1: only kora.cel_eval.binding may import the CEL binding "
+        "cel.stdlib",
+        "kora/cel_eval/dynamic.py:2: dynamically imports cel",
         "kora/cel_eval/evaluate.py:1: only kora.cel_eval.binding may import the CEL "
         "binding cel.cel",
         "kora/ir/conditions.py:1: only kora.cel_eval.binding may import the CEL "

@@ -74,16 +74,17 @@ def test_cel_binding_logger_never_carries_content(steps: str, expected: bool) ->
 
 CONFIGURED: str = """
 from datetime import UTC, datetime
-from kora.cel_eval import CEL_COMPONENT
 from kora.observability import LoggingSettings, configure_process
+from kora.observability.catalog import LOGGING_COMPONENT
 diagnostics = configure_process(
-    CEL_COMPONENT,
+    LOGGING_COMPONENT,
     LoggingSettings(),
     "test-instance",
     lambda: datetime(2026, 10, 21, tzinfo=UTC),
 )
 """
 SHUTDOWN: str = "diagnostics.shutdown(5.0)\n"
+LOGGER_STATE: str = "import logging\nprint(logging.getLogger('cel').disabled)\n"
 
 
 def loaded_events(stderr: str) -> list[dict[str, object]]:
@@ -92,22 +93,30 @@ def loaded_events(stderr: str) -> list[dict[str, object]]:
 
 
 def test_cel_binding_loaded_event_is_safe(tmp_path: Path) -> None:
-    refused_site = install_fake(isolated_site(tmp_path / "site"), fake(version="0.9.0"))
-
-    loaded = run_child(CONFIGURED + LOAD_OUTCOME + LOAD_OUTCOME + SHUTDOWN, full_path())
-    refused = run_child(
-        CONFIGURED + LOAD_OUTCOME + SHUTDOWN, isolated_path(refused_site)
+    before_import = install_fake(
+        isolated_site(tmp_path / "before"), fake(version="0.9.0")
     )
+    after_import = install_fake(isolated_site(tmp_path / "after"), fake())
+
+    loaded = run_child(
+        CONFIGURED + LOAD_OUTCOME + LOAD_OUTCOME + LOGGER_STATE + SHUTDOWN, full_path()
+    )
+    refused = [
+        run_child(CONFIGURED + LOAD_OUTCOME + SHUTDOWN, isolated_path(site))
+        for site in (before_import, after_import)
+    ]
 
     events = loaded_events(loaded.stderr)
     assert loaded.code == 0, loaded.stderr
-    assert loaded.stdout.splitlines() == [f"loaded {PINNED_VERSION}"] * 2
+    assert loaded.stdout.splitlines() == [f"loaded {PINNED_VERSION}"] * 2 + ["True"]
     assert len(events) == 1
     assert events[0]["level"] == "INFO"
     assert events[0]["component"] == "cel"
     assert events[0]["logger"] == "kora.cel_eval"
     assert events[0]["version"] == PINNED_VERSION
     assert set(events[0]) - RESERVED_KEYS == {"version"}
-    assert refused.code == 0, refused.stderr
-    assert refused.stdout.splitlines() == ["version_mismatch"]
-    assert loaded_events(refused.stderr) == []
+    assert [result.stdout.splitlines() for result in refused] == [
+        ["version_mismatch True True"],
+        ["panic_class_unresolved True True"],
+    ]
+    assert all(loaded_events(result.stderr) == [] for result in refused)

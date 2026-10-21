@@ -69,32 +69,50 @@ class FakeDistribution:
     files: Mapping[str, str]
     unrecorded: Mapping[str, str] = field(default_factory=lambda: {})
     tampered: frozenset[str] = frozenset()
+    cached: Mapping[str, str] = field(default_factory=lambda: {})
+    linked: Mapping[str, str] = field(default_factory=lambda: {})
+    hash_mode: str = "sha256"
+    stale_versions: tuple[str, ...] = ()
 
 
-def record_line(relative: str, content: bytes, tampered: bool) -> str:
+def record_line(relative: str, content: bytes, tampered: bool, mode: str) -> str:
     recorded = content + b"tampered" if tampered else content
-    return f"{relative},sha256={record_digest(recorded)},{len(content)}"
+    return f"{relative},{mode}={record_digest(recorded)},{len(content)}"
+
+
+def write_text(target: Path, text: str) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
+def write_metadata(site: Path, version: str) -> str:
+    dist_info = f"{DIST_INFO_PREFIX}-{version}.dist-info"
+    write_text(
+        site / dist_info / "METADATA",
+        f"Metadata-Version: 2.1\nName: {DISTRIBUTION}\nVersion: {version}\n",
+    )
+    return dist_info
 
 
 def install_fake(site: Path, fake: FakeDistribution) -> Path:
-    dist_info = f"{DIST_INFO_PREFIX}-{fake.version}.dist-info"
     lines: list[str] = []
     for relative, text in sorted(fake.files.items()):
         content = text.encode("utf-8")
-        target = site / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-        lines.append(record_line(relative, content, relative in fake.tampered))
+        write_text(site / relative, text)
+        tampered = relative in fake.tampered
+        lines.append(record_line(relative, content, tampered, fake.hash_mode))
     for relative, text in sorted(fake.unrecorded.items()):
-        target = site / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    metadata = site / dist_info / "METADATA"
-    metadata.parent.mkdir(parents=True)
-    metadata.write_text(
-        f"Metadata-Version: 2.1\nName: {DISTRIBUTION}\nVersion: {fake.version}\n",
-        encoding="utf-8",
-    )
+        write_text(site / relative, text)
+    for relative, text in sorted(fake.cached.items()):
+        write_text(site / relative, text)
+        lines.append(f"{relative},,")
+    for index, (relative, text) in enumerate(sorted(fake.linked.items())):
+        target = site.parent / f"linked-{index}"
+        write_text(target / "__init__.py", text)
+        (site / relative).symlink_to(target, target_is_directory=True)
+    dist_info = write_metadata(site, fake.version)
+    for version in fake.stale_versions:
+        write_metadata(site, version)
     lines.append(f"{dist_info}/METADATA,,")
     lines.append(f"{dist_info}/RECORD,,")
     (site / dist_info / "RECORD").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -134,7 +152,7 @@ from kora.cel_eval.binding import BindingUnavailable, load_binding
 try:
     binding = load_binding()
 except BindingUnavailable as refused:
-    print(refused.refusal.value)
+    print(refused.refusal.value, refused.__cause__ is None, refused.__context__ is None)
 else:
     print("loaded", binding.version)
 """
