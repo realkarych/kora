@@ -138,3 +138,117 @@ assert diagnostics.shutdown(5)
 
     assert result.code == 0, result.stderr
     assert "private-diagnostic-clock" not in result.stdout + result.stderr
+
+
+def test_cel_lifecycle_rejections_timeout_and_terminal_failure() -> None:
+    code = (
+        SETUP
+        + """
+from kora.cel_eval.thread import EvaluationThread, Settings
+from kora.cel_eval.errors import EvaluatorUnavailable
+from tests.cel_eval.thread_scenarios import ScriptedBinding, reached, turn
+from tests.measurements.cel_workload import quiesce
+
+diagnostics = configure_process(CEL_COMPONENT, LoggingSettings(), 'evaluator-test', clock)
+fake = ScriptedBinding(block='true', fail='(99 == 99)')
+owner = EvaluationThread(fake.binding(), Settings(close_timeout=0.001))
+async def main():
+    first = Evaluator(clock, owner)
+    running = asyncio.create_task(first.evaluate(expression('true'), {}, {}, ErrorContext('when')))
+    await reached(fake.started)
+    queued = asyncio.create_task(first.evaluate(expression('false'), {}, {}, ErrorContext('when')))
+    await turn()
+    for _ in range(2):
+        try:
+            await first.close()
+        except EvaluatorUnavailable:
+            pass
+    fake.release.set()
+    assert await running is True
+    try:
+        await queued
+    except EvaluatorUnavailable:
+        pass
+    await first.close()
+    quiesce(owner)
+    final = Evaluator(clock, owner)
+    try:
+        await final.evaluate(expression('99 == 99'), {}, {}, ErrorContext('when'))
+    except EvaluatorUnavailable:
+        pass
+    await final.close()
+    owner.worker.join(5)
+    assert not owner.worker.is_alive()
+asyncio.run(main())
+assert diagnostics.shutdown(5)
+"""
+    )
+
+    result = run_child(code, full_path(ROOT))
+
+    assert result.code == 0, result.stderr
+    records: list[dict[str, object]] = [
+        json.loads(line) for line in result.stderr.splitlines()
+    ]
+    timeouts = [r for r in records if r["event"] == "cel.evaluator.close_timed_out"]
+    failures = [r for r in records if r["event"] == "cel.evaluator.failed"]
+    stops = [r for r in records if r["event"] == "cel.evaluator.stopped"]
+    assert len(timeouts) == 1
+    assert timeouts[0]["level"] == "WARNING"
+    assert len(failures) == 1
+    assert failures[0]["level"] == "ERROR"
+    assert failures[0]["fault"] == "unmapped"
+    assert len(stops) == 1
+    assert stops[0]["rejected_jobs"] == 1
+
+
+def test_cel_diagnostic_failure_releases_existing_waiters() -> None:
+    code = (
+        SETUP
+        + """
+from kora.cel_eval.thread import EvaluationThread
+from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
+from tests.cel_eval.thread_scenarios import ScriptedBinding, reached, turn
+from tests.measurements.cel_workload import quiesce
+
+failure_enabled = threading.Event()
+def diagnostic_clock():
+    if failure_enabled.is_set() and threading.current_thread().name == 'kora-cel-evaluator':
+        raise ArithmeticError('private-diagnostic-cause')
+    return clock()
+
+diagnostics = configure_process(CEL_COMPONENT, LoggingSettings(), 'evaluator-test', diagnostic_clock)
+fake = ScriptedBinding(block='true')
+owner = EvaluationThread(fake.binding())
+async def main():
+    first = Evaluator(clock, owner)
+    idle = Evaluator(clock, owner)
+    waiting = Evaluator(clock, owner)
+    running = asyncio.create_task(first.evaluate(expression('true'), {}, {}, ErrorContext('when')))
+    await reached(fake.started)
+    queued = asyncio.create_task(waiting.evaluate(expression('false'), {}, {}, ErrorContext('when')))
+    await turn()
+    await idle.close()
+    closing = asyncio.create_task(first.close())
+    await turn()
+    failure_enabled.set()
+    fake.release.set()
+    outcomes = await asyncio.gather(running, queued, closing, return_exceptions=True)
+    assert isinstance(outcomes[1], EvaluatorUnavailable)
+    assert outcomes[1].reason is UnavailableReason.FAILED
+    assert outcomes[2] is None
+    await waiting.close()
+    owner.worker.join(5)
+    assert not owner.worker.is_alive()
+    assert owner.snapshot().handles == 0
+    assert owner.snapshot().outstanding == 0
+    assert owner.snapshot().bytes == 0
+asyncio.run(main())
+assert diagnostics.shutdown(5)
+"""
+    )
+
+    result = run_child(code, full_path(ROOT))
+
+    assert result.code == 0, result.stderr
+    assert "private-diagnostic-cause" not in result.stdout + result.stderr
