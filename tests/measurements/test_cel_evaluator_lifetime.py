@@ -67,7 +67,8 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                 assert point["payload_bytes"] == 0
                 assert point["tasks"] == 1
                 entries, characters = point["cache_entries"], point["cache_characters"]
-                assert entries is not None and characters is not None
+                assert entries is not None
+                assert characters is not None
                 assert entries <= (128 if mode == "native" else 8)
                 assert characters <= (131072 if mode == "native" else 64)
             report.environment[f"{mode}_{repeat}_retainers"] = "\n".join(
