@@ -10,12 +10,14 @@ export class LocalProxy {
   denied = 0
 
   async listen(origin: string): Promise<string> {
+    const allowed = new URL(origin)
+    assert(allowed.protocol === 'http:' && allowed.port !== '' && allowed.hostname === '127.0.0.1' && allowed.username === '' && allowed.password === '' && allowed.href === `${origin}/`)
     const permitted = (raw: string | undefined): URL | undefined => {
       if (raw === undefined) return undefined
       try {
         const target = new URL(raw)
         if (target.protocol === 'ws:') target.protocol = 'http:'
-        return target.origin === origin && target.username === '' && target.password === '' ? target : undefined
+        return target.protocol === 'http:' && target.origin === origin && target.username === '' && target.password === '' ? target : undefined
       } catch (error) {
         if (error instanceof TypeError) return undefined
         throw error
@@ -23,7 +25,6 @@ export class LocalProxy {
     }
     this.server.on('connection', socket => { this.track(socket) })
     this.server.on('connect', (incoming, socket, head) => {
-      const allowed = new URL(origin)
       if (incoming.url !== allowed.host) {
         this.denied++
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
@@ -46,7 +47,7 @@ export class LocalProxy {
         outgoing.end()
         return
       }
-      const upstream = request(target, { method: incoming.method, headers: incoming.headers }, response => {
+      const upstream = request({ protocol: allowed.protocol, hostname: allowed.hostname, port: allowed.port, path: target.pathname + target.search, method: incoming.method, headers: { ...incoming.headers, host: allowed.host } }, response => {
         outgoing.writeHead(response.statusCode ?? 502, response.headers)
         response.pipe(outgoing)
       })
@@ -62,7 +63,7 @@ export class LocalProxy {
         downstream.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
       }
-      const upstream = request(target, { headers: incoming.headers })
+      const upstream = request({ protocol: allowed.protocol, hostname: allowed.hostname, port: allowed.port, path: target.pathname + target.search, headers: { ...incoming.headers, host: allowed.host } })
       upstream.on('socket', socket => { this.track(socket) })
       upstream.on('upgrade', (response, socket, received) => {
         downstream.write(`HTTP/1.1 ${String(response.statusCode)} Switching Protocols\r\n`)
