@@ -9,7 +9,7 @@ import { checkCleanup, Ownership } from './ownership.ts'
 export async function artifactLimits(root: string, output: string): Promise<void> {
   const evidence: unknown[] = []
   try {
-    for (const mode of ['file', 'directory']) {
+    for (const mode of ['file', 'directory', 'reserve']) {
       const directory = await mkdtemp(join(tmpdir(), 'kora-artifact-limit-'))
       const owner = new Ownership()
       let stops = 0
@@ -17,12 +17,13 @@ export async function artifactLimits(root: string, output: string): Promise<void
       try {
         await owner.startServer('production', root)
         await owner.startBrowser()
-        const count = mode === 'file' ? 1 : 17
+        const count = mode === 'file' ? 1 : mode === 'reserve' ? 16 : 17
         for (let index = 0; index < count; index++) {
           const path = join(directory, `sparse-${String(index)}`)
           await writeFile(path, '')
-          await truncate(path, 32 * 1024 * 1024 + (mode === 'file' ? 1 : 0))
+          await truncate(path, 32 * 1024 * 1024 + (mode === 'file' ? 1 : mode === 'reserve' && index === 0 ? -1 : 0))
         }
+        if (mode === 'reserve') limit.close()
         const deadline = performance.now() + 5000
         while (!limit.failed && performance.now() < deadline) await setImmediate()
         assert(limit.failed, 'Artifact limit failed to stop work')

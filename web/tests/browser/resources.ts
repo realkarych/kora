@@ -66,12 +66,12 @@ export async function nativeResources(roots: number[]): Promise<NativeResources>
     try {
       const status = await readFile(`/proc/${String(pid)}/status`, 'utf8')
       const resident = /^VmRSS:\s+(\d+) kB$/mu.exec(status)?.[1]
+      pending.push(...await children(pid))
       if (resident === undefined) continue
       const entries = await readdir(`/proc/${String(pid)}/fd`)
       seen.add(pid)
       rss += Number(resident) * 1024
       descriptors += entries.length
-      pending.push(...await children(pid))
     } catch (error) {
       if (!missing(error)) throw error
     }

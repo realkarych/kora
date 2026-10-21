@@ -41,16 +41,16 @@ export class ArtifactLimit {
   close(): void {
     this.watcher.close()
     this.check()
-    let remaining = 512 * 1024 * 1024 - 65536
+    let remaining = 512 * 1024 * 1024 - 4 * 1024 * 1024 - 65536
     const files = readdirSync(this.root, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile())
     files.sort((left, right) => Number(right.name.endsWith('.json')) - Number(left.name.endsWith('.json')))
     for (const entry of files) {
       const path = join(entry.parentPath, entry.name)
       const size = statSync(path).size
       const retained = Math.min(size, remaining, 32 * 1024 * 1024)
-      if (retained < size) { this.oversized.add(path); truncateSync(path, retained) }
+      if (retained < size) { this.fail(); this.oversized.add(path); truncateSync(path, retained) }
       remaining -= retained
     }
-    if (this.failed) writeFileSync(join(this.root, 'artifact-limit.json'), JSON.stringify({ failed: true, truncated: [...this.oversized] }))
+    if (this.failed) writeFileSync(join(this.root, 'artifact-limit.json'), JSON.stringify({ failed: true, truncatedCount: this.oversized.size, truncated: [...this.oversized].slice(0, 100).map(path => path.slice(0, 512)) }))
   }
 }

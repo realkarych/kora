@@ -7,18 +7,22 @@ import { fileURLToPath } from 'node:url'
 import { Ownership } from './ownership.ts'
 import { nativeResources, verifyReleased } from './resources.ts'
 
-function terminateProcess(pid: number, signal: NodeJS.Signals): void {
-  try { process.kill(pid, signal) }
-  catch (error) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error
+async function terminateOwned(roots: number[], output: string): Promise<void> {
+  const discovered = await nativeResources(roots)
+  const pids = [...new Set([...roots, ...discovered.pids])].reverse()
+  const signals: { pid: number; code: string }[] = []
+  for (const pid of pids.flatMap(value => [-value, value])) {
+    try { process.kill(pid, 'SIGKILL'); signals.push({ pid, code: 'sent' }) }
+    catch (error) {
+      const code = error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : 'UnknownError'
+      signals.push({ pid, code })
+    }
   }
-}
-
-function terminateGroup(pid: number): void {
-  try { process.kill(-pid, 'SIGTERM') }
-  catch (error) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error
-  }
+  const evidence = { roots, discovered, signals, remaining: await nativeResources(pids) }
+  await writeFile(output, JSON.stringify(evidence))
+  evidence.remaining = await verifyReleased(pids)
+  await writeFile(output, JSON.stringify(evidence))
+  assert(signals.every(signal => ['sent', 'ESRCH', 'EPERM'].includes(signal.code)), 'Unexpected process signalling failure')
 }
 
 export async function failureChecks(root: string, output: string): Promise<unknown[]> {
@@ -29,8 +33,7 @@ export async function failureChecks(root: string, output: string): Promise<unkno
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: new Ownership().environment(), detached: true,
     })
     assert(child.pid)
-    const pid = child.pid
-    const owned = new Set<number>([pid])
+    const owned = new Set<number>([child.pid])
     child.on('message', (message: unknown) => {
       assert(message !== null && typeof message === 'object' && 'pids' in message && Array.isArray(message.pids))
       for (const value of message.pids as unknown[]) {
@@ -48,26 +51,16 @@ export async function failureChecks(root: string, output: string): Promise<unkno
     child.stderr?.on('data', consume)
     const exited = once(child, 'close')
     const controller = new AbortController()
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-      void nativeResources([pid]).then(resources => {
-        for (const value of resources.pids) owned.add(value)
-        for (const value of [...new Set(owned)].reverse()) {
-          terminateProcess(-value, 'SIGKILL')
-          terminateProcess(value, 'SIGKILL')
-        }
-      })
-    }, 30000)
+    const aborted = once(controller.signal, 'abort').then(() => { throw new Error('Failure fixture deadline exceeded') })
+    const timer = setTimeout(() => { controller.abort() }, 30000)
     try {
       if (scenario === 'cancellation') {
-        await Promise.race([once(child, 'message', { signal: controller.signal }), exited.then(() => { throw new Error('Cancellation child exited before readiness') })])
+        await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Cancellation child exited before readiness') }), aborted])
         child.kill('SIGTERM')
       }
-      await exited
+      await Promise.race([exited, aborted])
       const payload: unknown = JSON.parse(await readFile(destination, 'utf8'))
-      const result = { scenario, code: child.exitCode, stderr, captured, timedOut, payload }
+      const result = { scenario, code: child.exitCode, stderr, captured, payload }
       results.push(result)
       await writeFile(join(output, `failure-${scenario}-parent.json`), JSON.stringify(result))
       assert.equal(child.exitCode, 0)
@@ -76,14 +69,8 @@ export async function failureChecks(root: string, output: string): Promise<unkno
       await verifyReleased([...owned])
     } finally {
       clearTimeout(timer)
-      controller.abort()
-      terminateGroup(pid)
-      const remaining = await nativeResources([...owned])
-      for (const value of remaining.pids.reverse()) {
-        terminateProcess(-value, 'SIGKILL')
-        terminateProcess(value, 'SIGKILL')
-      }
-      await verifyReleased([...owned])
+      await terminateOwned([...owned], join(output, `failure-${scenario}-termination.json`))
+      await exited
     }
   }
   return results
@@ -106,17 +93,12 @@ export async function runnerCancellation(output: string, forced = false): Promis
   })
   const exited = once(child, 'close')
   const controller = new AbortController()
-  const killOwned = (): void => {
-    for (const value of [...new Set(owned)].reverse()) {
-      terminateProcess(-value, 'SIGKILL')
-      terminateProcess(value, 'SIGKILL')
-    }
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const startupTimer = setTimeout(() => { controller.abort(); killOwned() }, 30000)
+  const aborted = once(controller.signal, 'abort').then(() => 'deadline')
+  let timer = setTimeout(() => { controller.abort() }, 30000)
+  let deadline: boolean
   try {
-    const values: unknown = await Promise.race([once(child, 'message', { signal: controller.signal }), exited.then(() => { throw new Error('Runner exited before cancellation readiness') })])
-    assert(Array.isArray(values))
+    const values: unknown = await Promise.race([once(child, 'message'), exited.then(() => { throw new Error('Runner exited before cancellation readiness') }), aborted])
+    assert(Array.isArray(values), 'Runner startup deadline exceeded')
     const message: unknown = values[0]
     assert(message !== null && typeof message === 'object' && 'pids' in message && Array.isArray(message.pids))
     for (const value of message.pids as unknown[]) {
@@ -125,33 +107,32 @@ export async function runnerCancellation(output: string, forced = false): Promis
     }
     const resources = await nativeResources(owned)
     owned.push(...resources.pids)
-    clearTimeout(startupTimer)
     await writeFile(join(output, forced ? 'runner-forced-ownership.json' : 'runner-ownership.json'), JSON.stringify({ owned }))
-    timer = setTimeout(() => { controller.abort(); killOwned() }, forced ? 1000 : 30000)
-    child.kill(forced ? 'SIGSTOP' : 'SIGTERM')
-    await exited
-    if (forced) {
-      const remaining = await verifyReleased(owned)
-      await writeFile(join(output, 'runner-forced-cancellation.json'), JSON.stringify({ code: child.exitCode, signal: child.signalCode, stderr, bytes, owned, remaining }))
-      assert.equal(child.signalCode, 'SIGKILL')
-      assert.equal(bytes, 0)
-      return
-    }
-    const directories = await readdir(directory)
-    assert.equal(directories.length, 1)
-    const run = directories[0]
-    assert(run)
-    const report: unknown = JSON.parse(await readFile(join(directory, run, 'report.json'), 'utf8'))
-    await writeFile(join(output, 'runner-cancellation.json'), JSON.stringify({ code: child.exitCode, stderr, bytes, report }))
-    assert.equal(child.exitCode, 1)
-    assert.equal(bytes, 0)
-    assert(report !== null && typeof report === 'object' && 'status' in report && report.status === 'failed')
-    await verifyReleased(owned)
-  } finally {
-    clearTimeout(startupTimer)
     clearTimeout(timer)
-    controller.abort()
-    killOwned()
-    await verifyReleased(owned)
+    timer = setTimeout(() => { controller.abort() }, forced ? 1000 : 30000)
+    child.kill(forced ? 'SIGSTOP' : 'SIGTERM')
+    deadline = await Promise.race([exited.then(() => false), aborted.then(() => true)])
+  } finally {
+    clearTimeout(timer)
+    await terminateOwned(owned, join(output, forced ? 'runner-forced-termination.json' : 'runner-termination.json'))
+    await exited
   }
+  if (forced) {
+    const remaining = await verifyReleased(owned)
+    await writeFile(join(output, 'runner-forced-cancellation.json'), JSON.stringify({ code: child.exitCode, signal: child.signalCode, stderr, bytes, deadline, owned, remaining }))
+    assert(deadline)
+    assert.equal(child.signalCode, 'SIGKILL')
+    assert.equal(bytes, 0)
+    return
+  }
+  const directories = await readdir(directory)
+  assert.equal(directories.length, 1)
+  const run = directories[0]
+  assert(run)
+  const report: unknown = JSON.parse(await readFile(join(directory, run, 'report.json'), 'utf8'))
+  await writeFile(join(output, 'runner-cancellation.json'), JSON.stringify({ code: child.exitCode, stderr, bytes, deadline, report }))
+  assert(!deadline)
+  assert.equal(child.exitCode, 1)
+  assert.equal(bytes, 0)
+  assert(report !== null && typeof report === 'object' && 'status' in report && report.status === 'failed')
 }
