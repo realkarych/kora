@@ -7,48 +7,13 @@ import type { CDPSession } from 'playwright'
 import { checkCleanup, Ownership } from './ownership.ts'
 import type { Cleanup } from './ownership.ts'
 import { contextFor, Diagnostics, heap, ready, semantics } from './page.ts'
-import type { Heap, Load } from './page.ts'
-import { nativeResources, percentile, span } from './resources.ts'
+import { nativeResources } from './resources.ts'
 import type { NativeResources } from './resources.ts'
+import type { Trial } from './trial.ts'
+import { measurementProtocol } from './protocol.ts'
 import { diagnosticSnapshot } from './diagnostic-snapshot.ts'
 
-export interface Cycle {
-  cycle: number
-  active: NativeResources
-  beforeGCNative: NativeResources
-  beforeGC: Heap
-  afterGC: Heap
-  native: NativeResources
-  owned: NativeResources
-  runnerBeforeGC: NodeJS.MemoryUsage
-  runner: NodeJS.MemoryUsage
-  runnerCode: ReturnType<typeof getHeapCodeStatistics>
-  contexts: number
-  pages: number
-}
-
-export interface Trial {
-  arm: 'base' | 'head'
-  repeat: number
-  phases: { phase: string; native: NativeResources; runner: NodeJS.MemoryUsage }[]
-  runnerBefore: NodeJS.MemoryUsage
-  runnerAfter?: NodeJS.MemoryUsage
-  runnerReleasedBeforeGC?: NodeJS.MemoryUsage
-  retainedEvidenceBytes?: number
-  warmLoads: Load[]
-  warmCycles: Cycle[]
-  after?: NativeResources
-  loads: Load[]
-  cycles: Cycle[]
-  browserVersion: string
-  diagnostics: Diagnostics
-  before: NativeResources
-  cleanup?: Cleanup
-  failure?: string
-  serverOutput?: string[]
-}
-
-async function collectRunner(): Promise<void> {
+export async function collectRunner(): Promise<void> {
   assert(globalThis.gc, 'Runner requires --expose-gc')
   globalThis.gc()
   await setImmediate()
@@ -72,12 +37,12 @@ export async function snapshot(session: CDPSession, path: string): Promise<void>
   assert(!overflow, 'Heap snapshot exceeded 32 MiB bound')
 }
 
-export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void, diagnostic?: AbortSignal): Promise<Trial> {
+export async function measure(root: string, arm: 'base' | 'head', repeat: number, artifacts: string, save: (trial: Trial) => void, diagnostic?: AbortSignal): Promise<void> {
   await collectRunner()
   if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(artifacts, 'node-before', diagnostic)
   const owner = new Ownership(artifacts)
   const diagnostics = new Diagnostics()
-  const trial: Trial = { arm, repeat, runnerBefore: process.memoryUsage(), phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
+  const trial: Trial = { protocol: measurementProtocol, arm, repeat, runnerBefore: process.memoryUsage(), phases: [], warmLoads: [], warmCycles: [], loads: [], cycles: [], browserVersion: '', diagnostics, before: await nativeResources([process.pid]) }
   const phase = async (name: string): Promise<void> => {
     trial.phases.push({ phase: name, native: await nativeResources([process.pid]), runner: process.memoryUsage() })
   }
@@ -147,20 +112,12 @@ export async function measure(root: string, arm: 'base' | 'head', repeat: number
       trial.serverOutput = owner.logs
       trial.cleanup = await owner.close()
       trial.runnerReleasedBeforeGC = process.memoryUsage()
-      await collectRunner()
-      trial.runnerAfter = process.memoryUsage()
       if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(artifacts, 'node-closed', diagnostic)
-      trial.after = await nativeResources([process.pid])
-      await phase('released')
       trial.retainedEvidenceBytes = Buffer.byteLength(JSON.stringify(trial))
     } finally { save(trial) }
   }
   assert(trial.cleanup)
   checkCleanup(trial.cleanup)
-  assert(trial.after)
-  if (trial.before.descriptors !== null && trial.after.descriptors !== null) assert(trial.after.descriptors <= trial.before.descriptors, 'Runner descriptors did not return to baseline')
-  if (trial.before.processes !== null && trial.after.processes !== null) assert.equal(trial.after.processes, trial.before.processes, 'Runner processes did not return to baseline')
-  return trial
 }
 
 export async function smoke(root: string, mode: 'production' | 'development', artifacts: string, onReady?: (pids: number[]) => Promise<void>): Promise<{ diagnostics: Diagnostics; cleanup: Cleanup }> {
@@ -214,46 +171,4 @@ export async function smoke(root: string, mode: 'production' | 'development', ar
   }
   checkCleanup(cleanup)
   return { diagnostics, cleanup }
-}
-
-export function summarize(trial: Trial): Record<string, number> {
-  const result: Record<string, number> = {}
-  const allCycles = [...trial.warmCycles, ...trial.cycles]
-  assert(trial.runnerAfter && trial.runnerReleasedBeforeGC)
-  const runnerMeasurements = [trial.runnerBefore, trial.runnerAfter, trial.runnerReleasedBeforeGC, ...allCycles.flatMap(cycle => [cycle.runnerBeforeGC, cycle.runner]), ...trial.phases.map(phase => phase.runner)]
-  for (const metric of ['load', 'fcp', 'lcp', 'cls', 'longTasks', 'transfer'] as const) {
-    const values = trial.loads.map(load => load[metric])
-    result[`${metric}Median`] = percentile(values, 0.5)
-    result[`${metric}P95`] = percentile(values, 0.95)
-  }
-  for (const metric of ['used', 'documents', 'nodes', 'listeners'] as const) {
-    const values = trial.cycles.map(cycle => cycle.afterGC[metric])
-    result[`${metric}Span`] = span(values)
-    result[`${metric}LateSpan`] = span(values.slice(15))
-    result[`${metric}MedianGrowth`] = percentile(values.slice(-10), 0.5) - percentile(values.slice(0, 10), 0.5)
-    result[`${metric}Peak`] = Math.max(...allCycles.flatMap(cycle => [cycle.beforeGC[metric], cycle.afterGC[metric]]))
-  }
-  for (const metric of ['rss', 'descriptors', 'processes'] as const) {
-    const values = trial.cycles.map(cycle => cycle.native[metric])
-    if (values.some(value => value === null)) continue
-    const numbers = values.filter(value => value !== null)
-    result[`${metric}Span`] = span(numbers)
-    result[`${metric}LateSpan`] = span(numbers.slice(15))
-    result[`${metric}MedianGrowth`] = percentile(numbers.slice(-10), 0.5) - percentile(numbers.slice(0, 10), 0.5)
-    const active = allCycles.flatMap(cycle => [cycle.active[metric], cycle.beforeGCNative[metric], cycle.native[metric]]).filter(value => value !== null)
-    const phases = trial.phases.map(phase => phase.native[metric]).filter(value => value !== null)
-    result[`${metric}Peak`] = Math.max(...numbers, ...active, ...phases)
-  }
-  for (const metric of ['heapUsed', 'external', 'arrayBuffers'] as const) {
-    const values = trial.cycles.map(cycle => cycle.runner[metric])
-    result[`runner${metric}Peak`] = Math.max(...runnerMeasurements.map(point => point[metric]))
-    assert(trial.runnerAfter)
-    result[`runner${metric}ReleasedGrowth`] = trial.runnerAfter[metric] - trial.runnerBefore[metric]
-    result[`runner${metric}Span`] = span(values)
-    result[`runner${metric}LateSpan`] = span(values.slice(15))
-    result[`runner${metric}MedianGrowth`] = percentile(values.slice(-10), 0.5) - percentile(values.slice(0, 10), 0.5)
-  }
-  assert(trial.cleanup)
-  result.cleanupSeconds = trial.cleanup.seconds
-  return result
 }

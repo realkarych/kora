@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
 import { percentile, span } from './resources.ts'
 
+export const measurementProtocol = 'collector-released-v2'
+
 export interface Budgets {
+  protocol: typeof measurementProtocol
   reference: { platform: string; arch: string; node: string; browser: string }
   absolute: Record<string, number>
   pairedMargin: Record<string, number>
@@ -26,6 +29,8 @@ const floors: Record<string, number> = {
   processesSpan: 0, processesLateSpan: 0, processesMedianGrowth: 0,
   clsP95: 0, longTasksP95: 0, transferP95: 0,
 }
+
+export const measurementMetrics = Object.keys(floors)
 
 const terminalMetrics = ['runnerheapUsedReleasedGrowth', 'runnerexternalReleasedGrowth', 'runnerarrayBuffersReleasedGrowth']
 
@@ -53,7 +58,7 @@ function estimate(base: Record<string, number>[], reference: Budgets['reference'
     pairedMargin[metric] = margin
     absolute[metric] = maximum + margin
   }
-  return { reference, absolute, pairedMargin }
+  return { protocol: measurementProtocol, reference, absolute, pairedMargin }
 }
 
 export function calibrate(base: Record<string, number>[], reference: Budgets['reference']): Budgets {
@@ -77,6 +82,7 @@ export function calibrateBatch(groups: Record<string, number>[][], reference: Bu
 
 export function parseBudgets(value: unknown): Budgets {
   assert(value !== null && typeof value === 'object' && 'reference' in value && 'absolute' in value && 'pairedMargin' in value)
+  assert('protocol' in value && value.protocol === measurementProtocol, 'Incompatible browser measurement protocol')
   const reference = value.reference
   assert(reference !== null && typeof reference === 'object')
   assert('platform' in reference && typeof reference.platform === 'string')
@@ -94,7 +100,7 @@ export function parseBudgets(value: unknown): Budgets {
     for (const metric of terminalMetrics) assert.equal(output[metric], 0, `Terminal budget must be zero: ${metric}`)
     return output
   }
-  return { reference: { platform: reference.platform, arch: reference.arch, node: reference.node, browser: reference.browser }, absolute: numbers(value.absolute), pairedMargin: numbers(value.pairedMargin) }
+  return { protocol: measurementProtocol, reference: { platform: reference.platform, arch: reference.arch, node: reference.node, browser: reference.browser }, absolute: numbers(value.absolute), pairedMargin: numbers(value.pairedMargin) }
 }
 
 export function compare(base: Record<string, number>[], head: Record<string, number>[], budgets: Budgets): { gates: Record<string, boolean>; paired: Record<string, number[]>; variability: Record<string, number> } {

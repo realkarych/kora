@@ -9,9 +9,13 @@ import { dirname, join, resolve } from 'node:path'
 import { build } from 'vite'
 import { assetHashes, buildBase, git, repository, webRoot } from './build.ts'
 import { failureChecks, runnerCancellation } from './negative.ts'
-import { measure, smoke, summarize } from './measure.ts'
-import type { Trial } from './measure.ts'
-import { calibrate, compare, parseBudgets, requireReleased } from './protocol.ts'
+import { collectRunner, measure, smoke } from './measure.ts'
+import type { Trial } from './trial.ts'
+import { finalizeTrial, persistTerminal, persistTrial } from './trial-evidence.ts'
+import type { Terminal, TrialSummary } from './trial-evidence.ts'
+import { nativeResources } from './resources.ts'
+import { evidenceChecks } from './trial-evidence-checks.ts'
+import { calibrate, compare, measurementProtocol, parseBudgets, requireReleased } from './protocol.ts'
 import { protocolChecks } from './protocol-checks.ts'
 import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
@@ -29,15 +33,16 @@ assert(Number(calibration) + Number(smokeOnly) + Number(diagnostic) <= 1)
 const outputRoot = resolve(process.env.KORA_BROWSER_OUTPUT ?? join(repository, 'measurements', 'browser'))
 await mkdir(outputRoot, { recursive: true })
 const output = await mkdtemp(join(outputRoot, 'run-'))
+const evidenceRoot = diagnostic ? outputRoot : output
 const temporary = await mkdtemp(join(tmpdir(), 'kora-browser-'))
 const cancellation = new AbortController()
 const stop = (): void => { cancellation.abort(); void closeOwners() }
 const limits = new ArtifactLimit(output, stop)
 process.once('SIGTERM', stop)
 process.once('SIGINT', stop)
-const trials: Trial[] = []
+const trials: TrialSummary[] = []
 const report: Record<string, unknown> = {
-  output, status: 'running', mode: diagnostic ? 'collector-diagnostic-v1' : calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
+  output, protocol: measurementProtocol, status: 'running', mode: diagnostic ? 'collector-diagnostic-v1' : calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
   diagnosticEnvironmentKeys: diagnostic ? Object.keys(process.env).sort() : undefined,
   eligibleForCalibration: !diagnostic,
   command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
@@ -53,7 +58,7 @@ const save = (): void => {
   writeFileSync(join(output, 'report.json'), data)
 }
 const saveTrial = (trial: Trial): void => {
-  writeFileSync(join(output, `${trial.arm}-${String(trial.repeat)}.json`), JSON.stringify(trial, null, 2))
+  persistTrial(output, trial, evidenceRoot)
 }
 const started = performance.now()
 try {
@@ -114,11 +119,23 @@ try {
     save()
     for (const [arm, repeat] of order) {
       assert(!cancellation.signal.aborted, 'Browser runner interrupted')
-      trials.push(await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial, diagnostic ? cancellation.signal : undefined))
-      if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(output, 'node-returned', cancellation.signal)
+      try {
+        await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial, diagnostic ? cancellation.signal : undefined)
+      } finally {
+        await collectRunner()
+        const runnerAfter = process.memoryUsage()
+        const after = await nativeResources([process.pid])
+        const phase = { phase: 'released', native: await nativeResources([process.pid]), runner: process.memoryUsage() }
+        const terminal: Terminal = { protocol: measurementProtocol, arm, repeat, runnerAfter, after, phase }
+        persistTerminal(output, terminal, evidenceRoot)
+        if (diagnostic && arm === 'head' && repeat === 0) await diagnosticSnapshot(output, 'node-returned', cancellation.signal)
+        trials.push(finalizeTrial(output, terminal, cancellation.signal, evidenceRoot))
+      }
     }
     assert.equal(trials.length, 6)
-    const grouped = (arm: 'base' | 'head'): Record<string, number>[] => trials.filter(trial => trial.arm === arm).sort((a, b) => a.repeat - b.repeat).map(summarize)
+    evidenceChecks(output, evidenceRoot)
+    report.evidenceChecks = 'passed'
+    const grouped = (arm: 'base' | 'head'): Record<string, number>[] => trials.filter(trial => trial.arm === arm).sort((a, b) => a.repeat - b.repeat).map(trial => trial.metrics)
     const baseSummary = grouped('base')
     const headSummary = grouped('head')
     report.summaries = { base: baseSummary, head: headSummary }
@@ -126,19 +143,20 @@ try {
     assert(browser && trials.every(trial => trial.browserVersion === browser))
     const reference = { platform: process.platform, arch: process.arch, node: process.version, browser }
     if (diagnostic) {
+      protocolChecks()
       report.status = 'diagnostic complete; calibration and performance unverified'
     } else if (calibration) {
       assert.equal(process.platform, 'linux', 'Reference calibration requires Linux')
       assert.equal(process.arch, 'x64', 'Reference calibration requires x86_64')
       requireReleased([...baseSummary, ...headSummary])
       const proposed = calibrate(baseSummary, reference)
-      protocolChecks(proposed)
+      protocolChecks()
       report.proposedBudgets = proposed
       report.status = 'calibrated; frozen budgets and independent verification still required'
     } else {
       const input: unknown = JSON.parse(await readFile(join(import.meta.dirname, 'budgets.json'), 'utf8'))
       const budgets = parseBudgets(input)
-      protocolChecks(budgets)
+      protocolChecks()
       assert.deepEqual(reference, budgets.reference, 'Reference environment mismatch')
       const comparison = compare(baseSummary, headSummary, budgets)
       report.comparison = comparison

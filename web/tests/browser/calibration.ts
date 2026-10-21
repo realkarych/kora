@@ -6,7 +6,7 @@ import { readFile, stat, writeFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { calibrateBatch, compare, parseBudgets, requireReleased } from './protocol.ts'
+import { calibrateBatch, compare, measurementProtocol, parseBudgets, requireReleased } from './protocol.ts'
 import type { Budgets } from './protocol.ts'
 import { percentile, span } from './resources.ts'
 
@@ -105,6 +105,8 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
   const report = record(value)
   assert.equal(report.status, 'calibrated; frozen budgets and independent verification still required')
   assert.equal(report.mode, 'calibration')
+  assert.equal(report.protocol, measurementProtocol)
+  assert.equal(report.eligibleForCalibration, true)
   assert.equal(report.prHead, manifest.head)
   assert.equal(report.base, manifest.base)
   assert.equal(report.checkout, manifest.checkout)
@@ -127,6 +129,7 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
   assert.equal(runner.attempt, manifest.attempt)
   assert.equal(runner.job, 'browser')
   assert.equal(runner.slot, String(job.slot))
+  assert.equal(runner.image, 'ubuntu24')
   for (const key of ['name', 'image', 'imageVersion']) string(runner[key], /^.{1,256}$/u)
   for (const [key, expected] of Object.entries({ repetitions: 3, coldWarmup: 2, coldSamples: 20, lifecycleWarmup: 3, lifecycleSamples: 30 })) assert.equal(report[key], expected)
   assert.deepEqual(report.order, [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]])
@@ -142,7 +145,7 @@ export function validateDataset(value: unknown, manifest: Manifest, job: Job): D
     diagnostics(smoke.diagnostics)
     released(smoke.cleanup)
   }
-  for (const key of ['runnerCancellation', 'artifactLimits', 'networkChecks']) assert.equal(report[key], 'passed')
+  for (const key of ['runnerCancellation', 'artifactLimits', 'networkChecks', 'evidenceChecks']) assert.equal(report[key], 'passed')
   const failures = array(report.failureChecks, 6).map(record)
   assert.deepEqual(failures.map(failure => failure.scenario), scenarios)
   for (const failure of failures) {
@@ -214,6 +217,7 @@ function summarizeRaw(trial: Record<string, unknown>): Record<string, number> {
 
 function validateTrial(value: unknown, dataset: Dataset, arm: 'base' | 'head', repeat: number): void {
   const trial = record(value)
+  assert.equal(trial.protocol, measurementProtocol)
   assert.equal(trial.arm, arm)
   assert.equal(trial.repeat, repeat)
   assert.equal(trial.browserVersion, dataset.reference.browser)
@@ -247,6 +251,18 @@ function validateTrial(value: unknown, dataset: Dataset, arm: 'base' | 'head', r
   }
 }
 
+export function validateFinalization(trial: Record<string, unknown>, pending: Record<string, unknown>, terminal: Record<string, unknown>, arm: 'base' | 'head', repeat: number): void {
+  for (const input of [trial, pending, terminal]) {
+    assert.equal(input.protocol, measurementProtocol)
+    assert.equal(input.arm, arm)
+    assert.equal(input.repeat, repeat)
+  }
+  assert.equal(pending.runnerAfter, undefined)
+  assert.equal(pending.after, undefined)
+  assert.equal(record(terminal.phase).phase, 'released')
+  assert.deepEqual(trial, { ...pending, runnerAfter: terminal.runnerAfter, after: terminal.after, phases: [...array(pending.phases, 25), terminal.phase] }, 'Finalization changed raw evidence')
+}
+
 export function aggregate(datasets: Dataset[]): { budgets: Budgets; comparisons: ReturnType<typeof compare>[] } {
   assert.equal(datasets.length, 5)
   const first = datasets[0]
@@ -255,7 +271,8 @@ export function aggregate(datasets: Dataset[]): { budgets: Budgets; comparisons:
   assert.equal(new Set(runners).size, 5, 'Runner identities must be distinct')
   for (const dataset of datasets) {
     assert.deepEqual(dataset.reference, first.reference)
-    for (const key of ['image', 'imageVersion']) assert.equal(record(dataset.report.runner)[key], record(first.report.runner)[key], `Mismatched runner ${key}`)
+    assert.equal(dataset.report.protocol, measurementProtocol)
+    assert.equal(record(dataset.report.runner).image, 'ubuntu24')
     for (const key of ['checkout', 'headTree', 'checkoutParents', 'prHead', 'base', 'node', 'platform', 'arch', 'lockSha256', 'playwright', 'browserDistribution', 'assets', 'viewport', 'throttling', 'cache']) assert.deepEqual(dataset.report[key], first.report[key], `Mismatched ${key}`)
     requireReleased([...dataset.base, ...dataset.head])
   }
@@ -286,7 +303,7 @@ export function validateArchiveEntries(entries: string[], reportPath: string): v
   for (const arm of ['base', 'head']) {
     for (let repeat = 0; repeat < 3; repeat++) {
       const trial = `${arm}-${String(repeat)}`
-      required.push(`${trial}.json`, `${trial}-baseline.heapsnapshot`, `${trial}-end.heapsnapshot`)
+      required.push(`${trial}.json`, `${trial}-pending.json`, `${trial}-terminal.json`, `${trial}-baseline.heapsnapshot`, `${trial}-end.heapsnapshot`)
     }
   }
   for (const mode of ['production', 'development']) {
@@ -313,7 +330,14 @@ async function loadDataset(manifest: Manifest, job: Job): Promise<Dataset> {
   const prefix = job.reportPath.slice(0, -'report.json'.length)
   const dataset = validateDataset(await readArchive(job, job.reportPath, 4 * 1024 * 1024), manifest, job)
   for (const arm of ['base', 'head'] as const) {
-    for (let repeat = 0; repeat < 3; repeat++) validateTrial(await readArchive(job, `${prefix}${arm}-${String(repeat)}.json`, 4 * 1024 * 1024), dataset, arm, repeat)
+    for (let repeat = 0; repeat < 3; repeat++) {
+      const name = `${prefix}${arm}-${String(repeat)}`
+      const trial = record(await readArchive(job, `${name}.json`, 4 * 1024 * 1024))
+      const pending = record(await readArchive(job, `${name}-pending.json`, 4 * 1024 * 1024))
+      const terminal = record(await readArchive(job, `${name}-terminal.json`, 65536))
+      validateFinalization(trial, pending, terminal, arm, repeat)
+      validateTrial(trial, dataset, arm, repeat)
+    }
   }
   for (const name of [...scenarios.map(scenario => `failure-${scenario}`), 'runner', 'runner-forced']) {
     const termination = record(await readArchive(job, `${prefix}${name}-termination.json`, 64 * 1024))
