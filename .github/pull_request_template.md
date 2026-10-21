@@ -1,3 +1,7 @@
+## Impact
+
+In one paragraph of 1–3 short sentences, explain the effect this PR delivers for the project, who it affects and why it matters where relevant, including material limits. Use plain language understandable without the implementation or prior discussion. Do not discuss code or implementation, list files or symbols, report checks, or narrate the work here. For design, documentation or process changes, describe their actual effect without implying implemented runtime behavior or inventing benefits. Keep technical details and required acceptance and verification evidence in the sections below.
+
 Closes #
 
 ## What changes

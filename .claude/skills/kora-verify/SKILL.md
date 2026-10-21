@@ -31,6 +31,7 @@ Use the stricter coverage of the approved/base policy and the proposed policy un
 | Profile | Before the implementation plan | Before readiness |
 |---|---|---|
 | [Correctness](references/correctness.md) | Contract or nontrivial design changes; a typo needs no design review | Every affected component, scaled to the change |
+| [Condensation](references/condensation.md) | Nontrivial implementation designs introducing abstractions, reuse boundaries or test strategy | Every component affected by source, tests, executable tooling or relevant dependency changes, including deletions and renames; editorial-only changes do not activate it |
 | [Browser](references/browser.md) | New or changed console interactions, including specification-only changes | Every frontend/backend change once a runnable console exists: common smoke plus affected journeys |
 | [Performance](references/performance.md) | Performance-sensitive architecture, resource ownership or contract changes | Every frontend/backend change and other resource-lifecycle changes: relevant measurements and leak checks, in a separate review |
 | [Security](references/security.md) | New or changed trust boundaries, including specification-only changes | Changes to authentication, secrets, policy, untrusted content/templates, execution, publication, network, uploads, dependencies, CI or agent configuration; every component records applicability |

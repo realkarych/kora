@@ -177,7 +177,7 @@
       "type": "object",
       "properties": {
         "timeout": { "$ref": "#/$defs/duration" },
-        "max_events": { "type": "integer", "minimum": 1 },
+        "max_events": { "type": "integer", "minimum": 1, "maximum": 100000 },
         "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
         "stall_after": { "$ref": "#/$defs/duration" }
       },
@@ -210,7 +210,7 @@
     },
     "toolPolicy": {
       "type": "object",
-      "description": "The one tool-call policy of a node (DD-29, S2-2): ordered allow and deny patterns in the harness tool-pattern syntax; the namespace policy is prepended at run time",
+      "description": "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns in the harness tool-pattern syntax, evaluated per layer together with the namespace policy: a deny in either layer wins, every layer with a non-empty allow list must match, and order inside an array has no effect",
       "properties": {
         "allow": { "type": "array", "items": { "type": "string" } },
         "deny": { "type": "array", "items": { "type": "string" } }

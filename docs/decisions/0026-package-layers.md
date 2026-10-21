@@ -4,6 +4,7 @@
 - Deciders: project owner
 - Resolves: issue #104
 - Amends: [ADR-0013](0013-implementation-stack.md) (repository layout)
+- Fake-module amendment dated 2026-10-21: the import rule for fake modules and the testing roots, under [issue #136](https://github.com/realkarych/kora/issues/136); implementation plan approved by the project owner, wording pending line-by-line owner review.
 - Discovery amendment dated 2026-10-21: the consequence on provider discovery, under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
 - Related: [ADR-0002](0002-ai-first-api-and-thin-clients.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), [ADR-0016](0016-trusted-execution-and-publication.md)
 
@@ -42,11 +43,13 @@ Several components are shared between these processes: the API client and its mo
 - `kora.testing` is a root because `run_scenario` starts an in-process `kora standalone` (dsl.md section 4).
 - `kora.conformance` is a root because the end-to-end conformance suite needs the whole engine (ADR-0005).
 
+Fake modules (amended 2026-10-21, [issue #136](https://github.com/realkarych/kora/issues/136)). A module within `kora.plugins.<family>.fake` is imported only by `kora.testing`, `kora.conformance`, its own fake module and `tests/`, and no fake module imports a fake module of another family. `kora.standalone` imports neither testing root, and `kora.__main__` imports them only inside its top-level `test`, `conformance` and `mcp` command functions; the dry-run command function that issue #140 chooses joins that set in #140's change, with the owner's approval. Composition roots make no dynamic-import call (`importlib.import_module`, `importlib.util.spec_from_file_location`, `importlib.util.module_from_spec`, `__import__`, `pkgutil.resolve_name`, `runpy.run_module`, `runpy.run_path`), whatever its argument. Elsewhere the rule sees static imports and literal dynamic imports only, and no checked form covers an entry point's `load()` outside provider loading, as the limits below state. The rule and its seeded self-test are part of the enforcement below ([fakes.md section 2](../../knowledge/specs/fakes.md#2-fakes-never-reach-a-serving-process)).
+
 **Third-party checks.**
 
 - Only `cel_eval` may import the CEL binding `cel`, and this binds the composition roots too, so `cel`, `ir` and `dsl` work without the `kora[cel]` extra. A root may still import `cel_eval` or `api`, so that the CLI entry point starts without the extra depends on `kora.__main__` deferring those imports; the CLI work item adds the pending contract `test_cli_compile_runs_without_cel_extra`, which runs `kora compile` in an environment without `kora[cel]`.
 - `fastapi`, `starlette`, `uvicorn`, `sqlalchemy`, `alembic`, `asyncpg` and `aiosqlite` may not be imported by `observability`, `cel`, `ir`, `protocols`, `models`, `client`, `executor`, `runner` or `worker`. `mcp` is left out until the MCP SDK's HTTP stack is settled.
-- A call to `importlib.import_module`, `__import__` or `pkgutil.resolve_name` whose module argument is a string literal naming a kora module is refused outside the provider-loading module `kora.protocols.loading`. The check follows aliases of these functions and of their modules, `builtins.__import__`, the `name` keyword and a relative literal with a literal package. Dynamic edges do not count towards the invariant, which is about static imports.
+- A call to `importlib.import_module`, `__import__`, `pkgutil.resolve_name` or `runpy.run_module` whose module argument is a string literal naming a kora module is refused outside the provider-loading module `kora.protocols.loading`. The check follows aliases of these functions and of their modules, `builtins.__import__`, the `name` keyword and a relative literal with a literal package. Dynamic edges do not count towards the invariant, which is about static imports.
 
 **Enforcement.** `tests/architecture/test_import_layers.py` parses every module under `src/kora` with the standard library `ast` module. It checks the import rule against the table and the invariant over the transitive closure of the actual static import graph, independently of the table. It also checks the third-party rules, keeps the test's table identical to the documented one, and keeps its server-free set, server set and composition roots identical to this record. CI runs pytest in every scaffold lane.
 
@@ -69,7 +72,7 @@ Layering is a maintainability and packaging rule, with defence in depth for trus
 It does not guarantee:
 
 - what a process can import in an environment where kora is installed;
-- dynamic loading through `kora.provider` entry points, `importlib`, `__import__` and `pkgutil.resolve_name`, beyond the literal check above;
+- dynamic loading through `kora.provider` entry points, `importlib`, `__import__`, `pkgutil.resolve_name` and `runpy`, beyond the literal check above and the composition-root rule of the fake-module amendment, which also refuses `runpy.run_path` and the `importlib.util` spec loaders in roots;
 - process placement and credential separation, since an execution-side provider may run supervisor code inside the worker process;
 - third-party imports beyond the checked list above.
 
