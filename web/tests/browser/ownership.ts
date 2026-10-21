@@ -9,6 +9,13 @@ import { nativeResources, verifyReleased } from './resources.ts'
 import type { NativeResources } from './resources.ts'
 import { LocalProxy } from './proxy.ts'
 
+interface CleanupFailure {
+  stage: string
+  name: string
+  code: string | null
+  message: string
+}
+
 export interface Cleanup {
   browserExit: number | null
   serverExit: number | null
@@ -17,7 +24,7 @@ export interface Cleanup {
   forced: boolean
   proxyDenied: number
   proxySockets: number
-  failures: string[]
+  failures: CleanupFailure[]
 }
 
 const activeOwners = new Set<Ownership>()
@@ -140,17 +147,19 @@ export class Ownership {
 
   private async closeOnce(): Promise<Cleanup> {
     const start = performance.now()
-    const failures: string[] = []
-    const collect = (results: PromiseSettledResult<unknown>[]): void => {
-      for (const result of results) {
+    const failures: CleanupFailure[] = []
+    const collect = (results: PromiseSettledResult<unknown>[], stages: string[]): void => {
+      for (const [index, result] of results.entries()) {
         if (result.status === 'rejected') {
           const error: unknown = result.reason
-          failures.push(error instanceof Error ? error.name : 'UnknownError')
+          const stage = stages[index]
+          assert(stage)
+          failures.push({ stage, name: error instanceof Error ? error.name.slice(0, 64) : 'UnknownError', code: error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code.slice(0, 64) : null, message: error instanceof Error ? error.message.slice(0, 512) : 'Non-error cleanup failure' })
         }
       }
     }
     await Promise.allSettled([...this.acquiring])
-    collect(await Promise.allSettled([this.sample()]))
+    collect(await Promise.allSettled([this.sample()]), ['sample'])
     let forced = false
     const browserProcess = this.browserServer?.process()
     const closeBrowser = async (): Promise<void> => {
@@ -170,8 +179,8 @@ export class Ownership {
         try { await closed } finally { clearTimeout(timer) }
       }
     }
-    collect(await Promise.allSettled([closeBrowser(), closeServer(), this.proxy.close()]))
-    collect(await Promise.allSettled([verifyReleased([...this.pids])]))
+    collect(await Promise.allSettled([closeBrowser(), closeServer(), this.proxy.close()]), ['browser', 'server', 'proxy'])
+    collect(await Promise.allSettled([verifyReleased([...this.pids])]), ['release'])
     const result = {
       browserExit: browserProcess?.exitCode ?? null,
       serverExit: this.server?.exitCode ?? null,
@@ -186,7 +195,7 @@ export class Ownership {
     this.browserServer = undefined
     this.server = undefined
     activeOwners.delete(this)
-    if (this.overflow) failures.push('DiagnosticOverflow')
+    if (this.overflow) failures.push({ stage: 'diagnostics', name: 'DiagnosticOverflow', code: null, message: 'Child diagnostics exceeded 64 KiB' })
     return result
   }
 }

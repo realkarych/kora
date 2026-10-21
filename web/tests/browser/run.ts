@@ -33,7 +33,7 @@ process.once('SIGINT', stop)
 const trials: Trial[] = []
 const report: Record<string, unknown> = {
   output, status: 'running', mode: calibration ? 'calibration' : smokeOnly ? 'smoke' : 'verification',
-  command: process.argv.slice(1), node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
+  command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
   viewport: { width: 1280, height: 900 }, throttling: 'none', cache: 'fresh context for cold loads; request routing disables HTTP cache',
   repetitions: 3, coldWarmup: 2, coldSamples: 20, lifecycleWarmup: 3, lifecycleSamples: 30,
   statisticalUnit: 'browser process pair', referenceCounters: process.platform === 'linux' ? 'available' : 'unverified',

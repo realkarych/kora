@@ -12,7 +12,7 @@ export interface NativeResources {
 }
 
 function missing(error: unknown): boolean {
-  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
+  return error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ESRCH')
 }
 
 async function children(pid: number): Promise<number[]> {
