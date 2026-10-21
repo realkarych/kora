@@ -149,14 +149,17 @@ from kora.cel_eval.errors import EvaluatorUnavailable
 from tests.cel_eval.thread_scenarios import ScriptedBinding, reached, turn
 from tests.measurements.cel_workload import quiesce
 
-diagnostics = configure_process(CEL_COMPONENT, LoggingSettings(), 'evaluator-test', clock)
+diagnostics = configure_process(
+    CEL_COMPONENT, LoggingSettings(), 'evaluator-test', clock)
 fake = ScriptedBinding(block='true', fail='(99 == 99)')
 owner = EvaluationThread(fake.binding(), Settings(close_timeout=0.001))
 async def main():
     first = Evaluator(clock, owner)
-    running = asyncio.create_task(first.evaluate(expression('true'), {}, {}, ErrorContext('when')))
+    running = asyncio.create_task(
+        first.evaluate(expression('true'), {}, {}, ErrorContext('when')))
     await reached(fake.started)
-    queued = asyncio.create_task(first.evaluate(expression('false'), {}, {}, ErrorContext('when')))
+    queued = asyncio.create_task(
+        first.evaluate(expression('false'), {}, {}, ErrorContext('when')))
     await turn()
     for _ in range(2):
         try:
@@ -213,20 +216,24 @@ from tests.measurements.cel_workload import quiesce
 
 failure_enabled = threading.Event()
 def diagnostic_clock():
-    if failure_enabled.is_set() and threading.current_thread().name == 'kora-cel-evaluator':
+    worker = threading.current_thread().name == 'kora-cel-evaluator'
+    if failure_enabled.is_set() and worker:
         raise ArithmeticError('private-diagnostic-cause')
     return clock()
 
-diagnostics = configure_process(CEL_COMPONENT, LoggingSettings(), 'evaluator-test', diagnostic_clock)
+diagnostics = configure_process(
+    CEL_COMPONENT, LoggingSettings(), 'evaluator-test', diagnostic_clock)
 fake = ScriptedBinding(block='true')
 owner = EvaluationThread(fake.binding())
 async def main():
     first = Evaluator(clock, owner)
     idle = Evaluator(clock, owner)
     waiting = Evaluator(clock, owner)
-    running = asyncio.create_task(first.evaluate(expression('true'), {}, {}, ErrorContext('when')))
+    running = asyncio.create_task(
+        first.evaluate(expression('true'), {}, {}, ErrorContext('when')))
     await reached(fake.started)
-    queued = asyncio.create_task(waiting.evaluate(expression('false'), {}, {}, ErrorContext('when')))
+    queued = asyncio.create_task(
+        waiting.evaluate(expression('false'), {}, {}, ErrorContext('when')))
     await turn()
     await idle.close()
     closing = asyncio.create_task(first.close())

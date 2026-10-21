@@ -11,7 +11,7 @@ from tests.cel_eval.test_cel_conversion import expression
 from tests.cel_eval.test_cel_evaluation import clock
 from tests.cel_eval.thread_scenarios import ScriptedBinding
 from tests.measurements.cel_workload import quiesce
-from tests.observability.conftest import PipeReader
+from tests.support.observability import PipeReader
 
 
 def fill(descriptor: int) -> None:
