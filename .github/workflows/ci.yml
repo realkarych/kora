@@ -176,6 +176,50 @@ jobs:
             measurements-checkout-revision.txt
           if-no-files-found: error
 
+  browser:
+    name: Console browser checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_BROWSER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_BROWSER_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version-file: web/.node-version
+          package-manager-cache: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          package_json_file: web/package.json
+          run_install: false
+          cache: true
+          cache_dependency_path: web/pnpm-lock.yaml
+      - name: Install pinned browser tools
+        run: |
+          pnpm --dir web install --frozen-lockfile
+          pnpm --dir web exec playwright install --with-deps chromium
+      - name: Check and build browser sources
+        run: |
+          pnpm --dir web run typecheck
+          pnpm --dir web run lint
+          pnpm --dir web run build
+      - name: Run browser smoke and reference calibration
+        run: pnpm --dir web run test:browser --calibrate
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: console-browser-checks
+          path: measurements/browser/
+          if-no-files-found: error
+          retention-days: 14
+
   markdown:
     name: Markdown lint
     runs-on: ubuntu-latest

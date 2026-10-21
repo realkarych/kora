@@ -1,5 +1,7 @@
 # Development
 
+Browser verification amendment dated 2026-10-21: implementation plan approved under [issue #179](https://github.com/realkarych/kora/issues/179); wording pending line-by-line owner review.
+
 Scope and implementation plan approved by the project owner under [issue #86](https://github.com/realkarych/kora/issues/86) on 2026-10-18; wording pending line-by-line owner review.
 
 CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording pending line-by-line owner review.
@@ -194,3 +196,16 @@ CI caches dependency stores using lockfile-derived keys, with separate uv cache 
 Setup tooling must install the pinned pnpm as a native executable before project commands. A legacy bootstrap can add package-manager entries to the lockfile even during frozen installation; the final dependency-file diff checks that setup and builds preserve it. The [dated correction record](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#pnpm-bootstrap-lockfile-correction) identifies the compatible action and reproduction evidence.
 
 Every change needs an issue, an owner-approved implementation plan before nontrivial edits, and a pull request closing exactly that issue. Keep specifications and implementation together, include each acceptance criterion and its verification evidence in the PR, and run all commands above before requesting review. New runtime dependencies enter only with an implemented consumer and a recorded reason in the [stack inventory](../knowledge/architecture/detailed.md#stack-per-component).
+
+## Browser checks
+
+Install the pinned Chromium distribution after the frozen frontend installation. Run the production/development smoke, failure-path checks and controlled base/head loading/lifecycle comparison through the registered command:
+
+```sh
+pnpm --dir web exec playwright install chromium
+KORA_BROWSER_BASE="$(git rev-parse origin/master)" pnpm --dir web run test:browser
+```
+
+Reference calibration and verification require a clean committed tree and a production build environment (`NODE_ENV` unset or `production`). The command builds the current shell and the explicit base with the same head toolchain, and verifies that failure fixtures preserve the measured head assets. Each invocation preserves its evidence in a fresh directory under `measurements/browser/`; `KORA_BROWSER_OUTPUT` changes the parent directory. Reports identify the actual checkout, PR head, base, browser and lockfile. Linux x86_64 is the reference environment for native process-tree counters and frozen budgets. `--smoke` supplies functional-only local evidence on Linux or macOS; it does not satisfy performance verification. The initial `--calibrate` mode records proposed budgets, which require a separate verification run after freezing. See the [measurement protocol and activation evidence](../knowledge/research/console-browser-checks-2026-10-21.md).
+
+CI installs Chromium system dependencies and runs the command in the parallel `Console browser checks` job, retaining failure evidence as well as successful results. The static shell activates boot, diagnostics, basic semantics, keyboard, responsive and loading/resource checks. API-backed journeys activate with their implementing components.
