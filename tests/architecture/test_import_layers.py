@@ -219,7 +219,8 @@ def literal_argument(node: ast.Call, position: int, keyword: str) -> str | None:
 
 
 def dynamic_target(node: ast.Call) -> str | None:
-    name = literal_argument(node, 0, "name")
+    literal = literal_argument(node, 0, "name")
+    name = None if literal is None else literal.split(":", 1)[0]
     if name is None or not name.startswith("."):
         return name
     package = literal_argument(node, 1, "package")
@@ -295,7 +296,9 @@ def import_violation(
     module: SourceModule, importer_layer: str, imported: ImportedModule
 ) -> str | None:
     if imported.dynamic:
-        if is_within(module.name, PROVIDER_LOADING_MODULE):
+        if is_within(module.name, PROVIDER_LOADING_MODULE) and not is_within(
+            imported.target, CEL_BINDING
+        ):
             return None
         return f"dynamically imports {imported.target}"
     if not is_within(imported.target, ROOT_PACKAGE):
@@ -540,7 +543,9 @@ def test_checker_flags_server_library_in_server_free_package(tmp_path: Path) -> 
 
 
 def test_only_the_binding_module_imports_cel_binding(tmp_path: Path) -> None:
-    write_packages(tmp_path, ["kora", "kora.cel", "kora.cel_eval", "kora.ir"])
+    write_packages(
+        tmp_path, ["kora", "kora.cel", "kora.cel_eval", "kora.ir", "kora.protocols"]
+    )
     write_module(tmp_path, "kora.ir.conditions", "import cel\nimport kora.cel\n")
     write_module(tmp_path, "kora.cel_eval.binding", "import cel\nfrom cel import x\n")
     write_module(tmp_path, "kora.cel_eval.evaluate", "import cel.cel\n")
@@ -548,6 +553,16 @@ def test_only_the_binding_module_imports_cel_binding(tmp_path: Path) -> None:
         tmp_path,
         "kora.cel_eval.dynamic",
         "import importlib\nimportlib.import_module('cel')\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.cel_eval.resolved",
+        "import pkgutil\npkgutil.resolve_name('cel:compile')\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.protocols.loading",
+        "import importlib\nimportlib.import_module('cel.cel')\n",
     )
     write_module(tmp_path, "kora.__main__", "import cel.stdlib\nimport kora.db\n")
 
@@ -559,8 +574,10 @@ def test_only_the_binding_module_imports_cel_binding(tmp_path: Path) -> None:
         "kora/cel_eval/dynamic.py:2: dynamically imports cel",
         "kora/cel_eval/evaluate.py:1: only kora.cel_eval.binding may import the CEL "
         "binding cel.cel",
+        "kora/cel_eval/resolved.py:2: dynamically imports cel",
         "kora/ir/conditions.py:1: only kora.cel_eval.binding may import the CEL "
         "binding cel",
+        "kora/protocols/loading.py:2: dynamically imports cel.cel",
     ]
 
 

@@ -52,6 +52,7 @@ def wheel_tag(distribution: importlib.metadata.Distribution) -> str:
         for line in metadata.splitlines()
         if line.startswith("Tag: ")
     ]
+    assert len(tags) == 1, "the installed wheel names exactly one tag"
     return tags[0]
 
 

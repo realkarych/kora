@@ -10,6 +10,7 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Protocol
 
 from kora.cel import CheckedExpression, JsonValue
@@ -111,13 +112,7 @@ def search_path() -> list[str]:
 
 
 def matching_distributions() -> list[importlib.metadata.Distribution]:
-    found: dict[tuple[Path, str], importlib.metadata.Distribution] = {}
-    for distribution in importlib.metadata.distributions(
-        name=DISTRIBUTION, path=search_path()
-    ):
-        site = Path(str(distribution.locate_file(""))).resolve()
-        found.setdefault((site, distribution.version), distribution)
-    return list(found.values())
+    return list(importlib.metadata.distributions(name=DISTRIBUTION, path=search_path()))
 
 
 def record_digest(content: bytes) -> str:
@@ -155,10 +150,9 @@ def present_files(package: Path) -> list[Path] | None:
         base = Path(directory)
         if any((base / name).is_symlink() for name in [*subdirectories, *names]):
             return None
-        subdirectories[:] = sorted(
-            name for name in subdirectories if name != CACHE_DIRECTORY
-        )
-        present.extend(base / name for name in sorted(names))
+        subdirectories.sort()
+        if not is_cached(base.relative_to(package).parts):
+            present.extend(base / name for name in sorted(names))
     return present
 
 
@@ -218,12 +212,12 @@ def panic_classes() -> set[type[BaseException]]:
     return found
 
 
-def import_binding() -> bool:
+def import_binding() -> ModuleType | None:
     try:
         import cel
     except (ImportError, OSError):
-        return False
-    return sys.modules.get(MODULE) is cel
+        return None
+    return cel
 
 
 def native_compile() -> NativeCompile:
@@ -232,17 +226,17 @@ def native_compile() -> NativeCompile:
     return cel.compile
 
 
-def module_file(name: str) -> Path | None:
-    loaded = vars(sys.modules[name]).get("__file__")
+def module_file(module: ModuleType) -> Path | None:
+    loaded = vars(module).get("__file__")
     return Path(loaded).resolve() if isinstance(loaded, str) else None
 
 
-def loaded_files_match(located: Located) -> bool:
+def loaded_files_match(located: Located, package: ModuleType) -> bool:
     for name in binding_modules():
-        loaded = module_file(name)
+        loaded = module_file(sys.modules[name])
         if loaded is None or loaded not in located.recorded:
             return False
-    return module_file(MODULE) == located.package.resolve()
+    return module_file(package) == located.package.resolve()
 
 
 def announce(version: str) -> None:
@@ -260,9 +254,10 @@ def load() -> Binding:
     located = locate()
     silence_binding_logger()
     before = panic_classes()
-    if not import_binding():
+    package = import_binding()
+    if package is None:
         raise BindingUnavailable(Refusal.IMPORT_FAILED)
-    if not loaded_files_match(located):
+    if not loaded_files_match(located, package):
         raise BindingUnavailable(Refusal.MODULE_OUTSIDE_RECORD)
     introduced = panic_classes() - before
     if len(introduced) != 1:

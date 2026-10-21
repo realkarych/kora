@@ -73,6 +73,10 @@ class FakeDistribution:
     linked: Mapping[str, str] = field(default_factory=lambda: {})
     hash_mode: str = "sha256"
     stale_versions: tuple[str, ...] = ()
+    egg_info: bool = False
+    linked_files: Mapping[str, str] = field(default_factory=lambda: {})
+    missing: Mapping[str, str] = field(default_factory=lambda: {})
+    linked_package: bool = False
 
 
 def record_line(relative: str, content: bytes, tampered: bool, mode: str) -> str:
@@ -110,9 +114,26 @@ def install_fake(site: Path, fake: FakeDistribution) -> Path:
         target = site.parent / f"linked-{index}"
         write_text(target / "__init__.py", text)
         (site / relative).symlink_to(target, target_is_directory=True)
+    for index, (relative, text) in enumerate(sorted(fake.linked_files.items())):
+        target = site.parent / f"linked-file-{index}.py"
+        write_text(target, text)
+        (site / relative).parent.mkdir(parents=True, exist_ok=True)
+        (site / relative).symlink_to(target)
+        lines.append(record_line(relative, text.encode("utf-8"), False, fake.hash_mode))
+    for relative, text in sorted(fake.missing.items()):
+        lines.append(record_line(relative, text.encode("utf-8"), False, fake.hash_mode))
+    if fake.linked_package:
+        moved = site.parent / "linked-package"
+        (site / MODULE).rename(moved)
+        (site / MODULE).symlink_to(moved, target_is_directory=True)
     dist_info = write_metadata(site, fake.version)
     for version in fake.stale_versions:
         write_metadata(site, version)
+    if fake.egg_info:
+        write_text(
+            site / f"{DIST_INFO_PREFIX}-{fake.version}.egg-info" / "PKG-INFO",
+            f"Metadata-Version: 2.1\nName: {DISTRIBUTION}\nVersion: {fake.version}\n",
+        )
     lines.append(f"{dist_info}/METADATA,,")
     lines.append(f"{dist_info}/RECORD,,")
     (site / dist_info / "RECORD").write_text("\n".join(lines) + "\n", encoding="utf-8")

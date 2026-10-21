@@ -43,6 +43,9 @@ def fake(init: str = "", version: str = PINNED_VERSION) -> FakeDistribution:
 
 
 FOREIGN_FILE: str = "__file__ = '/elsewhere/__init__.py'\n"
+SIBLING_FILE: str = (
+    "import os\n__file__ = os.path.join(os.path.dirname(__file__), 'cli.py')\n"
+)
 PIP_CACHE: dict[str, str] = {"cel/__pycache__/__init__.cpython-311.pyc": ""}
 
 MISMATCHED: list[FakeLeg] = [
@@ -71,6 +74,26 @@ MISMATCHED: list[FakeLeg] = [
         Refusal.PANIC_CLASS_UNRESOLVED,
     ),
     FakeLeg(
+        "same_version_metadata",
+        (replace(fake(), egg_info=True),),
+        Refusal.AMBIGUOUS,
+    ),
+    FakeLeg(
+        "missing_recorded_file",
+        (replace(fake(), missing={"cel/extra.py": ""}),),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
+        "another_recorded_file",
+        (
+            replace(
+                fake(SIBLING_FILE),
+                files={"cel/__init__.py": SIBLING_FILE, "cel/cli.py": ""},
+            ),
+        ),
+        Refusal.MODULE_OUTSIDE_RECORD,
+    ),
+    FakeLeg(
         "pip_bytecode_cache",
         (replace(fake(), cached=PIP_CACHE),),
         Refusal.PANIC_CLASS_UNRESOLVED,
@@ -89,6 +112,31 @@ UNCHECKED_CODE: list[FakeLeg] = [
                 fake("from . import cli\n"),
                 files={"cel/__init__.py": "from . import cli\n", "cel/cli.py": ""},
                 unrecorded={"cel/cli/__init__.py": WRITE_MARKER},
+            ),
+        ),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
+        "linked_file",
+        (
+            replace(
+                fake("from . import sub\n"),
+                linked_files={"cel/sub.py": WRITE_MARKER},
+            ),
+        ),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
+        "linked_package",
+        (replace(fake(WRITE_MARKER), linked_package=True),),
+        Refusal.FILE_MISMATCH,
+    ),
+    FakeLeg(
+        "linked_bytecode",
+        (
+            replace(
+                fake(WRITE_MARKER),
+                linked_files={"cel/__pycache__/__init__.cpython-311.pyc": ""},
             ),
         ),
         Refusal.FILE_MISMATCH,

@@ -3,7 +3,7 @@ from functools import partial
 
 import pytest
 
-from kora.cel import JsonValue
+from kora.cel import Diagnostic, JsonValue
 from kora.cel.functions import FUNCTIONS, Form
 from kora.cel.limits import MAX_CODE_POINTS
 from kora.cel_eval.binding import Binding, NativeProgram
@@ -18,7 +18,7 @@ from tests.cel.binding_support import (
     unordered,
 )
 from tests.cel.generator import generated_expressions
-from tests.cel.support import accepted
+from tests.cel.support import accepted, checked_syntax
 from tests.cel.test_cel_patterns import INVALID, SUPPORTED
 from tests.cel.test_cel_rendering import CORPUS, NESTED_AT_LIMIT, conformance_corpus
 
@@ -95,6 +95,11 @@ UNARY_RUNS: tuple[str, ...] = (
     "!!-9223372036854775808",
 )
 UNARY_OPERANDS: tuple[JsonValue, ...] = (7, True, "s")
+OUT_OF_RANGE_RUNS: tuple[str, ...] = (
+    "--9223372036854775808",
+    "---9223372036854775808",
+    "---0x8000000000000000",
+)
 
 
 def empty_matching(pattern: str) -> str:
@@ -194,6 +199,18 @@ def test_cel_unary_runs_reduce_as_the_binding_does(
     ]
 
     assert [author for author, _ in pairs] == [rendered for _, rendered in pairs]
+
+
+def test_cel_unary_runs_kora_rejects_are_refused_by_the_binding(
+    cel_binding: Binding,
+) -> None:
+    sources = OUT_OF_RANGE_RUNS
+
+    diagnostics = [checked_syntax(source) for source in sources]
+    refused = [author_evaluated(cel_binding, source) for source in sources]
+
+    assert all(isinstance(diagnostic, Diagnostic) for diagnostic in diagnostics)
+    assert refused == [("error", "ValueError")] * len(sources)
 
 
 @pytest.mark.parametrize("shape", sorted(NESTED_AT_LIMIT))
