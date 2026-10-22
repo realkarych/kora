@@ -2,7 +2,7 @@
 
 This development workflow was designed under [issue #87](https://github.com/realkarych/kora/issues/87). Its scope is contributor verification in Codex and Claude Code, not kora's product harness skill packages. [AGENTS.md](../../AGENTS.md) requires the checkpoints; [kora-verify](../../.claude/skills/kora-verify/SKILL.md) owns routing and evidence. Product behavior remains in the specifications and their cited decisions.
 
-CEL numerical-calibration amendment dated 2026-10-23: the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); wording reviewed line by line and approved by the project owner on 2026-10-23.
+CEL numerical-calibration amendment dated 2026-10-23: the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); the corresponding human-facing documentation wording was reviewed line by line and approved by the project owner on 2026-10-23.
 
 ## Minimal inventory
 
