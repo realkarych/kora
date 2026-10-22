@@ -1,22 +1,15 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile } from 'node:fs/promises'
 import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { arch, cpus, platform, release, tmpdir, totalmem } from 'node:os'
+import { arch, platform, release } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { build } from 'vite'
-import { assetHashes, buildBase, git, repository, webRoot } from './build.ts'
+import { assetHashes, git, repository, webRoot } from './build.ts'
 import { failureChecks, runnerCancellation } from './negative.ts'
-import { measure, smoke } from './measure.ts'
-import type { Trial } from './trial.ts'
-import { finalizeTrial, persistTerminal, persistTrial, readSummary, readEvidence } from './trial-evidence.ts'
-import type { Terminal } from './trial-evidence.ts'
-import { nativeResources } from './resources.ts'
-import { evidenceChecks } from './trial-evidence-checks.ts'
-import { compare, measurementProtocol, parseBudgets } from './protocol.ts'
-import { protocolChecks } from './protocol-checks.ts'
+import { smoke } from './smoke.ts'
 import { runnerChecks } from './runner-checks.ts'
 import { parseRunnerMode } from './runner-mode.ts'
 import { networkChecks } from './network.ts'
@@ -24,39 +17,28 @@ import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
 import { artifactLimits } from './limits.ts'
 const mode = parseRunnerMode(process.argv.slice(2))
-const calibration = mode === 'calibration'
-const smokeOnly = mode === 'smoke'
 const cancelProbe = process.env.KORA_BROWSER_CANCEL_PROBE === '1'
 const outputRoot = resolve(process.env.KORA_BROWSER_OUTPUT ?? join(repository, 'measurements', 'browser'))
 await mkdir(outputRoot, { recursive: true })
 const output = await mkdtemp(join(outputRoot, 'run-'))
-const temporary = await mkdtemp(join(tmpdir(), 'kora-browser-'))
 const cancellation = new AbortController()
 const stop = (): void => { cancellation.abort(); void closeOwners() }
 const limits = new ArtifactLimit(output, stop)
 process.once('SIGTERM', stop)
 process.once('SIGINT', stop)
 const report: Record<string, unknown> = {
-  output, protocol: measurementProtocol, status: 'running', mode,
-  eligibleForCalibration: calibration,
-  command: process.argv.slice(1), nodeFlags: process.execArgv, node: process.version, platform: platform(), release: release(), arch: arch(), cpus: cpus().length,
-  cpuModels: [...new Set(cpus().map(cpu => cpu.model))], totalMemory: totalmem(),
-  runner: { runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB, slot: process.env.KORA_BROWSER_CALIBRATION_SLOT, name: process.env.RUNNER_NAME, image: process.env.ImageOS, imageVersion: process.env.ImageVersion },
-  viewport: { width: 1280, height: 900 }, throttling: 'none', cache: 'fresh context for cold loads; request routing disables HTTP cache',
-  repetitions: 3, coldWarmup: 2, coldSamples: 20, lifecycleWarmup: 3, lifecycleSamples: 30,
-  statisticalUnit: 'Node process with six ordered browser trials', referenceCounters: process.platform === 'linux' ? 'available' : 'unverified',
+  output, protocol: 'console-functional-v1', status: 'running', mode,
+  node: process.version, platform: platform(), release: release(), arch: arch(),
+  runner: { runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT, job: process.env.GITHUB_JOB, image: process.env.ImageOS, imageVersion: process.env.ImageVersion },
+  viewports: [1280, 768, 375], referenceCounters: process.platform === 'linux' ? 'available' : 'unverified',
 }
 const save = (): void => {
   const data = JSON.stringify(report, null, 2)
   assert(Buffer.byteLength(data) <= 4 * 1024 * 1024, 'Report exceeded 4 MiB bound')
   writeFileSync(join(output, 'report.json'), data)
 }
-const saveTrial = (trial: Trial): void => {
-  persistTrial(output, trial)
-}
 const started = performance.now()
 try {
-  protocolChecks()
   runnerChecks()
   report.preflightChecks = 'passed'
   const checkout = await git(['rev-parse', 'HEAD'])
@@ -70,7 +52,6 @@ try {
   report.headTree = await git(['rev-parse', `${prHead}^{tree}`])
   report.prHead = prHead
   report.dirty = await git(['status', '--porcelain', '--untracked-files=normal'])
-  if (!smokeOnly && !cancelProbe) assert.equal(report.dirty, '', 'Reference measurements require a clean committed tree')
   const require = createRequire(import.meta.url)
   const playwrightPackage = require.resolve('playwright/package.json')
   const corePackage = createRequire(playwrightPackage).resolve('playwright-core/package.json')
@@ -79,10 +60,10 @@ try {
   report.playwright = metadata
   report.browserDistribution = distribution
   report.lockSha256 = createHash('sha256').update(await readFile(join(webRoot, 'pnpm-lock.yaml'))).digest('hex')
-  assert(process.env.NODE_ENV === undefined || process.env.NODE_ENV === 'production', 'Browser measurements require a production build environment')
+  assert(process.env.NODE_ENV === undefined || process.env.NODE_ENV === 'production', 'Browser checks require a production build environment')
   if (!cancelProbe) await build({ root: webRoot, configFile: join(webRoot, 'vite.config.ts'), logLevel: 'error' })
   const headAssets = await assetHashes(webRoot)
-  report.headAssetsBeforeFixtures = headAssets
+  report.assets = headAssets
   const readyForCancellation = async (pids: number[]): Promise<void> => {
     if (!cancelProbe) return
     const cancelled = once(process, 'SIGTERM')
@@ -102,66 +83,8 @@ try {
   report.artifactLimits = 'passed'
   await networkChecks(output)
   report.networkChecks = 'passed'
-  assert.deepEqual(await assetHashes(webRoot), headAssets, 'Browser fixtures changed the measured head assets')
-  save()
-  if (!smokeOnly) {
-    const base = process.env.KORA_BROWSER_BASE
-    assert(base && /^[a-f0-9]{40}$/u.test(base), 'Set KORA_BROWSER_BASE to the exact comparison commit')
-    report.base = base
-    const baseRoot = await buildBase(base, temporary)
-    report.assets = { base: await assetHashes(baseRoot), head: await assetHashes(webRoot) }
-    const order: ['base' | 'head', number][] = calibration
-      ? [['base', 0], ['head', 0], ['head', 1], ['base', 1], ['base', 2], ['head', 2]]
-      : [['head', 0], ['base', 0], ['base', 1], ['head', 1], ['head', 2], ['base', 2]]
-    report.order = order
-    save()
-    const completeTrial = async (arm: 'base' | 'head', repeat: number): Promise<void> => {
-      try {
-        await measure(arm === 'base' ? baseRoot : webRoot, arm, repeat, output, saveTrial)
-      } finally {
-        const after = await nativeResources([process.pid])
-        const terminal: Terminal = { protocol: measurementProtocol, arm, repeat, after, phase: { phase: 'released', native: await nativeResources([process.pid]) } }
-        persistTerminal(output, terminal)
-        finalizeTrial(output, terminal, cancellation.signal)
-      }
-    }
-    for (const [arm, repeat] of order) {
-      cancellation.signal.throwIfAborted()
-      await completeTrial(arm, repeat)
-    }
-    const trials = order.map(([arm, repeat]) => readSummary(output, arm, repeat))
-    assert.equal(trials.length, 6)
-    evidenceChecks(output)
-    report.evidenceChecks = 'passed'
-    const grouped = (arm: 'base' | 'head'): Record<string, number>[] => trials.filter(trial => trial.arm === arm).sort((a, b) => a.repeat - b.repeat).map(trial => trial.metrics)
-    const baseSummary = grouped('base')
-    const headSummary = grouped('head')
-    report.summaries = { base: baseSummary, head: headSummary }
-    const browser = trials[0]?.browserVersion
-    assert(browser && trials.every(trial => trial.browserVersion === browser))
-    const reference = { platform: process.platform, arch: process.arch, node: process.version, browser }
-    report.reference = reference
-    if (calibration) {
-      assert.equal(process.platform, 'linux', 'Reference calibration requires Linux')
-      assert.equal(process.arch, 'x64', 'Reference calibration requires x86_64')
-      report.reference = reference
-      report.status = 'awaiting five-runner batch aggregation'
-    } else {
-      const input: unknown = JSON.parse(await readFile(join(import.meta.dirname, 'budgets.json'), 'utf8'))
-      const budgets = parseBudgets(input)
-      const frozenPath = join(import.meta.dirname, 'frozen-training.json')
-      const frozen = readEvidence(frozenPath)
-      assert(frozen !== null && typeof frozen === 'object' && 'budgets' in frozen, 'invalid-frozen-training')
-      assert.deepEqual(parseBudgets(frozen.budgets), budgets, 'frozen-budget-mismatch')
-      report.frozenAggregate = createHash('sha256').update(await readFile(frozenPath)).digest('hex')
-      assert.deepEqual(reference, budgets.reference, 'Reference environment mismatch')
-      const comparison = compare(baseSummary, headSummary, budgets)
-      report.comparison = comparison
-      save()
-      assert(Object.keys(comparison.gates).length === 231 && Object.values(comparison.gates).every(Boolean), 'Browser measurement gate failed')
-      report.status = 'passed'
-    }
-  } else report.status = 'smoke passed; performance unverified'
+  assert.deepEqual(await assetHashes(webRoot), headAssets, 'Browser fixtures changed the production assets')
+  report.status = 'passed'
 } catch (error) {
   report.status = 'failed'
   report.failure = { code: error instanceof SyntaxError ? 'invalid-json' : error instanceof assert.AssertionError ? 'invalid-evidence' : 'operation-failed' }
@@ -172,7 +95,6 @@ try {
   if (cancellation.signal.aborted || limits.failed) { report.status = 'failed'; process.exitCode = 1 }
   report.artifactLimitFailed = limits.failed
   report.seconds = (performance.now() - started) / 1000
-  await rm(temporary, { recursive: true, force: true })
   save()
   process.removeListener('SIGTERM', stop)
   process.removeListener('SIGINT', stop)

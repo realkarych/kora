@@ -5,13 +5,6 @@ import { join } from 'node:path'
 
 export const directoryLimit = 512 * 1024 * 1024
 
-export function artifactBytes(root: string): number {
-  return readdirSync(root, { recursive: true, withFileTypes: true }).reduce((total, entry) => {
-    assert(!entry.isSymbolicLink(), 'Artifacts cannot contain symbolic links')
-    return total + (entry.isFile() ? statSync(join(entry.parentPath, entry.name)).size : 0)
-  }, 0)
-}
-
 export class ArtifactLimit {
   readonly root: string
   readonly watcher: FSWatcher

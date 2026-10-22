@@ -1,6 +1,6 @@
 # Browser runner heap tolerance and retention sensitivity
 
-Historical method: the owner-approved [removal amendment](https://github.com/realkarych/kora/issues/179#issuecomment-6328536178) withdraws this Node-controller self-memory protocol and its guarantees. The failed v3 evidence below remains rejected and causally unresolved. Current browser verification uses [console-lifecycle-v4](console-browser-checks-2026-10-21.md#current-console-lifecycle-v4-protocol); this record supplies no current budget or sensitivity guarantee.
+Historical method: the owner-approved [removal amendment](https://github.com/realkarych/kora/issues/179#issuecomment-6328536178) withdraws this Node-controller self-memory protocol and its guarantees. The failed v3 evidence below remains rejected and causally unresolved. The later [complete benchmark removal](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349) also retires v4. Current browser verification uses [console-functional-v1](console-browser-checks-2026-10-21.md#current-console-functional-v1-protocol); this record supplies no current budget or sensitivity guarantee.
 
 Checked 2026-10-22. Issue #179 and PR #180 own this measurement change. The owner approved the bounded method in [the implementation amendment](https://github.com/realkarych/kora/issues/179#issuecomment-6327372790). This record describes the candidate method and historical evidence; it does not claim a measured tolerance or runtime validation pass.
 

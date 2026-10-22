@@ -141,20 +141,14 @@ jobs:
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
   browser:
-    name: Console browser validation (${{ matrix.slot }})
+    name: Console browser checks
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        slot: [1, 2, 3, 4, 5]
     timeout-minutes: 10
     defaults:
       run:
         shell: bash
     env:
       KORA_BROWSER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-      KORA_BROWSER_BASE: b3aa12eea8a27fc22643e88bb5a82939481f42bc
-      KORA_BROWSER_CALIBRATION_SLOT: ${{ matrix.slot }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -179,12 +173,12 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
-      - name: Run the declared browser stage
+      - name: Run browser checks
         run: pnpm --dir web run test:browser
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
         with:
-          name: console-browser-validation-${{ matrix.slot }}
+          name: console-browser-checks
           path: measurements/browser/
           if-no-files-found: error
           retention-days: 14
