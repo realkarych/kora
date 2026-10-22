@@ -71,7 +71,7 @@ An ACL-enforced broker that issues scoped, short-lived credentials to an agent o
 
 - Agents do not see the repository's `CLAUDE.md` or `AGENTS.md` unless the node is trusted; authors put project instructions into the node configuration or obtain the namespace permission.
 - Gate files must be declared; an undeclared gate file is editable by the agent.
-- Digest verification runs at gate time, so an edit that slipped past the tool policy costs the attempt; after MVP, hermetic behaviour is best-effort on ACP agents that read project configuration regardless.
+- Digest verification runs at gate time, so an edit that slipped past the tool policy costs the attempt; after MVP, an ACP agent that cannot exclude project configuration is refused under the same fail-closed rule.
 - Cedar and OPA evaluators can replace `allow_deny` as plugins without a change to the intermediate representation.
 - A policy pattern on a call kind the harness cannot intercept is rejected at validation, except under `trust_repo_config: true`, where the repository's configuration can act around the policy (amended 2026-10-19); the coverage an adapter declares is verified against the harness's real interface before the adapter ships, and the Codex managed-hook flow through the app-server is confirmed with a real binary in the first vertical slice.
 - On Codex every tool call spawns the hook process once; the cost is bounded by the session's `max_events`.
