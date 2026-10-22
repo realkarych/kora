@@ -330,7 +330,7 @@ The CLI is a Typer application over the hand-written `httpx` client that shares 
 | `kora notifications list\|show\|put\|delete\|enable\|disable` | the notification-subscription operations above |
 | `kora presets pull` | fetches registry presets into `.kora/presets/` so `kora compile` stays offline (current contract [dsl](dsl.md)) |
 | `kora plugins list`, `kora doctor` | local: installed protocol implementations and their config schemas; installation health incl. harness version ranges (current contract [ADR-0004](../../docs/decisions/0004-harness-adapters-over-vendor-sdks.md)); `kora doctor` also reports whether `kora[cel]` is installed at the pinned binding version |
-| `kora conformance <protocol> <name>` | local: runs the conformance suite against an implementation (NFR-10.2) |
+| `kora conformance <protocol> <name> --config <provider.json> --fixtures <installed.python.module> [--fixture-data <exercise.json>]` | local: runs the selected activated suite with bounded validated configuration and explicit installed exercise fixtures; config omission requires schema-valid `{}`; missing fixtures/suites or zero tests fail ([protocols.md](protocols.md#local-conformance-command), NFR-10.2) |
 | `kora standalone`, `kora db upgrade`, `kora db verify-storage` | local operations, not API |
 
 Output: human table by default, `--json` returns the API response verbatim so agents and scripts share the schema.
