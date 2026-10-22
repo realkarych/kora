@@ -15,15 +15,20 @@ from typing import cast
 from urllib.parse import unquote, urlsplit
 
 from tests.cel_eval.children import full_path
+from tests.measurements.cel_bound_workload import (
+    BOUND_FAMILIES,
+    BOUND_PAIRS,
+    bound_case,
+    conversion_samples,
+    select_bounds,
+)
 from tests.measurements.cel_cost_workload import (
     FULL_TIMINGS,
     NATIVE_TIMINGS,
     SAMPLES,
     WARMUP,
-    PilotCase,
+    ConversionCase,
     pilot_cases,
-    prepared,
-    value_depth,
 )
 from tests.measurements.cel_measurement_process import ProcessResult, run_process
 from tests.measurements.harness import Sample, new_report
@@ -34,26 +39,7 @@ PILOT_SECONDS: float = 240.0
 PRELUDE: str = (
     "import json, sys; sys.path[:] = json.loads(sys.argv[1]); "
     "from tests.measurements.cel_cost_workload import run_case; "
-    "run_case(sys.argv[2], sys.argv[3])"
-)
-OBSERVATION_KEYS: frozenset[str] = frozenset(
-    {
-        "schema",
-        "case",
-        "mode",
-        "input_sha256",
-        "original_bytes",
-        "converted_bytes",
-        "values",
-        "original_depth",
-        "converted_depth",
-        "warmup",
-        "samples",
-        "timings",
-        "resources",
-        "stack_restored",
-        "completion",
-    }
+    "run_case(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else 'pilot')"
 )
 
 
@@ -84,36 +70,48 @@ def timings_of(observation: dict[str, object]) -> dict[str, list[int]]:
     return result
 
 
+def unique_mapping(entries: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in entries:
+        if key in result:
+            raise ValueError("duplicate measurement field")
+        result[key] = value
+    return result
+
+
+def reject_constant(value: str) -> object:
+    raise ValueError("nonfinite measurement value")
+
+
 def validate_observation(
-    content: bytes, case: PilotCase, mode: str
+    content: bytes, case: ConversionCase, mode: str
 ) -> dict[str, object]:
-    raw: object = json.loads(content)
+    raw: object = json.loads(
+        content, object_pairs_hook=unique_mapping, parse_constant=reject_constant
+    )
     value = mapping(raw)
-    if frozenset(value) != OBSERVATION_KEYS:
-        raise ValueError("unexpected observation fields")
-    converted = prepared(case)
+    if mode not in ("full", "native"):
+        raise ValueError("unknown observation mode")
+    names = FULL_TIMINGS if mode == "full" else NATIVE_TIMINGS
     expected: dict[str, object] = {
-        "schema": 1,
+        "schema": 2,
         "case": case.name,
         "mode": mode,
-        "input_sha256": case.digest(),
-        "original_bytes": case.original_size().bytes,
-        "converted_bytes": converted.bytes,
-        "values": converted.count,
-        "original_depth": value_depth(case.value),
-        "converted_depth": value_depth(converted.values["values"]),
+        **case.metadata(),
         "warmup": WARMUP,
         "samples": SAMPLES,
+        "calls": {name: 1 if mode == "full" else case.batch for name in names},
         "stack_restored": True,
         "completion": "cel-conversion-complete",
     }
+    if set(value) != set(expected) | {"timings", "resources"}:
+        raise ValueError("unexpected observation fields")
     if any(
-        type(value[key]) is not type(item) or value[key] != item
+        json.dumps(value[key], sort_keys=True) != json.dumps(item, sort_keys=True)
         for key, item in expected.items()
     ):
         raise ValueError("observation does not match the declared workload")
     timings = timings_of(value)
-    names = FULL_TIMINGS if mode == "full" else NATIVE_TIMINGS
     if set(timings) != set(names):
         raise ValueError("observation has the wrong timing phases")
     resources = mapping(value["resources"])
@@ -212,42 +210,85 @@ def is_reference() -> bool:
     )
 
 
-def pilot(output: Path) -> int:
+def collect_conversion(output: Path, catalogue: str) -> int:
     started = time.monotonic()
     report = new_report()
-    report.environment.update(
-        {
-            "cpu_model": cpu_model(),
-            "machine": platform.machine(),
-            "kernel": platform.release(),
-            "runner_image": os.environ.get("ImageOS"),
-            "image_version": os.environ.get("ImageVersion"),
-            "python_build": str(sysconfig.get_config_var("CONFIG_ARGS")),
-        }
-    )
     observations: list[dict[str, object]] = []
     decisions: list[dict[str, object]] = []
     failures: list[dict[str, object]] = []
-    reference = is_reference()
+    candidates: list[dict[str, object]] = []
+    manifest: list[str] = []
+    header: dict[str, object] = {
+        "source_revision": os.environ.get("KORA_MEASUREMENT_REVISION"),
+        "checkout_revision": None,
+        "tree": None,
+        "dirty": None,
+        "wheel": None,
+    }
+    selected: tuple[int, int] | None = None
+    reference = False
     status = "measurement_failed"
-    source = os.environ.get("KORA_MEASUREMENT_REVISION") or git_value(
-        "rev-parse", "HEAD"
-    )
-    checkout = git_value("rev-parse", "HEAD")
-    tree = git_value("rev-parse", "HEAD^{tree}")
-    dirty = bool(git_value("status", "--porcelain"))
-    wheel = wheel_identity()
+    phase = "provenance"
+    expected_count = 120 if catalogue == "bounds" else 28
     try:
+        report.environment.update(
+            {
+                "cpu_model": cpu_model(),
+                "machine": platform.machine(),
+                "kernel": platform.release(),
+                "runner_image": os.environ.get("ImageOS"),
+                "image_version": os.environ.get("ImageVersion"),
+                "python_build": str(sysconfig.get_config_var("CONFIG_ARGS")),
+                "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+                "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+                "github_job": os.environ.get("GITHUB_JOB"),
+                "runner_name": os.environ.get("RUNNER_NAME"),
+            }
+        )
+        if catalogue not in ("pilot", "bounds"):
+            raise ValueError("unknown conversion catalogue")
+        reference = is_reference()
+        header["source_revision"] = header["source_revision"] or git_value(
+            "rev-parse", "HEAD"
+        )
+        header["checkout_revision"] = git_value("rev-parse", "HEAD")
+        header["tree"] = git_value("rev-parse", "HEAD^{tree}")
+        header["dirty"] = bool(git_value("status", "--porcelain"))
+        header["wheel"] = wheel_identity()
+        phase = "reference_qualification"
+        if catalogue == "bounds" and not reference:
+            raise RuntimeError("bound selection requires the reference runner")
         if os.environ.get("GITHUB_ACTIONS") == "true" and (
-            not reference or dirty or source != checkout
+            not reference
+            or header["dirty"]
+            or header["source_revision"] != header["checkout_revision"]
         ):
-            raise RuntimeError("CI pilot requires a clean matching reference checkout")
-        for case in pilot_cases():
+            raise RuntimeError(
+                "CI collection requires a clean matching reference checkout"
+            )
+        phase = "catalogue"
+        cases = (
+            tuple(
+                bound_case(size, count, family)
+                for size, count in BOUND_PAIRS
+                for family in BOUND_FAMILIES
+            )
+            if catalogue == "bounds"
+            else tuple(case.workload() for case in pilot_cases())
+        )
+        manifest = [case.name for case in cases]
+        if len(manifest) != expected_count or len(set(manifest)) != expected_count:
+            raise ValueError("conversion catalogue is incomplete or duplicated")
+        minima: dict[tuple[int, int, str], int] = {}
+        for case in cases:
             paired: dict[str, dict[str, list[int]]] = {}
             for mode in ("full", "native"):
+                phase = case.name + "/" + mode
                 remaining = PILOT_SECONDS - (time.monotonic() - started)
                 if remaining <= 0:
-                    raise RuntimeError("conversion pilot exceeded its suite deadline")
+                    raise RuntimeError(
+                        "conversion collection exceeded its suite deadline"
+                    )
                 result = run_process(
                     [
                         sys.executable,
@@ -257,6 +298,7 @@ def pilot(output: Path) -> int:
                         json.dumps(full_path(ROOT)),
                         case.name,
                         mode,
+                        catalogue,
                     ],
                     deadline_seconds=min(10.0, remaining),
                 )
@@ -291,91 +333,128 @@ def pilot(output: Path) -> int:
                             Sample(
                                 f"{case.name}/{name}",
                                 iteration,
-                                1,
+                                1 if mode == "full" else case.batch,
                                 duration / 1_000_000_000,
                                 {"nanoseconds": duration, "warmup": iteration < WARMUP},
                             )
                         )
+            phase = case.name + "/decision"
             full = paired["full"]
             native = paired["native"]
-            combined = [
-                prep + actual - control
-                for prep, actual, control in zip(
-                    full["bind_ns"],
-                    native["native_ns"],
-                    native["control_ns"],
-                    strict=True,
-                )
-            ]
+            combined = conversion_samples(
+                full["bind_ns"], native["native_ns"], native["control_ns"], case.batch
+            )
             native_deltas = [
                 actual - control
                 for actual, control in zip(
                     native["native_ns"], native["control_ns"], strict=True
                 )
             ]
-            if min(native_deltas[WARMUP:]) <= 0:
-                raise RuntimeError("native conversion contribution is not identifiable")
             minimum = min(combined[WARMUP:])
             decisions.append(
                 {
                     "case": case.name,
+                    "byte_limit": case.byte_limit,
+                    "value_limit": case.value_limit,
+                    "native_calls": case.batch,
                     "combined_conversion_ns": combined,
-                    "native_conversion_delta_ns": native_deltas,
+                    "native_batch_delta_ns": native_deltas,
+                    "native_per_call_ns": [
+                        (value + case.batch - 1) // case.batch
+                        for value in native["native_ns"]
+                    ],
+                    "control_per_call_ns": [
+                        value // case.batch for value in native["control_ns"]
+                    ],
                     "minimum_conversion_ns": minimum,
                     "minimum_preparation_ns": min(full["bind_ns"][WARMUP:]),
                     "minimum_production_ns": min(full["production_ns"][WARMUP:]),
                     "within_quarter_budget": minimum <= STOP_NS,
                 }
             )
+            if catalogue == "bounds":
+                minima[
+                    case.byte_limit, case.value_limit, case.name.rsplit("-", 2)[0]
+                ] = minimum
+        phase = "selection"
         if time.monotonic() - started > PILOT_SECONDS:
-            raise RuntimeError("conversion pilot exceeded its suite deadline")
-        status = (
-            "non_reference"
-            if not reference
-            else "passed"
-            if all(item["within_quarter_budget"] for item in decisions)
-            else "conversion_stop"
-        )
+            raise RuntimeError("conversion collection exceeded its suite deadline")
+        if catalogue == "bounds":
+            selected = select_bounds(minima)
+            candidates = [
+                {
+                    "byte_limit": size,
+                    "value_limit": count,
+                    "worst_minimum_ns": max(
+                        minima[size, count, family] for family in BOUND_FAMILIES
+                    ),
+                    "within_headroom": 3
+                    * max(minima[size, count, family] for family in BOUND_FAMILIES)
+                    <= 2 * STOP_NS,
+                }
+                for size, count in BOUND_PAIRS
+            ]
+            status = (
+                "bounds_selected" if selected is not None else "no_qualifying_bounds"
+            )
+        else:
+            status = (
+                "non_reference"
+                if not reference
+                else "passed"
+                if all(item["within_quarter_budget"] for item in decisions)
+                else "conversion_stop"
+            )
+        phase = "complete"
     finally:
         elapsed = time.monotonic() - started
-        report.durations["pilot"] = elapsed
+        if status == "measurement_failed":
+            failures.append({"phase": phase, "status": "incomplete"})
+        report.durations["conversion"] = elapsed
         report.gates["suite_seconds"] = elapsed <= PILOT_SECONDS
-        report.gates["all_cases_complete"] = len(decisions) == 28
+        report.gates["all_cases_complete"] = (
+            len(decisions) == expected_count and not failures
+        )
         report.gates["reference_runner"] = reference
-        report.gates["conversion_within_quarter_budget"] = len(decisions) == 28 and all(
-            item["within_quarter_budget"] for item in decisions
+        report.gates["selection_qualified"] = (
+            status == "bounds_selected" if catalogue == "bounds" else status == "passed"
         )
         payload: dict[str, object] = {
-            "schema": 1,
+            "schema": 2,
+            "catalogue": catalogue,
             "status": status,
+            "phase": phase,
             "reference_runner": reference,
-            "source_revision": source,
-            "checkout_revision": checkout,
-            "tree": tree,
-            "dirty": dirty,
-            "wheel": wheel,
+            **header,
             "stop_nanoseconds": STOP_NS,
             "warmup": WARMUP,
             "samples": SAMPLES,
+            "manifest": manifest,
             "observations": observations,
             "decisions": decisions,
+            "candidates": candidates,
+            "selected_bounds": list(selected) if selected is not None else None,
             "failures": failures,
             "measurement": json.loads(report.to_json()),
         }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return 3 if status == "conversion_stop" else 0
+    return 3 if status in ("conversion_stop", "no_qualifying_bounds") else 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("pilot",))
+    parser.add_argument("command", choices=("pilot", "select-bounds"))
     parser.add_argument("--output", required=True, type=Path)
     arguments = parser.parse_args()
     output: object = arguments.output
     if not isinstance(output, Path):
         raise TypeError("measurement output must be a path")
-    raise SystemExit(pilot(output))
+    raise SystemExit(
+        collect_conversion(
+            output, "bounds" if arguments.command == "select-bounds" else "pilot"
+        )
+    )
 
 
 if __name__ == "__main__":

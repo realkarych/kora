@@ -60,7 +60,7 @@ def test_cel_conversion_pilot_has_four_sizes_per_family() -> None:
 def test_cel_conversion_observations_come_from_completed_real_children(
     mode: str,
 ) -> None:
-    case = pilot_cases()[0]
+    case = pilot_cases()[0].workload()
 
     result = run_process(
         [

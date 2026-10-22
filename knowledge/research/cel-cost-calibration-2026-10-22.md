@@ -35,3 +35,37 @@ The complete pilot has a 240-second deadline. It retains every completed observa
 The existing evaluator lifetime, logging, database, provider, browser and scanner checks remain required. A clean pilot is not calibration readiness and does not activate a consumer. The subsequent protocol, model corrections, five-job fits, independent final reviews and owner-reviewed documentation remain governed by the approved issue plan.
 
 Observability impact is confined to synthetic development-measurement artifacts. Runtime event ownership, context, redaction and sinks are unchanged; normal evaluator cases retain their existing component diagnostics. Measurement records supply no execution or administrative authority.
+
+## Historical default-bound result
+
+The single [reference run](https://github.com/realkarych/kora/actions/runs/39827907788) at source/checkout `69c890b8e9bdcaef084053d3736630b4175b308b`, tree `add748ba3fed069b643bb2e5ea3f038e7ed64f98`, completed all 56 observations and 28 decisions in 43.574 seconds. Its [artifact](https://github.com/realkarych/kora/actions/runs/39827907788/artifacts/12446509232) records `conversion_stop`, 21 cases above 2.5 ms and no child failures. The reference used Ubuntu 24.04 image `20261012.334.1`, AMD EPYC 7763, CPython 3.11.17, uv 0.13.1 and the locked binding wheel. This is valid failed-budget evidence, not a calibrated bound.
+
+| Largest family | Minimum complete conversion |
+| --- | --- |
+| ASCII strings | 16.622720 ms |
+| Four-byte Unicode strings | 5.058381 ms |
+| Escaped controls | 2.830931 ms |
+| Dense empty lists | 65.770838 ms |
+| Small maps | 20.512998 ms |
+| Depth-32 chains | 99.957938 ms |
+| Integer-to-double conversion | 34.038217 ms |
+
+The deepest case contains 32,001 values and 65,001 canonical bytes. Its minimum full production interval is 102.126815 ms. The ASCII case contains only five values and 65,517 canonical bytes, so a value-count limit alone cannot address the measured conversion cost. Independent correctness and performance audits reconstructed all workloads and recomputed every decision without mismatch; the [review and CI ledger](https://github.com/realkarych/kora/pull/203#issuecomment-6347818444) retains their scopes and evidence.
+
+The retained ZIP SHA-256 is `4cb25bf01f8a298abd5b70185c72212a6f127a9142c5653c86607ccc22c9efcf`, matching GitHub metadata. Its schema-1 JSON SHA-256 is `082654e37d7889908fe7a26b5b4720fd22df5e2ddb4fbe8343d021ceb67609d8`. Historical acceptance is reproduced only at that pinned revision. Later smaller limits do not add a production bypass for old workloads.
+
+## Smaller-bound selection preregistration
+
+The [amended plan](https://github.com/realkarych/kora/issues/167#issuecomment-6348001217) preserves the 10 ms / 16 MiB target and selects a smaller byte/value pair before continuing calibration. No new limits are established by this preregistration.
+
+The fixed candidate grid is the Cartesian product of canonical byte limits 1,024, 2,048, 4,096 and 8,192 with value-count limits 128, 256 and 512. Each pair has ten workload families: ASCII, four-byte Unicode, escaped controls, dense empty lists, small maps, depth-32 chains, numeric expansion, key-heavy maps, mixed chains with ASCII padding, and many separately referenced variables. The last family uses a list of all variable-size operations before comparing with its expected result, so the control cannot short-circuit those operations. The successful comparison may visit more elements than its false control; this positive operation residual is retained conservatively.
+
+Construct each case deterministically within both original and converted candidate limits. Count each referenced root and scalar/container occurrence; keys contribute canonical bytes but no values. The recipe identifies the structural unit, byte or value constraint preventing an unreachable corner. Reports retain both representations' digests, exact bytes/counts/depths, types, expression/rendering and control identity. Independent literal small-corner expectations and canonical serialization check construction separately from production admission.
+
+Use `PYTHONPATH=src uv run --no-sync python -m tests.measurements.cel_cost_calibration select-bounds --output measurements/cel-conversion-pilot.json`. The fixed CI dispatch choice is `cel_calibration_mode=bounds`, retaining the existing `cel-conversion-pilot` artifact identity. Schema 2 distinguishes this catalogue from the historical pilot. Selection requires a clean, matching reference checkout; non-reference or provenance-initialization failures write an explicitly nonqualifying report and exit nonzero.
+
+Each phase retains three warm-ups and fifteen samples. Preparation/production samples contain one call. Native and control samples contain 32 real calls, each with its result asserted, and retain exact batch totals and counts. For every retained pair, require a strictly positive raw `native_total - control_total` before any rounding. A zero or negative raw difference fails the whole collection, even if rounding could manufacture a positive nanosecond. Warm-ups remain recorded and excluded from identification and qualification.
+
+The conservative per-call conversion sample is `bind_ns + ceil(native_total / 32) - floor(control_total / 32)`. Each case contributes its minimum retained paired sample. A candidate qualifies only if `3 * worst_case_minimum_ns <= 5_000_000`, applying 1.5 headroom to the unchanged 2.5 ms allocation. Select the qualifying pair maximizing `(byte_limit * value_limit, byte_limit, value_limit)`. All 120 identities must be complete and valid before selection. A valid budget exceedance disqualifies its candidate; malformed, missing, duplicate or mismatched evidence invalidates the entire collection.
+
+One qualifying reference job collects the grid under the unchanged 240-second suite, ten-second child and bounded-stream limits. No grid change or rerun follows an observed failure without an amended plan. Five later independent calibration jobs must each re-establish conversion under the raw 2.5 ms ceiling for the selected catalogue. Selection is not final cost, memory, lifetime or crash evidence. Production caps and the initial execution-semantics contract change only after qualifying selection and their separate implementation/review steps.

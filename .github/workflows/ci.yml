@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - pilot
+          - bounds
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -151,7 +152,7 @@ jobs:
 
   cel-conversion-pilot:
     name: CEL conversion pilot
-    if: github.event_name == 'workflow_dispatch' && inputs.cel_calibration_mode == 'pilot'
+    if: github.event_name == 'workflow_dispatch' && (inputs.cel_calibration_mode == 'pilot' || inputs.cel_calibration_mode == 'bounds')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -173,7 +174,9 @@ jobs:
         run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
       - name: Measure conversion before calibration
         id: pilot
-        run: uv run --no-sync python -m tests.measurements.cel_cost_calibration pilot --output measurements/cel-conversion-pilot.json
+        env:
+          KORA_CEL_CONVERSION_COMMAND: ${{ inputs.cel_calibration_mode == 'bounds' && 'select-bounds' || 'pilot' }}
+        run: uv run --no-sync python -m tests.measurements.cel_cost_calibration "$KORA_CEL_CONVERSION_COMMAND" --output measurements/cel-conversion-pilot.json
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ !cancelled() && steps.pilot.outcome != 'skipped' }}
         with:
