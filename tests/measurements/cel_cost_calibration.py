@@ -415,6 +415,8 @@ def validate_memory_observation(
                 type(item) is not int or item <= 0 for item in rss.values()
             ):
                 raise ValueError("invalid memory RSS reading")
+            if cast(int, rss["peak"]) < cast(int, rss["current"]):
+                raise ValueError("memory peak is below its current reading")
     return value
 
 

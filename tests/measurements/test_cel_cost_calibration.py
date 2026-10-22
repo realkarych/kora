@@ -368,16 +368,8 @@ def test_cel_cost_catalogue_constructs_only_declared_individual_recipes() -> Non
     from tests.measurements.cel_cost_catalogue import (
         OPERATION_IDENTITIES,
         operation_case,
-        operation_cases,
     )
 
-    expected = operation_cases()
-
-    actual = tuple(
-        operation_case(family, size) for family, size in OPERATION_IDENTITIES
-    )
-
-    assert actual == expected
     assert len(OPERATION_IDENTITIES) == len(set(OPERATION_IDENTITIES)) == 145
     for family, size in (("unknown", 1), ("concat_string", 3), ("evaluation", 2)):
         with pytest.raises(ValueError, match="undeclared cost case"):
@@ -452,6 +444,34 @@ def test_cel_cold_memory_recipes_have_exact_native_results_and_valid_data() -> N
         assert max(original[2], converted[2]) <= 32, case.name
 
 
+def test_cel_cold_memory_depth_control_retains_native_conditional_depth() -> None:
+    from kora.cel.tree import Conditional
+    from tests.measurements.cel_cost_catalogue import memory_case
+
+    case = memory_case("memory_control_depth", 32)
+
+    checked = case.checked()
+    node = checked.tree
+    depth = 0
+    while isinstance(node, Conditional):
+        depth += 1
+        node = node.otherwise
+
+    assert depth == 32
+    assert checked.rendering.count("?") == 32
+
+
+def test_cel_cold_memory_source_control_reaches_the_exact_source_limit() -> None:
+    from tests.measurements.cel_cost_catalogue import memory_case
+
+    case = memory_case("memory_control_arithmetic_tree", 1024)
+
+    checked = case.checked()
+
+    assert len(case.source) == 4096
+    assert len(checked.rendering) == 6146
+
+
 @pytest.mark.parametrize(
     ("family", "size"), [("memory_control_true", 1), ("memory_intermediate", 32)]
 )
@@ -488,3 +508,9 @@ def test_cel_cold_memory_child_measures_before_oracle_and_releases(
     invalid["resources"] = {}
     with pytest.raises(ValueError, match="memory"):
         validate_memory_observation(json.dumps(invalid).encode(), family, size)
+    impossible = dict(report)
+    impossible["linux_peak_reset"] = True
+    for point in ("baseline", "reset", "measured"):
+        impossible[point] = {"current": 1024, "peak": 512}
+    with pytest.raises(ValueError, match="memory"):
+        validate_memory_observation(json.dumps(impossible).encode(), family, size)

@@ -536,7 +536,7 @@ MEMORY_IDENTITIES: tuple[tuple[str, int], ...] = (
     )
     + tuple(("memory_control_arithmetic_tree", size) for size in (128, 256, 512, 1024))
     + tuple(("memory_control_boolean_tree", size) for size in (64, 128, 256, 512))
-    + (("memory_control_depth", 31),)
+    + (("memory_control_depth", 32),)
     + tuple(
         ("memory_data_" + name, 1)
         for name in (
@@ -591,6 +591,8 @@ def memory_case(family: str, size: int) -> CostCase:
                 ("1", "+") if family.endswith("arithmetic_tree") else ("true", "&&")
             )
             level = [leaf] * size
+            if leaf == "1" and size == 1024:
+                level[0] = "11"
             while len(level) > 1:
                 level = [
                     f"({left}{operator}{right})"
@@ -606,11 +608,11 @@ def memory_case(family: str, size: int) -> CostCase:
                 size,
                 "memory",
                 0,
-                "!" * size + "true",
+                "false?false:" * size + "true",
                 "true",
                 {},
                 {},
-                False,
+                True,
                 True,
                 batch=1,
             )
