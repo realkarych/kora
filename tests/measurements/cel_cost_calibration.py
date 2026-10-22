@@ -27,6 +27,7 @@ from tests.measurements.cel_bound_workload import (
     select_bounds,
 )
 from tests.measurements.cel_cost_catalogue import (
+    axis_cases,
     cost_family_cases,
     memory_case,
     reference_case,
@@ -62,6 +63,11 @@ MEMORY_PRELUDE: str = (
     "import json, sys; sys.path[:] = json.loads(sys.argv[1]); "
     "from tests.measurements.cel_cost_workload import run_memory_case; "
     "run_memory_case(sys.argv[2], int(sys.argv[3]))"
+)
+AXIS_PRELUDE: str = (
+    "import json,sys;sys.path[:]=json.loads(sys.argv[1]);"
+    "from tests.measurements.cel_cost_workload import run_axis_family;"
+    "run_axis_family(sys.argv[2],sys.argv[3])"
 )
 
 
@@ -413,6 +419,110 @@ def validate_memory_observation(
             if cast(int, rss["peak"]) < cast(int, rss["current"]):
                 raise ValueError("memory peak is below its current reading")
     return value
+
+
+def validate_axis_family(content: bytes, family: str, mode: str) -> dict[str, object]:
+    if mode not in ("prepare", "native"):
+        raise ValueError("undeclared conversion axis mode")
+    raw: object = json.loads(
+        content, object_pairs_hook=unique_mapping, parse_constant=reject_constant
+    )
+    report = mapping(raw)
+    expected: dict[str, object] = {
+        "schema": 1,
+        "catalogue": "conversion_axes",
+        "family": family,
+        "mode": mode,
+        "warmup": WARMUP,
+        "samples": SAMPLES,
+        "reference": reference_case().metadata(),
+        "completion": "cel-conversion-axis-complete",
+    }
+    if set(report) != set(expected) | {"cases", "resources"} or any(
+        json.dumps(report[key], sort_keys=True) != json.dumps(value, sort_keys=True)
+        for key, value in expected.items()
+    ):
+        raise ValueError("conversion axis identity changed")
+    cases = axis_cases(family)
+    entries = sequence(report["cases"])
+    if len(entries) != len(cases):
+        raise ValueError("incomplete conversion axis family")
+    for case, entry in zip(cases, entries, strict=True):
+        observation = mapping(entry)
+        target = case.converted()
+        control = bind(case.checked(), case.control, case.types)
+        assert isinstance(control, BoundValues)
+        control_statistics = binding_statistics(control.values)
+        dimension = 0 if family == "convert_bytes" else 1
+        identity = {
+            "case": case.name,
+            **case.metadata(),
+            "control_statistics": list(control_statistics),
+            "predictor_units": binding_statistics(target)[dimension]
+            - control_statistics[dimension],
+        }
+        if set(observation) != set(identity) | {"target", "control_samples"} or any(
+            json.dumps(observation[key], sort_keys=True)
+            != json.dumps(value, sort_keys=True)
+            for key, value in identity.items()
+        ):
+            raise ValueError("conversion axis observation changed")
+        calls = 1 if mode == "prepare" else 32
+        for name in ("target", "control_samples"):
+            samples = sequence(observation[name])
+            if len(samples) != WARMUP + SAMPLES:
+                raise ValueError("incomplete conversion axis samples")
+            for raw_sample in samples:
+                sample = mapping(raw_sample)
+                if set(sample) != {
+                    "elapsed_ns",
+                    "calls",
+                    "result_count",
+                    "reference_before_ns",
+                    "reference_after_ns",
+                    "reference_calls",
+                    "reference_before_results",
+                    "reference_after_results",
+                } or any(
+                    type(item) is not int or item <= 0 for item in sample.values()
+                ):
+                    raise ValueError("invalid conversion axis bracket")
+                if (
+                    sample["calls"] != calls
+                    or sample["result_count"] != calls
+                    or any(
+                        sample[field] != 32
+                        for field in (
+                            "reference_calls",
+                            "reference_before_results",
+                            "reference_after_results",
+                        )
+                    )
+                ):
+                    raise ValueError("conversion axis call count changed")
+    counters = mapping(report["resources"])
+    if set(counters) != {
+        "pid",
+        "elapsed_ns",
+        "descriptors_before",
+        "descriptors_after",
+        "persistent_workers",
+        "stack_restored",
+    }:
+        raise ValueError("incomplete conversion axis resource counters")
+    for name in ("pid", "elapsed_ns", "descriptors_before", "descriptors_after"):
+        item = counters[name]
+        if type(item) is not int or item <= 0:
+            raise ValueError("invalid conversion axis resource counter")
+    if (
+        counters["descriptors_before"] != counters["descriptors_after"]
+        or counters["stack_restored"] is not True
+        or type(counters["persistent_workers"]) is not int
+        or counters["persistent_workers"] != 0
+        or cast(int, counters["elapsed_ns"]) >= 10_000_000_000
+    ):
+        raise ValueError("conversion axis resources were not released")
+    return report
 
 
 def validate_observation(

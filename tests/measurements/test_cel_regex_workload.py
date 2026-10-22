@@ -10,6 +10,7 @@ from tests.cel_eval.children import ROOT, full_path
 from tests.measurements.cel_measurement_process import run_process
 from tests.measurements.cel_regex_workload import (
     BOUNDARY_PRELUDE,
+    MATCH_PATTERNS,
     PATTERN_FORMS,
     REGEX_IDENTITIES,
     boundary_limits,
@@ -121,3 +122,22 @@ def test_regex_boundary_trace_refuses_missing_bisections_and_early_refusal() -> 
     for trace in invalid:
         with pytest.raises(ValueError, match="boundary"):
             boundary_limits(trace)
+    converged = [attempt(1, "accepted"), attempt(1_048_576, "refused")]
+    upper = 524_288
+    while upper > 1:
+        converged.append(attempt(upper, "refused"))
+        upper //= 2
+    after_convergence = [*converged, attempt(1, "accepted")]
+    with pytest.raises(ValueError, match="boundary"):
+        boundary_limits(after_convergence)
+
+
+def test_regex_matching_patterns_accept_the_complete_valid_sized_subject() -> None:
+    binding = load_binding()
+
+    for name, pattern, character in MATCH_PATTERNS:
+        case = regex_case("regex_match_" + name + "_late_failure", 512)
+        values = {"text": character * (512 if character == "a" else 128)}
+        result = binding.execute(binding.compile(case.checked()), values)
+        assert result is False, name
+        assert pattern.startswith("^"), name

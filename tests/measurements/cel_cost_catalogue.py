@@ -6,7 +6,7 @@ from typing import Literal
 from kora.cel import CheckedExpression, JsonValue, ValueBound, Variable, check
 from kora.cel.cost import DATA_BOUND, DATA_BYTES
 from kora.cel.types import DOUBLE, DYN, INT, STRING, CelType, ListOf, MapOf
-from tests.measurements.cel_cost_workload import digest
+from tests.measurements.cel_cost_workload import ConversionCase, digest
 
 SMALL_SIZES: tuple[int, ...] = (8, 16, 32, 64)
 TEXT_SIZES: tuple[int, ...] = (64, 128, 256, 512)
@@ -567,6 +567,7 @@ MEMORY_IDENTITIES: tuple[tuple[str, int], ...] = (
         )
     )
     + tuple(("memory_intermediate", size) for size in (8, 16, 32, 64))
+    + (("memory_intermediate", 128), ("memory_intermediate", 250))
     + tuple(("memory_string_delivery", size) for size in (1, 2, 4, 8))
     + tuple(
         (family, size)
@@ -828,3 +829,41 @@ def memory_case(family: str, size: int) -> CostCase:
         batch=1,
         declared_bounds={"values": DATA_BOUND},
     )
+
+
+AXIS_FAMILIES: tuple[str, ...] = ("convert_bytes", "convert_values")
+
+
+def axis_cases(family: str) -> tuple[ConversionCase, ...]:
+    if family not in AXIS_FAMILIES:
+        raise ValueError("undeclared conversion axis")
+    result: list[ConversionCase] = []
+    for size in (
+        (512, 1024, 2048, 4096) if family == "convert_bytes" else (16, 32, 64, 128)
+    ):
+        if family == "convert_bytes":
+            target: JsonValue = "a" * (size - 2)
+            control: JsonValue = ""
+            kind: CelType = STRING
+            expected = size - 2
+            constraints = ("constant_value_count_1",)
+        else:
+            target = ["a" * (4098 - 3 * size), *[[] for _ in range(size - 2)]]
+            control = ["a" * 4092]
+            kind = DYN
+            expected = size - 1
+            constraints = ("constant_canonical_bytes_4096",)
+        result.append(
+            ConversionCase(
+                f"{family}-{size}",
+                f"values.size()=={expected}",
+                {"values": target},
+                {"values": kind},
+                {"values": control},
+                32,
+                4096,
+                256,
+                constraints,
+            )
+        )
+    return tuple(result)

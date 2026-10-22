@@ -299,7 +299,7 @@ def test_cel_cost_catalogue_results_agree_with_native_execution() -> None:
         "compile_rendering",
         "evaluation",
         "regex_atoms_escape_w",
-        "regex_match_unicode",
+        "regex_match_unicode_late_failure",
     ],
 )
 def test_cel_cost_bracketed_families_complete_on_real_children(family: str) -> None:
@@ -479,6 +479,71 @@ def test_cel_cold_memory_source_control_reaches_the_exact_source_limit() -> None
 
     assert len(case.source) == 4096
     assert len(checked.rendering) == 6146
+
+
+@pytest.mark.parametrize("family", ["convert_bytes", "convert_values"])
+def test_cel_conversion_axes_keep_the_other_dimension_constant(family: str) -> None:
+    from tests.measurements.cel_cost_catalogue import axis_cases
+    from tests.measurements.cel_cost_workload import binding_statistics
+
+    cases = axis_cases(family)
+
+    observed = [binding_statistics(case.bindings) for case in cases]
+    controls = [binding_statistics(case.control) for case in cases]
+
+    assert len(cases) == 4
+    if family == "convert_bytes":
+        assert [point[0] for point in observed] == [512, 1024, 2048, 4096]
+        assert {point[1] for point in observed + controls} == {1}
+        assert {point[0] for point in controls} == {2}
+    else:
+        assert [point[1] for point in observed] == [16, 32, 64, 128]
+        assert {point[0] for point in observed + controls} == {4096}
+        assert {point[1] for point in controls} == {2}
+
+
+@pytest.mark.parametrize("family", ["convert_bytes", "convert_values"])
+@pytest.mark.parametrize("mode", ["prepare", "native"])
+def test_cel_conversion_axis_children_retain_complete_brackets(
+    family: str, mode: str
+) -> None:
+    from tests.measurements.cel_cost_calibration import (
+        AXIS_PRELUDE,
+        mapping,
+        sequence,
+        validate_axis_family,
+    )
+
+    result = run_process(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            AXIS_PRELUDE,
+            json.dumps(full_path(ROOT)),
+            family,
+            mode,
+        ]
+    )
+
+    report = validate_axis_family(result.stdout, family, mode)
+
+    assert result.code == 0
+    assert not result.stderr
+    assert not result.timed_out
+    assert not result.overflow
+    assert result.descriptors_before == result.descriptors_after
+    entries = sequence(report["cases"])
+    assert len(entries) == 4
+    invalid = dict(report)
+    observations = [dict(mapping(item)) for item in entries]
+    observations[0]["predictor_units"] = True
+    invalid["cases"] = observations
+    with pytest.raises(ValueError, match="axis"):
+        validate_axis_family(json.dumps(invalid).encode(), family, mode)
+    invalid["resources"] = {}
+    with pytest.raises(ValueError, match="axis"):
+        validate_axis_family(json.dumps(invalid).encode(), family, mode)
 
 
 @pytest.mark.parametrize(

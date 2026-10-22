@@ -170,12 +170,12 @@ REPETITIONS: tuple[tuple[str, str, int], ...] = (
     ("lazy", "{1,3}?", 3),
 )
 MATCH_PATTERNS: tuple[tuple[str, str, str], ...] = (
-    ("ascii", "a+z$", "a"),
-    ("class", r"\w+z$", "a"),
-    ("unicode", r"\p{L}+z$", "a"),
-    ("wide", ".+z$", "\U0001f642"),
-    ("hostile", "(?:a|aa)+z$", "a"),
-    ("mixed", r"[\p{L}\d]+z$", "a"),
+    ("ascii", "^[a-z]+$", "a"),
+    ("class", r"^\w+$", "a"),
+    ("unicode", r"^\p{L}+$", "a"),
+    ("wide", r"^[\x{80}-\x{10ffff}]+$", "\U0001f642"),
+    ("hostile", "^(?:a|aa)+$", "a"),
+    ("mixed", r"^[\p{L}\d]+$", "a"),
 )
 REGEX_IDENTITIES: tuple[tuple[str, int], ...] = (
     (("regex_base", 1),)
@@ -202,8 +202,9 @@ REGEX_IDENTITIES: tuple[tuple[str, int], ...] = (
         for size in (32, 64, 128, 256)
     )
     + tuple(
-        ("regex_match_" + name, size)
+        ("regex_match_" + name + "_" + outcome, size)
         for name, _, _ in MATCH_PATTERNS
+        for outcome in ("late_failure", "success")
         for size in (256, 512, 1024, 2048)
     )
 )
@@ -224,9 +225,10 @@ def matches_source(subject: str, pattern: str) -> str:
     return f"{subject}.matches({json.dumps(pattern, ensure_ascii=False)})"
 
 
-def repeated_negative_matches(subject: str, pattern: str) -> str:
+def repeated_matches(subject: str, pattern: str, expected: bool) -> str:
     source = matches_source(subject, pattern)
-    return "[" + ",".join([source] * 8) + "].all(p,!p)"
+    values = ",".join(["true" if expected else "false"] * 8)
+    return "[" + ",".join([source] * 8) + "]==[" + values + "]"
 
 
 def regex_case(family: str, size: int) -> CostCase:
@@ -305,16 +307,28 @@ def regex_case(family: str, size: int) -> CostCase:
             batch=1,
         )
     if family.startswith("regex_match_"):
-        name = family.removeprefix("regex_match_")
+        successful = family.endswith("_success")
+        name = (
+            family.removeprefix("regex_match_")
+            .removesuffix("_success")
+            .removesuffix("_late_failure")
+        )
         _, pattern, character = next(item for item in MATCH_PATTERNS if item[0] == name)
-        text = character * (size if character == "a" else size // 4)
+        if successful:
+            text = character * (size if character == "a" else size // 4)
+        else:
+            text = (
+                "a" * (size - 1) + "!"
+                if character == "a"
+                else character * (size // 4 - 1) + "aaaa"
+            )
         return CostCase(
             family,
             size,
             "pattern_match",
             8 * size,
-            repeated_negative_matches("text", pattern),
-            repeated_negative_matches("''", pattern),
+            repeated_matches("text", pattern, successful),
+            repeated_matches("''", pattern, False),
             {"text": text},
             {"text": STRING},
             True,
@@ -446,6 +460,8 @@ def boundary_limits(attempts: Sequence[BoundaryAttempt]) -> tuple[int, int | Non
     upper = UPPER_REPETITIONS
     expected = 1
     for index, attempt in enumerate(attempts):
+        if index > 1 and upper - lower == 1:
+            raise ValueError("regex boundary contains a probe after convergence")
         count = attempt["count"]
         status = attempt["status"]
         if (

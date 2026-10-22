@@ -732,3 +732,163 @@ def run_memory_case(family: str, size: int) -> None:
         "completion": "cel-cold-memory-complete",
     }
     sys.stdout.write(json.dumps(payload))
+
+
+def preparation_sample(
+    checked: CheckedExpression,
+    values: dict[str, JsonValue],
+    types: dict[str, CelType],
+    expected: dict[str, JsonValue],
+    reference: Callable[[], object],
+) -> BracketedSample:
+    before = timed_calls(reference, True, 32)
+    started = time.perf_counter_ns()
+    result = bind(checked, values, types)
+    elapsed = time.perf_counter_ns() - started
+    after = timed_calls(reference, True, 32)
+    assert isinstance(result, BoundValues)
+    assert result.values == expected
+    return BracketedSample(
+        elapsed_ns=elapsed,
+        calls=1,
+        result_count=1,
+        reference_before_ns=before,
+        reference_after_ns=after,
+        reference_calls=32,
+        reference_before_results=32,
+        reference_after_results=32,
+    )
+
+
+def axis_samples(
+    cases: tuple[ConversionCase, ...], mode: str
+) -> list[dict[str, object]]:
+    from tests.measurements.cel_cost_catalogue import reference_case
+
+    binding = load_binding()
+    reference = reference_case()
+    checked_reference = reference.checked()
+    reference_values = bind(checked_reference, reference.bindings, reference.types)
+    assert isinstance(reference_values, BoundValues)
+    reference_program = binding.compile(checked_reference)
+    measure_reference = partial(
+        binding.execute, reference_program, reference_values.values
+    )
+    observations: list[dict[str, object]] = []
+    for case in cases:
+        checked = case.checked()
+        target_values = prepared(case)
+        control_values = bind(checked, case.control, case.types)
+        assert isinstance(control_values, BoundValues)
+        program = binding.compile(checked)
+        targets: list[BracketedSample] = []
+        controls: list[BracketedSample] = []
+        for _ in range(WARMUP + SAMPLES):
+            if mode == "prepare":
+                targets.append(
+                    preparation_sample(
+                        checked,
+                        case.bindings,
+                        case.types,
+                        target_values.values,
+                        measure_reference,
+                    )
+                )
+                controls.append(
+                    preparation_sample(
+                        checked,
+                        case.control,
+                        case.types,
+                        control_values.values,
+                        measure_reference,
+                    )
+                )
+            elif mode == "native":
+                targets.append(
+                    bracketed_sample(
+                        partial(binding.execute, program, target_values.values),
+                        True,
+                        32,
+                        measure_reference,
+                    )
+                )
+                controls.append(
+                    bracketed_sample(
+                        partial(binding.execute, program, control_values.values),
+                        False,
+                        32,
+                        measure_reference,
+                    )
+                )
+            else:
+                raise ValueError("undeclared conversion axis mode")
+        target_statistics = binding_statistics(target_values.values)
+        control_statistics = binding_statistics(control_values.values)
+        dimension = 0 if case.name.startswith("convert_bytes-") else 1
+        observations.append(
+            {
+                "case": case.name,
+                **case.metadata(),
+                "predictor_units": target_statistics[dimension]
+                - control_statistics[dimension],
+                "control_statistics": list(control_statistics),
+                "target": targets,
+                "control_samples": controls,
+            }
+        )
+    return observations
+
+
+class NativeAxisProbe(EvaluationThread):
+    def __init__(self, cases: tuple[ConversionCase, ...]) -> None:
+        self.cases: tuple[ConversionCase, ...] = cases
+        self.observations: list[dict[str, object]] = []
+        self.completed: bool = False
+        super().__init__(load_binding())
+
+    def _run(self) -> None:
+        self.observations = axis_samples(self.cases, "native")
+        self.completed = True
+
+
+def run_axis_family(family: str, mode: str) -> None:
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    from tests.measurements.cel_cost_catalogue import axis_cases, reference_case
+
+    started = time.perf_counter_ns()
+    descriptors = len(os.listdir("/dev/fd"))
+    previous = threading.stack_size()
+    cases = axis_cases(family)
+    if mode == "prepare":
+        observations = axis_samples(cases, mode)
+    elif mode == "native":
+        probe = NativeAxisProbe(cases)
+        probe.worker.join(9)
+        assert not probe.worker.is_alive()
+        assert probe.completed
+        observations = probe.observations
+    else:
+        raise ValueError("undeclared conversion axis mode")
+    assert previous == threading.stack_size()
+    workers = sum(t.name == "kora-cel-evaluator" for t in threading.enumerate())
+    assert workers == 0
+    payload: dict[str, object] = {
+        "schema": 1,
+        "catalogue": "conversion_axes",
+        "family": family,
+        "mode": mode,
+        "warmup": WARMUP,
+        "samples": SAMPLES,
+        "reference": reference_case().metadata(),
+        "cases": observations,
+        "resources": {
+            "pid": os.getpid(),
+            "elapsed_ns": time.perf_counter_ns() - started,
+            "descriptors_before": descriptors,
+            "descriptors_after": len(os.listdir("/dev/fd")),
+            "persistent_workers": workers,
+            "stack_restored": True,
+        },
+        "completion": "cel-conversion-axis-complete",
+    }
+    sys.stdout.write(json.dumps(payload))
