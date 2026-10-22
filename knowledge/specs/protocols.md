@@ -154,6 +154,8 @@ class TransferItem:
     sha256: str
     kind: Literal["resource", "input", "script"]   # `script` only for the testing runner of fakes.md section 3
 
+CredentialMode = Literal["credential_required", "local_credential_free"]
+
 @dataclass(frozen=True)
 class PublicationAuthorization:
     attempt_id: str
@@ -162,6 +164,9 @@ class PublicationAuthorization:
     operation_id: str
     prepared_digest: str
     destination_digest: str
+    binding: str
+    binding_revision: int
+    credential_mode: CredentialMode
     principal: PrincipalRef
     credential: SecretValue | None
 
@@ -862,6 +867,8 @@ class PrincipalRef:
 @dataclass(frozen=True)
 class CredentialRequest:
     binding: str
+    binding_revision: int
+    credential_mode: CredentialMode
     repo: str
     purpose: Literal["checkout", "publish", "api"]
     attempt_id: str | None
@@ -877,6 +884,9 @@ class CredentialRights:
 
 @dataclass(frozen=True)
 class IssuedCredential:
+    binding: str
+    binding_revision: int
+    credential_mode: CredentialMode
     value: SecretValue | None
     principal: PrincipalRef
     rights: CredentialRights | None
@@ -904,13 +914,17 @@ class Vcs(Protocol):
 
 ### Credential-free local publication
 
+`CredentialRequest`, `IssuedCredential` and `PublicationAuthorization` carry the same required `binding`, `binding_revision` and `credential_mode`, without defaults. The binding is an immutable trusted identifier, not a mutable alias: nonempty, at most 256 UTF-8 bytes. The revision is an exact positive JSON integer at most 2^53−1, never a boolean. `CredentialMode` is exactly `credential_required` or `local_credential_free`; it describes credential presence independently of backend kind. Configuration changes advance the revision; different configuration under the same identity/revision is invalid.
+
+The sealed execution request and trusted preparation checkpoint pin the expected binding tuple before preparation. Late authorization cannot initialize or replace it. Acquisition uses that saved tuple, repository and purpose; the authority verifies them against its authorized binding snapshot before resolving secrets or calling an issuer. A mismatch is a content-free `config_error`, with no alias fallback. The returned `IssuedCredential` tuple must exactly match the request. The worker/API rechecks current binding authorization with the lease and desired-state gate, and the executor compares all three authorization fields with the checkpoint independently of the destination digest. These fields do not by themselves provide an instantaneous distributed revocation fence.
+
 The saved trusted binding declares `local_credential_free` mode and a stable local principal. Required fields `PublicationAuthorization.credential: SecretValue | None` and `IssuedCredential.value: SecretValue | None` have no default: explicit null is allowed only by that binding, while omission is malformed. Non-null mode requires a registered SecretValue; a missing/empty secret, resolution failure, local URL or caller flag never selects credential-free mode.
 
 For a credential-free result, require `rights=None` (type becomes CredentialRights | None), `expires_at=None`, `replacement="not_applicable"` and `revocation="not_applicable"`; credential-bearing mode keeps its existing non-null rights and existing enum alternatives. Reject contradictory combinations. Local mode cannot satisfy minimum upstream credential-rights/expiry/revocation requirements, and null expiry never extends attempt authority.
 
-`PrincipalRef.kind="local_service"` identifies a local service. Its `provider_instance` is the trusted local provider authority and `stable_id` an immutable configured service identifier preserved across restart and binding revisions, never a username/UID/path/binding alias/Git author/code-host account. `PublicationAuthorization.principal` embeds the complete trusted principal snapshot from the issued credential or explicit local binding; identity comparison uses `(provider_instance, stable_id)` and needs no separately resolved identifier. Persist the binding identity/revision, mode and principal with the publication checkpoint before dispatch. Current aliases or candidate data cannot replace this saved context.
+`PrincipalRef.kind="local_service"` identifies a local service. Its `provider_instance` is the trusted local provider authority and `stable_id` an immutable configured service identifier preserved across restart and binding revisions, never a username/UID/path/binding alias/Git author/code-host account. `PublicationAuthorization.principal` embeds the complete trusted principal snapshot from the issued credential or explicit local binding; identity comparison uses `(provider_instance, stable_id)` and needs no separately resolved identifier. Persist the acquired principal with the publication checkpoint before dispatch, retaining the binding identity/revision and mode pinned before preparation. Current aliases or candidate data cannot replace this saved context.
 
-`Vcs.acquire_credential` remains in the first-slice subset: local checkout/publish returns that no-secret result without secret resolution or an issuer; API purpose is unsupported. CheckoutPlan.credentials stays empty. Publish acquisition remains late, after inspection; adoption validates the same saved operation again. The result does not itself authorize dispatch. #156 owns these method/model definitions; #159 owns the local implementation and conformance. A no-secret result is not `vcs.credential_issued`. Publication-related `runtime.phase` records carry scoped principal, trusted binding identity/revision and credential mode, alongside explicit phase/outcome. Worker/API promotion records this append-only audit provenance and mirrors it compactly in attempt.scratch; the runtime owns its authenticated source. An authorization record never claims that a push occurred. Preserve real credential issuance audit semantics.
+`Vcs.acquire_credential` remains in the first-slice subset: local checkout/publish returns that no-secret result without secret resolution or an issuer; API purpose is unsupported. CheckoutPlan.credentials stays empty. Publish acquisition remains late, after inspection. Adoption reacquires for the original saved binding tuple and operation only; a changed or unavailable binding refuses new publication without rewriting the checkpoint or declaring unknown effects settled. Authorized read-only reconciliation and completed historical replay retain the original destination and provenance. Credential refresh under an unchanged binding remains allowed. The result does not itself authorize dispatch. #156 owns these method/model definitions; #159 owns the local implementation and conformance. A no-secret result is not `vcs.credential_issued`. Publication-related `runtime.phase` records carry scoped principal, trusted binding identity/revision and credential mode, alongside explicit phase/outcome. Worker/API promotion records this append-only audit provenance and mirrors it compactly in attempt.scratch; the runtime owns its authenticated source. An authorization record never claims that a push occurred. Preserve real credential issuance audit semantics.
 
 Allow only absolute POSIX paths or `file:///absolute/path` with empty authority, referring to an existing bare repository. Reject URL userinfo/host/port/query/fragment, relative/scp/helper/network forms, malformed encoding and decoded traversal. Decode URL path exactly once and preserve ordinary escaped filename characters, normalize one filesystem representation and pin/recheck the destination directory identity. Every checkout/head-read/publish/reconcile path consumes that same validated identity. This is a Git transport restriction, not proof that the filesystem is physically local. Reject substitutions through symlinks, parent replacement or changed binding revisions.
 
@@ -918,12 +932,12 @@ Fresh trusted Git metadata/configuration and a constructed environment exclude i
 
 Required owner chain:
 
-- Worker/API: current lease and desired state, authenticated current authority, final check serialized with dispatch.
+- Worker/API: current lease, desired state and binding authorization, authenticated current authority, final check serialized with dispatch.
 - Runner/runtime registry: successful inspection, immutable prepared checkpoint, current dispatcher, earlier dispatcher/publication closure, no retirement, serialization/permit.
-- Executor: matching attempt/domain/dispatcher/operation/prepared/destination fields, saved binding mode/principal/value combination and local deadline before push.
+- Executor: matching attempt/domain/dispatcher/operation/prepared/destination fields, exact saved binding identity/revision/mode, principal/value combination and local deadline before push.
 - Worker/API recovery: recorded principal and settled result; unknown publication retains recovery obligations and reservations.
 
-`PublishPermit` remains internal and cannot replace PublicationAuthorization. Match failures use `publication_authorization_mismatch` before publication. `test_publication_authorization_is_late`, `test_publication_destination_is_trusted` and #159's credential/principal test cover explicit-null/omitted-field, binding/principal/mode mismatch, pre-inspection, stale/cancelled/expired/retired authority, unresolved predecessor, adoption, response-loss and no-overwrite cases. Only actual remote issuance/rotation/expiry/credential re-scan cases wait for the code-host trigger.
+`PublishPermit` remains internal and cannot replace PublicationAuthorization. Match failures use `publication_authorization_mismatch` before publication. `test_publication_authorization_is_late`, `test_publication_destination_is_trusted` and #159's credential/principal test cover explicit-null/omitted-field, binding/principal/mode mismatch, pre-inspection, stale/cancelled/expired/retired authority, unresolved predecessor, adoption, response-loss and no-overwrite cases. `test_protocol_models_are_closed` rejects missing/invalid binding tuple fields and contradictory null combinations. The authorization tests change the binding revision between preparation/acquisition and acquisition/dispatch while keeping principal and destination unchanged; acquisition mismatches resolve no secret and call no issuer. `test_finalize_recovers_prepared_revision` and `test_publish_reconciles_after_response_loss` cover unchanged-binding adoption, changed-binding refusal and retained uncertainty. The provenance retention test preserves the original tuple and rejects conflicting replay on both databases. Only actual remote issuance/rotation/expiry/credential re-scan cases wait for the code-host trigger.
 
 ### Shared preparation and publication rules
 
