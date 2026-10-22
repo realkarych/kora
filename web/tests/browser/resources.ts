@@ -89,13 +89,16 @@ export async function nativeResources(roots: number[]): Promise<NativeResources>
   return { pids: [...seen].sort((a, b) => a - b), rss, descriptors, processes: seen.size }
 }
 
-export async function verifyReleased(pids: number[]): Promise<NativeResources> {
+export async function verifyReleased(pids: number[], observe: typeof nativeResources = nativeResources): Promise<NativeResources> {
   const deadline = performance.now() + 5000
-  let remaining = await nativeResources(pids)
-  while (remaining.processes !== null && remaining.processes > 0 && performance.now() < deadline) {
+  for (;;) {
+    try {
+      const remaining = await observe(pids)
+      if (remaining.processes === null || remaining.processes === 0) return remaining
+      assert(performance.now() < deadline, 'Owned descendants remain alive')
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && (error.code === 'EACCES' || error.code === 'EPERM')) || performance.now() >= deadline) throw error
+    }
     await setImmediate()
-    remaining = await nativeResources(pids)
   }
-  assert(remaining.processes === null || remaining.processes === 0, 'Owned descendants remain alive')
-  return remaining
 }

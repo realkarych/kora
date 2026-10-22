@@ -12,6 +12,14 @@ Artifacts remain bounded to 32 MiB per file and 512 MiB cumulative, reserving th
 
 CI now has exactly one `Console browser checks` job, invokes the ordinary command and uploads `console-browser-checks`. There is no slot matrix, comparison base or calibration environment. Pinned actions/tools, read-only permissions, other CI jobs and the ten-minute pipeline budget remain. Full automated accessibility scanning remains unverified and API-backed journeys activate with their implementing components.
 
+### Denied observations during process release
+
+Under [issue #193](https://github.com/realkarych/kora/issues/193), release waiting retains its single five-second deadline and fully awaits each fresh observation. Only `EACCES` and `EPERM` may wait for another observation; a persistent denial is rethrown at that deadline, a still-live process fails, and unrelated errors propagate immediately. Permission denial never becomes an empty inventory. Generic resource collection and pre-signal discovery remain strict, and temporary deletion still requires confirmed ownership and successful release evidence.
+
+`tests/browser/test_release_wait.py::test_release_wait_observes_real_process_lifetime` runs readable release and persistent-live cases on Linux and macOS. Linux additionally runs temporary and persistent denial against a real child made nondumpable with the existing Python standard library. The temporary case forwards the real resource collector through an explicitly injected observation function and permits child termination only after that function encounters an actual permission error inside the waiter. It fabricates no result or error and patches no runtime behavior. The persistent case proves that denial remains a failure while the child stays alive. The fixture kills and reaps its held child on every ending path. These checks run in the existing scaffold suite, where Python and Node are already installed; the browser job gains no dependency.
+
+The triggering [CI failure](https://github.com/realkarych/kora/actions/runs/39698833513/job/119563276362) recorded denied descriptor access after forced termination. Its remaining resources were unverified and its temporary directory retained. The artifact does not establish the precise kernel state, eventual successful cleanup or a resource leak. The correction preserves that failed result and does not reinstate numerical benchmarks or change resource limits.
+
 Current status: the functional replacement is implemented; its final-revision checks, independent review and CI evidence are recorded separately in PR #180. Historical numerical artifacts supply no pass for this protocol.
 
 ## Retired console-lifecycle-v4 protocol
