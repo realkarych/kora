@@ -105,7 +105,8 @@
             "app",
             "bot_user",
             "service_user",
-            "user"
+            "user",
+            "local_service"
           ]
         },
         "display_name": {
