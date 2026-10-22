@@ -3,7 +3,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from kora.protocols.json import (
+from kora.ir.json import (
     JSON_RULES,
     JsonObject,
     JsonShapeError,

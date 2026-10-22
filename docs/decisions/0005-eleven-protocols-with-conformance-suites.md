@@ -9,6 +9,7 @@
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 - Fake-provider amendment dated 2026-10-21: kora's fakes are constructed by injection and never discovered, under [issue #136](https://github.com/realkarych/kora/issues/136); implementation plan approved by the project owner, wording pending line-by-line owner review.
 - Provider-loading amendment dated 2026-10-21: entry-point names encode the protocol and loading is selective, decided by the project owner under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
+- Opt-in conformance amendment dated 2026-10-22: the conformance cases ship as the opt-in pytest plugin `kora.conformance.plugin`, whose fixtures take the provider under test by injection, and carry the `kora_conformance` marker; entry-point parametrisation returns with `kora conformance` under [issue #140](https://github.com/realkarych/kora/issues/140). Decided in the [#156 plan](https://github.com/realkarych/kora/issues/156#issuecomment-6296106167) and implemented under [issue #204](https://github.com/realkarych/kora/issues/204); wording pending line-by-line owner review.
 
 ## Context
 
@@ -16,7 +17,7 @@ kora is designed for an instance shared by many teams on an organisation's own i
 
 ## Decision
 
-Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and a `conformance` marker.
+Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and conformance cases marked `kora_conformance`.
 
 1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, late `finalize`, `cancel`). MVP: `local`, `docker`.
 2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude` and `codex`, plus the fake harness for tests, which is injected and never registered; `acp` after MVP (ADR-0004).
@@ -38,7 +39,7 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 
 **Fakes are injected, never discovered** (amended 2026-10-21, [issue #136](https://github.com/realkarych/kora/issues/136)). kora's fakes are the one class of implementation that is constructed by injection and never discovered: no kora fake is a `kora.provider` entry point, provider loading refuses the name `fake` and the fake and testing modules, and only the testing compositions construct them. They pass the same conformance suites as production implementations, under the applicability matrix of [fakes.md](../../knowledge/specs/fakes.md#8-conformance-applicability).
 
-**Conformance suites.** Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
+**Conformance suites.** Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformance` that take the provider under test from the fixtures of the opt-in plugin `kora.conformance.plugin` (amended 2026-10-22; entry-point parametrisation, `kora conformance runtime inhouse_ci`, returns with issue #140); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
 
 ## Alternatives considered
 

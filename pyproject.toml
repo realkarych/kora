@@ -13,6 +13,7 @@ license-files = ["LICENSE"]
 dependencies = [
     "aiosqlite==0.22.1",
     "alembic==1.20.0",
+    "pydantic==2.14.1",
     "sqlalchemy[asyncio]==2.1.5",
     "structlog==26.1.0",
     "typer==0.27.3",
@@ -40,6 +41,9 @@ postgres = [
 ]
 cel = [
     "common-expression-language==0.10.0",
+]
+conformance = [
+    "pytest==9.1.1",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -77,6 +81,7 @@ no-build-package = [
     "markupsafe",
     "wrapt",
     "common-expression-language",
+    "pydantic-core",
 ]
 constraint-dependencies = ["wcwidth==0.8.5"]
 
@@ -156,12 +161,17 @@ addopts = [
     "--strict-config",
     "--strict-markers",
     "--import-mode=importlib",
+    "-p",
+    "kora.conformance.plugin",
     "-m",
     "not measurement",
 ]
 filterwarnings = ["error"]
 empty_parameter_set_mark = "fail_at_collect"
-markers = ["measurement: serial performance and resource-lifetime measurement"]
+markers = [
+    "measurement: serial performance and resource-lifetime measurement",
+    "kora_conformance: a protocol conformance case of kora.conformance",
+]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 
@@ -173,6 +183,7 @@ dev = [
     "pyright==1.1.414",
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "ruamel-yaml==0.19.1",
     "ruff==0.17.1",
     "testcontainers==4.15.0",
 ]

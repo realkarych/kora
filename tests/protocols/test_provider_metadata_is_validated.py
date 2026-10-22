@@ -7,16 +7,16 @@ from typing import cast
 
 import pytest
 
+from kora.ir.json import JsonObject
 from kora.observability import LoggingSettings, ProcessDiagnostics
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.json import JsonObject
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import (
     ProtocolName,
     ProviderMetadata,
     ProviderMetadataError,
 )
-from tests.protocols.conftest import Configure
+from tests.protocols.conftest import StartCapture
 from tests.protocols.entry_points import (
     entry,
     implementation,
@@ -24,7 +24,6 @@ from tests.protocols.entry_points import (
     returning,
     source,
 )
-from tests.support.observability import Pipe
 
 RUNTIME: ProtocolName = ProtocolName.RUNTIME
 SENTINEL: str = "sentinel-0d9e4b61"
@@ -82,10 +81,8 @@ RULE_CASES: list[tuple[str, Callable[[], object]]] = [
 
 
 @pytest.fixture
-def diagnostics(configure: Configure, pipe: Pipe) -> ProcessDiagnostics:
-    created = configure(LoggingSettings(), pipe.write_end)
-    pipe.reader.start()
-    return created
+def diagnostics(start_capture: StartCapture) -> ProcessDiagnostics:
+    return start_capture(LoggingSettings()).diagnostics
 
 
 def load_alpha(load: Callable[[], object], diagnostics: ProcessDiagnostics) -> object:

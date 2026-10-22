@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 import pytest
 
-from kora.observability import Level, LoggingSettings, ProcessDiagnostics
+from kora.observability import Level, LoggingSettings
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.loading import (
     LOADING_COMPONENT,
@@ -12,7 +12,7 @@ from kora.protocols.loading import (
     load_provider,
 )
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
-from tests.protocols.conftest import DRAIN_SECONDS, Configure
+from tests.protocols.conftest import StartCapture
 from tests.protocols.entry_points import (
     DISTRIBUTION,
     FakeEntryPoints,
@@ -21,7 +21,6 @@ from tests.protocols.entry_points import (
     returning,
     source,
 )
-from tests.support.observability import Pipe
 
 SENTINEL: str = "sentinel-7f3a91c2"
 SENTINEL_MODULE: str = "kora_loading_fixture.sentinel_7f3a91c2"
@@ -52,13 +51,6 @@ def failing_entries() -> FakeEntryPoints:
     )
 
 
-def finish(diagnostics: ProcessDiagnostics, pipe: Pipe) -> list[dict[str, object]]:
-    assert diagnostics.shutdown(DRAIN_SECONDS)
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
-    return pipe.reader.records()
-
-
 def refusal(action: Callable[[], ProviderMetadata]) -> KoraProtocolError:
     with pytest.raises(KoraProtocolError) as raised:
         action()
@@ -76,10 +68,10 @@ def assert_content_free(error: KoraProtocolError) -> None:
 
 
 def test_provider_loading_failure_is_structured_and_logged(
-    configure: Configure, pipe: Pipe
+    start_capture: StartCapture,
 ) -> None:
-    diagnostics = configure(DEBUG_LOADING, pipe.write_end)
-    pipe.reader.start()
+    capture = start_capture(DEBUG_LOADING)
+    diagnostics = capture.diagnostics
     entries = failing_entries()
 
     def load(name: str) -> Callable[[], ProviderMetadata]:
@@ -90,7 +82,7 @@ def test_provider_loading_failure_is_structured_and_logged(
     broken = refusal(load("broken"))
     raising = refusal(load("raising"))
     loaded = load("alpha")()
-    records = finish(diagnostics, pipe)
+    records = capture.finish()
 
     assert missing.code == "provider_not_installed"
     assert missing.details == {"protocol": "runtime", "name": "missing"}
@@ -116,13 +108,13 @@ def test_provider_loading_failure_is_structured_and_logged(
 
 
 def test_provider_loading_failure_is_structured_and_logged_in_discovery(
-    configure: Configure, pipe: Pipe
+    start_capture: StartCapture,
 ) -> None:
-    diagnostics = configure(DEBUG_LOADING, pipe.write_end)
-    pipe.reader.start()
+    capture = start_capture(DEBUG_LOADING)
+    diagnostics = capture.diagnostics
 
     discovery: Discovery = discover_providers(diagnostics, failing_entries())
-    records = finish(diagnostics, pipe)
+    records = capture.finish()
 
     assert [provider.name for provider in discovery.providers] == ["alpha"]
     assert [failure.error.code for failure in discovery.failures] == [

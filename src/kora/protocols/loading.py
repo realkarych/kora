@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Protocol, cast
 
+from kora.ir.json import JsonObject
 from kora.observability import (
     CATALOG,
     ComponentLogger,
@@ -14,7 +15,6 @@ from kora.observability import (
     ProcessDiagnostics,
 )
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.json import JsonObject
 from kora.protocols.metadata import (
     METADATA_RULES,
     ProtocolName,

@@ -134,6 +134,7 @@ RUNTIME_CONFIGURATION_CALLS: frozenset[str] = frozenset({"addinivalue_line"})
 WARNING_FILTER_CALLS: frozenset[str] = frozenset({"catch_warnings"})
 PLUGIN_MANAGER: str = "pluginmanager"
 TESTS_DIRECTORY: str = "tests/"
+PLUGIN_MANAGER_DIRECTORIES: tuple[str, ...] = (TESTS_DIRECTORY, "src/kora/conformance/")
 GETATTR: str = "getattr"
 MODULES_ATTRIBUTE: str = "modules"
 BANNED_ATTRIBUTES: frozenset[str] = frozenset(
@@ -312,12 +313,17 @@ PYTEST_TABLE: dict[str, object] = {
         "--strict-config",
         "--strict-markers",
         "--import-mode=importlib",
+        "-p",
+        "kora.conformance.plugin",
         "-m",
         "not measurement",
     ],
     "filterwarnings": ["error"],
     "empty_parameter_set_mark": "fail_at_collect",
-    "markers": ["measurement: serial performance and resource-lifetime measurement"],
+    "markers": [
+        "measurement: serial performance and resource-lifetime measurement",
+        "kora_conformance: a protocol conformance case of kora.conformance",
+    ],
     "asyncio_mode": "strict",
     "asyncio_default_fixture_loop_scope": "function",
 }
@@ -853,7 +859,7 @@ def python_violations(source: SourceFile, text: str) -> Iterator[Violation]:
         if (
             isinstance(node, ast.Attribute)
             and node.attr == PLUGIN_MANAGER
-            and source.relative.startswith(TESTS_DIRECTORY)
+            and source.relative.startswith(PLUGIN_MANAGER_DIRECTORIES)
         ):
             yield Violation(source.relative, node.lineno, "plugin manager access")
         if isinstance(node, ast.Subscript):

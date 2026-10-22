@@ -1,6 +1,6 @@
 import re
 
-from kora.protocols.json import JsonObject, parse_json_object
+from kora.ir.json import JsonObject, parse_json_object
 
 ERROR_CODE: re.Pattern[str] = re.compile(r"[a-z][a-z0-9_]{0,63}")
 

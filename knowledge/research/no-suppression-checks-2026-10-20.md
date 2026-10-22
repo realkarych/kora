@@ -138,3 +138,14 @@ On 2026-10-22 the owner approved [issue #179's removal amendment](https://github
 ## Experimental browser benchmark removal
 
 On 2026-10-22 the owner approved [issue #179's full benchmark removal](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349). The exact frontend script guard removes `calibrate:browser` and retains `test:browser` as `node tests/browser/run.ts`. Its ordinary invocation and `--smoke` compatibility alias run the same functional suite. Numerical collectors, arithmetic/manifest/trial-finalization fixtures, budgets and five-job calibration/validation stages are deleted. The guard continues to pin the full remaining script table and strict browser TypeScript configuration. Functional smoke, failure/cancellation/resource release, network restrictions and artifact bounds remain active. No lint/type/test setting, assertion, retry, source rule or suppression allowance changes; the numerical coverage reduction is explicit in the active verification policy. Prior sections describe historical commands and guarantees.
+
+## Opt-in conformance plugin
+
+On 2026-10-22 the owner approved the [issue #204 plan](https://github.com/realkarych/kora/issues/204#issuecomment-6347756345), which changes the pinned pytest table in three ways.
+
+- **Loading.** `addopts` gains `-p kora.conformance.plugin`, so kora's own suite loads the opt-in conformance plugin. The plugin cannot be loaded through a root `conftest.py`, because the check bans `pytest_plugins`, and adopters keep loading it themselves.
+- **The marker.** `markers` gains `kora_conformance`, which `--strict-markers` requires. It is registered in the table, not through a `pytest_configure` hook.
+- **Hook registration.** The `pluginmanager` access check extends from `tests/` to `src/kora/conformance/`, so the plugin cannot register a hook at run time unchecked.
+
+None of these weakens a check: the strict options stay, and no test is skipped or filtered.
+

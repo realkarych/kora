@@ -1,9 +1,9 @@
-import os
 import time
 from collections.abc import Callable, Iterator, Mapping
 
 import pytest
 
+from kora.conformance.capture import WAIT_SECONDS, Pipe
 from kora.observability import (
     CATALOG,
     EventSpec,
@@ -14,14 +14,7 @@ from kora.observability import (
     configure_process,
     current_diagnostics,
 )
-from tests.support.observability import (
-    WAIT_SECONDS,
-    FakeClock,
-    Pipe,
-    PipeReader,
-    ProcessResult,
-    run_python,
-)
+from tests.support.observability import FakeClock, ProcessResult, run_python
 
 TEST_COMPONENT: str = CATALOG.register_component("testing")
 NOTE: EventSpec = CATALOG.register(
@@ -62,12 +55,9 @@ def run_kora(arguments: list[str], environment: Mapping[str, str]) -> ProcessRes
 
 @pytest.fixture
 def pipe() -> Iterator[Pipe]:
-    read_end, write_end = os.pipe()
-    created = Pipe(read_end, write_end, PipeReader(read_end))
+    created = Pipe.open()
     yield created
-    created.close_write_end()
-    created.reader.join()
-    created.close_read_end()
+    created.release()
 
 
 @pytest.fixture
