@@ -408,6 +408,10 @@ def collect_conversion(output: Path, catalogue: str) -> int:
         phase = "complete"
     finally:
         elapsed = time.monotonic() - started
+        if elapsed > PILOT_SECONDS and status != "measurement_failed":
+            status = "measurement_failed"
+            selected = None
+            phase = "suite_deadline"
         if status == "measurement_failed":
             failures.append({"phase": phase, "status": "incomplete"})
         report.durations["conversion"] = elapsed
@@ -439,6 +443,8 @@ def collect_conversion(output: Path, catalogue: str) -> int:
         }
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    if status == "measurement_failed":
+        return 1
     return 3 if status in ("conversion_stop", "no_qualifying_bounds") else 0
 
 
