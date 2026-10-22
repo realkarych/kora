@@ -289,7 +289,7 @@ The CLI is a Typer application over the hand-written `httpx` client that shares 
 | `kora artifacts <run> [--node …]`, `kora artifact <art> [--payload]` | artifact routes |
 | `kora cost <run>` | `GET …/runs/{run}/cost` |
 | `kora cost --daily [--namespace <ns>]` | `GET /namespaces/{ns}/cost/daily` |
-| `kora approvals [--status …] [--run <run>]`, `kora approve <apr> --input decision=approve`, `kora reject <apr> --input comments=…` | `/approvals` routes; the CLI fetches the request and submits the bound SHA and digests it shows; `kora reject` sets the form's decision field; both need a token with `approve` |
+| `kora approvals [--status …] [--run <run>]`, `kora approve <apr> --input decision=approve`, `kora reject <apr> --input comments=…` | `/approvals` routes; the CLI fetches the request and submits the bound SHA and digests it shows; `kora reject` sets the form's decision field, with the default and explicit-predicate behavior in [ir.md section 4.2](ir.md#42-human-input-node-config-fr-22-fr-7); both need a token with `approve` |
 | `kora retry <run> <node_path> [--strategy …]`, `kora cancel <run> [<node_path>]` | retry/cancel routes |
 | `kora reconcile <run> <node_path> --attempt <att> --action observe\|stop\|confirm_stopped --expected-version <n> --expected-domain <domain> --reason <text> --idempotency-key <key> [--evidence <file>]` | the reconcile route; JSON evidence file contains the reference and closure attestations for `confirm_stopped`; output is the same recovery projection |
 | `kora presets …`, `kora namespaces …`, `kora schedules …`, `kora workers` | registry and worker routes |
