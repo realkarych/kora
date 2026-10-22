@@ -299,10 +299,10 @@
     },
     "humanInputConfig": {
       "type": "object",
-      "required": ["channel", "form", "timeout", "on_expiry"],
+      "required": ["channel", "timeout", "on_expiry"],
       "properties": {
         "channel": { "type": "string" },
-        "form": { "type": "object" },
+        "form": {"type": "object", "default": {"type": "object", "properties": {"decision": {"type": "string", "enum": ["approve", "reject"]}, "comments": {"type": "string"}}, "required": ["decision"], "additionalProperties": false}, "description": "Absent selects the built-in decision/comments form. An explicit schema is preserved; response values are never filled from schema defaults."},
         "timeout": { "$ref": "#/$defs/duration" },
         "on_expiry": { "type": "string", "enum": ["fail", "skip", "default_value"] },
         "default_value": {},
@@ -315,7 +315,7 @@
           "patternProperties": { "^x-": {} },
           "additionalProperties": false
         },
-        "approve_when": { "$ref": "#/$defs/expression" },
+        "approve_when": {"$ref": "#/$defs/expression", "description": "When absent, response.decision == 'approve' applies only when the effective form declares decision and the expression passes CEL checking; otherwise IR011. Explicit expressions are preserved."},
         "context": { "type": "string", "maxLength": 4096, "description": "input path of the artifact shown to the approver, e.g. a ReviewBundle" }
       },
       "patternProperties": { "^x-": {} },
@@ -434,10 +434,10 @@
       "patternProperties": { "^x-": {} },
       "additionalProperties": false,
       "allOf": [
-        { "if": { "properties": { "kind": { "const": "agent" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/agentConfig" } } } },
-        { "if": { "properties": { "kind": { "const": "command" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/commandConfig" } } } },
-        { "if": { "properties": { "kind": { "const": "human_input" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/humanInputConfig" } } } },
-        { "if": { "properties": { "kind": { "const": "wait_event" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/waitEventConfig" } } } },
+        {"if": {"properties": {"kind": {"const": "agent"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/agentConfig"}, "outputs": {"required": ["session"], "properties": {"session": {"properties": {"type": {"const": "AgentSession"}}}}, "additionalProperties": {"properties": {"type": {"not": {"const": "AgentSession"}}}}, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
+        {"if": {"properties": {"kind": {"const": "command"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/commandConfig"}, "outputs": {"required": ["result"], "properties": {"result": {"properties": {"type": {"const": "CommandResult"}}}}, "additionalProperties": {"properties": {"type": {"not": {"const": "CommandResult"}}}}, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
+        {"if": {"properties": {"kind": {"const": "human_input"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/humanInputConfig"}, "outputs": {"required": ["response"], "properties": {"response": {"properties": {"type": {"const": "StructuredOutput"}}}}, "additionalProperties": false, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
+        {"if": {"properties": {"kind": {"const": "wait_event"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/waitEventConfig"}, "outputs": {"required": ["event"], "properties": {"event": {"properties": {"type": {"const": "StructuredOutput"}}}}, "additionalProperties": false, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
         { "if": { "properties": { "kind": { "const": "timer" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/timerConfig" } } } },
         { "if": { "properties": { "kind": { "const": "branch" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/branchConfig" } } } },
         { "if": { "properties": { "kind": { "const": "fan_out" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/fanOutConfig" } } } },

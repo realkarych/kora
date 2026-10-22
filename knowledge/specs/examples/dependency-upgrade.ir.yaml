@@ -81,21 +81,16 @@ graph:
         response: { type: StructuredOutput }
       config:
         channel: cli
-        form:
-          type: object
-          properties: { decision: { enum: [approve, reject] }, comments: { type: string } }
-          required: [decision]
         timeout: "2d"
         on_expiry: skip
         binds: { vcs_ref: inputs.change, gate_digests: [inputs.tests] }
-        approve_when: "response.decision == 'approve'"
     merged:
       kind: wait_event
       inputs:
         change: { type: VcsRef, from: upgrade, output: change }
       depends_on: [approve]
       outputs:
-        status: { type: StructuredOutput }
+        event: { type: StructuredOutput }
       config:
         poll: { sensor: change_request_status, config: { ref: inputs.change }, until: "observation.status == 'merged'" }
         interval: "10m"
