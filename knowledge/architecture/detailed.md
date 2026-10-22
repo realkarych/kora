@@ -2,7 +2,7 @@
 
 Status: non-normative reference, consolidated against the specifications and ADRs through ADR-0022 on 2026-10-17. The editorial consolidation is pending owner review in [issue #76](https://github.com/realkarych/kora/issues/76). These are planned components; diagrams and named conformance gates are not implementation evidence.
 
-CEL cost-regression amendment dated 2026-10-23: the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); concrete wording pending line-by-line owner review.
+CEL cost-regression amendment dated 2026-10-23: the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); wording reviewed line by line and approved by the project owner on 2026-10-23.
 
 Start with the [technical introduction](../../docs/technical-introduction.md). This reference keeps component and deployment views, the module/contract map, the stack inventory, canonical terms and unresolved implementation mechanics. For a change, use the [specification task index](../README.md#which-file-to-load-for-which-task), then the ADRs it cites. ADRs take precedence over specifications; neither is superseded by this reference.
 

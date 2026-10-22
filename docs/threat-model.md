@@ -10,7 +10,7 @@ Scope and implementation plan approved under [issue #90](https://github.com/real
 
 CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording accepted by the project owner on 2026-10-22.
 
-CEL cost-regression amendment dated 2026-10-23 (TM-04, TM-10, TM-12 and their evidence): the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); concrete wording pending line-by-line owner review.
+CEL cost-regression amendment dated 2026-10-23 (TM-04, TM-10, TM-12 and their evidence): the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); wording reviewed line by line and approved by the project owner on 2026-10-23.
 
 Held-read amendment dated 2026-10-19: the TM-10 scenario names callers that hold reads open and its boundary the API read path, its remaining limit names the bounded run-read wait and `?follow=true` streams, the TM-01, TM-02 and TM-10 evidence rows name the run-read wait and mounted-credential contracts, and the maintenance section records the merge of PR #109; direction and implementation plan approved by the project owner under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
 
