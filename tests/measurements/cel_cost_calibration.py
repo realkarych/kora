@@ -3,6 +3,7 @@ import hashlib
 import importlib.metadata
 import itertools
 import json
+import math
 import os
 import platform
 import shutil
@@ -10,10 +11,13 @@ import sys
 import sysconfig
 import time
 import tomllib
+from collections.abc import Sequence
+from fractions import Fraction
 from pathlib import Path
-from typing import cast
+from typing import TypedDict, cast
 from urllib.parse import unquote, urlsplit
 
+from kora.cel_eval.convert import BoundValues, bind
 from tests.cel_eval.children import full_path
 from tests.measurements.cel_bound_workload import (
     BOUND_FAMILIES,
@@ -22,12 +26,21 @@ from tests.measurements.cel_bound_workload import (
     conversion_samples,
     select_bounds,
 )
+from tests.measurements.cel_cost_catalogue import (
+    OPERATION_IDENTITIES,
+    memory_case,
+    operation_case,
+    reference_case,
+)
 from tests.measurements.cel_cost_workload import (
     FULL_TIMINGS,
     NATIVE_TIMINGS,
     SAMPLES,
     WARMUP,
     ConversionCase,
+    binding_statistics,
+    digest,
+    logical_memory,
     pilot_cases,
 )
 from tests.measurements.cel_measurement_process import ProcessResult, run_process
@@ -41,6 +54,158 @@ PRELUDE: str = (
     "from tests.measurements.cel_cost_workload import run_case; "
     "run_case(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else 'pilot')"
 )
+COST_PRELUDE: str = (
+    "import json, sys; sys.path[:] = json.loads(sys.argv[1]); "
+    "from tests.measurements.cel_cost_workload import run_cost_family; "
+    "run_cost_family(sys.argv[2])"
+)
+MEMORY_PRELUDE: str = (
+    "import json, sys; sys.path[:] = json.loads(sys.argv[1]); "
+    "from tests.measurements.cel_cost_workload import run_memory_case; "
+    "run_memory_case(sys.argv[2], int(sys.argv[3]))"
+)
+
+
+class CostFamilyReport(TypedDict):
+    schema: int
+    catalogue: str
+    family: str
+    warmup: int
+    samples: int
+    reference: dict[str, object]
+    cases: list[dict[str, object]]
+    resources: dict[str, object]
+    completion: str
+
+
+class Complexity(TypedDict):
+    exponent: float
+    doubling_ratios: list[float]
+    within_limits: bool
+
+
+def positive_integer(value: int) -> None:
+    if type(value) is not int or value <= 0:
+        raise ValueError("measurement count must be a positive integer")
+
+
+def normalized_sample(
+    elapsed: int,
+    calls: int,
+    reference_before: int,
+    reference_after: int,
+    reference_calls: int,
+    frozen_reference: Fraction,
+) -> Fraction:
+    for value in (elapsed, calls, reference_before, reference_after, reference_calls):
+        positive_integer(value)
+    if frozen_reference <= 0:
+        raise ValueError("frozen reference must be positive")
+    mean_reference = Fraction(reference_before + reference_after, 2 * reference_calls)
+    return Fraction(elapsed, calls) * frozen_reference / mean_reference
+
+
+def paired_residuals(
+    targets: Sequence[dict[str, object]],
+    controls: Sequence[dict[str, object]],
+    frozen_reference: Fraction,
+) -> list[Fraction]:
+    if len(targets) != WARMUP + SAMPLES or len(controls) != WARMUP + SAMPLES:
+        raise ValueError("incomplete paired calibration samples")
+    residuals: list[Fraction] = []
+    for target, control in zip(targets, controls, strict=True):
+        normalized: list[Fraction] = []
+        for sample in (target, control):
+            normalized.append(
+                normalized_sample(
+                    cast(int, sample["elapsed_ns"]),
+                    cast(int, sample["calls"]),
+                    cast(int, sample["reference_before_ns"]),
+                    cast(int, sample["reference_after_ns"]),
+                    cast(int, sample["reference_calls"]),
+                    frozen_reference,
+                )
+            )
+        residuals.append(normalized[0] - normalized[1])
+    if any(value <= 0 for value in residuals[WARMUP:]):
+        raise ValueError("paired normalized residual is not identifiable")
+    return residuals
+
+
+def upper_slope(points: Sequence[tuple[int, Fraction]]) -> Fraction:
+    sizes = [size for size, _ in points]
+    if len(sizes) != 4 or len(set(sizes)) != 4 or sizes != sorted(sizes):
+        raise ValueError("a calibration series requires four distinct ordered sizes")
+    for size, residual in points:
+        positive_integer(size)
+        if residual <= 0:
+            raise ValueError("a calibration residual is not identifiable")
+    return max(residual / size for size, residual in points)
+
+
+def fit_time_weight(series: Sequence[Sequence[tuple[int, Fraction]]]) -> int:
+    if not series:
+        raise ValueError("no calibration series")
+    slope = max(upper_slope(points) for points in series)
+    return math.ceil(slope * Fraction(3, 2) * 1_000_000)
+
+
+def fit_memory_weights(
+    controls: Sequence[int], positive_models: Sequence[tuple[int, int]]
+) -> tuple[int, int]:
+    if not controls or not positive_models:
+        raise ValueError("memory calibration requires fixed and variable cases")
+    if any(type(value) is not int or value < 0 for value in controls):
+        raise ValueError("invalid fixed memory observation")
+    fixed = math.ceil(Fraction(3, 2) * max(controls))
+    ratios: list[Fraction] = []
+    for logical, observed in positive_models:
+        if type(logical) is not int or logical <= 0:
+            raise ValueError("memory calibration requires a positive logical size")
+        if type(observed) is not int or observed < 0:
+            raise ValueError("invalid variable memory observation")
+        ratios.append(Fraction(observed - fixed, logical))
+    slope = max(ratios)
+    if slope <= 0:
+        raise ValueError("variable memory contribution is not identifiable")
+    return fixed, max(1, math.ceil(Fraction(3, 2) * slope))
+
+
+def fit_pattern_unit(accepted_counts: Sequence[int]) -> int:
+    if len(accepted_counts) < 5:
+        raise ValueError("pattern calibration requires five independent jobs")
+    for count in accepted_counts:
+        positive_integer(count)
+    unit = max(Fraction(10_485_760, count) for count in accepted_counts)
+    return math.ceil(Fraction(3, 2) * unit)
+
+
+def complexity_of(
+    points: Sequence[tuple[int, Fraction]], *, quadratic: bool
+) -> Complexity:
+    upper_slope(points)
+    if any(
+        after != before * 2
+        for (before, _), (after, _) in zip(points[:-1], points[1:], strict=True)
+    ):
+        raise ValueError("complexity sizes must double")
+    x = [math.log2(size) for size, _ in points]
+    y = [math.log2(value) for _, value in points]
+    mean_x = sum(x) / 4
+    mean_y = sum(y) / 4
+    exponent = sum(
+        (size - mean_x) * (elapsed - mean_y) for size, elapsed in zip(x, y, strict=True)
+    ) / sum((size - mean_x) ** 2 for size in x)
+    ratios = [
+        float(after / before)
+        for (_, before), (_, after) in zip(points[:-1], points[1:], strict=True)
+    ]
+    return Complexity(
+        exponent=exponent,
+        doubling_ratios=ratios,
+        within_limits=exponent <= (2.25 if quadratic else 1.25)
+        and all(ratio <= (5.0 if quadratic else 2.5) for ratio in ratios),
+    )
 
 
 def mapping(value: object) -> dict[str, object]:
@@ -81,6 +246,176 @@ def unique_mapping(entries: list[tuple[str, object]]) -> dict[str, object]:
 
 def reject_constant(value: str) -> object:
     raise ValueError("nonfinite measurement value")
+
+
+def validate_cost_family(content: bytes, family: str) -> CostFamilyReport:
+    raw: object = json.loads(
+        content, object_pairs_hook=unique_mapping, parse_constant=reject_constant
+    )
+    value = mapping(raw)
+    expected: dict[str, object] = {
+        "schema": 1,
+        "catalogue": "calibration",
+        "family": family,
+        "warmup": WARMUP,
+        "samples": SAMPLES,
+        "reference": reference_case().metadata(),
+        "completion": "cel-cost-family-complete",
+    }
+    if set(value) != set(expected) | {"cases", "resources"} or any(
+        json.dumps(value[key], sort_keys=True) != json.dumps(item, sort_keys=True)
+        for key, item in expected.items()
+    ):
+        raise ValueError("cost family identity does not match its manifest")
+    cases = [
+        operation_case(name, size)
+        for name, size in OPERATION_IDENTITIES
+        if name == family
+    ]
+    observations = sequence(value["cases"])
+    if not cases or len(cases) != len(observations):
+        raise ValueError("cost family is incomplete")
+    for case, raw_observation in zip(cases, observations, strict=True):
+        observation = mapping(raw_observation)
+        prepared = bind(case.checked(), case.bindings, case.types)
+        assert isinstance(prepared, BoundValues)
+        metadata = {**case.metadata(), "prepared_sha256": digest(prepared.values)}
+        if set(observation) != set(metadata) | {"target", "control_samples"} or any(
+            json.dumps(observation[key], sort_keys=True)
+            != json.dumps(item, sort_keys=True)
+            for key, item in metadata.items()
+        ):
+            raise ValueError("cost observation does not match its manifest")
+        for name in ("target", "control_samples"):
+            samples = [mapping(item) for item in sequence(observation[name])]
+            if len(samples) != WARMUP + SAMPLES:
+                raise ValueError("incomplete cost samples")
+            for sample in samples:
+                if set(sample) != {
+                    "elapsed_ns",
+                    "calls",
+                    "result_count",
+                    "reference_before_ns",
+                    "reference_after_ns",
+                    "reference_calls",
+                    "reference_before_results",
+                    "reference_after_results",
+                } or any(
+                    type(item) is not int or item <= 0 for item in sample.values()
+                ):
+                    raise ValueError("invalid bracketed cost sample")
+                if (
+                    sample["calls"] != case.batch
+                    or sample["result_count"] != case.batch
+                    or any(
+                        sample[field] != 32
+                        for field in (
+                            "reference_calls",
+                            "reference_before_results",
+                            "reference_after_results",
+                        )
+                    )
+                ):
+                    raise ValueError("cost sample call count changed")
+    resources = mapping(value["resources"])
+    if set(resources) != {
+        "pid",
+        "elapsed_ns",
+        "descriptors_before",
+        "descriptors_after",
+        "persistent_workers",
+        "stack_restored",
+    }:
+        raise ValueError("incomplete cost resource counters")
+    for field in ("pid", "elapsed_ns", "descriptors_before", "descriptors_after"):
+        item = resources[field]
+        if type(item) is not int or item <= 0:
+            raise ValueError("invalid cost resource counter")
+    if (
+        resources["descriptors_before"] != resources["descriptors_after"]
+        or resources["stack_restored"] is not True
+        or type(resources["persistent_workers"]) is not int
+        or resources["persistent_workers"] != (1 if family == "evaluation" else 0)
+        or cast(int, resources["elapsed_ns"]) >= 10_000_000_000
+    ):
+        raise ValueError("cost child did not release its owned resources")
+    return cast(CostFamilyReport, value)
+
+
+def validate_memory_observation(
+    content: bytes, family: str, size: int
+) -> dict[str, object]:
+    raw: object = json.loads(
+        content, object_pairs_hook=unique_mapping, parse_constant=reject_constant
+    )
+    value = mapping(raw)
+    case = memory_case(family, size)
+    metadata = case.metadata()
+    expected: dict[str, object] = {
+        "schema": 1,
+        "catalogue": "cold_memory",
+        **metadata,
+        "completion": "cel-cold-memory-complete",
+        "stack_restored": True,
+        "original_statistics": list(binding_statistics(case.bindings)),
+        "logical_bytes": logical_memory(case, case.checked()),
+        "result_sha256": metadata["expected_sha256"],
+        "resources": {
+            "handles": 0,
+            "outstanding": 0,
+            "charged_bytes": 0,
+            "persistent_workers": 1,
+        },
+    }
+    fields = {
+        "baseline",
+        "reset",
+        "measured",
+        "linux_peak_reset",
+        "production_ns",
+        "pid",
+        "elapsed_ns",
+        "descriptors_before",
+        "descriptors_after",
+    }
+    if set(value) != set(expected) | fields or any(
+        json.dumps(value[key], sort_keys=True) != json.dumps(item, sort_keys=True)
+        for key, item in expected.items()
+    ):
+        raise ValueError("memory observation does not match its manifest")
+    for field in (
+        "pid",
+        "elapsed_ns",
+        "production_ns",
+        "descriptors_before",
+        "descriptors_after",
+    ):
+        item = value[field]
+        if type(item) is not int or item <= 0:
+            raise ValueError("invalid memory process counter")
+    logical = value["logical_bytes"]
+    if type(logical) is not int or logical < 0:
+        raise ValueError("invalid logical memory size")
+    if (
+        value["descriptors_before"] != value["descriptors_after"]
+        or cast(int, value["elapsed_ns"]) >= 10_000_000_000
+    ):
+        raise ValueError("memory child did not release its descriptors")
+    reset = value["linux_peak_reset"]
+    if type(reset) is not bool:
+        raise ValueError("invalid memory reset status")
+    for field in ("baseline", "reset", "measured"):
+        reading = value[field]
+        if not reset:
+            if reading is not None:
+                raise ValueError("non-Linux memory cannot qualify")
+        else:
+            rss = mapping(reading)
+            if set(rss) != {"current", "peak"} or any(
+                type(item) is not int or item <= 0 for item in rss.values()
+            ):
+                raise ValueError("invalid memory RSS reading")
+    return value
 
 
 def validate_observation(

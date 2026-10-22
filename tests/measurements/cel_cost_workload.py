@@ -1,21 +1,27 @@
 import asyncio
 import hashlib
 import json
+import os
 import resource
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TypedDict
+from functools import partial
+from typing import TYPE_CHECKING, TypedDict
 
 from kora.cel import CheckedExpression, JsonValue, ValueBound, Variable, check
 from kora.cel.types import DOUBLE, DYN, CelType, ListOf
-from kora.cel_eval.binding import load_binding
+from kora.cel_eval.binding import Program, load_binding
 from kora.cel_eval.bounds import Size, measure
 from kora.cel_eval.convert import BoundValues, bind, convert
 from kora.cel_eval.errors import ErrorContext, ErrorKind
 from kora.cel_eval.thread import EvaluationThread, Evaluator
+
+if TYPE_CHECKING:
+    from tests.measurements.cel_cost_catalogue import CostCase
 
 WARMUP: int = 3
 SAMPLES: int = 15
@@ -379,5 +385,355 @@ def run_case(name: str, mode: str, catalogue: str = "pilot") -> None:
         "resources": resources,
         "stack_restored": True,
         "completion": "cel-conversion-complete",
+    }
+    sys.stdout.write(json.dumps(payload))
+
+
+class BracketedSample(TypedDict):
+    elapsed_ns: int
+    calls: int
+    result_count: int
+    reference_before_ns: int
+    reference_after_ns: int
+    reference_calls: int
+    reference_before_results: int
+    reference_after_results: int
+
+
+def timed_calls(action: Callable[[], object], expected: object, calls: int) -> int:
+    completed = 0
+    started = time.perf_counter_ns()
+    for _ in range(calls):
+        result = action()
+        assert type(result) is type(expected)
+        assert result == expected
+        completed += 1
+    elapsed = time.perf_counter_ns() - started
+    assert completed == calls
+    return elapsed
+
+
+def bracketed_sample(
+    action: Callable[[], object],
+    expected: object,
+    calls: int,
+    reference: Callable[[], object],
+) -> BracketedSample:
+    before = timed_calls(reference, True, 32)
+    elapsed = timed_calls(action, expected, calls)
+    after = timed_calls(reference, True, 32)
+    return BracketedSample(
+        elapsed_ns=elapsed,
+        calls=calls,
+        result_count=calls,
+        reference_before_ns=before,
+        reference_after_ns=after,
+        reference_calls=32,
+        reference_before_results=32,
+        reference_after_results=32,
+    )
+
+
+class NativeCostProbe(EvaluationThread):
+    def __init__(self, cases: tuple["CostCase", ...]) -> None:
+        self.cases: tuple[CostCase, ...] = cases
+        self.observations: list[dict[str, object]] = []
+        self.completed: bool = False
+        super().__init__(load_binding())
+
+    def execute_case(
+        self,
+        case: "CostCase",
+        checked: CheckedExpression,
+        program: Program,
+        values: BoundValues,
+    ) -> object:
+        if case.phase == "compile":
+            return self.machine.validate(checked).valid
+        return self.machine.binding.execute(program, values.values)
+
+    def _run(self) -> None:
+        from tests.measurements.cel_cost_catalogue import reference_case
+
+        reference = reference_case()
+        reference_checked = reference.checked()
+        reference_values = bind(reference_checked, reference.bindings, reference.types)
+        assert isinstance(reference_values, BoundValues)
+        binding = self.machine.binding
+        reference_program = binding.compile(reference_checked)
+
+        def measure_reference() -> object:
+            return binding.execute(reference_program, reference_values.values)
+
+        for case in self.cases:
+            checked = case.checked()
+            control = case.control_checked()
+            values = bind(checked, case.bindings, case.types)
+            assert isinstance(values, BoundValues)
+            program = binding.compile(checked)
+            control_program = binding.compile(control)
+
+            action = partial(self.execute_case, case, checked, program, values)
+            control_action = partial(
+                self.execute_case, case, control, control_program, values
+            )
+
+            target_samples: list[BracketedSample] = []
+            control_samples: list[BracketedSample] = []
+            for _ in range(WARMUP + SAMPLES):
+                target_samples.append(
+                    bracketed_sample(
+                        action, case.expected, case.batch, measure_reference
+                    )
+                )
+                control_samples.append(
+                    bracketed_sample(
+                        control_action,
+                        case.control_expected,
+                        case.batch,
+                        measure_reference,
+                    )
+                )
+            self.observations.append(
+                {
+                    **case.metadata(),
+                    "prepared_sha256": digest(values.values),
+                    "target": target_samples,
+                    "control_samples": control_samples,
+                }
+            )
+        self.completed = True
+
+
+async def production_base(case: "CostCase") -> list[dict[str, object]]:
+    from tests.measurements.cel_cost_catalogue import reference_case
+
+    reference = reference_case()
+    reference_checked = reference.checked()
+    reference_values = bind(reference_checked, reference.bindings, reference.types)
+    assert isinstance(reference_values, BoundValues)
+    binding = load_binding()
+    reference_program = binding.compile(reference_checked)
+    evaluator = Evaluator(clock)
+    checked = case.checked()
+    target: list[BracketedSample] = []
+    controls: list[BracketedSample] = []
+
+    def measure_reference() -> object:
+        return binding.execute(reference_program, reference_values.values)
+
+    try:
+        for _ in range(WARMUP + SAMPLES):
+            for samples in (target, controls):
+                before = timed_calls(measure_reference, True, 32)
+                started = time.perf_counter_ns()
+                completed = 0
+                for _ in range(case.batch):
+                    outcome = await evaluator.evaluate(
+                        checked, {}, {}, ErrorContext("measurements.base")
+                    )
+                    assert outcome is True
+                    completed += 1
+                elapsed = time.perf_counter_ns() - started
+                after = timed_calls(measure_reference, True, 32)
+                assert completed == case.batch
+                samples.append(
+                    BracketedSample(
+                        elapsed_ns=elapsed,
+                        calls=case.batch,
+                        result_count=completed,
+                        reference_before_ns=before,
+                        reference_after_ns=after,
+                        reference_calls=32,
+                        reference_before_results=32,
+                        reference_after_results=32,
+                    )
+                )
+    finally:
+        await evaluator.close()
+    with evaluator.owner.condition:
+        assert evaluator.owner.condition.wait_for(
+            lambda: evaluator.snapshot().diagnostics == 0, 1
+        )
+    state = evaluator.snapshot()
+    assert state.handles == state.outstanding == state.bytes == 0
+    return [
+        {
+            **case.metadata(),
+            "prepared_sha256": digest({}),
+            "target": target,
+            "control_samples": controls,
+        }
+    ]
+
+
+def run_cost_family(family: str) -> None:
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    from tests.measurements.cel_cost_catalogue import (
+        OPERATION_IDENTITIES,
+        operation_case,
+        reference_case,
+    )
+
+    started = time.perf_counter_ns()
+    descriptors_before = len(os.listdir("/dev/fd"))
+    previous_stack = threading.stack_size()
+    cases = tuple(
+        operation_case(name, size)
+        for name, size in OPERATION_IDENTITIES
+        if name == family
+    )
+    if not cases:
+        raise ValueError("unknown cost family")
+    if family == "evaluation":
+        observations = asyncio.run(production_base(cases[0]))
+    else:
+        probe = NativeCostProbe(cases)
+        probe.worker.join(9)
+        assert not probe.worker.is_alive()
+        assert probe.completed
+        observations = probe.observations
+    assert previous_stack == threading.stack_size()
+    workers = sum(
+        thread.name == "kora-cel-evaluator" for thread in threading.enumerate()
+    )
+    payload: dict[str, object] = {
+        "schema": 1,
+        "catalogue": "calibration",
+        "family": family,
+        "warmup": WARMUP,
+        "samples": SAMPLES,
+        "reference": reference_case().metadata(),
+        "cases": observations,
+        "resources": {
+            "pid": os.getpid(),
+            "elapsed_ns": time.perf_counter_ns() - started,
+            "descriptors_before": descriptors_before,
+            "descriptors_after": len(os.listdir("/dev/fd")),
+            "persistent_workers": workers,
+            "stack_restored": True,
+        },
+        "completion": "cel-cost-family-complete",
+    }
+    sys.stdout.write(json.dumps(payload))
+
+
+class RssReading(TypedDict):
+    current: int
+    peak: int
+
+
+def linux_rss() -> RssReading | None:
+    if sys.platform != "linux":
+        return None
+    from pathlib import Path
+
+    fields: dict[str, int] = {}
+    for line in Path("/proc/self/status").read_text().splitlines():
+        name, _, rest = line.partition(":")
+        if name in ("VmRSS", "VmHWM"):
+            amount, unit = rest.split()
+            assert unit == "kB"
+            fields[name] = int(amount) * 1024
+    if set(fields) != {"VmRSS", "VmHWM"}:
+        raise RuntimeError("Linux RSS observation is incomplete")
+    return RssReading(current=fields["VmRSS"], peak=fields["VmHWM"])
+
+
+async def cold_memory(case: "CostCase") -> dict[str, object]:
+    from pathlib import Path
+
+    from kora.cel_eval.evaluate import ResultType
+    from tests.measurements.cel_cost_catalogue import ResultRecipe
+
+    checked = case.checked()
+    evaluator = Evaluator(clock)
+    context = ErrorContext("measurements.cold_memory")
+    result_type = (
+        ResultType.STRING
+        if isinstance(case.expected_data, ResultRecipe)
+        else ResultType.BOOL
+    )
+    before = linux_rss()
+    if sys.platform == "linux":
+        Path("/proc/self/clear_refs").write_text("5")
+    reset = linux_rss()
+    try:
+        started = time.perf_counter_ns()
+        result = await evaluator.evaluate(
+            checked, case.bindings, case.types, context, result_type
+        )
+        elapsed = time.perf_counter_ns() - started
+        measured = linux_rss()
+        expected = case.expected
+        assert type(result) is type(expected)
+        assert result == expected
+        logical = logical_memory(case, checked)
+        metadata = case.metadata()
+        input_statistics = binding_statistics(case.bindings)
+    finally:
+        await evaluator.close()
+    with evaluator.owner.condition:
+        assert evaluator.owner.condition.wait_for(
+            lambda: evaluator.snapshot().diagnostics == 0, 1
+        )
+    state = evaluator.snapshot()
+    assert state.handles == state.outstanding == state.bytes == 0
+    return {
+        **metadata,
+        "baseline": before,
+        "reset": reset,
+        "measured": measured,
+        "logical_bytes": logical,
+        "production_ns": elapsed,
+        "original_statistics": list(input_statistics),
+        "linux_peak_reset": sys.platform == "linux",
+        "result_sha256": digest(result),
+        "resources": {
+            "handles": state.handles,
+            "outstanding": state.outstanding,
+            "charged_bytes": state.bytes,
+            "persistent_workers": sum(
+                t.name == "kora-cel-evaluator" for t in threading.enumerate()
+            ),
+        },
+    }
+
+
+def logical_memory(case: "CostCase", checked: CheckedExpression) -> int:
+    from dataclasses import replace
+
+    from kora.cel import Budget
+    from kora.cel.cost import PROVISIONAL_WEIGHTS, estimate
+
+    return estimate(
+        checked.tree,
+        len(checked.rendering),
+        case.environment(),
+        replace(PROVISIONAL_WEIGHTS, memory_base=0, memory_byte=1),
+        Budget(10**30, 10**30),
+    ).memory
+
+
+def run_memory_case(family: str, size: int) -> None:
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    from tests.measurements.cel_cost_catalogue import memory_case
+
+    started = time.perf_counter_ns()
+    descriptors_before = len(os.listdir("/dev/fd"))
+    previous_stack = threading.stack_size()
+    case = memory_case(family, size)
+    observation = asyncio.run(cold_memory(case))
+    assert threading.stack_size() == previous_stack
+    payload: dict[str, object] = {
+        "schema": 1,
+        "catalogue": "cold_memory",
+        **observation,
+        "pid": os.getpid(),
+        "elapsed_ns": time.perf_counter_ns() - started,
+        "descriptors_before": descriptors_before,
+        "descriptors_after": len(os.listdir("/dev/fd")),
+        "stack_restored": True,
+        "completion": "cel-cold-memory-complete",
     }
     sys.stdout.write(json.dumps(payload))

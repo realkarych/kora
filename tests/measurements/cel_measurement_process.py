@@ -16,6 +16,9 @@ class ProcessResult:
     stderr: bytes
     timed_out: bool
     overflow: bool
+    elapsed_ns: int
+    descriptors_before: int
+    descriptors_after: int
 
 
 def run_process(
@@ -26,6 +29,8 @@ def run_process(
 ) -> ProcessResult:
     if deadline_seconds <= 0 or output_limit < 1:
         raise ValueError("measurement process limits must be positive")
+    started_ns = time.perf_counter_ns()
+    descriptors_before = len(os.listdir("/dev/fd"))
     deadline = time.monotonic() + deadline_seconds
     outputs = {"stdout": bytearray(), "stderr": bytearray()}
     timed_out = False
@@ -88,13 +93,16 @@ def run_process(
                 if child.poll() is None:
                     child.kill()
                 child.wait()
-            return ProcessResult(
-                child.pid,
-                child.returncode,
-                bytes(outputs["stdout"]),
-                bytes(outputs["stderr"]),
-                timed_out,
-                overflow,
-            )
+        return ProcessResult(
+            child.pid,
+            child.returncode,
+            bytes(outputs["stdout"]),
+            bytes(outputs["stderr"]),
+            timed_out,
+            overflow,
+            time.perf_counter_ns() - started_ns,
+            descriptors_before,
+            len(os.listdir("/dev/fd")),
+        )
     finally:
         signal.signal(signal.SIGINT, previous_handler)

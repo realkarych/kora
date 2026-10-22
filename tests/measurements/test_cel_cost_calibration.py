@@ -1,5 +1,6 @@
 import json
 import sys
+from fractions import Fraction
 
 import pytest
 
@@ -98,3 +99,392 @@ def test_cel_conversion_observations_come_from_completed_real_children(
         altered[name] = replacement
         with pytest.raises(ValueError, match="observation|timing"):
             validate_observation(json.dumps(altered).encode(), case, mode)
+
+
+def test_cel_cost_normalization_preserves_rational_brackets() -> None:
+    from tests.measurements.cel_cost_calibration import normalized_sample
+
+    elapsed = 960
+    reference_before = 640
+    reference_after = 1280
+
+    normalized = normalized_sample(
+        elapsed, 32, reference_before, reference_after, 32, Fraction(60)
+    )
+
+    assert normalized == Fraction(60)
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True])
+def test_cel_cost_normalization_refuses_invalid_reference(invalid: int) -> None:
+    from tests.measurements.cel_cost_calibration import normalized_sample
+
+    with pytest.raises(ValueError, match="positive integer"):
+        normalized_sample(960, 32, invalid, 1280, 32, Fraction(60))
+
+
+def test_cel_cost_residuals_use_independent_brackets_before_subtraction() -> None:
+    from tests.measurements.cel_cost_calibration import paired_residuals
+
+    target: dict[str, object] = {
+        "elapsed_ns": 960,
+        "calls": 32,
+        "reference_before_ns": 640,
+        "reference_after_ns": 1280,
+        "reference_calls": 32,
+    }
+    control: dict[str, object] = {
+        "elapsed_ns": 320,
+        "calls": 32,
+        "reference_before_ns": 320,
+        "reference_after_ns": 960,
+        "reference_calls": 32,
+    }
+
+    residuals = paired_residuals([target] * 18, [control] * 18, Fraction(60))
+
+    assert residuals == [Fraction(30)] * 18
+
+
+def test_cel_cost_residuals_refuse_a_normalized_reversal() -> None:
+    from tests.measurements.cel_cost_calibration import paired_residuals
+
+    target: dict[str, object] = {
+        "elapsed_ns": 96,
+        "calls": 32,
+        "reference_before_ns": 640,
+        "reference_after_ns": 1280,
+        "reference_calls": 32,
+    }
+    control: dict[str, object] = {
+        "elapsed_ns": 64,
+        "calls": 32,
+        "reference_before_ns": 32,
+        "reference_after_ns": 96,
+        "reference_calls": 32,
+    }
+
+    with pytest.raises(ValueError, match="identifiable"):
+        paired_residuals([target] * 18, [control] * 18, Fraction(60))
+
+
+def test_cel_cost_fitting_uses_the_upper_slope_and_upward_headroom() -> None:
+    from tests.measurements.cel_cost_calibration import fit_time_weight
+
+    series = [
+        [(1, Fraction(2)), (2, Fraction(6)), (4, Fraction(8)), (8, Fraction(16))],
+        [(1, Fraction(1)), (2, Fraction(2)), (4, Fraction(4)), (8, Fraction(8))],
+    ]
+
+    fitted = fit_time_weight(series)
+
+    assert fitted == 4_500_000
+
+
+@pytest.mark.parametrize("residual", [Fraction(0), Fraction(-1)])
+def test_cel_cost_fitting_refuses_nonpositive_residuals(residual: Fraction) -> None:
+    from tests.measurements.cel_cost_calibration import fit_time_weight
+
+    series = [[(1, Fraction(2)), (2, Fraction(4)), (4, residual), (8, Fraction(16))]]
+
+    with pytest.raises(ValueError, match="identifiable"):
+        fit_time_weight(series)
+
+
+def test_cel_cost_fitting_requires_four_distinct_sizes() -> None:
+    from tests.measurements.cel_cost_calibration import fit_time_weight
+
+    series = [[(1, Fraction(2)), (2, Fraction(4)), (2, Fraction(8)), (8, Fraction(16))]]
+
+    with pytest.raises(ValueError, match="four distinct"):
+        fit_time_weight(series)
+
+
+def test_cel_cost_memory_fit_keeps_fixed_and_variable_contributions_separate() -> None:
+    from tests.measurements.cel_cost_calibration import fit_memory_weights
+
+    controls = [100, 200]
+    positive_models = [(10, 500), (20, 700), (1000, 200)]
+
+    fixed, multiplier = fit_memory_weights(controls, positive_models)
+
+    assert fixed == 300
+    assert multiplier == 30
+
+
+def test_cel_cost_memory_fit_refuses_a_zero_variable_denominator() -> None:
+    from tests.measurements.cel_cost_calibration import fit_memory_weights
+
+    with pytest.raises(ValueError, match="positive logical"):
+        fit_memory_weights([100], [(0, 200)])
+
+
+def test_cel_regex_table_fit_uses_all_five_compiled_size_boundaries() -> None:
+    from tests.measurements.cel_cost_calibration import fit_pattern_unit
+
+    accepted_counts = [2046, 2046, 2046, 2046, 2046]
+
+    fitted = fit_pattern_unit(accepted_counts)
+
+    assert fitted == 7688
+
+
+@pytest.mark.parametrize(
+    ("elapsed", "quadratic", "accepted"),
+    [
+        ([2, 4, 8, 16], False, True),
+        ([1, 4, 16, 64], True, True),
+        ([1, 1, 1, 1], False, True),
+        ([1, 4, 16, 64], False, False),
+        ([1, 8, 64, 512], True, False),
+    ],
+)
+def test_cel_cost_complexity_gates_keep_flat_and_expected_growth(
+    elapsed: list[int], quadratic: bool, accepted: bool
+) -> None:
+    from tests.measurements.cel_cost_calibration import complexity_of
+
+    points = [
+        (size, Fraction(value))
+        for size, value in zip((1, 2, 4, 8), elapsed, strict=True)
+    ]
+
+    result = complexity_of(points, quadratic=quadratic)
+
+    assert result["within_limits"] is accepted
+
+
+def test_cel_cost_catalogue_results_agree_with_native_execution() -> None:
+    from kora.cel_eval.binding import load_binding
+    from kora.cel_eval.convert import BoundValues
+    from tests.measurements.cel_cost_catalogue import operation_cases
+
+    cases = operation_cases()
+    binding = load_binding()
+    identities: set[str] = set()
+
+    for case in cases:
+        checked = case.checked()
+        control = case.control_checked()
+        prepared = bind(checked, case.bindings, case.types)
+        assert isinstance(prepared, BoundValues)
+        result = binding.execute(binding.compile(checked), prepared.values)
+        baseline = binding.execute(binding.compile(control), prepared.values)
+        assert type(result) is type(case.expected)
+        assert result == case.expected
+        assert type(baseline) is type(case.control_expected)
+        assert baseline == case.control_expected
+        assert case.name not in identities
+        identities.add(case.name)
+
+    assert len(cases) == 145
+    assert {case.coefficient for case in cases} == {
+        "evaluation",
+        "node",
+        "iteration",
+        "map_quadratic",
+        "concat_byte",
+        "concat_value",
+        "compare_byte",
+        "compare_value",
+        "function_byte",
+        "rendering_character",
+    }
+
+
+@pytest.mark.parametrize("family", ["concat_string", "compile_rendering", "evaluation"])
+def test_cel_cost_bracketed_families_complete_on_real_children(family: str) -> None:
+    from tests.measurements.cel_cost_calibration import (
+        COST_PRELUDE,
+        validate_cost_family,
+    )
+
+    result = run_process(
+        [sys.executable, "-I", "-c", COST_PRELUDE, json.dumps(full_path(ROOT)), family]
+    )
+
+    report = validate_cost_family(result.stdout, family)
+
+    assert result.code == 0
+    assert not result.stderr
+    assert not result.overflow
+    assert not result.timed_out
+    assert len(report["cases"]) == (1 if family == "evaluation" else 4)
+    assert result.descriptors_after == result.descriptors_before
+    replacements: list[tuple[str, object]] = [
+        ("completion", "wrong"),
+        ("family", "wrong"),
+        ("reference", {}),
+        ("cases", []),
+        ("resources", {}),
+    ]
+    for field, replacement in replacements:
+        invalid = dict(report)
+        invalid[field] = replacement
+        with pytest.raises(ValueError, match="cost"):
+            validate_cost_family(json.dumps(invalid).encode(), family)
+
+
+def test_cel_cost_catalogue_predictors_match_individual_estimator_charges() -> None:
+    from dataclasses import replace
+
+    from kora.cel import Budget, ValueBound, Variable
+    from kora.cel.cost import estimate
+    from tests.cel.test_cel_cost import ZERO_WEIGHTS
+    from tests.measurements.cel_cost_catalogue import operation_cases
+    from tests.measurements.cel_cost_workload import binding_statistics
+
+    cases = operation_cases()
+    budget = Budget(10**30, 10**30)
+
+    for case in cases:
+        checked = case.checked()
+        control = case.control_checked()
+        environment: dict[str, Variable] = {}
+        for name, value in case.bindings.items():
+            size, values, _ = binding_statistics({name: value})
+            items = len(value) if isinstance(value, list | dict) else 0
+            environment[name] = Variable(
+                case.types[name], ValueBound(size, values, items, 16384)
+            )
+        weights = replace(ZERO_WEIGHTS, **{case.coefficient: 1})
+        actual = estimate(
+            checked.tree, len(checked.rendering), environment, weights, budget
+        )
+        baseline = estimate(
+            control.tree, len(control.rendering), environment, weights, budget
+        )
+        predictor = (
+            actual.steps
+            if case.coefficient == "evaluation"
+            else actual.compile_steps - baseline.compile_steps
+            if case.coefficient == "rendering_character"
+            else actual.steps - baseline.steps
+        )
+        assert predictor == case.units, case.name
+
+
+def test_cel_cost_catalogue_constructs_only_declared_individual_recipes() -> None:
+    from tests.measurements.cel_cost_catalogue import (
+        OPERATION_IDENTITIES,
+        operation_case,
+        operation_cases,
+    )
+
+    expected = operation_cases()
+
+    actual = tuple(
+        operation_case(family, size) for family, size in OPERATION_IDENTITIES
+    )
+
+    assert actual == expected
+    assert len(OPERATION_IDENTITIES) == len(set(OPERATION_IDENTITIES)) == 145
+    for family, size in (("unknown", 1), ("concat_string", 3), ("evaluation", 2)):
+        with pytest.raises(ValueError, match="undeclared cost case"):
+            operation_case(family, size)
+
+
+def test_cel_cost_declared_bounds_cover_originals_without_converting_them() -> None:
+    from kora.cel.cost import DATA_BYTES, DATA_VALUES
+    from tests.measurements.cel_cost_catalogue import operation_cases
+    from tests.measurements.cel_cost_workload import binding_statistics
+
+    cases = operation_cases()
+
+    for case in cases:
+        environment = case.environment()
+        for name, value in case.bindings.items():
+            size, values, _ = binding_statistics({name: value})
+            bound = environment[name].bound
+            assert bound is not None
+            assert size <= bound.bytes <= DATA_BYTES
+            assert values <= bound.values <= DATA_VALUES
+
+
+def test_cel_cold_memory_catalogue_has_fixed_and_positive_logical_cases() -> None:
+    from dataclasses import replace
+
+    from kora.cel import Budget
+    from kora.cel.cost import estimate
+    from tests.cel.test_cel_cost import ZERO_WEIGHTS
+    from tests.measurements.cel_cost_catalogue import MEMORY_IDENTITIES, memory_case
+
+    weights = replace(ZERO_WEIGHTS, memory_byte=1)
+    logical: dict[str, int] = {}
+
+    for family, size in MEMORY_IDENTITIES:
+        case = memory_case(family, size)
+        checked = case.checked()
+        logical[case.name] = estimate(
+            checked.tree,
+            len(checked.rendering),
+            case.environment(),
+            weights,
+            Budget(10**30, 10**30),
+        ).memory
+
+    assert len(logical) == len(MEMORY_IDENTITIES)
+    assert sum(value == 0 for value in logical.values()) == 13
+    assert all(value > 0 for name, value in logical.items() if "control" not in name)
+    assert max(logical.values()) >= 1_000_000
+
+
+def test_cel_cold_memory_recipes_have_exact_native_results_and_valid_data() -> None:
+    from kora.cel_eval.binding import load_binding
+    from kora.cel_eval.convert import BoundValues
+    from tests.measurements.cel_cost_catalogue import MEMORY_IDENTITIES, memory_case
+    from tests.measurements.cel_cost_workload import binding_statistics
+
+    binding = load_binding()
+    cases = tuple(memory_case(family, size) for family, size in MEMORY_IDENTITIES)
+
+    for case in cases:
+        checked = case.checked()
+        prepared = bind(checked, case.bindings, case.types)
+        assert isinstance(prepared, BoundValues), case.name
+        result = binding.execute(binding.compile(checked), prepared.values)
+        original = binding_statistics(case.bindings)
+        converted = binding_statistics(prepared.values)
+        assert type(result) is type(case.expected), case.name
+        assert result == case.expected, case.name
+        assert max(original[0], converted[0]) <= 4096, case.name
+        assert max(original[1], converted[1]) <= 256, case.name
+        assert max(original[2], converted[2]) <= 32, case.name
+
+
+@pytest.mark.parametrize(
+    ("family", "size"), [("memory_control_true", 1), ("memory_intermediate", 32)]
+)
+def test_cel_cold_memory_child_measures_before_oracle_and_releases(
+    family: str, size: int
+) -> None:
+    from tests.measurements.cel_cost_calibration import (
+        MEMORY_PRELUDE,
+        validate_memory_observation,
+    )
+
+    result = run_process(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            MEMORY_PRELUDE,
+            json.dumps(full_path(ROOT)),
+            family,
+            str(size),
+        ]
+    )
+
+    report = validate_memory_observation(result.stdout, family, size)
+
+    assert result.code == 0
+    assert not result.stderr
+    assert not result.overflow
+    assert not result.timed_out
+    assert report["completion"] == "cel-cold-memory-complete"
+    assert report["linux_peak_reset"] is (sys.platform == "linux")
+    assert result.descriptors_before == result.descriptors_after
+    invalid = dict(report)
+    invalid["resources"] = {}
+    with pytest.raises(ValueError, match="memory"):
+        validate_memory_observation(json.dumps(invalid).encode(), family, size)
