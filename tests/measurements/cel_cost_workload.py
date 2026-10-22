@@ -68,9 +68,8 @@ class PilotCase:
         )
 
     def original_size(self) -> Size:
-        size = measure(self.value)
-        assert isinstance(size, Size)
-        return size
+        size, count, _ = binding_statistics({"values": self.value})
+        return Size(size, count)
 
     def digest(self) -> str:
         data = json.dumps(self.value, ensure_ascii=False, separators=(",", ":"))

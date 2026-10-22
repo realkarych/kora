@@ -87,6 +87,8 @@ def bind(
     result: dict[str, JsonValue] = {}
     total_bytes = 0
     total_values = 0
+    original_bytes = 0
+    original_values = 0
     for name in checked.variables:
         if name in BUILTIN_TYPES and name not in values:
             continue
@@ -96,6 +98,10 @@ def bind(
         before = measure(value)
         if isinstance(before, ErrorKind):
             return before
+        original_bytes += before.bytes
+        original_values += before.values
+        if original_bytes > MAX_BYTES or original_values > MAX_VALUES:
+            return ErrorKind.BOUND_EXCEEDED
         converted = convert(value, types.get(name, DYN))
         if isinstance(converted, ErrorKind):
             return converted

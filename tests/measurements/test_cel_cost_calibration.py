@@ -3,8 +3,10 @@ import sys
 
 import pytest
 
-from kora.cel_eval.convert import BoundValues, bind
+from kora.cel_eval.convert import bind
+from kora.cel_eval.errors import ErrorKind
 from tests.cel_eval.children import full_path
+from tests.measurements.cel_bound_workload import bound_case
 from tests.measurements.cel_cost_calibration import (
     PRELUDE,
     ROOT,
@@ -27,20 +29,21 @@ from tests.measurements.cel_measurement_process import run_process
         ("numbers", 34001, 62001, 15001, 2),
     ],
 )
-def test_cel_conversion_pilot_uses_valid_near_bound_shapes(
+def test_cel_conversion_pilot_preserves_and_refuses_historical_shapes(
     family: str, original_bytes: int, converted_bytes: int, values: int, depth: int
 ) -> None:
     case = next(c for c in pilot_cases() if c.family == family and c.scale == 8)
     checked = case.checked()
+    metadata = case.workload().metadata()
 
     converted = bind(checked, {"values": case.value}, {"values": case.type})
 
     assert case.original_size().bytes == original_bytes
-    assert isinstance(converted, BoundValues)
-    assert converted.bytes == converted_bytes
-    assert converted.count == values
+    assert converted is ErrorKind.BOUND_EXCEEDED
+    assert metadata["converted_bytes"] == converted_bytes
+    assert metadata["values"] == values
     assert value_depth(case.value) == depth
-    assert value_depth(converted.values["values"]) == depth
+    assert metadata["converted_depth"] == depth
 
 
 def test_cel_conversion_pilot_has_four_sizes_per_family() -> None:
@@ -60,7 +63,7 @@ def test_cel_conversion_pilot_has_four_sizes_per_family() -> None:
 def test_cel_conversion_observations_come_from_completed_real_children(
     mode: str,
 ) -> None:
-    case = pilot_cases()[0].workload()
+    case = bound_case(4096, 256, "ascii")
 
     result = run_process(
         [
@@ -71,6 +74,7 @@ def test_cel_conversion_observations_come_from_completed_real_children(
             json.dumps(full_path(ROOT)),
             case.name,
             mode,
+            "bounds",
         ]
     )
     observation = validate_observation(result.stdout, case, mode)

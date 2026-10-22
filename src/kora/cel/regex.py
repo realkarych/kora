@@ -14,6 +14,8 @@ CASELESS_RANGE_WEIGHT: Final[int] = 304
 ANY_WEIGHT: Final[int] = 1001
 ANCHOR_WEIGHT: Final[int] = 32
 REPETITION_OVERHEAD: Final[int] = 32
+PATTERN_BASE_WEIGHT: Final[int] = 1
+SYNTAX_CHARACTER_WEIGHT: Final[int] = 1
 PATTERN_SIZE_CAP: Final[int] = 1_048_576
 
 CLASS_WEIGHTS: Final[dict[str, int]] = {
@@ -122,7 +124,9 @@ class PatternParser:
         weight = self.alternation()
         if self.position < len(self.text):
             raise PatternError(Reason.INVALID_PATTERN)
-        return weight
+        return saturated(
+            PATTERN_BASE_WEIGHT + max(weight, len(self.text) * SYNTAX_CHARACTER_WEIGHT)
+        )
 
     def alternation(self) -> int:
         total = self.concatenation()

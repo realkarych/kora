@@ -2,13 +2,14 @@ import math
 from dataclasses import dataclass
 from typing import cast
 
+from kora.cel.cost import DATA_BYTES, DATA_VALUES
 from kora.cel_eval.errors import ErrorKind
 
-MAX_BYTES: int = 65_536
+MAX_BYTES: int = DATA_BYTES
 MAX_ITEMS: int = 1_000
 MAX_STRING_BYTES: int = 16_384
 MAX_DEPTH: int = 32
-MAX_VALUES: int = MAX_BYTES // 2 + 1
+MAX_VALUES: int = DATA_VALUES
 
 
 @dataclass(frozen=True)

@@ -116,7 +116,7 @@ async def test_cel_completed_results_obey_outstanding_byte_limit() -> None:
     with pytest.raises(EvaluatorUnavailable) as caught:
         await evaluator.evaluate(
             checked,
-            {"s": "x" * 4096},
+            {"s": "x" * 4094},
             {"s": STRING},
             ErrorContext("reason"),
             ResultType.STRING,

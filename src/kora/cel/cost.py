@@ -58,7 +58,8 @@ from kora.cel.types import (
     unwrap,
 )
 
-DATA_BYTES: Final[int] = 65536
+DATA_BYTES: Final[int] = 4096
+DATA_VALUES: Final[int] = 256
 DATA_ITEMS: Final[int] = 1000
 DATA_STRING_BYTES: Final[int] = 16384
 DATA_DEPTH: Final[int] = 32
@@ -95,6 +96,7 @@ class Weights:
     pattern_compile: int
     pattern_match: int
     rendering_character: int
+    memory_base: int
     memory_byte: int
 
 
@@ -119,6 +121,7 @@ PROVISIONAL_WEIGHTS: Final[Weights] = Weights(
     pattern_compile=2_400_000,
     pattern_match=40,
     rendering_character=1_000_000_000,
+    memory_base=0,
     memory_byte=1,
 )
 
@@ -139,7 +142,7 @@ class ValueBound:
 
 DATA_BOUND: Final[ValueBound] = ValueBound(
     bytes=DATA_BYTES,
-    values=DATA_BYTES // 2 + 1,
+    values=DATA_VALUES,
     items=DATA_ITEMS,
     string_bytes=DATA_STRING_BYTES,
 )
@@ -775,7 +778,7 @@ class Estimator:
         element = join_all(shapes)
         element_cel_type = element.type if element is not None else DYN
         size = sum_affine([shape.bytes for shape in shapes]).plus(
-            Affine.of(len(shapes) + 1)
+            Affine.of(max(2, len(shapes) + 1))
         )
         values = sum_affine([shape.values for shape in shapes]).plus(Affine.of(1))
         shape = Shape(ListOf(element_cel_type), size, values, len(shapes), 0, element)
@@ -787,7 +790,7 @@ class Estimator:
         values_only = shapes[1::2]
         element = join_all(values_only)
         size = sum_affine([shape.bytes for shape in shapes]).plus(
-            Affine.of(len(shapes) + 1)
+            Affine.of(max(2, len(shapes) + 1))
         )
         values = sum_affine([shape.values for shape in shapes]).plus(Affine.of(1))
         value_type = element.type if element is not None else DYN
@@ -827,7 +830,8 @@ class Estimator:
             )
         if node.function in ("string", "bytes") and operands:
             result_type = STRING if node.function == "string" else BYTES
-            size = operand_bytes.plus(Affine.of(SCALAR_BYTES))
+            expansion = 6 if node.function == "string" else 1
+            size = operand_bytes.times(expansion).plus(Affine.of(SCALAR_BYTES))
             shape = Shape(result_type, size, Affine.of(1), 0, 0)
             allocated = self.allocation(size)
             return NodeCost(shape, steps, peak.join(held.plus(allocated)), allocated)
@@ -871,7 +875,7 @@ class Estimator:
             transformed_element = transform.substituted(
                 bytes_key, element.bytes
             ).substituted(values_key, element.values)
-            size = across(transform.bytes).plus(Affine.of(count + 1))
+            size = across(transform.bytes).plus(Affine.of(max(2, count + 1)))
             values = across(transform.values).plus(Affine.of(1))
             shape = Shape(
                 ListOf(transform.type), size, values, count, 0, transformed_element
@@ -896,6 +900,8 @@ def filtered(source: Shape, element: Shape, count: int) -> Shape:
 def across_range(
     value: Affine, bytes_key: Key, values_key: Key, count: int, source: Shape
 ) -> Affine:
+    if count == 0:
+        return ZERO
     coefficients = value.coefficients()
     bytes_coefficient = coefficients.pop(bytes_key, 0)
     values_coefficient = coefficients.pop(values_key, 0)
@@ -984,7 +990,11 @@ def estimate(
         + weights.convert_value * converted_values
     )
     steps = base + cost.steps.concrete()
-    memory = converted_bytes * weights.memory_byte + cost.memory.concrete()
+    memory = (
+        weights.memory_base
+        + converted_bytes * weights.memory_byte
+        + cost.memory.concrete()
+    )
     if memory > budget.memory:
         raise fail(Reason.MEMORY, node.offset)
     if steps > budget.steps:

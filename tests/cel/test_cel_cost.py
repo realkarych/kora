@@ -53,6 +53,7 @@ ZERO_WEIGHTS = Weights(
     pattern_compile=0,
     pattern_match=0,
     rendering_character=0,
+    memory_base=0,
     memory_byte=0,
 )
 UNBOUNDED = Budget(steps=10**30, memory=10**30)
@@ -186,8 +187,8 @@ def test_cel_cost_estimate_charges_follow_the_table() -> None:
     assert concat.steps == 102 + 52
     assert converted.steps == 102
     assert base.steps == 7
-    assert compiled.steps == 32
-    assert matched.steps == 32 * 102
+    assert compiled.steps == 33
+    assert matched.steps == 33 * 102
     assert function.steps == 102 + 52
     assert rendering.compile_steps == 3 * len("s.contains(t)")
     assert scoped.variables == ("l", "y")
@@ -201,7 +202,58 @@ def test_cel_cost_estimate_charges_follow_the_table() -> None:
     assert mapped.steps == 3 + 102 + 3
     assert integer.steps == 102
     assert filtered.steps == 30 * 30
-    assert pattern_memory.memory == 102 + 3 + 32
+    assert pattern_memory.memory == 102 + 3 + 33
+
+
+def test_cel_cost_estimate_charges_fixed_memory_once() -> None:
+    weights = only(memory_base=7, memory_byte=1)
+    text = Variable(STRING, string_bound(8))
+
+    scalar_result = estimated("true", weights)
+    collection = estimated("[s, s]", weights, s=text)
+
+    assert scalar_result.memory == 7
+    assert collection.memory == 40
+
+
+@pytest.mark.parametrize(
+    ("source", "memory"),
+    [
+        ("[]", 2),
+        ("{}", 2),
+        ("[[], {}]", 11),
+        ("[].map(x, x)", 4),
+        ("{}.map(k, k)", 4),
+        ("[].filter(x, true)", 4),
+        ("{}.filter(k, true)", 4),
+    ],
+)
+def test_cel_cost_estimate_counts_empty_collection_brackets(
+    source: str, memory: int
+) -> None:
+    weights = only(memory_byte=1)
+
+    result = estimated(source, weights)
+
+    assert result.memory == memory
+
+
+@pytest.mark.parametrize(
+    ("escape", "count", "canonical"), [("00", 8, 50), ("ff", 20, 62)]
+)
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_cel_cost_estimate_bounds_canonical_bytes_to_string_expansion(
+    escape: str, count: int, canonical: int, dynamic: bool
+) -> None:
+    literal = "b'" + f"\\x{escape}" * count + "'"
+    operand = f"dyn({literal})" if dynamic else literal
+    source = f"string({operand}) == ''"
+
+    comparison = estimated(source, only(compare_byte=1))
+    collection = estimated(f"[string({operand})]", only(concat_byte=1))
+
+    assert comparison.steps >= canonical + 2
+    assert collection.steps >= canonical + 2
 
 
 def test_cel_cost_estimate_closes_every_comprehension_scope() -> None:

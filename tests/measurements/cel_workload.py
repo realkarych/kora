@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from kora.cel.types import DYN
+from kora.cel_eval.bounds import MAX_BYTES, MAX_VALUES
 from kora.cel_eval.errors import (
     ErrorContext,
     ErrorKind,
@@ -109,14 +110,21 @@ def quiesce(owner: EvaluationThread) -> None:
 
 
 async def native(traced: bool = True) -> Measurements:
+    list_items = MAX_VALUES - 2
+    string_bytes = MAX_BYTES - 8
     cases: list[tuple[str, dict[str, object]]] = [
         ("true", {}),
         ("false", {}),
         ("inputs.missing == 1", {"inputs": {}}),
         ("inputs.n.x == 1", {"inputs": {"n": None}}),
-        ("inputs.items[1000] == 1", {"inputs": {"items": [0] * 1000}}),
+        (f"inputs.items[{list_items}] == 1", {"inputs": {"items": [0] * list_items}}),
         ("1 / 0 == 0", {}),
         ("9223372036854775807 + 1 == 0", {}),
+        (
+            f"inputs.items.size() == {list_items}",
+            {"inputs": {"items": [0] * list_items}},
+        ),
+        (f"inputs.s.size() == {string_bytes}", {"inputs": {"s": "a" * string_bytes}}),
         ("inputs.items.size() == 1000", {"inputs": {"items": [0] * 1000}}),
         ("inputs.s.size() == 16384", {"inputs": {"s": "a" * 16384}}),
     ]
@@ -146,6 +154,8 @@ async def native(traced: bool = True) -> Measurements:
             ErrorKind.OVERFLOW,
             True,
             True,
+            ErrorKind.BOUND_EXCEEDED,
+            ErrorKind.BOUND_EXCEEDED,
         )
         assert (
             tuple(

@@ -78,6 +78,34 @@ AT_THE_LIMITS: dict[str, tuple[str, str]] = {
     ),
 }
 PANIC: str = "PanicException"
+
+
+@pytest.mark.parametrize(
+    ("escape", "count", "expected"), [("00", 8, "\x00" * 8), ("ff", 20, "\ufffd" * 20)]
+)
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_cel_bytes_to_string_preserves_native_expansion(
+    cel_binding: Binding, escape: str, count: int, expected: str, dynamic: bool
+) -> None:
+    literal = "b'" + f"\\x{escape}" * count + "'"
+    operand = f"dyn({literal})" if dynamic else literal
+
+    result = evaluated(cel_binding, f"string({operand})")
+
+    assert result == typed(expected)
+
+
+@pytest.mark.parametrize("pattern", ["", "()" * 20, "|" * 31, "(?i)" * 16, "(?:)" * 16])
+def test_cel_empty_pattern_structures_execute(
+    cel_binding: Binding, pattern: str
+) -> None:
+    source = f"''.matches('{pattern}')"
+
+    result = evaluated(cel_binding, source)
+
+    assert result == ("bool", "True")
+
+
 UNARY_RUNS: tuple[str, ...] = (
     "!!x",
     "!!!x",

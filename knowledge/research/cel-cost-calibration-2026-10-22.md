@@ -69,3 +69,30 @@ Each phase retains three warm-ups and fifteen samples. Preparation/production sa
 The conservative per-call conversion sample is `bind_ns + ceil(native_total / 32) - floor(control_total / 32)`. Each case contributes its minimum retained paired sample. A candidate qualifies only if `3 * worst_case_minimum_ns <= 5_000_000`, applying 1.5 headroom to the unchanged 2.5 ms allocation. Select the qualifying pair maximizing `(byte_limit * value_limit, byte_limit, value_limit)`. All 120 identities must be complete and valid before selection. A valid budget exceedance disqualifies its candidate; malformed, missing, duplicate or mismatched evidence invalidates the entire collection.
 
 One qualifying reference job collects the grid under the unchanged 240-second suite, ten-second child and bounded-stream limits. No grid change or rerun follows an observed failure without an amended plan. Five later independent calibration jobs must each re-establish conversion under the raw 2.5 ms ceiling for the selected catalogue. Selection is not final cost, memory, lifetime or crash evidence. Production caps and the initial execution-semantics contract change only after qualifying selection and their separate implementation/review steps.
+
+## Qualified smaller-bound result
+
+The single [bounds collection](https://github.com/realkarych/kora/actions/runs/39836408320) at clean source/checkout `31c1e90be895e9d08d9fbfa7740ecd468398f3de`, tree `1582d5e93ab600ed403022f8a495482739c73b2d`, completed all 120 cases and 240 child observations in 67.309544263 seconds. The [artifact](https://github.com/realkarych/kora/actions/runs/39836408320/artifacts/12450767954) retains 960 timing vectors, 17,280 raw observations and every candidate disposition. All 1,800 retained raw native/control differences are positive; the smallest is 80,238 ns. All completion, reference, deadline and selection gates pass, with no failures.
+
+| Canonical byte limit | Value limit | Worst minimum conversion | Qualifies with 1.5 headroom |
+| --- | --- | --- | --- |
+| 1,024 | 128 | 0.457523 ms | Yes |
+| 1,024 | 256 | 0.724039 ms | Yes |
+| 1,024 | 512 | 1.200144 ms | Yes |
+| 2,048 | 128 | 0.651869 ms | Yes |
+| 2,048 | 256 | 0.908992 ms | Yes |
+| 2,048 | 512 | 1.517275 ms | Yes |
+| 4,096 | 128 | 1.071875 ms | Yes |
+| 4,096 | 256 | 1.323915 ms | Yes |
+| 4,096 | 512 | 1.828399 ms | No |
+| 8,192 | 128 | 1.894702 ms | No |
+| 8,192 | 256 | 2.111792 ms | No |
+| 8,192 | 512 | 2.663414 ms | No |
+
+The deterministic selection is **4,096 bytes and 256 values**. Its product ties 2,048 / 512; the registered byte tie-break chooses 4,096 / 256. Mixed containers at depth 32 are the worst selected family: 1.323915 ms, or 1.9858725 ms with headroom, below 2.5 ms. The largest retained selected production interval is 1.602646 ms. These empirical limits preserve the 10 ms evaluation target; they do not guarantee an interrupt or performance on arbitrary hardware.
+
+The reference used Ubuntu 24.04 image `20261012.334.1`, AMD EPYC 9V74, CPython 3.11.17, uv 0.13.1 and the locked binding 0.10.0 wheel. ZIP SHA-256 is `6e0613597fb9c1a68f2d305827c69a50c45e7448ffe6eb35e938cf54eb16bead`; sole JSON SHA-256 is `18734e9dda19ea541b85b968969900810047694920ed5ccb50e9a325c3c2c30a`. Separate independent correctness, performance and CI provenance audits reconstructed the evidence without mismatch. The complete dispatch passed in 390 seconds.
+
+All 120 full children release handles, outstanding jobs and charged bytes to zero, leaving the expected process-owned daemon. All 120 native probes finish with zero workers. Successful-child wall times, PIDs and descriptor snapshots are not retained individually; the ten-second termination/reaping guarantee depends on the separately tested supervisor completion path. Full memory, accumulation, GIL, crash and five-job calibration evidence remains pending.
+
+Production admission now uses the selected shared byte/value constants. Both original and converted aggregates are checked; typed numeric shrinkage cannot admit an oversized original. Boundary tests preserve converted expansion, original shrinkage refusal, exact limits, multiple roots and real evaluator propagation. Historical largest recipes retain their exact original/converted statistics and are explicitly refused under the smaller bounds. Successful measurement-child coverage uses the selected catalogue. The lifetime workload retains every original native error and resource threshold, exercising the largest admitted list/string payloads and separately refusing the old oversized payloads. The completed-result admission regression retains its 32,768-byte threshold while fitting its original string into the new canonical input limit.

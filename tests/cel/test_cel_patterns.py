@@ -150,3 +150,13 @@ def test_cel_regex_estimate_floors_wide_classes() -> None:
     assert negated_class >= any_character
     assert plus == counted
     assert star < plus
+
+
+@pytest.mark.parametrize("pattern", ["", "()" * 20, "|" * 31, "(?i)" * 16, "(?:)" * 16])
+def test_cel_regex_charges_empty_structure_and_syntax(pattern: str) -> None:
+    empty = parse_pattern("")
+
+    weight = parse_pattern(pattern)
+
+    assert empty > 0
+    assert weight >= empty + len(pattern)

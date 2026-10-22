@@ -1,3 +1,4 @@
+import json
 import math
 from collections.abc import Mapping
 
@@ -88,15 +89,101 @@ def test_cel_binding_refuses_over_bound_data(value: object) -> None:
 
 
 def test_cel_bounds_check_the_converted_representation() -> None:
+    from kora.cel_eval.bounds import Size, measure
     from kora.cel_eval.convert import bind
     from kora.cel_eval.errors import ErrorKind
 
-    checked = expression("payload == payload")
-    values = [[1] * 1_000 for _ in range(20)]
+    checked = expression("number == number && padding == padding")
+    values = {"number": 1, "padding": "x" * 4092}
+    originals = [measure(value) for value in values.values()]
 
-    result = bind(checked, {"payload": values}, {})
+    result = bind(checked, values, {})
 
+    assert all(isinstance(size, Size) for size in originals)
+    assert sum(size.bytes for size in originals if isinstance(size, Size)) == 4095
+    assert sum(size.values for size in originals if isinstance(size, Size)) == 2
+    assert len(json.dumps(1.0)) + len(json.dumps(values["padding"])) == 4097
     assert result is ErrorKind.BOUND_EXCEEDED
+
+
+def test_cel_binding_refuses_oversized_original_aggregate_before_numeric_shrink() -> (
+    None
+):
+    from kora.cel_eval.bounds import Size, measure
+    from kora.cel_eval.convert import bind
+    from kora.cel_eval.errors import ErrorKind
+
+    checked = expression("number == number && padding == padding")
+    values = {"number": 1.0, "padding": "x" * 4092}
+    originals = [measure(value) for value in values.values()]
+
+    result = bind(checked, values, {"number": INT})
+
+    assert all(isinstance(size, Size) for size in originals)
+    assert sum(size.bytes for size in originals if isinstance(size, Size)) == 4097
+    assert sum(size.values for size in originals if isinstance(size, Size)) == 2
+    assert len(json.dumps(1)) + len(json.dumps(values["padding"])) == 4095
+    assert result is ErrorKind.BOUND_EXCEEDED
+
+
+@pytest.mark.parametrize(("number", "cel_type"), [(1, DOUBLE), (1.0, INT)])
+def test_cel_binding_accepts_exact_original_or_converted_numeric_boundary(
+    number: int | float, cel_type: CelType
+) -> None:
+    from kora.cel_eval.convert import BoundValues, bind
+
+    checked = expression("number == number && padding == padding")
+    values = {"number": number, "padding": "x" * 4091}
+
+    result = bind(checked, values, {"number": cel_type})
+
+    assert isinstance(result, BoundValues)
+    assert result.bytes == (4096 if cel_type is DOUBLE else 4094)
+    assert result.count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dimension", ["bytes", "values"])
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+async def test_cel_binding_aggregates_referenced_byte_and_value_limits(
+    dimension: str, offset: int
+) -> None:
+    from kora.cel_eval.bounds import Size, measure
+    from kora.cel_eval.convert import BoundValues, bind
+    from kora.cel_eval.errors import ErrorContext, ErrorKind, EvaluationError
+    from kora.cel_eval.thread import Evaluator
+    from tests.cel_eval.test_cel_evaluation import clock
+
+    checked = expression("left == left && right == right")
+    values: dict[str, object] = (
+        {"left": "x" * 2046, "right": "y" * (2046 + offset)}
+        if dimension == "bytes"
+        else {
+            "left": [[] for _ in range(127)],
+            "right": [[] for _ in range(127 + offset)],
+        }
+    )
+    originals = [measure(value) for value in values.values()]
+    evaluator = Evaluator(clock)
+
+    bound = bind(checked, values, {})
+    try:
+        outcome = await evaluator.evaluate(checked, values, {}, ErrorContext("when"))
+    finally:
+        await evaluator.close()
+
+    assert all(isinstance(size, Size) for size in originals)
+    if offset > 0:
+        assert bound is ErrorKind.BOUND_EXCEEDED
+        assert isinstance(outcome, EvaluationError)
+        assert outcome.kind is ErrorKind.BOUND_EXCEEDED
+    else:
+        assert isinstance(bound, BoundValues)
+        assert (bound.bytes if dimension == "bytes" else bound.count) == (
+            4096 if dimension == "bytes" else 256
+        ) + offset
+        assert outcome is True
+    assert evaluator.snapshot().outstanding == evaluator.snapshot().handles == 0
 
 
 def test_cel_binding_owns_only_referenced_detached_values() -> None:
