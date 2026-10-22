@@ -92,7 +92,7 @@ uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/artifacts/VcsRef.schema
 uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/artifacts/VcsRef.schema.json knowledge/specs/artifacts/examples/invalid/*.json
 ```
 
-The first two commands exit 0. The third exits nonzero and reports every fixture: unknown status, traversal, empty segment, trailing control, oversized revision and URL without opener. Fixtures are deliberately invalid payloads, not valid examples to upload.
+The first two commands exit 0. The third exits nonzero and reports every fixture: unknown status, traversal (including after U+2028/U+2029), empty segment, trailing control, oversized revision and URL without opener. Fixtures are deliberately invalid payloads, not valid examples to upload.
 
 | Named contract | Owner and activation |
 |---|---|

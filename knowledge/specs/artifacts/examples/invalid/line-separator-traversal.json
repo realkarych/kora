@@ -1,0 +1,1 @@
+{"base_commit": "revision:1", "branch": "kora/example/run/change/1", "changed_paths": ["a\u2028/../b"], "commit": "revision:2", "diff_stat": "1 file changed\nquote: \" \\", "pushed_by": {"display_name": "Publisher \u00f1", "kind": "service_user", "provider_instance": "local", "stable_id": "publisher"}, "repo": "sample"}
