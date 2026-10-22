@@ -162,7 +162,7 @@ class PublicationAuthorization:
     operation_id: str
     prepared_digest: str
     destination_digest: str
-    principal_id: str
+    principal: PrincipalRef
     credential: SecretValue | None
 
 @dataclass(frozen=True)
@@ -908,7 +908,7 @@ The saved trusted binding declares `local_credential_free` mode and a stable loc
 
 For a credential-free result, require `rights=None` (type becomes CredentialRights | None), `expires_at=None`, `replacement="not_applicable"` and `revocation="not_applicable"`; credential-bearing mode keeps its existing non-null rights and existing enum alternatives. Reject contradictory combinations. Local mode cannot satisfy minimum upstream credential-rights/expiry/revocation requirements, and null expiry never extends attempt authority.
 
-`PrincipalRef.kind="local_service"` identifies a local service. Its `provider_instance` is the trusted local provider authority and `stable_id` an immutable configured service identifier preserved across restart and binding revisions, never a username/UID/path/binding alias/Git author/code-host account. Compare the scoped identity; principal_id must resolve unambiguously to it. Persist the binding identity/revision, mode and principal with the publication checkpoint. Current aliases or candidate data cannot replace this saved context.
+`PrincipalRef.kind="local_service"` identifies a local service. Its `provider_instance` is the trusted local provider authority and `stable_id` an immutable configured service identifier preserved across restart and binding revisions, never a username/UID/path/binding alias/Git author/code-host account. `PublicationAuthorization.principal` embeds the complete trusted principal snapshot from the issued credential or explicit local binding; identity comparison uses `(provider_instance, stable_id)` and needs no separately resolved identifier. Persist the binding identity/revision, mode and principal with the publication checkpoint before dispatch. Current aliases or candidate data cannot replace this saved context.
 
 `Vcs.acquire_credential` remains in the first-slice subset: local checkout/publish returns that no-secret result without secret resolution or an issuer; API purpose is unsupported. CheckoutPlan.credentials stays empty. Publish acquisition remains late, after inspection; adoption validates the same saved operation again. The result does not itself authorize dispatch. #156 owns these method/model definitions; #159 owns the local implementation and conformance. A no-secret result is not `vcs.credential_issued`. Publication-related `runtime.phase` records carry scoped principal, trusted binding identity/revision and credential mode, alongside explicit phase/outcome. Worker/API promotion records this append-only audit provenance and mirrors it compactly in attempt.scratch; the runtime owns its authenticated source. An authorization record never claims that a push occurred. Preserve real credential issuance audit semantics.
 
