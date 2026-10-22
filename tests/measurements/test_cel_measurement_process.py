@@ -61,7 +61,7 @@ def test_cel_measurement_child_failure_retains_bounded_stderr() -> None:
 
 def test_cel_measurement_interrupt_kills_and_reaps_its_child(tmp_path: Path) -> None:
     code = """
-import json, os, sys
+import json, os, signal, sys
 from pathlib import Path
 sys.path[:] = json.loads(sys.argv[1])
 from tests.measurements.cel_measurement_process import run_process
@@ -71,9 +71,11 @@ child = (
     "os.kill(os.getppid(), signal.SIGINT); signal.pause()"
 )
 before = len(os.listdir('/dev/fd'))
+handler_before = signal.getsignal(signal.SIGINT)
 try:
     run_process([sys.executable, '-I', '-c', child, sys.argv[2]])
 except KeyboardInterrupt:
+    assert signal.getsignal(signal.SIGINT) is handler_before
     pid = int(Path(sys.argv[2]).read_text())
     try:
         os.kill(pid, 0)

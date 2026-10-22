@@ -240,7 +240,8 @@ def pilot(output: Path) -> int:
         for case in pilot_cases():
             paired: dict[str, dict[str, list[int]]] = {}
             for mode in ("full", "native"):
-                if time.monotonic() - started >= PILOT_SECONDS:
+                remaining = PILOT_SECONDS - (time.monotonic() - started)
+                if remaining <= 0:
                     raise RuntimeError("conversion pilot exceeded its suite deadline")
                 result = run_process(
                     [
@@ -251,7 +252,8 @@ def pilot(output: Path) -> int:
                         json.dumps(full_path(ROOT)),
                         case.name,
                         mode,
-                    ]
+                    ],
+                    deadline_seconds=min(10.0, remaining),
                 )
                 failure: dict[str, object] = {
                     "case": case.name,
