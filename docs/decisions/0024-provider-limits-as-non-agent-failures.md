@@ -6,6 +6,8 @@
 - Amends: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md) (the adapter classifies provider limits), [ADR-0010](0010-cost-accounting-and-limits.md) (the provider pause sits with the other admission limits)
 - Related: ADR-0007, ADR-0017, ADR-0020, ADR-0021, ADR-0022
 
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+
 ## Context
 
 kora has no notion of a model provider's rate limit or quota. A harness session that hits one ends as `harness_error`, which a node's retry policy normally retries within minutes, so all attempts are spent and the run fails. A quota that resets five hours later would have let it succeed. When a `fan_out` and other runs share one credential, every attempt hits the limit and retries on its own. After the reset they all wake together and hit it again.
@@ -28,6 +30,10 @@ Three things are not confirmed:
 - whether reset fields are present for API-key accounts and not only for subscription plans;
 - the exact fields of Claude's `api_retry` message;
 - the ordering between the limit signal and the terminal result.
+
+## First-slice amendment of 2026-10-23
+
+First-slice installations create no new attempt after an agent, infrastructure or provider failure, and have no provider-pause scheduler. Retry/pause configuration and defaults that enable those behaviors are refused. Existing classification, internal harness retry observations, interruption, permitted collection/publication of completed partial work and usage completeness remain required independently for both harnesses. Bounded transport retries and adoption of the same live attempt remain required; lease expiry is never proof of loss. [First-slice.md](../../knowledge/specs/first-slice.md#required-and-pending-test-cases) splits each mixed test into required and later retry/pause legs; the complete future behavior below activates with those implementations.
 
 ## Decision
 

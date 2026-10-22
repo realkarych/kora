@@ -6,6 +6,8 @@
 - Amends: [ADR-0008](0008-content-bound-approvals.md) (automation and self-approval checks), [ADR-0016](0016-trusted-execution-and-publication.md) (the credential behind late authorization)
 - Related: ADR-0005, ADR-0011, ADR-0013, ADR-0017, ADR-0018, ADR-0021
 
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+
 ## Context
 
 kora checks out repositories, publishes prepared revisions, opens change requests, posts comments and reads review state on code hosts. Until now one credential from the VCS provider configuration did all of it, and nothing defined the identity kora acts under.
@@ -22,6 +24,22 @@ Three facts shape the answer:
 - A GitHub App installation token expires after one hour, so a credential resolved when the workload is submitted can be dead when a multi-hour session ends.
 - Backends differ in what they enforce. A GitHub installation token can be narrowed to repositories and permissions but not to one push or branch. GitLab project tokens have date-based expiry and scope names of their own. A static service credential has whatever rights it was created with.
 - A login, a token id or a configured alias is not an account. ADR-0008's rule that kora's own bot and the change-request author cannot approve needs a stable identifier that survives token replacement.
+
+## First-slice amendment of 2026-10-23
+
+A saved trusted binding may explicitly select `local_credential_free` for an existing local bare repository. Missing, empty or failed credentials, a local-looking URL and caller flags never select that mode. `PublicationAuthorization` remains mandatory; its required `credential` field and `IssuedCredential.value` accept explicit null only in this mode, with no omission default. Credential-bearing modes continue to require registered secret values.
+
+The no-secret result has `rights=None`, `expires_at=None`, `replacement="not_applicable"` and `revocation="not_applicable"`. These values state that no upstream credential exists; they cannot satisfy a binding's minimum upstream credential-rights/expiry/revocation requirements, and null expiry never extends attempt authority. Contradictory combinations fail acquisition. The common model adds nullable rights and the two enum values without changing credential-bearing semantics.
+
+`PrincipalRef` gains `kind="local_service"`. Its provider instance scopes an immutable configured service identifier, preserved across restart and binding revisions. It is not a username, UID, path, binding alias, Git author or invented code-host account. Equality compares the scoped identity, and `principal_id` resolves unambiguously to it. The binding identity/revision, mode and principal are saved with the prepared publication and cannot be replaced by current aliases or candidate data.
+
+`Vcs.acquire_credential` remains in the first-slice protocol: checkout and publish return this no-secret metadata without resolving a secret or calling an issuer; API purpose is unsupported. `CheckoutPlan.credentials` is empty. Publish acquisition stays late, after inspection, and adoption validates the same saved operation again. Acquiring metadata grants no dispatch authority. The worker/API checks current lease and desired state serialized with dispatch; runtime/runner requires inspection, the saved checkpoint, current dispatcher, earlier dispatcher/publication closure and no retirement; the executor matches all identities, digests, principal/binding/mode and deadline before push. `PublishPermit` cannot replace the authorization. Mismatch fails `publication_authorization_mismatch` before publication; unknown outcomes retain reservations and recovery obligations.
+
+Local mode emits no `vcs.credential_issued`. Publication-related `runtime.phase` records carry the scoped principal, binding identity/revision, mode and explicit phase/outcome. The runtime owns their authenticated source; worker/API promotion preserves append-only audit provenance and a compact checkpoint mirror. Authorization does not assert that a push occurred. The audit provenance survives checkpoint release and payload retention without storing secret values or secret-derived hashes.
+
+The destination is an absolute POSIX path or `file:///absolute/path` with empty authority, naming an existing bare repository. Network/scp/helper/relative forms, URL authority/userinfo/query/fragment, malformed encodings and decoded traversal are refused. Normalize once and pin/recheck directory identity across checkout, head reads, publication and reconciliation; reject symlink/parent replacement and changed binding revisions. This restricts Git transport and does not prove a physically local filesystem. Fresh trusted Git metadata and a constructed environment exclude inherited config/includes/rewrites/pushurl, helpers, SSH/askpass, candidate hooks/filters and object alternates. Destination-side hooks/configuration remain operator-trusted under the cooperative local model, not suppressed by client cleanup.
+
+The exact contract and conformance cases are in [protocols.md](../../knowledge/specs/protocols.md#credential-free-local-publication). Local authorization, principal and recovery evidence remain required now. Remote issuer, rotation, expiry, credential re-scan and code-host identity tests activate with their corresponding backend; the general MVP backend design below is not a first-slice implementation claim.
 
 ## Decision
 

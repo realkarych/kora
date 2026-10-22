@@ -10,11 +10,19 @@
 - Diagnostic amendment dated 2026-10-23: shared source and document locations under [issue #207](https://github.com/realkarych/kora/issues/207); exact amendment wording reviewed and approved by the project owner on 2026-10-23.
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+
 ## Context
 
 kora's positioning states that it is operated by agents as much as by people: whatever an engineer can do through the UI, the CLI or the API, their own Claude Code or Codex session must be able to do through kora's MCP server and a published skill. NFR-0.3 makes this a design constraint on every operation.
 
 Two questions had to be settled: how the agent-facing surface is produced (a first draft generated one MCP tool per API operation, which the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#curated-mcp-tools) judged noisy for agents), and whether agent nodes inside a graph may call kora.
+
+## First-slice amendment of 2026-10-23
+
+A separate authoring `kora_validate` tool validates compiled IR through `POST /validate`. The complete future inventory is sixteen tools; this explicitly supersedes the fifteen-tool cap. The first slice exposes the ten stdio tools and complete included-operation mappings in [first-slice.md](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract). Compile/test pair-presence and skill-reference parity activate with their implementations; Python compilation and scenario execution remain prohibited on the server at all times.
+
+Exactly `GET /healthz`, `GET /readyz` and `GET /metrics` are excluded from CLI/MCP operation parity as infrastructure probes, alongside the existing worker and auth exclusions. This is not an authentication exemption: the route-authorization contract governs each probe. Doctor, provider listing/conformance, database maintenance and standalone remain local operations, not remotely callable API work.
 
 ## Decision
 
@@ -23,7 +31,7 @@ The HTTP API (`/api/v1`) is the only implementation of every operation. Its Open
 Every other surface is a thin client with no logic of its own:
 
 - the Typer CLI over the shared Python client, returning the API response or error envelope verbatim under `--json`;
-- two curated MCP servers, `kora-authoring` and `kora-operating`, with fifteen task-shaped tools in total (ADR-0014; the fifteenth, `kora_test`, from issue #46, amended 2026-10-19); execution reconciliation uses existing `kora_admin` (ADR-0017); tools that start work (`kora_trigger`, `kora_retry`) return their outcome at once, `kora_plan` returns its plan, and waiting for a run is a bounded option of reading it through `kora_runs` (amended 2026-10-19); both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
+- two curated MCP servers, `kora-authoring` and `kora-operating`, with sixteen task-shaped tools in the complete inventory (ADR-0014; `kora_test` from issue #46 and `kora_validate` from issue #140); execution reconciliation uses existing `kora_admin` (ADR-0017); tools that start work (`kora_trigger`, `kora_retry`) return their outcome at once, `kora_plan` returns its plan, and waiting for a run is a bounded option of reading it through `kora_runs` (amended 2026-10-19); both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
 - one skill package per harness (a Claude Code plugin, Codex skills), generated from the same reference material as the `kora_reference` tool and kept as files in each harness's own format;
 - the `kora web` console, whose only HTTP dependency is the generated TypeScript client.
 

@@ -27,7 +27,7 @@ A process that serves the API or runs a worker never selects a fake runtime, har
 - **Never discovered.** No kora fake is a `kora.provider` entry point. `load_provider` refuses the reserved name `fake` in every protocol, an entry whose module lies within `kora.plugins.<family>.fake`, `kora.testing` or `kora.conformance`, and an implementation defined in that set, all with `provider_reserved` ([provider loading](protocols.md#provider-loading-issue-150)). A third-party distribution therefore cannot register a kora fake as a provider. Its own code can still import a fake or subclass one, because installed providers remain trusted cooperative code (TM-12 of the [threat model](../../docs/threat-model.md)).
 - **The static import rule.** Enforced by `tests/architecture/test_import_layers.py` with a seeded self-test:
   - only `kora.testing`, `kora.conformance`, the fake modules themselves and `tests/` import a fake module;
-  - `kora.standalone` imports none of `kora.testing` and `kora.conformance`, and `kora.__main__` imports them only inside its top-level command functions `test`, `conformance` and `mcp` (the stdio authoring server, for `kora_test`), never at module level; the dry-run command function that issue #140 chooses joins that set in #140's change, with the owner's approval;
+  - `kora.standalone` imports none of `kora.testing` and `kora.conformance`, and `kora.__main__` imports them only inside its top-level command functions `test`, `conformance` and `mcp` (the stdio authoring server, for `kora_test`), never at module level; dry-run is deferred by [the first-slice contract](first-slice.md), and any future import exception requires its own owner-approved author-side testing implementation;
   - composition roots make no dynamic-import call (`importlib.import_module`, `importlib.util.spec_from_file_location`, `importlib.util.module_from_spec`, `__import__`, `pkgutil.resolve_name`, `runpy.run_module`, `runpy.run_path`), whatever its argument;
   - a fake module imports no fake module of another family, and shared code never lives in a fake module.
 
@@ -36,7 +36,7 @@ A process that serves the API or runs a worker never selects a fake runtime, har
 - **The production runner** loads its harness only through `load_provider`, so it can never host the fake. A workload, configuration or environment naming `fake` fails closed.
 - **The runner launch command.** A runtime receives the command that starts its runner by constructor injection from its composition root ([local runtime](protocols.md#local-runtime-issue-123), "Spawn"). Production roots pass only the production `kora-runner`; `kora.testing` and `kora.conformance` pass the testing runner. No configuration key, CLI flag, environment variable, `kora.toml` entry or workload field selects it.
 - **The `kora.standalone` seam.** Its provider injection is a Python constructor parameter only; no configuration key, CLI flag, environment variable or `kora.toml` entry maps to it.
-- **`/plan` and the dry run.** `POST /namespaces/{ns}/plan` computes the materialised plan from the target runtime's declared capabilities without constructing any runtime, and executes nothing. The dry run is not an API operation: it runs author-side through `kora.testing`, and its placement and activation stay with [issue #140](https://github.com/realkarych/kora/issues/140). Both are deferred from slice 1, so no implemented behaviour changes.
+- **`/plan` and the dry run.** `POST /namespaces/{ns}/plan` computes the materialised plan from the target runtime's declared capabilities without constructing any runtime, and executes nothing. The dry run is not an API operation: it runs author-side through `kora.testing`, and its placement and activation belong to the future author-side testing implementation under the first-slice deferral. Both are deferred from slice 1, so no implemented behaviour changes.
 - **Capability flags and the evidence stamp.** Inside `kora.testing`, fake capability flags satisfy validation and admission checks, because tests must exercise acceptance paths; outside it no fake exists to declare them. The testing composition stamps `evidence: fake` on every attempt record, report and `kora test` result. The stamp is its own field, distinct from `CommandResult.resource_protection`, and comes from the composition, never from configuration, so nothing clears it. Worker start-up accepts a fake runtime's protection declaration only under the testing composition.
 - **Every `kora.testing` composition** (scenarios, the dry run, integration tests):
   - publishes only to a local bare repository created in its temporary directory, with no remote;
@@ -198,7 +198,7 @@ The fakes end an attempt through the same `TerminalReport`, `ClosureEvidence`, `
   | `command_failed`, `attempt_failed` | refused for agent selectors |
 
   A class whose enforcing limit is not configured on the addressed node is an execution error, for example `timeout` without a deadline. Stall, timeout and pause cases run where agent workloads run on the fake runtime, which is always the case in scenarios (section 3).
-- **Dry-run fixture records** carry a selector key. The rest of the dry run waits for issue #140.
+- **Dry-run fixture records** carry a selector key. Dry-run behavior activates with the future author-side testing implementation.
 
 ## 8. Conformance applicability
 
@@ -264,7 +264,7 @@ These are future executable contracts; documentation CI runs only the static imp
 | `test_unreleased_barrier_fails_within_watchdog` | a never-released barrier and a `quiescent_without_wake` state fail by name within the real-time watchdog, listing the holders, and leave no task, process group, directory or descriptor; a watchdog above 300 s is refused with `watchdog_above_ceiling` | 7 |
 | `test_fake_results_carry_fake_evidence` | every record of a testing composition carries `evidence: fake`, including mixed runs; configuration cannot clear it | 7, 17 |
 | `test_fakes_pass_their_conformance_rows` | the suites pass exactly the cases section 8 marks `passes` | 7 |
-| `test_dry_run_resolves_no_secret` | with a production-like `KORA_DATABASE_URL` and a reachable remote set in the process-start environment, the dry run resolves no secret, touches neither and writes nothing durable; a scenario leg with the local Git backend does the same | the scenario leg in 7 and 20; the dry-run leg pending issue #140 |
+| `test_dry_run_resolves_no_secret` | with a production-like `KORA_DATABASE_URL` and a reachable remote set in the process-start environment, the dry run resolves no secret, touches neither and writes nothing durable; a scenario leg with the local Git backend does the same | the scenario leg in 7 and 20; the dry-run leg pending author-side testing implementation |
 
 | measurement | work item |
 |---|---|
