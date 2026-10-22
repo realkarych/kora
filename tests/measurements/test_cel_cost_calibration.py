@@ -292,7 +292,16 @@ def test_cel_cost_catalogue_results_agree_with_native_execution() -> None:
     }
 
 
-@pytest.mark.parametrize("family", ["concat_string", "compile_rendering", "evaluation"])
+@pytest.mark.parametrize(
+    "family",
+    [
+        "concat_string",
+        "compile_rendering",
+        "evaluation",
+        "regex_atoms_escape_w",
+        "regex_match_unicode",
+    ],
+)
 def test_cel_cost_bracketed_families_complete_on_real_children(family: str) -> None:
     from tests.measurements.cel_cost_calibration import (
         COST_PRELUDE,
@@ -473,7 +482,12 @@ def test_cel_cold_memory_source_control_reaches_the_exact_source_limit() -> None
 
 
 @pytest.mark.parametrize(
-    ("family", "size"), [("memory_control_true", 1), ("memory_intermediate", 32)]
+    ("family", "size"),
+    [
+        ("memory_control_true", 1),
+        ("memory_intermediate", 32),
+        ("regex_atoms_escape_w", 8),
+    ],
 )
 def test_cel_cold_memory_child_measures_before_oracle_and_releases(
     family: str, size: int

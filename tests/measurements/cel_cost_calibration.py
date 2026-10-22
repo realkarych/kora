@@ -27,9 +27,8 @@ from tests.measurements.cel_bound_workload import (
     select_bounds,
 )
 from tests.measurements.cel_cost_catalogue import (
-    OPERATION_IDENTITIES,
+    cost_family_cases,
     memory_case,
-    operation_case,
     reference_case,
 )
 from tests.measurements.cel_cost_workload import (
@@ -267,11 +266,7 @@ def validate_cost_family(content: bytes, family: str) -> CostFamilyReport:
         for key, item in expected.items()
     ):
         raise ValueError("cost family identity does not match its manifest")
-    cases = [
-        operation_case(name, size)
-        for name, size in OPERATION_IDENTITIES
-        if name == family
-    ]
+    cases = cost_family_cases(family)
     observations = sequence(value["cases"])
     if not cases or len(cases) != len(observations):
         raise ValueError("cost family is incomplete")

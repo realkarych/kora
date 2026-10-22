@@ -529,6 +529,20 @@ def operation_cases() -> tuple[CostCase, ...]:
     return tuple(operation_case(family, size) for family, size in OPERATION_IDENTITIES)
 
 
+def cost_family_cases(family: str) -> tuple[CostCase, ...]:
+    if family.startswith("regex_"):
+        from tests.measurements.cel_regex_workload import REGEX_IDENTITIES, regex_case
+
+        return tuple(
+            regex_case(name, size) for name, size in REGEX_IDENTITIES if name == family
+        )
+    return tuple(
+        operation_case(name, size)
+        for name, size in OPERATION_IDENTITIES
+        if name == family
+    )
+
+
 MEMORY_IDENTITIES: tuple[tuple[str, int], ...] = (
     tuple(
         ("memory_control_" + name, 1)
@@ -581,6 +595,15 @@ MEMORY_IDENTITIES: tuple[tuple[str, int], ...] = (
 
 
 def memory_case(family: str, size: int) -> CostCase:
+    if family.startswith("regex_"):
+        from tests.measurements.cel_regex_workload import (
+            REGEX_MEMORY_IDENTITIES,
+            regex_case,
+        )
+
+        if type(size) is not int or (family, size) not in REGEX_MEMORY_IDENTITIES:
+            raise ValueError("undeclared memory case")
+        return replace(regex_case(family, size), batch=1)
     if type(size) is not int or (family, size) not in MEMORY_IDENTITIES:
         raise ValueError("undeclared memory case")
     if family in {name for name, _ in OPERATION_IDENTITIES}:

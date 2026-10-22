@@ -570,19 +570,14 @@ async def production_base(case: "CostCase") -> list[dict[str, object]]:
 def run_cost_family(family: str) -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     from tests.measurements.cel_cost_catalogue import (
-        OPERATION_IDENTITIES,
-        operation_case,
+        cost_family_cases,
         reference_case,
     )
 
     started = time.perf_counter_ns()
     descriptors_before = len(os.listdir("/dev/fd"))
     previous_stack = threading.stack_size()
-    cases = tuple(
-        operation_case(name, size)
-        for name, size in OPERATION_IDENTITIES
-        if name == family
-    )
+    cases = cost_family_cases(family)
     if not cases:
         raise ValueError("unknown cost family")
     if family == "evaluation":
