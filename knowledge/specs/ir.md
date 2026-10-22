@@ -47,7 +47,7 @@ runtime:                      # section (b): policy and infrastructure
   concurrency: { max_running_nodes: 20 }
   limits: { timeout: "72h", budget_usd: 200 }      # whole run
   stall_after: "15m"          # runtime-level default for agent-loop silence; nodes override in limits (DD-15)
-  provider_retry: { max_wait: "6h" }   # model-provider limits: total waiting allowed before the node fails with provider_limited; namespace default when absent (ADR-0024)
+  provider_retry: { max_wait: "6h" }   # model-provider limits: total waiting allowed before the node fails with provider_limited; enabled-feature namespace default when absent; slice 1 resolves omission to max_wait "0s" (ADR-0024)
   retention: { transcripts: "30d", artifact_payloads: "30d" }   # graph-level, namespace default applies when absent (DD-4)
   protected_paths: ["Makefile", "tests/**"]     # repository files no agent node may edit; verified before every command gate (DD-34); gate scripts travel as command resources (section 4)
 secrets:                      # section (c): references only
@@ -272,6 +272,8 @@ A loop is a subgraph with `retry.max_attempts > 1`. Rules materialised in the IR
 - VCS side effects of failed attempts are never touched (FR-2.7, FR-6.1b).
 
 ## 6. Retry policy and strategy (FR-6.3, FR-6.4)
+
+For first-slice installations, omitted `runtime.provider_retry`, an empty object and any schema-valid zero `max_wait` resolve to `{max_wait: "0s"}`, the disabled policy. This built-in default is chosen before the enabled-feature namespace/six-hour fallback. An explicit positive value or a positive default in namespace, binding, standalone or `kora.toml` configuration is refused before effects, never silently replaced. Malformed/null values retain schema errors. Save the normalized zero in the execution contract so a later installation upgrade cannot reinterpret omission. Numeric budget zero remains refused independently. Zero disables provider-pause/deadline/backoff and new-attempt scheduling, not observations, interruption, same-attempt recovery or closure. The future enabled behavior below applies only to a positive resolved provider wait.
 
 ```yaml
 retry:

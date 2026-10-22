@@ -42,6 +42,8 @@ This is the first-slice contract adopted by [ADR-0001](../../docs/decisions/0001
 6. Preserve existing specific syntax/type/capability codes. Security fields cannot downgrade to warning merely because a feature is absent: implement and test the control, or refuse it. Use IR013 for malformed patterns and IR019 for unsupported namespace policy as today. A well-formed node-only security rule whose tool kind has no enforceable coverage becomes the new installation-refusal error instead of IR008; retain existing more specific hard-error codes when their conditions apply. IR008 remains only for non-security adapter warnings; optional security capabilities cannot be silently weakened under IR009. The [ADR-0009 amendment](../../docs/decisions/0009-target-repository-trust-boundary.md) supersedes permissive security-warning behavior.
 7. Outside IR, reject unsupported trigger/configuration values before accepting a run or starting providers, with safe structured diagnostics. Never resolve secrets or perform publication while deciding support.
 
+For first-slice installations, omitted `runtime.provider_retry`, an empty object and any schema-valid zero `max_wait` resolve to `{max_wait: "0s"}`, the disabled policy. This built-in default is chosen before the enabled-feature namespace/six-hour fallback. An explicit positive value or a positive default in namespace, binding, standalone or `kora.toml` configuration is refused before effects, never silently replaced. Malformed/null values retain schema errors. Save the normalized zero in the execution contract so a later installation upgrade cannot reinterpret omission. Numeric budget zero remains refused independently.
+
 ## Included operation and parity contract
 
 Retain every included API operation with one reachable CLI form and MCP selector. Ten slice tools: authoring `kora_reference` (deployed graphs/versions only), `kora_validate`, `kora_deploy`; operating `kora_trigger`, `kora_runs`, `kora_inspect`, `kora_approvals`, `kora_respond`, `kora_cancel`, `kora_admin` (reconcile only).
@@ -65,7 +67,9 @@ Credential-free local publication preserves late authorization, a stable scoped 
 
 | Existing gate / leg | Required in slice 1 or exact pending trigger |
 |---|---|
-| test_slice_one_failures_never_create_new_attempts  | Terminal agent/infrastructure/provider failures and lost-after-closure fail the node without retry_backoff/provider_pause or replacement; lease expiry alone stays unresolved, preserves reservations and can adopt the same live attempt; omitted defaults enable no retry |
+| test_slice_one_provider_retry_defaults_are_disabled | Omission, {}, schema-valid zero and every supported default source resolve to saved max_wait "0s"; restart or installation upgrade never enables it |
+| test_slice_one_rejects_provider_retry_configuration | Positive explicit/default policies refuse before provider/secret effects; validate/deploy agree on IR028 and safe path, malformed values retain schema errors |
+| test_slice_one_failures_never_create_new_attempts  | Terminal agent/infrastructure/provider failures and lost-after-closure fail the node without retry_backoff/provider_pause/provider_wait_deadline or replacement; a provider-limit observation does not pause an eligible peer sharing its quota; lease expiry alone stays unresolved, preserves reservations and can adopt the same live attempt; omitted defaults enable no retry |
 | test_slice_one_rejects_unsupported_topology  | Work item 3 rejects wider/parallel topology consistently in validate/deploy with IR028 and the relevant field path; complete language/schema checking remains independent |
 | test_cel_examples_pass_checker | Full IR/CEL checking, work items 2/4; never gated on deployment subset |
 | test_claude_usage_from_stream_events | Usage/completeness remains required; only its budget-limit leg waits for budgets; Codex usage stays required independently |
