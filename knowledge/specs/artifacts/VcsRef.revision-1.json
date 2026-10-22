@@ -1,0 +1,24 @@
+{
+  "name": "VcsRef",
+  "builtin_revision": "1",
+  "schema": "urn:kora:artifact:VcsRef",
+  "parent": null,
+  "behavior": {
+    "validation": "kora.vcs-ref-validation.v1",
+    "digest_fields": "kora.json-payload.v1",
+    "summary": "kora.json-payload.v1"
+  },
+  "validation": {
+    "max_raw_json_bytes": 1048576,
+    "max_canonical_json_bytes": 1048576,
+    "max_changed_paths": 10000,
+    "max_changed_path_utf8_bytes": 524288,
+    "max_revision_characters": 255,
+    "max_principal_characters": 255,
+    "max_json_depth": 16
+  },
+  "digest_selection": [
+    ""
+  ],
+  "schema_sha256": "a789787ffe5c5b27992a47e85d708d5aeb5b74806c462796e3356817474d39d8"
+}

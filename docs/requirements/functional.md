@@ -1,5 +1,7 @@
 # kora — Functional Requirements
 
+VcsRef revision-1 amendment dated 2026-10-23: the project owner approved the contract plan and the exact wording in this document under [issue #208](https://github.com/realkarych/kora/issues/208#issuecomment-6353268608).
+
 Status: Reviewed by the project owner on 2026-10-16. Scope tags: **[MVP]** must ship in the first usable release; **[post-MVP]** designed for, not built. Decisions were taken by the project owner during requirements elicitation; precedents cited are from `knowledge/research/agentic-pipeline-orchestrators.md`.
 
 Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
@@ -81,7 +83,7 @@ CEL amendment dated 2026-10-19: decisions taken and implementation plan approved
 - **FR-4.1 [MVP]** Every edge carries a typed artifact. A base `Artifact` type defines: id, type name, JSON-Schema of the payload, producer (run, node, attempt), lineage (input artifact ids), created-at, storage reference.
 - **FR-4.2 [MVP]** Built-in artifact types:
   - `StructuredOutput` — JSON validated against a Pydantic/JSON Schema declared on the node; produced via the harness's structured-output feature.
-  - `VcsRef` — reference into the VCS: repository, branch, commit, optional change request (PR/review) URL and status, the code host's page for the commit and, where the host has one, its comparison from the base, diff summary.
+  - `VcsRef` — immutable publication facts: repository, branch, exact commit and base revision, changed paths and diff summary, the pushing principal, and optional change-request, commit and comparison URLs with the change-request opening principal. Current change-request status and branch head are observed separately. Revision 1 and its immutable behavior descriptors are defined in the [built-in artifact contract](../../knowledge/specs/artifacts/README.md).
   - `AgentSession` — harness name and version, session id (resumable handle), transcript reference, token usage per model, cost estimate with cost basis and billing class, turn count, duration, tool-permission denials, stop reason.
   - `CommandResult` — exit code, captured output reference, optional parsed JSON (FR-2.8).
   - `ReviewBundle` — the evidence package for the single human touchpoint, split into two parts. **Facts**, populated by kora from its own records and read-only to agents: the `VcsRef` under review (pinned to a commit), gate results taken from `CommandResult` rows with the protected paths in force and the verification result, metrics with the provenance of each number (measured by a command node or reported by an agent session), the diff reference, attempt history, the aggregated cost of all attempts, and provenance of each fact. **Narrative**, written by an agent node: selection rationale and summary. Approvals bind to the digests of the facts; the frontend and the change-request comment render facts and narrative visibly apart. The human-input node accepts a `ReviewBundle` as input; the VCS approval channel publishes it as a change-request comment.
