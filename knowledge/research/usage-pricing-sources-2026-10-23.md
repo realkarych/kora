@@ -10,6 +10,8 @@ The [official SDK cost guide](https://code.claude.com/docs/en/agent-sdk/cost-tra
 
 The accepted adapter mapping retains the latest per-call stream counts, never sums assistant snapshots or deltas, and normalizes a supported final per-model cost into `reported_usd`. Query-wide cache TTL counts are used only with proven matching attribution. Unknown basis values remain evidence and use the declared table mapping; no whole-process amount is distributed among models. Missing dimensions, post-result tails and observation loss remain explicit. Real subagent forwarding, resume and streaming-abort behavior require separate adapter evidence.
 
+The pinned Python SDK declares [`ModelUsage.costUSD` as `float`](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.168/src/claude_agent_sdk/types.py). Its [transport](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.168/src/claude_agent_sdk/_internal/transport/subprocess_cli.py) uses ordinary JSON decoding, and the [message parser](https://github.com/anthropics/claude-agent-sdk-python/blob/v0.2.168/src/claude_agent_sdk/_internal/message_parser.py) forwards model usage. The adapter therefore cannot recover the original decimal wire precision through that interface. The native-ingress normalization rule preserves the SDK estimate as a bounded decimal string; exact decimal-only processing starts at the normalized boundary. No alternate CLI parser is implied.
+
 ## Codex
 
 Source inspection uses commit `83086188ae0614bd882818ff1aa23f3194962012` (the `rust-v0.163.0` source revision checked during design). It is evidence for this contract, not a new repository dependency pin.
