@@ -2,7 +2,7 @@
 
 Scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127) on 2026-10-19; wording pending line-by-line owner review.
 
-CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording pending line-by-line owner review.
+CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording accepted by the project owner on 2026-10-22.
 
 Local-runtime simplification amendment dated 2026-10-22: under [issue #194](https://github.com/realkarych/kora/issues/194), the measurement rows of issue #123 drop the delegated scope and the disk reserves, and add the peer-attestation cost, the full-disk fallback, the retry and the index-disabled resume measurements; wording pending line-by-line owner review.
 

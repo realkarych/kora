@@ -6,7 +6,7 @@ Browser verification amendment dated 2026-10-22 (TM-12 evidence): the project ow
 
 Scope and implementation plan approved under [issue #90](https://github.com/realkarych/kora/issues/90); document accepted for merge by the project owner in [PR #92](https://github.com/realkarych/kora/pull/92) on 2026-10-18. Claude harness amendment dated 2026-10-19 (TM-03, TM-05, TM-06, TM-12 and their evidence): scope and implementation plan approved under [issue #125](https://github.com/realkarych/kora/issues/125); accepted by the project owner on 2026-10-19.
 
-CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording pending line-by-line owner review.
+CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording accepted by the project owner on 2026-10-22.
 
 Held-read amendment dated 2026-10-19: the TM-10 scenario names callers that hold reads open and its boundary the API read path, its remaining limit names the bounded run-read wait and `?follow=true` streams, the TM-01, TM-02 and TM-10 evidence rows name the run-read wait and mounted-credential contracts, and the maintenance section records the merge of PR #109; direction and implementation plan approved by the project owner under [issue #124](https://github.com/realkarych/kora/issues/124); wording pending line-by-line owner review.
 
