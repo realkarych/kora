@@ -6,6 +6,8 @@ Scope and implementation plan approved by the project owner under [issue #86](ht
 
 CEL evaluator amendment dated 2026-10-21: infrastructure and verification added under [issue #166](https://github.com/realkarych/kora/issues/166); wording accepted by the project owner on 2026-10-22.
 
+CEL cost-regression amendment dated 2026-10-23: the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); concrete wording pending line-by-line owner review.
+
 Packaging-test removal amendment dated 2026-10-19: removal decided by the project owner under [issue #112](https://github.com/realkarych/kora/issues/112); wording pending line-by-line owner review.
 
 Import-layer test amendment dated 2026-10-19: the pytest source check added under [issue #104](https://github.com/realkarych/kora/issues/104); wording pending line-by-line owner review.
@@ -103,12 +105,23 @@ KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
 ```
 
-The CEL evaluator lifetime suite runs serially in its own `cel-measurements` Linux 3.11.17 job, retaining three independent processes per main workload, all cycle samples and retaining paths in `cel-evaluator-lifetime-measurement`. It measures native success/errors, cache turnover, repeated handles, cancellation, terminal failure, idle/busy thread hops, and exit with draining, blocked and broken diagnostics at disabled/INFO/DEBUG levels. Its first baseline and gates are recorded in [the evaluator lifetime record](../knowledge/research/cel-evaluator-lifetime-2026-10-21.md). This does not replace the cost/crash calibration of #167. Run on an otherwise idle machine:
+The CEL evaluator lifetime suite runs serially in its own `cel-measurements` Linux 3.11.17 job, retaining three independent processes per main workload, all cycle samples and retaining paths in `cel-evaluator-lifetime-measurement`. It measures native success/errors, cache turnover, repeated handles, cancellation, terminal failure, idle/busy thread hops, and exit with draining, blocked and broken diagnostics at disabled/INFO/DEBUG levels. Its first baseline and gates are recorded in [the evaluator lifetime record](../knowledge/research/cel-evaluator-lifetime-2026-10-21.md). These native-memory and resource-lifetime checks remain required alongside the compact regression below. Run on an otherwise idle machine:
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/cel-evaluator-lifetime.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_evaluator_lifetime.py
 ```
+
+The compact CEL regression runs serially in that same dedicated job and keeps its existing required status. Ten fixed cases each use a fresh child and four real `Evaluator.evaluate` calls: one cold cache miss and three warm hits. Every timed call includes binding, queueing, compilation when needed, native execution and delivery, and must stay at or below 100 ms. Expression checks and startup precede timing; result assertions follow it. The [protocol and retained history](../knowledge/research/cel-cost-calibration-2026-10-22.md#current-compact-regression-protocol) define all cases and report fields. Run locally with:
+
+```sh
+KORA_CEL_COST_OUTPUT=measurements/cel-cost-smoke.json \
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_cost_regression.py
+```
+
+The reference environment is Ubuntu 24.04 x86_64 with CPython 3.11.17, uv 0.13.1 and the pinned CEL wheel. The 240-second suite, ten-second children, 256 KiB per-stream caps and ten-minute whole-CI budget remain unchanged. Artifact `cel-cost-regression-measurement` retains `cel-cost-smoke.json` and `cel-checkout-revision.txt`; the report requires a clean, matching CI checkout and records provenance, all forty intervals, raw child output, exact results and cleanup counters. A macOS local report is `non_reference` functional data and cannot qualify as reference evidence. The golden corpus and specification consistency checks in `tests/cel/test_cel_cost_regression.py` run with the ordinary source tests.
+
+The 100 ms value is an observed coarse regression target for the fixed cases. The 100,000,000,000,000-unit steps budget and 16 MiB logical-memory estimate remain provisional; they establish no universal time bound, RSS envelope, interruption deadline or full native crash margin. Full fitting, RSS/GIL calibration, crash-threshold searches and five-runner collection are removed under the [scoped verification exclusion](../knowledge/reviews/ai-development-setup.md#cel-numerical-calibration-exclusion), not passing or pending gates. Historical pilot/bounds commands are available only at their measured revisions. Existing evaluator, browser, logging, database and scanner checks remain required, as do real API/scheduler integration and their performance obligations when implemented. The existing `cel` diagnostic activation row and future consumer error ownership in [observability.md](../knowledge/specs/observability.md#7-component-coverage-and-activation) are unchanged.
 
 The metadata database lifetime measurement runs under the same marker, on every database that `KORA_TEST_DATABASES` selects, with its own step budget and contract-derived gates (balanced pool checkouts, a free SQLite writer, no open transaction and no temporary file after every ending path, threads, descriptors and server connections back at baseline, bounded heap growth over repeated migrate, connect and transaction cycles, one statement per read call, every marked run visited once per sweep); CI runs it after the logging measurement in the same lane and uploads the artifact `metadata-database-lifetime-measurement`:
 

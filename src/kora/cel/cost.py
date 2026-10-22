@@ -126,7 +126,7 @@ PROVISIONAL_WEIGHTS: Final[Weights] = Weights(
 )
 
 PROVISIONAL_BUDGET: Final[Budget] = Budget(
-    steps=10_000_000_000_000, memory=16 * 1024 * 1024
+    steps=100_000_000_000_000, memory=16 * 1024 * 1024
 )
 
 

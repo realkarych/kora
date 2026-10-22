@@ -1,16 +1,6 @@
 name: CI
 
 on:
-  workflow_dispatch:
-    inputs:
-      cel_calibration_mode:
-        description: CEL calibration phase
-        required: true
-        default: pilot
-        type: choice
-        options:
-          - pilot
-          - bounds
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
@@ -150,40 +140,6 @@ jobs:
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
-  cel-conversion-pilot:
-    name: CEL conversion pilot
-    if: github.event_name == 'workflow_dispatch' && (inputs.cel_calibration_mode == 'pilot' || inputs.cel_calibration_mode == 'bounds')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    env:
-      PYTHONPATH: src
-      KORA_TEST_DATABASES: sqlite
-      KORA_MEASUREMENT_REVISION: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
-        with:
-          version: 0.13.1
-          python-version: 3.11.17
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          cache-suffix: cel-conversion-pilot
-      - name: Install locked wheel dependencies
-        run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
-      - name: Measure conversion before calibration
-        id: pilot
-        env:
-          KORA_CEL_CONVERSION_COMMAND: ${{ inputs.cel_calibration_mode == 'bounds' && 'select-bounds' || 'pilot' }}
-        run: uv run --no-sync python -m tests.measurements.cel_cost_calibration "$KORA_CEL_CONVERSION_COMMAND" --output measurements/cel-conversion-pilot.json
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: ${{ !cancelled() && steps.pilot.outcome != 'skipped' }}
-        with:
-          name: cel-conversion-pilot
-          path: measurements/cel-conversion-pilot.json
-          if-no-files-found: error
-
   cel-measurements:
     name: CEL evaluator lifetime
     runs-on: ubuntu-24.04
@@ -197,6 +153,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1
@@ -207,17 +164,33 @@ jobs:
       - name: Install locked wheel dependencies
         run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
       - name: Record checked-out revision
-        run: git rev-parse HEAD > measurements-checkout-revision.txt
+        run: |
+          mkdir -p measurements
+          git rev-parse HEAD > measurements/cel-checkout-revision.txt
       - name: Measure evaluator lifetime and diagnostics
         id: measurement
         run: uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_evaluator_lifetime.py
+      - name: Check representative evaluation cost
+        id: cost_regression
+        if: ${{ !cancelled() }}
+        env:
+          KORA_CEL_COST_OUTPUT: measurements/cel-cost-smoke.json
+        run: uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_cost_regression.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ !cancelled() && steps.cost_regression.outcome != 'skipped' }}
+        with:
+          name: cel-cost-regression-measurement
+          path: |
+            measurements/cel-cost-smoke.json
+            measurements/cel-checkout-revision.txt
+          if-no-files-found: error
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
         with:
           name: cel-evaluator-lifetime-measurement
           path: |
             measurements/cel-evaluator-lifetime.json
-            measurements-checkout-revision.txt
+            measurements/cel-checkout-revision.txt
           if-no-files-found: error
 
   browser:

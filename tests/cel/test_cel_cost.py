@@ -19,6 +19,7 @@ from kora.cel import (
     check,
 )
 from kora.cel.cost import estimate
+from kora.cel.diagnostics import DiagnosticError
 from kora.cel.parser import parse
 from kora.cel.render import canonical_rendering
 from kora.cel.types import (
@@ -97,6 +98,18 @@ def estimated(source: str, weights: Weights, **environment: Variable) -> Estimat
     return estimate(tree, len(rendering), environment, weights, UNBOUNDED)
 
 
+def rejected_by_budget(
+    source: str, environment: dict[str, Variable], budget: Budget
+) -> Diagnostic:
+    tree = parse(source)
+    rendering = canonical_rendering(tree)
+
+    with pytest.raises(DiagnosticError) as refused:
+        estimate(tree, len(rendering), environment, budget=budget)
+
+    return refused.value.diagnostic
+
+
 def test_cel_cost_estimate_rejects_compounding_concatenation() -> None:
     environment = {"l": string_list(items=1, element=16 * KIB, total=16 * KIB + 4)}
     eight = "+".join(["{v}"] * 8)
@@ -137,7 +150,11 @@ def test_cel_cost_estimate_bounds_comprehension_results() -> None:
 
 
 def test_cel_cost_estimate_rejects_quadratic_macros_over_unbounded_lists() -> None:
-    over_dyn = check("payload.items.map(x, x)", {"payload": Variable(DYN)})
+    budget = Budget(steps=10_000_000_000_000, memory=16 * 1024 * 1024)
+
+    over_dyn = rejected_by_budget(
+        "payload.items.map(x, x)", {"payload": Variable(DYN)}, budget
+    )
     over_small = check("l.map(x, x * 2)", {"l": int_list(10)})
 
     assert isinstance(over_dyn, Diagnostic)
@@ -276,6 +293,7 @@ def test_cel_cost_estimate_closes_every_comprehension_scope() -> None:
 
 
 def test_cel_cost_estimate_keeps_element_bounds_through_literals() -> None:
+    budget = Budget(steps=10_000_000_000_000, memory=16 * 1024 * 1024)
     nested = ValueBound(bytes=60_000, values=30_001, items=1000, string_bytes=0)
     lists = Variable(
         ListOf(ListOf(INT)),
@@ -290,8 +308,10 @@ def test_cel_cost_estimate_keeps_element_bounds_through_literals() -> None:
         "(true ? [l] : [1]).map(x, x.map(y, 1))",
     ]
 
-    untyped = [check(source) for source in sources]
-    typed = check("([[1]] + l).all(x, x.map(y, 1).size() > 0)", {"l": lists})
+    untyped = [rejected_by_budget(source, {}, budget) for source in sources]
+    typed = rejected_by_budget(
+        "([[1]] + l).all(x, x.map(y, 1).size() > 0)", {"l": lists}, budget
+    )
 
     for diagnostic in [*untyped, typed]:
         assert isinstance(diagnostic, Diagnostic)
@@ -480,6 +500,7 @@ def test_cel_cost_estimate_shapes_filter_results_as_lists_of_keys() -> None:
 
 
 def test_cel_cost_estimate_counts_filtered_keys_as_range_elements() -> None:
+    budget = Budget(steps=10_000_000_000_000, memory=16 * 1024 * 1024)
     bound = ValueBound(bytes=16384, values=8193, items=300, string_bytes=1024)
     environment = {
         "v": Variable(MapOf(STRING, DYN), bound),
@@ -488,7 +509,11 @@ def test_cel_cost_estimate_counts_filtered_keys_as_range_elements() -> None:
 
     alone = [check(f"{name}.filter(k, true).size() > 0", environment) for name in "vw"]
     nested = [
-        check(f"{name}.filter(k, true).all(x, {name}.all(y, true))", environment)
+        rejected_by_budget(
+            f"{name}.filter(k, true).all(x, {name}.all(y, true))",
+            environment,
+            budget,
+        )
         for name in "vw"
     ]
 

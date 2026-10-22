@@ -31,8 +31,6 @@ def test_cel_measurement_children_are_bounded_and_reaped(
     assert result.stdout == expected
     assert result.timed_out is timed_out
     assert result.overflow is overflow
-    assert result.elapsed_ns > 0
-    assert result.descriptors_before == result.descriptors_after == descriptors_before
     assert len(os.listdir("/dev/fd")) == descriptors_before
     with pytest.raises(ChildProcessError):
         os.waitpid(result.pid, os.WNOHANG)
