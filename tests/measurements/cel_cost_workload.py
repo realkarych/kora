@@ -108,6 +108,19 @@ def pilot_cases() -> tuple[PilotCase, ...]:
     return tuple(result)
 
 
+def value_depth(value: JsonValue) -> int:
+    pending: list[tuple[JsonValue, int]] = [(value, 0)]
+    deepest = 0
+    while pending:
+        current, depth = pending.pop()
+        deepest = max(deepest, depth)
+        if isinstance(current, list):
+            pending.extend((child, depth + 1) for child in current)
+        elif isinstance(current, dict):
+            pending.extend((child, depth + 1) for child in current.values())
+    return deepest
+
+
 def prepared(case: PilotCase) -> BoundValues:
     value = bind(case.checked(), {"values": case.value}, {"values": case.type})
     assert isinstance(value, BoundValues)
@@ -208,6 +221,7 @@ def run_case(name: str, mode: str) -> None:
     before = case.original_size()
     converted = prepared(case)
     converted_bytes, converted_values = converted.bytes, converted.count
+    converted_depth = value_depth(converted.values["values"])
     del converted
     previous_stack = threading.stack_size()
     if mode == "full":
@@ -230,6 +244,8 @@ def run_case(name: str, mode: str) -> None:
         "original_bytes": before.bytes,
         "converted_bytes": converted_bytes,
         "values": converted_values,
+        "original_depth": value_depth(case.value),
+        "converted_depth": converted_depth,
         "warmup": WARMUP,
         "samples": SAMPLES,
         "timings": timings,

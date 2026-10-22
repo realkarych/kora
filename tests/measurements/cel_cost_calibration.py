@@ -23,6 +23,7 @@ from tests.measurements.cel_cost_workload import (
     PilotCase,
     pilot_cases,
     prepared,
+    value_depth,
 )
 from tests.measurements.cel_measurement_process import ProcessResult, run_process
 from tests.measurements.harness import Sample, new_report
@@ -44,6 +45,8 @@ OBSERVATION_KEYS: frozenset[str] = frozenset(
         "original_bytes",
         "converted_bytes",
         "values",
+        "original_depth",
+        "converted_depth",
         "warmup",
         "samples",
         "timings",
@@ -97,6 +100,8 @@ def validate_observation(
         "original_bytes": case.original_size().bytes,
         "converted_bytes": converted.bytes,
         "values": converted.count,
+        "original_depth": value_depth(case.value),
+        "converted_depth": value_depth(converted.values["values"]),
         "warmup": WARMUP,
         "samples": SAMPLES,
         "stack_restored": True,

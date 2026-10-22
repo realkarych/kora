@@ -8,7 +8,7 @@ The reference is GitHub-hosted Ubuntu 24.04 x86_64 with CPython 3.11.17, uv 0.13
 
 Run the approved first phase with `PYTHONPATH=src uv run --no-sync python -m tests.measurements.cel_cost_calibration pilot --output measurements/cel-conversion-pilot.json`. CI dispatch selects `cel_calibration_mode=pilot`; its artifact is `cel-conversion-pilot`. Existing regular CI jobs and required statuses remain unchanged. The later collection/fitting and crash commands are not implemented at this stage.
 
-Each shape has scales 1, 2, 4 and 8. Every phase retains three warm-ups and fifteen measured calls. Original and converted values must pass the production bounds walker. Largest cases are:
+Each shape has scales 1, 2, 4 and 8. Every phase retains three warm-ups and fifteen measured calls. Original and converted values must pass the production bounds walker; each observation records their exact maximum depth, with the root at depth zero. Largest cases are:
 
 | Family | Construction at scale 8 | Original / converted canonical bytes | Converted value count |
 | --- | --- | --- | --- |

@@ -11,24 +11,24 @@ from tests.measurements.cel_cost_calibration import (
     timings_of,
     validate_observation,
 )
-from tests.measurements.cel_cost_workload import pilot_cases
+from tests.measurements.cel_cost_workload import pilot_cases, value_depth
 from tests.measurements.cel_measurement_process import run_process
 
 
 @pytest.mark.parametrize(
-    ("family", "original_bytes", "converted_bytes", "values"),
+    ("family", "original_bytes", "converted_bytes", "values", "depth"),
     [
-        ("ascii", 65517, 65517, 5),
-        ("unicode", 65421, 65421, 5),
-        ("escapes", 65485, 65485, 5),
-        ("empty_lists", 65001, 65001, 22001),
-        ("small_maps", 62001, 62001, 7001),
-        ("deep_chains", 65001, 65001, 32001),
-        ("numbers", 34001, 62001, 15001),
+        ("ascii", 65517, 65517, 5, 1),
+        ("unicode", 65421, 65421, 5, 1),
+        ("escapes", 65485, 65485, 5, 1),
+        ("empty_lists", 65001, 65001, 22001, 2),
+        ("small_maps", 62001, 62001, 7001, 2),
+        ("deep_chains", 65001, 65001, 32001, 32),
+        ("numbers", 34001, 62001, 15001, 2),
     ],
 )
 def test_cel_conversion_pilot_uses_valid_near_bound_shapes(
-    family: str, original_bytes: int, converted_bytes: int, values: int
+    family: str, original_bytes: int, converted_bytes: int, values: int, depth: int
 ) -> None:
     case = next(c for c in pilot_cases() if c.family == family and c.scale == 8)
     checked = case.checked()
@@ -39,6 +39,8 @@ def test_cel_conversion_pilot_uses_valid_near_bound_shapes(
     assert isinstance(converted, BoundValues)
     assert converted.bytes == converted_bytes
     assert converted.count == values
+    assert value_depth(case.value) == depth
+    assert value_depth(converted.values["values"]) == depth
 
 
 def test_cel_conversion_pilot_has_four_sizes_per_family() -> None:
@@ -82,6 +84,8 @@ def test_cel_conversion_observations_come_from_completed_real_children(
         ("case", "wrong"),
         ("input_sha256", "wrong"),
         ("completion", "wrong"),
+        ("original_depth", 33),
+        ("converted_depth", True),
         ("stack_restored", False),
         ("timings", {"native_ns": [True] * 18}),
         ("resources", {"handles": 1}),
