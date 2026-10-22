@@ -930,6 +930,8 @@ Allow only absolute POSIX paths or `file:///absolute/path` with empty authority,
 
 Fresh trusted Git metadata/configuration and a constructed environment exclude inherited Git configuration, includes/URL rewrites/pushurl, credential helpers, SSH agents/keys, askpass, candidate hooks/filters and object alternates. Destination-side hooks/configuration are explicitly trusted operator configuration under the cooperative local-runtime model; they must not be described as suppressed by client cleanup. The implementation must test client-side redirection separately, and accepted destination identity remains unchanged.
 
+Local mode uses the existing heartbeat and dispatch gate, not the control-plane credential-issuer route. After inspection and local metadata acquisition, a fresh authenticated heartbeat for the current epoch/dispatcher precedes each effectful `finalize`. Require `desired_state=run`, execute authority permitting publication, an unexpired lease and unchanged eligible deadline, closed predecessors and no sticky expiry. Serialize the final checks and dispatch against closure of the worker-local gate; a failed or unavailable check permits no dispatch. The authorization travels over the authenticated runtime control channel. API cancellation cannot retroactively revoke an already-dispatched push; unknown outcomes retain closure obligations and reservations.
+
 Required owner chain:
 
 - Worker/API: current lease, desired state and binding authorization, authenticated current authority, final check serialized with dispatch.
