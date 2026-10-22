@@ -7,6 +7,7 @@
 - Absorbs: DD-5, DD-16, DD-18, DD-28, requirements decision 16, FR section 0 (FR-0.0 to FR-0.4)
 - Amends: [ADR-0020](0020-execution-capacity-and-bounded-run-acceptance.md), 2026-10-19 (start outcomes are immediate tool results)
 - Related: [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md), [0013-implementation-stack.md](0013-implementation-stack.md)
+- Diagnostic amendment dated 2026-10-23: shared source and document locations under [issue #207](https://github.com/realkarych/kora/issues/207); exact amendment wording reviewed and approved by the project owner on 2026-10-23.
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
 ## Context
@@ -32,7 +33,7 @@ Parity is verified structurally: a CI coverage test checks that every API operat
 
 **Waiting is a bounded read option** (amended 2026-10-19). The API's run read takes a wait for one of two fixed conditions, the run has finished or one of its approval requests is pending, with a cap of 45 seconds fixed in the API contract. At the cap the API returns the current view as an ordinary response, and the caller reads again. The cap sits below the default tool-call timeout of the supported coding-agent clients ([dated evidence](../../knowledge/research/mcp-tasks-probe-2026-10-19.md#3-client-support-claude-code-and-codex)). The wait condition lives in the API; the CLI and the MCP servers forward the option, and no operation is added. MCP Tasks are not used; they are revisited when the official Python SDK implements the Tasks extension and Claude Code or Codex declares it.
 
-All errors are structured objects with a stable `code`, a message and a `location` (file and line for DSL errors, YAML path for IR errors, ids for runtime errors); clients branch on the code, never on prose.
+All errors are structured objects with a stable `code` and a safe message; clients branch on the code, never on prose. Compilation and validation findings use the shared [diagnostic contract](../../knowledge/specs/diagnostics.md): a nullable segmented document `path`, optional source `location` with file and line, independent Unicode code-point `offset`, node association and recovery hint. Runtime identifiers and HTTP request correlation belong to their enclosing error contracts.
 
 The MCP servers present the user's token and therefore have exactly the user's permissions; they add no state and no permission model of their own.
 
