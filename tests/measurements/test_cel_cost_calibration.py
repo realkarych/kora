@@ -1,0 +1,92 @@
+import json
+import sys
+
+import pytest
+
+from kora.cel_eval.convert import BoundValues, bind
+from tests.cel_eval.children import full_path
+from tests.measurements.cel_cost_calibration import (
+    PRELUDE,
+    ROOT,
+    timings_of,
+    validate_observation,
+)
+from tests.measurements.cel_cost_workload import pilot_cases
+from tests.measurements.cel_measurement_process import run_process
+
+
+@pytest.mark.parametrize(
+    ("family", "original_bytes", "converted_bytes", "values"),
+    [
+        ("ascii", 65517, 65517, 5),
+        ("unicode", 65421, 65421, 5),
+        ("escapes", 65485, 65485, 5),
+        ("empty_lists", 65001, 65001, 22001),
+        ("small_maps", 62001, 62001, 7001),
+        ("deep_chains", 65001, 65001, 32001),
+        ("numbers", 34001, 62001, 15001),
+    ],
+)
+def test_cel_conversion_pilot_uses_valid_near_bound_shapes(
+    family: str, original_bytes: int, converted_bytes: int, values: int
+) -> None:
+    case = next(c for c in pilot_cases() if c.family == family and c.scale == 8)
+    checked = case.checked()
+
+    converted = bind(checked, {"values": case.value}, {"values": case.type})
+
+    assert case.original_size().bytes == original_bytes
+    assert isinstance(converted, BoundValues)
+    assert converted.bytes == converted_bytes
+    assert converted.count == values
+
+
+def test_cel_conversion_pilot_has_four_sizes_per_family() -> None:
+    cases = pilot_cases()
+
+    families = {case.family for case in cases}
+
+    assert len(cases) == 28
+    assert len(families) == 7
+    assert all(
+        [case.scale for case in cases if case.family == family] == [1, 2, 4, 8]
+        for family in families
+    )
+
+
+@pytest.mark.parametrize("mode", ["full", "native"])
+def test_cel_conversion_observations_come_from_completed_real_children(
+    mode: str,
+) -> None:
+    case = pilot_cases()[0]
+
+    result = run_process(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            PRELUDE,
+            json.dumps(full_path(ROOT)),
+            case.name,
+            mode,
+        ]
+    )
+    observation = validate_observation(result.stdout, case, mode)
+
+    assert result.code == 0
+    assert not result.stderr
+    assert not result.timed_out
+    assert not result.overflow
+    assert all(len(values) == 18 for values in timings_of(observation).values())
+    for name, replacement in (
+        ("case", "wrong"),
+        ("input_sha256", "wrong"),
+        ("completion", "wrong"),
+        ("stack_restored", False),
+        ("timings", {"native_ns": [True] * 18}),
+        ("resources", {"handles": 1}),
+    ):
+        altered = dict(observation)
+        altered[name] = replacement
+        with pytest.raises(ValueError, match="observation|timing"):
+            validate_observation(json.dumps(altered).encode(), case, mode)
