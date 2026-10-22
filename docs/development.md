@@ -1,6 +1,6 @@
 # Development
 
-Browser verification amendment dated 2026-10-21: implementation plan approved under [issue #179](https://github.com/realkarych/kora/issues/179); wording pending line-by-line owner review.
+Browser verification amendment dated 2026-10-22: the project owner approved the [benchmark removal and matching documentation](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349), with delegated independent review and merge.
 
 Scope and implementation plan approved by the project owner under [issue #86](https://github.com/realkarych/kora/issues/86) on 2026-10-18; wording pending line-by-line owner review.
 
@@ -199,13 +199,19 @@ Every change needs an issue, an owner-approved implementation plan before nontri
 
 ## Browser checks
 
-Install the pinned Chromium distribution after the frozen frontend installation. Run the production/development smoke, failure-path checks and controlled base/head loading/lifecycle comparison through the registered command:
+The owner approved removal of the experimental numerical browser benchmark under [issue #179](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349) on 2026-10-22, including matching documentation and delegated independent review before merge. The retained protocol is `console-functional-v1`.
+
+Install the pinned Chromium distribution after the frozen frontend installation, then run the registered functional suite:
 
 ```sh
 pnpm --dir web exec playwright install chromium
-KORA_BROWSER_BASE="$(git rev-parse origin/master)" pnpm --dir web run test:browser
+pnpm --dir web run test:browser
 ```
 
-Reference calibration and verification require a clean committed tree and a production build environment (`NODE_ENV` unset or `production`). The command builds the current shell and the explicit base with the same head toolchain, and verifies that failure fixtures preserve the measured head assets. Each invocation preserves its evidence in a fresh directory under `measurements/browser/`; `KORA_BROWSER_OUTPUT` changes the parent directory. Reports identify the actual checkout, PR head, base, browser and lockfile. Linux x86_64 is the reference environment for native process-tree counters and frozen budgets. `--smoke` supplies functional-only local evidence on Linux or macOS; it does not satisfy performance verification. The initial `--calibrate` mode records proposed budgets, which require a separate verification run after freezing. See the [measurement protocol and activation evidence](../knowledge/research/console-browser-checks-2026-10-21.md).
+The command builds the current production assets and checks the real production and development servers at 1280, 768 and 375 pixels. Each viewport covers navigation, reload, visible content, document/font/paint readiness, basic semantics, keyboard focus and horizontal overflow, with zero unexpected browser diagnostics. Screenshots, terminal screenshots and traces are retained on the first failure. `--smoke` is a compatibility alias for the same suite; removed and unknown modes fail before any output directory, server or browser is acquired.
 
-CI installs Chromium system dependencies and runs the command in the parallel `Console browser checks` job, retaining failure evidence as well as successful results. The static shell activates boot, diagnostics, basic semantics, keyboard, responsive and loading/resource checks. API-backed journeys activate with their implementing components.
+Six real failure scenarios cover startup, navigation, assertion, deadline, cancellation and cancellation during browser acquisition. Ordinary runner cancellation and a report-path collision prove that owned descendants and temporary contents are released before parent fallback. Forced cancellation checks the parent's bounded cleanup. Exact-origin HTTP/WebSocket routing, the local proxy, blocked service workers, sanitized child environments and artifact-limit fixtures remain active. Cleanup evidence includes exact owned PIDs, Linux descriptor/process counters, proxy sockets and temporary directories; unavailable native counters on macOS are reported as unverified.
+
+Every invocation writes a fresh directory under `measurements/browser/`; `KORA_BROWSER_OUTPUT` changes its parent. Reports record checkout/head identity, dirty state, locked tools/browser distribution, asset hashes, functional outcomes and bounded completion diagnostics. `NODE_ENV` must be unset or `production`. Artifacts remain bounded to 32 MiB per file and 512 MiB in total, with reserved report capacity.
+
+CI runs one `Console browser checks` job and uploads `console-browser-checks`, retaining failure evidence. Read-only permissions, pinned tools/actions, other lanes and the ten-minute whole-pipeline budget remain. Numerical base/head loading and memory comparisons, browser heap snapshots, calibrated RSS/heap/loading budgets and five-runner training/holdout stages have been removed. Their historical failures remain failures, with no current numerical regression or leak-freedom guarantee. This scoped removal does not change backend, CEL or database performance obligations. The [current protocol and historical evidence](../knowledge/research/console-browser-checks-2026-10-21.md) record the distinction. Full accessibility scanning remains unverified; API-backed journeys activate with their implementing components.

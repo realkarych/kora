@@ -27,6 +27,15 @@ export interface Cleanup {
   failures: CleanupFailure[]
 }
 
+export function childEnvironment(): Record<string, string> {
+  const env: Record<string, string> = { NODE_ENV: 'test', LANG: 'C.UTF-8' }
+  for (const key of ['PATH', 'HOME', 'TMPDIR', 'PLAYWRIGHT_BROWSERS_PATH']) {
+    const value = process.env[key]
+    if (value !== undefined) env[key] = value
+  }
+  return env
+}
+
 const activeOwners = new Set<Ownership>()
 
 export async function closeOwners(): Promise<void> {
@@ -64,7 +73,7 @@ export class Ownership {
     assert(this.server === undefined)
     const server = fork(fileURLToPath(new URL('./server.ts', import.meta.url)), [mode, root, String(port)], {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
-      env: this.environment(),
+      env: childEnvironment(),
     })
     this.server = server
     assert(server.pid)
@@ -98,14 +107,6 @@ export class Ownership {
     }
   }
 
-  environment(): Record<string, string> {
-    const env: Record<string, string> = { NODE_ENV: 'test', LANG: 'C.UTF-8' }
-    for (const key of ['PATH', 'HOME', 'TMPDIR', 'PLAYWRIGHT_BROWSERS_PATH']) {
-      const value = process.env[key]
-      if (value !== undefined) env[key] = value
-    }
-    return env
-  }
 
   startBrowser(): Promise<Browser> {
     assert(!this.isClosing(), 'Owner is closing')
@@ -119,7 +120,7 @@ export class Ownership {
     assert(this.origin)
     const proxy = await this.proxy.listen(this.origin)
     assert(!this.isClosing(), 'Owner is closing')
-    const launching = chromium.launchServer({ headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false, timeout: 15000, env: this.environment(), proxy: { server: proxy, bypass: '<-loopback>' }, tracesDir: this.traceDirectory })
+    const launching = chromium.launchServer({ headless: true, handleSIGTERM: false, handleSIGINT: false, handleSIGHUP: false, timeout: 15000, env: childEnvironment(), proxy: { server: proxy, bypass: '<-loopback>' }, tracesDir: this.traceDirectory })
     this.lifecycle.dispatchEvent(new Event('launching'))
     this.browserServer = await launching
     const pid = this.browserServer.process().pid

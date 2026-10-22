@@ -218,13 +218,6 @@ def sort_key(item: tuple[Key, int]) -> tuple[int, str]:
 ZERO: Final[Affine] = Affine(0)
 
 
-def join_affine(values: list[Affine]) -> Affine:
-    result = ZERO
-    for value in values:
-        result = result.join(value)
-    return result
-
-
 def sum_affine(values: list[Affine]) -> Affine:
     result = ZERO
     for value in values:

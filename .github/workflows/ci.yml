@@ -185,7 +185,6 @@ jobs:
         shell: bash
     env:
       KORA_BROWSER_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-      KORA_BROWSER_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -210,7 +209,7 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
-      - name: Run browser smoke and lifecycle verification
+      - name: Run browser checks
         run: pnpm --dir web run test:browser
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}

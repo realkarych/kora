@@ -21,9 +21,22 @@ PROVIDER_LOADING_MODULE: str = "kora.protocols.loading"
 CEL_BINDING: str = "cel"
 CEL_BINDING_OWNER: str = "kora.cel_eval.binding"
 DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
-    {"importlib.import_module", "builtins.__import__", "pkgutil.resolve_name"}
+    {
+        "importlib.import_module",
+        "builtins.__import__",
+        "pkgutil.resolve_name",
+        "importlib.util.spec_from_file_location",
+        "importlib.util.module_from_spec",
+        "runpy.run_module",
+        "runpy.run_path",
+    }
 )
 BUILTIN_NAMES: dict[str, str] = {"__import__": "builtins.__import__"}
+FAKE_MODULE_PATTERN: re.Pattern[str] = re.compile(r"kora\.plugins\.[^.]+\.fake")
+TESTING_ROOTS: frozenset[str] = frozenset({"kora.testing", "kora.conformance"})
+ENTRY_ROOTS: frozenset[str] = frozenset({"kora.__main__", "kora.standalone"})
+TESTING_COMMAND_ROOT: str = "kora.__main__"
+TESTING_COMMAND_FUNCTIONS: frozenset[str] = frozenset({"test", "conformance", "mcp"})
 
 BASE: frozenset[str] = frozenset({"ir", "observability"})
 SUPERVISOR_PROVIDER_IMPORTS: frozenset[str] = BASE | {"runner", "executor", "protocols"}
@@ -199,14 +212,17 @@ def local_bindings(tree: ast.Module) -> dict[str, str]:
     return bindings
 
 
-def call_name(node: ast.Call, bindings: dict[str, str]) -> str | None:
-    function = node.func
-    if isinstance(function, ast.Name):
-        return bindings.get(function.id, function.id)
-    if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name):
-        owner = bindings.get(function.value.id, function.value.id)
-        return f"{owner}.{function.attr}"
+def expression_name(node: ast.expr, bindings: dict[str, str]) -> str | None:
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        owner = expression_name(node.value, bindings)
+        return None if owner is None else f"{owner}.{node.attr}"
     return None
+
+
+def call_name(node: ast.Call, bindings: dict[str, str]) -> str | None:
+    return expression_name(node.func, bindings)
 
 
 def literal_argument(node: ast.Call, position: int, keyword: str) -> str | None:
@@ -270,6 +286,62 @@ def imported_modules(
                 yield ImportedModule(node.lineno, target, dynamic=True)
 
 
+def fake_module_of(module: str) -> str | None:
+    match = FAKE_MODULE_PATTERN.match(module)
+    if match is None or not is_within(module, match.group(0)):
+        return None
+    return match.group(0)
+
+
+def is_testing_root(module: str) -> bool:
+    return any(is_within(module, root) for root in TESTING_ROOTS)
+
+
+def fake_import_violation(importer: str, target: str) -> str | None:
+    target_fake = fake_module_of(target)
+    if target_fake is None or is_testing_root(importer):
+        return None
+    if fake_module_of(importer) == target_fake:
+        return None
+    return f"imports the fake module {target}"
+
+
+def command_function_lines(module: SourceModule) -> frozenset[int]:
+    if module.name != TESTING_COMMAND_ROOT:
+        return frozenset()
+    tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+    lines: set[int] = set()
+    for node in tree.body:
+        if (
+            isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name in TESTING_COMMAND_FUNCTIONS
+            and node.end_lineno is not None
+        ):
+            lines.update(range(node.lineno, node.end_lineno + 1))
+    return frozenset(lines)
+
+
+def root_dynamic_import_lines(module: SourceModule) -> Iterator[int]:
+    tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+    bindings = local_bindings(tree)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and call_name(node, bindings) in DYNAMIC_IMPORT_CALLS
+        ):
+            yield node.lineno
+
+
+def entry_root_violation(
+    module: SourceModule, imported: ImportedModule, command_lines: frozenset[int]
+) -> str | None:
+    if module.name not in ENTRY_ROOTS or not is_testing_root(imported.target):
+        return None
+    if imported.line in command_lines:
+        return None
+    return f"imports {imported.target} outside a testing command function"
+
+
 def third_party_violation(
     importer: str, importer_layer: str, target: str
 ) -> str | None:
@@ -295,6 +367,9 @@ def kora_violation(importer_layer: str, target: str) -> str | None:
 def import_violation(
     module: SourceModule, importer_layer: str, imported: ImportedModule
 ) -> str | None:
+    fake_reason = fake_import_violation(module.name, imported.target)
+    if fake_reason is not None:
+        return fake_reason
     if imported.dynamic:
         if is_within(module.name, PROVIDER_LOADING_MODULE) and not is_within(
             imported.target, CEL_BINDING
@@ -309,12 +384,22 @@ def import_violation(
 def composition_root_violations(
     module: SourceModule, known: frozenset[str]
 ) -> Iterator[Violation]:
+    command_lines = command_function_lines(module)
     for imported in imported_modules(module, known):
+        if imported.dynamic:
+            continue
         if is_within(imported.target, CEL_BINDING):
             reason = (
                 f"only {CEL_BINDING_OWNER} may import the CEL binding {imported.target}"
             )
             yield Violation(module.path, imported.line, reason)
+        reason = fake_import_violation(
+            module.name, imported.target
+        ) or entry_root_violation(module, imported, command_lines)
+        if reason is not None:
+            yield Violation(module.path, imported.line, reason)
+    for line in root_dynamic_import_lines(module):
+        yield Violation(module.path, line, "makes a dynamic-import call")
 
 
 def find_violations(source_root: Path) -> list[Violation]:
@@ -620,4 +705,90 @@ def test_checker_resolves_namespace_subpackages_and_root_scope(tmp_path: Path) -
         "kora/__init__.py:3: kora may not import db (kora.db)",
         "kora/mcp/tools.py:1: mcp may not import mcp.stdio (kora.mcp.stdio)",
         "kora/runner/__init__.pyi:2: runner may not import db (kora.db)",
+    ]
+
+
+def test_fake_import_rule(tmp_path: Path) -> None:
+    write_packages(
+        tmp_path,
+        [
+            "kora",
+            "kora.plugins",
+            "kora.plugins.runtime",
+            "kora.plugins.runtime.fake",
+            "kora.plugins.harness",
+            "kora.plugins.harness.fake",
+            "kora.plugins.vcs",
+            "kora.testing",
+            "kora.conformance",
+        ],
+    )
+    write_module(tmp_path, "kora.plugins.runtime.fake.script", "")
+    write_module(
+        tmp_path,
+        "kora.plugins.runtime.fake.core",
+        "from kora.plugins.runtime.fake import script\n"
+        "import kora.plugins.harness.fake\n",
+    )
+    write_module(
+        tmp_path, "kora.plugins.runtime.local", "import kora.plugins.runtime.fake\n"
+    )
+    write_module(tmp_path, "kora.plugins.vcs.fakeish", "")
+    write_module(tmp_path, "kora.plugins.vcs.git", "import kora.plugins.vcs.fakeish\n")
+    write_module(
+        tmp_path,
+        "kora.testing.engine",
+        "import kora.plugins.harness.fake\nimport kora.plugins.runtime.fake\n",
+    )
+    write_module(
+        tmp_path, "kora.conformance.runtime", "import kora.plugins.runtime.fake\n"
+    )
+    write_module(
+        tmp_path,
+        "kora.testing.loader",
+        "import importlib\nimport importlib.util\n\ndef load(name: str) -> None:\n"
+        "    importlib.import_module(name)\n"
+        "    importlib.util.spec_from_file_location(name, name)\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.__main__",
+        "import kora.testing\n"
+        "\n"
+        "def test() -> None:\n"
+        "    import kora.testing\n"
+        "    import kora.plugins.runtime.fake\n"
+        "\n"
+        "async def conformance() -> None:\n"
+        "    import kora.conformance\n"
+        "\n"
+        "def mcp() -> None:\n"
+        "    import kora.testing\n"
+        "    import runpy\n"
+        "    runpy.run_module(name)\n"
+        "\n"
+        "def serve() -> None:\n"
+        "    import kora.conformance\n",
+    )
+    write_module(
+        tmp_path,
+        "kora.standalone",
+        "def build() -> None:\n    import kora.testing\n",
+    )
+
+    violations = find_violations(tmp_path)
+
+    assert describe_all(violations, tmp_path) == [
+        "kora/__main__.py:1: imports kora.testing outside a testing command function",
+        "kora/__main__.py:5: imports the fake module kora.plugins.runtime.fake",
+        "kora/__main__.py:16: imports kora.conformance outside a testing command "
+        "function",
+        "kora/__main__.py:13: makes a dynamic-import call",
+        "kora/plugins/runtime/fake/core.py:2: imports the fake module "
+        "kora.plugins.harness.fake",
+        "kora/plugins/runtime/local.py:1: imports the fake module "
+        "kora.plugins.runtime.fake",
+        "kora/standalone.py:2: imports kora.testing outside a testing command function",
+        "kora/testing/loader.py:5: makes a dynamic-import call",
+        "kora/testing/loader.py:6: makes a dynamic-import call",
     ]

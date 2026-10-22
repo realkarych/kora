@@ -8,6 +8,8 @@ Immutable-history amendment dated 2026-10-17: direction and implementation plan 
 
 Execution-recovery amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; document wording pending line-by-line owner review. See [ADR-0017](../decisions/0017-execution-uncertainty-and-safe-replacement.md).
 
+Fake-contract amendment dated 2026-10-21 (NFR-10.1): `/plan` and the dry run no longer construct a fake runtime in a serving process, under [issue #136](https://github.com/realkarych/kora/issues/136); implementation plan approved by the project owner, wording pending line-by-line owner review. See [fakes.md](../../knowledge/specs/fakes.md).
+
 Publication-boundary amendment dated 2026-10-17: pending owner review; architectural direction recorded in [ADR-0016](../decisions/0016-trusted-execution-and-publication.md).
 
 External-observation amendment dated 2026-10-17: direction and implementation plan accepted by the project owner; wording pending line-by-line review. See [ADR-0021](../decisions/0021-external-observations-outside-transactions.md).
@@ -92,7 +94,7 @@ CEL amendment dated 2026-10-19: decisions taken and implementation plan approved
 
 ## 10. Testability and developer experience
 
-- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora plan` prints the materialised execution plan and `kora trigger --dry-run` executes a run on the fake runtime and harness. Behavioural scenarios (`kora test` and the stdio `kora_test` tool) supply agent outcomes by unambiguous selectors, execute command nodes for real with explicit reported overrides, inject approvals, events, time and randomness, enforce and report the absence of network and production secrets, and return machine-readable results, through the ordinary engine with configured fakes (dsl.md section 4).
+- **NFR-10.1 [MVP]** A fake harness adapter and a fake runtime allow graphs to be tested end-to-end in CI without model calls; `kora plan` prints the materialised execution plan from the target runtime's declared capabilities, constructing no runtime, and `kora trigger --dry-run` executes a run author-side on the fake runtime and harness, never through a serving process. Behavioural scenarios (`kora test` and the stdio `kora_test` tool) supply agent outcomes by unambiguous selectors, execute command nodes for real with explicit reported overrides, inject approvals, events, time and randomness, enforce and report the absence of network and production secrets, and return machine-readable results, through the ordinary engine with injected fakes (dsl.md section 4).
 - **NFR-10.2 [MVP]** Conformance suites exist for every protocol (NFR-5.1) so adopters can validate their enterprise runtime, VCS and secrets implementations.
 - **NFR-10.3 [MVP]** Compile-time errors point to the Python source line of the offending node; IR validation errors point to the YAML path.
 

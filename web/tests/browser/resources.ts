@@ -99,23 +99,3 @@ export async function verifyReleased(pids: number[]): Promise<NativeResources> {
   assert(remaining.processes === null || remaining.processes === 0, 'Owned descendants remain alive')
   return remaining
 }
-
-export function numberField(value: unknown, key: string): number {
-  assert(value !== null && typeof value === 'object' && key in value)
-  const result: unknown = Reflect.get(value, key)
-  assert(typeof result === 'number' && Number.isFinite(result))
-  return result
-}
-
-export function span(values: number[]): number {
-  assert(values.length > 0 && values.every(Number.isFinite))
-  return Math.max(...values) - Math.min(...values)
-}
-
-export function percentile(values: number[], fraction: number): number {
-  assert(values.length > 0)
-  const sorted = [...values].sort((a, b) => a - b)
-  const value = sorted[Math.ceil(sorted.length * fraction) - 1]
-  assert(value !== undefined)
-  return value
-}

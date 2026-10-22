@@ -7,6 +7,7 @@
 - Absorbs: DD-2, DD-21, DD-22, the protocol part of DD-29; NFR section 5; requirements decision 14, the "policy protocol in MVP" part of requirements decision 19 and the "OTel as the only MVP exporter" part of requirements decision 20
 - Related: [ADR-0001](0001-own-control-plane.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0011](0011-namespaces-and-personal-tokens.md)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
+- Fake-provider amendment dated 2026-10-21: kora's fakes are constructed by injection and never discovered, under [issue #136](https://github.com/realkarych/kora/issues/136); implementation plan approved by the project owner, wording pending line-by-line owner review.
 - Provider-loading amendment dated 2026-10-21: entry-point names encode the protocol and loading is selective, decided by the project owner under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
 
 ## Context
@@ -18,7 +19,7 @@ kora is designed for an instance shared by many teams on an organisation's own i
 Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` for its deployment configuration and a `conformance` marker.
 
 1. **runtime**: where a session executes (`submit` keyed by attempt id, `lookup`, `adopt`, `events`, late `finalize`, `cancel`). MVP: `local`, `docker`.
-2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude`, `codex`, plus `fake` for CI; `acp` after MVP (ADR-0004).
+2. **harness adapter**: how a session is driven inside the session runner. MVP: `claude` and `codex`, plus the fake harness for tests, which is injected and never registered; `acp` after MVP (ADR-0004).
 3. **VCS**: typed checkout and publish plans (`checkout_plan`, `publish_plan`) that the session runner executes inside the runtime, change requests, the branch head, CI status. MVP: `git` with the GitHub and GitLab APIs.
 4. **approval channel**: request, poll, feedback, cancel; never decides validity. MVP: `cli`, `vcs`.
 5. **secrets**: `resolve(secret://…)` bound to namespace prefixes. MVP: `env`, `file`.
@@ -34,6 +35,8 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 **Capability flags instead of promises.** A runtime declares, among others, `supports_resume`, `enforces_network_policy`, `credential_proxy`, `protected_execution` and `plan_executors`; `kora validate` emits warning `IR009` when a node requests a capability its runtime lacks. Network policy is enforced by the runtime with the harness sandbox as a second layer (DD-21); when a namespace sets `require_network_enforcement`, a secret-bearing node on a non-enforcing runtime becomes error `IR015`.
 
 **The VCS plans, the trusted supervisor executes** (amended 2026-10-17 by [ADR-0016](0016-trusted-execution-and-publication.md)). Typed plans remain the composition mechanism, without a runtime name in VCS requests. Preparation precedes candidate execution; export is untrusted candidate work; sealing stops the candidate domain; prepare/inspect execute in fresh trusted publisher metadata. Only then does the worker obtain late publication authorization and call `Runtime.finalize`. Runtime/VCS placement is still negotiated through `plan_executors`, preferring `runner`; `worker_host` uses a private publisher fed by sealed input, never credentialed operations in the candidate workspace. No common executor is an error. The common executor builds trusted `WorkspaceRef` and prepared publication results, recorded in the supervisor journal outside the candidate tree. `test_vcs_runtime_cross_product` proves composition without a shared worker filesystem; the security suite proves the declared boundary separately. Local is trusted development/testing; protected runtimes must establish the complete authority boundary.
+
+**Fakes are injected, never discovered** (amended 2026-10-21, [issue #136](https://github.com/realkarych/kora/issues/136)). kora's fakes are the one class of implementation that is constructed by injection and never discovered: no kora fake is a `kora.provider` entry point, provider loading refuses the name `fake` and the fake and testing modules, and only the testing compositions construct them. They pass the same conformance suites as production implementations, under the applicability matrix of [fakes.md](../../knowledge/specs/fakes.md#8-conformance-applicability).
 
 **Conformance suites.** Each protocol ships `kora.conformance.<protocol>` as pytest parametrised over the entry point under test (`kora conformance runtime inhouse_ci`); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
 
