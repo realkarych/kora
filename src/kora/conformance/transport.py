@@ -14,8 +14,8 @@ from kora.conformance.lifetime import (
     OrdinarySlot,
     ParentLifetime,
     Request,
+    RequestInput,
     TransportBudget,
-    WireInput,
     wire_admission,
 )
 from kora.protocols.common import BoundaryModel
@@ -575,7 +575,7 @@ class PendingCall:
     deadline: int
     slot: OrdinarySlot
     control_bytes: int
-    input_charge: WireInput
+    input_charge: RequestInput
     task: asyncio.Task[None] | None = None
     encoded: bytes | None = None
 
@@ -641,13 +641,11 @@ class LifetimeEndpoint:
     def _reserve_bytes(self, control: int, execution: int) -> None:
         if (
             control
-            + self.owner.transport_control_bytes
+            + self.owner.input_control_bytes
             + self.owner.control_bytes
             + self.owner.mutations.inventory().journal_bytes
             > self.owner.limits.max_control_recovery_bytes
-            or execution
-            + self.owner.transport_execution_bytes
-            + self.owner.execution_bytes
+            or execution + self.owner.input_execution_bytes + self.owner.execution_bytes
             > self.owner.limits.max_execution_snapshot_bytes
         ):
             raise ChannelError(ChannelFailure.CAPACITY)
@@ -790,7 +788,7 @@ class LifetimeEndpoint:
                         deadline,
                         slot,
                         reserved_control - header.control_bytes,
-                        WireInput(
+                        RequestInput(
                             self.owner,
                             self.budget,
                             header.control_bytes,

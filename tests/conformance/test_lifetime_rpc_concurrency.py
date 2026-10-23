@@ -1,9 +1,11 @@
 import asyncio
+import gc
 import os
 import signal
 import socket
 import sys
 import tempfile
+import weakref
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -59,6 +61,7 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
             launcher=launcher,
         )
         running: asyncio.Task[ClosureReport] | None = None
+        replay_inputs: list[weakref.ReferenceType[ProcessLaunch]] = []
         try:
             tree = await owner.reserve(
                 ReservationRequest(
@@ -149,6 +152,17 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 assert owner.inventory().pending_operations == 1
                 if workload == "execution":
                     assert owner.transport_execution_bytes >= 600000
+                    for pending in parent.pending.values():
+                        if pending.input_charge.execution_bytes:
+                            assert pending.task is not None
+                            frames = pending.task.get_stack()
+                            value: object = frames[0].f_locals["launch"]
+                            assert isinstance(value, ProcessLaunch)
+                            replay_inputs.append(weakref.ref(value))
+                    frames = []
+                    value = None
+                    pending = None
+                    assert len(replay_inputs) == 2
                     await loop.sock_sendto(feedback, b"cancel", peer)
                     assert (
                         await asyncio.wait_for(loop.sock_recv(feedback, 1), 5) == b"c"
@@ -208,6 +222,8 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 process = owner.records[child.token.resource_id].process
                 assert process is not None
                 assert process.returncode == 0
+                gc.collect()
+                assert all(reference() is None for reference in replay_inputs)
         finally:
             closing = owner.request_close(None)
             clock.advance(20_000_000_000)

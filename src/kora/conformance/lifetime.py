@@ -7,7 +7,7 @@ from collections.abc import Callable, Coroutine, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TypeAlias, cast
+from typing import TypeAlias, TypeVar, cast
 
 from pydantic import TypeAdapter
 
@@ -76,6 +76,19 @@ CLOSURE_CONTROL_BYTES: int = CLOSURE_REPORT_BYTES + 2048
 CLEANUP_DRIVER_BYTES: int = 4096
 MEMBER_CONTROL_BYTES: int = 2048
 RECOVERY_ATTEMPT_BYTES: int = 4096
+OwnedResult = TypeVar("OwnedResult")
+
+
+def request_size(request: BoundaryModel | None) -> tuple[bool, int]:
+    if request is None:
+        return False, 0
+    execution = isinstance(request, (ProcessLaunch, LocalRuntimeLaunch))
+    size = (
+        len(ExecutionConfig.from_launch(request).encode()[1])
+        if isinstance(request, ProcessLaunch)
+        else len(request.model_dump_json().encode())
+    )
+    return execution, size
 
 
 def consume_closure_failure(future: asyncio.Future[ClosureReport]) -> None:
@@ -118,6 +131,17 @@ class LifetimeError(Exception):
     def __init__(self, reason: LifetimeReason) -> None:
         self.reason = reason
         super().__init__(reason.value)
+
+
+async def owned_result(task: asyncio.Task[OwnedResult]) -> OwnedResult:
+    if not task.done():
+        await asyncio.wait((task,))
+    if task.cancelled():
+        raise asyncio.CancelledError
+    error = task.exception()
+    if isinstance(error, LifetimeError):
+        raise LifetimeError(error.reason)
+    return task.result()
 
 
 @dataclass
@@ -218,6 +242,8 @@ class ParentLifetime:
         self.execution_bytes = 0
         self.transport_control_bytes = 0
         self.transport_execution_bytes = 0
+        self.direct_control_bytes = 0
+        self.direct_execution_bytes = 0
         self.transport_pending = 0
         self.endpoint_count = 0
         self.closure_started = asyncio.Event()
@@ -342,7 +368,7 @@ class ParentLifetime:
 
     async def ready(self) -> None:
         try:
-            await asyncio.shield(self._bootstrap)
+            await owned_result(self._bootstrap)
         except (
             HelperError,
             ChannelError,
@@ -388,17 +414,55 @@ class ParentLifetime:
         if not slot.wire and (slot.task is None or slot.task.done()):
             self.ordinary_slots.discard(slot)
 
+    @property
+    def input_control_bytes(self) -> int:
+        return self.transport_control_bytes + self.direct_control_bytes
+
+    @property
+    def input_execution_bytes(self) -> int:
+        return self.transport_execution_bytes + self.direct_execution_bytes
+
+    def _reserve_direct_input(self, request: BoundaryModel | None) -> "RequestInput":
+        execution, size = request_size(request)
+        control = 0 if execution else size
+        execution_bytes = size if execution else 0
+        if (
+            self.control_bytes
+            + self.input_control_bytes
+            + self.mutations.inventory().journal_bytes
+            + control
+            > self.limits.max_control_recovery_bytes
+            or self.execution_bytes + self.input_execution_bytes + execution_bytes
+            > self.limits.max_execution_snapshot_bytes
+        ):
+            raise self._refuse(LifetimeReason.CAPACITY_EXCEEDED)
+        self.direct_control_bytes += control
+        self.direct_execution_bytes += execution_bytes
+        return RequestInput(self, None, control, execution_bytes)
+
     @contextmanager
-    def _ordinary_call(self) -> Generator[OrdinarySlot]:
+    def _ordinary_call(
+        self, deadline: int, request: BoundaryModel | None = None
+    ) -> Generator[OrdinarySlot]:
         admission = CALL_ADMISSION.get()
+        inherited = admission is not None and admission.owner is self
         slot = (
             admission.slot
-            if admission is not None and admission.owner is self
+            if inherited and admission is not None
             else self.admit_ordinary(wire=False)
         )
+        charge = None
+        token = None
         try:
+            if not inherited:
+                charge = self._reserve_direct_input(request)
+                token = CALL_ADMISSION.set(CallAdmission(self, slot, deadline, charge))
             yield slot
         finally:
+            if token is not None:
+                CALL_ADMISSION.reset(token)
+            if charge is not None:
+                charge.transfer()
             self._release_slot(slot)
 
     def snapshot(self) -> JournalSnapshot:
@@ -430,7 +494,7 @@ class ParentLifetime:
         if (
             len(snapshot.model_dump_json().encode())
             + self.control_bytes
-            + self.transport_control_bytes
+            + self.input_control_bytes
             > self.limits.max_control_recovery_bytes
         ):
             self.admission_open = False
@@ -484,18 +548,13 @@ class ParentLifetime:
             and admission.input_charge is not None
         ):
             admission.input_charge.transfer()
-        execution = isinstance(request, (ProcessLaunch, LocalRuntimeLaunch))
-        size = (
-            len(ExecutionConfig.from_launch(request).encode()[1])
-            if isinstance(request, ProcessLaunch)
-            else len(request.model_dump_json().encode())
-        )
+        execution, size = request_size(request)
         if (
-            self.execution_bytes + self.transport_execution_bytes + size
+            self.execution_bytes + self.input_execution_bytes + size
             > self.limits.max_execution_snapshot_bytes
             if execution
             else self.control_bytes
-            + self.transport_control_bytes
+            + self.input_control_bytes
             + self.mutations.inventory().journal_bytes
             + size
             > self.limits.max_control_recovery_bytes
@@ -530,7 +589,7 @@ class ParentLifetime:
     def _reserve_cleanup_control(self) -> None:
         if (
             self.control_bytes
-            + self.transport_control_bytes
+            + self.input_control_bytes
             + self.mutations.inventory().journal_bytes
             + CLOSURE_CONTROL_BYTES
             > self.limits.max_control_recovery_bytes
@@ -542,7 +601,7 @@ class ParentLifetime:
         available = (
             self.limits.max_control_recovery_bytes
             - self.control_bytes
-            - self.transport_control_bytes
+            - self.input_control_bytes
             - self.mutations.inventory().journal_bytes
             - self.limits.max_control_frame_bytes
             - CLOSURE_CONTROL_BYTES
@@ -573,7 +632,7 @@ class ParentLifetime:
 
     async def reserve(self, request: ReservationRequest) -> Reservation:
         deadline = self.deadline()
-        with self._ordinary_call() as slot:
+        with self._ordinary_call(deadline, request) as slot:
             return await self._reserve_call(request, deadline, slot)
 
     async def _reserve_call(
@@ -590,7 +649,7 @@ class ParentLifetime:
             self._reserve(request, deadline),
             slot,
         )
-        return cast(Reservation, await asyncio.shield(task))
+        return cast(Reservation, await owned_result(task))
 
     async def _reserve(self, request: ReservationRequest, deadline: int) -> Result:
         self._admit()
@@ -634,7 +693,7 @@ class ParentLifetime:
         self, token: ReservationToken, operation_id: OperationId, request: Request
     ) -> Acquisition:
         deadline = self.deadline()
-        with self._ordinary_call() as slot:
+        with self._ordinary_call(deadline, request) as slot:
             return await self._acquire_call(
                 token, operation_id, request, deadline, slot
             )
@@ -660,7 +719,7 @@ class ParentLifetime:
         existing = self.operations[("acquire", operation_id)]
         if existing.resource_id != token.resource_id:
             raise self._refuse(LifetimeReason.IDENTITY_MISMATCH)
-        return cast(Acquisition, await asyncio.shield(task))
+        return cast(Acquisition, await owned_result(task))
 
     async def _acquire(
         self, record: ResourceRecord, operation_id: str, request: Request, deadline: int
@@ -783,35 +842,31 @@ class ParentLifetime:
         revision: int,
     ) -> ActivationAcknowledgement:
         deadline = self.deadline()
-        with self._ordinary_call() as slot:
-            return await self._acknowledge_call(
-                token, acquisition_operation_id, revision, deadline, slot
-            )
-
-    async def _acknowledge_call(
-        self,
-        token: ReservationToken,
-        acquisition_operation_id: OperationId,
-        revision: int,
-        deadline: int,
-        slot: OrdinarySlot | None = None,
-    ) -> ActivationAcknowledgement:
-        await self._ready_deadline(deadline)
-        record = self._record(token)
         request = ActivationAcknowledgement(
             token=token,
             acquisition_operation_id=acquisition_operation_id,
             revision=revision,
             result=ActivationResult.ACTIVE,
         )
+        with self._ordinary_call(deadline, request) as slot:
+            return await self._acknowledge_call(request, deadline, slot)
+
+    async def _acknowledge_call(
+        self,
+        request: ActivationAcknowledgement,
+        deadline: int,
+        slot: OrdinarySlot | None = None,
+    ) -> ActivationAcknowledgement:
+        await self._ready_deadline(deadline)
+        record = self._record(request.token)
         task = self._operation(
-            ("acknowledge", acquisition_operation_id),
+            ("acknowledge", request.acquisition_operation_id),
             request,
-            token.resource_id,
+            request.token.resource_id,
             self._acknowledge(record, request, deadline),
             slot,
         )
-        return cast(ActivationAcknowledgement, await asyncio.shield(task))
+        return cast(ActivationAcknowledgement, await owned_result(task))
 
     async def _acknowledge(
         self, record: ResourceRecord, request: ActivationAcknowledgement, deadline: int
@@ -868,7 +923,7 @@ class ParentLifetime:
         self, resource_id: ResourceId | None
     ) -> tuple[ResourceObservation, ...]:
         deadline = self.deadline()
-        with self._ordinary_call():
+        with self._ordinary_call(deadline):
             return await self._observe_call(resource_id, deadline)
 
     async def _observe_call(
@@ -1303,8 +1358,8 @@ class ParentLifetime:
                 for record in self.records.values()
             ),
             endpoint_count=self.endpoint_count,
-            control_bytes=self.control_bytes + self.transport_control_bytes,
-            execution_bytes=self.execution_bytes + self.transport_execution_bytes,
+            control_bytes=self.control_bytes + self.input_control_bytes,
+            execution_bytes=self.execution_bytes + self.input_execution_bytes,
             ordinary_owners=len(self.ordinary_slots),
             cleanup_driver_tasks=int(not self._cleanup_driver.done()),
             cleanup_effect_tasks=int(
@@ -1367,7 +1422,7 @@ class CallAdmission:
     owner: ParentLifetime
     slot: OrdinarySlot
     deadline: int
-    input_charge: "WireInput | None"
+    input_charge: "RequestInput | None"
 
 
 @dataclass
@@ -1377,17 +1432,21 @@ class TransportBudget:
 
 
 @dataclass
-class WireInput:
+class RequestInput:
     owner: ParentLifetime
-    budget: TransportBudget
+    budget: TransportBudget | None
     control_bytes: int
     execution_bytes: int
 
     def transfer(self) -> None:
-        self.owner.transport_control_bytes -= self.control_bytes
-        self.owner.transport_execution_bytes -= self.execution_bytes
-        self.budget.control_bytes -= self.control_bytes
-        self.budget.execution_bytes -= self.execution_bytes
+        if self.budget is None:
+            self.owner.direct_control_bytes -= self.control_bytes
+            self.owner.direct_execution_bytes -= self.execution_bytes
+        else:
+            self.owner.transport_control_bytes -= self.control_bytes
+            self.owner.transport_execution_bytes -= self.execution_bytes
+            self.budget.control_bytes -= self.control_bytes
+            self.budget.execution_bytes -= self.execution_bytes
         self.control_bytes = 0
         self.execution_bytes = 0
 
@@ -1402,7 +1461,7 @@ def wire_admission(
     owner: ParentLifetime,
     slot: OrdinarySlot,
     deadline: int,
-    input_charge: WireInput | None = None,
+    input_charge: RequestInput | None = None,
 ) -> Generator[None]:
     if slot not in owner.ordinary_slots or not slot.wire:
         raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
