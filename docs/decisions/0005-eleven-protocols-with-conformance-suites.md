@@ -15,7 +15,7 @@
 
 - Local conformance lifetime amendment dated 2026-10-23: wording reviewed and [accepted by the project owner](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23.
 
-- Staged-storage amendment dated 2026-10-23: the [plan for #229](https://github.com/realkarych/kora/issues/229#issuecomment-6368221981) was [approved by the project owner](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832). The operation inventory and lifecycle below replace the four-method storage boundary; exact wording pending line-by-line owner review. Runtime implementation and evidence remain separate.
+- Staged-storage amendment dated 2026-10-23: the [plan for #229](https://github.com/realkarych/kora/issues/229#issuecomment-6368221981) was [approved by the project owner](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832). The operation inventory and lifecycle below replace the four-method storage boundary; exact wording [reviewed line by line and approved by the project owner](https://github.com/realkarych/kora/pull/245#issuecomment-6369119893) on 2026-10-23. Runtime implementation and evidence remain separate.
 
 ## Context
 

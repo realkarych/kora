@@ -2,7 +2,7 @@
 
 Local conformance lifetime amendment dated 2026-10-23: wording reviewed and [accepted by the project owner](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23.
 
-Staged-storage amendment dated 2026-10-23: the project owner [approved the #229 plan](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832), covering TM-09/TM-10/TM-11 and TM-06/TM-07 evidence. Exact wording is pending line-by-line owner review. The contract supplies no runtime enforcement or isolation evidence.
+Staged-storage amendment dated 2026-10-23: the project owner [approved the #229 plan](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832), covering TM-09/TM-10/TM-11 and TM-06/TM-07 evidence. Exact wording was [reviewed line by line and approved by the project owner](https://github.com/realkarych/kora/pull/245#issuecomment-6369119893) on 2026-10-23. The contract supplies no runtime enforcement or isolation evidence.
 
 API error and authorization amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #135](https://github.com/realkarych/kora/issues/135) on 2026-10-23.
 

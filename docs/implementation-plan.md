@@ -2,7 +2,7 @@
 
 Local conformance lifetime amendment dated 2026-10-23: [#231](https://github.com/realkarych/kora/issues/231) defines the parent-owned local lifetime ABI and pre-live runner launch seam. #215 implements the command and current activated-suite evidence; runtime/testing-runner integration activates with their own implementations. Every existing first-slice lifecycle gate remains required. Wording reviewed and [accepted by the project owner](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23.
 
-Staged-storage amendment dated 2026-10-23: the project owner [approved the #229 plan](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832). The staged protocol is specified; exact wording below is pending line-by-line owner review. Local provider and real API/metadata/retention implementations remain separate work.
+Staged-storage amendment dated 2026-10-23: the project owner [approved the #229 plan](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832). The staged protocol is specified; exact wording below was [reviewed line by line and approved by the project owner](https://github.com/realkarych/kora/pull/245#issuecomment-6369119893) on 2026-10-23. Local provider and real API/metadata/retention implementations remain separate work.
 
 VcsRef revision-1 amendment dated 2026-10-23: the project owner approved the contract plan and the exact wording in this document under [issue #208](https://github.com/realkarych/kora/issues/208#issuecomment-6353268608).
 
