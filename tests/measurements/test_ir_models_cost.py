@@ -12,7 +12,15 @@ from typing import cast
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from kora.ir import CommandConfig, CommandResource, McpServer, NodeLimits, ToolPolicy
+from kora.ir import (
+    BranchConfig,
+    CommandConfig,
+    CommandResource,
+    McpServer,
+    NodeLimits,
+    Retry,
+    ToolPolicy,
+)
 from kora.ir.json import (
     DEFAULT_MAX_DEPTH,
     MAX_CANONICAL_BYTES,
@@ -24,6 +32,9 @@ from kora.ir.json import (
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import parse_config_schema
 from tests.ir.config_cases import MINIMAL, POPULATED, RESOURCE
+from tests.ir.control_cases import CASE
+from tests.ir.control_cases import MINIMAL as CONTROL_MINIMAL
+from tests.ir.control_cases import POPULATED as CONTROL_POPULATED
 from tests.measurements.cel_measurement_process import run_process
 from tests.measurements.diagnostic_workload import Lifecycle, cases, exercise
 from tests.measurements.harness import (
@@ -304,7 +315,124 @@ def configuration_workloads() -> dict[str, tuple[Callable[[], object], int, bool
     return workloads
 
 
+def control_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]]:
+    workloads: dict[str, tuple[Callable[[], object], int, bool, int]] = {}
+    for shape, configurations in (
+        ("minimal", CONTROL_MINIMAL),
+        ("populated", CONTROL_POPULATED),
+    ):
+        for model, document in configurations.items():
+            workloads[f"control_{model.__name__}_{shape}"] = (
+                round_trip_action(model, document),
+                1,
+                True,
+                MEASURED,
+            )
+    for size in (1, 1000, 10000):
+        branch_cases: dict[str, object] = {"cases": [CASE] * size}
+        targets = ["target"] * size
+        branch_targets: dict[str, object] = {"cases": [{"when": "true", "to": targets}]}
+        for name, document in (("cases", branch_cases), ("targets", branch_targets)):
+            for action_name, factory in (
+                ("validate", validation_action),
+                ("export", export_action),
+            ):
+                workloads[f"control_branch_{name}_{size}_{action_name}"] = (
+                    factory(BranchConfig, document),
+                    size,
+                    True,
+                    DENSE_MEASURED,
+                )
+        invalid_case: dict[str, object] = {"when": "true", "to": ["a" * 64 + "\n"]}
+        refusals: dict[str, dict[str, object]] = {
+            "last_case": {"cases": [CASE] * (size - 1) + [invalid_case]},
+            "many_cases": {"cases": [invalid_case] * size},
+            "last_target": {
+                "cases": [{"when": "true", "to": [*targets[:-1], "$fail_attempt\n"]}]
+            },
+            "many_targets": {
+                "cases": [
+                    {
+                        "when": "true",
+                        "to": ["a" * 64 + "\n", "$fail_attempt\n"] * (size // 2)
+                        + ["a\n"] * (size % 2),
+                    }
+                ]
+            },
+        }
+        for name, document in refusals.items():
+            workloads[f"control_branch_refused_{name}_{size}"] = (
+                validation_action(BranchConfig, document, False),
+                size,
+                True,
+                DENSE_MEASURED,
+            )
+    branch_else: dict[str, object] = {"cases": [CASE], "else": ["target"] * 10000}
+    for action_name, factory in (
+        ("validate", validation_action),
+        ("export", export_action),
+    ):
+        workloads[f"control_else_10000_{action_name}"] = (
+            factory(BranchConfig, branch_else),
+            10000,
+            True,
+            DENSE_MEASURED,
+        )
+    workloads["control_else_refused_last_10000"] = (
+        validation_action(
+            BranchConfig,
+            {"cases": [CASE], "else": ["target"] * 9999 + ["$fail_attempt\n"]},
+            False,
+        ),
+        10000,
+        True,
+        DENSE_MEASURED,
+    )
+    for field in ("retry_on", "non_retryable"):
+        for name, entries in (
+            ("invalid", ["unknown"] * 10000),
+            ("duplicate", ["timeout"] * 10000),
+        ):
+            workloads[f"control_retry_{field}_{name}_10000"] = (
+                validation_action(Retry, {field: entries}, False),
+                10000,
+                True,
+                DENSE_MEASURED,
+            )
+    extended = {**CASE, "x-meta": deep_extension(MAX_CANONICAL_BYTES - 4096)}
+    nested_branch: dict[str, object] = {
+        "cases": [extended, extended],
+        "else": ["target"],
+    }
+    for action_name, factory in (
+        ("validate", validation_action),
+        ("export", export_action),
+    ):
+        workloads[f"control_case_extensions_2_{action_name}"] = (
+            factory(BranchConfig, nested_branch),
+            2,
+            True,
+            DENSE_MEASURED,
+        )
+    for name, extension in (
+        ("oversize", deep_extension(MAX_CANONICAL_BYTES + 4096)),
+        ("depth", too_deep()),
+    ):
+        workloads[f"control_case_extension_last_{name}"] = (
+            validation_action(
+                BranchConfig,
+                {"cases": [extended, {**CASE, "x-meta": extension}]},
+                False,
+            ),
+            2,
+            True,
+            DENSE_MEASURED,
+        )
+    return workloads
+
+
 WORKLOADS.update(configuration_workloads())
+WORKLOADS.update(control_workloads())
 
 
 @pytest.mark.parametrize("workload", sorted(WORKLOADS))

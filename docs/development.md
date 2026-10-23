@@ -1,5 +1,7 @@
 # Development
 
+IR control-configuration measurement amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #225](https://github.com/realkarych/kora/issues/225) on 2026-10-23.
+
 Diagnostic value measurement amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #219](https://github.com/realkarych/kora/issues/219) on 2026-10-23.
 
 Browser verification amendment dated 2026-10-22: the project owner approved the [benchmark removal and matching documentation](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349), with delegated independent review and merge.
@@ -149,6 +151,8 @@ KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
 The IR model measurement runs under the same marker: `ToolPolicy` validation and serialisation of 250,000 patterns, a 1 MiB depth-16 extension object, a dense 1 MiB extension and one just over the limit, a refused input whose last pattern is invalid, `KoraProtocolError` details and a provider `config_schema`, and dense 1 MiB objects of small integers, short ASCII, non-ASCII and escaped strings, empty objects, keys and floats through the bounded JSON parser, with one just over the limit. Each workload has a warm-up, 30 samples (10 for the dense ones), a traced peak and retained bytes, then 1,000 cycles of refused inputs follow. It gates only that each workload accepts or refuses as expected and, with the refused cycles, leaves retained memory at baseline; the timings are a baseline with no time gate. CI runs it after the protocol model measurement in the same lane and uploads the artifact `ir-models-cost-measurement`:
 
 The common configuration models add minimal and populated record round trips, command and MCP containers at 1, 1,000 and 10,000 entries, long constrained strings, 64 independently bounded resource extensions, and late or many-error refusals. Ordinary cases use three warm-ups and 30 samples; scaling and refusal cases use three warm-ups and ten samples. Three fresh processes each run 1,000 lightweight success/failure cycles, checking model release, thread and descriptor counts, allocation differences and current/peak RSS after quiescence. Every post-drop traced-memory checkpoint retains the existing less-than-65,536-byte gate. Timings and peak/native-memory values establish baselines without a new numerical gate; the extension bound is per record, not an aggregate configuration cap. The full materialized-graph workload remains pending [issue #218](https://github.com/realkarych/kora/issues/218).
+
+The control-configuration models add minimal and populated round trips, branch-case and target arrays at 1, 1,000 and 10,000 entries, retry-array refusals and two independently bounded case extensions. Alias-backed else targets and a refusal in the final nested case exercise the containing branch model. These workloads retain the same warm-ups, sample counts and post-drop gate; the three configuration lifetime workers include all implemented configuration records. Existing diagnostic workloads remain separate and unchanged. These measurements establish structural-model baselines; expression evaluation, routing and retry execution are not exercised.
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/ir-models-cost.json \
