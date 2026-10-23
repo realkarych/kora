@@ -267,3 +267,7 @@ Remaining IR configuration measurement amendment dated 2026-10-23: reviewed and 
 The required IR measurement includes the remaining configuration records, open JSON-data parsing and release, and timestamp acceptance and refusal paths. Existing protocol and extension bounds remain separate from the open-data fields. Minimal and populated record round trips and repeated configuration workers retain the existing warm-ups, timing samples and resource-release gates; expression evaluation, provider admission and wait execution are not exercised.
 
 Use export_ir and render_ir_json for canonical IR export from validated records. They preserve wire aliases, authored omissions, exact integer values and open JSON data through iterative traversal. Repeated mutable-container identities inside an open JSON field are refused before copying; validated configuration instances may still be reused elsewhere. The helpers accept materialized data and do not replace JSON or YAML text decoders. Existing protocol and extension bounds are unchanged.
+
+IR declaration measurement amendment dated 2026-10-23: reviewed and accepted by the project owner under issue #218 on 2026-10-23.
+
+The required IR measurement includes declaration, trigger, runtime and type-contract round trips, named-map parsing and refusal cleanup. It retains existing workloads and resource-release gates. Referenced built-in revisions remain declarations in these workloads; artifact payload resolution and provider execution are not measured.

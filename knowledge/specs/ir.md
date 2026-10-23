@@ -72,6 +72,14 @@ Every consumer uses this closure: schema-driven CEL checking, edge assignability
 
 Artifact type names are a built-in or namespaced type, recursively wrapped in `List[T]` where needed. The JSON Schema checks the structural spelling; semantic type validation (`IR003`) parses the complete type and checks balanced brackets at every nesting level. The schema alone cannot establish arbitrary bracket balance and imposes no list-depth limit.
 
+### Structural declarations
+
+The declaration records preserve authored fields without resolving installed resources or executing schemas. `InputRef` requires only `type`; its producer, output, path and optional flag remain absent when unauthored. `OutputDecl.schema` and custom contract schemas are open JSON objects, including nested boolean schemas. A custom contract requires the literal draft 2020-12 `$schema`, a required nullable `parent`, and nonempty behavior identity strings. Built-in revision and behavior availability, schema validity, recursive type balance and assignability remain semantic checks.
+
+`IrSourceLocation` preserves the wire `file` string, positive JSON integer `line` and `x-` metadata. It is distinct from the existing safe diagnostic `SourceLocation`; parsing opens no path and grants no diagnostic authority. Trusted public conversion remains with the shared validator.
+
+The version, type-contract name, retention period, secret reference and artifact-type patterns match the whole authored string, including refusal of trailing newlines. Named maps apply their entry contracts to every key: secret aliases use environment-name keys, approval-channel names are unrestricted strings, and `x-` names in these maps are ordinary entries. Runtime records preserve missing concurrency, retention and retry settings. `provider_retry` accepts ordinary record extensions and does not insert `max_wait`; first-slice disabled-policy normalization and provider support remain consumer responsibilities.
+
 ## 3. Nodes
 
 Every node has the common envelope below; `config` is kind-specific (section 4).

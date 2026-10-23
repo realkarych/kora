@@ -1,5 +1,9 @@
 # Implementation plan
 
+Retained dispatcher-history amendment dated 2026-10-23: the project owner approved the [contract plan and exact documentation wording](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702), [approval recorded](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030).
+
+Retained dispatcher-history amendment dated 2026-10-23: issue #226 specifies bounded resumable grant and closure-evidence transfer. Work item 6 implements the shared DTOs under #156 after the VcsRef contract lands; work items 9–11 implement metadata authority, scheduler integration and worker API reads, work item 14 implements durable runtime progress under #195–197, and work item 17 implements the worker bridge. These consumers remain pending implementation; the work-item-9–11 and 17 implementing issues must record their activation before code. A completed immutable snapshot is required before recovered effect authority and never replaces current grant, deadline, dispatcher-closure or publication fences. Required cases and resource-lifetime workloads are in the specifications; existing verification gates remain active.
+
 Local conformance lifetime amendment dated 2026-10-23: [#231](https://github.com/realkarych/kora/issues/231) defines the parent-owned local lifetime ABI and pre-live runner launch seam. #215 implements the command and current activated-suite evidence; runtime/testing-runner integration activates with their own implementations. Every existing first-slice lifecycle gate remains required. Wording reviewed and [accepted by the project owner](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23.
 
 VcsRef revision-1 amendment dated 2026-10-23: the project owner approved the contract plan and the exact wording in this document under [issue #208](https://github.com/realkarych/kora/issues/208#issuecomment-6353268608).
@@ -434,3 +438,7 @@ For Codex, the stream-volume and lifetime measurements cover the app-server proc
 Remaining IR configuration amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23.
 
 The remaining configuration foundation of work item 2 includes agent, human-input, event-wait and timer records. Subagent records use a closed vocabulary; hooks, embedded schemas and user data retain their explicit JSON-data boundaries. Timer values preserve their authored strings under the defined timestamp profile. These models preserve omissions and do not resolve providers, execute templates or expressions, enforce installation support or schedule waits. Full-document assembly and schema generation remain with #218.
+
+IR declaration amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23.
+
+The declaration foundation of work item 2 includes inputs, outputs, IR source metadata, type-contract references, trigger variants, target declarations, runtime settings and secret aliases. These are structural records. Built-in payload resolution, type assignability, provider support, first-slice retry normalization and trusted conversion of source metadata to public diagnostics remain with their actual consumers. The shared diagnostic values remain the existing foundation; IR source metadata is not itself a public diagnostic location.

@@ -19,7 +19,22 @@ from kora.ir.config import (
     WaitEventConfig,
     Workspace,
 )
+from kora.ir.contracts import (
+    BuiltinTypeContract,
+    CustomTypeContract,
+    TypeBehavior,
+    TypeContract,
+)
 from kora.ir.data import IrJsonObjectField, IrJsonValueField
+from kora.ir.declarations import (
+    InputRef,
+    IrSourceLocation,
+    OutputDecl,
+    OutputTarget,
+    ParameterTarget,
+    SubgraphOutput,
+    TargetConfig,
+)
 from kora.ir.diagnostics import (
     ConfigWarning,
     ContractViolation,
@@ -28,11 +43,50 @@ from kora.ir.diagnostics import (
 )
 from kora.ir.export import export_ir, render_ir_json
 from kora.ir.node import ErrorClass, ToolPolicy
+from kora.ir.runtime import (
+    Concurrency,
+    ProviderRetry,
+    Retention,
+    RuntimeSection,
+    SecretsSection,
+)
+from kora.ir.trigger import (
+    CronTrigger,
+    GraphTrigger,
+    ManualTrigger,
+    SensorTrigger,
+    Trigger,
+    WebhookAuth,
+    WebhookTrigger,
+)
 from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
     "PrincipalRef",
     "VcsRef",
+    "BuiltinTypeContract",
+    "CustomTypeContract",
+    "TypeBehavior",
+    "TypeContract",
+    "InputRef",
+    "IrSourceLocation",
+    "OutputDecl",
+    "OutputTarget",
+    "ParameterTarget",
+    "SubgraphOutput",
+    "TargetConfig",
+    "Concurrency",
+    "ProviderRetry",
+    "Retention",
+    "RuntimeSection",
+    "SecretsSection",
+    "CronTrigger",
+    "GraphTrigger",
+    "ManualTrigger",
+    "SensorTrigger",
+    "Trigger",
+    "WebhookAuth",
+    "WebhookTrigger",
     "IrJsonObjectField",
     "IrJsonValueField",
     "AgentConfig",

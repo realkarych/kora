@@ -4,7 +4,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 from json.encoder import encode_basestring_ascii
-from typing import TypeAlias, cast, get_args
+from typing import TypeAlias, cast, get_args, get_origin
 
 from pydantic import MISSING
 from pydantic_core import to_json
@@ -45,6 +45,24 @@ def is_ir_data_annotation(annotation: object) -> bool:
             return True
         pending.extend(get_args(item))
     return False
+
+
+def is_ir_object_map_annotation(annotation: object) -> bool:
+    if get_origin(annotation) is dict:
+        arguments = get_args(annotation)
+        return len(arguments) == 2 and arguments[1] is IrJsonObjectField
+    return any(is_ir_object_map_annotation(item) for item in get_args(annotation))
+
+
+def export_ir_object_map(value: object) -> JsonObject:
+    if not isinstance(value, dict):
+        raise invalid_ir_data()
+    result: JsonObject = {}
+    for name, item in dict[object, object].items(cast("dict[object, object]", value)):
+        if type(name) is not str or not isinstance(item, dict):
+            raise invalid_ir_data()
+        result[name] = detach_ir_data(cast("object", item))
+    return result
 
 
 def require_ir_root(value: object) -> IrRecord:
@@ -94,8 +112,12 @@ def export_ir(root: IrRecord) -> JsonObject:
                     field.annotation
                 ):
                     data[alias] = detach_ir_data(item)
+                elif isinstance(item, dict) and is_ir_object_map_annotation(
+                    field.annotation
+                ):
+                    data[alias] = export_ir_object_map(cast("object", item))
                 else:
-                    stack.append(Visit(item, data, alias))
+                    stack.append(Visit(cast("object", item), data, alias))
             extensions = parse_json_object(value.extensions)
             if any(not name.startswith("x-") for name in extensions):
                 raise invalid_ir_data()

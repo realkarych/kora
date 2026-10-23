@@ -30,10 +30,16 @@ from kora.ir import (
 from kora.ir.record import IrRecord
 from tests.ir.config_cases import MINIMAL, POPULATED, RESOURCE
 from tests.ir.control_cases import POPULATED as CONTROL_POPULATED
+from tests.ir.declaration_cases import INVALID as DECLARATION_INVALID
+from tests.ir.declaration_cases import POPULATED as DECLARATION_POPULATED
 from tests.ir.remaining_config_cases import INVALID as REMAINING_INVALID
 from tests.ir.remaining_config_cases import POPULATED as REMAINING_POPULATED
 from tests.measurements.harness import current_rss_bytes, open_descriptors
 from tests.measurements.ir_config_workload import validate_config
+from tests.measurements.ir_declaration_workload import (
+    TRIGGER_ARRAY,
+    trigger_lifetime_cycle,
+)
 from tests.measurements.ir_remaining_workload import supplemental_cycle
 
 INVALID: dict[type[BaseModel], dict[str, object]] = {
@@ -53,9 +59,11 @@ CONFIGURATIONS: dict[type[BaseModel], dict[str, object]] = {
     **POPULATED,
     **CONTROL_POPULATED,
     **REMAINING_POPULATED,
+    **DECLARATION_POPULATED,
 }
 
 INVALID.update((model, document) for model, document in REMAINING_INVALID.items())
+INVALID.update((model, document) for model, document in DECLARATION_INVALID.items())
 
 
 def model_references(value: object) -> list[weakref.ReferenceType[BaseModel]]:
@@ -83,12 +91,17 @@ def cycle(index: int = 0) -> int:
     for model, document in CONFIGURATIONS.items():
         parsed = model.model_validate(document)
         references.extend(model_references(parsed))
-        if isinstance(parsed, IrRecord) and type(parsed) in REMAINING_POPULATED:
+        if isinstance(parsed, IrRecord) and (
+            type(parsed) in REMAINING_POPULATED or type(parsed) in DECLARATION_POPULATED
+        ):
             export_ir(parsed)
         else:
             parsed.model_dump(mode="json", by_alias=True, exclude_unset=True)
         validate_config(model, INVALID[model], False)
         del parsed
+    triggers = trigger_lifetime_cycle()
+    references.extend(model_references(triggers))
+    del triggers
     supplemental_cycle(index)
     return sum(reference() is not None for reference in references)
 
@@ -135,6 +148,7 @@ def main() -> None:
     baseline_schemas = {
         model.__name__: id(model.__pydantic_core_schema__) for model in CONFIGURATIONS
     }
+    trigger_schema = id(TRIGGER_ARRAY.core_schema)
     gc.collect()
     tracemalloc.start()
     baseline_snapshot = tracemalloc.take_snapshot()
@@ -175,6 +189,7 @@ def main() -> None:
     assert {
         model.__name__: id(model.__pydantic_core_schema__) for model in CONFIGURATIONS
     } == baseline_schemas
+    assert id(TRIGGER_ARRAY.core_schema) == trigger_schema
     result: dict[str, object] = {
         "baseline_rss_bytes": baseline_rss,
         "baseline_peak_rss_bytes": baseline_peak_rss,
@@ -187,6 +202,8 @@ def main() -> None:
         "class_schema_inventory": sorted(baseline_schemas),
         "class_schemas_unchanged": True,
         "supplemental_fixtures": 14,
+        "trigger_union_array_size": 5,
+        "trigger_union_schema_unchanged": True,
         "warm_up": 3,
         "rss_source": "/bin/ps rss KiB converted to bytes"
         if sys.platform == "darwin"
