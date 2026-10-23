@@ -15,8 +15,7 @@ import time
 import tracemalloc
 from array import array
 from collections import Counter
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1141,35 +1140,19 @@ class PricingMigrationWatch:
         self.observer: asyncio.Task[None] | None = None
         self.writers: dict[str, Database] = {}
         self.writer_ledgers: list[ConnectionLedger] = []
-        self.writer_queue = asyncio.Lock() if kind is DatabaseKind.SQLITE else None
-        self.writer_requests = 0
-        self.writer_admissions = 0
         self.intervals: list[tuple[str, float, float]] = []
         self.active_phase: int | None = None
         self.pending_transaction: tuple[str, float] | None = None
         self.checkout_started = self.started
 
     async def prepare(self) -> None:
-        shared: Database | None = None
         for table in ("price_table", "usage_record", "attempt", "approval_request"):
-            if shared is None or self.kind is DatabaseKind.POSTGRESQL:
-                database = Database(narrow_settings(self.settings, 1))
-                self.writer_ledgers.append(ConnectionLedger(database))
-                async with database.transaction() as connection:
-                    await connection.exec_driver_sql("SELECT 1")
-                shared = database
-            else:
-                database = shared
+            database = Database(narrow_settings(self.settings, 1))
             self.writers[table] = database
+            self.writer_ledgers.append(ConnectionLedger(database))
+            async with database.transaction() as connection:
+                await connection.exec_driver_sql("SELECT 1")
         self.started = time.perf_counter()
-
-    @asynccontextmanager
-    async def writer_slot(self) -> AsyncGenerator[float, None]:
-        if self.writer_queue is None:
-            yield time.perf_counter()
-        else:
-            async with self.writer_queue:
-                yield time.perf_counter()
 
     def checkout(self, *arguments: object) -> None:
         self.checkout_started = time.perf_counter()
@@ -1437,29 +1420,22 @@ class PricingMigrationWatch:
             "approval_request": "old-other-approval",
         }[table]
         started = time.perf_counter()
-        self.writer_requests += 1
-        request_sequence = self.writer_requests
-        async with self.writer_slot() as queued:
-            self.writer_admissions += 1
-            queue_sequence = self.writer_admissions
-            if self.writer_queue is not None:
-                assert queue_sequence == request_sequence
-            async with database.transaction() as connection:
-                admitted = time.perf_counter()
-                relation = {
-                    "price_table": price_table,
-                    "usage_record": usage_record,
-                    "attempt": attempt,
-                    "approval_request": approval_request,
-                }[table]
-                result = await connection.execute(
-                    relation.update()
-                    .where(relation.c.id == identifier)
-                    .values(id=relation.c.id)
-                )
-                assert result.rowcount == 1
-                written = time.perf_counter()
-            finished = time.perf_counter()
+        async with database.transaction() as connection:
+            admitted = time.perf_counter()
+            relation = {
+                "price_table": price_table,
+                "usage_record": usage_record,
+                "attempt": attempt,
+                "approval_request": approval_request,
+            }[table]
+            result = await connection.execute(
+                relation.update()
+                .where(relation.c.id == identifier)
+                .values(id=relation.c.id)
+            )
+            assert result.rowcount == 1
+            written = time.perf_counter()
+        finished = time.perf_counter()
         await until(lambda: self.intervals[interval][2] > 0)
         phase, phase_start, phase_finish = self.intervals[interval]
         record(
@@ -1470,14 +1446,7 @@ class PricingMigrationWatch:
             self.kind,
             phase=phase,
             table=table,
-            writer_owner_count=len(self.writer_ledgers),
-            queue_policy="fifo" if self.writer_queue is not None else "independent",
-            request_sequence=request_sequence,
-            queue_sequence=queue_sequence,
             start_offset_seconds=started - self.started,
-            queue_admission_offset_seconds=queued - self.started,
-            application_queue_wait_seconds=queued - started,
-            database_admission_wait_seconds=admitted - queued,
             admission_offset_seconds=admitted - self.started,
             admission_wait_seconds=admitted - started,
             statement_seconds=written - admitted,
@@ -1496,7 +1465,7 @@ class PricingMigrationWatch:
         try:
             await asyncio.gather(*self.writer_tasks)
         finally:
-            for database in dict.fromkeys(self.writers.values()):
+            for database in self.writers.values():
                 await database.close()
             assert all(
                 ledger.opened == ledger.closed and ledger.outstanding == 0
@@ -1505,8 +1474,6 @@ class PricingMigrationWatch:
             self.finished.set()
             assert self.observer is not None
             await asyncio.wait_for(self.observer, CLOSE_WAIT_SECONDS)
-        assert self.writer_requests == self.writer_admissions == len(self.writer_tasks)
-        assert self.writer_queue is None or not self.writer_queue.locked()
         assert self.database is not None
         assert self.ledger is not None
         assert self.database.units_in_flight() == 0
@@ -1529,8 +1496,6 @@ class PricingMigrationWatch:
             new_directory_temporary_peak_observed_bytes=self.temporary_peak,
             new_named_temporary_files_after=named_count,
             new_named_temporary_bytes_after=named_bytes,
-            writer_owner_count=len(self.writer_ledgers),
-            writer_requests=self.writer_requests,
             temporary_counter_scope="new_files_in_fixture_directory_plus_process_open_unlinked_regular_files",
             wal_after_bytes=0
             if self.kind is DatabaseKind.POSTGRESQL
