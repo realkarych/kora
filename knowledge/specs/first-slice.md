@@ -54,7 +54,7 @@ Retain every included API operation with one reachable CLI form and MCP selector
 
 - Validate compiled IR; deploy graph versions; list/get graphs and versions.
 - Trigger; list/get runs, with the existing bounded wait on the single-run read; events.
-- Node read; attempts list/read; logs; artifact list/metadata/payload/lineage.
+- Node read; attempts list/read; logs; artifact list/metadata/payload/lineage. Full stdio payload retrieval uses `kora_inspect` with `artifact_id` and explicit local `download_to`, streaming the existing API response into a safely created file and returning a bounded local receipt; small inline inspection is not its only payload path.
 - Cancel run/node; approval list with run filter/read/respond; reconcile observe/stop/confirm_stopped.
 - Make versions-list, attempts-list, artifact-lineage and approval-read selection explicit using existing commands/tools, without increasing the slice tool count.
 - Preserve worker routes as their existing parity exclusion.
