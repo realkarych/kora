@@ -19,7 +19,8 @@ import time
 import tracemalloc
 from array import array
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from datetime import timedelta
 from decimal import Decimal
 from importlib.metadata import version
@@ -3321,6 +3322,81 @@ class PricingPublicationOutcome(BaseModel):
     private_owner_valid: bool | None = None
 
 
+class PricingPublicationAllocation:
+    def __init__(self, temporary: Path) -> None:
+        self.temporary = temporary.resolve()
+        self.directory: Path | None = None
+        self.identity: tuple[int, int] | None = None
+        self.previous_mask: set[int | signal.Signals] | None = None
+
+    def allocate(self) -> Path:
+        self.previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+        self.directory = Path(
+            tempfile.mkdtemp(prefix="kora-pricing-upload-", dir=self.temporary)
+        )
+        return self.directory
+
+    def receipt(self) -> PricingPublication:
+        if self.directory is None:
+            raise PricingEvidenceError("publication allocation is unavailable")
+        metadata = self.directory.lstat()
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise PricingEvidenceError("publication allocation identity is unavailable")
+        self.identity = (metadata.st_dev, metadata.st_ino)
+        publication = PricingPublication(
+            directory=self.directory, device=metadata.st_dev, inode=metadata.st_ino
+        )
+        self.restore_interrupts()
+        return publication
+
+    def restore_interrupts(self) -> None:
+        if self.previous_mask is not None:
+            previous = self.previous_mask
+            self.previous_mask = None
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+    def release(self) -> None:
+        if self.directory is None:
+            return
+        if self.identity is None:
+            raise PricingEvidenceError("publication allocation identity is unavailable")
+        release_pricing_publication_directory(
+            self.directory, self.identity[0], self.identity[1], self.temporary
+        )
+
+
+@contextmanager
+def pricing_publication_allocation(
+    temporary: Path,
+) -> Generator[PricingPublicationAllocation, None, None]:
+    allocation = PricingPublicationAllocation(temporary)
+    try:
+        yield allocation
+    finally:
+        original = sys.exception()
+        failure = original
+        try:
+            allocation.restore_interrupts()
+        except (KeyboardInterrupt, OSError) as restoration:
+            failure = (
+                restoration
+                if original is None
+                else BaseExceptionGroup(
+                    "publication acquisition and signal restoration failures",
+                    [original, restoration],
+                )
+            )
+        if failure is not None:
+            try:
+                allocation.release()
+            except (OSError, ValueError) as cleanup:
+                raise BaseExceptionGroup(
+                    "publication preparation and release failures", [failure, cleanup]
+                ) from None
+            if failure is not original:
+                raise failure
+
+
 def read_pricing_publication_envelope(
     directory: Path, name: Literal["manifest.json", "completion.json"]
 ) -> dict[str, JsonValue]:
@@ -3330,7 +3406,13 @@ def read_pricing_publication_envelope(
     raw = read_pricing_bytes(directory / name, limit)
     if len(raw) > limit:
         raise PricingEvidenceError("publication source envelope exceeds limit")
-    return parse_json_object(json.loads(raw))
+    try:
+        decoded = json.loads(raw)
+    except RecursionError:
+        raise PricingEvidenceError(
+            "publication source envelope exceeds depth"
+        ) from None
+    return parse_json_object(decoded)
 
 
 def prepare_pricing_publication(
@@ -3344,14 +3426,9 @@ def prepare_pricing_publication(
         release_outcome not in {"success", "failure", "cancelled", "skipped"}
     ):
         raise PricingEvidenceError("invalid publication step outcome")
-    selected = Path(
-        tempfile.mkdtemp(prefix="kora-pricing-upload-", dir=temporary.resolve())
-    )
-    metadata = selected.stat()
-    ownership = PricingPublication(
-        directory=selected, device=metadata.st_dev, inode=metadata.st_ino
-    )
-    try:
+    with pricing_publication_allocation(temporary) as allocation:
+        selected = allocation.allocate()
+        ownership = allocation.receipt()
         source = directory.with_name(directory.name + "-sealed")
         source_valid = True
         source_failure: str | None = None
@@ -3367,7 +3444,10 @@ def prepare_pricing_publication(
                 if name == "manifest.json" or not (source / name).exists():
                     continue
                 raw = read_pricing_bytes(source / name, limit)
-                write_pricing_bytes(selected / name, raw, limit)
+                try:
+                    write_pricing_bytes(selected / name, raw, limit)
+                finally:
+                    del raw
         except (OSError, ValueError) as error:
             source_valid = False
             source_failure = type(error).__name__
@@ -3406,35 +3486,33 @@ def prepare_pricing_publication(
         selected_bytes = sum(path.stat().st_size for path in files)
         return PricingPublication(
             directory=selected,
-            device=metadata.st_dev,
-            inode=metadata.st_ino,
+            device=ownership.device,
+            inode=ownership.inode,
             source_valid=source_valid,
             preparation_seconds=time.perf_counter() - started,
             selected_bytes=selected_bytes,
             selected_files=len(files),
         )
-    finally:
-        original = sys.exception()
-        if original is not None:
-            try:
-                release_pricing_publication(ownership, temporary)
-            except (OSError, ValueError) as cleanup:
-                raise BaseExceptionGroup(
-                    "publication preparation and release failures", [original, cleanup]
-                ) from None
 
 
 def release_pricing_publication(
     publication: PricingPublication, temporary: Path
 ) -> dict[str, JsonValue]:
+    return release_pricing_publication_directory(
+        publication.directory, publication.device, publication.inode, temporary
+    )
+
+
+def release_pricing_publication_directory(
+    directory: Path, device: int, inode: int, temporary: Path
+) -> dict[str, JsonValue]:
     started = time.perf_counter()
-    directory = publication.directory
     metadata = directory.lstat()
     if (
         not stat.S_ISDIR(metadata.st_mode)
         or directory.parent != temporary.resolve()
         or not directory.name.startswith("kora-pricing-upload-")
-        or (metadata.st_dev, metadata.st_ino) != (publication.device, publication.inode)
+        or (metadata.st_dev, metadata.st_ino) != (device, inode)
     ):
         raise PricingEvidenceError("publication cleanup ownership mismatch")
     shutil.rmtree(directory)

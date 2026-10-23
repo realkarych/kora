@@ -1349,3 +1349,222 @@ def test_pricing_fallback_handoff_is_ready_while_step_fails(
     finally:
         release_pricing_publication(publication, temporary)
     assert list(temporary.iterdir()) == []
+
+
+@pytest.mark.parametrize("nested_source", ["sealed", "working"])
+def test_pricing_recursive_envelope_retains_bounded_failure_publication(
+    tmp_path: Path, nested_source: str
+) -> None:
+    directory = tmp_path / "evidence"
+    directory.mkdir()
+    marker = b"private-recursive-envelope-marker-742"
+    nested = b'{"private":' + b"[" * 4096 + b'"' + marker + b'"'
+    nested += b"]" * 4096 + b',"complete":false}'
+    original = subprocess.Popen([sys.executable, "-I", "-c", "raise SystemExit(29)"])
+    original_code = original.wait(timeout=10)
+    known: dict[str, JsonValue] = {
+        "command_exit_code": original_code,
+        "command_pid": original.pid,
+        "command_reaped": True,
+        "command_interruption": None,
+        "private_owner_removed": None,
+        "private_owner_valid": None,
+    }
+    (directory / "completion.json").write_bytes(
+        nested if nested_source == "working" else json.dumps(known).encode()
+    )
+    target = tmp_path / "untouched"
+    target.mkdir()
+    (target / "private.json").write_bytes(marker)
+    sealed = tmp_path / "evidence-sealed"
+    if nested_source == "sealed":
+        sealed.mkdir()
+        (sealed / "completion.json").write_bytes(nested)
+        (sealed / "manifest.json").write_text('{"command_complete":false}')
+    else:
+        sealed.symlink_to(target, target_is_directory=True)
+    temporary = tmp_path / "runner"
+    temporary.mkdir()
+    output = tmp_path / "workflow-output"
+    environment = {
+        **os.environ,
+        "RUNNER_TEMP": str(temporary),
+        "GITHUB_OUTPUT": str(output),
+        "KORA_PRICING_EVIDENCE": str(directory),
+        "KORA_PRICING_MEASUREMENT_OUTCOME": "failure",
+        "KORA_PRICING_RELEASE_OUTCOME": "failure",
+    }
+    descriptors = len(os.listdir("/dev/fd"))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from tests.measurements.pricing_lifetime_support "
+            "import pricing_publication_prepare; pricing_publication_prepare()",
+        ],
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    (tmp_path / "publication.stdout").write_bytes(result.stdout)
+    (tmp_path / "publication.stderr").write_bytes(result.stderr)
+    (tmp_path / "publication.exit").write_text(str(result.returncode))
+    assert original_code == 29
+    assert result.returncode == 1
+    assert output.is_file()
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    publication = PricingPublication.model_validate_json(outputs["identity"])
+    try:
+        assert outputs["ready"] == "true"
+        assert outputs["directory"] == str(publication.directory)
+        assert marker not in result.stderr + result.stdout
+        assert b"RecursionError" not in result.stderr
+        assert {path.name for path in publication.directory.iterdir()} == {
+            "manifest.json",
+            "completion.json",
+        }
+        completion = json.loads(
+            (publication.directory / "completion.json").read_bytes()
+        )
+        (tmp_path / "publication-completion.json").write_text(json.dumps(completion))
+        (tmp_path / "publication-manifest.json").write_bytes(
+            (publication.directory / "manifest.json").read_bytes()
+        )
+        assert completion["complete"] is False
+        assert completion["working_proof_available"] is (nested_source == "sealed")
+        for field, value in known.items():
+            assert completion[field] == (value if nested_source == "sealed" else None)
+        assert all(
+            marker not in path.read_bytes() for path in publication.directory.iterdir()
+        )
+        assert (target / "private.json").read_bytes() == marker
+    finally:
+        release = release_pricing_publication(publication, temporary)
+        (tmp_path / "publication-release.json").write_text(json.dumps(release))
+    assert list(temporary.iterdir()) == []
+    assert len(os.listdir("/dev/fd")) == descriptors
+    with pytest.raises(ChildProcessError):
+        os.waitpid(original.pid, os.WNOHANG)
+
+
+@pytest.mark.parametrize(
+    "fault", ["interrupt", "blocked_interrupt", "identity", "identity_interrupt"]
+)
+def test_pricing_publication_acquisition_preserves_masks_and_owned_cleanup(
+    tmp_path: Path, fault: str
+) -> None:
+    temporary = tmp_path / "runner"
+    temporary.mkdir()
+    target = tmp_path / "foreign-target"
+    target.mkdir()
+    (target / "sentinel").write_bytes(b"foreign-preserved")
+    proof_path = tmp_path / "acquisition-proof.json"
+    moved = tmp_path / "moved-owned"
+    script = """
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+from tests.measurements.pricing_lifetime_support import (
+    pricing_publication_allocation,
+    release_pricing_publication,
+)
+
+root = Path(sys.argv[1])
+fault = sys.argv[2]
+blocked = {signal.SIGUSR1}
+if fault == "blocked_interrupt":
+    blocked.add(signal.SIGINT)
+outer = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+expected = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+proof: dict[str, object] = {
+    "outer_mask": sorted(int(item) for item in outer),
+    "expected_mask": sorted(int(item) for item in expected),
+}
+try:
+    try:
+        with pricing_publication_allocation(root / "runner") as allocation:
+            directory = allocation.allocate()
+            proof["directory"] = str(directory)
+            if fault in {"identity", "identity_interrupt"}:
+                directory.rename(root / "moved-owned")
+                directory.symlink_to(root / "foreign-target", target_is_directory=True)
+            if fault != "identity":
+                os.kill(os.getpid(), signal.SIGINT)
+                proof["pending_before_receipt"] = sorted(
+                    int(item) for item in signal.sigpending()
+                )
+                assert signal.SIGINT in signal.sigpending()
+            publication = allocation.receipt()
+            proof["receipt"] = json.loads(publication.model_dump_json())
+        if fault == "blocked_interrupt":
+            proof["release"] = release_pricing_publication(
+                publication, root / "runner"
+            )
+    finally:
+        proof["mask_after_owner"] = sorted(
+            int(item) for item in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        )
+        proof["pending_after_owner"] = sorted(
+            int(item) for item in signal.sigpending()
+        )
+        proof["remaining_after_owner"] = sorted(
+            str(item) for item in (root / "runner").iterdir()
+        )
+        if fault == "blocked_interrupt":
+            signal.pthread_sigmask(signal.SIG_SETMASK, outer)
+finally:
+    proof["mask_before_outer_restore"] = sorted(
+        int(item) for item in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    )
+    (root / "acquisition-proof.json").write_text(json.dumps(proof))
+    signal.pthread_sigmask(signal.SIG_SETMASK, outer)
+"""
+    descriptors = len(os.listdir("/dev/fd"))
+
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), fault],
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    (tmp_path / "acquisition.stdout").write_bytes(result.stdout)
+    (tmp_path / "acquisition.stderr").write_bytes(result.stderr)
+    (tmp_path / "acquisition.exit").write_text(str(result.returncode))
+    assert result.returncode != 0
+    proof = json.loads(proof_path.read_text())
+    assert proof["mask_after_owner"] == proof["expected_mask"]
+    assert int(signal.SIGUSR1) in proof["expected_mask"]
+    assert b"ready=true" not in result.stdout
+    assert b"foreign-preserved" not in result.stdout + result.stderr
+    assert (target / "sentinel").read_bytes() == b"foreign-preserved"
+    if fault != "identity":
+        assert int(signal.SIGINT) in proof["pending_before_receipt"]
+        assert b"KeyboardInterrupt" in result.stderr
+    if fault == "blocked_interrupt":
+        assert int(signal.SIGINT) in proof["expected_mask"]
+        assert int(signal.SIGINT) in proof["pending_after_owner"]
+        assert proof["release"]["publication_released"] is True
+        assert proof["mask_before_outer_restore"] == proof["outer_mask"]
+    else:
+        assert int(signal.SIGINT) not in proof["pending_after_owner"]
+    if fault in {"identity", "identity_interrupt"}:
+        assert b"publication allocation identity is unavailable" in result.stderr
+        assert b"publication preparation and release failures" in result.stderr
+        if fault == "identity_interrupt":
+            assert (
+                b"publication acquisition and signal restoration failures"
+                in result.stderr
+            )
+        assert Path(proof["directory"]).is_symlink()
+        assert moved.is_dir()
+        moved.rmdir()
+    else:
+        assert not Path(proof["directory"]).exists()
+        assert list(temporary.iterdir()) == []
+    assert len(os.listdir("/dev/fd")) == descriptors
