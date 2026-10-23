@@ -163,7 +163,7 @@ Opens from the node panel; two attempts of one node, the counterpart as the rout
 
 | section | left and right | route |
 |---|---|---|
-| outcome | status and error class; intended and observed `strategy`/`strategy_fallback`; retained `Feedback` with author and association when authorized, otherwise explicit content access/availability | `GET …/attempts/{att}/diff?against=` |
+| outcome | status/error class and intended/observed strategy from diff metadata; retained feedback, author and association only from each exact attempt's explicitly selected saved request, with complete-byte/digest, current access and structured-render checks; unavailable/forbidden/over-limit content remains explicit | diff metadata and each owner-pinned `GET …/attempts/{att}?content=request`; never implicit feedback text in the default diff |
 | outputs | paged immutable output pairs and digest/availability; selected bounded complete StructuredOutput patch, or explicit computation refusal with original reads. VcsRef branches/links require each complete authorized source. | diff metadata, `…/diff/entries?kind=outputs`, selected `…/diff/patch?scope=output&output=` and original payload reads |
 | cost and events | usage per model with completeness; event counts | the same |
 | configuration and versions | digest/availability/actual observation metadata; explicit saved input manifest preserving nesting/order/repetitions, saved policy and config selections. Complete structured rendering uses its budget; larger manifests show a limit and complete-read reference. Config comparison counts whole saved requests and may refuse without hiding originals. | diff metadata/entries/selected patch and owner-pinned attempt content reads |
