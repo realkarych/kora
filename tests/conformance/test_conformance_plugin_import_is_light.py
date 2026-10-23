@@ -52,3 +52,23 @@ def test_conformance_requires_extra() -> None:
     assert result.code != 0
     assert b"ConformanceExtraMissing" in result.stderr
     assert b"kora[conformance]" in result.stderr
+
+
+def test_lifetime_public_records_share_protocol_identity_without_runtime_imports() -> (
+    None
+):
+    source = (
+        "import json, sys\n"
+        "from kora.conformance import LocalRuntimeBinding, LocalRuntimeRegistration\n"
+        "from kora.protocols import lifetime\n"
+        "assert LocalRuntimeBinding is lifetime.LocalRuntimeBinding\n"
+        "assert LocalRuntimeRegistration is lifetime.LocalRuntimeRegistration\n"
+        "print(json.dumps(sorted(m for m in sys.modules if m.startswith("
+        "('kora.plugins', 'kora.testing', 'kora.conformance.lifetime', "
+        "'kora.conformance.transport')))))\n"
+    )
+
+    result = run_python(["-I", "-c", source], {})
+
+    assert result.code == 0, result.stderr
+    assert json.loads(result.stdout) == []

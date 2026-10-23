@@ -60,7 +60,13 @@ if TYPE_CHECKING:
         LocalLaunchAuthority as LocalLaunchAuthority,
     )
     from kora.protocols.lifetime import (
+        LocalRuntimeBinding as LocalRuntimeBinding,
+    )
+    from kora.protocols.lifetime import (
         LocalRuntimeLaunch as LocalRuntimeLaunch,
+    )
+    from kora.protocols.lifetime import (
+        LocalRuntimeRegistration as LocalRuntimeRegistration,
     )
     from kora.protocols.lifetime import (
         OriginalOutcome as OriginalOutcome,
@@ -120,7 +126,9 @@ LIFETIME_VALUES: frozenset[str] = frozenset(
         "LifetimeLimits",
         "LifetimeReason",
         "LocalLaunchAuthority",
+        "LocalRuntimeBinding",
         "LocalRuntimeLaunch",
+        "LocalRuntimeRegistration",
         "OriginalOutcome",
         "ProcessDomain",
         "ProcessLaunch",

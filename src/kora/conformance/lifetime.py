@@ -55,6 +55,7 @@ from kora.runner.processes import (
     GatedProcess,
     ProcessCondition,
     ProcessError,
+    ProcessObservation,
     RecoveredProcess,
     complete_identity,
     start_gated,
@@ -83,6 +84,8 @@ class ResourceRecord:
     acquisition: Acquisition | None = None
     dependency: ResourceId | None = None
     fenced: bool = False
+    observed_live_processes: int = 0
+    observed_remaining_pipes: int = 0
 
 
 @dataclass
@@ -199,6 +202,18 @@ class ParentLifetime:
             )
             record = ResourceRecord(entry, token, fenced=True)
             self.records[entry.resource_id] = record
+        for record in self.records.values():
+            entry = record.entry
+            if entry.state is ResourceState.CLOSED:
+                continue
+            if isinstance(entry.registration, ProcessRegistration):
+                record.recovered = RecoveredProcess(
+                    entry.registration, self.clock, self.identities
+                )
+            elif isinstance(entry.registration, BorrowedServiceRegistration):
+                record.dependency = entry.registration.connection_scope
+        for record in self.records.values():
+            entry = record.entry
             if entry.state is ResourceState.CLOSED or entry.registration is None:
                 if (
                     entry.state is not ResourceState.RESERVED
@@ -222,13 +237,9 @@ class ParentLifetime:
                     owner_uid=registration.owner_uid,
                 )
                 record.directory = parent.open_child(identity)
-            elif isinstance(entry.registration, BorrowedServiceRegistration):
-                record.dependency = entry.registration.connection_scope
-            elif isinstance(entry.registration, ProcessRegistration):
-                record.recovered = RecoveredProcess(
-                    entry.registration, self.clock, self.identities
-                )
-            else:
+            elif not isinstance(
+                entry.registration, (BorrowedServiceRegistration, ProcessRegistration)
+            ):
                 raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
         self.bootstrap_succeeded = True
         self.diagnostics.emit("recovery", LifetimeReason.COMPLETE, len(self.records))
@@ -617,19 +628,29 @@ class ParentLifetime:
         self, resource_id: ResourceId | None
     ) -> tuple[ResourceObservation, ...]:
         await self.ready()
+        deadline = self.deadline()
         return tuple(
-            self._observation(self.records[key]) for key in self._selected(resource_id)
+            self._observation(self.records[key], deadline)
+            for key in self._selected(resource_id)
         )
 
-    def _observation(self, record: ResourceRecord) -> ResourceObservation:
-        live = 0
-        pipes = 0
-        if record.process is not None and not record.process.closed:
-            observed = record.process.observe()
-            live = len(observed.live_members)
-            pipes = int(not observed.capture_eof)
-        if record.recovered is not None and not record.recovered.closed:
-            live = len(record.recovered.observe(self.deadline()).live_members)
+    def _observation(
+        self, record: ResourceRecord, deadline: int
+    ) -> ResourceObservation:
+        if record.process is not None and record.process.closed:
+            record.observed_live_processes = 0
+            record.observed_remaining_pipes = 0
+        if record.recovered is not None and record.recovered.closed:
+            record.observed_live_processes = 0
+        if self.clock.monotonic_ns() < deadline:
+            if record.process is not None and not record.process.closed:
+                observed = record.process.observe(deadline)
+                record.observed_live_processes = len(observed.live_members)
+                record.observed_remaining_pipes = int(not observed.capture_eof)
+            if record.recovered is not None and not record.recovered.closed:
+                record.observed_live_processes = len(
+                    record.recovered.observe(deadline).live_members
+                )
         return ResourceObservation(
             resource_id=record.entry.resource_id,
             kind=record.entry.kind,
@@ -640,8 +661,8 @@ class ParentLifetime:
                 and operation.resource_id == record.entry.resource_id
                 for operation in self.operations.values()
             ),
-            live_owned_process_count=live,
-            remaining_pipe_count=pipes,
+            live_owned_process_count=record.observed_live_processes,
+            remaining_pipe_count=record.observed_remaining_pipes,
             remaining_tree_count=int(
                 record.directory is not None and not record.directory.closed
             ),
@@ -713,6 +734,8 @@ class ParentLifetime:
                     raise
 
     async def _settle_process(self, record: ResourceRecord, deadline: int) -> bool:
+        if self.clock.monotonic_ns() >= deadline:
+            return False
         if record.recovered is not None:
             try:
                 await record.recovered.settle(deadline)
@@ -749,6 +772,9 @@ class ParentLifetime:
             except ChannelError:
                 earlier_settled = False
         await self._wait_operations(selected, cooperative)
+        inventory_ready = self._bootstrap.done() and self.bootstrap_succeeded
+        if resource_id is None:
+            selected.update(self.records)
         records = [record for key, record in self.records.items() if key in selected]
         for record in records:
             if record.process is not None:
@@ -765,25 +791,40 @@ class ParentLifetime:
         for requested, phase in ((signal.SIGTERM, term), (signal.SIGKILL, killed)):
             for record in records:
                 process = record.process or record.recovered
-                if process is not None and not process.closed:
+                if (
+                    process is not None
+                    and not process.closed
+                    and self.clock.monotonic_ns() < final
+                ):
                     observation = process.observe(final)
+                    record.observed_live_processes = len(observation.live_members)
+                    if isinstance(observation, ProcessObservation):
+                        record.observed_remaining_pipes = int(
+                            not observation.capture_eof
+                        )
                     if observation.condition is ProcessCondition.LIVE:
                         self.diagnostics.emit(
                             "escalated", LifetimeReason.RESOURCE_LIVE, len(records)
                         )
                         process.signal(requested, final)
-            self.mutations.signal(requested)
+            if self.clock.monotonic_ns() < final:
+                self.mutations.signal(requested)
             for record in records:
                 await self._settle_process(record, phase)
             await self._wait_operations(selected, phase)
         operations_settled = await self._wait_operations(selected, final)
         helpers_settled = await self.mutations.settle(final)
+        if resource_id is None:
+            selected.update(self.records)
+            records = list(self.records.values())
         safe = (
-            self.bootstrap_succeeded
+            inventory_ready
+            and self.bootstrap_succeeded
             and earlier_settled
             and operations_settled
             and helpers_settled
             and not self.mutations.failed
+            and self.clock.monotonic_ns() < final
         )
         for record in records:
             if record.entry.kind is ResourceKind.BORROWED_SERVICE:
@@ -847,10 +888,11 @@ class ParentLifetime:
                     "revision": self.revision + 1,
                 }
             )
-        try:
-            await self._persist(final)
-        except LifetimeError:
-            safe = False
+        if self.bootstrap_succeeded:
+            try:
+                await self._persist(final)
+            except LifetimeError:
+                safe = False
         if safe and resource_id is None:
             root = self.mutations.root
             directory = self.mutations.directory
@@ -876,7 +918,7 @@ class ParentLifetime:
                 ):
                     safe = False
         unresolved = tuple(
-            self._observation(record)
+            self._observation(record, final)
             for record in records
             if record.entry.state is not ResourceState.CLOSED
         )

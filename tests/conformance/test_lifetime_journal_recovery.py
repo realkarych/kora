@@ -10,7 +10,12 @@ from kora.conformance.journal import JournalSnapshot
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
 from kora.protocols.lifetime import CleanupReference, ProcessRegistration, ResourceKind
 from kora.protocols.time import SystemClock
-from kora.runner.identity import NativeIdentityReader
+from kora.runner.identity import (
+    GroupObservation,
+    IdentityObservation,
+    IdentityState,
+    NativeIdentityReader,
+)
 from kora.runner.processes import RecoveredProcess, SignalResult
 from tests.conformance.test_parent_lifetime import limits
 
@@ -96,3 +101,192 @@ async def test_corrupt_journal_cannot_lose_live_process_ownership(
             )
             await process.settle(deadline)
             process.release(deadline)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["bootstrap_close", "substituted_tree"])
+async def test_recovery_close_preserves_complete_inventory(
+    tmp_path: Path, case: str
+) -> None:
+    import asyncio
+    import os
+
+    from kora.protocols.lifetime import CleanupOutcome, TemporaryTreeRegistration
+    from kora.runner.filesystem import DirectoryAnchor
+    from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
+    from tests.conformance.test_lifetime_io_helper import entered_fifo
+    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "live",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
+    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    journal = JournalSnapshot.model_validate_json(path.read_bytes())
+    registration = journal.entries[-1].registration
+    assert isinstance(registration, ProcessRegistration)
+    independent_clock = SystemClock()
+    independent = RecoveredProcess(
+        registration, independent_clock, NativeIdentityReader()
+    )
+    barrier = DirectoryAnchor.open_path(tmp_path)
+    os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
+    reading, writing = os.pipe()
+    launcher = ProbeIOHelperLauncher(tmp_path, writing, barrier.descriptor, pause_at=1)
+    clock = ControlledLifetimeClock()
+    owner = ParentLifetime(
+        limits=limits(), recovery=reference, launcher=launcher, clock=clock
+    )
+    loop = asyncio.get_running_loop()
+    while not owner.mutations.helpers:
+        wake: asyncio.Future[None] = loop.create_future()
+        loop.call_soon(wake.set_result, None)
+        await wake
+    helper = owner.mutations.helpers[-1]
+    await entered_fifo(helper.process.pid, reading, owner.deadline(), clock)
+    if case == "substituted_tree":
+        tree = journal.entries[0].registration
+        assert isinstance(tree, TemporaryTreeRegistration)
+        tree_path = path.parent / tree.name
+        tree_path.rename(path.parent / "retained-original")
+        tree_path.mkdir(mode=0o700)
+        closing = None
+    else:
+        closing = asyncio.create_task(owner.close(None))
+        await owner.closure_started.wait()
+
+    try:
+        writer = os.open(
+            "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
+        )
+        os.close(writer)
+        if case == "substituted_tree":
+            with pytest.raises(LifetimeError):
+                await owner.ready()
+            retained = path.read_bytes()
+            closing = asyncio.create_task(owner.close(None))
+            await owner.closure_started.wait()
+            clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
+            report = await asyncio.wait_for(closing, 5)
+            assert report.state is CleanupOutcome.UNKNOWN
+            assert path.read_bytes() == retained
+            assert tuple(owner.records) == tuple(
+                entry.resource_id for entry in journal.entries
+            )
+        else:
+            assert closing is not None
+            await owner.ready()
+            clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
+            report = await asyncio.wait_for(closing, 5)
+            assert report.state is CleanupOutcome.CLOSED
+            assert independent.observe(
+                independent_clock.monotonic_ns() + 5_000_000_000
+            ).settled
+            assert not path.parent.exists()
+    finally:
+        deadline = independent_clock.monotonic_ns() + 5_000_000_000
+        assert independent.signal(signal.SIGKILL, deadline) in (
+            SignalResult.SENT,
+            SignalResult.SETTLED,
+        )
+        await independent.settle(deadline)
+        independent.release(deadline)
+        if not helper.closed:
+            helper.signal(signal.SIGKILL)
+            await helper.settle(deadline)
+        os.close(reading)
+        os.close(writing)
+        barrier.close()
+
+
+class ExpiringIdentityReader:
+    def __init__(self) -> None:
+        from tests.conformance.test_lifetime_pending_helpers import (
+            ControlledLifetimeClock,
+        )
+
+        self.clock = ControlledLifetimeClock()
+        self.native = NativeIdentityReader(clock=self.clock)
+        self.expiry: int | None = None
+        self.after_expiry_reads = 0
+
+    def read(self, pid: int) -> IdentityObservation:
+        if self.expiry is not None and self.clock.monotonic_ns() >= self.expiry:
+            self.after_expiry_reads += 1
+        return self.native.read(pid)
+
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        if self.expiry is None:
+            return self.native.group(process_group_id, deadline_ns)
+        self.clock.advance(max(0, self.expiry - self.clock.monotonic_ns()))
+        return GroupObservation(IdentityState.UNKNOWN)
+
+
+@pytest.mark.asyncio
+async def test_close_report_never_restarts_expired_process_observation(
+    tmp_path: Path,
+) -> None:
+    from kora.protocols.lifetime import CleanupOutcome
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "live",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
+    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    journal = JournalSnapshot.model_validate_json(path.read_bytes())
+    registration = journal.entries[-1].registration
+    assert isinstance(registration, ProcessRegistration)
+    independent_clock = SystemClock()
+    independent = RecoveredProcess(
+        registration, independent_clock, NativeIdentityReader()
+    )
+    reader = ExpiringIdentityReader()
+    owner = ParentLifetime(
+        limits=limits(),
+        recovery=reference,
+        identities=reader,
+        clock=reader.clock,
+        launcher=InstalledIOHelperLauncher(
+            home=tmp_path, state_home=tmp_path / "state"
+        ),
+    )
+    await owner.ready()
+    reader.expiry = reader.clock.monotonic_ns() + int(
+        (
+            owner.limits.cooperative_seconds
+            + owner.limits.term_seconds
+            + owner.limits.kill_observation_seconds
+            + owner.limits.drain_seconds
+        )
+        * 1_000_000_000
+    )
+
+    try:
+        report = await owner.close(None)
+
+        assert report.state is CleanupOutcome.UNKNOWN
+        assert reader.after_expiry_reads == 0
+        assert path.exists()
+    finally:
+        deadline = independent_clock.monotonic_ns() + 5_000_000_000
+        assert independent.signal(signal.SIGKILL, deadline) is SignalResult.SENT
+        await independent.settle(deadline)
+        independent.release(deadline)
