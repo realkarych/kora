@@ -34,6 +34,7 @@ The ASCII marker `\n[transcript truncated]\n` is 24 bytes. An over-cap transcrip
 | Same index with changed declaration or validated bytes | API002 upload_part_conflict; original winner and owner remain usable for the next index after request-local cleanup |
 | Two instances race for the next index | One winner; identical loser reconciles, conflicting loser refuses, unresolved effect stays pending |
 | Lost part response, then recover | Current committed prefix without accepting bytes; next data is exactly the needed immutable part |
+| Worker restart with a new incarnation/grant | Read a matching terminal result if present; older-grant live staging is API003, requiring a fresh reference for any permitted new upload while old cleanup remains owned |
 | Lost terminal response after stage cleanup | Current authorized saved descriptor through recover; no parsing, promotion or fabricated part acknowledgment |
 | Expired unsealed ready request | API002 upload_unavailable; no sealing right or reopened staging |
 | Truncated completion followed by more source data | API003; explicit recovery can return the retained descriptor |
@@ -54,6 +55,8 @@ Planning used thirteen fresh component/profile contexts for the shared storage/u
 Propagation stops at unchanged runtime/supervisor authority, target-result atomic acceptance, saved artifact validation/approval identity and ordinary descriptor reads. No new endpoint, client business logic or console journey is introduced. Source/test/tooling/dependency changes are absent, so readiness condensation does not activate; storage abstraction condensation was independently reviewed in planning. Existing browser smoke and all existing executable checks remain required.
 
 A metadata correctness finding identified an inherited refusal rule that could retire a valid shared upload after a losing replay conflicted. The contract now distinguishes request-local conflict/order/layout rejection from whole-owner authority loss, expiry, cancellation or validation failure. The former preserves committed progress and closes only its own resources; unknown effects remain charged. The named atomic-conflict case must prove the next valid index remains usable after cleanup. This resolves the ambiguity without weakening whole-owner retirement or provider closure.
+
+Worker correctness review also identified undifferentiated restart wording that could imply cross-grant stage resumption. The API and worker flow now distinguish response loss/API-process restart under the same live grant from a worker restart obtaining a new grant. Only the former resumes partial progress; the latter may read a terminal result, otherwise uses a fresh reference for any permitted new upload. Existing ownership and cleanup do not transfer. The response-loss case now requires both restart paths on both databases.
 
 ## Runtime activation and evidence limits
 
