@@ -30,6 +30,9 @@ classifiers = [
 [project.scripts]
 kora = "kora.__main__:main"
 
+[project.entry-points."kora.provider"]
+"secrets.env" = "kora.plugins.secrets.env:provider_metadata"
+
 [project.urls]
 Homepage = "https://github.com/realkarych/kora"
 Repository = "https://github.com/realkarych/kora"

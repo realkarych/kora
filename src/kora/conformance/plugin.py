@@ -64,3 +64,13 @@ def kora_secrets_resolvable() -> object:
 @pytest.fixture
 def kora_secrets_missing_reference() -> object:
     raise ConformanceFixtureMissing("kora_secrets_missing_reference")
+
+
+@pytest.fixture
+def kora_secrets_forbidden_reference() -> object:
+    raise ConformanceFixtureMissing("kora_secrets_forbidden_reference")
+
+
+@pytest.fixture
+def kora_secrets_listed_prefix() -> object:
+    raise ConformanceFixtureMissing("kora_secrets_listed_prefix")

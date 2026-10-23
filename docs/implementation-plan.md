@@ -2,6 +2,8 @@
 
 API error and authorization amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #135](https://github.com/realkarych/kora/issues/135) on 2026-10-23.
 
+Secrets and redaction amendment dated 2026-10-23: work item 14's env secrets provider and redaction land under [issue #192](https://github.com/realkarych/kora/issues/192), and its `allow_deny` policy moves to [issue #233](https://github.com/realkarych/kora/issues/233); wording pending line-by-line owner review.
+
 Pricing amendment dated 2026-10-23: the project owner approved the ownership, normalization and approval-cost plan under [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/221#issuecomment-6354160885) on 2026-10-23. The contract is specified; [#213](https://github.com/realkarych/kora/issues/213) owns the pending models/arithmetic and metadata migration, with its own plan approval before code.
 
 Scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127) on 2026-10-19; wording pending line-by-line owner review.
@@ -196,7 +198,7 @@ The work items are not issues yet. Each is opened when the owner asks, with the 
 | 11 | API application and the graph operations; the parity coverage test, the published OpenAPI document, the client contract test and the route-authorization coverage test; the stdio MCP server | server | 3, 8, 9; step 7; #140, #141 |
 | 12 | Run operations: trigger, run reads, events, nodes and attempts, logs, artifacts and cancel | server | 7, 11 |
 | 13 | `executor` and the git provider, with head reads against a local repository | execution | 6; #140 |
-| 14 | `runner` and the local runtime: registry, control channel, journal, transfer, retirement, adoption evidence and the harness launcher; the env secrets provider and redaction; the `allow_deny` policy | execution | 6, 7, 13; #123, #140, #141, #213 |
+| 14 | `runner` and the local runtime: registry, control channel, journal, transfer, retirement, adoption evidence and the harness launcher; the env secrets provider and redaction ([issue #192](https://github.com/realkarych/kora/issues/192): `kora.plugins.secrets.env`, `StreamMasker` and the snapshot registry, proven by `test_env_secrets_resolution`, `test_env_secrets_never_resolve_kora_variables`, `test_stream_masker_masks_across_chunks`, the provider legs of `test_secret_registration_lifetime` and `test_logging_redacts_content_and_safe_exception_chains`, and `test_logging_redaction_state_is_bounded_across_rotation`, with first baselines in the logging overhead measurement's redaction and `StreamMasker` rows and the protocol model measurement's registration workloads); the `allow_deny` policy ([issue #233](https://github.com/realkarych/kora/issues/233)) | execution | 6, 7, 13; #123, #140, #141, #213 |
 | 15 | `claude` and `codex` adapters, each with independent conformance, real policy-hook and launcher evidence, observability and resource-lifetime measurements. They may land in separate implementing issues and PRs, but both are required for slice acceptance | execution | 7, 14; #140, #213 |
 | 16 | Observation dispatcher: CLI channel delivery and the head reads of VCS-bound approvals | server | 8, 10, 13 |
 | 17 | `worker`, the worker routes and their client methods, request sealing with template rendering | execution | 7, 9, 11, 14; steps 6, 7, 8 |
@@ -390,10 +392,10 @@ The configuration-model part of work item 2 ([#212](https://github.com/realkaryc
 | NFR-3.1 scheduling latency: end to end | 21 |
 | Logging overhead and bounded output ([observability.md section 8](../knowledge/specs/observability.md#8-future-executable-evidence)) | 1 |
 | Event-sink back-pressure against policy-callback, interrupt and SDK-reader latency, including callback-emitted records and a stuck writer ([issue #134](https://github.com/realkarych/kora/issues/134)) | 14 with the fake adapter, 15 with Claude |
-| Redaction matching cost per record under the stream-volume workload ([issue #134](https://github.com/realkarych/kora/issues/134)) | 14 |
+| Redaction matching cost per record under the stream-volume workload ([issue #134](https://github.com/realkarych/kora/issues/134)) | 14; first baselines under #192 in `test_logging_overhead.py` (the redaction rows, including diverse text, and the `StreamMasker` per-line, 64 KiB, adversarial and small-feed rows) |
 | Finalisation memory at the collection caps and the 100,000-event ceiling, and memory during the writer-health window ([issue #134](https://github.com/realkarych/kora/issues/134)) | 7, 15 |
 | Command output volume and on-disk log bytes ([issue #134](https://github.com/realkarych/kora/issues/134)) | 13, 14 |
-| Redaction registration count, bytes and CPU across rotation, reacquisition, API issuance and adoption ([issue #134](https://github.com/realkarych/kora/issues/134)) | 14 |
+| Redaction registration count, bytes and CPU across rotation, reacquisition, API issuance and adoption ([issue #134](https://github.com/realkarych/kora/issues/134)) | 14; the rotation row of `test_logging_overhead.py` and the registration workloads of `test_protocol_models_cost.py` under #192; API issuance and adoption remain with 11 and 17 |
 | Counter write frequency per heartbeat ([issue #134](https://github.com/realkarych/kora/issues/134)) | 17 |
 | Journal fsync and group-commit cost on macOS ([issue #134](https://github.com/realkarych/kora/issues/134)) | 14 |
 | NFR-3.2 relay latency ([issue #134](https://github.com/realkarych/kora/issues/134)) | 15, 17 |

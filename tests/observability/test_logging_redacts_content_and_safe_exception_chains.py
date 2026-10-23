@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import types
 import warnings
@@ -7,6 +8,8 @@ import pytest
 import structlog.contextvars
 from sqlalchemy.exc import IntegrityError
 
+from kora.conformance.capture import Capture
+from kora.conformance.common import NAMESPACE_ID, context_for, kora_capture
 from kora.db import DB_COMPONENT
 from kora.db.connection import Database
 from kora.db.reads import token_by_digest
@@ -18,6 +21,8 @@ from kora.observability import (
     RenderFormat,
     SecretAdmissionError,
 )
+from kora.plugins.secrets.env import EnvSecretsConfiguration, EnvSecretsProvider
+from kora.protocols.errors import KoraProtocolError
 from tests.db.seed import Seeder
 from tests.observability.conftest import (
     LEVEL_EVENTS,
@@ -27,6 +32,8 @@ from tests.observability.conftest import (
     Pipe,
 )
 from tests.support.warning_filters import every_warning_raised
+
+__all__ = ["kora_capture"]
 
 REGISTERED_VALUE: str = "canary-registered-value-0001"
 UNREGISTERED_MARKER: str = "UNREGISTERED-MARKER-7731"
@@ -383,3 +390,34 @@ async def test_sql_parameters_and_statements_never_appear_in_diagnostics(
     assert bridged
     assert all(str(record["logger"]).startswith("sqlalchemy") for record in bridged)
     assert all(set(record) <= BRIDGED_RECORD_KEYS | {"exception"} for record in bridged)
+
+
+PROVIDER_VALUES: dict[str, str] = {
+    "CONF_SHORT": "short",
+    "CONF_WIDE": "é" * 1500,
+    "OTHER_TOKEN": "other-namespace-value-91",
+}
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["secret://env/CONF_SHORT", "secret://env/CONF_WIDE", "secret://env/OTHER_TOKEN"],
+)
+def test_secrets_provider_failures_leave_no_value_in_records_or_chains(
+    kora_capture: Capture, reference: str
+) -> None:
+    configuration = EnvSecretsConfiguration.model_validate(
+        {"namespace_prefixes": {NAMESPACE_ID: ["CONF_"]}}
+    )
+    provider = EnvSecretsProvider(configuration, PROVIDER_VALUES)
+
+    with pytest.raises(KoraProtocolError) as raised:
+        asyncio.run(provider.resolve(reference, context_for(kora_capture)))
+    kora_capture.finish()
+    lines = "\n".join(kora_capture.reader.lines())
+
+    chain = f"{raised.value!r} {raised.value.__cause__!r} {raised.value.__context__!r}"
+    rendered = f"{lines} {chain} {raised.value.details}"
+    assert [value for value in PROVIDER_VALUES.values() if value in rendered] == []
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
