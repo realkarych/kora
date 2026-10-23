@@ -22,7 +22,7 @@ The reviewed design resolves the following concrete concerns:
 - Runtime release retains tombstones. Separate disposable-environment destruction requires every producer and older effect closed, with no unknown recovery/publication and no borrowed/production root.
 - The runtime interface uses the same acquisition operation; there is no additional launch state machine. Cleanup uses the invocation ID as its journal key, without a second public identifier or settlement watermark.
 
-The project owner [approved the plan and exact documents](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23. The [published plan and review evidence](https://github.com/realkarych/kora/issues/231#issuecomment-6367818635) retain the reviewed draft. The contract is [conformance-lifetime.md](../specs/conformance-lifetime.md); ADR-0005 records the decision. Integration preserves the subsequently merged IR amendment in master `7e34181`.
+The project owner [approved the plan and exact documents](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23. The [published plan and review evidence](https://github.com/realkarych/kora/issues/231#issuecomment-6367818635) retain the reviewed draft. The contract is [conformance-lifetime.md](../specs/conformance-lifetime.md); ADR-0005 records the decision. Integration preserves the subsequently merged IR amendment and VcsRef revision-1 contract in master `85577d2`.
 
 ## Readiness evidence ownership
 
