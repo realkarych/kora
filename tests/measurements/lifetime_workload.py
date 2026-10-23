@@ -2,6 +2,7 @@ import asyncio
 import contextvars
 import gc
 import os
+import resource
 import socket
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from pydantic import BaseModel, ConfigDict
 from kora.conformance.controllers import duration_ns
 from kora.conformance.lifetime import LifetimeError, ParentLifetime, RecoveryAttempts
 from kora.conformance.transport import LifetimeEndpoint
+from kora.protocols.identity import ProcessIdentity
 from kora.protocols.lifetime import (
     CleanupOutcome,
     CleanupReference,
@@ -33,6 +35,7 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
+from kora.runner.identity import NativeIdentityReader
 from kora.runner.processes import ExitAnchor
 from tests.conformance.test_lifetime_cleanup_controls import (
     close_recovered_test_owner,
@@ -74,7 +77,8 @@ class CycleResult(BaseModel):
     journal_removed: bool
     owner_collected: bool
     input_collected: bool
-    original_parent_heap_peak_bytes: int
+    original_parent_heap_peak_bytes: int | None
+    original_parent_native_peak_bytes: int | None
 
 
 class RunResult(BaseModel):
@@ -95,6 +99,9 @@ class OriginalResult(BaseModel):
     reference: CleanupReference
     helpers: int
     heap_peak_bytes: int
+    native_peak_bytes: int
+    identities: tuple[ProcessIdentity, ...]
+    unobserved_pids: tuple[int, ...]
 
 
 async def turn() -> None:
@@ -261,7 +268,7 @@ async def ordinary_cycle(
 
 
 async def run_original(home: Path, observation: int) -> None:
-    launcher = MeasuredIOHelperLauncher(home, observation)
+    launcher = MeasuredIOHelperLauncher(home, observation, cold_first=False)
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(clock=clock, launcher=launcher, limits=limits())
     retained = False
@@ -272,15 +279,27 @@ async def run_original(home: Path, observation: int) -> None:
             request = launch_value(tree, "", "shutdown", False)
             acquired = await owner.acquire(token, new_operation_id(), request)
             await owner.acknowledge(token, acquired.operation_id, acquired.revision)
+            observed = NativeIdentityReader().read(os.getpid())
+            assert observed.process is not None
+            assert isinstance(acquired.registration, ProcessRegistration)
+            launcher.identities.update(
+                (observed.process.identity, acquired.registration.process)
+            )
             encoded = (
                 OriginalResult(
                     reference=CleanupReference(invocation_id=owner.invocation_id),
                     helpers=launcher.starts,
                     heap_peak_bytes=tracemalloc.get_traced_memory()[1],
+                    native_peak_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                    * (1024 if sys.platform == "linux" else 1),
+                    identities=tuple(launcher.identities),
+                    unobserved_pids=tuple(launcher.unobserved_pids),
                 )
                 .model_dump_json()
                 .encode("ascii")
             )
+            if len(encoded) > 4096:
+                raise ValueError("original parent observation exceeds bound")
             if os.write(1, encoded) != len(encoded):
                 raise OSError("incomplete recovery reference")
             retained = True
@@ -296,7 +315,7 @@ async def recovery_cycle(
     attempts: RecoveryAttempts,
     observer: Observer,
     index: int,
-) -> tuple[bool, int, int, weakref.ReferenceType[ParentLifetime]]:
+) -> tuple[bool, int, int, int, weakref.ReferenceType[ParentLifetime]]:
     with subprocess.Popen(
         [
             sys.executable,
@@ -323,6 +342,8 @@ async def recovery_cycle(
             assert original.wait() == 0
             result = OriginalResult.model_validate_json(original.stdout.read(4096))
             reference = result.reference
+            launcher.identities.update(result.identities)
+            launcher.unobserved_pids.update(result.unobserved_pids)
         finally:
             anchor.close()
             if original.poll() is None:
@@ -371,6 +392,7 @@ async def recovery_cycle(
             not invocation_path(home, reference.invocation_id).exists(),
             result.helpers,
             result.heap_peak_bytes,
+            result.native_peak_bytes,
             weakref.ref(owner),
         )
     finally:
@@ -409,7 +431,7 @@ async def measure(home: Path, artifacts: Path, loop: MeasuredLoop) -> RunResult:
     )
     launcher = MeasuredIOHelperLauncher(home, helper_fd)
     attempts = RecoveryAttempts()
-    observer = Observer(artifacts / "points.jsonl", loop, attempts)
+    observer = Observer(artifacts / "points.jsonl", loop, attempts, launcher)
     cycles: list[CycleResult] = []
     settled: list[Point] = []
     retained: list[dict[str, int]] = []
@@ -427,7 +449,8 @@ async def measure(home: Path, artifacts: Path, loop: MeasuredLoop) -> RunResult:
             owner_reference = None
             removed = False
             original_helpers = 0
-            original_peak = 0
+            original_peak = None
+            original_native = None
             clock = ControlledLifetimeClock()
             try:
                 async with asyncio.timeout(10):
@@ -436,6 +459,7 @@ async def measure(home: Path, artifacts: Path, loop: MeasuredLoop) -> RunResult:
                             removed,
                             original_helpers,
                             original_peak,
+                            original_native,
                             owner_reference,
                         ) = await recovery_cycle(
                             home, helper_fd, launcher, attempts, observer, index
@@ -484,6 +508,7 @@ async def measure(home: Path, artifacts: Path, loop: MeasuredLoop) -> RunResult:
                     owner_collected=collected,
                     input_collected=input_collected,
                     original_parent_heap_peak_bytes=original_peak,
+                    original_parent_native_peak_bytes=original_native,
                 )
             )
             if (index + 1) % 10 == 0:

@@ -6,43 +6,67 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
 from kora.conformance.io_helper import IOHelper
+from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock
-from kora.runner.identity import ProcPidInfo
+from kora.runner.identity import NativeIdentityReader, ProcPidInfo
 
 
-class HelperMeasurement(BaseModel):
+class HelperCounters(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     pid: int
     code: int
     import_ns: int
     total_ns: int
-    heap_bytes: int
-    heap_peak_bytes: int
     native_peak_bytes: int
     imports: int
     descriptors_before_kernel_exit: int
 
 
+class ColdHelperMeasurement(HelperCounters):
+    trace_scope: Literal["cold_import"]
+    cold_current_bytes: int
+    cold_peak_bytes: int
+
+
+class MutationHelperMeasurement(HelperCounters):
+    trace_scope: Literal["mutation"]
+    mutation_current_bytes: int
+    mutation_peak_bytes: int
+
+
+HELPER_MEASUREMENT = TypeAdapter(
+    Annotated[
+        ColdHelperMeasurement | MutationHelperMeasurement,
+        Field(discriminator="trace_scope"),
+    ]
+)
+
+
 class MeasuredIOHelperLauncher:
-    def __init__(self, home: Path, measurement_descriptor: int) -> None:
+    def __init__(
+        self, home: Path, measurement_descriptor: int, *, cold_first: bool = True
+    ) -> None:
         self.home = home
         self.measurement_descriptor = measurement_descriptor
         self.starts = 0
+        self.cold_first = cold_first
+        self.identities: set[ProcessIdentity] = set()
+        self.unobserved_pids: set[int] = set()
 
     def start(self, descriptors: tuple[int, ...], clock: Clock) -> IOHelper:
         parent, child = socket.socketpair()
+        cold = self.cold_first and self.starts == 0
         try:
             process = subprocess.Popen(
                 [
                     sys.executable,
-                    "-X",
-                    "tracemalloc=1",
+                    *(("-X", "tracemalloc=1") if cold else ()),
                     "-I",
                     str(Path(__file__).with_name("lifetime_io_measurement.py")),
                 ],
@@ -55,6 +79,9 @@ class MeasuredIOHelperLauncher:
                     "KORA_IO_CONTROL_FD": str(child.fileno()),
                     "KORA_IO_DESCRIPTORS": ",".join(str(item) for item in descriptors),
                     "KORA_MEASUREMENT_FD": str(self.measurement_descriptor),
+                    "KORA_MEASUREMENT_TRACE_SCOPE": "cold_import"
+                    if cold
+                    else "mutation",
                 },
                 close_fds=True,
                 pass_fds=(child.fileno(), self.measurement_descriptor, *descriptors),
@@ -66,6 +93,11 @@ class MeasuredIOHelperLauncher:
         finally:
             child.close()
         self.starts += 1
+        observed = NativeIdentityReader().read(process.pid)
+        if observed.process is None:
+            self.unobserved_pids.add(process.pid)
+        else:
+            self.identities.add(observed.process.identity)
         return IOHelper(process, parent, clock)
 
 

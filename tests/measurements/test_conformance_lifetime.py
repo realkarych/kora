@@ -10,7 +10,11 @@ from pathlib import Path
 import pytest
 
 from tests.measurements.harness import Report, Sample, report_lifecycle
-from tests.measurements.lifetime_measurement_support import HelperMeasurement
+from tests.measurements.lifetime_measurement_support import (
+    HELPER_MEASUREMENT,
+    ColdHelperMeasurement,
+    MutationHelperMeasurement,
+)
 from tests.measurements.lifetime_observation import Point
 from tests.measurements.lifetime_workload import SEQUENCE, RunResult
 
@@ -36,6 +40,8 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
         sample_interval_seconds=0.02,
         parent_trace_frames=1,
         helper_trace_frames=1,
+        cold_helper_records_per_parent=1,
+        helper_mutation_trace_start="immediately_before_main",
         direct_environment_bytes=440000,
         wire_environment_bytes=220000,
         artifacts=str(artifacts),
@@ -67,7 +73,7 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
         assert completed.returncode == 0, (folder / "stderr.txt").read_text()
         result = RunResult.model_validate_json((folder / "stdout.json").read_bytes())
         helpers = tuple(
-            HelperMeasurement.model_validate_json(line)
+            HELPER_MEASUREMENT.validate_json(line)
             for line in (folder / "helpers.jsonl").read_bytes().splitlines()
         )
         points = tuple(
@@ -79,6 +85,16 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
         assert len(result.settled) == 8
         assert len(result.retained_types) == 8
         assert len(helpers) == result.helpers
+        cold = tuple(
+            helper for helper in helpers if isinstance(helper, ColdHelperMeasurement)
+        )
+        mutations = tuple(
+            helper
+            for helper in helpers
+            if isinstance(helper, MutationHelperMeasurement)
+        )
+        assert len(cold) == 1
+        assert len(mutations) == result.helpers - 1
         assert len(points) == result.samples
         baseline = result.settled[0]
         for counts in result.retained_types:
@@ -92,11 +108,22 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
             assert settled.native_threads == baseline.native_threads
             assert settled.imports == baseline.imports
             assert not settled.child_rss
+            assert settled.tracked_processes > 0
+            assert settled.absent_processes == settled.tracked_processes
+            assert settled.unknown_processes == 0
             assert not any(settled.recovery.values())
         for cycle in result.cycles:
             assert cycle.journal_removed
             assert cycle.owner_collected
             assert cycle.input_collected
+            if cycle.workload == "recovery":
+                assert cycle.original_parent_heap_peak_bytes is not None
+                assert cycle.original_parent_heap_peak_bytes > 0
+                assert cycle.original_parent_native_peak_bytes is not None
+                assert cycle.original_parent_native_peak_bytes > 0
+            else:
+                assert cycle.original_parent_heap_peak_bytes is None
+                assert cycle.original_parent_native_peak_bytes is None
             report.samples.append(
                 Sample(
                     cycle.workload,
@@ -108,6 +135,12 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
                         "helpers": cycle.helpers,
                         "captured_bytes": cycle.captured_bytes,
                         "process_code": cycle.process_code,
+                        "original_parent_heap_peak_bytes": (
+                            cycle.original_parent_heap_peak_bytes
+                        ),
+                        "original_parent_native_peak_bytes": (
+                            cycle.original_parent_native_peak_bytes
+                        ),
                         "settled": True,
                     },
                 )
@@ -119,9 +152,14 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
         report.environment[f"parent_{run}_rss_peak_bytes"] = max(
             point.rss_bytes for point in points
         )
-        report.environment[f"helper_{run}_heap_peak_bytes"] = max(
-            helper.heap_peak_bytes for helper in helpers
+        report.environment[f"helper_{run}_cold_heap_peak_bytes"] = cold[
+            0
+        ].cold_peak_bytes
+        report.environment[f"helper_{run}_mutation_heap_peak_bytes"] = max(
+            helper.mutation_peak_bytes for helper in mutations
         )
+        report.environment[f"helper_{run}_cold_records"] = len(cold)
+        report.environment[f"helper_{run}_mutation_records"] = len(mutations)
         report.gates[f"parent_{run}_explicit_settlement"] = True
 
     report.gates["all_240_cycles"] = len(report.samples) == 240

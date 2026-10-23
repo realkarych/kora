@@ -7,12 +7,17 @@ import tracemalloc
 
 
 def run() -> int:
-    if not tracemalloc.is_tracing():
-        raise RuntimeError("interpreter allocation tracing required")
+    scope = os.environ["KORA_MEASUREMENT_TRACE_SCOPE"]
+    if scope not in ("cold_import", "mutation"):
+        raise ValueError("unknown helper trace scope")
+    if tracemalloc.is_tracing() != (scope == "cold_import"):
+        raise RuntimeError("helper trace scope does not match interpreter tracing")
     started = time.perf_counter_ns()
     from kora.conformance.io_helper import main
 
     imported = time.perf_counter_ns()
+    if scope == "mutation":
+        tracemalloc.start(1)
     code = main()
     current, peak = tracemalloc.get_traced_memory()
     native_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -23,8 +28,15 @@ def run() -> int:
                 "code": code,
                 "import_ns": imported - started,
                 "total_ns": time.perf_counter_ns() - started,
-                "heap_bytes": current,
-                "heap_peak_bytes": peak,
+                "trace_scope": scope,
+                **(
+                    {"cold_current_bytes": current, "cold_peak_bytes": peak}
+                    if scope == "cold_import"
+                    else {
+                        "mutation_current_bytes": current,
+                        "mutation_peak_bytes": peak,
+                    }
+                ),
                 "native_peak_bytes": native_peak
                 * (1024 if sys.platform == "linux" else 1),
                 "imports": len(sys.modules),

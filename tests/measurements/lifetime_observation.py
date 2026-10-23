@@ -15,7 +15,10 @@ from pydantic import BaseModel, ConfigDict
 
 from kora.conformance.lifetime import ParentLifetime, RecoveryAttempts
 from kora.protocols.lifetime import ProcessRegistration
+from kora.runner.identity import IdentityState, NativeIdentityReader
+from kora.runner.processes import complete_identity
 from tests.measurements.lifetime_measurement_support import (
+    MeasuredIOHelperLauncher,
     NativeCounters,
     descriptor_kinds,
 )
@@ -59,6 +62,9 @@ class Point(BaseModel):
     departed_child_counters: int
     ownership: dict[str, int]
     recovery: dict[str, int]
+    tracked_processes: int
+    absent_processes: int
+    unknown_processes: int
 
 
 def ownership(owner: ParentLifetime | None) -> dict[str, int]:
@@ -93,13 +99,18 @@ def ownership(owner: ParentLifetime | None) -> dict[str, int]:
 
 class Observer:
     def __init__(
-        self, path: Path, loop: MeasuredLoop, attempts: RecoveryAttempts
+        self,
+        path: Path,
+        loop: MeasuredLoop,
+        attempts: RecoveryAttempts,
+        launcher: MeasuredIOHelperLauncher,
     ) -> None:
         self.descriptor = os.open(
             path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
         )
         self.loop = loop
         self.attempts = attempts
+        self.launcher = launcher
         self.native = NativeCounters()
         self.started = time.perf_counter_ns()
         self.count = 0
@@ -110,13 +121,26 @@ class Observer:
         self.monitor: asyncio.Task[None] | None = None
         self.stopping = asyncio.Event()
 
+    def track_owner(self) -> None:
+        if self.owner is not None:
+            self.launcher.identities.update(
+                registration.process
+                for record in self.owner.records.values()
+                if isinstance(
+                    registration := record.entry.registration, ProcessRegistration
+                )
+            )
+
     def point(self) -> Point:
         heap, peak = tracemalloc.get_traced_memory()
         resident, threads = self.native.read(os.getpid())
         native_peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         recovery = self.attempts.inventory()
+        self.track_owner()
         child_rss: dict[int, int] = {}
         departed = 0
+        absent = 0
+        unknown = len(self.launcher.unobserved_pids)
         pids: set[int] = set()
         if self.owner is not None:
             pids.update(
@@ -140,6 +164,34 @@ class Observer:
                 if failure.errno not in (errno.ESRCH, errno.ENOENT):
                     raise
                 departed += 1
+        if self.phase == "settled":
+            reader = NativeIdentityReader()
+            current = reader.read(os.getpid())
+            assert current.process is not None
+            identity = current.process.identity
+            for saved in self.launcher.identities:
+                if not complete_identity(saved) or (
+                    saved.host_id,
+                    saved.boot_id,
+                    saved.pid_namespace,
+                ) != (identity.host_id, identity.boot_id, identity.pid_namespace):
+                    unknown += 1
+                    continue
+                observed = reader.read(saved.pid)
+                if observed.state is IdentityState.ABSENT or (
+                    observed.state is IdentityState.PRESENT
+                    and observed.process is not None
+                    and complete_identity(observed.process.identity)
+                    and observed.process.identity != saved
+                ):
+                    absent += 1
+                elif (
+                    observed.state is IdentityState.PRESENT
+                    and observed.process is not None
+                ):
+                    child_rss[saved.pid] = self.native.read(saved.pid)[0]
+                else:
+                    unknown += 1
         return Point(
             cycle=self.cycle,
             workload=self.workload,
@@ -167,6 +219,10 @@ class Observer:
                 "completed_tasks": recovery.completed_tasks,
                 "callbacks": recovery.dependency_callbacks,
             },
+            tracked_processes=len(self.launcher.identities)
+            + len(self.launcher.unobserved_pids),
+            absent_processes=absent,
+            unknown_processes=unknown,
         )
 
     def record(self) -> Point:
@@ -210,13 +266,22 @@ class Observer:
 
     async def settled(self) -> Point:
         await self.finish()
+        self.track_owner()
         self.owner = None
         self.phase = "settled"
         gc.collect()
         barrier: asyncio.Future[None] = self.loop.create_future()
         self.loop.call_soon(barrier.set_result, None)
         await barrier
-        return self.record()
+        gc.collect()
+        point = self.record()
+        assert point.tracked_processes > 0
+        assert point.absent_processes == point.tracked_processes
+        assert point.unknown_processes == 0
+        assert not point.child_rss
+        self.launcher.identities.clear()
+        self.launcher.unobserved_pids.clear()
+        return point
 
     async def close(self) -> None:
         try:
