@@ -327,7 +327,7 @@ class GatedProcess:
         ready = await channel.read_frame(self._deadline)
         if ready != b"ready":
             raise ChannelError(ChannelFailure.MALFORMED)
-        observation = self.observe()
+        observation = self.observe(self._deadline)
         if observation.condition is not ProcessCondition.LIVE:
             raise ProcessError(observation.condition)
         self._prepared = True
@@ -341,7 +341,7 @@ class GatedProcess:
         channel = self._channel
         if channel is None:
             raise ProcessError(ProcessCondition.UNKNOWN)
-        observation = self.observe()
+        observation = self.observe(self._deadline)
         if observation.condition is not ProcessCondition.LIVE:
             raise ProcessError(observation.condition)
         await channel.write_frame(b"activate", self._deadline)
@@ -361,11 +361,15 @@ class GatedProcess:
             and process.session_id == registration.session_id
         )
 
-    def _confirm_dead_group(self, known_dead: dict[int, ProcessIdentity]) -> bool:
+    def _confirm_dead_group(
+        self, known_dead: dict[int, ProcessIdentity], deadline_ns: int | None
+    ) -> bool:
         registration = self._registration
         if registration is None:
             return False
-        confirmation = self._identities.group(registration.process_group_id)
+        confirmation = self._identities.group(
+            registration.process_group_id, deadline_ns
+        )
         if confirmation.state is not IdentityState.PRESENT:
             return False
         if registration.process.pid not in tuple(
@@ -385,7 +389,7 @@ class GatedProcess:
                 return False
         return True
 
-    def observe(self) -> ProcessObservation:
+    def observe(self, deadline_ns: int | None = None) -> ProcessObservation:
         anchor = self._anchor
         registration = self._registration
         exited = anchor is not None and anchor.exited
@@ -403,7 +407,7 @@ class GatedProcess:
             return ProcessObservation(ProcessCondition.MISMATCH, (), exited, eof)
         if leader.state is IdentityState.ABSENT and not exited:
             return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
-        group = self._identities.group(registration.process_group_id)
+        group = self._identities.group(registration.process_group_id, deadline_ns)
         if group.state is not IdentityState.PRESENT:
             return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
         if registration.process.pid not in tuple(pid for pid, _ in group.members):
@@ -459,11 +463,15 @@ class GatedProcess:
         condition = (
             ProcessCondition.SETTLED if exited and not live else ProcessCondition.LIVE
         )
-        if condition is ProcessCondition.SETTLED and not self._confirm_dead_group(dead):
+        if condition is ProcessCondition.SETTLED and not self._confirm_dead_group(
+            dead, deadline_ns
+        ):
             condition = ProcessCondition.UNKNOWN
         return ProcessObservation(condition, tuple(live), exited, eof)
 
-    def signal(self, requested: signal.Signals) -> SignalResult:
+    def signal(
+        self, requested: signal.Signals, deadline_ns: int | None = None
+    ) -> SignalResult:
         if requested not in (signal.SIGTERM, signal.SIGKILL):
             raise ValueError("only TERM and KILL are local cleanup signals")
         self.close_gate()
@@ -472,7 +480,7 @@ class GatedProcess:
         registration = self._registration
         if registration is None or registration.process_group_id == os.getpgrp():
             return SignalResult.UNKNOWN
-        observation = self.observe()
+        observation = self.observe(deadline_ns)
         if observation.condition is ProcessCondition.MISMATCH:
             return SignalResult.MISMATCH
         if observation.condition is ProcessCondition.UNKNOWN:
@@ -483,7 +491,9 @@ class GatedProcess:
             os.killpg(registration.process_group_id, requested)
         except (PermissionError, ProcessLookupError):
             return (
-                SignalResult.SETTLED if self.observe().settled else SignalResult.UNKNOWN
+                SignalResult.SETTLED
+                if self.observe(deadline_ns).settled
+                else SignalResult.UNKNOWN
             )
         return SignalResult.SENT
 
@@ -499,7 +509,7 @@ class GatedProcess:
     async def settle(self, deadline_ns: int) -> None:
         await self.wait_exit(deadline_ns)
         while True:
-            observation = self.observe()
+            observation = self.observe(deadline_ns)
             if observation.settled:
                 return
             if observation.condition is ProcessCondition.MISMATCH:
@@ -528,12 +538,12 @@ class GatedProcess:
                     if not timeout.cancelled():
                         raise
 
-    def release(self) -> int:
+    def release(self, deadline_ns: int | None = None) -> int:
         if self._released:
             if self.returncode is None:
                 raise ProcessError(ProcessCondition.START_FAILED)
             return self.returncode
-        observation = self.observe()
+        observation = self.observe(deadline_ns)
         if not observation.settled or not observation.capture_eof:
             raise ProcessError(observation.condition)
         process = self._process
@@ -574,7 +584,7 @@ def start_gated(
         validated_operation,
         acquisition_deadline_ns,
         clock,
-        identities if identities is not None else NativeIdentityReader(),
+        identities if identities is not None else NativeIdentityReader(clock=clock),
         cwd_descriptor,
     )
     return owner

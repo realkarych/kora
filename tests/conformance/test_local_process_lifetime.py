@@ -192,14 +192,36 @@ async def test_channel_rejects_concurrent_writers_and_releases_cancellation() ->
     assert closed.value.reason is ChannelFailure.CLOSED
 
 
-def test_native_identity_reads_actual_parent_group_and_unknown_pid() -> None:
+@pytest.mark.asyncio
+async def test_native_identity_reads_owned_group_parent_identity_and_unknown_pid(
+    tmp_path: Path,
+) -> None:
     from kora.runner.identity import IdentityState, NativeIdentityReader
+    from kora.runner.processes import start_gated
 
     reader = NativeIdentityReader()
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    owner = start_gated(
+        launch("pass", ProcessDomain.INVOCATION),
+        "3" * 32,
+        directory,
+        deadline,
+        clock,
+    )
+    os.close(directory)
 
-    observation = reader.read(os.getpid())
-    group = reader.group(os.getpgrp())
-    absent = reader.read(2**31 - 1)
+    try:
+        registration = await owner.prepare()
+        observation = reader.read(os.getpid())
+        group = reader.group(registration.process_group_id, deadline)
+        absent = reader.read(2**31 - 1)
+    finally:
+        owner.signal(signal.SIGKILL)
+        await owner.settle(deadline)
+        await owner.drain(deadline)
+        owner.release()
 
     assert observation.state is IdentityState.PRESENT
     process = observation.process
@@ -212,7 +234,11 @@ def test_native_identity_reads_actual_parent_group_and_unknown_pid() -> None:
     assert process.session_id == os.getsid(0)
     assert not process.dead
     assert group.state is IdentityState.PRESENT
-    assert os.getpid() in tuple(pid for pid, _ in group.members)
+    assert tuple(pid for pid, _ in group.members) == (registration.process.pid,)
+    member = group.members[0][1]
+    assert member.state is IdentityState.PRESENT
+    assert member.process is not None
+    assert member.process.identity == registration.process
     assert absent.state is IdentityState.ABSENT
 
 
@@ -546,10 +572,12 @@ class FilteredIdentityReader:
             return replace(result, process=replace(original, identity=changed))
         return result
 
-    def group(self, process_group_id: int) -> "GroupObservation":
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> "GroupObservation":
         from dataclasses import replace
 
-        result = self._native.group(process_group_id)
+        result = self._native.group(process_group_id, deadline_ns)
         if self.failure == "omit_once":
             self.failure = None
             return replace(
@@ -705,3 +733,44 @@ async def test_explicit_relative_executable_resolves_in_owned_directory(
 
     assert result == 0
     assert (tmp_path / "executed").exists()
+
+
+class AdvancingScanClock(SystemClock):
+    def __init__(self) -> None:
+        self._instant = 0
+
+    def monotonic_ns(self) -> int:
+        self._instant += 1_000_000_000
+        return self._instant
+
+
+def test_native_group_scan_refuses_total_entry_capacity_exhaustion() -> None:
+    from kora.runner.identity import IdentityState, NativeIdentityReader
+
+    source = NativeIdentityReader(max_scan_entries=1)
+
+    observation = source.group(os.getpgrp())
+
+    assert observation.state is IdentityState.UNKNOWN
+
+
+def test_native_group_scan_refuses_expired_progress_budget() -> None:
+    from kora.runner.identity import IdentityState, NativeIdentityReader
+
+    source = NativeIdentityReader(clock=AdvancingScanClock())
+
+    observation = source.group(os.getpgrp())
+
+    assert observation.state is IdentityState.UNKNOWN
+
+
+def test_native_group_scan_preserves_callers_absolute_deadline() -> None:
+    from kora.runner.identity import IdentityState, NativeIdentityReader
+
+    clock = SystemClock()
+    source = NativeIdentityReader(clock=clock)
+    expired = clock.monotonic_ns() - 1
+
+    observation = source.group(os.getpgrp(), expired)
+
+    assert observation.state is IdentityState.UNKNOWN

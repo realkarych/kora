@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from kora.protocols.identity import ProcessIdentity
+from kora.protocols.time import Clock, SystemClock
 
 
 class IdentityState(StrEnum):
@@ -39,7 +40,9 @@ class GroupObservation:
 class IdentityReader(Protocol):
     def read(self, pid: int) -> IdentityObservation: ...
 
-    def group(self, process_group_id: int) -> GroupObservation: ...
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation: ...
 
 
 class BsdInfo(ctypes.Structure):
@@ -99,7 +102,13 @@ class GetHostUuid(Protocol):
 
 
 class NativeIdentityReader:
-    def __init__(self) -> None:
+    def __init__(
+        self, *, clock: Clock | None = None, max_scan_entries: int = 65536
+    ) -> None:
+        if isinstance(max_scan_entries, bool) or not 1 <= max_scan_entries <= 65536:
+            raise ValueError("native process scan capacity must be between 1 and 65536")
+        self._clock = clock if clock is not None else SystemClock()
+        self._max_scan_entries = max_scan_entries
         self._library: ctypes.CDLL | None = None
         self._host: str | None = None
         self._boot: str | None = None
@@ -208,13 +217,25 @@ class NativeIdentityReader:
             ),
         )
 
-    def group(self, process_group_id: int) -> GroupObservation:
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        scan_deadline = self._clock.monotonic_ns() + 1_000_000_000
+        if deadline_ns is not None:
+            scan_deadline = min(scan_deadline, deadline_ns)
+        if self._clock.monotonic_ns() >= scan_deadline:
+            return GroupObservation(IdentityState.UNKNOWN)
         if sys.platform == "linux":
             members: list[tuple[int, IdentityObservation]] = []
             try:
                 entries = os.scandir("/proc")
                 with entries:
-                    for entry in entries:
+                    for index, entry in enumerate(entries):
+                        if (
+                            index >= self._max_scan_entries
+                            or self._clock.monotonic_ns() >= scan_deadline
+                        ):
+                            return GroupObservation(IdentityState.UNKNOWN)
                         if not entry.name.isdecimal():
                             continue
                         pid = int(entry.name)
@@ -238,27 +259,31 @@ class NativeIdentityReader:
                             or process.process_group_id == process_group_id
                         ):
                             members.append((pid, observation))
-                            if len(members) >= 65536:
-                                return GroupObservation(IdentityState.UNKNOWN)
             except (OSError, ValueError, IndexError, UnicodeError):
+                return GroupObservation(IdentityState.UNKNOWN)
+            if self._clock.monotonic_ns() >= scan_deadline:
                 return GroupObservation(IdentityState.UNKNOWN)
             return GroupObservation(IdentityState.PRESENT, tuple(members))
         library = self._library
         if library is None:
             return GroupObservation(IdentityState.UNKNOWN)
-        buffer = (ctypes.c_int * 65536)()
+        buffer = (ctypes.c_int * self._max_scan_entries)()
         list_pids = cast(ProcListPids, library.proc_listpids)
         size = list_pids(2, process_group_id, buffer, ctypes.sizeof(buffer))
         if (
             size <= 0
             or size >= ctypes.sizeof(buffer)
             or size % ctypes.sizeof(ctypes.c_int)
+            or self._clock.monotonic_ns() >= scan_deadline
         ):
             return GroupObservation(IdentityState.UNKNOWN)
-        pids = tuple(
-            buffer[index] for index in range(size // ctypes.sizeof(ctypes.c_int))
-        )
-        return GroupObservation(
-            IdentityState.PRESENT,
-            tuple((pid, self.read(pid)) for pid in pids if pid > 0),
-        )
+        darwin_members: list[tuple[int, IdentityObservation]] = []
+        for index in range(size // ctypes.sizeof(ctypes.c_int)):
+            if self._clock.monotonic_ns() >= scan_deadline:
+                return GroupObservation(IdentityState.UNKNOWN)
+            pid = buffer[index]
+            if pid > 0:
+                darwin_members.append((pid, self.read(pid)))
+        if self._clock.monotonic_ns() >= scan_deadline:
+            return GroupObservation(IdentityState.UNKNOWN)
+        return GroupObservation(IdentityState.PRESENT, tuple(darwin_members))
