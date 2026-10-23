@@ -24,7 +24,7 @@ Every page has a browser address with the namespace in its path; the console roo
 | page | address | carried in the address |
 |---|---|---|
 | Graphs | `/{ns}/graphs` | the search text as `?q=` |
-| graph page | `/{ns}/graphs/{graph}` for the newest run; `/{ns}/graphs/{graph}/runs/{run}` for a selected run | `?node={node_path}` for the open node panel (the path percent-encoded); `expand={node_id}` repeated for each expanded fan-out; the timeline filter stays out |
+| graph page | `/{ns}/graphs/{graph}` for the newest run; `/{ns}/graphs/{graph}/runs/{run}` for a selected run | `?node={node_path}` for the open node panel (the path percent-encoded); each repeated `expand=` value is one percent-encoded JSON array containing the complete declared topology scope path, using the same IDs/path meaning as API `scope`. Reused subgraph bodies retain their distinct parent paths; runtime element indexes are excluded. Restore against the selected pinned version and apply the eight-scope expansion-limit state, including Back restoration. The timeline filter stays out. |
 | review page | `/{ns}/approvals/{apr}` | |
 | Approvals | `/{ns}/approvals` | `?status=` for the history block |
 | Targets | `/{ns}/targets`; `/{ns}/targets/{key}` | `?active=all` to include idle targets |
