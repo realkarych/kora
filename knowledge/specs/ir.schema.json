@@ -123,10 +123,10 @@
         }
       ]
     },
-    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
-    "envName": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
-    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
-    "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d)$" },
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])" },
+    "envName": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])" },
+    "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])" },
     "retentionPeriod": { "type": "string", "pattern": "^([0-9]+d|forever)$" },
     "retention": {
       "type": "object",
@@ -189,7 +189,7 @@
       "required": ["type"],
       "properties": {
         "type": { "$ref": "#/$defs/artifactType" },
-        "from": { "type": "string", "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|[a-z][a-z0-9_]{0,63})$" },
+        "from": { "type": "string", "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])" },
         "output": { "$ref": "#/$defs/id" },
         "path": { "type": "string", "maxLength": 4096, "description": "dotted path into the source artifact or params; for $inputs the subgraph input name" },
         "optional": { "type": "boolean" }
@@ -284,7 +284,7 @@
       "properties": {
         "cmd": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
         "output_file": { "type": "string" },
-        "resources": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["name", "sha256", "size", "executable"], "properties": { "name": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+$" }, "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0, "maximum": 262144 }, "executable": { "type": "boolean" } }, "patternProperties": {"^x-": {}}, "additionalProperties": false } },
+        "resources": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["name", "sha256", "size", "executable"], "properties": { "name": { "type": "string", "pattern": "^(?!/)(?![\\s\\S]*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+(?![\\s\\S])" }, "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0, "maximum": 262144 }, "executable": { "type": "boolean" } }, "patternProperties": {"^x-": {}}, "additionalProperties": false } },
         "resource_set_digest": { "$ref": "#/$defs/digest" },
         "workspace": { "$ref": "#/$defs/workspace" },
         "env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "type": "string" } },
@@ -378,14 +378,14 @@
             "required": ["when", "to"],
             "properties": {
               "when": { "$ref": "#/$defs/expression" },
-              "to": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})$" }, "minItems": 1 },
+              "to": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])" }, "minItems": 1 },
               "reason": { "$ref": "#/$defs/expression" }
             },
             "patternProperties": { "^x-": {} },
             "additionalProperties": false
           }
         },
-        "else": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})$" } },
+        "else": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])" } },
         "else_reason": { "$ref": "#/$defs/expression" }
       },
       "patternProperties": { "^x-": {} },

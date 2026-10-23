@@ -9,6 +9,8 @@
 
 - Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
 
+- API error and authorization amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #135](https://github.com/realkarych/kora/issues/135) on 2026-10-23.
+
 ## Context
 
 kora's design centre is a platform instance shared by many teams on an organisation's own infrastructure (NFR-0.1). Namespaces group graphs, secret references, presets, tool policies and quotas (FR-12.4). Requirements decision 15 kept access control post-MVP: the MVP would ship namespaces and a single shared API token, with role-based access control and credential management arriving later through the authentication protocol.
@@ -32,6 +34,8 @@ Standalone first initialization commits both personal-token digests and their ow
 
 Slice-1 standalone binds only to literal `127.0.0.1` over HTTP and refuses non-loopback binding. The shared client permits HTTP only to literal `127.0.0.1` through a direct connection, bypasses ambient proxies for that exception and refuses explicit proxy routing that cannot preserve it. Every other destination requires HTTPS with certificate-chain and requested-hostname verification; verification cannot be disabled and failures cannot trigger a cleartext or unverified retry. The client never forwards a bearer across origins on redirect. Loopback does not replace authentication or provide same-user containment. Browser session authentication remains governed by the separate frontend contract below.
 
+Installation-wide operational metrics are readable by a personal token with `platform` whose grants cover every current namespace; neither `approve` nor `transcripts` is required. This predicate also applies to an empty namespace set and grants observation of the reviewed global process, runtime and worker catalog and retained historical aggregates. It grants no additional mutation or content rights. The scraper credential still has its ordinary namespace and platform mutation powers. New namespaces outside its grants deny the whole scrape until grants are updated, exposing the complete-coverage predicate through success or refusal. Current credential authority and the captured metric payload must satisfy the API contract at its final authorization point; cached prior authority cannot authorize a later request. The fixed `/healthz` and `/readyz` probes are public and reveal only availability.
+
 Workers hold service principals: a service token belongs to a worker, is bound to a runtime and a namespace list enforced at claim, and may only claim, heartbeat, upload and transition attempts whose lease it holds, checked by lease epoch. There are no tokens for agent nodes (ADR-0002).
 
 Frontend login (amended 2026-10-16): `kora open` asks the API for a one-time login link with the user's token (`POST /auth/login-links`) and opens it in the browser; the link carries a single-use code valid for 60 seconds, and `GET /auth/session/{code}` exchanges it for an opaque server-side session cookie (`SameSite=Strict`, `Secure`, HTTP-only) with the token's namespaces and flags. Pasting the token into the login form (`POST /auth/session`) remains the fallback for a machine without the CLI. OIDC sign-in replaces both through the authentication protocol after MVP. Cookie-authenticated mutations carry CSRF protection, the single-page application ships a Content Security Policy, and cookies are never accepted on Bearer-only API paths. The approver recorded from the frontend is the token's owner.
@@ -46,7 +50,7 @@ There are no per-token rate limits in the MVP. The built-in authenticator is `st
 ## Consequences
 
 - The `api_token` table carries `kind`, `owner`, `namespaces` (with `transcripts`), `approve`, `platform`, `runtime` and `expires_at`; approval requests record the owner, not the token.
-- `API005` is the one forbidden code: namespace outside the list, missing `approve` or `platform`, missing `transcripts`.
+- `API009` means missing or invalid credentials; its fixed 401 response does not disclose whether an ordinary API bearer is unknown, expired or revoked. `API005` is the one forbidden code: namespace outside the list, missing `approve` or `platform`, missing `transcripts`.
 - The `/auth/*` routes exist only for the frontend and its sign-in and are excluded from the parity coverage test; `kora open` is a convenience over them, not an API operation.
 
 ## Where it is applied

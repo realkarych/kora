@@ -30,6 +30,9 @@ classifiers = [
 [project.scripts]
 kora = "kora.__main__:main"
 
+[project.entry-points."kora.provider"]
+"secrets.env" = "kora.plugins.secrets.env:provider_metadata"
+
 [project.urls]
 Homepage = "https://github.com/realkarych/kora"
 Repository = "https://github.com/realkarych/kora"
@@ -177,6 +180,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 build = [
+    "editables==0.6",
     "hatchling==1.32.4",
 ]
 dev = [
