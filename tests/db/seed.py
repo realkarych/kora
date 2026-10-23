@@ -589,3 +589,102 @@ def seed_predecessor(connection: Connection) -> PredecessorHistory:
         for name in {name for name, _ in rows}
     }
     return predecessor_snapshot(connection, columns)
+
+
+def seed_pricing_measurement_history(connection: Connection) -> None:
+    seed_predecessor(connection)
+    frozen = MetaData()
+    with expression_index_warnings_ignored():
+        frozen.reflect(connection)
+
+    def clone(table_name: str, overrides: list[dict[str, object]]) -> None:
+        target = frozen.tables[table_name]
+        original = dict(connection.execute(select(target).limit(1)).mappings().one())
+        rows = [{**original, **values} for values in overrides]
+        connection.execute(insert(target), rows)
+
+    def payload(size: int) -> object:
+        value = {"historical": "x" * (size - 17)}
+        encoded = json.dumps(value, separators=(",", ":"))
+        assert len(encoded.encode()) == size
+        return encoded if connection.dialect.name == "sqlite" else value
+
+    clone(
+        "namespace",
+        [{"id": f"scope-{i}", "name": f"scope-{i}"} for i in range(8)],
+    )
+    scopes = ["old-namespace", "other-namespace", *(f"scope-{i}" for i in range(8))]
+    clone(
+        "run",
+        [
+            {"id": f"ledger-{i}", "namespace_id": scope, "idempotency_key": f"key-{i}"}
+            for i, scope in enumerate(scopes[1:], 1)
+        ],
+    )
+    clone(
+        "node_instance",
+        [{"id": f"ledger-node-{i}", "run_id": f"ledger-{i}"} for i in range(1, 10)],
+    )
+    clone(
+        "attempt",
+        [
+            {
+                "id": f"history-attempt-{i:03d}",
+                "node_instance_id": "old-node_instance"
+                if i % 10 == 0
+                else f"ledger-node-{i % 10}",
+                "number": i + 4,
+                "status": "running" if i % 2 else "succeeded",
+                "price_table_id": None if i % 3 == 0 else "old-price",
+            }
+            for i in range(97)
+        ],
+    )
+    connection.execute(
+        frozen.tables["price_table"].update().values(prices=payload(512))
+    )
+    clone(
+        "price_table",
+        [
+            {
+                "id": f"history-price-{i:04d}",
+                "namespace_id": None if i % 10 == 0 else scopes[i % 10 - 1],
+                "model": f"model-{i}",
+                "prices": payload(512),
+            }
+            for i in range(995)
+        ],
+    )
+    connection.execute(
+        frozen.tables["usage_record"].update().values(source=payload(256))
+    )
+    clone(
+        "usage_record",
+        [
+            {
+                "id": f"history-usage-{i:04d}",
+                "attempt_id": f"history-attempt-{i % 97:03d}",
+                "model": f"usage-model-{i}",
+                "source": payload(256),
+            }
+            for i in range(998)
+        ],
+    )
+    clone(
+        "usage_record",
+        [
+            {
+                "id": "oversized-source",
+                "attempt_id": "old-attempt",
+                "model": "oversized",
+                "source": payload(1_048_576),
+            }
+        ],
+    )
+    connection.execute(
+        frozen.tables["approval_request"].update().values(run_cost=payload(4096))
+    )
+    clone(
+        "approval_request",
+        [{"id": f"history-approval-{i}", "run_cost": payload(4096)} for i in range(23)],
+    )
