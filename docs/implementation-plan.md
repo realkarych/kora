@@ -460,3 +460,7 @@ The declaration foundation of work item 2 includes inputs, outputs, IR source me
 IR document amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23.
 
 The document foundation of work item 2 includes all eight node envelopes, graph and subgraph definitions, provenance and the complete IR root. Structural models enforce canonical output roles and retain content-free evidence for ignored root fields. The shared validator still owns public warnings and semantic checks. Subgraph composition uses the graph's shared definition registry; no nested definition registry is added. Reproducible whole-schema generation remains with #218.
+
+IR whole-document amendment dated 2026-10-23: the structural document and reproducibly generated schema land under issue #218 after its model parts. The project owner reviewed and approved this wording on 2026-10-23.
+
+Work item 2's structural foundation includes all node configurations and envelopes, type-contract declarations, triggers, runtime and secrets records, graph/subgraph definitions and the complete document. The committed IR schema is generated from these models and checked for drift. Structural parsing preserves authored omissions and data; it does not resolve built-in payload revisions, validate semantic type closure or expressions, admit installation capabilities, lower compiler defaults or authorize execution. Built-in payloads remain with #138 and its implementing issues; schema-driven CEL checking and shared validation remain work items 4 and 3.

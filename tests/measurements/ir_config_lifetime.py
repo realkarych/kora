@@ -1,14 +1,10 @@
 import gc
 import json
-import os
-import resource
-import subprocess
 import sys
 import threading
 import time
 import tracemalloc
 import weakref
-from pathlib import Path
 from typing import cast
 
 from pydantic import BaseModel
@@ -37,7 +33,12 @@ from tests.ir.document_cases import INVALID as DOCUMENT_INVALID
 from tests.ir.document_cases import POPULATED as DOCUMENT_POPULATED
 from tests.ir.remaining_config_cases import INVALID as REMAINING_INVALID
 from tests.ir.remaining_config_cases import POPULATED as REMAINING_POPULATED
-from tests.measurements.harness import current_rss_bytes, open_descriptors
+from tests.measurements.harness import (
+    open_descriptors,
+    os_threads,
+    peak_rss_bytes,
+    rss_bytes,
+)
 from tests.measurements.ir_config_workload import validate_config
 from tests.measurements.ir_declaration_workload import (
     TRIGGER_ARRAY,
@@ -122,33 +123,6 @@ def cycle(index: int = 0) -> int:
     references.extend(model_references(graph))
     del graph
     return sum(reference() is not None for reference in references)
-
-
-def rss_bytes() -> int:
-    current = current_rss_bytes()
-    if current is not None:
-        return current
-    completed = subprocess.run(
-        ["/bin/ps", "-o", "rss=", "-p", str(os.getpid())],
-        check=True,
-        capture_output=True,
-    )
-    return int(completed.stdout.strip()) * 1024
-
-
-def peak_rss_bytes() -> int:
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(peak) if sys.platform == "darwin" else int(peak) * 1024
-
-
-def os_threads() -> int | None:
-    task_path = Path("/proc/self/task")
-    if task_path.exists():
-        return len(list(task_path.iterdir()))
-    completed = subprocess.run(
-        ["/bin/ps", "-M", "-p", str(os.getpid())], check=True, capture_output=True
-    )
-    return len(completed.stdout.splitlines()) - 1
 
 
 def main() -> None:

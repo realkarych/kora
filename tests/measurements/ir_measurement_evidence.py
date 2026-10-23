@@ -122,6 +122,16 @@ def configuration_evidence(run: int) -> Evidence:
     )
 
 
+def schema_evidence(run: int) -> Evidence:
+    return Evidence(
+        frozenset({f"{NODE}test_ir_schema_repeated_lifetime[{run}]"}),
+        frozenset(
+            f"schema_lifetime_{run}_{cycle}_retained" for cycle in (250, 500, 750, 1000)
+        ),
+        Counter(("schema_lifetime", run, cycle) for cycle in (250, 500, 750, 1000)),
+    )
+
+
 def expected_evidence() -> Evidence:
     nodes = {f"{NODE}test_ir_model_validation_cost[{name}]" for name in WORKLOADS} | {
         f"{NODE}test_repeated_failures_return_to_baseline",
@@ -145,6 +155,10 @@ def expected_evidence() -> Evidence:
         nodes.update(worker.nodes)
         gates.update(worker.gates)
         samples.update(worker.samples)
+        schema_worker = schema_evidence(run)
+        nodes.update(schema_worker.nodes)
+        gates.update(schema_worker.gates)
+        samples.update(schema_worker.samples)
         for traced in (True, False):
             mode = "traced" if traced else "untraced"
             nodes.add(f"{NODE}test_shared_diagnostic_resource_lifetime[{run}-{traced}]")
@@ -340,19 +354,24 @@ def verify_report(
 
 def verify_union(directory: Path, revision: str) -> dict[str, object]:
     full = expected_evidence()
-    worker1 = configuration_evidence(1)
-    worker2 = configuration_evidence(2)
+    workers = (
+        configuration_evidence(1),
+        configuration_evidence(2),
+        *(schema_evidence(run) for run in range(3)),
+    )
     expected = (
         Evidence(
-            full.nodes - worker1.nodes - worker2.nodes,
-            full.gates - worker1.gates - worker2.gates,
-            full.samples - worker1.samples - worker2.samples,
+            full.nodes - frozenset().union(*(worker.nodes for worker in workers)),
+            full.gates - frozenset().union(*(worker.gates for worker in workers)),
+            full.samples
+            - sum(
+                (worker.samples for worker in workers), Counter[tuple[str, int, int]]()
+            ),
         ),
-        worker1,
-        worker2,
+        *workers,
     )
     required_directories = {
-        f"ir-models-cost-measurement-{revision}-{run}" for run in range(3)
+        f"ir-models-cost-measurement-{revision}-{run}" for run in range(6)
     }
     if (
         not directory.is_dir()
@@ -392,6 +411,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
                 "remaining_fixture_manifest",
                 "declaration_fixture_manifest",
                 "document_fixture_manifest",
+                "schema_fixture_manifest",
             )
         }
         if any(not value for value in actual_manifests.values()):
@@ -410,7 +430,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         frozenset(selected) != full.nodes
         or frozenset(gates) != full.gates
         or samples != full.samples
-        or (len(selected), len(gates), sum(samples.values())) != (330, 446, 7791)
+        or (len(selected), len(gates), sum(samples.values())) != (337, 462, 7923)
     ):
         raise ValueError("incomplete IR evidence union")
     return {

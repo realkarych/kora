@@ -19,6 +19,7 @@ from tests.measurements.ir_measurement_evidence import (
     expected_evidence,
     junit_nodes,
     verify_configuration_payloads,
+    schema_evidence,
     verify_report,
     verify_union,
 )
@@ -84,6 +85,7 @@ def rendered_report(inventory: Evidence) -> str:
             "remaining_fixture_manifest": "remaining",
             "declaration_fixture_manifest": "declaration",
             "document_fixture_manifest": "document",
+            "schema_fixture_manifest": "schema",
         }
     )
     report.gates.update(dict.fromkeys(inventory.gates, True))
@@ -137,11 +139,13 @@ def rendered_junit(inventory: Evidence) -> str:
 def test_ir_evidence_inventory_preserves_every_named_action_and_sample() -> None:
     expected = expected_evidence()
 
-    workers = [configuration_evidence(run) for run in range(3)]
+    workers = [configuration_evidence(run) for run in range(3)] + [
+        schema_evidence(run) for run in range(3)
+    ]
 
-    assert len(expected.nodes) == 330
-    assert len(expected.gates) == 446
-    assert sum(expected.samples.values()) == 7791
+    assert len(expected.nodes) == 337
+    assert len(expected.gates) == 462
+    assert sum(expected.samples.values()) == 7923
     assert all(len(worker.nodes) == 1 for worker in workers)
     assert all(len(worker.gates) == 4 for worker in workers)
     assert all(sum(worker.samples.values()) == 4 for worker in workers)
@@ -232,14 +236,18 @@ def test_ir_union_checks_all_artifact_identities(
     tmp_path: Path, mutation: str | None
 ) -> None:
     full = expected_evidence()
-    worker1 = configuration_evidence(1)
-    worker2 = configuration_evidence(2)
-    first = Evidence(
-        full.nodes - worker1.nodes - worker2.nodes,
-        full.gates - worker1.gates - worker2.gates,
-        full.samples - worker1.samples - worker2.samples,
+    workers = (
+        configuration_evidence(1),
+        configuration_evidence(2),
+        *(schema_evidence(run) for run in range(3)),
     )
-    for run, inventory in enumerate((first, worker1, worker2)):
+    first = Evidence(
+        full.nodes - frozenset().union(*(worker.nodes for worker in workers)),
+        full.gates - frozenset().union(*(worker.gates for worker in workers)),
+        full.samples
+        - sum((worker.samples for worker in workers), Counter[tuple[str, int, int]]()),
+    )
+    for run, inventory in enumerate((first, *workers)):
         shard = tmp_path / f"ir-models-cost-measurement-{REVISION}-{run}"
         shard.mkdir()
         document = rendered_report(inventory)
@@ -258,12 +266,12 @@ def test_ir_union_checks_all_artifact_identities(
             / "ir-models-cost-2.xml"
         ).unlink()
     elif mutation == "duplicate":
-        (tmp_path / f"ir-models-cost-measurement-{REVISION}-3").mkdir()
+        (tmp_path / f"ir-models-cost-measurement-{REVISION}-6").mkdir()
 
     if mutation is None:
         result = verify_union(tmp_path, REVISION)
 
-        assert (result["tests"], result["gates"], result["samples"]) == (330, 446, 7791)
+        assert (result["tests"], result["gates"], result["samples"]) == (337, 462, 7923)
     else:
         with pytest.raises(ValueError, match="IR"):
             verify_union(tmp_path, REVISION)

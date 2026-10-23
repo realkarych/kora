@@ -165,13 +165,22 @@ jobs:
         include:
           - run: 0
             pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]'
           - run: 1
             pytest-arguments: >-
               'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]'
           - run: 2
             pytest-arguments: >-
               'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+          - run: 3
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]'
+          - run: 4
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]'
+          - run: 5
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]'
     env:
       KORA_TEST_DATABASES: sqlite
       KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -469,13 +478,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           version: 0.13.1
           python-version: 3.11.17
           cache-suffix: ir-examples
+      - name: Prepare source-owned IR schemas and independent corpus
+        run: |
+          uv sync --locked --no-build --no-install-project
+          PYTHONPATH=src uv run --no-sync python -m tests.ir.schema_document_cases measurements/ir-schema-checker
+          git rev-parse HEAD > measurements/ir-schema-checker-revision.txt
+      - name: Check actual model modes, committed schema and independent corpus
+        run: |
+          uvx --python 3.11.17 --from check-jsonschema@0.38.2 --with pyright==1.1.414 python -c 'import subprocess, sys; subprocess.run([sys.executable, "-m", "pyright", "--pythonpath", sys.executable, ".github/check_ir_schema.py"], check=True)'
+          uvx --python 3.11.17 --from check-jsonschema@0.38.2 --with pyright==1.1.414 python .github/check_ir_schema.py measurements/ir-schema-checker > measurements/ir-schema-checker-results.json
       - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/ir.schema.json knowledge/specs/examples/*.ir.yaml
       - run: uvx check-jsonschema@0.38.2 --schemafile knowledge/specs/scenario.schema.json knowledge/specs/examples/scenarios/*/*.yaml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: ir-schema-checker-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            measurements/ir-schema-checker/
+            measurements/ir-schema-checker-results.json
+            measurements/ir-schema-checker-revision.txt
+          if-no-files-found: error
 
   github-templates:
     name: GitHub templates

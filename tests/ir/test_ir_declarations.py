@@ -144,16 +144,17 @@ def test_ir_remaining_patterns_are_used_at_each_schema_location() -> None:
     definitions = cast("dict[str, dict[str, object]]", schema["$defs"])
     properties = cast("dict[str, dict[str, object]]", schema["properties"])
     contracts = properties["type_contracts"]
-    parent = cast("list[dict[str, object]]", definitions["typeContract"]["oneOf"])[1]
-    parent_properties = cast("dict[str, dict[str, object]]", parent["properties"])
+    parent_properties = cast(
+        "dict[str, dict[str, object]]", definitions["CustomTypeContract"]["properties"]
+    )
     parent_alternatives = cast(
-        "list[dict[str, object]]", parent_properties["parent"]["oneOf"]
+        "list[dict[str, object]]", parent_properties["parent"]["anyOf"]
     )
     expected = TypeAdapter(TypeContractName).json_schema()["pattern"]
 
     patterns = [
         cast("dict[str, object]", contracts["propertyNames"])["pattern"],
-        parent_alternatives[1]["pattern"],
+        parent_alternatives[0]["pattern"],
     ]
 
     assert patterns == [expected, expected]
@@ -161,94 +162,35 @@ def test_ir_remaining_patterns_are_used_at_each_schema_location() -> None:
         properties["ir_version"]["pattern"]
         == TypeAdapter(IrVersion).json_schema()["pattern"]
     )
-    for name, scalar in [
-        ("retentionPeriod", "RetentionPeriod"),
-        ("secretRef", "SecretRef"),
-        ("artifactType", "ArtifactType"),
-    ]:
-        assert (
-            definitions[name]["pattern"]
-            == SCALAR_ADAPTERS[scalar].json_schema()["pattern"]
-        )
+    retention = cast(
+        "dict[str, dict[str, object]]", definitions["Retention"]["properties"]
+    )
+    aliases = cast(
+        "dict[str, dict[str, object]]", definitions["SecretsSection"]["properties"]
+    )
+    output = cast(
+        "dict[str, dict[str, object]]", definitions["OutputDecl"]["properties"]
+    )
+    for field, scalar in (
+        (retention["transcripts"], "RetentionPeriod"),
+        (
+            cast("dict[str, object]", aliases["aliases"]["additionalProperties"]),
+            "SecretRef",
+        ),
+        (output["type"], "ArtifactType"),
+    ):
+        assert field["pattern"] == SCALAR_ADAPTERS[scalar].json_schema()["pattern"]
 
 
 def declaration_schema(model: type[IrRecord]) -> dict[str, object]:
     from tests.ir.support import schema_definition
 
-    name = model.__name__
-    direct = {
-        "IrSourceLocation": "sourceLocation",
-        "InputRef": "inputRef",
-        "OutputDecl": "outputDecl",
-        "TypeBehavior": "typeBehavior",
-        "Retention": "retention",
-        "RuntimeSection": "runtimeSection",
-        "TargetConfig": "targetConfig",
-    }
-    if name in direct:
-        schema = cast("dict[str, object]", schema_definition(direct[name]))
-        if name == "TargetConfig":
-            properties = cast("dict[str, dict[str, object]]", schema["properties"])
-            key = properties["key"]
-            key["anyOf"] = key.pop("oneOf")
-        return schema
-    if name in ("BuiltinTypeContract", "CustomTypeContract"):
-        contract = cast("dict[str, object]", schema_definition("typeContract"))
-        variants = cast("list[dict[str, object]]", contract["oneOf"])
-        expected = variants[0 if name == "BuiltinTypeContract" else 1]
-        if name == "CustomTypeContract":
-            properties = cast("dict[str, dict[str, object]]", expected["properties"])
-            parent = properties["parent"]
-            parent["anyOf"] = list(reversed(cast("list[object]", parent.pop("oneOf"))))
-        return expected
-    if name in ("ParameterTarget", "OutputTarget"):
-        target = cast("dict[str, object]", schema_definition("targetConfig"))
-        properties = cast("dict[str, dict[str, object]]", target["properties"])
-        variants = cast("list[dict[str, object]]", properties["key"]["oneOf"])
-        return variants[0 if name == "ParameterTarget" else 1]
-    if name in ("Concurrency", "ProviderRetry"):
-        runtime = cast("dict[str, object]", schema_definition("runtimeSection"))
-        properties = cast("dict[str, dict[str, object]]", runtime["properties"])
-        return properties["concurrency" if name == "Concurrency" else "provider_retry"]
-    if name == "SecretsSection":
-        document = cast("dict[str, object]", json.loads(SCHEMA_PATH.read_text()))
-        return cast("dict[str, dict[str, object]]", document["properties"])["secrets"]
-    if name == "SubgraphOutput":
-        subgraph = cast("dict[str, object]", schema_definition("subgraph"))
-        properties = cast("dict[str, dict[str, object]]", subgraph["properties"])
-        return cast("dict[str, object]", properties["outputs"]["additionalProperties"])
-    trigger = cast("dict[str, object]", schema_definition("trigger"))
-    properties = cast("dict[str, dict[str, object]]", trigger["properties"])
-    if name == "WebhookAuth":
-        return properties["auth"]
-    kind = cast("str", MINIMAL[model]["kind"])
-    variants = cast("list[dict[str, dict[str, object]]]", trigger["allOf"])
-    for variant in variants:
-        condition = cast("dict[str, dict[str, object]]", variant["if"]["properties"])
-        if condition["kind"]["const"] != kind:
-            continue
-        then = variant["then"]
-        names = cast("dict[str, object]", then["propertyNames"])
-        alternatives = cast("list[dict[str, list[str]]]", names["anyOf"])
-        fields = alternatives[0]["enum"]
-        return {
-            "type": "object",
-            "required": ["kind", *cast("list[str]", then.get("required", []))],
-            "properties": {
-                field: {"type": "string", "const": kind}
-                if field == "kind"
-                else properties[field]
-                for field in fields
-            },
-            "patternProperties": {"^x-": {}},
-            "additionalProperties": False,
-        }
-    raise AssertionError("the trigger variant is in the handwritten schema")
+    return cast("dict[str, object]", schema_definition(model.__name__))
 
 
 @pytest.mark.parametrize("model", list(MINIMAL))
 @pytest.mark.parametrize("mode", ["validation", "serialization"])
-def test_ir_declaration_schemas_match_handwritten_fragments(
+def test_ir_declaration_schemas_match_generated_definitions(
     model: type[IrRecord], mode: str
 ) -> None:
     from typing import Literal

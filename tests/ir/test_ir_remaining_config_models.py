@@ -73,7 +73,7 @@ def test_timer_timestamp_profile_matches_schema_consumers(
     value: str, valid: bool
 ) -> None:
     model = TimerConfig
-    schema = cast("dict[str, object]", schema_definition("timerConfig"))
+    schema = cast("dict[str, object]", schema_definition("TimerConfig"))
     document = {"at": value}
 
     model_valid = True

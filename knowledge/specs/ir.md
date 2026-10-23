@@ -4,6 +4,8 @@ Status: design draft for owner review (2026-10-15, revised after the design revi
 
 CEL cost-regression amendment dated 2026-10-23: the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); the corresponding human-facing documentation wording was reviewed line by line and approved by the project owner on 2026-10-23.
 
+The committed schema is generated from the real `GraphDocument` model by `kora.ir.schema.generate_ir_schema` and `render_ir_schema`. The dialect and public `$id` are unchanged. Local `$defs` and references use the real Pydantic model/type names; the unreleased IR 1.0 does not preserve the former handwritten fragment names as compatibility definitions. Scalar and literal constraints may be inlined in model properties. Every generated reference resolves inside the schema; generation reads no committed schema and performs no network or provider lookup. The complete byte-drift test preserves source-owned annotations as well as constraints.
+
 ## 1. Design rules
 
 1. **The IR is data, not code.** The scheduler never imports user Python; everything it needs is materialised in the file, including resolved per-node configuration (FR-3.2) and expressions for branches and predicates (section 7).
@@ -273,7 +275,7 @@ config:
 
 Exactly one of `duration` and `at` must be present; both, neither, null, non-string values, ordinary unknown fields and expressions are refused. The common `x-` extension allowance remains. Duration uses the existing grammar, including zero, leading zeros and no magnitude cap. Neither field is normalized.
 
-`at` uses the kora timestamp profile: ASCII Gregorian local years 0001–9999 and valid calendar dates; `T`/`t`; hour 00–23 and minute/second 00–59; an optional dot fraction of 1–6 digits; and a required `Z`/`z` or signed HH:MM zone with offset hours 00–23 and minutes 00–59. Lowercase, signed offsets, `-00:00`, fractional width and trailing zeros are preserved. Commas, leap seconds, whitespace/newlines, year zero, absent zones, numeric epochs and datetime objects are refused. There is no future-relative test. The exact portable pattern is carried in `timerConfig.at` alongside `format: date-time`; calendar validation and enabled schema format checking reject impossible dates.
+`at` uses the kora timestamp profile: ASCII Gregorian local years 0001–9999 and valid calendar dates; `T`/`t`; hour 00–23 and minute/second 00–59; an optional dot fraction of 1–6 digits; and a required `Z`/`z` or signed HH:MM zone with offset hours 00–23 and minutes 00–59. Lowercase, signed offsets, `-00:00`, fractional width and trailing zeros are preserved. Commas, leap seconds, whitespace/newlines, year zero, absent zones, numeric epochs and datetime objects are refused. There is no future-relative test. The exact portable pattern is carried in `TimerConfig.at` alongside `format: date-time`; calendar validation and enabled schema format checking reject impossible dates.
 
 The six-digit fraction admission follows the microsecond timestamp representation; it does not silently truncate precision. UTC-conversion overflow near the year boundaries belongs to a later semantic-validator/scheduler refusal before effects. Structural acceptance supplies no durable scheduling behavior.
 

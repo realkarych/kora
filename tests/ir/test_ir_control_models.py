@@ -111,20 +111,22 @@ def test_ir_identifier_patterns_match_schema_consumers(
 
 
 def identifier_definition(name: str) -> dict[str, object]:
-    if name == "id":
-        return cast("dict[str, object]", schema_definition("id"))
     definition = cast(
         "dict[str, object]",
-        schema_definition("inputRef" if name == "from" else "branchConfig"),
+        schema_definition(
+            "Graph"
+            if name == "id"
+            else "InputRef"
+            if name == "from"
+            else "BranchConfig"
+            if name == "else"
+            else "BranchCase"
+        ),
     )
     properties = cast("dict[str, dict[str, object]]", definition["properties"])
-    if name == "from":
-        return properties["from"]
-    if name == "else":
-        return cast("dict[str, object]", properties["else"]["items"])
-    case = cast("dict[str, object]", properties["cases"]["items"])
-    fields = cast("dict[str, dict[str, object]]", case["properties"])
-    return cast("dict[str, object]", fields["to"]["items"])
+    if name in ("id", "from"):
+        return properties[name]
+    return cast("dict[str, object]", properties[name]["items"])
 
 
 @pytest.mark.parametrize("name", ["id", "to", "else", "from"])
