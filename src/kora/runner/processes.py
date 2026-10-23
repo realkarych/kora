@@ -29,7 +29,7 @@ from kora.runner.channels import (
     ChannelFailure,
     wait_future,
 )
-from kora.runner.gate import ExecutionConfig
+from kora.runner.gate import ExecutionConfig, encode_deadline
 from kora.runner.identity import (
     IdentityReader,
     IdentityState,
@@ -550,15 +550,16 @@ class GatedProcess:
 
     def _start(self, cwd_descriptor: int) -> None:
         asyncio.get_running_loop()
+        gate_deadline = time.monotonic_ns() + max(
+            0, self._deadline - self._clock.monotonic_ns()
+        )
+        header = encode_deadline(gate_deadline)
         try:
             with ExitStack() as child_descriptors:
                 parent, child = socket.socketpair()
                 self._channel = BoundedChannel(parent, self._clock)
                 child_descriptors.callback(child.close)
-                gate_deadline = time.monotonic_ns() + max(
-                    0, self._deadline - self._clock.monotonic_ns()
-                )
-                parent.sendall(gate_deadline.to_bytes(8, "big"))
+                parent.sendall(header)
                 directory = os.dup(cwd_descriptor)
                 child_descriptors.callback(os.close, directory)
                 output = self._output_descriptor(self._launch.stdout, child_descriptors)
@@ -872,10 +873,11 @@ def start_gated(
 ) -> GatedProcess:
     validated_operation = TypeAdapter(OperationId).validate_python(operation_id)
     if (
-        isinstance(acquisition_deadline_ns, bool)
-        or not 0 <= acquisition_deadline_ns <= 2**63 - 1
+        not isinstance(cast(object, acquisition_deadline_ns), int)
+        or isinstance(acquisition_deadline_ns, bool)
+        or acquisition_deadline_ns < 0
     ):
-        raise ValueError("acquisition deadline is a bounded monotonic instant")
+        raise ValueError("acquisition deadline is a nonnegative integer instant")
     owner = GatedProcess(
         launch,
         validated_operation,

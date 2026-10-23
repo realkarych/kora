@@ -2,6 +2,7 @@ import asyncio
 import os
 import socket
 import struct
+import sys
 from dataclasses import dataclass
 
 from pydantic import TypeAdapter
@@ -24,6 +25,27 @@ from kora.runner.channels import (
 EXECUTABLE_VALUE: TypeAdapter[str] = TypeAdapter(Executable)
 EXECUTION_VALUE: TypeAdapter[str] = TypeAdapter(ExecutionString)
 ENVIRONMENT_NAME: TypeAdapter[str] = TypeAdapter(EnvironmentName)
+GATE_DEADLINE_BYTES: int = 132
+MAX_GATE_DEADLINE_NS: int = int(sys.float_info.max) * 1_000_000_000 + (2**63 - 1)
+
+
+def encode_deadline(deadline_ns: object) -> bytes:
+    if (
+        not isinstance(deadline_ns, int)
+        or isinstance(deadline_ns, bool)
+        or not 0 < deadline_ns <= MAX_GATE_DEADLINE_NS
+    ):
+        raise ValueError("gate deadline is outside the native mapped range")
+    return deadline_ns.to_bytes(GATE_DEADLINE_BYTES, "big")
+
+
+def decode_deadline(header: bytes) -> int:
+    if len(header) != GATE_DEADLINE_BYTES:
+        raise ValueError("gate deadline header has invalid length")
+    deadline_ns = int.from_bytes(header, "big")
+    if not 0 < deadline_ns <= MAX_GATE_DEADLINE_NS:
+        raise ValueError("gate deadline is outside the native mapped range")
+    return deadline_ns
 
 
 @dataclass(frozen=True)
@@ -139,12 +161,14 @@ def main() -> int:
     ):
         return 70
     endpoint = socket.socket(fileno=control_descriptor)
-    header = endpoint.recv(8, socket.MSG_WAITALL)
-    if len(header) != 8:
+    try:
+        deadline = decode_deadline(
+            endpoint.recv(GATE_DEADLINE_BYTES, socket.MSG_WAITALL)
+        )
+    except (OSError, ValueError):
         endpoint.close()
         os.close(cwd_descriptor)
         return 71
-    deadline = int.from_bytes(header, "big")
     try:
         config = asyncio.run(receive_execution(endpoint, cwd_descriptor, deadline))
         execute_workload(config)

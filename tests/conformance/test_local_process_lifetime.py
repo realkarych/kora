@@ -520,7 +520,7 @@ async def test_real_gate_rejects_invalid_transport_without_execution(
     import subprocess
 
     from kora.runner.channels import MAX_FRAME_BYTES, MAX_RECORD_BYTES, BoundedChannel
-    from kora.runner.gate import ExecutionConfig
+    from kora.runner.gate import ExecutionConfig, encode_deadline
     from kora.runner.identity import IdentityState, NativeIdentityReader
     from kora.runner.processes import ExitAnchor
 
@@ -530,7 +530,7 @@ async def test_real_gate_rejects_invalid_transport_without_execution(
     metadata, payload = ExecutionConfig.from_launch(request).encode()
     parent, child = socket.socketpair()
     directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    parent.sendall(deadline.to_bytes(8, "big"))
+    parent.sendall(encode_deadline(deadline))
     process = subprocess.Popen(
         [sys.executable, "-I", "-m", "kora.runner.gate"],
         stdin=subprocess.DEVNULL,
