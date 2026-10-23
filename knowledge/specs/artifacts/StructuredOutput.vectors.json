@@ -738,6 +738,37 @@
       "accepted": false
     }
   ],
+  "projection_composition_cases": [
+    {
+      "name": "integer-view-negative-zero-to-dyn-list",
+      "admitted_child_text": "-0.0",
+      "child_checker_schema": {
+        "type": "integer"
+      },
+      "child_converted_text": "0",
+      "destination_type": "List[StructuredOutput]",
+      "destination_checker_schema": {
+        "type": "array",
+        "items": {}
+      },
+      "destination_converted_text": "[-0.0]",
+      "converted_only_reconstruction_is_sufficient": false
+    },
+    {
+      "name": "number-view-wide-integer-to-integer-export",
+      "admitted_child_text": "9007199254740993",
+      "child_checker_schema": {
+        "type": "number"
+      },
+      "child_converted_text": "9007199254740992.0",
+      "destination_type": "StructuredOutput",
+      "destination_checker_schema": {
+        "type": "integer"
+      },
+      "destination_converted_text": "9007199254740993",
+      "converted_only_reconstruction_is_sufficient": false
+    }
+  ],
   "producer_cases": [
     {
       "name": "direct-approval-wide-unused-integer",
