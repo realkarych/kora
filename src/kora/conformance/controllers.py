@@ -233,3 +233,12 @@ class MutationOwner:
             self.directory.close()
         if self.root is not None:
             self.root.close()
+
+    def dispose_settled(self) -> bool:
+        if self.pending or any(not helper.closed for helper in self.helpers):
+            return False
+        for helper in self.helpers:
+            for descriptor in helper.take_descriptors():
+                os.close(descriptor)
+        self.release()
+        return True

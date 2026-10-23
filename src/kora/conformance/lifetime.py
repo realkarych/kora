@@ -972,6 +972,23 @@ class ParentLifetime:
             helpers=self.mutations.inventory(),
         )
 
+    def dispose_recovery_observers(self) -> bool:
+        if (
+            not self._bootstrap.done()
+            or any(not operation.task.done() for operation in self.operations.values())
+            or any(not closure.done() for closure in self.closures.values())
+            or any(record.process is not None for record in self.records.values())
+        ):
+            return False
+        if not self.mutations.dispose_settled():
+            return False
+        for record in self.records.values():
+            if record.recovered is not None:
+                record.recovered.dispose_observation()
+            if record.directory is not None:
+                record.directory.close()
+        return True
+
 
 async def resume_close(
     reference: CleanupReference, limits: LifetimeLimits
@@ -982,7 +999,10 @@ async def resume_close(
 
 async def _resume_owned(owner: ParentLifetime) -> ClosureReport:
     try:
-        await owner.ready()
-    except LifetimeError:
-        owner.admission_open = False
-    return await owner.close(None)
+        try:
+            await owner.ready()
+        except LifetimeError:
+            owner.admission_open = False
+        return await owner.close(None)
+    finally:
+        owner.dispose_recovery_observers()

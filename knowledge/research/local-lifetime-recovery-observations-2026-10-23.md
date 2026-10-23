@@ -19,3 +19,9 @@ Successful release and uncertain observer disposal are separate operations. Disp
 ## Terminal RPC close
 
 A child inside the scope closed by `close(None)` cannot await a receipt proving its own death. The typed client receives transport-closed failure; the parent retains the close task and obtains the true final ClosureReport. Subtree close returns its actual report when the caller remains outside that subtree. EOF and lost replies initiate or join parent-owned closure and never certify success themselves. The separate-process terminal and EOF tests assert child exit and the parent's final report. Future command composition must coordinate private cooperative cleanup before termination instead of expecting a successful response after its own scope closes.
+
+## Completed recovery attempt disposal
+
+`test_completed_unknown_resume_disposes_volatile_descriptors_after_gc` runs the actual public resume wrapper in a separate process against a substituted tree and later live process entry. After UNKNOWN and explicit GC, the original implementation retained the exact claim lock: an independent open and nonblocking exclusive flock failed with EWOULDBLOCK (RED: 1 failed in 2.51s). The correction disposes only after bootstrap, operations, closures and all fixed helpers have finished with affirmative helper exit/reap. It closes transferred-but-unclaimed descriptors, root/directory/claim descriptors and recovery observation/tree anchors without deleting or modifying the durable journal or upgrading UNKNOWN. The real process remains independently owned by the test for failure cleanup.
+
+The corrected public regression passed in 2.45s. Combined resume, stale-publisher, parent-exit, helper and architecture checks passed 27 tests in 23.13s; scoped Ruff/format and strict Pyright passed. Strong retention for an unresolved helper or a cancelled wrapper remains separate pending implementation; this settled-only disposal does not establish that ownership claim.
