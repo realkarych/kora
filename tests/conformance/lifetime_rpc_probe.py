@@ -16,6 +16,7 @@ from kora.protocols.lifetime import (
     EnvironmentVariable,
     ProcessDomain,
     ProcessLaunch,
+    Reservation,
     ReservationRequest,
     ResourceKind,
     TemporaryTreeRequest,
@@ -80,6 +81,82 @@ def progress(address: str, mode: str, phase: bytes) -> None:
             feedback.sendto(phase, address)
 
 
+async def partial_input(
+    client: LifetimeClient,
+    endpoint: socket.socket,
+    tree: Reservation,
+    mode: str,
+    feedback_address: str,
+) -> None:
+    if mode == "cancel_frame":
+        await client.channel.write_frame(
+            HEADER.dump_json(
+                OrdinaryHeader(
+                    request_id=client.next_request_id,
+                    verb="observe",
+                    control_bytes=256,
+                    execution_bytes=0,
+                )
+            ),
+            client.clock.monotonic_ns() + 5_000_000_000,
+        )
+        await asyncio.get_running_loop().sock_sendall(
+            endpoint, (256).to_bytes(4, "big") + b"{"
+        )
+    else:
+        process = await client.reserve(
+            ReservationRequest(
+                operation_id=new_operation_id(),
+                kind=ResourceKind.PROCESS_DOMAIN,
+                parent_resource_id=tree.token.resource_id,
+            )
+        )
+        progress(feedback_address, mode, b"s")
+        request = ProcessLaunch(
+            executable=sys.executable,
+            argv=(sys.executable, "-I", "-c", "pass"),
+            environment=(),
+            working_directory_resource_id=tree.token.resource_id,
+            stdin=None,
+            stdout=None,
+            stderr=None,
+            domain=ProcessDomain.INVOCATION,
+        )
+        metadata, payload = ExecutionConfig.from_launch(request).encode()
+        call = ProcessCall(
+            token=process.token,
+            operation_id=new_operation_id(),
+            working_directory_resource_id=tree.token.resource_id,
+            stdout=None,
+            stderr=None,
+            domain=ProcessDomain.INVOCATION,
+            execution_bytes=len(payload),
+        )
+        deadline = client.clock.monotonic_ns() + 5_000_000_000
+        await client.channel.write_frame(
+            HEADER.dump_json(
+                OrdinaryHeader(
+                    request_id=client.next_request_id,
+                    verb="process",
+                    control_bytes=len(CALL.dump_json(call)) + len(metadata),
+                    execution_bytes=len(payload),
+                )
+            ),
+            deadline,
+        )
+        await client.channel.write_frame(CALL.dump_json(call), deadline)
+        await client.channel.write_frame(metadata, deadline)
+        await client.channel.write_frame(len(payload).to_bytes(4, "big"), deadline)
+        await client.channel.write_frame(payload[:1], deadline)
+    feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    feedback.sendto(b"p", feedback_address)
+    feedback.close()
+    await client.reader
+    assert client.closed
+    assert client.channel.closed
+    client.disconnect()
+
+
 async def run(address: str, mode: str, feedback_address: str) -> None:
     endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     endpoint.connect(address)
@@ -91,6 +168,9 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
     progress(feedback_address, mode, b"r")
     assert await client.reserve(reservation_request) == tree
     progress(feedback_address, mode, b"d")
+    if mode in ("cancel_frame", "cancel_execution"):
+        await partial_input(client, endpoint, tree, mode, feedback_address)
+        return
     if mode.startswith("concurrent-"):
         feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         feedback.bind(feedback_address + "-child")
@@ -109,9 +189,7 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
     acquired = await client.acquire(
         tree.token, new_operation_id(), TemporaryTreeRequest()
     )
-    progress(feedback_address, mode, b"t")
     await client.acknowledge(tree.token, acquired.operation_id, acquired.revision)
-    progress(feedback_address, mode, b"a")
     process = await client.reserve(
         ReservationRequest(
             operation_id=new_operation_id(),
@@ -119,7 +197,6 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
             parent_resource_id=tree.token.resource_id,
         )
     )
-    progress(feedback_address, mode, b"s")
     request = ProcessLaunch(
         executable=sys.executable,
         argv=(sys.executable, "-I", "-c", "pass"),
@@ -149,69 +226,15 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
         )
         return
     acquisition = await client.acquire(process.token, operation_id, request)
-    progress(feedback_address, mode, b"q")
     assert await client.acquire(process.token, operation_id, request) == acquisition
-    progress(feedback_address, mode, b"u")
     await client.acknowledge(process.token, operation_id, acquisition.revision)
-    progress(feedback_address, mode, b"v")
     observations = await client.observe(None)
     assert {observation.resource_id for observation in observations} == {
         tree.token.resource_id,
         process.token.resource_id,
     }
-    progress(feedback_address, mode, b"o")
     report = await client.close(tree.token.resource_id)
-    progress(feedback_address, mode, b"c")
     assert report.cleanup_reference is None
-    if mode in ("cancel_frame", "cancel_execution"):
-        if mode == "cancel_frame":
-            await client.channel.write_frame(
-                HEADER.dump_json(
-                    OrdinaryHeader(
-                        request_id=client.next_request_id,
-                        verb="observe",
-                        control_bytes=256,
-                        execution_bytes=0,
-                    )
-                ),
-                client.clock.monotonic_ns() + 5_000_000_000,
-            )
-            await asyncio.get_running_loop().sock_sendall(
-                endpoint, (256).to_bytes(4, "big") + b"{"
-            )
-        else:
-            metadata, payload = ExecutionConfig.from_launch(request).encode()
-            call = ProcessCall(
-                token=process.token,
-                operation_id=new_operation_id(),
-                working_directory_resource_id=tree.token.resource_id,
-                stdout=None,
-                stderr=None,
-                domain=ProcessDomain.INVOCATION,
-                execution_bytes=len(payload),
-            )
-            deadline = client.clock.monotonic_ns() + 5_000_000_000
-            await client.channel.write_frame(
-                HEADER.dump_json(
-                    OrdinaryHeader(
-                        request_id=client.next_request_id,
-                        verb="process",
-                        control_bytes=len(CALL.dump_json(call)) + len(metadata),
-                        execution_bytes=len(payload),
-                    )
-                ),
-                deadline,
-            )
-            await client.channel.write_frame(CALL.dump_json(call), deadline)
-            await client.channel.write_frame(metadata, deadline)
-            await client.channel.write_frame(len(payload).to_bytes(4, "big"), deadline)
-            await client.channel.write_frame(payload[:1], deadline)
-        feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-        feedback.sendto(b"p", feedback_address)
-        feedback.close()
-        await client.reader
-        assert client.closed
-        assert client.channel.closed
     if mode == "terminal":
         failure = None
         try:

@@ -103,30 +103,26 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                 if mode.startswith("cancel"):
                     running = asyncio.create_task(parent.run())
                     loop = asyncio.get_running_loop()
-                    for phase in (
-                        b"r",
-                        b"d",
-                        b"t",
-                        b"a",
-                        b"s",
-                        b"q",
-                        b"u",
-                        b"v",
-                        b"o",
-                        b"c",
-                        b"p",
-                    ):
+                    frontier_deadline = loop.time() + 5
+                    phases = (
+                        (b"r", b"d", b"p")
+                        if mode == "cancel_frame"
+                        else (b"r", b"d", b"s", b"p")
+                    )
+                    for phase in phases:
                         assert (
-                            await asyncio.wait_for(loop.sock_recv(feedback, 1), 5)
+                            await asyncio.wait_for(
+                                loop.sock_recv(feedback, 1),
+                                max(0, frontier_deadline - loop.time()),
+                            )
                             == phase
                         )
-                    deadline = owner.deadline()
                     while not (
                         owner.transport_execution_bytes
                         if mode == "cancel_execution"
                         else owner.transport_control_bytes - ENDPOINT_CONTROL_BYTES
                     ):
-                        assert owner.clock.monotonic_ns() < deadline
+                        assert loop.time() < frontier_deadline
                         ready: asyncio.Future[None] = loop.create_future()
                         loop.call_soon(ready.set_result, None)
                         await ready
