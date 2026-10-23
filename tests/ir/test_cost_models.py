@@ -569,3 +569,194 @@ def test_timestamps_refuse_numeric_epoch_strings(value: str) -> None:
         UsageRow.model_validate(payload)
     with pytest.raises(ValidationError):
         UsageRow.model_validate_json(json.dumps(payload))
+
+
+def revision_with_encoded_size(
+    effective_from: str, byte_count: int
+) -> dict[str, object]:
+    prices = {f"{i:03d}": rates_payload() for i in range(200)}
+    payload = revision_payload(prices)
+    payload["effective_from"] = effective_from
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    padding = byte_count - len(encoded)
+    for i in range(200):
+        growth = min(padding, 253)
+        prices[f"{i:03d}" + "x" * growth] = prices.pop(f"{i:03d}")
+        padding -= growth
+    return payload
+
+
+def test_revision_refuses_canonical_growth_from_basic_iso() -> None:
+    payload = revision_with_encoded_size("20261023T000000Z", 65536)
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+
+    with pytest.raises(ValidationError):
+        PriceRevision.model_validate(payload)
+    with pytest.raises(ValidationError):
+        PriceRevision.model_validate_json(encoded)
+
+    assert len(encoded.encode()) == 65536
+
+
+def test_revision_normalization_at_exact_bound_round_trips() -> None:
+    payload = revision_with_encoded_size("20261023T000000Z", 65532)
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    offset_payload = dict(payload)
+    offset_payload["effective_from"] = datetime.fromisoformat(
+        "2026-10-23T01:00:00+01:00"
+    )
+
+    revision = PriceRevision.model_validate_json(encoded)
+    offset_revision = PriceRevision.model_validate(offset_payload)
+    restored = PriceRevision.model_validate_json(revision.model_dump_json())
+
+    assert restored == revision == offset_revision
+    assert (
+        len(
+            json.dumps(
+                revision.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode()
+        )
+        == 65536
+    )
+
+
+@pytest.mark.parametrize("priced_observations", [False, True])
+def test_missing_reports_refuse_partial_snapshot_completeness(
+    priced_observations: bool,
+) -> None:
+    models = (
+        [model_payload(usd_estimate="1", known_usd_estimate="1")]
+        if priced_observations
+        else []
+    )
+    payload = run_payload(
+        models=models,
+        completeness="partial",
+        missing_report_attempts=1,
+        pricing_status="partially_priced" if priced_observations else "unpriced",
+        usd_estimate=None,
+        known_usd_estimate="1" if priced_observations else None,
+    )
+
+    with pytest.raises(ValidationError):
+        RunCost.model_validate(payload)
+
+
+@pytest.mark.parametrize("priced_observations", [False, True])
+def test_missing_reports_preserve_unavailable_and_known_subtotals(
+    priced_observations: bool,
+) -> None:
+    models = (
+        [model_payload(usd_estimate="1", known_usd_estimate="1")]
+        if priced_observations
+        else []
+    )
+    payload = run_payload(
+        models=models,
+        completeness="unavailable",
+        missing_report_attempts=1,
+        pricing_status="partially_priced" if priced_observations else "unpriced",
+        usd_estimate=None,
+        known_usd_estimate="1" if priced_observations else None,
+    )
+
+    snapshot = RunCost.model_validate(payload)
+
+    assert snapshot.completeness == "unavailable"
+    assert snapshot.known_usd_estimate == ("1" if priced_observations else None)
+
+
+@pytest.mark.parametrize(
+    "gap", ["attribution_gap_attempts", "observation_gap_attempts"]
+)
+def test_observed_gaps_preserve_partial_snapshot_completeness(gap: str) -> None:
+    payload = run_payload(
+        models=[model_payload(usd_estimate="1", known_usd_estimate="1")],
+        observed_at=NOW,
+        completeness="partial",
+        pricing_status="partially_priced",
+        usd_estimate=None,
+        known_usd_estimate="1",
+        **{gap: 1},
+    )
+
+    snapshot = RunCost.model_validate(payload)
+
+    assert snapshot.completeness == "partial"
+    assert snapshot.known_usd_estimate == "1"
+
+
+@pytest.mark.parametrize(
+    "value", ["0001-01-01T00:00:00+01:00", "9999-12-31T23:59:59-01:00"]
+)
+def test_utc_range_overflow_is_a_content_free_validation_refusal(value: str) -> None:
+    python_payload = usage_payload(observed_at=datetime.fromisoformat(value))
+    json_payload = json.dumps(usage_payload(observed_at=value))
+
+    with pytest.raises(ValidationError) as python_error:
+        UsageRow.model_validate(python_payload)
+    with pytest.raises(ValidationError) as json_error:
+        UsageRow.model_validate_json(json_payload)
+    python_safe = safe_field_errors(
+        python_error.value, frozenset(UsageRow.model_fields), "Invalid cost value."
+    )
+    json_safe = safe_field_errors(
+        json_error.value, frozenset(UsageRow.model_fields), "Invalid cost value."
+    )
+
+    assert python_safe == json_safe
+    assert python_safe[0].type == "cost_invalid"
+    assert value not in str(python_error.value) + str(json_error.value) + repr(
+        python_safe
+    )
+
+
+@pytest.mark.parametrize("value", ["0001-01-01T00:00:00Z", "9999-12-31T23:59:59Z"])
+def test_utc_year_boundaries_remain_valid(value: str) -> None:
+    payload = usage_payload(observed_at=value)
+
+    row = UsageRow.model_validate(payload)
+    restored = UsageRow.model_validate_json(row.model_dump_json())
+
+    assert restored == row
+    assert restored.model_dump(mode="json")["observed_at"] == value
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"SOURCE_KEY_SECRET": "SOURCE_PAYLOAD_SECRET" * 1000},
+        {"SOURCE_KEY_SECRET": {"SOURCE_PAYLOAD_SECRET": float("inf")}},
+    ],
+)
+def test_source_marker_validation_errors_are_content_free(
+    source: dict[str, object],
+) -> None:
+    payload = usage_payload(source=source)
+    payload["observed_at"] = "2026-10-23T00:00:00Z"
+
+    with pytest.raises(ValidationError) as python_error:
+        UsageRow.model_validate(payload)
+    with pytest.raises(ValidationError) as json_error:
+        UsageRow.model_validate_json(json.dumps(payload))
+    python_safe = safe_field_errors(
+        python_error.value, frozenset(UsageRow.model_fields), "Invalid cost value."
+    )
+    json_safe = safe_field_errors(
+        json_error.value, frozenset(UsageRow.model_fields), "Invalid cost value."
+    )
+
+    assert python_safe == json_safe
+    assert "SECRET" not in str(python_error.value) + str(json_error.value) + repr(
+        python_safe
+    )

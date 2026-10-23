@@ -133,7 +133,10 @@ def timestamp_input(value: object) -> object:
 
 
 def timestamp_utc(value: datetime) -> datetime:
-    return value.astimezone(UTC)
+    try:
+        return value.astimezone(UTC)
+    except OverflowError as error:
+        raise refusal() from error
 
 
 def timestamp_wire(value: datetime) -> str:
@@ -177,7 +180,7 @@ def preflight(value: object, budget: CanonicalBudget, depth: int = 0) -> None:
         for item in items:
             preflight(item, budget, depth + 1)
     elif isinstance(value, datetime):
-        spend_string(budget, timestamp_wire(value), "json_scalar", 0)
+        spend_string(budget, timestamp_wire(timestamp_utc(value)), "json_scalar", 0)
     else:
         if isinstance(value, int) and value.bit_length() > MAX_INTEGER_BITS:
             raise JsonShapeError("json_size")
@@ -220,7 +223,9 @@ class CostValue(BaseModel):
                 for key in cast("Mapping[object, object]", value):
                     if not isinstance(key, str) or key not in cls.model_fields:
                         raise refusal()
-            return handler(value)
+            owned = handler(value)
+            preflight(owned, CanonicalBudget(cls.byte_limit))
+            return owned
         except (ValidationError, JsonShapeError) as error:
             raise refusal() from error
 
@@ -491,7 +496,9 @@ class RunCost(CostValue):
             self.completeness == "complete" or self.pricing_status == "estimated"
         ):
             raise refusal()
-        if self.missing_report_attempts and self.observed_at is not None:
+        if self.missing_report_attempts and (
+            self.completeness != "unavailable" or self.observed_at is not None
+        ):
             raise refusal()
         if self.observed_at is not None and self.observed_at > self.as_of:
             raise refusal()
