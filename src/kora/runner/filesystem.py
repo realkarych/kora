@@ -1,0 +1,173 @@
+import os
+import stat
+from pathlib import Path
+from typing import Annotated
+
+from pydantic import Field, StrictStr, field_validator
+
+from kora.protocols.common import BoundaryModel
+from kora.protocols.lifetime import Uint32, Uint64
+
+
+class FilesystemError(Exception):
+    pass
+
+
+class DirectoryIdentity(BoundaryModel):
+    name: Annotated[
+        StrictStr, Field(min_length=1, max_length=255, pattern=r"^[^/\x00]+$")
+    ]
+    device: Uint64
+    inode: Uint64
+    owner_uid: Uint32
+
+    @field_validator("name")
+    @classmethod
+    def relative_name(cls, value: str) -> str:
+        if value in (".", ".."):
+            raise ValueError("relative entry name required")
+        return value
+
+
+def identity_of(descriptor: int, name: str) -> DirectoryIdentity:
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise FilesystemError("directory_required")
+    return DirectoryIdentity(
+        name=name,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        owner_uid=metadata.st_uid,
+    )
+
+
+def verify_private(descriptor: int, *, directory: bool) -> None:
+    metadata = os.fstat(descriptor)
+    expected = 0o700 if directory else 0o600
+    valid_kind = (
+        stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
+    )
+    if (
+        not valid_kind
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != expected
+    ):
+        raise FilesystemError("private_identity_required")
+    if not directory and metadata.st_nlink != 1:
+        raise FilesystemError("exclusive_file_required")
+
+
+class DirectoryAnchor:
+    def __init__(self, descriptor: int, identity: DirectoryIdentity) -> None:
+        self.descriptor = descriptor
+        self.identity = identity
+        self.closed = False
+
+    @classmethod
+    def open_path(cls, path: Path) -> "DirectoryAnchor":
+        if not path.is_absolute() or ".." in path.parts:
+            raise FilesystemError("absolute_directory_required")
+        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for component in path.parts[1:]:
+                following = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+                os.close(descriptor)
+                descriptor = following
+            verify_private(descriptor, directory=True)
+            return cls(descriptor, identity_of(descriptor, path.name or "/"))
+        except (OSError, FilesystemError):
+            os.close(descriptor)
+            raise
+
+    def open_child(self, expected: DirectoryIdentity) -> "DirectoryAnchor":
+        self.verify()
+        descriptor = os.open(
+            expected.name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=self.descriptor,
+        )
+        try:
+            verify_private(descriptor, directory=True)
+            if identity_of(descriptor, expected.name) != expected:
+                raise FilesystemError("identity_mismatch")
+            return DirectoryAnchor(descriptor, expected)
+        except (OSError, FilesystemError):
+            os.close(descriptor)
+            raise
+
+    def verify(self) -> None:
+        if (
+            self.closed
+            or identity_of(self.descriptor, self.identity.name) != self.identity
+        ):
+            raise FilesystemError("identity_mismatch")
+        verify_private(self.descriptor, directory=True)
+
+    def close(self) -> None:
+        if not self.closed:
+            os.close(self.descriptor)
+            self.closed = True
+
+
+def create_directory(parent: DirectoryAnchor, name: str) -> DirectoryAnchor:
+    if name in (".", "..") or "/" in name or not name:
+        raise FilesystemError("invalid_relative_name")
+    parent.verify()
+    os.mkdir(name, mode=0o700, dir_fd=parent.descriptor)
+    descriptor = os.open(
+        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent.descriptor
+    )
+    try:
+        verify_private(descriptor, directory=True)
+        identity = identity_of(descriptor, name)
+        os.fsync(parent.descriptor)
+        return DirectoryAnchor(descriptor, identity)
+    except (OSError, FilesystemError):
+        os.close(descriptor)
+        raise
+
+
+def remove_directory(
+    parent: DirectoryAnchor, expected: DirectoryIdentity, *, max_entries: int = 65536
+) -> None:
+    remaining = [max_entries]
+    _remove_directory(parent, expected, remaining)
+
+
+def _remove_directory(
+    parent: DirectoryAnchor, expected: DirectoryIdentity, remaining: list[int]
+) -> None:
+    child = parent.open_child(expected)
+    try:
+        with os.scandir(child.descriptor) as entries:
+            for entry in entries:
+                remaining[0] -= 1
+                if remaining[0] < 0:
+                    raise FilesystemError("tree_capacity")
+                metadata = os.stat(
+                    entry.name, dir_fd=child.descriptor, follow_symlinks=False
+                )
+                if metadata.st_uid != os.getuid() or stat.S_ISLNK(metadata.st_mode):
+                    raise FilesystemError("foreign_tree_entry")
+                if stat.S_ISDIR(metadata.st_mode):
+                    nested = DirectoryIdentity(
+                        name=entry.name,
+                        device=metadata.st_dev,
+                        inode=metadata.st_ino,
+                        owner_uid=metadata.st_uid,
+                    )
+                    _remove_directory(child, nested, remaining)
+                elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
+                    os.unlink(entry.name, dir_fd=child.descriptor)
+                else:
+                    raise FilesystemError("unsupported_tree_entry")
+        confirming = parent.open_child(expected)
+        confirming.close()
+        os.rmdir(expected.name, dir_fd=parent.descriptor)
+        os.fsync(parent.descriptor)
+    finally:
+        child.close()
