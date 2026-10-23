@@ -3,10 +3,12 @@ import json
 import sys
 from html import escape
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from tests.measurements.harness import Report, Sample
+from tests.measurements.ir_config_lifetime import CONFIGURATIONS
 from tests.measurements.ir_measurement_evidence import (
     ROOT,
     Evidence,
@@ -14,11 +16,56 @@ from tests.measurements.ir_measurement_evidence import (
     configuration_evidence,
     expected_evidence,
     junit_nodes,
+    verify_configuration_payloads,
     verify_report,
     verify_union,
 )
 
 REVISION = "a" * 40
+
+
+def configuration_payload() -> dict[str, object]:
+    return {
+        "baseline_rss_bytes": 100,
+        "baseline_peak_rss_bytes": 200,
+        "baseline_threads": 1,
+        "baseline_os_threads": 1,
+        "baseline_descriptors": 4,
+        "checkpoints": [
+            {
+                "cycles": cycle,
+                "seconds": 0.1,
+                "retained_bytes": 0,
+                "peak_traced_bytes": 32,
+                "current_rss_bytes": 100,
+                "peak_rss_bytes": 200,
+                "live_models": 0,
+                "threads": 1,
+                "os_threads": 1,
+                "tracer_bytes": 16,
+                "descriptors": 4,
+                "allocation_differences": [],
+            }
+            for cycle in (250, 500, 750, 1000)
+        ],
+        "cycles": 1000,
+        "models_per_cycle": 53,
+        "class_schema_inventory": sorted(model.__name__ for model in CONFIGURATIONS),
+        "class_schemas_unchanged": True,
+        "supplemental_fixtures": 14,
+        "trigger_union_array_size": 5,
+        "trigger_union_schema_unchanged": True,
+        "document_miniature_nodes": 22,
+        "document_full_size_slots": 10,
+        "document_full_size_rotation": {
+            "flat_valid": 3,
+            "flat_final_invalid": 3,
+            "flat_all_invalid": 2,
+            "nested_valid": 2,
+        },
+        "warm_up": 3,
+        "rss_source": "synthetic resource observations",
+    }
 
 
 def rendered_report(inventory: Evidence) -> str:
@@ -37,6 +84,11 @@ def rendered_report(inventory: Evidence) -> str:
         }
     )
     report.gates.update(dict.fromkeys(inventory.gates, True))
+    for run in range(3):
+        if configuration_evidence(run).nodes <= inventory.nodes:
+            report.environment[f"config_lifetime_{run}"] = json.dumps(
+                configuration_payload()
+            )
     for (name, repeat, count), multiplicity in inventory.samples.items():
         report.samples.extend(
             Sample(name, repeat, count, 0.1) for _ in range(multiplicity)
@@ -189,3 +241,120 @@ def test_ir_union_checks_all_artifact_identities(
     else:
         with pytest.raises(ValueError, match="IR"):
             verify_union(tmp_path, REVISION)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "malformed", "object", "extra_run"])
+def test_ir_report_requires_only_its_selected_configuration_payload(
+    mutation: str,
+) -> None:
+    expected = configuration_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    if mutation == "missing":
+        report.environment.pop("config_lifetime_1")
+    elif mutation == "malformed":
+        report.environment["config_lifetime_1"] = "{"
+    elif mutation == "object":
+        report.environment["config_lifetime_1"] = "[]"
+    else:
+        report.environment["config_lifetime_0"] = json.dumps(configuration_payload())
+
+    with pytest.raises(ValueError, match="IR configuration"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("models_per_cycle", 40),
+        ("cycles", 999),
+        ("class_schema_inventory", ["wrong"]),
+        ("class_schemas_unchanged", False),
+        ("class_schemas_unchanged", 1),
+        ("trigger_union_schema_unchanged", False),
+        ("trigger_union_schema_unchanged", 1),
+        ("warm_up", 2),
+        ("supplemental_fixtures", 13),
+        ("trigger_union_array_size", 4),
+        ("document_miniature_nodes", 21),
+        ("document_full_size_slots", 9),
+        ("document_full_size_rotation", {"flat_valid": 10}),
+        ("baseline_threads", True),
+        ("checkpoints", []),
+        ("class_schema_inventory", ["AgentConfig"] * 53),
+        ("baseline_rss_bytes", None),
+        ("unknown", "metadata"),
+    ],
+)
+def test_ir_report_refuses_wrong_configuration_inventory(
+    field: str, value: object
+) -> None:
+    expected = configuration_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = configuration_payload()
+    payload[field] = value
+    report.environment["config_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR configuration"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cycles", 251),
+        ("live_models", 1),
+        ("live_models", False),
+        ("retained_bytes", 65536),
+        ("threads", 2),
+        ("descriptors", 5),
+        ("os_threads", True),
+        ("seconds", 0.2),
+        ("peak_traced_bytes", True),
+    ],
+)
+def test_ir_report_refuses_inconsistent_configuration_checkpoints(
+    field: str, value: object
+) -> None:
+    expected = configuration_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = configuration_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    checkpoints[0][field] = value
+    report.environment["config_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR configuration"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize("field", tuple(configuration_payload()))
+def test_ir_report_refuses_missing_configuration_metadata(field: str) -> None:
+    expected = configuration_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = configuration_payload()
+    payload.pop(field)
+    report.environment["config_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR configuration"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize("field", ["current_rss_bytes", "peak_rss_bytes", "os_threads"])
+def test_linux_configuration_evidence_requires_native_counters(field: str) -> None:
+    expected = configuration_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.platform = "linux"
+    payload = configuration_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    checkpoints[0][field] = None
+    report.environment["config_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR configuration"):
+        verify_configuration_payloads(report, expected)

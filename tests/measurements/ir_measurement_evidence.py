@@ -6,13 +6,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from xml.parsers.expat import ParserCreate
 
-from pydantic import BaseModel, ConfigDict, StrictBool, TypeAdapter
+from pydantic import BaseModel, ConfigDict, StrictBool, TypeAdapter, ValidationError
 
 from tests.measurements.harness import ExtraValue
+from tests.measurements.ir_config_lifetime import CONFIGURATIONS
+from tests.measurements.ir_declaration_workload import LIFETIME_TRIGGERS
+from tests.measurements.ir_document_workload import LIFETIME_DOCUMENT, graph_inventory
+from tests.measurements.ir_remaining_workload import OPEN, REFUSED_OPEN
 from tests.measurements.test_ir_models_cost import (
     FAILURE_CYCLES,
     FAILURES,
     MEASURED,
+    RETAINED_LIMIT_BYTES,
+    WARM_UP,
     WORKLOADS,
     cases,
 )
@@ -52,6 +58,54 @@ class MeasurementReport(BaseModel):
     gates: dict[str, StrictBool]
     durations_seconds: dict[str, float]
     samples: list[MeasurementSample]
+
+
+class AllocationDifference(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    location: str
+    bytes: int
+    count: int
+
+
+class ConfigurationCheckpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    cycles: int
+    seconds: float
+    retained_bytes: int
+    peak_traced_bytes: int
+    current_rss_bytes: int | None
+    peak_rss_bytes: int | None
+    live_models: int
+    threads: int
+    os_threads: int | None
+    tracer_bytes: int
+    descriptors: int
+    allocation_differences: list[AllocationDifference]
+
+
+class ConfigurationLifetime(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    baseline_rss_bytes: int
+    baseline_peak_rss_bytes: int
+    baseline_threads: int
+    baseline_os_threads: int | None
+    baseline_descriptors: int
+    checkpoints: list[ConfigurationCheckpoint]
+    cycles: int
+    models_per_cycle: int
+    class_schema_inventory: list[str]
+    class_schemas_unchanged: StrictBool
+    supplemental_fixtures: int
+    trigger_union_array_size: int
+    trigger_union_schema_unchanged: StrictBool
+    document_miniature_nodes: int
+    document_full_size_slots: int
+    document_full_size_rotation: dict[str, int]
+    warm_up: int
+    rss_source: str
 
 
 def configuration_evidence(run: int) -> Evidence:
@@ -124,6 +178,73 @@ def junit_nodes(document: str) -> frozenset[str]:
     return frozenset(nodes)
 
 
+def verify_configuration_payloads(
+    report: MeasurementReport, expected: Evidence
+) -> None:
+    runs = [
+        run for run in range(3) if configuration_evidence(run).nodes <= expected.nodes
+    ]
+    if {name for name in report.environment if name.startswith("config_lifetime_")} != {
+        f"config_lifetime_{run}" for run in runs
+    }:
+        raise ValueError("incomplete IR configuration lifetime evidence")
+    for run in runs:
+        raw = report.environment[f"config_lifetime_{run}"]
+        if not isinstance(raw, str):
+            raise ValueError("incomplete IR configuration lifetime evidence")
+        try:
+            payload = ConfigurationLifetime.model_validate_json(raw)
+        except ValidationError as error:
+            raise ValueError("incomplete IR configuration lifetime evidence") from error
+        cycles = sorted(count for _, _, count in configuration_evidence(run).samples)
+        if (
+            payload.cycles != cycles[-1]
+            or payload.models_per_cycle != len(CONFIGURATIONS)
+            or payload.class_schema_inventory
+            != sorted(model.__name__ for model in CONFIGURATIONS)
+            or not payload.class_schemas_unchanged
+            or not payload.trigger_union_schema_unchanged
+            or payload.supplemental_fixtures != len(OPEN) + len(REFUSED_OPEN)
+            or payload.trigger_union_array_size != len(LIFETIME_TRIGGERS)
+            or payload.document_miniature_nodes
+            != graph_inventory(LIFETIME_DOCUMENT)["nodes"]
+            or payload.document_full_size_slots != payload.cycles // 100
+            or payload.document_full_size_rotation
+            != {
+                "flat_valid": 3,
+                "flat_final_invalid": 3,
+                "flat_all_invalid": 2,
+                "nested_valid": 2,
+            }
+            or payload.warm_up != WARM_UP
+            or [point.cycles for point in payload.checkpoints] != cycles
+            or report.platform == "linux"
+            and payload.baseline_os_threads is None
+        ):
+            raise ValueError("inconsistent IR configuration lifetime inventory")
+        times = {
+            sample.count: sample.seconds
+            for sample in report.samples
+            if sample.workload == "config_lifetime" and sample.repeat == run
+        }
+        for point in payload.checkpoints:
+            if (
+                point.seconds != times.get(point.cycles)
+                or point.retained_bytes >= RETAINED_LIMIT_BYTES
+                or point.live_models != 0
+                or point.threads != payload.baseline_threads
+                or point.descriptors != payload.baseline_descriptors
+                or point.os_threads != payload.baseline_os_threads
+                or report.platform == "linux"
+                and (
+                    point.current_rss_bytes is None
+                    or point.peak_rss_bytes is None
+                    or point.os_threads is None
+                )
+            ):
+                raise ValueError("inconsistent IR configuration lifetime checkpoint")
+
+
 def verify_report(
     document: str, junit: str, revision: str, expected: Evidence
 ) -> MeasurementReport:
@@ -150,6 +271,7 @@ def verify_report(
         or sample_identities != expected.samples
     ):
         raise ValueError("incomplete IR shard evidence")
+    verify_configuration_payloads(report, expected)
     repeats = Counter(sample.workload for sample in report.samples)
     if set(report.summary) != set(repeats) or any(
         report.summary[name].get("repeats") != count for name, count in repeats.items()
