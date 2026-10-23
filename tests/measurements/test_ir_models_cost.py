@@ -52,6 +52,59 @@ RETAINED_LIMIT_BYTES: int = 65_536
 LEAF_BYTES: int = 1024
 CONFIG_SCHEMA_BYTES: int = 65_536
 
+COST_RETAINED_LIMIT_BYTES: int = 262_144
+COST_RSS_LIMIT_BYTES: int = 8_388_608
+COST_TIMING_LIMIT_SECONDS: dict[str, float] = {
+    "cost_union_1": 2.0**-16,
+    "cost_union_16": 2.0**-14,
+    "cost_union_64": 2.0**-10,
+    "cost_union_65_refused": 2.0**-10,
+    "cost_coverage_complete": 2.0**-13,
+    "cost_coverage_initial": 2.0**-14,
+    "cost_coverage_gap_refused": 2.0**-13,
+    "cost_coverage_sequence_refused": 2.0**-14,
+    "cost_observation_valid": 2.0**-12,
+    "cost_observation_tokens_refused": 2.0**-13,
+    "cost_observation_ttl_refused": 2.0**-12,
+    "cost_observation_reasoning_refused": 2.0**-12,
+    "cost_snapshot_1_validate": 2.0**-10,
+    "cost_snapshot_1_round_trip": 2.0**-10,
+    "cost_pricing_max_products": 2.0**-14,
+    "cost_pricing_overflow_refused": 2.0**-16,
+    "cost_pricing_unknown": 2.0**-18,
+    "cost_pricing_subscription": 2.0**-19,
+    "cost_snapshot_64_validate": 2.0**-6,
+    "cost_snapshot_64_round_trip": 2.0**-5,
+    "cost_snapshot_1024_validate": 2.0**-2,
+    "cost_snapshot_1024_round_trip": 2.0**-1,
+    "cost_revision_65535_validate": 2.0**-5,
+    "cost_revision_65535_parse": 2.0**-6,
+    "cost_revision_65536_validate": 2.0**-6,
+    "cost_revision_65536_parse": 2.0**-6,
+    "cost_revision_65537_validate": 2.0**-8,
+    "cost_revision_65537_parse": 2.0**-15,
+    "cost_revision_65536_round_trip": 2.0**-4,
+    "cost_revision_normalized_growth_refused": 2.0**-6,
+    "cost_source_8191": 2.0**-11,
+    "cost_source_8192": 2.0**-11,
+    "cost_source_8193": 2.0**-13,
+    "cost_source_8192_round_trip": 2.0**-11,
+    "cost_source_8192_dense_round_trip": 2.0**-6,
+    "cost_source_depth_refused": 2.0**-13,
+    "cost_source_cycle_refused": 2.0**-13,
+    "cost_snapshot_subtotal_refused": 2.0**-2,
+    "cost_snapshot_1025_refused": 2.0**-4,
+    "cost_lexical_money_refused": 2.0**-17,
+    "cost_lexical_identifier_refused": 2.0**-9,
+    "cost_snapshot_bytes_1048575_validate": 2.0**-2,
+    "cost_snapshot_bytes_1048575_parse": 2.0**-2,
+    "cost_snapshot_bytes_1048576_validate": 2.0**-2,
+    "cost_snapshot_bytes_1048576_parse": 2.0**-2,
+    "cost_snapshot_bytes_1048577_validate": 2.0**-4,
+    "cost_snapshot_bytes_1048577_parse": 2.0**-9,
+    "cost_snapshot_bytes_1048576_round_trip": 2.0**-1,
+}
+
 
 def test_cost_checker_refuses_unexpected_acceptance() -> None:
     case = CostCase("unexpected_acceptance", lambda: object(), False)
@@ -91,7 +144,7 @@ def append_cost_report(report: Report, output: bytes) -> dict[str, object]:
                 cast("float", sample["seconds"]),
             )
         )
-    return cast("dict[str, object]", payload["environment"])
+    return payload
 
 
 @pytest.mark.parametrize("run", range(3))
@@ -129,8 +182,16 @@ def test_accounting_value_cost(report: Report, run: int, group: str) -> None:
         assert result.code == 0, result.stderr.decode()
         assert result.stderr == b""
         report.environment[identity] = result.stdout.decode()
-        environment = append_cost_report(report, result.stdout)
+        payload = append_cost_report(report, result.stdout)
+        environment = cast("dict[str, object]", payload["environment"])
         assert environment["operations_per_batch"] == 1
+        summaries = cast("dict[str, dict[str, float]]", payload["summary"])
+        counts = {sample.workload: sample.count for sample in report.samples}
+        for name, summary in summaries.items():
+            seconds = summary["p95_us_per_record"] * counts[name] / 1_000_000
+            passed = seconds <= COST_TIMING_LIMIT_SECONDS[name]
+            report.gates[f"{identity}_{name}_p95"] = passed
+            assert passed, (name, seconds, COST_TIMING_LIMIT_SECONDS[name])
         report.samples.append(Sample(f"cost_{group}_timing_process", run, 1, elapsed))
 
     assert (open_descriptors(), threading.active_count()) == before
@@ -171,7 +232,8 @@ def test_accounting_value_lifetime(
         assert not result.overflow
         assert result.code == 0, result.stderr.decode()
         assert result.stderr == b""
-        environment = append_cost_report(report, result.stdout)
+        payload = append_cost_report(report, result.stdout)
+        environment = cast("dict[str, object]", payload["environment"])
         points = cast(
             "list[dict[str, int]]", json.loads(cast("str", environment["checkpoints"]))
         )
@@ -183,6 +245,11 @@ def test_accounting_value_lifetime(
         for point in points:
             assert (point["heap"] >= 0) is traced
             assert (point["rss"] >= 0) is not traced
+            resource = "heap" if traced else "rss"
+            limit = COST_RETAINED_LIMIT_BYTES if traced else COST_RSS_LIMIT_BYTES
+            passed = point[resource] - points[0][resource] <= limit
+            report.gates[f"{identity}_{point['cycle']}_{resource}_retained"] = passed
+            assert passed, (identity, point, limit)
         report.samples.append(
             Sample(f"cost_{mode}_{group}_lifetime_process", run, 1, elapsed)
         )
