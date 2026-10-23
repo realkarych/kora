@@ -1,5 +1,7 @@
 # ADR-0005: Eleven provider protocols, each with a conformance suite, registered through one entry point
 
+Bounded-read amendment dated 2026-10-23: the project owner approved the contract plan and exact wording under [issue #227](https://github.com/realkarych/kora/issues/227#issuecomment-6371188973).
+
 - Status: accepted, 2026-10-15; amended 2026-10-16 (the VCS protocol answers the branch head, [ADR-0008](0008-content-bound-approvals.md), issue #16); amended 2026-10-16 (the VCS returns typed checkout and publish plans that the session runner executes; [architecture critique of 2026-10-16, finding A13](../../knowledge/reviews/architecture-critique-2026-10-16.md#a13-remote-composition), issue #20)
 - Reviewed: by the project owner, 2026-10-16; publication-boundary amendment dated 2026-10-17 pending owner review
 - Superseded in part by: [ADR-0016](0016-trusted-execution-and-publication.md) (control state, publication and recovery)
@@ -58,6 +60,8 @@ Core owns current authorization, validation, durable intents, reservations and t
 Finite private-byte, stage and deletion capacity covers active work and unresolved cleanup independently of the worker reservation released at acceptance. Core acknowledges durably saved outcomes and closes issuance before provider evidence may be compacted; providers independently prove closure. A delayed operation cannot recreate a retired stage or delete recreated accepted content. Stable identity across aliases/restart, no-overwrite installation, crash attribution, bounded inventory work and concrete closure/compaction mechanisms are blocking implementation proofs. A concrete S3-compatible backend that cannot establish them fails closed; protocol selection alone is no runtime guarantee.
 
 Local conformance and resource-lifetime evidence activate with the separately planned local-provider implementation. The API/metadata/retention integration remains with its actual consumers and #216; provider conformance cannot satisfy it. The [dated review record](../../knowledge/reviews/artifact-storage-contract-2026-10-23.md) records scope and evidence status.
+
+Artifact storage supports bounded range reads over the same immutable content references and closeable reader ownership as complete reads. A range does not create authority, a new retention owner or a cursor session, and the provider reads the requested bytes without loading or discarding the preceding content. The read contracts and conformance obligations are specified in [bounded read projections](../../knowledge/specs/bounded-read-projections.md); staging and promotion remain governed by their own contract.
 
 ## Alternatives considered
 
