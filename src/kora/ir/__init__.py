@@ -59,8 +59,11 @@ from kora.ir.trigger import (
     WebhookAuth,
     WebhookTrigger,
 )
+from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "PrincipalRef",
+    "VcsRef",
     "BuiltinTypeContract",
     "CustomTypeContract",
     "TypeBehavior",

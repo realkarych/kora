@@ -1,5 +1,7 @@
 # Threat model
 
+VcsRef model amendment dated 2026-10-23: the project owner approved the #209 implementation plan and the exact typed-boundary evidence paragraph below. Existing threat actors, controls, remaining limitations and authority are unchanged.
+
 Retained dispatcher-history amendment dated 2026-10-23: the project owner approved the [contract plan and exact documentation wording](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702), [approval recorded](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030).
 
 Local conformance lifetime amendment dated 2026-10-23: wording reviewed and [accepted by the project owner](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23.
@@ -63,6 +65,8 @@ CEL binding amendment dated 2026-10-21 (TM-04 and TM-12 rows, TM-03/TM-04 and TM
 Three facts remain separate: owner review of this text, acceptance of a design decision, and evidence that an implementation enforces it. Some cited ADRs record accepted direction with wording still pending owner review; this synthesis does not upgrade that status. Deployment conditions are independent of all three. The [source comparison](../knowledge/research/threat-model-document-structure-2026-10-18.md) explains the document structure; external projects are not evidence for kora's protection.
 
 CEL evaluator evidence for TM-04 and TM-12 is active under [issue #166](https://github.com/realkarych/kora/issues/166): exact JSON conversion, pre-allocation bounds, detached snapshots, bounded outstanding ownership and cache, safe error records and diagnostics, narrow native failure mapping and a single pinned terminal worker guard. `test_cel_native_compilation_requires_checked_expression` rejects production raw-compilation access outside the binding loader. The evaluator lifetime artifact covers resource retention and real diagnostic sink failure. The compact regression and golden checks, schema-driven checking/projections and correction of minimum-int negation block the first product consumer. The compact regression runs within the already-required `CEL evaluator lifetime` CI status added by [PR #175](https://github.com/realkarych/kora/pull/175), alongside the existing lifetime checks; it introduces no new required status. [Evaluator lifetime evidence](../knowledge/research/cel-evaluator-lifetime-2026-10-21.md).
+
+The VcsRef typed-boundary evidence under [issue #209](https://github.com/realkarych/kora/issues/209) covers TM-04/TM-10 through strict bounded parsing and failure release, TM-06/TM-07 through content-free diagnostics and unchanged untrusted summary content, TM-08/TM-11 through full-payload identity and separate principal identity, and TM-12 through the decided model stack and immutable schema/behavior checks. Publication authority, upload admission, recovery and client rendering are not established by these model tests and remain pending their implementing components.
 
 ## Assets, actors and assumptions
 
