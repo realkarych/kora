@@ -115,6 +115,16 @@ def snapshot_at_bytes(size: int) -> dict[str, object]:
     return document
 
 
+def dense_source() -> dict[str, object]:
+    document: dict[str, object] = {
+        "items": [{"values": [index, {"key": "value"}]} for index in range(200)],
+        "padding": "",
+    }
+    document["padding"] = "x" * (8192 - len(canonical(document).encode()))
+    assert len(canonical(document).encode()) == 8192
+    return document
+
+
 def union_models(count: int, refuse: bool = False) -> object:
     accumulated: frozenset[str] = frozenset()
     for index in range(count):
@@ -228,6 +238,18 @@ def cost_cases() -> list[CostCase]:
             200,
         )
     )
+    actions.append(
+        CostCase(
+            "revision_normalized_growth_refused",
+            partial(
+                PriceRevision.model_validate,
+                revision_with_encoded_size("20261023T000000Z", 65536),
+            ),
+            False,
+            "large",
+            200,
+        )
+    )
     for size in (8191, 8192, 8193):
         source = {"x": "x" * (size - 8)}
         document = usage_payload(observed_at=NOW, source=source)
@@ -251,6 +273,35 @@ def cost_cases() -> list[CostCase]:
             "large",
         )
     )
+    actions.append(
+        CostCase(
+            "source_8192_dense_round_trip",
+            partial(
+                round_trip,
+                UsageRow,
+                usage_payload(observed_at=NOW, source=dense_source()),
+            ),
+            True,
+            "large",
+        )
+    )
+    deep: dict[str, object] = {}
+    for _ in range(18):
+        deep = {"nested": deep}
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+    for name, source in (("depth", deep), ("cycle", cyclic)):
+        actions.append(
+            CostCase(
+                f"source_{name}_refused",
+                partial(
+                    UsageRow.model_validate,
+                    usage_payload(observed_at=NOW, source=source),
+                ),
+                False,
+                "large",
+            )
+        )
     for size in (1048575, 1048576, 1048577):
         document = snapshot_at_bytes(size)
         for operation, action in (
@@ -271,6 +322,19 @@ def cost_cases() -> list[CostCase]:
             "snapshot_bytes_1048576_round_trip",
             partial(round_trip, RunCost, snapshot_at_bytes(1048576)),
             True,
+            "large",
+            1024,
+        )
+    )
+    inconsistent = snapshot_at_bytes(1048576)
+    inconsistent["usd_estimate"] = "1"
+    inconsistent["known_usd_estimate"] = "1"
+    assert len(canonical(inconsistent).encode()) == 1048576
+    actions.append(
+        CostCase(
+            "snapshot_subtotal_refused",
+            partial(RunCost.model_validate, inconsistent),
+            False,
             "large",
             1024,
         )
