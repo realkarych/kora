@@ -5,13 +5,24 @@ from typing import Protocol, cast
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
-from kora.ir.errors import safe_field_errors
+from kora.ir.errors import PLACEHOLDER_LOCATION, SafeFieldError, safe_field_errors
 
 ROOT: Path = Path(__file__).parents[2]
 SCHEMA_PATH: Path = ROOT / "knowledge" / "specs" / "ir.schema.json"
 EXAMPLES: Path = ROOT / "knowledge" / "specs" / "examples"
 POLICY_FIELDS: frozenset[str] = frozenset({"allow", "deny", "extensions"})
 SAFE_MESSAGE: str = "the tool policy is invalid"
+CONFIG_ERROR_MESSAGE: str = "the execution configuration is invalid"
+
+
+def configuration_errors(error: ValidationError) -> tuple[SafeFieldError, ...]:
+    errors = safe_field_errors(error, frozenset(), CONFIG_ERROR_MESSAGE)
+    return tuple(
+        SafeFieldError(
+            tuple(PLACEHOLDER_LOCATION for _ in item.loc), item.type, item.msg
+        )
+        for item in errors
+    )
 
 
 def schema_definition(name: str) -> object:

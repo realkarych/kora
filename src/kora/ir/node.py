@@ -1,28 +1,10 @@
-from collections.abc import Mapping
 from enum import StrEnum
-from typing import Final, cast
+from typing import ClassVar, LiteralString, cast
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    GetJsonSchemaHandler,
-    ModelWrapValidatorHandler,
-    SerializerFunctionWrapHandler,
-    StrictStr,
-    field_validator,
-    model_serializer,
-    model_validator,
-)
-from pydantic.config import JsonDict
-from pydantic.json_schema import JsonSchemaValue
-from pydantic_core import CoreSchema, PydanticCustomError
+from pydantic import StrictStr, field_validator
+from pydantic_core import PydanticCustomError
 
-from kora.ir.json import JsonObjectField
-
-EXTENSION_PREFIX: Final[str] = "x-"
-EXTENSIONS_FIELD: Final[str] = "extensions"
-POLICY_FIELDS: Final[frozenset[str]] = frozenset({"allow", "deny"})
+from kora.ir.record import IrRecord
 
 
 class ErrorClass(StrEnum):
@@ -47,53 +29,18 @@ class ErrorClass(StrEnum):
     CONFIG_ERROR = "config_error"
 
 
-def extension_schema(schema: JsonDict) -> None:
-    properties = schema.get("properties")
-    if isinstance(properties, dict):
-        properties.pop(EXTENSIONS_FIELD, None)
-    schema["patternProperties"] = {f"^{EXTENSION_PREFIX}": {}}
-    schema["additionalProperties"] = False
-
-
-def split_extensions(value: Mapping[object, object]) -> dict[str, object]:
-    fields: dict[str, object] = {}
-    extensions: dict[str, object] = {}
-    for key, item in value.items():
-        if type(key) is str and key.startswith(EXTENSION_PREFIX):
-            extensions[key] = item
-        elif type(key) is str and key in POLICY_FIELDS:
-            fields[key] = item
-        else:
-            raise PydanticCustomError(
-                "tool_policy_field_unknown", "the tool policy has an unknown field"
-            )
-    return {**fields, EXTENSIONS_FIELD: extensions}
-
-
-class ToolPolicy(BaseModel):
-    model_config = ConfigDict(
-        frozen=True,
-        extra="forbid",
-        hide_input_in_errors=True,
-        json_schema_extra=extension_schema,
+class ToolPolicy(IrRecord):
+    shape_error: ClassVar[tuple[LiteralString, LiteralString]] = (
+        "tool_policy_type",
+        "the tool policy is not an object",
+    )
+    field_error: ClassVar[tuple[LiteralString, LiteralString]] = (
+        "tool_policy_field_unknown",
+        "the tool policy has an unknown field",
     )
 
     allow: tuple[StrictStr, ...] = ()
     deny: tuple[StrictStr, ...] = ()
-    extensions: JsonObjectField = Field(default_factory=JsonObjectField)
-
-    @model_validator(mode="wrap")
-    @classmethod
-    def read_extensions(
-        cls, value: object, handler: ModelWrapValidatorHandler["ToolPolicy"]
-    ) -> "ToolPolicy":
-        if isinstance(value, ToolPolicy):
-            return handler(value)
-        if not isinstance(value, Mapping):
-            raise PydanticCustomError(
-                "tool_policy_type", "the tool policy is not an object"
-            )
-        return handler(split_extensions(cast("Mapping[object, object]", value)))
 
     @field_validator("allow", "deny", mode="before")
     @classmethod
@@ -103,20 +50,3 @@ class ToolPolicy(BaseModel):
                 "tool_policy_patterns", "the patterns are not a list"
             )
         return cast("list[object] | tuple[object, ...]", value)
-
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
-    ) -> JsonSchemaValue:
-        if handler.mode == "serialization":
-            return cls.model_json_schema(mode="validation")
-        return handler(core_schema)
-
-    @model_serializer(mode="wrap")
-    def write_extensions(
-        self, handler: SerializerFunctionWrapHandler
-    ) -> dict[str, object]:
-        serialised: object = handler(self)
-        data = dict(cast("dict[str, object]", serialised))
-        extensions = data.pop(EXTENSIONS_FIELD, {})
-        return {**data, **cast("dict[str, object]", extensions)}
