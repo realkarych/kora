@@ -365,3 +365,35 @@ def test_canonical_export_refuses_mutated_non_extension_keys() -> None:
     for export in (export_ir, render_ir_json):
         with pytest.raises(ValueError, match="the IR data is invalid"):
             export(parsed)
+
+
+CANONICAL_WRITER_CASES: list[tuple[JsonValue, str]] = [
+    (None, "null"),
+    (True, "true"),
+    (False, "false"),
+    (0, "0"),
+    (-1, "-1"),
+    (1.0, "1.0"),
+    (-0.0, "-0.0"),
+    (1e20, "1e+20"),
+    (5e-324, "5e-324"),
+    ('\b\f\n\r\t\\"\ud800', '"\\b\\f\\n\\r\\t\\\\\\"\\ud800"'),
+    ({"first": [], "second": {}}, '{"first":[],"second":{}}'),
+    ([None, True, {"x": False}, []], '[null,true,{"x":false},[]]'),
+]
+
+
+@pytest.mark.parametrize(("value", "encoded"), CANONICAL_WRITER_CASES)
+def test_canonical_writer_preserves_scalar_bytes_and_container_separators(
+    value: JsonValue, encoded: str
+) -> None:
+    from kora.ir import render_ir_json
+
+    parsed = AgentConfig.model_validate(agent_document({"value": value}))
+
+    rendered = render_ir_json(parsed)
+
+    assert rendered == (
+        '{"harness":"claude","prompt":"","workspace":{"repo":""},'
+        '"output_schema":{"value":' + encoded + "}}"
+    )

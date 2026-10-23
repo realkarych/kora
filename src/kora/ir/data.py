@@ -1,66 +1,81 @@
 import math
-from typing import Annotated, cast
+from collections.abc import Iterator
+from typing import Annotated, TypeAlias, cast
 
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic_core import CoreSchema, PydanticCustomError, core_schema
 
 from kora.ir.json import JsonObject, JsonValue
 
+RawObject: TypeAlias = dict[object, object]
+RawArray: TypeAlias = list[object]
+
 
 def invalid_ir_data() -> PydanticCustomError:
     return PydanticCustomError("ir_data_invalid", "the IR data is invalid")
 
 
+def ir_data_scalar(value: object) -> None | bool | int | float | str:
+    if value is None or type(value) is bool or type(value) is int or type(value) is str:
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    raise invalid_ir_data()
+
+
+def ir_data_entries(
+    value: dict[object, object] | list[object],
+) -> Iterator[tuple[object, object]]:
+    if isinstance(value, dict):
+        return iter(RawObject.items(value))
+    return enumerate(RawArray.__iter__(value))
+
+
 def detach_ir_data(value: object) -> JsonValue:
-    result: list[JsonValue] = [None]
-    pending: list[tuple[object, JsonObject | list[JsonValue], str | int]] = [
-        (value, result, 0)
-    ]
-    seen: set[int] = set()
-    while pending:
-        source, target, key = pending.pop()
+    source: dict[object, object] | list[object]
+    result: JsonObject | list[JsonValue]
+    if isinstance(value, dict):
+        source = cast("dict[object, object]", value)
+        result = {}
+    elif isinstance(value, list):
+        source = cast("list[object]", value)
+        result = []
+    else:
+        return ir_data_scalar(value)
+    entries = [ir_data_entries(source)]
+    targets = [result]
+    seen = {id(source)}
+    while entries:
+        entry = next(entries[-1], None)
+        if entry is None:
+            entries.pop()
+            targets.pop()
+            continue
+        key, item = entry
+        target = targets[-1]
         parsed: JsonValue
-        if source is None or type(source) in (bool, int, str):
-            parsed = cast("None | bool | int | str", source)
-        elif type(source) is float:
-            number = source
-            if not math.isfinite(number):
-                raise invalid_ir_data()
-            parsed = number
-        elif isinstance(source, dict | list):
-            identity = id(cast("object", source))
+        if isinstance(item, dict) or isinstance(item, list):
+            identity = id(cast("object", item))
             if identity in seen:
                 raise invalid_ir_data()
             seen.add(identity)
-            if isinstance(source, dict):
-                copied: JsonObject = {}
-                children: list[
-                    tuple[object, JsonObject | list[JsonValue], str | int]
-                ] = []
-                for name, item in dict[object, object].items(
-                    cast("dict[object, object]", source)
-                ):
-                    if type(name) is not str:
-                        raise invalid_ir_data()
-                    copied[name] = None
-                    children.append((item, copied, name))
-                pending.extend(reversed(children))
-                parsed = copied
+            if isinstance(item, dict):
+                source = cast("dict[object, object]", item)
+                parsed = {}
             else:
-                items = cast("list[object]", source)
-                array: list[JsonValue] = [None] * len(items)
-                pending.extend(
-                    (items[index], array, index)
-                    for index in range(len(items) - 1, -1, -1)
-                )
-                parsed = array
+                source = cast("list[object]", item)
+                parsed = []
+            entries.append(ir_data_entries(source))
+            targets.append(parsed)
         else:
-            raise invalid_ir_data()
+            parsed = ir_data_scalar(item)
         if isinstance(target, dict):
-            target[cast("str", key)] = parsed
+            if type(key) is not str:
+                raise invalid_ir_data()
+            target[key] = parsed
         else:
-            target[cast("int", key)] = parsed
-    return result[0]
+            target.append(parsed)
+    return result
 
 
 def validate_ir_json_value(value: object) -> JsonValue:

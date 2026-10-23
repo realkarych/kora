@@ -1,8 +1,10 @@
 import json
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
-from typing import cast, get_args
+from json.encoder import encode_basestring_ascii
+from typing import TypeAlias, cast, get_args
 
 from pydantic import MISSING
 from pydantic_core import to_json
@@ -10,6 +12,8 @@ from pydantic_core import to_json
 from kora.ir.data import IrDataValue, IrJsonObjectField, detach_ir_data, invalid_ir_data
 from kora.ir.json import JsonObject, JsonValue, parse_json_object
 from kora.ir.record import IrRecord, wire_name
+
+JsonArray: TypeAlias = list[JsonValue]
 
 
 @dataclass
@@ -116,32 +120,49 @@ def export_ir(root: IrRecord) -> JsonObject:
     return cast("JsonObject", result[0])
 
 
+def render_entries(
+    value: JsonObject | list[JsonValue],
+) -> Iterator[tuple[str | int, JsonValue]]:
+    if isinstance(value, dict):
+        return iter(JsonObject.items(value))
+    return enumerate(JsonArray.__iter__(value))
+
+
 def render_ir_json(root: IrRecord) -> str:
     data = export_ir(root)
-    fragments: list[str] = []
-    pending: list[tuple[bool, JsonValue]] = [(False, data)]
-    while pending:
-        literal, value = pending.pop()
-        if literal:
-            fragments.append(cast("str", value))
-        elif isinstance(value, dict):
-            fragments.append("{")
-            pending.append((True, "}"))
-            entries = list(value.items())
-            for index in range(len(entries) - 1, -1, -1):
-                key, item = entries[index]
-                pending.append((False, item))
-                pending.append((True, ":"))
-                pending.append((True, json.dumps(key, ensure_ascii=True)))
-                if index:
-                    pending.append((True, ","))
-        elif isinstance(value, list):
-            fragments.append("[")
-            pending.append((True, "]"))
-            for index in range(len(value) - 1, -1, -1):
-                pending.append((False, value[index]))
-                if index:
-                    pending.append((True, ","))
+    fragments = ["{"]
+    entries = [render_entries(data)]
+    endings = ["}"]
+    first = [True]
+    while entries:
+        entry = next(entries[-1], None)
+        if entry is None:
+            entries.pop()
+            first.pop()
+            fragments.append(endings.pop())
+            continue
+        key, value = entry
+        if first[-1]:
+            first[-1] = False
+        else:
+            fragments.append(",")
+        if endings[-1] == "}":
+            fragments.append(encode_basestring_ascii(cast("str", key)))
+            fragments.append(":")
+        if isinstance(value, dict) or isinstance(value, list):
+            opening, ending = ("{", "}") if isinstance(value, dict) else ("[", "]")
+            fragments.append(opening)
+            entries.append(render_entries(value))
+            endings.append(ending)
+            first.append(True)
+        elif value is None:
+            fragments.append("null")
+        elif value is True:
+            fragments.append("true")
+        elif value is False:
+            fragments.append("false")
+        elif isinstance(value, str):
+            fragments.append(encode_basestring_ascii(value))
         elif type(value) is int:
             fragments.append(to_json(value).decode("ascii"))
         else:
