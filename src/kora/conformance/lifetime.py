@@ -1,6 +1,8 @@
 import asyncio
 import os
 import signal
+import sys
+import threading
 from collections.abc import Callable, Coroutine, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -21,6 +23,7 @@ from kora.conformance.io_helper import (
 )
 from kora.conformance.journal import JournalEntry, JournalSnapshot
 from kora.protocols.common import BoundaryModel
+from kora.protocols.identity import ProcessIdentity
 from kora.protocols.lifetime import (
     Acquisition,
     ActivationAcknowledgement,
@@ -72,6 +75,7 @@ CLOSURE_REPORT_BYTES: int = 16384
 CLOSURE_CONTROL_BYTES: int = CLOSURE_REPORT_BYTES + 2048
 CLEANUP_DRIVER_BYTES: int = 4096
 MEMBER_CONTROL_BYTES: int = 2048
+RECOVERY_ATTEMPT_BYTES: int = 4096
 
 
 def consume_closure_failure(future: asyncio.Future[ClosureReport]) -> None:
@@ -203,6 +207,8 @@ class ParentLifetime:
         self.ordinary_slots: set[OrdinarySlot] = set()
         self.closures: dict[ResourceId | None, asyncio.Future[ClosureReport]] = {}
         self.control_bytes = CLOSURE_CONTROL_BYTES + CLEANUP_DRIVER_BYTES
+        if recovery is not None:
+            self.control_bytes += RECOVERY_ATTEMPT_BYTES
         if self.control_bytes > self.limits.max_control_recovery_bytes:
             raise LifetimeError(LifetimeReason.CAPACITY_EXCEEDED)
         self.invocation_cleanup = CleanupControl()
@@ -1318,6 +1324,23 @@ class ParentLifetime:
                 record.directory.close()
         return True
 
+    def recovery_dependencies(self) -> tuple[asyncio.Future[object], ...]:
+        dependencies: list[asyncio.Future[object]] = [
+            cast(asyncio.Future[object], self._bootstrap),
+            cast(asyncio.Future[object], self._cleanup_driver),
+        ]
+        dependencies.extend(
+            cast(asyncio.Future[object], operation.task)
+            for operation in self.operations.values()
+        )
+        if self.cleanup_effect is not None:
+            dependencies.append(cast(asyncio.Future[object], self.cleanup_effect.task))
+        dependencies.extend(
+            cast(asyncio.Future[object], helper.anchor.readiness)
+            for helper in self.mutations.helpers
+        )
+        return tuple(dependency for dependency in dependencies if not dependency.done())
+
 
 @dataclass(frozen=True)
 class CallAdmission:
@@ -1344,11 +1367,224 @@ def wire_admission(
         CALL_ADMISSION.reset(token)
 
 
+@dataclass(frozen=True)
+class RecoveryBinding:
+    home: str
+    state_home: str
+    platform: str
+    uid: int
+    process: ProcessIdentity
+    loop: asyncio.AbstractEventLoop
+    launcher_identity: int | None
+    clock_identity: int | None
+
+
+@dataclass
+class RecoveryContext:
+    binding: RecoveryBinding
+    root: DirectoryIdentity | None = None
+    attempts: dict[str, "RecoveryAttempt"] = field(
+        default_factory=dict[str, "RecoveryAttempt"]
+    )
+
+
+@dataclass(eq=False)
+class RecoveryAttempt:
+    registry: "RecoveryAttempts"
+    context: RecoveryContext
+    reference: CleanupReference
+    limits: LifetimeLimits
+    owner: ParentLifetime | None = None
+    task: asyncio.Task[ClosureReport] | None = None
+    dependencies: set[asyncio.Future[object]] = field(
+        default_factory=set[asyncio.Future[object]]
+    )
+
+    def changed(self, future: asyncio.Future[object]) -> None:
+        self.dependencies.discard(future)
+        if not future.cancelled():
+            future.exception()
+        self.reconcile()
+
+    def reconcile(self) -> None:
+        if self.context.binding.loop.is_closed():
+            return
+        if asyncio.get_running_loop() is not self.context.binding.loop:
+            return
+        owner = self.owner
+        task = self.task
+        if owner is None or task is None:
+            return
+        root = owner.mutations.root
+        if root is not None:
+            self.registry.bind_root(self, root.identity)
+        if owner.mutations.pending == 0:
+            for helper in owner.mutations.helpers:
+                if not helper.closed:
+                    helper.release()
+        if task.done() and owner.dispose_recovery_observers():
+            if not task.cancelled():
+                task.exception()
+            for dependency in self.dependencies:
+                dependency.remove_done_callback(self.changed)
+            self.dependencies.clear()
+            self.registry.remove(self)
+            return
+        dependencies = (
+            *owner.recovery_dependencies(),
+            cast(asyncio.Future[object], task),
+        )
+        for dependency in dependencies:
+            if not dependency.done() and dependency not in self.dependencies:
+                self.dependencies.add(dependency)
+                dependency.add_done_callback(self.changed)
+
+
+@dataclass(frozen=True)
+class RecoveryInventory:
+    contexts: int
+    attempts: int
+    placeholders: int
+    active_tasks: int
+    completed_tasks: int
+    dependency_callbacks: int
+
+
+class RecoveryAttempts:
+    def __init__(self) -> None:
+        self.guard = threading.Lock()
+        self.context: RecoveryContext | None = None
+
+    def inventory(self) -> RecoveryInventory:
+        with self.guard:
+            context = self.context
+            attempts = () if context is None else tuple(context.attempts.values())
+        return RecoveryInventory(
+            contexts=int(context is not None),
+            attempts=len(attempts),
+            placeholders=sum(attempt.owner is None for attempt in attempts),
+            active_tasks=sum(
+                attempt.task is not None and not attempt.task.done()
+                for attempt in attempts
+            ),
+            completed_tasks=sum(
+                attempt.task is not None and attempt.task.done() for attempt in attempts
+            ),
+            dependency_callbacks=sum(len(attempt.dependencies) for attempt in attempts),
+        )
+
+    def bind_root(self, attempt: RecoveryAttempt, root: DirectoryIdentity) -> None:
+        with self.guard:
+            context = self.context
+            if (
+                context is not None
+                and context is attempt.context
+                and context.attempts.get(attempt.reference.invocation_id) is attempt
+            ):
+                if context.root is not None and context.root != root:
+                    raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
+                context.root = root
+
+    def remove(self, attempt: RecoveryAttempt) -> None:
+        with self.guard:
+            context = self.context
+            if (
+                context is not None
+                and context is attempt.context
+                and context.attempts.get(attempt.reference.invocation_id) is attempt
+            ):
+                del context.attempts[attempt.reference.invocation_id]
+                if not context.attempts:
+                    self.context = None
+
+    async def resume(
+        self,
+        reference: CleanupReference,
+        limits: LifetimeLimits,
+        *,
+        launcher: IOHelperLauncher,
+        home: str,
+        state_home: str,
+        clock: Clock | None = None,
+    ) -> ClosureReport:
+        observed = NativeIdentityReader().read(os.getpid())
+        if (
+            observed.state is not IdentityState.PRESENT
+            or observed.process is None
+            or not complete_identity(observed.process.identity)
+        ):
+            raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
+        binding = RecoveryBinding(
+            home,
+            state_home,
+            sys.platform,
+            os.geteuid(),
+            observed.process.identity,
+            asyncio.get_running_loop(),
+            None if isinstance(launcher, InstalledIOHelperLauncher) else id(launcher),
+            None if clock is None else id(clock),
+        )
+        with self.guard:
+            previous = self.context
+            retained = (
+                tuple(previous.attempts.values())
+                if previous is not None and previous.binding == binding
+                else ()
+            )
+        for existing in retained:
+            existing.reconcile()
+        with self.guard:
+            context = self.context
+            if context is None:
+                context = RecoveryContext(binding)
+                self.context = context
+            elif context.binding != binding:
+                raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
+            attempt = context.attempts.get(reference.invocation_id)
+            if attempt is not None:
+                if attempt.reference != reference or attempt.limits != limits:
+                    raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
+                created = False
+            else:
+                if context.attempts and context.root is None:
+                    raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
+                if len(context.attempts) >= limits.max_state_root_invocations:
+                    raise LifetimeError(LifetimeReason.CAPACITY_EXCEEDED)
+                attempt = RecoveryAttempt(self, context, reference, limits)
+                context.attempts[reference.invocation_id] = attempt
+                created = True
+        if created:
+            try:
+                owner = ParentLifetime(
+                    limits=limits, recovery=reference, launcher=launcher, clock=clock
+                )
+            except (LifetimeError, OSError, RuntimeError):
+                self.remove(attempt)
+                raise
+            owner.mutations.expected_root = context.root
+            attempt.owner = owner
+            attempt.task = asyncio.create_task(_resume_owned(owner))
+            attempt.reconcile()
+        task = attempt.task
+        if task is None:
+            raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
+        return await asyncio.shield(task)
+
+
+RECOVERY_ATTEMPTS: RecoveryAttempts = RecoveryAttempts()
+
+
 async def resume_close(
     reference: CleanupReference, limits: LifetimeLimits
 ) -> ClosureReport:
-    owner = ParentLifetime(limits=limits, recovery=reference)
-    return await asyncio.shield(asyncio.create_task(_resume_owned(owner)))
+    launcher = InstalledIOHelperLauncher()
+    return await RECOVERY_ATTEMPTS.resume(
+        reference,
+        limits,
+        launcher=launcher,
+        home=launcher.home,
+        state_home=launcher.state_home,
+    )
 
 
 async def _resume_owned(owner: ParentLifetime) -> ClosureReport:

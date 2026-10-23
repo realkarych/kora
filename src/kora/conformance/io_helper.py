@@ -47,6 +47,7 @@ class RecoverMutation(BoundaryModel):
     action: Literal["recover"] = "recover"
     invocation_id: InvocationId
     owner: ProcessIdentity
+    expected_root: DirectoryIdentity | None = None
 
 
 class PublishMutation(BoundaryModel):
@@ -392,6 +393,9 @@ def bootstrap(mutation: BootstrapMutation) -> tuple[MutationResult, tuple[int, .
 
 def recover(mutation: RecoverMutation) -> tuple[MutationResult, tuple[int, ...]]:
     root = DirectoryAnchor.open_path(state_directory())
+    if mutation.expected_root is not None and root.identity != mutation.expected_root:
+        root.close()
+        raise HelperError(LifetimeReason.IDENTITY_MISMATCH)
     invocation_fd = os.open(
         mutation.invocation_id,
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,

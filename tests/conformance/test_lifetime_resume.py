@@ -8,12 +8,88 @@ from pathlib import Path
 
 import pytest
 
+from kora.conformance.io_helper import (
+    HelperError,
+    InstalledIOHelperLauncher,
+    RecoverMutation,
+)
 from kora.conformance.journal import JournalSnapshot
-from kora.protocols.lifetime import CleanupOutcome, ClosureReport, ProcessRegistration
+from kora.protocols.lifetime import (
+    CleanupOutcome,
+    ClosureReport,
+    LifetimeReason,
+    ProcessRegistration,
+)
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
+from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
+
+
+@pytest.mark.asyncio
+async def test_recovery_expected_root_refuses_replacement_before_takeover(
+    tmp_path: Path,
+) -> None:
+    original = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "tree",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    old_path = next(tmp_path.rglob(original.stdout.decode("ascii"))) / "journal"
+    root = DirectoryAnchor.open_path(old_path.parent.parent)
+    saved = old_path.read_bytes()
+    old_root = old_path.parent.parent
+    old_root.rename(old_root.with_name("retained-original"))
+    replacement = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "tree",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    new_path = next(tmp_path.rglob(replacement.stdout.decode("ascii"))) / "journal"
+    new_saved = new_path.read_bytes()
+    current = NativeIdentityReader().read(os.getpid())
+    assert current.process is not None
+    clock = SystemClock()
+    helper = InstalledIOHelperLauncher(
+        home=tmp_path, state_home=tmp_path / "state"
+    ).start((), clock)
+    deadline = clock.monotonic_ns() + 10_000_000_000
+
+    try:
+        mutation = RecoverMutation(
+            invocation_id=replacement.stdout.decode("ascii"),
+            owner=current.process.identity,
+            expected_root=root.identity,
+        )
+        with pytest.raises(HelperError) as refused:
+            await helper.execute(mutation, deadline)
+
+        assert refused.value.reason is LifetimeReason.IDENTITY_MISMATCH
+        assert new_path.read_bytes() == new_saved
+        assert (
+            old_root.with_name("retained-original")
+            / original.stdout.decode("ascii")
+            / "journal"
+        ).read_bytes() == saved
+        assert not helper.descriptors
+    finally:
+        if not helper.closed:
+            helper.signal(signal.SIGKILL)
+            assert await helper.settle(deadline)
+        root.close()
 
 
 @pytest.mark.asyncio

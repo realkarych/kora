@@ -20,7 +20,7 @@ from kora.protocols.identity import ProcessIdentity
 from kora.protocols.lifetime import CleanupReference, LifetimeLimits, LifetimeReason
 from kora.protocols.time import Clock
 from kora.runner.channels import ChannelError
-from kora.runner.filesystem import DirectoryAnchor
+from kora.runner.filesystem import DirectoryAnchor, DirectoryIdentity
 from kora.runner.processes import ProcessError
 
 
@@ -42,6 +42,7 @@ class MutationOwner:
         self.clock = clock
         self.limits = limits
         self.root: DirectoryAnchor | None = None
+        self.expected_root: DirectoryIdentity | None = None
         self.directory: DirectoryAnchor | None = None
         self.claim: int | None = None
         self.snapshot: JournalSnapshot | None = None
@@ -108,7 +109,11 @@ class MutationOwner:
         self, reference: CleanupReference, owner: ProcessIdentity, deadline: int
     ) -> JournalSnapshot:
         result = await self.perform(
-            RecoverMutation(invocation_id=reference.invocation_id, owner=owner),
+            RecoverMutation(
+                invocation_id=reference.invocation_id,
+                owner=owner,
+                expected_root=self.expected_root,
+            ),
             None,
             deadline,
         )
