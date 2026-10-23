@@ -1,0 +1,3765 @@
+{
+  "base": "56cd90aebd75e38627fdf2d35306867471324276",
+  "schema_source": "GraphDocument.model_json_schema in each actual mode",
+  "cases": [
+    {
+      "name": "agent_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "agent",
+              "config": {
+                "harness": "claude",
+                "prompt": "",
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "session": {
+                  "type": "AgentSession"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "agent_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "session": {
+                      "type": "AgentSession"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "agent_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "agent",
+              "outputs": {
+                "session": {
+                  "type": "AgentSession"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "agent",
+              "config": false,
+              "outputs": {
+                "session": {
+                  "type": "AgentSession"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "agent",
+              "config": {
+                "harness": "claude",
+                "prompt": "",
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "session": {
+                  "type": "AgentSession"
+                }
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "agent",
+              "config": null,
+              "outputs": {
+                "session": {
+                  "type": "AgentSession"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "agent",
+              "config": {
+                "harness": "claude",
+                "prompt": "",
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "session": {
+                  "type": "AgentSession"
+                }
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "command_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "command",
+              "config": {
+                "cmd": [
+                  "true"
+                ],
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "result": {
+                  "type": "CommandResult"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "command_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "result": {
+                      "type": "CommandResult"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "command_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "command",
+              "outputs": {
+                "result": {
+                  "type": "CommandResult"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "command",
+              "config": false,
+              "outputs": {
+                "result": {
+                  "type": "CommandResult"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "command",
+              "config": {
+                "cmd": [
+                  "true"
+                ],
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "result": {
+                  "type": "CommandResult"
+                }
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "command",
+              "config": null,
+              "outputs": {
+                "result": {
+                  "type": "CommandResult"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "command",
+              "config": {
+                "cmd": [
+                  "true"
+                ],
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "result": {
+                  "type": "CommandResult"
+                }
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "human_input_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "human_input",
+              "config": {
+                "channel": "cli",
+                "timeout": "0s",
+                "on_expiry": "fail"
+              },
+              "outputs": {
+                "response": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "human_input_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {
+                    "response": {
+                      "type": "StructuredOutput"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "human_input_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "human_input",
+              "outputs": {
+                "response": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "human_input",
+              "config": false,
+              "outputs": {
+                "response": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "human_input",
+              "config": {
+                "channel": "cli",
+                "timeout": "0s",
+                "on_expiry": "fail"
+              },
+              "outputs": {
+                "response": {
+                  "type": "StructuredOutput"
+                }
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "human_input",
+              "config": null,
+              "outputs": {
+                "response": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "human_input",
+              "config": {
+                "channel": "cli",
+                "timeout": "0s",
+                "on_expiry": "fail"
+              },
+              "outputs": {
+                "response": {
+                  "type": "StructuredOutput"
+                }
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "wait_event_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "wait_event",
+              "config": {
+                "poll": {
+                  "sensor": "http",
+                  "until": "true"
+                },
+                "timeout": "0s",
+                "on_expiry": "skip"
+              },
+              "outputs": {
+                "event": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "wait_event_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {
+                    "event": {
+                      "type": "StructuredOutput"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "wait_event_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "wait_event",
+              "outputs": {
+                "event": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "wait_event",
+              "config": false,
+              "outputs": {
+                "event": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "wait_event",
+              "config": {
+                "poll": {
+                  "sensor": "http",
+                  "until": "true"
+                },
+                "timeout": "0s",
+                "on_expiry": "skip"
+              },
+              "outputs": {
+                "event": {
+                  "type": "StructuredOutput"
+                }
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "wait_event",
+              "config": null,
+              "outputs": {
+                "event": {
+                  "type": "StructuredOutput"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "wait_event",
+              "config": {
+                "poll": {
+                  "sensor": "http",
+                  "until": "true"
+                },
+                "timeout": "0s",
+                "on_expiry": "skip"
+              },
+              "outputs": {
+                "event": {
+                  "type": "StructuredOutput"
+                }
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "timer_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "timer_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "timer_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer"
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "timer_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "timer_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "timer_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": null
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "timer_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "branch_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "branch",
+              "config": {
+                "cases": [
+                  {
+                    "when": "true",
+                    "to": [
+                      "next"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "branch_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "branch",
+                  "config": {
+                    "cases": [
+                      {
+                        "when": "true",
+                        "to": [
+                          "next"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "branch_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "branch"
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "branch_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "branch",
+              "config": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "branch_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "branch",
+              "config": {
+                "cases": [
+                  {
+                    "when": "true",
+                    "to": [
+                      "next"
+                    ]
+                  }
+                ]
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "branch_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "branch",
+              "config": null
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "branch_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "branch",
+              "config": {
+                "cases": [
+                  {
+                    "when": "true",
+                    "to": [
+                      "next"
+                    ]
+                  }
+                ]
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "fan_out_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "fan_out",
+              "config": {
+                "body": "shared",
+                "over": "items"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "fan_out_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "fan_out",
+                  "config": {
+                    "body": "shared",
+                    "over": "items"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "fan_out_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "fan_out"
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "fan_out_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "fan_out",
+              "config": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "fan_out_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "fan_out",
+              "config": {
+                "body": "shared",
+                "over": "items"
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "fan_out_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "fan_out",
+              "config": null
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "fan_out_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "fan_out",
+              "config": {
+                "body": "shared",
+                "over": "items"
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "subgraph_minimal",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "subgraph",
+              "config": {
+                "body": "shared"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "subgraph_nested",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "subgraph",
+                  "config": {
+                    "body": "shared"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "subgraph_missing_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "subgraph"
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "subgraph_wrong_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "subgraph",
+              "config": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "subgraph_unknown_envelope",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "subgraph",
+              "config": {
+                "body": "shared"
+              },
+              "unknown": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "subgraph_null_config",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "subgraph",
+              "config": null
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "subgraph_extensions",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "subgraph",
+              "config": {
+                "body": "shared"
+              },
+              "x-meta": false
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "agent_role_missing",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {}
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_role_renamed",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "alias": {
+                      "type": "AgentSession"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_role_retyped",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "session": {
+                      "type": "Other"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_role_aliased",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "session": {
+                      "type": "AgentSession"
+                    },
+                    "alias": {
+                      "type": "AgentSession"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_role_missing_type",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "session": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_role_unknown_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "session": {
+                      "type": "AgentSession",
+                      "unknown": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_role_wrong_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "agent",
+                  "config": {
+                    "harness": "claude",
+                    "prompt": "",
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "session": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "agent_extra_other",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "agent",
+              "config": {
+                "harness": "claude",
+                "prompt": "",
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "session": {
+                  "type": "AgentSession"
+                },
+                "extra": {
+                  "type": "Other"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "command_role_missing",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {}
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_role_renamed",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "alias": {
+                      "type": "CommandResult"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_role_retyped",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "result": {
+                      "type": "Other"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_role_aliased",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "result": {
+                      "type": "CommandResult"
+                    },
+                    "alias": {
+                      "type": "CommandResult"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_role_missing_type",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "result": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_role_unknown_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "result": {
+                      "type": "CommandResult",
+                      "unknown": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_role_wrong_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "command",
+                  "config": {
+                    "cmd": [
+                      "true"
+                    ],
+                    "workspace": {
+                      "repo": ""
+                    }
+                  },
+                  "outputs": {
+                    "result": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "command_extra_other",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "command",
+              "config": {
+                "cmd": [
+                  "true"
+                ],
+                "workspace": {
+                  "repo": ""
+                }
+              },
+              "outputs": {
+                "result": {
+                  "type": "CommandResult"
+                },
+                "extra": {
+                  "type": "Other"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "human_input_role_missing",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {}
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_role_renamed",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {
+                    "alias": {
+                      "type": "StructuredOutput"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_role_retyped",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {
+                    "response": {
+                      "type": "Other"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_role_aliased",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {
+                    "response": {
+                      "type": "StructuredOutput"
+                    },
+                    "alias": {
+                      "type": "StructuredOutput"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_role_missing_type",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {
+                    "response": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_role_unknown_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {
+                    "response": {
+                      "type": "StructuredOutput",
+                      "unknown": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_role_wrong_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "human_input",
+                  "config": {
+                    "channel": "cli",
+                    "timeout": "0s",
+                    "on_expiry": "fail"
+                  },
+                  "outputs": {
+                    "response": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "human_input_extra_other",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "human_input",
+              "config": {
+                "channel": "cli",
+                "timeout": "0s",
+                "on_expiry": "fail"
+              },
+              "outputs": {
+                "response": {
+                  "type": "StructuredOutput"
+                },
+                "extra": {
+                  "type": "Other"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_role_missing",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {}
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_role_renamed",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {
+                    "alias": {
+                      "type": "StructuredOutput"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_role_retyped",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {
+                    "event": {
+                      "type": "Other"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_role_aliased",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {
+                    "event": {
+                      "type": "StructuredOutput"
+                    },
+                    "alias": {
+                      "type": "StructuredOutput"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_role_missing_type",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {
+                    "event": {}
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_role_unknown_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {
+                    "event": {
+                      "type": "StructuredOutput",
+                      "unknown": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_role_wrong_decl",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "wait_event",
+                  "config": {
+                    "poll": {
+                      "sensor": "http",
+                      "until": "true"
+                    },
+                    "timeout": "0s",
+                    "on_expiry": "skip"
+                  },
+                  "outputs": {
+                    "event": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "wait_event_extra_other",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "wait_event",
+              "config": {
+                "poll": {
+                  "sensor": "http",
+                  "until": "true"
+                },
+                "timeout": "0s",
+                "on_expiry": "skip"
+              },
+              "outputs": {
+                "event": {
+                  "type": "StructuredOutput"
+                },
+                "extra": {
+                  "type": "Other"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "contract_name_'Text'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {
+          "Text": {
+            "builtin_revision": "1"
+          }
+        },
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "contract_name_'ns/Text'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {
+          "ns/Text": {
+            "builtin_revision": "1"
+          }
+        },
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "contract_name_'x-meta'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {
+          "x-meta": {
+            "builtin_revision": "1"
+          }
+        },
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "contract_name_'Text\\n'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {
+          "Text\n": {
+            "builtin_revision": "1"
+          }
+        },
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "contract_name_'text'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {
+          "text": {
+            "builtin_revision": "1"
+          }
+        },
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "contract_name_''",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {
+          "": {
+            "builtin_revision": "1"
+          }
+        },
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "node_name_'node'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "node_name_'x-meta'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "x-meta": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "node_name_'node\\n'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node\n": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "node_name_'Node'",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "Node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "node_name_''",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "body_forbidden_id",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              },
+              "id": {}
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "body_forbidden_namespace",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              },
+              "namespace": {}
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "body_forbidden_subgraphs",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              },
+              "subgraphs": {}
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "body_forbidden_params",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              },
+              "params": {}
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "body_forbidden_triggers",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              },
+              "triggers": {}
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "body_forbidden_target",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              },
+              "target": {}
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "body_forbidden_overlap",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          },
+          "subgraphs": {
+            "shared": {
+              "nodes": {
+                "node": {
+                  "kind": "timer",
+                  "config": {
+                    "duration": "0s"
+                  }
+                }
+              },
+              "overlap": {}
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "provenance_partial_open",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        },
+        "meta": {
+          "presets": {
+            "x-entry": {
+              "prompt": ""
+            }
+          },
+          "defaults": {
+            "global": {
+              "harness": ""
+            }
+          },
+          "arbitrary": [
+            null,
+            false
+          ],
+          "x-field": {
+            "type": false
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "provenance_wrong_compiler",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        },
+        "meta": {
+          "compiler": false
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "root_unknown",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        },
+        "unknown": {
+          "runtime": false
+        },
+        "schema_": false
+      },
+      "valid": true
+    },
+    {
+      "name": "root_schema_raw",
+      "document": {
+        "$schema": "not a normalized URI",
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "timer_authored_output",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "timer",
+              "config": {
+                "duration": "0s"
+              },
+              "outputs": {
+                "authored": {
+                  "type": "Text"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "branch_authored_output",
+      "document": {
+        "ir_version": "1.0",
+        "type_contracts": {},
+        "graph": {
+          "id": "graph",
+          "namespace": "example",
+          "nodes": {
+            "node": {
+              "kind": "branch",
+              "config": {
+                "cases": [
+                  {
+                    "when": "true",
+                    "to": [
+                      "next"
+                    ]
+                  }
+                ]
+              },
+              "outputs": {
+                "authored": {
+                  "type": "Text"
+                }
+              }
+            }
+          }
+        },
+        "runtime": {
+          "runtime": "local",
+          "vcs": "git"
+        }
+      },
+      "valid": true
+    }
+  ]
+}
