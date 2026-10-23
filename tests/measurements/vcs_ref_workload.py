@@ -66,12 +66,15 @@ def full_boundary(payload: bytes) -> object:
 
 
 def dimensions(value: dict[str, object]) -> dict[str, int]:
-    paths = cast("list[str]", value["changed_paths"])
+    paths = cast("list[object]", value["changed_paths"])
     return {
         "json_bytes": len(wire(value)),
         "root_fields": len(value),
         "paths": len(paths),
-        "path_utf8_bytes": sum(len(path.encode()) for path in paths),
+        "path_utf8_bytes": sum(
+            len(path.encode()) for path in paths if type(path) is str
+        ),
+        "invalid_path_types": sum(type(path) is not str for path in paths),
         "diff_characters": len(cast("str", value["diff_stat"])),
         "commit_url_characters": len(cast("str", value.get("commit_url", ""))),
     }
@@ -140,6 +143,14 @@ def cases() -> tuple[list[Case], dict[str, dict[str, int]]]:
             {**document(), "commit_url": "https://example.test/" + "a" * 524_288},
             True,
         ),
+        "long_host": (
+            {**document(), "commit_url": "https://" + "a" * 524_288 + "/"},
+            True,
+        ),
+        "long_host_invalid_late": (
+            {**document(), "commit_url": "https://" + "a" * 524_288 + "%xx/"},
+            False,
+        ),
         "zero_port": (
             {
                 **document(),
@@ -151,6 +162,20 @@ def cases() -> tuple[list[Case], dict[str, dict[str, int]]]:
     for name, (candidate, accepted) in object_cases.items():
         actions.append(Case(f"vcs_{name}", partial(parse_vcs_ref, candidate), accepted))
         manifest[f"vcs_{name}"] = dimensions(candidate)
+    dense_invalid: dict[str, list[object]] = {
+        "paths": [f"../{index:05d}" for index in range(10_000)],
+        "types": [{"invalid": index} for index in range(10_000)],
+    }
+    for name, entries in dense_invalid.items():
+        candidate = {**document(), "changed_paths": entries}
+        routes = {
+            "object": partial(parse_vcs_ref, candidate),
+            "constructor": partial(construct, VcsRef, candidate),
+        }
+        for route, action in routes.items():
+            key = f"vcs_dense_invalid_{name}_{route}"
+            actions.append(Case(key, action, False))
+            manifest[key] = dimensions(candidate)
     payload = wire(document())
     dense = b"{" + b'"unknown":0,' * 80_000 + b'"last":0}'
     raw_cases = {

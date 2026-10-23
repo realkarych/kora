@@ -10,12 +10,23 @@ from pathlib import Path
 from tests.measurements.harness import current_rss_bytes, open_descriptors
 
 
+def high_water_rss_bytes() -> int:
+    if sys.platform == "linux":
+        status = dict(
+            line.split(":", 1)
+            for line in Path("/proc/self/status").read_text().splitlines()
+        )
+        return int(status["VmHWM"].split()[0]) * 1024
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
 def run(source: str) -> dict[str, str | float | int | None]:
     sys.path.insert(0, source)
     gc.collect()
     before_descriptors = open_descriptors()
     before_threads = threading.active_count()
     before_rss = current_rss_bytes()
+    before_high_water = high_water_rss_bytes()
     tracemalloc.start()
     before_heap = tracemalloc.get_traced_memory()[0]
 
@@ -35,8 +46,8 @@ def run(source: str) -> dict[str, str | float | int | None]:
         "heap_peak": peak,
         "rss_before": before_rss,
         "rss_after": current_rss_bytes(),
-        "high_water": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        * (1024 if sys.platform == "linux" else 1),
+        "high_water_before": before_high_water,
+        "high_water": high_water_rss_bytes(),
         "descriptors_before": before_descriptors,
         "descriptors_after": open_descriptors(),
         "threads_before": before_threads,
