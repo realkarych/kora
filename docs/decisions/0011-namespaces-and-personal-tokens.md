@@ -7,6 +7,8 @@
 - Related: [0002-ai-first-api-and-thin-clients.md](0002-ai-first-api-and-thin-clients.md), [0003-scheduler-and-workers-over-http.md](0003-scheduler-and-workers-over-http.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0009-target-repository-trust-boundary.md](0009-target-repository-trust-boundary.md)
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
+- Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
+
 ## Context
 
 kora's design centre is a platform instance shared by many teams on an organisation's own infrastructure (NFR-0.1). Namespaces group graphs, secret references, presets, tool policies and quotas (FR-12.4). Requirements decision 15 kept access control post-MVP: the MVP would ship namespaces and a single shared API token, with role-based access control and credential management arriving later through the authentication protocol.
@@ -22,7 +24,13 @@ User tokens are personal from the MVP: each is bound to a person and a namespace
 - `approve`: may respond to approvals. The respond route, `kora approve`, `kora reject` and the MCP tool `kora_respond` require it; the approver recorded in the audit is the token owner.
 - `platform`: may publish presets, namespace policies and tool policies. Preset and namespace writes and the MCP tool `kora_admin` require it. `kora compile` fails (`DSL013`) when a registry preset escalates above the namespace policy.
 
-Reading transcripts and session segments is a per-namespace `transcripts` capability on the token's namespace list, not a flag. There are no roles and no groups. The MCP server's default token has no `approve`; `kora standalone` prints one personal token with both flags for the `default` namespace.
+Reading transcripts and session segments is a per-namespace `transcripts` capability on the token's namespace list, not a flag. There are no roles and no groups. At first initialization, `kora standalone` issues two distinct personal tokens for the same owner and the `default` namespace: a CLI token with `approve` and `platform`, and an MCP token with neither. Both have `transcripts`. The CLI reads `KORA_TOKEN`; stdio MCP reads only `KORA_MCP_TOKEN`, accepts no token-valued flag and never falls back to the CLI variable. Both use `KORA_URL`.
+
+The API alone enforces the configured token's rights. The default MCP token therefore receives `API005` for approval and platform operations; a deliberately configured stronger token has its actual rights. An approval audit identifies the token owner, not proof that a human performed the action. Separate defaults do not isolate processes running as the same operating-system user.
+
+Standalone first initialization commits both personal-token digests and their owner/namespace bindings atomically, then prints the two credentials once as explicit command results, never diagnostics. Existing directories or migrations do not imply completed initialization. A failure before commit permits initialization again; committed initialization with failed or partial output requires explicit token recovery and does not automatically issue replacements on restart. Plaintext credentials are not persisted or redisplayed. The internal worker service credential has a separate restart and retirement lifecycle and is never printed or borrowed from either personal token.
+
+Slice-1 standalone binds only to literal `127.0.0.1` over HTTP and refuses non-loopback binding. The shared client permits HTTP only to literal `127.0.0.1` through a direct connection, bypasses ambient proxies for that exception and refuses explicit proxy routing that cannot preserve it. Every other destination requires HTTPS with certificate-chain and requested-hostname verification; verification cannot be disabled and failures cannot trigger a cleartext or unverified retry. The client never forwards a bearer across origins on redirect. Loopback does not replace authentication or provide same-user containment. Browser session authentication remains governed by the separate frontend contract below.
 
 Workers hold service principals: a service token belongs to a worker, is bound to a runtime and a namespace list enforced at claim, and may only claim, heartbeat, upload and transition attempts whose lease it holds, checked by lease epoch. There are no tokens for agent nodes (ADR-0002).
 
