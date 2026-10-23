@@ -139,8 +139,8 @@ def launch_value(
         if workload == "shutdown"
         else (sys.executable, "-I", "-c", "pass"),
         environment=tuple(
-            EnvironmentVariable(name=f"KORA_INPUT_{number}", value="v" * 110000)
-            for number in range(4)
+            EnvironmentVariable(name=f"KORA_INPUT_{number}", value="v" * 55000)
+            for number in range(8)
         )
         if near
         else (),

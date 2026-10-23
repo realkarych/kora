@@ -41,8 +41,8 @@ async def run(address: str) -> None:
             executable=sys.executable,
             argv=(sys.executable, "-I", "-c", "pass"),
             environment=tuple(
-                EnvironmentVariable(name=f"KORA_WIRE_{number}", value="w" * 110000)
-                for number in range(2)
+                EnvironmentVariable(name=f"KORA_WIRE_{number}", value="w" * 55000)
+                for number in range(4)
             ),
             working_directory_resource_id=reserved.token.resource_id,
             stdin=None,
