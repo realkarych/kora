@@ -14,6 +14,8 @@
 
 - Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
 
+- API error and authorization amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #135](https://github.com/realkarych/kora/issues/135) on 2026-10-23.
+
 ## Context
 
 kora's positioning states that it is operated by agents as much as by people: whatever an engineer can do through the UI, the CLI or the API, their own Claude Code or Codex session must be able to do through kora's MCP server and a published skill. NFR-0.3 makes this a design constraint on every operation.
@@ -32,7 +34,7 @@ The HTTP API (`/api/v1`) is the only implementation of every operation. Its Open
 
 Every other surface is a thin client with no logic of its own:
 
-- the Typer CLI over the shared Python client, returning the API response or error envelope verbatim under `--json`;
+- the Typer CLI over the shared Python client, returning completed API responses and errors verbatim under `--json`, with distinct content-free records for local failures;
 - two curated MCP servers, `kora-authoring` and `kora-operating`, with sixteen task-shaped tools in the complete inventory (ADR-0014; `kora_test` from issue #46 and `kora_validate` from issue #140); execution reconciliation uses existing `kora_admin` (ADR-0017); tools that start work (`kora_trigger`, `kora_retry`) return their outcome at once, `kora_plan` returns its plan, and waiting for a run is a bounded option of reading it through `kora_runs` (amended 2026-10-19); both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
 - one skill package per harness (a Claude Code plugin, Codex skills), generated from the same reference material as the `kora_reference` tool and kept as files in each harness's own format;
 - the `kora web` console, whose only HTTP dependency is the generated TypeScript client.
@@ -43,7 +45,7 @@ Parity is verified structurally: a CI coverage test checks that every API operat
 
 **Waiting is a bounded read option** (amended 2026-10-19). The API's run read takes a wait for one of two fixed conditions, the run has finished or one of its approval requests is pending, with a cap of 45 seconds fixed in the API contract. At the cap the API returns the current view as an ordinary response, and the caller reads again. The cap sits below the default tool-call timeout of the supported coding-agent clients ([dated evidence](../../knowledge/research/mcp-tasks-probe-2026-10-19.md#3-client-support-claude-code-and-codex)). The wait condition lives in the API; the CLI and the MCP servers forward the option, and no operation is added. MCP Tasks are not used; they are revisited when the official Python SDK implements the Tasks extension and Claude Code or Codex declares it.
 
-All errors are structured objects with a stable `code` and a safe message; clients branch on the code, never on prose. Compilation and validation findings use the shared [diagnostic contract](../../knowledge/specs/diagnostics.md): a nullable segmented document `path`, optional source `location` with file and line, independent Unicode code-point `offset`, node association and recovery hint. Runtime identifiers and HTTP request correlation belong to their enclosing error contracts.
+All errors are structured objects with a stable `code` and a safe message; clients branch on the code, never on prose. Compilation and validation findings use the shared [diagnostic contract](../../knowledge/specs/diagnostics.md): a nullable segmented document `path`, optional source `location` with file and line, independent Unicode code-point `offset`, node association and recovery hint. Runtime identifiers and HTTP request correlation belong to their enclosing error contracts. Local failures have no invented HTTP status or server request ID. The shared client owns transport classification; CLI and MCP render it without changing API authority or retry semantics. Offline incomplete validation is rendered at the client boundary without moving validation into clients. Structured follow streams distinguish server terminal errors from local transfer failures; opaque transcript bytes never receive appended JSON. [The API contract](../../knowledge/specs/api-and-agent-surface.md#client-and-local-validation-failures) defines these explicit output exceptions.
 
 The MCP servers present their configured personal token and therefore have exactly that token's permissions; they add no state and no permission model of their own. Standalone issues a separate default MCP token without `approve` or `platform`, as specified in [ADR-0011](0011-namespaces-and-personal-tokens.md).
 
