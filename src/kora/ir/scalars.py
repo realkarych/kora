@@ -12,3 +12,11 @@ Digest = Annotated[
 EnvName = Annotated[
     StrictStr, Field(pattern=re.compile(r"^[A-Z][A-Z0-9_]{0,63}(?![\s\S])"))
 ]
+NodeId = Annotated[
+    StrictStr, Field(pattern=re.compile(r"^[a-z][a-z0-9_]{0,63}(?![\s\S])"))
+]
+BranchTarget = Annotated[
+    StrictStr,
+    Field(pattern=re.compile(r"^(\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\s\S])")),
+]
+Expression = Annotated[StrictStr, Field(min_length=1, max_length=4096)]
