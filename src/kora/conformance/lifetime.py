@@ -388,6 +388,19 @@ class ParentLifetime:
         if not slot.wire and (slot.task is None or slot.task.done()):
             self.ordinary_slots.discard(slot)
 
+    @contextmanager
+    def _ordinary_call(self) -> Generator[OrdinarySlot]:
+        admission = CALL_ADMISSION.get()
+        slot = (
+            admission.slot
+            if admission is not None and admission.owner is self
+            else self.admit_ordinary(wire=False)
+        )
+        try:
+            yield slot
+        finally:
+            self._release_slot(slot)
+
     def snapshot(self) -> JournalSnapshot:
         previous = self.mutations.snapshot
         return JournalSnapshot(
@@ -465,6 +478,12 @@ class ParentLifetime:
             if existing.request != request:
                 raise self._refuse(LifetimeReason.IDENTITY_MISMATCH)
             return existing.task
+        if (
+            admission is not None
+            and admission.owner is self
+            and admission.input_charge is not None
+        ):
+            admission.input_charge.transfer()
         execution = isinstance(request, (ProcessLaunch, LocalRuntimeLaunch))
         size = (
             len(ExecutionConfig.from_launch(request).encode()[1])
@@ -553,7 +572,9 @@ class ParentLifetime:
             raise self._refuse(LifetimeReason.ACQUISITION_FAILED) from error
 
     async def reserve(self, request: ReservationRequest) -> Reservation:
-        return await self._reserve_call(request, self.deadline())
+        deadline = self.deadline()
+        with self._ordinary_call() as slot:
+            return await self._reserve_call(request, deadline, slot)
 
     async def _reserve_call(
         self,
@@ -612,7 +633,11 @@ class ParentLifetime:
     async def acquire(
         self, token: ReservationToken, operation_id: OperationId, request: Request
     ) -> Acquisition:
-        return await self._acquire_call(token, operation_id, request, self.deadline())
+        deadline = self.deadline()
+        with self._ordinary_call() as slot:
+            return await self._acquire_call(
+                token, operation_id, request, deadline, slot
+            )
 
     async def _acquire_call(
         self,
@@ -757,9 +782,11 @@ class ParentLifetime:
         acquisition_operation_id: OperationId,
         revision: int,
     ) -> ActivationAcknowledgement:
-        return await self._acknowledge_call(
-            token, acquisition_operation_id, revision, self.deadline()
-        )
+        deadline = self.deadline()
+        with self._ordinary_call() as slot:
+            return await self._acknowledge_call(
+                token, acquisition_operation_id, revision, deadline, slot
+            )
 
     async def _acknowledge_call(
         self,
@@ -840,16 +867,9 @@ class ParentLifetime:
     async def observe(
         self, resource_id: ResourceId | None
     ) -> tuple[ResourceObservation, ...]:
-        admission = CALL_ADMISSION.get()
-        slot = (
-            admission.slot
-            if admission is not None and admission.owner is self
-            else self.admit_ordinary(wire=False)
-        )
-        try:
-            return await self._observe_call(resource_id, self.deadline())
-        finally:
-            self._release_slot(slot)
+        deadline = self.deadline()
+        with self._ordinary_call():
+            return await self._observe_call(resource_id, deadline)
 
     async def _observe_call(
         self, resource_id: ResourceId | None, deadline: int
@@ -1347,6 +1367,29 @@ class CallAdmission:
     owner: ParentLifetime
     slot: OrdinarySlot
     deadline: int
+    input_charge: "WireInput | None"
+
+
+@dataclass
+class TransportBudget:
+    control_bytes: int = 0
+    execution_bytes: int = 0
+
+
+@dataclass
+class WireInput:
+    owner: ParentLifetime
+    budget: TransportBudget
+    control_bytes: int
+    execution_bytes: int
+
+    def transfer(self) -> None:
+        self.owner.transport_control_bytes -= self.control_bytes
+        self.owner.transport_execution_bytes -= self.execution_bytes
+        self.budget.control_bytes -= self.control_bytes
+        self.budget.execution_bytes -= self.execution_bytes
+        self.control_bytes = 0
+        self.execution_bytes = 0
 
 
 CALL_ADMISSION: ContextVar[CallAdmission | None] = ContextVar(
@@ -1356,11 +1399,14 @@ CALL_ADMISSION: ContextVar[CallAdmission | None] = ContextVar(
 
 @contextmanager
 def wire_admission(
-    owner: ParentLifetime, slot: OrdinarySlot, deadline: int
+    owner: ParentLifetime,
+    slot: OrdinarySlot,
+    deadline: int,
+    input_charge: WireInput | None = None,
 ) -> Generator[None]:
     if slot not in owner.ordinary_slots or not slot.wire:
         raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
-    token = CALL_ADMISSION.set(CallAdmission(owner, slot, deadline))
+    token = CALL_ADMISSION.set(CallAdmission(owner, slot, deadline, input_charge))
     try:
         yield
     finally:

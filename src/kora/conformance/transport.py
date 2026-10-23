@@ -14,6 +14,8 @@ from kora.conformance.lifetime import (
     OrdinarySlot,
     ParentLifetime,
     Request,
+    TransportBudget,
+    WireInput,
     wire_admission,
 )
 from kora.protocols.common import BoundaryModel
@@ -573,7 +575,7 @@ class PendingCall:
     deadline: int
     slot: OrdinarySlot
     control_bytes: int
-    execution_bytes: int
+    input_charge: WireInput
     task: asyncio.Task[None] | None = None
     encoded: bytes | None = None
 
@@ -617,8 +619,7 @@ class LifetimeEndpoint:
         self.channel = BoundedChannel(endpoint, owner.clock)
         self.resources: dict[ResourceId, EndpointResource] = {}
         self.pending: dict[int, PendingCall] = {}
-        self.control_bytes = 0
-        self.execution_bytes = 0
+        self.budget = TransportBudget()
         self._closing = False
         self.changed = asyncio.Event()
         self.last_request_id = 0
@@ -628,6 +629,14 @@ class LifetimeEndpoint:
             self.channel.close()
             raise
         owner.endpoint_count += 1
+
+    @property
+    def control_bytes(self) -> int:
+        return self.budget.control_bytes
+
+    @property
+    def execution_bytes(self) -> int:
+        return self.budget.execution_bytes
 
     def _reserve_bytes(self, control: int, execution: int) -> None:
         if (
@@ -642,14 +651,14 @@ class LifetimeEndpoint:
             > self.owner.limits.max_execution_snapshot_bytes
         ):
             raise ChannelError(ChannelFailure.CAPACITY)
-        self.control_bytes += control
-        self.execution_bytes += execution
+        self.budget.control_bytes += control
+        self.budget.execution_bytes += execution
         self.owner.transport_control_bytes += control
         self.owner.transport_execution_bytes += execution
 
     def _release_bytes(self, control: int, execution: int) -> None:
-        self.control_bytes -= control
-        self.execution_bytes -= execution
+        self.budget.control_bytes -= control
+        self.budget.execution_bytes -= execution
         self.owner.transport_control_bytes -= control
         self.owner.transport_execution_bytes -= execution
 
@@ -669,7 +678,8 @@ class LifetimeEndpoint:
 
     def _release_pending(self, request_id: int) -> None:
         pending = self.pending.pop(request_id)
-        self._release_bytes(pending.control_bytes, pending.execution_bytes)
+        pending.input_charge.transfer()
+        self._release_bytes(pending.control_bytes, 0)
         self.owner.release_wire(pending.slot)
         self.owner.transport_pending -= 1
 
@@ -770,18 +780,29 @@ class LifetimeEndpoint:
                             stderr=call.stderr,
                             domain=call.domain,
                         )
+                        del metadata, payload, config
                     elif header.execution_bytes:
                         raise ChannelError(ChannelFailure.MALFORMED)
                     if consumed != header.control_bytes:
                         raise ChannelError(ChannelFailure.MALFORMED)
                     pending = PendingCall(
-                        header, deadline, slot, reserved_control, header.execution_bytes
+                        header,
+                        deadline,
+                        slot,
+                        reserved_control - header.control_bytes,
+                        WireInput(
+                            self.owner,
+                            self.budget,
+                            header.control_bytes,
+                            header.execution_bytes,
+                        ),
                     )
                     self.pending[header.request_id] = pending
                     self.owner.transport_pending += 1
                     pending.task = asyncio.create_task(
                         self._handle(pending, call, launch)
                     )
+                    del encoded, call, launch
                     pending.task.add_done_callback(self._completed)
                     transferred = True
                 finally:
@@ -831,11 +852,10 @@ class LifetimeEndpoint:
     async def _handle(
         self, pending: PendingCall, call: Call, launch: ProcessLaunch | None
     ) -> None:
-        self._release_bytes(pending.header.control_bytes, pending.execution_bytes)
-        pending.control_bytes -= pending.header.control_bytes
-        pending.execution_bytes = 0
         try:
-            with wire_admission(self.owner, pending.slot, pending.deadline):
+            with wire_admission(
+                self.owner, pending.slot, pending.deadline, pending.input_charge
+            ):
                 reply: Reply = SuccessReply(
                     value=await self._value(pending, call, launch)
                 )

@@ -12,6 +12,8 @@ from kora.conformance.transport import (
     ProcessCall,
 )
 from kora.protocols.lifetime import (
+    Acquisition,
+    EnvironmentVariable,
     ProcessDomain,
     ProcessLaunch,
     ReservationRequest,
@@ -23,6 +25,61 @@ from kora.runner.channels import ChannelFailure
 from kora.runner.gate import ExecutionConfig
 
 
+async def close_pending(
+    client: LifetimeClient,
+    feedback: socket.socket,
+    feedback_address: str,
+    resource_id: str,
+    acquisitions: list[asyncio.Task[Acquisition]],
+) -> None:
+    loop = asyncio.get_running_loop()
+    await loop.sock_sendto(feedback, resource_id.encode("ascii"), feedback_address)
+    command = await loop.sock_recv(feedback, 16)
+    if command == b"cancel":
+        acquisitions[1].cancel()
+        try:
+            await acquisitions[1]
+        except asyncio.CancelledError:
+            if not acquisitions[1].cancelled():
+                raise
+        assert len(client.pending) == len(acquisitions)
+        await loop.sock_sendto(feedback, b"c", feedback_address)
+        command = await loop.sock_recv(feedback, 16)
+    assert command == b"close"
+    closing = asyncio.create_task(client.close(resource_id))
+    cancelled = asyncio.create_task(client.close(resource_id))
+    started: asyncio.Future[None] = loop.create_future()
+    loop.call_soon(started.set_result, None)
+    await started
+    cancelled.cancel()
+    try:
+        await cancelled
+    except asyncio.CancelledError:
+        if not cancelled.cancelled():
+            raise
+    for acquisition in acquisitions:
+        if acquisition.cancelled():
+            continue
+        try:
+            await acquisition
+        except LifetimeError:
+            pass
+        else:
+            raise AssertionError("fenced acquisition returned a usable lease")
+    report = await closing
+    assert report.cleanup_reference is None
+    assert await client.close(resource_id) == report
+    assert not client.pending
+    feedback.close()
+    client.disconnect()
+
+
+def progress(address: str, mode: str, phase: bytes) -> None:
+    if mode.startswith("cancel"):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as feedback:
+            feedback.sendto(phase, address)
+
+
 async def run(address: str, mode: str, feedback_address: str) -> None:
     endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     endpoint.connect(address)
@@ -31,12 +88,13 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
         operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
     )
     tree = await client.reserve(reservation_request)
+    progress(feedback_address, mode, b"r")
     assert await client.reserve(reservation_request) == tree
+    progress(feedback_address, mode, b"d")
     if mode.startswith("concurrent-"):
         feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         feedback.bind(feedback_address + "-child")
         feedback.setblocking(False)
-        loop = asyncio.get_running_loop()
         operation_id = new_operation_id()
         acquisitions = [
             asyncio.create_task(
@@ -44,39 +102,16 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
             )
             for _ in range(int(mode.split("-")[1]))
         ]
-        await loop.sock_sendto(
-            feedback, tree.token.resource_id.encode("ascii"), feedback_address
+        await close_pending(
+            client, feedback, feedback_address, tree.token.resource_id, acquisitions
         )
-        assert await loop.sock_recv(feedback, 16) == b"close"
-        closing = asyncio.create_task(client.close(tree.token.resource_id))
-        cancelled = asyncio.create_task(client.close(tree.token.resource_id))
-        started: asyncio.Future[None] = loop.create_future()
-        loop.call_soon(started.set_result, None)
-        await started
-        cancelled.cancel()
-        try:
-            await cancelled
-        except asyncio.CancelledError:
-            if not cancelled.cancelled():
-                raise
-        for acquisition in acquisitions:
-            try:
-                await acquisition
-            except LifetimeError:
-                pass
-            else:
-                raise AssertionError("fenced acquisition returned a usable lease")
-        report = await closing
-        assert report.cleanup_reference is None
-        assert await client.close(tree.token.resource_id) == report
-        assert not client.pending
-        feedback.close()
-        client.disconnect()
         return
     acquired = await client.acquire(
         tree.token, new_operation_id(), TemporaryTreeRequest()
     )
+    progress(feedback_address, mode, b"t")
     await client.acknowledge(tree.token, acquired.operation_id, acquired.revision)
+    progress(feedback_address, mode, b"a")
     process = await client.reserve(
         ReservationRequest(
             operation_id=new_operation_id(),
@@ -84,10 +119,16 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
             parent_resource_id=tree.token.resource_id,
         )
     )
+    progress(feedback_address, mode, b"s")
     request = ProcessLaunch(
         executable=sys.executable,
         argv=(sys.executable, "-I", "-c", "pass"),
-        environment=(),
+        environment=tuple(
+            EnvironmentVariable(name=f"PAYLOAD{index}", value="x" * 60000)
+            for index in range(15 if mode == "replay-near" else 5)
+        )
+        if mode.startswith("replay-")
+        else (),
         working_directory_resource_id=tree.token.resource_id,
         stdin=None,
         stdout=None,
@@ -95,18 +136,46 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
         domain=ProcessDomain.INVOCATION,
     )
     operation_id = new_operation_id()
+    if mode.startswith("replay-"):
+        feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        feedback.bind(feedback_address + "-child")
+        feedback.setblocking(False)
+        acquisitions = [
+            asyncio.create_task(client.acquire(process.token, operation_id, request))
+            for _ in range(1 if mode == "replay-near" else 3)
+        ]
+        await close_pending(
+            client, feedback, feedback_address, tree.token.resource_id, acquisitions
+        )
+        return
     acquisition = await client.acquire(process.token, operation_id, request)
+    progress(feedback_address, mode, b"q")
     assert await client.acquire(process.token, operation_id, request) == acquisition
+    progress(feedback_address, mode, b"u")
     await client.acknowledge(process.token, operation_id, acquisition.revision)
+    progress(feedback_address, mode, b"v")
     observations = await client.observe(None)
     assert {observation.resource_id for observation in observations} == {
         tree.token.resource_id,
         process.token.resource_id,
     }
+    progress(feedback_address, mode, b"o")
     report = await client.close(tree.token.resource_id)
+    progress(feedback_address, mode, b"c")
     assert report.cleanup_reference is None
     if mode in ("cancel_frame", "cancel_execution"):
         if mode == "cancel_frame":
+            await client.channel.write_frame(
+                HEADER.dump_json(
+                    OrdinaryHeader(
+                        request_id=client.next_request_id,
+                        verb="observe",
+                        control_bytes=256,
+                        execution_bytes=0,
+                    )
+                ),
+                client.clock.monotonic_ns() + 5_000_000_000,
+            )
             await asyncio.get_running_loop().sock_sendall(
                 endpoint, (256).to_bytes(4, "big") + b"{"
             )

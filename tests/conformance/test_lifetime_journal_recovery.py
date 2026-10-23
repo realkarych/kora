@@ -175,6 +175,13 @@ async def test_recovery_close_preserves_complete_inventory(
             closing = asyncio.create_task(owner.close(None))
             await owner.closure_started.wait()
             clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
+            reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
+            while not independent.observe(reap_deadline).settled:
+                assert independent_clock.monotonic_ns() < reap_deadline
+                wake = loop.create_future()
+                loop.call_soon(wake.set_result, None)
+                await wake
+            clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
             report = await asyncio.wait_for(closing, 5)
             assert report.state is CleanupOutcome.UNKNOWN
             assert path.read_bytes() == retained
@@ -185,6 +192,13 @@ async def test_recovery_close_preserves_complete_inventory(
             assert closing is not None
             await owner.ready()
             clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
+            reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
+            while not independent.observe(reap_deadline).settled:
+                assert independent_clock.monotonic_ns() < reap_deadline
+                wake = loop.create_future()
+                loop.call_soon(wake.set_result, None)
+                await wake
+            clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
             report = await asyncio.wait_for(closing, 5)
             assert report.state is CleanupOutcome.CLOSED
             assert independent.observe(
