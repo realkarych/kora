@@ -7,6 +7,7 @@ from typing import Annotated, Literal, TypeAlias, cast
 
 from pydantic import Field, StrictInt, TypeAdapter, ValidationError
 
+from kora.conformance.controllers import duration_ns
 from kora.conformance.lifetime import (
     CLOSURE_CONTROL_BYTES,
     CLOSURE_REPORT_BYTES,
@@ -379,8 +380,8 @@ class LifetimeClient:
     async def _read(self) -> None:
         try:
             while not self.closed:
-                deadline = self.clock.monotonic_ns() + int(
-                    self.limits.acquisition_seconds * 1_000_000_000
+                deadline = self.clock.monotonic_ns() + duration_ns(
+                    self.limits.acquisition_seconds
                 )
                 reservation = max(
                     reply_reservation("observe", self.limits), CLOSURE_REPORT_BYTES
@@ -433,8 +434,8 @@ class LifetimeClient:
             or self.next_request_id > 2**64 - 1
         ):
             raise LifetimeTransportError(ChannelFailure.CAPACITY)
-        deadline = self.clock.monotonic_ns() + int(
-            self.limits.acquisition_seconds * 1_000_000_000
+        deadline = self.clock.monotonic_ns() + duration_ns(
+            self.limits.acquisition_seconds
         )
         encoded = CALL.dump_json(call)
         metadata, execution = (
@@ -540,14 +541,14 @@ class LifetimeClient:
             raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
         if not control.requested:
             control.requested = True
-            control.deadline = self.clock.monotonic_ns() + int(
-                (
-                    self.limits.cooperative_seconds
-                    + self.limits.term_seconds
-                    + self.limits.kill_observation_seconds
-                    + self.limits.drain_seconds
+            control.deadline = self.clock.monotonic_ns() + sum(
+                duration_ns(seconds)
+                for seconds in (
+                    self.limits.cooperative_seconds,
+                    self.limits.term_seconds,
+                    self.limits.kill_observation_seconds,
+                    self.limits.drain_seconds,
                 )
-                * 1_000_000_000
             )
             self.changed.set()
         return await asyncio.shield(control.future)
