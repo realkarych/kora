@@ -45,3 +45,9 @@ Revision `9c06768` failed before the first bootstrap with JOURNAL_UNAVAILABLE, i
 ## Invalid environment dataset
 
 Revision `13d9b7a` failed in 7.29 seconds constructing the first large request. The planned 110,000-character environment values exceeded the existing 65,536-character per-string bound. The replacement splits each value into two 55,000-byte entries, preserving the exact aggregate 440,000 direct/220,000 wire value bytes, independently decoded copy counts, unchanged aggregate gate and full population. This is a dataset correction, not an increased bound. The complete failed artifact is retained under `/tmp/kora-247-lifetime-evidence/attempt-2`. Its phase observations cover setup only and are not a successful-cycle result.
+
+## Host interruption and artifact loss
+
+The complete replacement at `7b04e642bfde3d7e5ea5d09ae0f7421d0dd598c3` started as attempt3. After an interruption, the execution session was unavailable, both `/tmp/kora-247-lifetime-evidence` and the separate coordination scratch directory were absent, and the host reported only four minutes of uptime at 2026-10-23T23:43:59Z. No workload/helper/client process remained in the OS inventory. Attempt3 has an unknown outcome; it is neither a passed measurement nor an observed assertion failure. The previously observed attempt1/2 failures above remain historical command evidence, but their raw temporary artifacts were lost in this host restart. They are no longer claimed available for inspection.
+
+Subsequent attempts store reports, raw samples, stderr and snapshots under the persistent ignored workspace `.superpowers/measurements/lifetime/`. Runtime state remains in separately owned private directories. A complete replacement after this documented interruption preserves the same committed population, instrumentation and resource/timeout gates; it is not a favorable rerun of a verified successful result.
