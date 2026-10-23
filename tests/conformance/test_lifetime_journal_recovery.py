@@ -290,3 +290,81 @@ async def test_close_report_never_restarts_expired_process_observation(
         assert independent.signal(signal.SIGKILL, deadline) is SignalResult.SENT
         await independent.settle(deadline)
         independent.release(deadline)
+
+
+@pytest.mark.asyncio
+async def test_recovery_control_capacity_keeps_entire_older_inventory(
+    tmp_path: Path,
+) -> None:
+    from kora.conformance.journal import JournalEntry
+    from kora.protocols.lifetime import CleanupOutcome, ResourceState, new_operation_id
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "live",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
+    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    original = JournalSnapshot.model_validate_json(path.read_bytes())
+    registration = original.entries[-1].registration
+    assert isinstance(registration, ProcessRegistration)
+    extended = original.model_copy(
+        update={
+            "entries": (
+                *original.entries,
+                *(
+                    JournalEntry(
+                        resource_id=new_operation_id(),
+                        parent_resource_id=None,
+                        kind=ResourceKind.TEMPORARY_TREE,
+                        state=ResourceState.RESERVED,
+                        revision=1,
+                    )
+                    for _ in range(100)
+                ),
+            )
+        }
+    )
+    path.write_bytes(extended.model_dump_json().encode())
+    clock = SystemClock()
+    independent = RecoveredProcess(registration, clock, NativeIdentityReader())
+    owner = ParentLifetime(
+        limits=limits(),
+        recovery=reference,
+        launcher=InstalledIOHelperLauncher(
+            home=tmp_path, state_home=tmp_path / "state"
+        ),
+    )
+
+    try:
+        with pytest.raises(LifetimeError):
+            await owner.ready()
+        after_takeover = path.read_bytes()
+        report = await owner.close(None)
+
+        assert report.state is CleanupOutcome.UNKNOWN
+        assert report.unresolved_count == len(extended.entries)
+        assert len(owner.records) == len(extended.entries)
+        assert {entry.resource_id for entry in extended.entries} == set(owner.records)
+        assert (
+            owner.records[original.entries[-1].resource_id].entry.registration
+            == registration
+        )
+        assert path.read_bytes() == after_takeover
+        assert (
+            JournalSnapshot.model_validate_json(after_takeover).entries
+            == extended.entries
+        )
+        assert owner.dispose_recovery_observers()
+    finally:
+        deadline = clock.monotonic_ns() + 5_000_000_000
+        assert independent.signal(signal.SIGKILL, deadline) is SignalResult.SENT
+        await independent.settle(deadline)
+        independent.release(deadline)

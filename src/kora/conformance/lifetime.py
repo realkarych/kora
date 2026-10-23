@@ -1,9 +1,10 @@
 import asyncio
 import os
 import signal
-from collections.abc import Callable, Coroutine
-from dataclasses import dataclass
-from functools import partial
+from collections.abc import Callable, Coroutine, Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import TypeAlias, cast
 
 from pydantic import TypeAdapter
@@ -48,7 +49,7 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import ChannelError, wait_future
+from kora.runner.channels import ChannelError
 from kora.runner.filesystem import DirectoryAnchor, DirectoryIdentity, FilesystemError
 from kora.runner.gate import ExecutionConfig
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
@@ -67,6 +68,46 @@ Request: TypeAlias = (
 )
 Result: TypeAlias = Reservation | Acquisition | ActivationAcknowledgement
 OPERATION_ID: TypeAdapter[OperationId] = TypeAdapter(OperationId)
+CLOSURE_REPORT_BYTES: int = 16384
+CLOSURE_CONTROL_BYTES: int = CLOSURE_REPORT_BYTES + 2048
+CLEANUP_DRIVER_BYTES: int = 4096
+MEMBER_CONTROL_BYTES: int = 2048
+
+
+def consume_closure_failure(future: asyncio.Future[ClosureReport]) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
+def closure_future() -> asyncio.Future[ClosureReport]:
+    future: asyncio.Future[ClosureReport] = asyncio.get_running_loop().create_future()
+    future.add_done_callback(consume_closure_failure)
+    return future
+
+
+@dataclass
+class CleanupControl:
+    result: asyncio.Future[ClosureReport] = field(default_factory=closure_future)
+    start: int | None = None
+    cooperative: int = 0
+    term: int = 0
+    killed: int = 0
+    final: int = 0
+    selected: set[str] = field(default_factory=set[str])
+    published: bool = False
+    failed: bool = False
+
+
+@dataclass
+class CleanupEffect:
+    task: asyncio.Task[None]
+    control: CleanupControl
+
+
+@dataclass(eq=False)
+class OrdinarySlot:
+    wire: bool
+    task: asyncio.Task[Result] | None = None
 
 
 class LifetimeError(Exception):
@@ -87,6 +128,9 @@ class ResourceRecord:
     fenced: bool = False
     observed_live_processes: int = 0
     observed_remaining_pipes: int = 0
+    cleanup: CleanupControl | None = None
+    signalled: int = 0
+    member_capacity: int = 0
 
 
 @dataclass
@@ -105,19 +149,18 @@ class LifetimeInventory:
     endpoint_count: int
     control_bytes: int
     execution_bytes: int
+    ordinary_owners: int
+    cleanup_driver_tasks: int
+    cleanup_effect_tasks: int
+    closure_results: int
+    member_capacity: int
+    pending_process_readiness: int
     helpers: HelperInventory
 
 
 def consume_task_failure(task: asyncio.Task[object]) -> None:
     if not task.cancelled():
         task.exception()
-
-
-def finish_future(
-    future: asyncio.Future[None], task: asyncio.Task[ClosureReport]
-) -> None:
-    if not future.done():
-        future.set_result(None)
 
 
 class ParentLifetime:
@@ -157,8 +200,15 @@ class ParentLifetime:
         self.bootstrap_succeeded = False
         self.records: dict[ResourceId, ResourceRecord] = {}
         self.operations: dict[tuple[str, str], RecordedOperation] = {}
-        self.closures: dict[ResourceId | None, asyncio.Task[ClosureReport]] = {}
-        self.control_bytes = 0
+        self.ordinary_slots: set[OrdinarySlot] = set()
+        self.closures: dict[ResourceId | None, asyncio.Future[ClosureReport]] = {}
+        self.control_bytes = CLOSURE_CONTROL_BYTES + CLEANUP_DRIVER_BYTES
+        if self.control_bytes > self.limits.max_control_recovery_bytes:
+            raise LifetimeError(LifetimeReason.CAPACITY_EXCEEDED)
+        self.invocation_cleanup = CleanupControl()
+        self.cleanup_changed = asyncio.Event()
+        self.cleanup_effect: CleanupEffect | None = None
+        self.bootstrap_finished: int | None = None
         self.execution_bytes = 0
         self.transport_control_bytes = 0
         self.transport_execution_bytes = 0
@@ -177,8 +227,27 @@ class ParentLifetime:
             self._establish() if recovery is None else self._recover(recovery)
         )
         self._bootstrap.add_done_callback(consume_task_failure)
+        self._bootstrap.add_done_callback(self._bootstrap_complete)
+        self._cleanup_driver = asyncio.create_task(self._drive_cleanup())
+        self._cleanup_driver.add_done_callback(self._driver_complete)
+
+    def _driver_complete(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            for _, control in self._cleanup_controls():
+                if control.start is not None and not control.result.done():
+                    control.result.set_exception(error)
+
+    def _bootstrap_complete(self, task: asyncio.Task[None]) -> None:
+        self.bootstrap_finished = self.clock.monotonic_ns()
+        self.cleanup_changed.set()
 
     def deadline(self) -> int:
+        admission = CALL_ADMISSION.get()
+        if admission is not None and admission.owner is self:
+            return admission.deadline
         return self.clock.monotonic_ns() + int(
             self.limits.acquisition_seconds * 1_000_000_000
         )
@@ -204,13 +273,27 @@ class ParentLifetime:
             )
             record = ResourceRecord(entry, token, fenced=True)
             self.records[entry.resource_id] = record
+        if (
+            self.control_bytes
+            + self.mutations.inventory().journal_bytes
+            + len(self.records) * CLOSURE_CONTROL_BYTES
+            > self.limits.max_control_recovery_bytes
+        ):
+            raise self._refuse(LifetimeReason.CAPACITY_EXCEEDED)
+        for record in self.records.values():
+            self._reserve_cleanup_control()
+            record.cleanup = CleanupControl()
         for record in self.records.values():
             entry = record.entry
             if entry.state is ResourceState.CLOSED:
                 continue
             if isinstance(entry.registration, ProcessRegistration):
+                record.member_capacity = self._reserve_process_members()
                 record.recovered = RecoveredProcess(
-                    entry.registration, self.clock, self.identities
+                    entry.registration,
+                    self.clock,
+                    self.identities,
+                    max_members=record.member_capacity,
                 )
             elif isinstance(entry.registration, BorrowedServiceRegistration):
                 record.dependency = entry.registration.connection_scope
@@ -263,6 +346,41 @@ class ParentLifetime:
         ) as error:
             self.admission_open = False
             raise LifetimeError(LifetimeReason.JOURNAL_UNAVAILABLE) from error
+
+    async def _ready_deadline(self, deadline: int) -> None:
+        if self.clock.monotonic_ns() >= deadline:
+            raise self._refuse(LifetimeReason.EFFECT_UNSETTLED)
+        if not self._bootstrap.done():
+            timeout = asyncio.create_task(self.clock.sleep_until(deadline))
+            try:
+                await asyncio.wait(
+                    (self._bootstrap, timeout), return_when=asyncio.FIRST_COMPLETED
+                )
+                if not self._bootstrap.done() or self.clock.monotonic_ns() >= deadline:
+                    raise self._refuse(LifetimeReason.EFFECT_UNSETTLED)
+            finally:
+                timeout.cancel()
+                try:
+                    await timeout
+                except asyncio.CancelledError:
+                    if not timeout.cancelled():
+                        raise
+        await self.ready()
+
+    def admit_ordinary(self, *, wire: bool) -> OrdinarySlot:
+        if len(self.ordinary_slots) >= self.limits.max_outstanding_operations:
+            raise self._refuse(LifetimeReason.CAPACITY_EXCEEDED)
+        slot = OrdinarySlot(wire)
+        self.ordinary_slots.add(slot)
+        return slot
+
+    def release_wire(self, slot: OrdinarySlot) -> None:
+        slot.wire = False
+        self._release_slot(slot)
+
+    def _release_slot(self, slot: OrdinarySlot) -> None:
+        if not slot.wire and (slot.task is None or slot.task.done()):
+            self.ordinary_slots.discard(slot)
 
     def snapshot(self) -> JournalSnapshot:
         previous = self.mutations.snapshot
@@ -330,7 +448,11 @@ class ParentLifetime:
         request: BoundaryModel,
         resource_id: ResourceId | None,
         coroutine: Coroutine[object, object, Result],
+        slot: OrdinarySlot | None = None,
     ) -> asyncio.Task[Result]:
+        admission = CALL_ADMISSION.get()
+        if slot is None and admission is not None and admission.owner is self:
+            slot = admission.slot
         existing = self.operations.get(key)
         if existing is not None:
             coroutine.close()
@@ -343,9 +465,7 @@ class ParentLifetime:
             if isinstance(request, ProcessLaunch)
             else len(request.model_dump_json().encode())
         )
-        if sum(
-            not operation.task.done() for operation in self.operations.values()
-        ) + self.transport_pending >= self.limits.max_outstanding_operations or (
+        if (
             self.execution_bytes + self.transport_execution_bytes + size
             > self.limits.max_execution_snapshot_bytes
             if execution
@@ -357,14 +477,60 @@ class ParentLifetime:
         ):
             coroutine.close()
             raise self._refuse(LifetimeReason.CAPACITY_EXCEEDED)
+        try:
+            admitted = self.admit_ordinary(wire=False) if slot is None else slot
+        except LifetimeError:
+            coroutine.close()
+            raise
+        if admitted not in self.ordinary_slots or admitted.task is not None:
+            coroutine.close()
+            raise self._refuse(LifetimeReason.IDENTITY_MISMATCH)
         if execution:
             self.execution_bytes += size
         else:
             self.control_bytes += size
         task = asyncio.create_task(self._run_operation(coroutine))
+        admitted.task = task
         task.add_done_callback(consume_task_failure)
+        task.add_done_callback(self._operation_complete)
         self.operations[key] = RecordedOperation(request, task, resource_id)
         return task
+
+    def _operation_complete(self, task: asyncio.Task[Result]) -> None:
+        for slot in tuple(self.ordinary_slots):
+            if slot.task is task:
+                self._release_slot(slot)
+        self.cleanup_changed.set()
+
+    def _reserve_cleanup_control(self) -> None:
+        if (
+            self.control_bytes
+            + self.transport_control_bytes
+            + self.mutations.inventory().journal_bytes
+            + CLOSURE_CONTROL_BYTES
+            > self.limits.max_control_recovery_bytes
+        ):
+            raise self._refuse(LifetimeReason.CAPACITY_EXCEEDED)
+        self.control_bytes += CLOSURE_CONTROL_BYTES
+
+    def _reserve_process_members(self) -> int:
+        available = (
+            self.limits.max_control_recovery_bytes
+            - self.control_bytes
+            - self.transport_control_bytes
+            - self.mutations.inventory().journal_bytes
+            - self.limits.max_control_frame_bytes
+            - CLOSURE_CONTROL_BYTES
+        )
+        capacity = min(
+            65536,
+            available
+            // ((self.limits.max_outstanding_operations + 1) * MEMBER_CONTROL_BYTES),
+        )
+        if capacity < 1:
+            raise self._refuse(LifetimeReason.CAPACITY_EXCEEDED)
+        self.control_bytes += capacity * MEMBER_CONTROL_BYTES
+        return capacity
 
     async def _run_operation(
         self, coroutine: Coroutine[object, object, Result]
@@ -381,16 +547,25 @@ class ParentLifetime:
             raise self._refuse(LifetimeReason.ACQUISITION_FAILED) from error
 
     async def reserve(self, request: ReservationRequest) -> Reservation:
-        await self.ready()
+        return await self._reserve_call(request, self.deadline())
+
+    async def _reserve_call(
+        self,
+        request: ReservationRequest,
+        deadline: int,
+        slot: OrdinarySlot | None = None,
+    ) -> Reservation:
+        await self._ready_deadline(deadline)
         task = self._operation(
             ("reserve", request.operation_id),
             request,
             request.parent_resource_id,
-            self._reserve(request),
+            self._reserve(request, deadline),
+            slot,
         )
         return cast(Reservation, await asyncio.shield(task))
 
-    async def _reserve(self, request: ReservationRequest) -> Result:
+    async def _reserve(self, request: ReservationRequest, deadline: int) -> Result:
         self._admit()
         if request.kind is ResourceKind.LOCAL_RUNTIME_DOMAIN:
             raise self._refuse(LifetimeReason.ACQUISITION_FAILED)
@@ -417,9 +592,10 @@ class ParentLifetime:
             state=ResourceState.RESERVED,
             revision=self.revision + 1,
         )
-        record = ResourceRecord(entry, token)
+        self._reserve_cleanup_control()
+        record = ResourceRecord(entry, token, cleanup=CleanupControl())
         self.records[resource_id] = record
-        await self._persist(self.deadline())
+        await self._persist(deadline)
         return Reservation(
             token=token,
             kind=request.kind,
@@ -430,14 +606,25 @@ class ParentLifetime:
     async def acquire(
         self, token: ReservationToken, operation_id: OperationId, request: Request
     ) -> Acquisition:
-        await self.ready()
+        return await self._acquire_call(token, operation_id, request, self.deadline())
+
+    async def _acquire_call(
+        self,
+        token: ReservationToken,
+        operation_id: OperationId,
+        request: Request,
+        deadline: int,
+        slot: OrdinarySlot | None = None,
+    ) -> Acquisition:
+        await self._ready_deadline(deadline)
         operation_id = OPERATION_ID.validate_python(operation_id)
         record = self._record(token)
         task = self._operation(
             ("acquire", operation_id),
             request,
             token.resource_id,
-            self._acquire(record, operation_id, request),
+            self._acquire(record, operation_id, request, deadline),
+            slot,
         )
         existing = self.operations[("acquire", operation_id)]
         if existing.resource_id != token.resource_id:
@@ -445,7 +632,7 @@ class ParentLifetime:
         return cast(Acquisition, await asyncio.shield(task))
 
     async def _acquire(
-        self, record: ResourceRecord, operation_id: str, request: Request
+        self, record: ResourceRecord, operation_id: str, request: Request, deadline: int
     ) -> Result:
         self._admit(record)
         if (
@@ -453,7 +640,6 @@ class ParentLifetime:
             or request.kind != record.entry.kind
         ):
             raise self._refuse(LifetimeReason.IDENTITY_MISMATCH)
-        deadline = self.deadline()
         directory: DirectoryAnchor | None = None
         if isinstance(request, ProcessLaunch):
             working = self.records.get(request.working_directory_resource_id)
@@ -501,6 +687,7 @@ class ParentLifetime:
             )
             raise self._refuse(LifetimeReason.EFFECT_UNSETTLED)
         if isinstance(request, ProcessLaunch) and directory is not None:
+            record.member_capacity = self._reserve_process_members()
             record.process = start_gated(
                 request,
                 operation_id,
@@ -508,6 +695,7 @@ class ParentLifetime:
                 deadline,
                 self.clock,
                 self.identities,
+                max_members=record.member_capacity,
             )
             registration = await record.process.prepare()
         elif isinstance(request, TemporaryTreeRequest) and directory is not None:
@@ -563,7 +751,19 @@ class ParentLifetime:
         acquisition_operation_id: OperationId,
         revision: int,
     ) -> ActivationAcknowledgement:
-        await self.ready()
+        return await self._acknowledge_call(
+            token, acquisition_operation_id, revision, self.deadline()
+        )
+
+    async def _acknowledge_call(
+        self,
+        token: ReservationToken,
+        acquisition_operation_id: OperationId,
+        revision: int,
+        deadline: int,
+        slot: OrdinarySlot | None = None,
+    ) -> ActivationAcknowledgement:
+        await self._ready_deadline(deadline)
         record = self._record(token)
         request = ActivationAcknowledgement(
             token=token,
@@ -575,12 +775,13 @@ class ParentLifetime:
             ("acknowledge", acquisition_operation_id),
             request,
             token.resource_id,
-            self._acknowledge(record, request),
+            self._acknowledge(record, request, deadline),
+            slot,
         )
         return cast(ActivationAcknowledgement, await asyncio.shield(task))
 
     async def _acknowledge(
-        self, record: ResourceRecord, request: ActivationAcknowledgement
+        self, record: ResourceRecord, request: ActivationAcknowledgement, deadline: int
     ) -> Result:
         acquisition = record.acquisition
         if (
@@ -594,7 +795,7 @@ class ParentLifetime:
         record.entry = record.entry.model_copy(
             update={"state": ResourceState.ACTIVE, "revision": self.revision + 1}
         )
-        await self._persist(self.deadline())
+        await self._persist(deadline)
         if record.fenced or not self.admission_open:
             return request.model_copy(update={"result": ActivationResult.CLOSING})
         if record.process is not None:
@@ -633,8 +834,21 @@ class ParentLifetime:
     async def observe(
         self, resource_id: ResourceId | None
     ) -> tuple[ResourceObservation, ...]:
-        await self.ready()
-        deadline = self.deadline()
+        admission = CALL_ADMISSION.get()
+        slot = (
+            admission.slot
+            if admission is not None and admission.owner is self
+            else self.admit_ordinary(wire=False)
+        )
+        try:
+            return await self._observe_call(resource_id, self.deadline())
+        finally:
+            self._release_slot(slot)
+
+    async def _observe_call(
+        self, resource_id: ResourceId | None, deadline: int
+    ) -> tuple[ResourceObservation, ...]:
+        await self._ready_deadline(deadline)
         return tuple(
             self._observation(self.records[key], deadline)
             for key in self._selected(resource_id)
@@ -683,261 +897,186 @@ class ParentLifetime:
                 "cancelled", LifetimeReason.CANCELLED, len(self.records)
             )
 
-    async def close(self, resource_id: ResourceId | None) -> ClosureReport:
-        existing = self.closures.get(resource_id)
-        if existing is not None:
-            return await asyncio.shield(existing)
-        selected = self._selected(resource_id)
+    def request_close(
+        self, resource_id: ResourceId | None
+    ) -> asyncio.Future[ClosureReport]:
+        control = (
+            self.invocation_cleanup
+            if resource_id is None
+            else self.records[resource_id].cleanup
+            if resource_id in self.records
+            else None
+        )
+        if control is None:
+            raise self._refuse(LifetimeReason.IDENTITY_UNKNOWN)
+        if control.start is not None:
+            return control.result
         start = self.clock.monotonic_ns()
+        control.start = start
+        control.cooperative = start + int(
+            self.limits.cooperative_seconds * 1_000_000_000
+        )
+        control.term = control.cooperative + int(
+            self.limits.term_seconds * 1_000_000_000
+        )
+        control.killed = control.term + int(
+            self.limits.kill_observation_seconds * 1_000_000_000
+        )
+        control.final = control.killed + int(self.limits.drain_seconds * 1_000_000_000)
+        control.selected = self._selected(resource_id)
         if resource_id is None:
             self.admission_open = False
-            self.cooperative_deadline_ns = start + int(
-                self.limits.cooperative_seconds * 1_000_000_000
-            )
+            self.cooperative_deadline_ns = control.cooperative
             self.closure_started.set()
+        self._fence(control.selected)
+        self.closures[resource_id] = control.result
+        self.cleanup_changed.set()
+        return control.result
+
+    def _fence(self, selected: set[str]) -> None:
         for key in selected:
             record = self.records[key]
             record.fenced = True
             if record.process is not None:
                 record.process.close_gate()
-        earlier = tuple(self.closures.values())
-        task = asyncio.create_task(self._close(resource_id, selected, earlier, start))
-        task.add_done_callback(consume_task_failure)
-        self.closures[resource_id] = task
-        return await asyncio.shield(task)
 
-    async def _wait_operations(self, selected: set[str], deadline: int) -> bool:
-        tasks: tuple[asyncio.Task[Result] | asyncio.Task[None], ...] = (
-            self._bootstrap,
-            *tuple(
-                operation.task
-                for operation in self.operations.values()
-                if not operation.task.done()
-                and (operation.resource_id in selected or operation.resource_id is None)
+    async def close(self, resource_id: ResourceId | None) -> ClosureReport:
+        return await asyncio.shield(self.request_close(resource_id))
+
+    def _cleanup_controls(self) -> tuple[tuple[ResourceId | None, CleanupControl], ...]:
+        return (
+            (None, self.invocation_cleanup),
+            *(
+                (key, record.cleanup)
+                for key, record in self.records.items()
+                if record.cleanup is not None
             ),
         )
-        tasks = tuple(task for task in tasks if not task.done())
-        if not tasks:
-            return True
-        timeout = asyncio.create_task(self.clock.sleep_until(deadline))
-        try:
-            pending: set[asyncio.Task[Result] | asyncio.Task[None]] = set(tasks)
-            while pending and not timeout.done():
-                _, pending = await asyncio.wait(
-                    (*pending, timeout), return_when=asyncio.FIRST_COMPLETED
-                )
-                pending.discard(timeout)
-            for task in tasks:
-                if task.done() and not task.cancelled():
-                    task.exception()
-            return all(task.done() for task in tasks)
-        finally:
-            timeout.cancel()
-            try:
-                await timeout
-            except asyncio.CancelledError:
-                if not timeout.cancelled():
-                    raise
 
-    async def _settle_process(self, record: ResourceRecord, deadline: int) -> bool:
-        if self.clock.monotonic_ns() >= deadline:
-            return False
-        if record.recovered is not None:
-            try:
-                await record.recovered.settle(deadline)
-                return True
-            except (ChannelError, ProcessError):
-                return False
-        process = record.process
-        if process is None or process.closed:
-            return True
-        try:
-            await process.settle(deadline)
-            await process.drain(deadline)
-            return True
-        except (ChannelError, ProcessError):
-            return False
-
-    async def _close(
-        self,
-        resource_id: ResourceId | None,
-        selected: set[str],
-        earlier: tuple[asyncio.Task[ClosureReport], ...],
-        start: int,
-    ) -> ClosureReport:
-        cooperative = start + int(self.limits.cooperative_seconds * 1_000_000_000)
-        term = cooperative + int(self.limits.term_seconds * 1_000_000_000)
-        killed = term + int(self.limits.kill_observation_seconds * 1_000_000_000)
-        final = killed + int(self.limits.drain_seconds * 1_000_000_000)
-        earlier_settled = True
-        for previous in earlier:
-            completion = asyncio.get_running_loop().create_future()
-            previous.add_done_callback(partial(finish_future, completion))
-            try:
-                await wait_future(completion, cooperative, self.clock)
-            except ChannelError:
-                earlier_settled = False
-        await self._wait_operations(selected, cooperative)
-        inventory_ready = self._bootstrap.done() and self.bootstrap_succeeded
-        if resource_id is None:
-            selected.update(self.records)
-        records = [record for key, record in self.records.items() if key in selected]
-        for record in records:
-            if record.process is not None:
-                record.process.close_gate()
-            if record.entry.state is not ResourceState.CLOSED:
-                record.entry = record.entry.model_copy(
-                    update={
-                        "state": ResourceState.CLOSING,
-                        "revision": self.revision + 1,
-                    }
-                )
-        for record in records:
-            await self._settle_process(record, cooperative)
-        for requested, phase in ((signal.SIGTERM, term), (signal.SIGKILL, killed)):
-            for record in records:
-                process = record.process or record.recovered
-                if (
-                    process is not None
-                    and not process.closed
-                    and self.clock.monotonic_ns() < final
-                ):
-                    observation = process.observe(final)
-                    record.observed_live_processes = len(observation.live_members)
-                    if isinstance(observation, ProcessObservation):
-                        record.observed_remaining_pipes = int(
-                            not observation.capture_eof
-                        )
-                    if observation.condition is ProcessCondition.LIVE:
-                        self.diagnostics.emit(
-                            "escalated", LifetimeReason.RESOURCE_LIVE, len(records)
-                        )
-                        process.signal(requested, final)
-            if self.clock.monotonic_ns() < final:
-                self.mutations.signal(requested)
-            for record in records:
-                await self._settle_process(record, phase)
-            await self._wait_operations(selected, phase)
-        operations_settled = await self._wait_operations(selected, final)
-        helpers_settled = await self.mutations.settle(final)
-        if resource_id is None:
-            selected.update(self.records)
-            records = list(self.records.values())
-        safe = (
-            inventory_ready
-            and self.bootstrap_succeeded
-            and earlier_settled
-            and operations_settled
-            and helpers_settled
-            and not self.mutations.failed
-            and self.clock.monotonic_ns() < final
+    def _cleanup_pending(self, control: CleanupControl) -> bool:
+        return not self._bootstrap.done() or any(
+            not operation.task.done()
+            and (
+                operation.resource_id is None
+                or operation.resource_id in control.selected
+            )
+            for operation in self.operations.values()
         )
-        for record in records:
-            if record.entry.kind is ResourceKind.BORROWED_SERVICE:
-                scope = self.records.get(record.dependency or "")
-                process = None if scope is None else scope.process or scope.recovered
-                if process is None or (
-                    record.dependency not in selected and not process.closed
-                ):
-                    safe = False
-        if safe:
-            for record in records:
-                process = record.process or record.recovered
-                if process is not None and not process.closed:
-                    try:
-                        process.release(final)
-                    except ProcessError:
-                        safe = False
-        if safe:
-            for record in reversed(records):
-                if record.directory is not None and not record.directory.closed:
-                    parent_id = record.entry.parent_resource_id
-                    parent = (
-                        self.mutations.directory
-                        if parent_id is None
-                        else self.records[parent_id].directory
-                    )
-                    if parent is None:
-                        safe = False
-                        break
-                    try:
-                        await self.mutations.perform(
-                            RemoveTreeMutation(
-                                directory=parent.identity,
-                                target=record.directory.identity,
-                            ),
-                            parent,
-                            final,
-                        )
-                        self.mutations.prune()
-                        record.directory.close()
-                    except (
-                        HelperError,
-                        ChannelError,
-                        ProcessError,
-                        FilesystemError,
-                        OSError,
-                    ):
-                        safe = False
-                        break
+
+    def _cleanup_done(self, task: asyncio.Task[None]) -> None:
+        consume_task_failure(task)
+        self.cleanup_changed.set()
+
+    def _start_cleanup_effect(
+        self, control: CleanupControl, effect: Coroutine[object, object, None]
+    ) -> None:
+        task = asyncio.create_task(effect)
+        self.cleanup_effect = CleanupEffect(task, control)
+        task.add_done_callback(self._cleanup_done)
+
+    async def _remove_cleanup_tree(self, record: ResourceRecord, deadline: int) -> None:
+        directory = record.directory
+        parent_id = record.entry.parent_resource_id
+        parent = (
+            self.mutations.directory
+            if parent_id is None
+            else self.records[parent_id].directory
+        )
+        if directory is None or parent is None:
+            raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
+        await self.mutations.perform(
+            RemoveTreeMutation(directory=parent.identity, target=directory.identity),
+            parent,
+            deadline,
+        )
+        self.mutations.prune()
+        directory.close()
+
+    async def _publish_cleanup(self, control: CleanupControl) -> None:
+        await self._persist(control.final)
+        control.published = True
+
+    async def _remove_cleanup_root(self, control: CleanupControl) -> None:
+        root = self.mutations.root
+        directory = self.mutations.directory
+        if root is None or directory is None:
+            raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
+        await self.mutations.perform(
+            RemoveTreeMutation(directory=root.identity, target=directory.identity),
+            root,
+            control.final,
+        )
+        self.mutations.prune()
+        self.mutations.release()
+
+    def _cleanup_processes(
+        self, records: list[ResourceRecord], control: CleanupControl, *, release: bool
+    ) -> bool:
+        settled = True
+        now = self.clock.monotonic_ns()
+        requested = (
+            signal.SIGKILL
+            if now >= control.term
+            else signal.SIGTERM
+            if now >= control.cooperative
+            else None
+        )
+        escalation = 2 if requested is signal.SIGKILL else 1
         for record in records:
             process = record.process or record.recovered
-            closed = safe or (
-                process is not None and process.closed and record.directory is None
+            if process is None or process.closed:
+                continue
+            if self.clock.monotonic_ns() >= control.final:
+                return False
+            observed = process.observe(control.final)
+            record.observed_live_processes = len(observed.live_members)
+            captured = (
+                not isinstance(observed, ProcessObservation) or observed.capture_eof
             )
-            record.entry = record.entry.model_copy(
-                update={
-                    "state": ResourceState.CLOSED if closed else ResourceState.UNKNOWN,
-                    "reason": LifetimeReason.COMPLETE
-                    if closed
-                    else LifetimeReason.EFFECT_UNSETTLED,
-                    "revision": self.revision + 1,
-                }
-            )
-        if self.bootstrap_succeeded:
-            try:
-                await self._persist(final)
-            except LifetimeError:
-                safe = False
-        if safe and resource_id is None:
-            root = self.mutations.root
-            directory = self.mutations.directory
-            if root is None or directory is None or self.endpoint_count:
-                safe = False
-            else:
-                try:
-                    await self.mutations.perform(
-                        RemoveTreeMutation(
-                            directory=root.identity, target=directory.identity
-                        ),
-                        root,
-                        final,
+            if isinstance(observed, ProcessObservation):
+                record.observed_remaining_pipes = int(not observed.capture_eof)
+            if observed.settled and captured:
+                if release:
+                    try:
+                        process.release(control.final)
+                    except ProcessError:
+                        settled = False
+                continue
+            settled = False
+            if (
+                requested is not None
+                and record.signalled < escalation
+                and observed.condition is ProcessCondition.LIVE
+            ):
+                self.diagnostics.emit(
+                    "escalated", LifetimeReason.RESOURCE_LIVE, len(records)
+                )
+                process.signal(requested, control.final)
+                record.signalled = escalation
+        return settled
+
+    def _finish_cleanup(
+        self, resource_id: ResourceId | None, control: CleanupControl, *, safe: bool
+    ) -> None:
+        records = [
+            record for key, record in self.records.items() if key in control.selected
+        ]
+        if not safe:
+            for record in records:
+                if record.entry.state is not ResourceState.CLOSED:
+                    record.entry = record.entry.model_copy(
+                        update={
+                            "state": ResourceState.UNKNOWN,
+                            "reason": LifetimeReason.EFFECT_UNSETTLED,
+                        }
                     )
-                    self.mutations.prune()
-                    self.mutations.release()
-                except (
-                    HelperError,
-                    ChannelError,
-                    ProcessError,
-                    FilesystemError,
-                    OSError,
-                ):
-                    safe = False
-        unresolved = tuple(
-            self._observation(record, final)
+        unresolved = [
+            record
             for record in records
             if record.entry.state is not ResourceState.CLOSED
-        )
+        ]
         outcome = CleanupOutcome.CLOSED if safe else CleanupOutcome.UNKNOWN
-        for record in records:
-            if record.recovered is not None and not record.recovered.closed:
-                record.recovered.dispose_observation()
-        self.diagnostics.emit(
-            "closed" if safe else "unknown",
-            LifetimeReason.COMPLETE if safe else LifetimeReason.EFFECT_UNSETTLED,
-            len(records),
-        )
-        return ClosureReport(
+        report = ClosureReport(
             invocation_id=self.invocation_id,
             resource_id=resource_id,
             revision=self.revision,
@@ -945,11 +1084,182 @@ class ParentLifetime:
             original_outcome=self.original_outcome,
             cleanup_outcome=outcome,
             unresolved_count=len(unresolved),
-            samples=unresolved[: self.limits.max_unresolved_samples],
+            samples=tuple(
+                self._observation(record, control.final)
+                for record in unresolved[: self.limits.max_unresolved_samples]
+            ),
             cleanup_reference=None
             if safe
             else CleanupReference(invocation_id=self.invocation_id),
         )
+        if len(report.model_dump_json().encode()) > CLOSURE_REPORT_BYTES:
+            raise LifetimeError(LifetimeReason.CAPACITY_EXCEEDED)
+        self.diagnostics.emit(
+            "closed" if safe else "unknown",
+            LifetimeReason.COMPLETE if safe else LifetimeReason.EFFECT_UNSETTLED,
+            len(records),
+        )
+        control.result.set_result(report)
+
+    def _advance_cleanup(
+        self, resource_id: ResourceId | None, control: CleanupControl
+    ) -> None:
+        if resource_id is None:
+            control.selected.update(self.records)
+            self._fence(control.selected)
+        now = self.clock.monotonic_ns()
+        if now >= control.final:
+            self._finish_cleanup(resource_id, control, safe=False)
+            return
+        records = [
+            record for key, record in self.records.items() if key in control.selected
+        ]
+        pending = self._cleanup_pending(control)
+        helpers_settled = self.mutations.pending == 0 and all(
+            helper.closed and not helper.descriptors
+            for helper in self.mutations.helpers
+        )
+        settled = self._cleanup_processes(
+            records, control, release=not pending and helpers_settled
+        )
+        if self.clock.monotonic_ns() >= control.final:
+            self._finish_cleanup(resource_id, control, safe=False)
+            return
+        if (
+            resource_id is None
+            and now >= control.cooperative
+            and not helpers_settled
+            and self.cleanup_effect is None
+        ):
+            self.mutations.signal(
+                signal.SIGKILL if now >= control.term else signal.SIGTERM
+            )
+        if pending or not helpers_settled or not settled:
+            return
+        inventory_ready = (
+            self.bootstrap_succeeded
+            and self.bootstrap_finished is not None
+            and self.bootstrap_finished <= control.cooperative
+        )
+        if not inventory_ready or self.mutations.failed or control.failed:
+            self._finish_cleanup(resource_id, control, safe=False)
+            return
+        for record in records:
+            if record.entry.kind is ResourceKind.BORROWED_SERVICE:
+                dependency = self.records.get(record.dependency or "")
+                process = (
+                    None
+                    if dependency is None
+                    else dependency.process or dependency.recovered
+                )
+                if process is None or not process.closed:
+                    self._finish_cleanup(resource_id, control, safe=False)
+                    return
+        if self.cleanup_effect is not None:
+            return
+        for record in reversed(records):
+            if record.directory is not None and not record.directory.closed:
+                self._start_cleanup_effect(
+                    control, self._remove_cleanup_tree(record, control.final)
+                )
+                return
+        for record in records:
+            if record.entry.state is not ResourceState.CLOSED:
+                record.entry = record.entry.model_copy(
+                    update={
+                        "state": ResourceState.CLOSED,
+                        "reason": LifetimeReason.COMPLETE,
+                        "revision": self.revision + 1,
+                    }
+                )
+        if not control.published:
+            self._start_cleanup_effect(control, self._publish_cleanup(control))
+            return
+        if resource_id is None:
+            if self.endpoint_count:
+                self._finish_cleanup(resource_id, control, safe=False)
+                return
+            directory = self.mutations.directory
+            if directory is None:
+                self._finish_cleanup(resource_id, control, safe=False)
+                return
+            if not directory.closed:
+                self._start_cleanup_effect(control, self._remove_cleanup_root(control))
+                return
+        self._finish_cleanup(resource_id, control, safe=True)
+
+    async def _drive_cleanup(self) -> None:
+        while True:
+            self.cleanup_changed.clear()
+            effect = self.cleanup_effect
+            if effect is not None and effect.task.done():
+                if effect.task.cancelled() or effect.task.exception() is not None:
+                    effect.control.failed = True
+                self.cleanup_effect = None
+            for helper in self.mutations.helpers:
+                if (
+                    not self.mutations.pending
+                    and not helper.closed
+                    and helper.anchor.exited
+                    and not helper.anchor.unknown
+                ):
+                    helper.release()
+            self.mutations.prune()
+            active = [
+                (key, control)
+                for key, control in self._cleanup_controls()
+                if control.start is not None and not control.result.done()
+            ]
+            for key, control in active:
+                self._advance_cleanup(key, control)
+            if self.invocation_cleanup.result.done() and all(
+                control.result.done() for _, control in active
+            ):
+                return
+            active = [
+                (key, control) for key, control in active if not control.result.done()
+            ]
+            if not active:
+                await self.cleanup_changed.wait()
+                continue
+            now = self.clock.monotonic_ns()
+            if any(control.final <= now for _, control in active):
+                continue
+            deadline = min(
+                instant
+                for _, control in active
+                for instant in (
+                    control.cooperative,
+                    control.term,
+                    control.killed,
+                    control.final,
+                )
+                if instant > now
+            )
+            changed = asyncio.create_task(self.cleanup_changed.wait())
+            timeout = asyncio.create_task(self.clock.sleep_until(deadline))
+            pending: set[asyncio.Future[None] | asyncio.Task[bool]] = {changed, timeout}
+            selected = set[str]().union(*(control.selected for _, control in active))
+            for key in selected:
+                process = self.records[key].process or self.records[key].recovered
+                if process is not None and not process.closed:
+                    pending.update(process.readiness())
+            pending.update(
+                helper.anchor.readiness
+                for helper in self.mutations.helpers
+                if not helper.closed and not helper.anchor.readiness.done()
+            )
+            try:
+                await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                changed.cancel()
+                timeout.cancel()
+                for waiter in (changed, timeout):
+                    try:
+                        await waiter
+                    except asyncio.CancelledError:
+                        if not waiter.cancelled():
+                            raise
 
     def inventory(self) -> LifetimeInventory:
         return LifetimeInventory(
@@ -969,12 +1279,31 @@ class ParentLifetime:
             endpoint_count=self.endpoint_count,
             control_bytes=self.control_bytes + self.transport_control_bytes,
             execution_bytes=self.execution_bytes + self.transport_execution_bytes,
+            ordinary_owners=len(self.ordinary_slots),
+            cleanup_driver_tasks=int(not self._cleanup_driver.done()),
+            cleanup_effect_tasks=int(
+                self.cleanup_effect is not None and not self.cleanup_effect.task.done()
+            ),
+            closure_results=sum(
+                control.result.done() for _, control in self._cleanup_controls()
+            ),
+            member_capacity=sum(
+                record.member_capacity for record in self.records.values()
+            ),
+            pending_process_readiness=sum(
+                len(process.readiness())
+                for record in self.records.values()
+                if (process := record.process or record.recovered) is not None
+                and not process.closed
+            ),
             helpers=self.mutations.inventory(),
         )
 
     def dispose_recovery_observers(self) -> bool:
         if (
             not self._bootstrap.done()
+            or not self._cleanup_driver.done()
+            or (self.cleanup_effect is not None and not self.cleanup_effect.task.done())
             or any(not operation.task.done() for operation in self.operations.values())
             or any(not closure.done() for closure in self.closures.values())
             or any(record.process is not None for record in self.records.values())
@@ -988,6 +1317,31 @@ class ParentLifetime:
             if record.directory is not None:
                 record.directory.close()
         return True
+
+
+@dataclass(frozen=True)
+class CallAdmission:
+    owner: ParentLifetime
+    slot: OrdinarySlot
+    deadline: int
+
+
+CALL_ADMISSION: ContextVar[CallAdmission | None] = ContextVar(
+    "lifetime_call_admission", default=None
+)
+
+
+@contextmanager
+def wire_admission(
+    owner: ParentLifetime, slot: OrdinarySlot, deadline: int
+) -> Generator[None]:
+    if slot not in owner.ordinary_slots or not slot.wire:
+        raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
+    token = CALL_ADMISSION.set(CallAdmission(owner, slot, deadline))
+    try:
+        yield
+    finally:
+        CALL_ADMISSION.reset(token)
 
 
 async def resume_close(

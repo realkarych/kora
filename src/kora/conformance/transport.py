@@ -2,11 +2,20 @@ import asyncio
 import socket
 import struct
 import sys
+from dataclasses import dataclass
 from typing import Annotated, Literal, TypeAlias, cast
 
 from pydantic import Field, StrictInt, TypeAdapter, ValidationError
 
-from kora.conformance.lifetime import LifetimeError, ParentLifetime, Request
+from kora.conformance.lifetime import (
+    CLOSURE_CONTROL_BYTES,
+    CLOSURE_REPORT_BYTES,
+    LifetimeError,
+    OrdinarySlot,
+    ParentLifetime,
+    Request,
+    wire_admission,
+)
 from kora.protocols.common import BoundaryModel
 from kora.protocols.lifetime import (
     Acquisition,
@@ -111,6 +120,88 @@ class LifetimeTransportError(Exception):
         super().__init__(reason.value)
 
 
+HEADER_BYTES: int = 256
+ENDPOINT_CONTROL_BYTES: int = CLOSURE_REPORT_BYTES + HEADER_BYTES + 2048
+
+
+class OrdinaryHeader(BoundaryModel):
+    kind: Literal["ordinary"] = "ordinary"
+    request_id: Annotated[StrictInt, Field(gt=0, le=2**64 - 1)]
+    verb: Literal["reserve", "acquire", "process", "acknowledge", "observe"]
+    control_bytes: Annotated[StrictInt, Field(gt=0, le=131072)]
+    execution_bytes: Annotated[StrictInt, Field(ge=0, le=1048576)]
+
+
+class CloseHeader(BoundaryModel):
+    kind: Literal["close"] = "close"
+    resource_id: ResourceId | None
+
+
+Header: TypeAlias = Annotated[OrdinaryHeader | CloseHeader, Field(discriminator="kind")]
+HEADER: TypeAdapter[Header] = TypeAdapter(Header)
+
+
+class OrdinaryReply(BoundaryModel):
+    kind: Literal["ordinary"] = "ordinary"
+    request_id: Annotated[StrictInt, Field(gt=0, le=2**64 - 1)]
+    reply: Reply
+
+
+class CloseReply(BoundaryModel):
+    kind: Literal["close"] = "close"
+    resource_id: ResourceId
+    report: ClosureReport
+
+
+Envelope: TypeAlias = Annotated[OrdinaryReply | CloseReply, Field(discriminator="kind")]
+ENVELOPE: TypeAdapter[Envelope] = TypeAdapter(Envelope)
+
+
+def reply_reservation(verb: str, limits: LifetimeLimits) -> int:
+    return 1024 + 512 * limits.max_resource_records if verb == "observe" else 8192
+
+
+def consume_reply(future: asyncio.Future[ReplyValue]) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
+def consume_close(future: asyncio.Future[ClosureReport]) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
+async def cancel_task(task: asyncio.Task[None]) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        if not task.cancelled():
+            raise
+
+
+@dataclass
+class ClientControl:
+    future: asyncio.Future[ClosureReport]
+    deadline: int = 0
+    requested: bool = False
+    sent: bool = False
+
+
+@dataclass
+class ClientRequest:
+    call: Call
+    encoded: bytes
+    metadata: bytes
+    execution: bytes
+    deadline: int
+    future: asyncio.Future[ReplyValue]
+    control_bytes: int
+    reply_bytes: int
+    reserve_bytes: int
+    sent: bool = False
+
+
 class LifetimeClient:
     def __init__(
         self,
@@ -122,57 +213,270 @@ class LifetimeClient:
         self.clock = clock if clock is not None else SystemClock()
         self.limits = limits if limits is not None else LifetimeLimits()
         self.channel = BoundedChannel(endpoint, self.clock)
-        self._lock = asyncio.Lock()
-        self._tasks: set[asyncio.Task[ReplyValue]] = set()
+        self.pending: dict[int, ClientRequest] = {}
+        self.resources: dict[ResourceId | None, ClientControl] = {}
+        self.invocation_id: str | None = None
+        self.control_bytes = (
+            ENDPOINT_CONTROL_BYTES
+            + CLOSURE_CONTROL_BYTES
+            + 2 * reply_reservation("observe", self.limits)
+        )
+        self.execution_bytes = 0
+        self.next_request_id = 1
+        self.changed = asyncio.Event()
+        self.closed = False
+        if self.control_bytes > self.limits.max_control_recovery_bytes:
+            self.channel.close()
+            raise LifetimeTransportError(ChannelFailure.CAPACITY)
+        future: asyncio.Future[ClosureReport] = (
+            asyncio.get_running_loop().create_future()
+        )
+        future.add_done_callback(consume_close)
+        self.resources[None] = ClientControl(future)
+        self.reader = asyncio.create_task(self._read())
+        self.writer = asyncio.create_task(self._write())
+        self.reader.add_done_callback(self._completed)
+        self.writer.add_done_callback(self._completed)
+
+    def _completed(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            self._disconnect(ChannelFailure.MALFORMED)
 
     def disconnect(self) -> None:
+        self._disconnect(ChannelFailure.CLOSED)
+
+    def _disconnect(self, reason: ChannelFailure) -> None:
+        if self.closed:
+            return
+        self.closed = True
         self.channel.close()
+        self.changed.set()
+        for pending in self.pending.values():
+            if not pending.future.done():
+                pending.future.set_exception(LifetimeTransportError(reason))
+        self.pending.clear()
+        for control in self.resources.values():
+            if not control.future.done():
+                control.future.set_exception(LifetimeTransportError(reason))
+        self.resources.clear()
+        self.control_bytes = 0
+        self.execution_bytes = 0
 
-    async def _exchange(self, call: Call, launch: ProcessLaunch | None) -> ReplyValue:
-        async with self._lock:
-            deadline = self.clock.monotonic_ns() + int(
-                self.limits.acquisition_seconds * 1_000_000_000
-            )
-            try:
-                encoded = CALL.dump_json(call)
-                if len(encoded) > self.limits.max_control_frame_bytes:
-                    raise ChannelError(ChannelFailure.CAPACITY)
-                await self.channel.write_frame(encoded, deadline)
-                if launch is not None:
-                    metadata, payload = ExecutionConfig.from_launch(launch).encode()
-                    await self.channel.write_frame(metadata, deadline)
-                    await self.channel.write_record(payload, deadline)
-                reply = REPLY.validate_json(
-                    await self.channel.read_record(
-                        deadline, self.limits.max_control_recovery_bytes
+    async def _write(self) -> None:
+        try:
+            while not self.closed:
+                self.changed.clear()
+                for resource_id, control in tuple(self.resources.items()):
+                    if control.requested and not control.sent:
+                        await self.channel.write_frame(
+                            HEADER.dump_json(CloseHeader(resource_id=resource_id)),
+                            control.deadline,
+                        )
+                        control.sent = True
+                for request_id, pending in tuple(self.pending.items()):
+                    if pending.sent:
+                        continue
+                    call = pending.call
+                    if isinstance(call, CloseCall):
+                        raise ChannelError(ChannelFailure.MALFORMED)
+                    header = OrdinaryHeader(
+                        request_id=request_id,
+                        verb=call.verb,
+                        control_bytes=len(pending.encoded) + len(pending.metadata),
+                        execution_bytes=len(pending.execution),
                     )
+                    await self.channel.write_frame(
+                        HEADER.dump_json(header), pending.deadline
+                    )
+                    await self.channel.write_frame(pending.encoded, pending.deadline)
+                    if pending.metadata:
+                        await self.channel.write_frame(
+                            pending.metadata, pending.deadline
+                        )
+                        await self.channel.write_record(
+                            pending.execution, pending.deadline
+                        )
+                    pending.sent = True
+                    break
+                if any(not pending.sent for pending in self.pending.values()) or any(
+                    control.requested and not control.sent
+                    for control in self.resources.values()
+                ):
+                    continue
+                deadlines = [pending.deadline for pending in self.pending.values()]
+                deadlines.extend(
+                    control.deadline
+                    for control in self.resources.values()
+                    if control.requested and not control.future.done()
                 )
-            except (ChannelError, ValidationError, OSError) as error:
-                self.channel.close()
-                reason = (
-                    error.reason
-                    if isinstance(error, ChannelError)
-                    else ChannelFailure.MALFORMED
-                )
-                raise LifetimeTransportError(reason) from error
-            if isinstance(reply, FailureReply):
-                raise LifetimeError(reply.reason)
-            return reply.value
+                if not deadlines:
+                    await self.changed.wait()
+                    continue
+                deadline = min(deadlines)
+                if self.clock.monotonic_ns() >= deadline:
+                    raise ChannelError(ChannelFailure.DEADLINE)
+                changed = asyncio.create_task(self.changed.wait())
+                timeout = asyncio.create_task(self.clock.sleep_until(deadline))
+                try:
+                    await asyncio.wait(
+                        (changed, timeout), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if timeout.done() and self.clock.monotonic_ns() >= deadline:
+                        raise ChannelError(ChannelFailure.DEADLINE)
+                finally:
+                    changed.cancel()
+                    try:
+                        await changed
+                    except asyncio.CancelledError:
+                        if not changed.cancelled():
+                            raise
+                    await cancel_task(timeout)
+        except (ChannelError, OSError) as error:
+            self._disconnect(
+                error.reason
+                if isinstance(error, ChannelError)
+                else ChannelFailure.CLOSED
+            )
 
-    def _completed(self, task: asyncio.Task[ReplyValue]) -> None:
-        self._tasks.discard(task)
-        if not task.cancelled():
-            task.exception()
+    def _validate_reply(self, pending: ClientRequest, value: ReplyValue) -> None:
+        call = pending.call
+        valid = False
+        if isinstance(call, ReserveCall) and isinstance(value, Reservation):
+            valid = value.kind is call.request.kind
+            if self.invocation_id is None:
+                self.invocation_id = value.token.invocation_id
+            valid = valid and value.token.invocation_id == self.invocation_id
+            if valid and value.token.resource_id not in self.resources:
+                future: asyncio.Future[ClosureReport] = (
+                    asyncio.get_running_loop().create_future()
+                )
+                future.add_done_callback(consume_close)
+                self.resources[value.token.resource_id] = ClientControl(future)
+                pending.reserve_bytes = 0
+        elif isinstance(call, (AcquireCall, ProcessCall)) and isinstance(
+            value, Acquisition
+        ):
+            valid = (
+                value.token == call.token and value.operation_id == call.operation_id
+            )
+        elif isinstance(call, AcknowledgeCall) and isinstance(
+            value, ActivationAcknowledgement
+        ):
+            valid = (
+                value.token == call.token
+                and value.acquisition_operation_id == call.acquisition_operation_id
+                and value.revision == call.revision
+            )
+        elif isinstance(call, ObserveCall) and isinstance(value, tuple):
+            valid = all(
+                observation.resource_id in self.resources for observation in value
+            )
+        if not valid:
+            raise ChannelError(ChannelFailure.MALFORMED)
+
+    async def _read(self) -> None:
+        try:
+            while not self.closed:
+                deadline = self.clock.monotonic_ns() + int(
+                    self.limits.acquisition_seconds * 1_000_000_000
+                )
+                reservation = max(
+                    reply_reservation("observe", self.limits), CLOSURE_REPORT_BYTES
+                )
+                envelope = ENVELOPE.validate_json(
+                    await self.channel.read_record(deadline, reservation)
+                )
+                if isinstance(envelope, CloseReply):
+                    control = self.resources.get(envelope.resource_id)
+                    if (
+                        control is None
+                        or not control.requested
+                        or control.future.done()
+                        or envelope.report.resource_id != envelope.resource_id
+                        or envelope.report.invocation_id != self.invocation_id
+                    ):
+                        raise ChannelError(ChannelFailure.MALFORMED)
+                    control.future.set_result(envelope.report)
+                    self.changed.set()
+                    continue
+                pending = self.pending.get(envelope.request_id)
+                if pending is None or not pending.sent or pending.future.done():
+                    raise ChannelError(ChannelFailure.MALFORMED)
+                if self.clock.monotonic_ns() >= pending.deadline:
+                    raise ChannelError(ChannelFailure.DEADLINE)
+                reply = envelope.reply
+                if isinstance(reply, SuccessReply):
+                    self._validate_reply(pending, reply.value)
+                    pending.future.set_result(reply.value)
+                else:
+                    pending.future.set_exception(LifetimeError(reply.reason))
+                self.control_bytes -= pending.control_bytes + pending.reserve_bytes
+                self.execution_bytes -= len(pending.execution)
+                del self.pending[envelope.request_id]
+                self.changed.set()
+        except (ChannelError, ValidationError, OSError) as error:
+            self._disconnect(
+                error.reason
+                if isinstance(error, ChannelError)
+                else ChannelFailure.MALFORMED
+            )
 
     async def _request(
         self, call: Call, launch: ProcessLaunch | None = None
     ) -> ReplyValue:
-        if len(self._tasks) >= self.limits.max_outstanding_operations:
+        if self.closed:
+            raise LifetimeTransportError(ChannelFailure.CLOSED)
+        if (
+            len(self.pending) >= self.limits.max_outstanding_operations
+            or self.next_request_id > 2**64 - 1
+        ):
             raise LifetimeTransportError(ChannelFailure.CAPACITY)
-        task = asyncio.create_task(self._exchange(call, launch))
-        self._tasks.add(task)
-        task.add_done_callback(self._completed)
-        return await asyncio.shield(task)
+        deadline = self.clock.monotonic_ns() + int(
+            self.limits.acquisition_seconds * 1_000_000_000
+        )
+        encoded = CALL.dump_json(call)
+        metadata, execution = (
+            (b"", b"")
+            if launch is None
+            else ExecutionConfig.from_launch(launch).encode()
+        )
+        reply_bytes = reply_reservation(call.verb, self.limits)
+        control_bytes = len(encoded) + len(metadata) + 2 * reply_bytes
+        reserve_bytes = CLOSURE_CONTROL_BYTES if isinstance(call, ReserveCall) else 0
+        if (
+            len(encoded) > self.limits.max_control_frame_bytes
+            or len(metadata) > self.limits.max_control_frame_bytes
+            or self.control_bytes + control_bytes + reserve_bytes
+            > self.limits.max_control_recovery_bytes
+            or self.execution_bytes + len(execution)
+            > self.limits.max_execution_snapshot_bytes
+        ):
+            raise LifetimeTransportError(ChannelFailure.CAPACITY)
+        future: asyncio.Future[ReplyValue] = asyncio.get_running_loop().create_future()
+        future.add_done_callback(consume_reply)
+        self.pending[self.next_request_id] = ClientRequest(
+            call,
+            encoded,
+            metadata,
+            execution,
+            deadline,
+            future,
+            control_bytes,
+            reply_bytes,
+            reserve_bytes,
+        )
+        self.next_request_id += 1
+        self.control_bytes += control_bytes + reserve_bytes
+        self.execution_bytes += len(execution)
+        self.changed.set()
+        timeout = asyncio.create_task(self.clock.sleep_until(deadline))
+        try:
+            await asyncio.wait((future, timeout), return_when=asyncio.FIRST_COMPLETED)
+            if not future.done():
+                self._disconnect(ChannelFailure.DEADLINE)
+            return future.result()
+        finally:
+            await cancel_task(timeout)
 
     async def reserve(self, request: ReservationRequest) -> Reservation:
         return cast(Reservation, await self._request(ReserveCall(request=request)))
@@ -227,23 +531,24 @@ class LifetimeClient:
         )
 
     async def close(self, resource_id: ResourceId | None) -> ClosureReport:
-        return cast(
-            ClosureReport, await self._request(CloseCall(resource_id=resource_id))
-        )
-
-
-class PendingCall:
-    def __init__(
-        self,
-        call: Call,
-        launch: ProcessLaunch | None,
-        control_bytes: int,
-        execution_bytes: int,
-    ) -> None:
-        self.call = call
-        self.launch = launch
-        self.control_bytes = control_bytes
-        self.execution_bytes = execution_bytes
+        if self.closed:
+            raise LifetimeTransportError(ChannelFailure.CLOSED)
+        control = self.resources.get(resource_id)
+        if control is None:
+            raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
+        if not control.requested:
+            control.requested = True
+            control.deadline = self.clock.monotonic_ns() + int(
+                (
+                    self.limits.cooperative_seconds
+                    + self.limits.term_seconds
+                    + self.limits.kill_observation_seconds
+                    + self.limits.drain_seconds
+                )
+                * 1_000_000_000
+            )
+            self.changed.set()
+        return await asyncio.shield(control.future)
 
 
 def peer_process_id(endpoint: socket.socket) -> int:
@@ -254,6 +559,23 @@ def peer_process_id(endpoint: socket.socket) -> int:
     if sys.platform == "darwin":
         return struct.unpack("i", endpoint.getsockopt(0, 2, 4))[0]
     raise LifetimeTransportError(ChannelFailure.MALFORMED)
+
+
+@dataclass
+class EndpointResource:
+    subscribed: bool = False
+    sent: bool = False
+
+
+@dataclass
+class PendingCall:
+    header: OrdinaryHeader
+    deadline: int
+    slot: OrdinarySlot
+    control_bytes: int
+    execution_bytes: int
+    task: asyncio.Task[None] | None = None
+    encoded: bytes | None = None
 
 
 class LifetimeEndpoint:
@@ -293,16 +615,18 @@ class LifetimeEndpoint:
         self.owner = owner
         self.child_resource_id = child_resource_id
         self.channel = BoundedChannel(endpoint, owner.clock)
-        self.queue: asyncio.Queue[PendingCall | None] = asyncio.Queue(
-            owner.limits.max_outstanding_operations
-        )
-        self.resources: set[ResourceId] = set()
+        self.resources: dict[ResourceId, EndpointResource] = {}
+        self.pending: dict[int, PendingCall] = {}
         self.control_bytes = 0
         self.execution_bytes = 0
         self._closing = False
-        self._reader: asyncio.Task[None] | None = None
-        self._dispatcher: asyncio.Task[None] | None = None
-        self._closure: asyncio.Task[ClosureReport] | None = None
+        self.changed = asyncio.Event()
+        self.last_request_id = 0
+        try:
+            self._reserve_bytes(ENDPOINT_CONTROL_BYTES, 0)
+        except ChannelError:
+            self.channel.close()
+            raise
         owner.endpoint_count += 1
 
     def _reserve_bytes(self, control: int, execution: int) -> None:
@@ -334,49 +658,103 @@ class LifetimeEndpoint:
             return
         self._closing = True
         self.channel.close()
+        self.changed.set()
         self.owner.endpoint_count -= 1
-        self._closure = asyncio.create_task(self.owner.close(None))
+        self.owner.request_close(None)
+
+    def _completed(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            self._shutdown()
+        self.changed.set()
+
+    def _release_pending(self, request_id: int) -> None:
+        pending = self.pending.pop(request_id)
+        self._release_bytes(pending.control_bytes, pending.execution_bytes)
+        self.owner.release_wire(pending.slot)
+        self.owner.transport_pending -= 1
 
     async def run(self) -> ClosureReport:
-        self._reader = asyncio.create_task(self._read())
-        self._dispatcher = asyncio.create_task(self._dispatch())
+        reader = asyncio.create_task(self._read())
+        writer = asyncio.create_task(self._write())
+        reader.add_done_callback(self._completed)
+        writer.add_done_callback(self._completed)
         try:
-            await asyncio.gather(self._reader, self._dispatcher)
+            await asyncio.gather(reader, writer)
         finally:
             self._shutdown()
-        closure = self._closure
-        if closure is None:
-            raise LifetimeError(LifetimeReason.EFFECT_UNSETTLED)
-        return await asyncio.shield(closure)
+            await cancel_task(reader)
+            await cancel_task(writer)
+            for pending in tuple(self.pending.values()):
+                if pending.task is not None:
+                    await cancel_task(pending.task)
+            for request_id in tuple(self.pending):
+                self._release_pending(request_id)
+            self.resources.clear()
+            self._release_bytes(ENDPOINT_CONTROL_BYTES, 0)
+        return await self.owner.close(None)
+
+    def _check_resource(self, resource_id: ResourceId | None) -> None:
+        if resource_id is not None and resource_id not in self.resources:
+            raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
 
     async def _read(self) -> None:
         try:
             while not self._closing:
                 deadline = self.owner.deadline()
-                frame_reservation = self.owner.limits.max_control_frame_bytes
-                self._reserve_bytes(frame_reservation, 0)
-                reserved_control = frame_reservation
-                reserved_execution = 0
-                queued = False
+                header = HEADER.validate_json(
+                    await self.channel.read_frame(deadline, HEADER_BYTES)
+                )
+                if isinstance(header, CloseHeader):
+                    self._check_resource(header.resource_id)
+                    future = self.owner.request_close(header.resource_id)
+                    if header.resource_id is None:
+                        self._shutdown()
+                        return
+                    resource = self.resources[header.resource_id]
+                    if not resource.subscribed:
+                        resource.subscribed = True
+                        future.add_done_callback(self._close_ready)
+                    self.changed.set()
+                    continue
+                if header.request_id <= self.last_request_id:
+                    raise ChannelError(ChannelFailure.MALFORMED)
+                self.last_request_id = header.request_id
+                slot = self.owner.admit_ordinary(wire=True)
+                reserved_control = header.control_bytes + 2 * reply_reservation(
+                    header.verb, self.owner.limits
+                )
+                reserved = False
+                transferred = False
                 try:
-                    encoded = await self.channel.read_frame(deadline)
-                    if len(encoded) > frame_reservation:
-                        raise ChannelError(ChannelFailure.CAPACITY)
+                    self._reserve_bytes(reserved_control, header.execution_bytes)
+                    reserved = True
+                    encoded = await self.channel.read_frame(
+                        deadline,
+                        min(
+                            header.control_bytes,
+                            self.owner.limits.max_control_frame_bytes,
+                        ),
+                    )
                     call = CALL.validate_json(encoded)
-                    self._release_bytes(frame_reservation - len(encoded), 0)
-                    reserved_control = len(encoded)
+                    if call.verb != header.verb or isinstance(call, CloseCall):
+                        raise ChannelError(ChannelFailure.MALFORMED)
                     launch = None
+                    consumed = len(encoded)
                     if isinstance(call, ProcessCall):
-                        self._reserve_bytes(frame_reservation, call.execution_bytes)
-                        reserved_control += frame_reservation
-                        reserved_execution = call.execution_bytes
-                        metadata = await self.channel.read_frame(deadline)
-                        if len(metadata) > frame_reservation:
-                            raise ChannelError(ChannelFailure.CAPACITY)
-                        payload = await self.channel.read_record(
-                            deadline, call.execution_bytes
+                        if call.execution_bytes != header.execution_bytes:
+                            raise ChannelError(ChannelFailure.MALFORMED)
+                        metadata = await self.channel.read_frame(
+                            deadline,
+                            min(
+                                header.control_bytes - consumed,
+                                self.owner.limits.max_control_frame_bytes,
+                            ),
                         )
-                        if len(payload) != call.execution_bytes:
+                        consumed += len(metadata)
+                        payload = await self.channel.read_record(
+                            deadline, header.execution_bytes
+                        )
+                        if len(payload) != header.execution_bytes:
                             raise ChannelError(ChannelFailure.MALFORMED)
                         config = ExecutionConfig.decode(metadata, payload)
                         launch = ProcessLaunch(
@@ -392,98 +770,111 @@ class LifetimeEndpoint:
                             stderr=call.stderr,
                             domain=call.domain,
                         )
-                        del payload, metadata, config
-                    if (
-                        self.owner.transport_pending
-                        + self.owner.inventory().pending_operations
-                        >= self.owner.limits.max_outstanding_operations
-                    ):
-                        raise ChannelError(ChannelFailure.CAPACITY)
-                    self.queue.put_nowait(
-                        PendingCall(call, launch, reserved_control, reserved_execution)
+                    elif header.execution_bytes:
+                        raise ChannelError(ChannelFailure.MALFORMED)
+                    if consumed != header.control_bytes:
+                        raise ChannelError(ChannelFailure.MALFORMED)
+                    pending = PendingCall(
+                        header, deadline, slot, reserved_control, header.execution_bytes
                     )
+                    self.pending[header.request_id] = pending
                     self.owner.transport_pending += 1
-                    queued = True
-                    del encoded, call, launch
+                    pending.task = asyncio.create_task(
+                        self._handle(pending, call, launch)
+                    )
+                    pending.task.add_done_callback(self._completed)
+                    transferred = True
                 finally:
-                    if not queued:
-                        self._release_bytes(reserved_control, reserved_execution)
-        except (
-            ChannelError,
-            ValidationError,
-            UnicodeError,
-            asyncio.QueueFull,
-            OSError,
-        ):
+                    if not transferred:
+                        if reserved:
+                            self._release_bytes(
+                                reserved_control, header.execution_bytes
+                            )
+                        self.owner.release_wire(slot)
+        except (ChannelError, LifetimeError, ValidationError, UnicodeError, OSError):
             self._shutdown()
-        finally:
-            while not self.queue.empty():
-                pending = self.queue.get_nowait()
-                if pending is not None:
-                    self.owner.transport_pending -= 1
-                    self._release_bytes(pending.control_bytes, pending.execution_bytes)
-            self.queue.put_nowait(None)
 
-    def _check_resource(self, resource_id: ResourceId | None) -> None:
-        if resource_id is not None and resource_id not in self.resources:
-            raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
+    def _close_ready(self, future: asyncio.Future[ClosureReport]) -> None:
+        self.changed.set()
 
-    async def _handle(self, pending: PendingCall) -> ReplyValue:
-        call = pending.call
+    async def _value(
+        self, pending: PendingCall, call: Call, launch: ProcessLaunch | None
+    ) -> ReplyValue:
         if isinstance(call, ReserveCall):
             self._check_resource(call.request.parent_resource_id)
             reservation = await self.owner.reserve(call.request)
-            self.resources.add(reservation.token.resource_id)
+            self.resources.setdefault(reservation.token.resource_id, EndpointResource())
             return reservation
         if isinstance(call, (AcquireCall, ProcessCall)):
             self._check_resource(call.token.resource_id)
             if isinstance(call, ProcessCall):
                 self._check_resource(call.working_directory_resource_id)
-                if pending.launch is None:
+                if launch is None:
                     raise LifetimeError(LifetimeReason.ACQUISITION_FAILED)
-                return await self.owner.acquire(
-                    call.token, call.operation_id, pending.launch
-                )
+                return await self.owner.acquire(call.token, call.operation_id, launch)
             return await self.owner.acquire(call.token, call.operation_id, call.request)
         if isinstance(call, AcknowledgeCall):
             self._check_resource(call.token.resource_id)
             return await self.owner.acknowledge(
                 call.token, call.acquisition_operation_id, call.revision
             )
-        self._check_resource(call.resource_id)
         if isinstance(call, ObserveCall):
+            self._check_resource(call.resource_id)
             observations = await self.owner.observe(call.resource_id)
             return tuple(
                 observation
                 for observation in observations
                 if observation.resource_id in self.resources
             )
-        if call.resource_id is None:
-            self._shutdown()
-            raise LifetimeTransportError(ChannelFailure.CLOSED)
-        return await self.owner.close(call.resource_id)
+        raise LifetimeError(LifetimeReason.IDENTITY_MISMATCH)
 
-    async def _dispatch(self) -> None:
-        while not self._closing:
-            pending = await self.queue.get()
-            if pending is None:
-                return
-            self.owner.transport_pending -= 1
-            self._release_bytes(0, pending.execution_bytes)
-            pending.execution_bytes = 0
-            try:
-                try:
-                    result = await self._handle(pending)
-                    reply: Reply = SuccessReply(value=result)
-                except LifetimeError as error:
-                    reply = FailureReply(reason=error.reason)
-                encoded = REPLY.dump_json(reply)
-                self._reserve_bytes(len(encoded), 0)
-                try:
-                    await self.channel.write_record(encoded, self.owner.deadline())
-                finally:
-                    self._release_bytes(len(encoded), 0)
-            except (ChannelError, LifetimeTransportError, OSError):
-                self._shutdown()
-            finally:
-                self._release_bytes(pending.control_bytes, pending.execution_bytes)
+    async def _handle(
+        self, pending: PendingCall, call: Call, launch: ProcessLaunch | None
+    ) -> None:
+        self._release_bytes(pending.header.control_bytes, pending.execution_bytes)
+        pending.control_bytes -= pending.header.control_bytes
+        pending.execution_bytes = 0
+        try:
+            with wire_admission(self.owner, pending.slot, pending.deadline):
+                reply: Reply = SuccessReply(
+                    value=await self._value(pending, call, launch)
+                )
+        except LifetimeError as error:
+            reply = FailureReply(reason=error.reason)
+        envelope = OrdinaryReply(request_id=pending.header.request_id, reply=reply)
+        encoded = ENVELOPE.dump_json(envelope)
+        if len(encoded) > reply_reservation(pending.header.verb, self.owner.limits):
+            raise ChannelError(ChannelFailure.CAPACITY)
+        pending.encoded = encoded
+        self.changed.set()
+
+    async def _write(self) -> None:
+        try:
+            while not self._closing:
+                self.changed.clear()
+                for resource_id, resource in tuple(self.resources.items()):
+                    if not resource.subscribed or resource.sent:
+                        continue
+                    future = self.owner.closures[resource_id]
+                    if not future.done():
+                        continue
+                    report = future.result()
+                    control = self.owner.records[resource_id].cleanup
+                    if control is None:
+                        raise ChannelError(ChannelFailure.MALFORMED)
+                    encoded = ENVELOPE.dump_json(
+                        CloseReply(resource_id=resource_id, report=report)
+                    )
+                    if len(encoded) > CLOSURE_REPORT_BYTES:
+                        raise ChannelError(ChannelFailure.CAPACITY)
+                    await self.channel.write_record(encoded, control.final)
+                    resource.sent = True
+                for request_id, pending in tuple(self.pending.items()):
+                    if pending.encoded is not None:
+                        await self.channel.write_record(
+                            pending.encoded, pending.deadline
+                        )
+                        self._release_pending(request_id)
+                await self.changed.wait()
+        except (ChannelError, OSError):
+            self._shutdown()

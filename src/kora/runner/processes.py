@@ -334,6 +334,9 @@ class RecoveredProcess:
     def watcher_count(self) -> int:
         return len(self.members.entries)
 
+    def readiness(self) -> tuple[asyncio.Future[None], ...]:
+        return self.members.pending()
+
     def _scope_matches(self) -> bool:
         registration = self.registration
         current = self.identities.read(os.getpid())
@@ -487,6 +490,8 @@ class GatedProcess:
         clock: Clock,
         identities: IdentityReader,
         cwd_descriptor: int,
+        *,
+        max_members: int = 65536,
     ) -> None:
         self._launch = launch
         self._operation_id = operation_id
@@ -495,7 +500,7 @@ class GatedProcess:
         self._identities = identities
         self._process: subprocess.Popen[bytes] | None = None
         self._anchor: ExitAnchor | None = None
-        self._watches = MemberWatches(clock, identities)
+        self._watches = MemberWatches(clock, identities, max_members)
         self._channel: BoundedChannel | None = None
         self._captures: list[CaptureDrain] = []
         self._registration: ProcessRegistration | None = None
@@ -517,6 +522,16 @@ class GatedProcess:
     @property
     def capture_bytes(self) -> int:
         return sum(capture.bytes_discarded for capture in self._captures)
+
+    def readiness(self) -> tuple[asyncio.Future[None], ...]:
+        pending = self._watches.pending()
+        if self._anchor is not None and not self._anchor.readiness.done():
+            pending += (self._anchor.readiness,)
+        return pending + tuple(
+            capture.readiness
+            for capture in self._captures
+            if not capture.closed and not capture.readiness.done()
+        )
 
     def _output_descriptor(self, mode: ProcessOutput | None, owned: ExitStack) -> int:
         if mode is ProcessOutput.CAPTURE:
@@ -852,6 +867,8 @@ def start_gated(
     acquisition_deadline_ns: int,
     clock: Clock,
     identities: IdentityReader | None = None,
+    *,
+    max_members: int = 65536,
 ) -> GatedProcess:
     validated_operation = TypeAdapter(OperationId).validate_python(operation_id)
     if (
@@ -866,5 +883,6 @@ def start_gated(
         clock,
         identities if identities is not None else NativeIdentityReader(clock=clock),
         cwd_descriptor,
+        max_members=max_members,
     )
     return owner

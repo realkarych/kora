@@ -252,6 +252,10 @@ class CaptureDrain:
         return self._saw_eof
 
     @property
+    def readiness(self) -> asyncio.Future[None]:
+        return self._eof
+
+    @property
     def closed(self) -> bool:
         return self._closed
 

@@ -2,10 +2,13 @@ import asyncio
 import socket
 import sys
 
+from kora.conformance.lifetime import LifetimeError
 from kora.conformance.transport import (
     CALL,
+    HEADER,
     LifetimeClient,
     LifetimeTransportError,
+    OrdinaryHeader,
     ProcessCall,
 )
 from kora.protocols.lifetime import (
@@ -29,6 +32,47 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
     )
     tree = await client.reserve(reservation_request)
     assert await client.reserve(reservation_request) == tree
+    if mode.startswith("concurrent-"):
+        feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        feedback.bind(feedback_address + "-child")
+        feedback.setblocking(False)
+        loop = asyncio.get_running_loop()
+        operation_id = new_operation_id()
+        acquisitions = [
+            asyncio.create_task(
+                client.acquire(tree.token, operation_id, TemporaryTreeRequest())
+            )
+            for _ in range(int(mode.split("-")[1]))
+        ]
+        await loop.sock_sendto(
+            feedback, tree.token.resource_id.encode("ascii"), feedback_address
+        )
+        assert await loop.sock_recv(feedback, 16) == b"close"
+        closing = asyncio.create_task(client.close(tree.token.resource_id))
+        cancelled = asyncio.create_task(client.close(tree.token.resource_id))
+        started: asyncio.Future[None] = loop.create_future()
+        loop.call_soon(started.set_result, None)
+        await started
+        cancelled.cancel()
+        try:
+            await cancelled
+        except asyncio.CancelledError:
+            if not cancelled.cancelled():
+                raise
+        for acquisition in acquisitions:
+            try:
+                await acquisition
+            except LifetimeError:
+                pass
+            else:
+                raise AssertionError("fenced acquisition returned a usable lease")
+        report = await closing
+        assert report.cleanup_reference is None
+        assert await client.close(tree.token.resource_id) == report
+        assert not client.pending
+        feedback.close()
+        client.disconnect()
+        return
     acquired = await client.acquire(
         tree.token, new_operation_id(), TemporaryTreeRequest()
     )
@@ -64,7 +108,7 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
     if mode in ("cancel_frame", "cancel_execution"):
         if mode == "cancel_frame":
             await asyncio.get_running_loop().sock_sendall(
-                endpoint, (65536).to_bytes(4, "big") + b"{"
+                endpoint, (256).to_bytes(4, "big") + b"{"
             )
         else:
             metadata, payload = ExecutionConfig.from_launch(request).encode()
@@ -78,6 +122,17 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
                 execution_bytes=len(payload),
             )
             deadline = client.clock.monotonic_ns() + 5_000_000_000
+            await client.channel.write_frame(
+                HEADER.dump_json(
+                    OrdinaryHeader(
+                        request_id=client.next_request_id,
+                        verb="process",
+                        control_bytes=len(CALL.dump_json(call)) + len(metadata),
+                        execution_bytes=len(payload),
+                    )
+                ),
+                deadline,
+            )
             await client.channel.write_frame(CALL.dump_json(call), deadline)
             await client.channel.write_frame(metadata, deadline)
             await client.channel.write_frame(len(payload).to_bytes(4, "big"), deadline)
@@ -85,7 +140,9 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
         feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         feedback.sendto(b"p", feedback_address)
         feedback.close()
-        assert await asyncio.get_running_loop().sock_recv(endpoint, 1) == b""
+        await client.reader
+        assert client.closed
+        assert client.channel.closed
     if mode == "terminal":
         failure = None
         try:
