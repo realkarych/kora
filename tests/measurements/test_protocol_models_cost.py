@@ -38,8 +38,8 @@ REGISTRATION_WORKLOADS: dict[str, tuple[int, int, bool]] = {
     "escaped_8b": (85, 8, True),
     "plain_1kib": (32, 1024, False),
     "escaped_1kib": (12, 1024, True),
-    "plain_16kib": (3, 16384, False),
-    "escaped_16kib": (1, 16384, True),
+    "plain_4kib": (15, 4096, False),
+    "escaped_4kib": (8, 4000, True),
 }
 
 

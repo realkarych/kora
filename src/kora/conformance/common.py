@@ -19,6 +19,7 @@ CONFORMANCE_COMPONENT: Final[str] = CATALOG.register_component("conformance")
 INSTANCE_ID: Final[str] = "conformance"
 NAMESPACE_ID: Final[str] = "conformance"
 MARKER: Final[str] = "kora-conformance-content-marker"
+REQUEST_DIGEST: Final[str] = "conformance-sealed-request"
 
 Exercise = Callable[[ProtocolContext, str], Awaitable[object]]
 
@@ -52,7 +53,7 @@ def context_for(capture: Capture) -> ProtocolContext:
         logger=capture.diagnostics.logger(CONFORMANCE_COMPONENT),
         secrets=None,
         secret_admission=capture.scope.admission(),
-        request_digest=None,
+        request_digest=REQUEST_DIGEST,
         deadline=None,
         clock=SystemClock(),
         activity=NoActivity(),
