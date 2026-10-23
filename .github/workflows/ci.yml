@@ -155,6 +155,69 @@ jobs:
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
+      - name: Provision isolated Python 3.11 pricing environment
+        id: pricing_environment
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0'
+        run: |
+          KORA_PRICING_ROOT="$(mktemp -d "$RUNNER_TEMP/kora-pricing.XXXXXXXX")"
+          printf 'KORA_PRICING_ROOT=%s\n' "$KORA_PRICING_ROOT" >> "$GITHUB_ENV"
+          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
+          sha256sum .venv/pyvenv.cfg > "$KORA_PRICING_ROOT/original-environment.sha256"
+          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/original-packages.txt"
+          sha256sum pyproject.toml uv.lock web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml > "$KORA_PRICING_ROOT/dependencies.sha256"
+          uv python install 3.11.17
+          KORA_PRICING_BASE="$(uv python find --managed-python 3.11.17)"
+          export UV_PROJECT_ENVIRONMENT="$KORA_PRICING_ROOT/environment"
+          export UV_PYTHON="$KORA_PRICING_BASE"
+          uv sync --python "$KORA_PRICING_BASE" --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          uv export --python "$KORA_PRICING_BASE" --locked --only-group build --no-emit-project \
+            --format requirements.txt --output-file "$KORA_PRICING_ROOT/constraints.txt"
+          uv pip install --python "$KORA_PRICING_ROOT/environment/bin/python" \
+            --target "$KORA_PRICING_ROOT/backend" --require-hashes \
+            --requirements "$KORA_PRICING_ROOT/constraints.txt"
+          uv pip install --python "$KORA_PRICING_ROOT/environment/bin/python" --no-deps \
+            --build-constraints "$KORA_PRICING_ROOT/constraints.txt" --require-build-hashes --editable .
+          "$KORA_PRICING_ROOT/environment/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 11, 17)'
+          sha256sum --check "$KORA_PRICING_ROOT/original-environment.sha256"
+          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/packages-after.txt"
+          cmp "$KORA_PRICING_ROOT/original-packages.txt" "$KORA_PRICING_ROOT/packages-after.txt"
+          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
+          sha256sum --check "$KORA_PRICING_ROOT/dependencies.sha256"
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+      - name: Measure complete pricing database lifetime
+        id: pricing_measurement
+        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0'
+        env:
+          KORA_TEST_DATABASES: sqlite,postgresql
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          KORA_PRICING_EVIDENCE: ${{ github.workspace }}/measurements/pricing-database-lifetime
+        run: |
+          "$KORA_PRICING_ROOT/environment/bin/python" -c \
+            'import sys; from tests.measurements.pricing_lifetime_support import pricing_command; sys.exit(pricing_command())'
+      - name: Verify pricing isolation
+        if: ${{ !cancelled() && steps.pricing_environment.outcome != 'skipped' && matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0' }}
+        run: |
+          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
+          sha256sum --check "$KORA_PRICING_ROOT/original-environment.sha256"
+          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/packages-final.txt"
+          cmp "$KORA_PRICING_ROOT/original-packages.txt" "$KORA_PRICING_ROOT/packages-final.txt"
+          sha256sum --check "$KORA_PRICING_ROOT/dependencies.sha256"
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+          printf 'KORA_PRICING_ISOLATION_VERIFIED=true\n' >> "$GITHUB_ENV"
+      - name: Release pricing environment and retain lifecycle proof
+        if: ${{ always() && steps.pricing_environment.outcome != 'skipped' && matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0' }}
+        run: |
+          "$PWD/.venv/bin/python" -c \
+            'from tests.measurements.pricing_lifetime_support import pricing_environment_release; pricing_environment_release()'
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ !cancelled() && steps.pricing_environment.outcome != 'skipped' && matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0' }}
+        with:
+          name: pricing-database-lifetime-measurement
+          path: measurements/pricing-database-lifetime/
+          if-no-files-found: error
+
   cel-measurements:
     name: CEL evaluator lifetime
     runs-on: ubuntu-24.04
