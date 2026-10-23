@@ -34,6 +34,7 @@ from kora.protocols.lifetime import (
     OperationId,
     OriginalOutcome,
     ProcessLaunch,
+    ProcessRegistration,
     Reservation,
     ReservationRequest,
     ReservationToken,
@@ -54,6 +55,7 @@ from kora.runner.processes import (
     GatedProcess,
     ProcessCondition,
     ProcessError,
+    RecoveredProcess,
     complete_identity,
     start_gated,
 )
@@ -76,6 +78,7 @@ class ResourceRecord:
     entry: JournalEntry
     token: ReservationToken
     process: GatedProcess | None = None
+    recovered: RecoveredProcess | None = None
     directory: DirectoryAnchor | None = None
     acquisition: Acquisition | None = None
     dependency: ResourceId | None = None
@@ -219,6 +222,10 @@ class ParentLifetime:
                 record.directory = parent.open_child(identity)
             elif isinstance(entry.registration, BorrowedServiceRegistration):
                 record.dependency = entry.registration.connection_scope
+            elif isinstance(entry.registration, ProcessRegistration):
+                record.recovered = RecoveredProcess(
+                    entry.registration, self.clock, self.identities
+                )
             else:
                 raise LifetimeError(LifetimeReason.IDENTITY_UNKNOWN)
         self.bootstrap_succeeded = True
@@ -618,6 +625,8 @@ class ParentLifetime:
             observed = record.process.observe()
             live = len(observed.live_members)
             pipes = int(not observed.capture_eof)
+        if record.recovered is not None and not record.recovered.closed:
+            live = len(record.recovered.observe(self.deadline()).live_members)
         return ResourceObservation(
             resource_id=record.entry.resource_id,
             kind=record.entry.kind,
@@ -698,6 +707,12 @@ class ParentLifetime:
                     raise
 
     async def _settle_process(self, record: ResourceRecord, deadline: int) -> bool:
+        if record.recovered is not None:
+            try:
+                await record.recovered.settle(deadline)
+                return True
+            except (ChannelError, ProcessError):
+                return False
         process = record.process
         if process is None or process.closed:
             return True
@@ -743,13 +758,14 @@ class ParentLifetime:
             await self._settle_process(record, cooperative)
         for requested, phase in ((signal.SIGTERM, term), (signal.SIGKILL, killed)):
             for record in records:
-                if record.process is not None and not record.process.closed:
-                    observation = record.process.observe(final)
+                process = record.process or record.recovered
+                if process is not None and not process.closed:
+                    observation = process.observe(final)
                     if observation.condition is ProcessCondition.LIVE:
                         self.diagnostics.emit(
                             "escalated", LifetimeReason.RESOURCE_LIVE, len(records)
                         )
-                        record.process.signal(requested, final)
+                        process.signal(requested, final)
             if self.mutations.pending:
                 self.mutations.signal(requested)
             for record in records:
@@ -766,9 +782,10 @@ class ParentLifetime:
         )
         if safe:
             for record in records:
-                if record.process is not None and not record.process.closed:
+                process = record.process or record.recovered
+                if process is not None and not process.closed:
                     try:
-                        record.process.release(final)
+                        process.release(final)
                     except ProcessError:
                         safe = False
         if safe:
@@ -804,10 +821,9 @@ class ParentLifetime:
                         safe = False
                         break
         for record in records:
+            process = record.process or record.recovered
             closed = safe or (
-                record.process is not None
-                and record.process.closed
-                and record.directory is None
+                process is not None and process.closed and record.directory is None
             )
             record.entry = record.entry.model_copy(
                 update={
@@ -852,6 +868,9 @@ class ParentLifetime:
             if record.entry.state is not ResourceState.CLOSED
         )
         outcome = CleanupOutcome.CLOSED if safe else CleanupOutcome.UNKNOWN
+        for record in records:
+            if record.recovered is not None and not record.recovered.closed:
+                record.recovered.dispose_observation()
         self.diagnostics.emit(
             "closed" if safe else "unknown",
             LifetimeReason.COMPLETE if safe else LifetimeReason.EFFECT_UNSETTLED,
@@ -878,7 +897,8 @@ class ParentLifetime:
                 not operation.task.done() for operation in self.operations.values()
             ),
             retained_processes=sum(
-                record.process is not None and not record.process.closed
+                (record.process is not None and not record.process.closed)
+                or (record.recovered is not None and not record.recovered.closed)
                 for record in self.records.values()
             ),
             retained_trees=sum(

@@ -204,8 +204,10 @@ async def test_conformance_fixture_resources_are_released_state_root_capacity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["tree", "live", "gone"])
 async def test_conformance_fixture_resources_are_released_after_dead_owner_recovery(
     tmp_path: Path,
+    mode: str,
 ) -> None:
     import subprocess
 
@@ -217,6 +219,7 @@ async def test_conformance_fixture_resources_are_released_after_dead_owner_recov
             "-I",
             str(Path(__file__).with_name("lifetime_recovery_probe.py")),
             str(tmp_path),
+            mode,
         ],
         check=True,
         capture_output=True,

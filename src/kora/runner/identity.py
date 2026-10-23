@@ -269,9 +269,12 @@ class NativeIdentityReader:
             return GroupObservation(IdentityState.UNKNOWN)
         buffer = (ctypes.c_int * self._max_scan_entries)()
         list_pids = cast(ProcListPids, library.proc_listpids)
+        ctypes.set_errno(0)
         size = list_pids(2, process_group_id, buffer, ctypes.sizeof(buffer))
+        failure = ctypes.get_errno()
         if (
-            size <= 0
+            size < 0
+            or failure != 0
             or size >= ctypes.sizeof(buffer)
             or size % ctypes.sizeof(ctypes.c_int)
             or self._clock.monotonic_ns() >= scan_deadline
