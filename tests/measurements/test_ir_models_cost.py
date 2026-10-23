@@ -735,7 +735,8 @@ def test_vcs_ref_validation_lifetime(report: Report, repeat: int, traced: bool) 
             point.heap is None and point.peak is None and point.tracer is None
             for point in payload.points
         )
-    report.gates[f"{name}_resources_released"] = True
+    report.gates[f"{name}_lifecycle_assertions_passed"] = True
+    report.environment[f"{name}_native_growth_review"] = "required"
 
 
 @pytest.mark.parametrize("repeat", range(3))

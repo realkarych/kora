@@ -37,6 +37,8 @@ Cold public imports compare exact base `41ea853883201665adaeb7d730da9d15be148456
 
 The ten-second child deadline, 256 KiB per-stream output cap, strict less-than-65,536-byte retained-Python gate and ten-minute workflow budget remain. Linux native-inclusive RSS/counters and final-revision artifacts remain required. Timings and RSS are first-implementation baselines; unexplained continuing growth blocks readiness. Publication, recovery, uploads, storage, authorization and rendering evidence remain with their implementing components.
 
+Each VcsRef child report records `lifecycle_assertions_passed` for its executable process, provenance, outcome, stable-handle, counter and mode-specific heap assertions. Its separate `native_growth_review: "required"` marker does not claim an automated native-memory release verdict. Readiness additionally requires the independent review of actual RSS/high-water trajectories and retaining evidence; passing those assertions alone cannot qualify unexplained native growth. Untraced children deliberately record no traced-Python heap bound.
+
 ## Interpreter cache attribution
 
 The first Linux report at `793059578d8448fc5cc4bb0fccdae1d6fddb5f7d` showed traced quiescent heap growing from 696 bytes to 28,557–30,507 bytes across 500 operations. The growing allocation sites were `json/decoder.py:329` and `pathlib.py:1044`. Untraced RSS settled by cycles 125–150; descriptors and Python/OS threads stayed at 4/1/1. Passing numeric gates alone did not resolve the allocation owner.
