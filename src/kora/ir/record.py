@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic.config import JsonDict
+from pydantic.fields import FieldInfo
 from pydantic.json_schema import JsonSchemaValue
 from pydantic_core import CoreSchema, PydanticCustomError
 
@@ -24,6 +25,10 @@ def extension_schema(schema: JsonDict) -> None:
         properties.pop("extensions", None)
     schema["patternProperties"] = {"^x-": {}}
     schema["additionalProperties"] = False
+
+
+def wire_name(name: str, field: FieldInfo) -> str:
+    return field.alias if field.alias is not None else name
 
 
 def require_array(value: object) -> object:
@@ -63,7 +68,7 @@ class IrRecord(BaseModel):
         fields: dict[str, object] = {}
         extensions: dict[str, object] = {}
         wire_fields = {
-            field.alias if field.alias is not None else name
+            wire_name(name, field)
             for name, field in cls.model_fields.items()
             if name != "extensions"
         }
@@ -81,11 +86,8 @@ class IrRecord(BaseModel):
     def __get_pydantic_json_schema__(
         cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
     ) -> JsonSchemaValue:
-        if handler.mode == "serialization" and core_schema["type"] == "function-wrap":
-            core_schema = core_schema.copy()
-            model_schema = core_schema["schema"].copy()
-            model_schema.pop("serialization", None)
-            core_schema["schema"] = model_schema
+        if handler.mode == "serialization":
+            core_schema = without_record_serializer(core_schema)
         return handler(core_schema)
 
     @model_serializer(mode="wrap")
@@ -96,3 +98,19 @@ class IrRecord(BaseModel):
         data = dict(cast("dict[str, object]", serialised))
         extensions = data.pop("extensions", {})
         return {**data, **cast("dict[str, object]", extensions)}
+
+
+def without_record_serializer(schema: CoreSchema) -> CoreSchema:
+    if (
+        schema["type"] == "function-wrap"
+        or schema["type"] == "function-after"
+        or schema["type"] == "function-before"
+    ):
+        copied = schema.copy()
+        copied["schema"] = without_record_serializer(schema["schema"])
+        return copied
+    if schema["type"] == "model":
+        model = schema.copy()
+        model.pop("serialization", None)
+        return model
+    return schema

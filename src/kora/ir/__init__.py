@@ -1,25 +1,47 @@
 from kora.ir.config import (
+    AgentConfig,
     BranchCase,
     BranchConfig,
     CommandConfig,
     CommandResource,
+    EventSelector,
     FanOutConfig,
+    HumanInputBinds,
+    HumanInputConfig,
     McpServer,
     NetworkPolicy,
     NodeLimits,
     Retry,
+    SensorPoll,
+    SubagentConfig,
     SubgraphNodeConfig,
+    TimerConfig,
+    WaitEventConfig,
     Workspace,
 )
+from kora.ir.data import IrJsonObjectField, IrJsonValueField
 from kora.ir.diagnostics import (
     ConfigWarning,
     ContractViolation,
     Diagnostic,
     SourceLocation,
 )
+from kora.ir.export import export_ir, render_ir_json
 from kora.ir.node import ErrorClass, ToolPolicy
 
 __all__ = [
+    "IrJsonObjectField",
+    "IrJsonValueField",
+    "AgentConfig",
+    "SubagentConfig",
+    "HumanInputBinds",
+    "HumanInputConfig",
+    "EventSelector",
+    "SensorPoll",
+    "WaitEventConfig",
+    "TimerConfig",
+    "export_ir",
+    "render_ir_json",
     "BranchCase",
     "BranchConfig",
     "CommandConfig",

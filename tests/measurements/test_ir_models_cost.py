@@ -1,12 +1,10 @@
 import gc
 import json
-import subprocess
 import sys
 import threading
 import time
 import tracemalloc
 from collections.abc import Callable, Iterator
-from pathlib import Path
 from typing import cast
 
 import pytest
@@ -48,6 +46,10 @@ from tests.measurements.ir_config_workload import (
     round_trip_action,
     validation_action,
 )
+from tests.measurements.ir_remaining_workload import (
+    fixture_manifest,
+    remaining_workloads,
+)
 
 pytestmark = pytest.mark.measurement
 
@@ -63,7 +65,9 @@ CONFIG_SCHEMA_BYTES: int = 65_536
 
 @pytest.fixture(scope="module")
 def report() -> Iterator[Report]:
-    yield from report_lifecycle()
+    for report in report_lifecycle():
+        report.environment["remaining_fixture_manifest"] = fixture_manifest()
+        yield report
 
 
 def leaves(total: int) -> list[JsonValue]:
@@ -433,6 +437,7 @@ def control_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]
 
 WORKLOADS.update(configuration_workloads())
 WORKLOADS.update(control_workloads())
+WORKLOADS.update(remaining_workloads())
 
 
 @pytest.mark.parametrize("workload", sorted(WORKLOADS))
@@ -465,18 +470,17 @@ def test_ir_model_validation_cost(report: Report, workload: str) -> None:
 
 @pytest.mark.parametrize("run", range(3))
 def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
-    root = Path(__file__).parents[2]
-
-    completed = subprocess.run(
+    before = (open_descriptors(), threading.active_count())
+    completed = run_process(
         [sys.executable, "-m", "tests.measurements.ir_config_lifetime"],
-        cwd=root,
-        capture_output=True,
-        check=False,
-        timeout=60,
+        deadline_seconds=60,
     )
 
-    assert completed.returncode == 0, completed.stderr.decode()
+    assert not completed.timed_out
+    assert not completed.overflow
+    assert completed.code == 0, completed.stderr.decode()
     assert completed.stderr == b""
+    assert (open_descriptors(), threading.active_count()) == before
     result = cast("dict[str, object]", json.loads(completed.stdout))
     report.environment[f"config_lifetime_{run}"] = completed.stdout.decode()
     checkpoints = cast("list[dict[str, int | float | None]]", result["checkpoints"])
@@ -492,6 +496,11 @@ def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
         assert checkpoint["live_models"] == 0
         assert checkpoint["threads"] == result["baseline_threads"]
         assert checkpoint["descriptors"] == result["baseline_descriptors"]
+        assert checkpoint["os_threads"] == result["baseline_os_threads"]
+        if sys.platform == "linux":
+            assert checkpoint["current_rss_bytes"] is not None
+            assert checkpoint["peak_rss_bytes"] is not None
+            assert checkpoint["os_threads"] is not None
     extension = {"x-meta": deep_extension(MAX_CANONICAL_BYTES - 4096)}
     report.environment["config_nested_extensions_records"] = 64
     report.environment["config_nested_extensions_aggregate_bytes"] = 64 * len(

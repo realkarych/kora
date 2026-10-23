@@ -1,24 +1,37 @@
 import math
 import re
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Self, cast
 
 from pydantic import (
     MISSING,
     AfterValidator,
     BeforeValidator,
+    ConfigDict,
     Field,
     PlainValidator,
     StrictBool,
     StrictInt,
     StrictStr,
     WithJsonSchema,
+    model_validator,
 )
 from pydantic.config import JsonDict, JsonValue
 from pydantic_core import PydanticCustomError
 
-from kora.ir.node import ErrorClass
-from kora.ir.record import IrRecord, require_array
-from kora.ir.scalars import BranchTarget, Digest, Duration, EnvName, Expression, NodeId
+from kora.ir.data import IrJsonObjectField, IrJsonValueField
+from kora.ir.node import ErrorClass, ToolPolicy
+from kora.ir.record import IrRecord, extension_schema, require_array
+from kora.ir.scalars import (
+    BranchTarget,
+    Digest,
+    Duration,
+    EnvName,
+    Expression,
+    HarnessName,
+    NodeId,
+    SensorName,
+    Timestamp,
+)
 
 
 def require_integer(value: object) -> int:
@@ -212,3 +225,145 @@ class Retry(IrRecord):
     non_retryable: ErrorClasses | MISSING = MISSING
     predicate: Expression | MISSING = MISSING
     strategy: Literal["fresh", "resume", "fresh_with_feedback"] | MISSING = MISSING
+
+
+def unique_skills(values: tuple[str, ...]) -> tuple[str, ...]:
+    if len(set(values)) != len(values):
+        raise PydanticCustomError("ir_skills_unique", "skills repeat")
+    return values
+
+
+class SubagentConfig(IrRecord):
+    name: StrictStr
+    description: StrictStr
+    prompt: StrictStr
+    tools: Strings | MISSING = MISSING
+
+
+class AgentConfig(IrRecord):
+    harness: HarnessName
+    model: StrictStr | MISSING = MISSING
+    prompt: StrictStr
+    system_prompt_append: StrictStr | MISSING = MISSING
+    skills: (
+        Annotated[
+            Strings,
+            AfterValidator(unique_skills),
+            Field(json_schema_extra={"uniqueItems": True}),
+        ]
+        | MISSING
+    ) = MISSING
+    subagents: (
+        Annotated[tuple[SubagentConfig, ...], BeforeValidator(require_array)] | MISSING
+    ) = MISSING
+    hooks: IrJsonObjectField | MISSING = MISSING
+    mcp_servers: dict[StrictStr, McpServer] | MISSING = MISSING
+    tool_policy: ToolPolicy | MISSING = MISSING
+    permission_mode: Literal["plan", "accept_edits", "dont_ask", "bypass"] | MISSING = (
+        MISSING
+    )
+    sandbox: Literal["read_only", "workspace_write", "full_access"] | MISSING = MISSING
+    trust_repo_config: StrictBool | MISSING = MISSING
+    network_policy: NetworkPolicy | MISSING = MISSING
+    workspace: Workspace
+    output_schema: IrJsonObjectField | MISSING = MISSING
+    env: (
+        Annotated[dict[EnvName, StrictStr], Field(json_schema_extra=environment_schema)]
+        | MISSING
+    ) = MISSING
+    secret_env: (
+        Annotated[dict[EnvName, EnvName], Field(json_schema_extra=environment_schema)]
+        | MISSING
+    ) = MISSING
+    runtime: StrictStr | MISSING = MISSING
+    vcs: StrictStr | MISSING = MISSING
+
+
+class HumanInputBinds(IrRecord):
+    vcs_ref: Annotated[StrictStr, Field(max_length=4096)] | MISSING = MISSING
+    gate_digests: (
+        Annotated[
+            tuple[Annotated[StrictStr, Field(max_length=4096)], ...],
+            BeforeValidator(require_array),
+        ]
+        | MISSING
+    ) = MISSING
+
+
+class HumanInputConfig(IrRecord):
+    channel: StrictStr
+    form: IrJsonObjectField | MISSING = Field(
+        default=MISSING,
+        json_schema_extra={
+            "default": {
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string", "enum": ["approve", "reject"]},
+                    "comments": {"type": "string"},
+                },
+                "required": ["decision"],
+                "additionalProperties": False,
+            }
+        },
+    )
+    timeout: Duration
+    on_expiry: Literal["fail", "skip", "default_value"]
+    default_value: IrJsonValueField | MISSING = MISSING
+    binds: HumanInputBinds | MISSING = MISSING
+    approve_when: Expression | MISSING = MISSING
+    context: Annotated[StrictStr, Field(max_length=4096)] | MISSING = MISSING
+
+
+class EventSelector(IrRecord):
+    type: Literal["webhook", "graph"]
+    name: StrictStr
+    match: Expression | MISSING = MISSING
+
+
+class SensorPoll(IrRecord):
+    sensor: SensorName
+    config: IrJsonObjectField | MISSING = MISSING
+    until: Expression
+
+
+def wait_event_schema(schema: JsonDict) -> None:
+    extension_schema(schema)
+    schema["oneOf"] = [{"required": ["event"]}, {"required": ["poll"]}]
+
+
+def timer_schema(schema: JsonDict) -> None:
+    extension_schema(schema)
+    schema["oneOf"] = [{"required": ["duration"]}, {"required": ["at"]}]
+
+
+class WaitEventConfig(IrRecord):
+    model_config = ConfigDict(json_schema_extra=wait_event_schema)
+
+    event: EventSelector | MISSING = MISSING
+    poll: SensorPoll | MISSING = MISSING
+    interval: Duration | MISSING = MISSING
+    timeout: Duration
+    on_expiry: Literal["fail", "skip"]
+
+    @model_validator(mode="after")
+    def exclusive_wait(self) -> Self:
+        if (self.event is MISSING) == (self.poll is MISSING):
+            raise PydanticCustomError(
+                "ir_wait_exclusive", "exactly one wait selector is required"
+            )
+        return self
+
+
+class TimerConfig(IrRecord):
+    model_config = ConfigDict(json_schema_extra=timer_schema)
+
+    duration: Duration | MISSING = MISSING
+    at: Timestamp | MISSING = MISSING
+
+    @model_validator(mode="after")
+    def exclusive_time(self) -> Self:
+        if (self.duration is MISSING) == (self.at is MISSING):
+            raise PydanticCustomError(
+                "ir_timer_exclusive", "exactly one timer value is required"
+            )
+        return self
