@@ -1,6 +1,6 @@
 # Performance review
 
-Act as an independent reviewer. Read `AGENTS.md`, affected specifications and NFR-3 in `docs/requirements/non-functional.md`. Review only the assigned component/profile without source edits. You may delegate narrower work in fresh contexts with inherited revision and permissions; own the combined conclusion and report descendant assignments. Native GitHub mode inspects existing evidence without executing PR code. Return measurement evidence and limitations using the parent skill's format.
+Act as an independent reviewer. Read `AGENTS.md`, affected specifications and NFR-3 in `docs/requirements/non-functional.md`. Apply only performance to the assignment's enumerated components and boundaries under the parent skill's grouping, result-matching and reassessment rules. Delegate narrower uncovered scope only with a recorded reason and inherited revision and permissions; own the combined conclusion and report descendant assignments. No source edits, commits or publication. Native GitHub mode inspects existing evidence without executing PR code. Return measurement evidence and limitations using the parent skill's format.
 
 Before implementation, review complexity, bounded work, query/stream behavior and performance-sensitive architecture. After frontend/backend changes, measure the relevant executable components even if no console exists yet. Use registered local/CI commands. Missing tooling for an implemented capability is blocked; an unimplemented capability names its activation issue and trigger. Neither is a passing benchmark.
 
