@@ -1462,18 +1462,66 @@ class PricingMigrationWatch:
         )
 
     async def finish(self) -> None:
-        try:
-            await asyncio.gather(*self.writer_tasks)
-        finally:
-            for database in self.writers.values():
-                await database.close()
-            assert all(
-                ledger.opened == ledger.closed and ledger.outstanding == 0
-                for ledger in self.writer_ledgers
+        finalization = asyncio.create_task(self.finalize())
+        failures: list[BaseException] = []
+        while not finalization.done():
+            try:
+                await asyncio.shield(finalization)
+            except asyncio.CancelledError as error:
+                failures.append(error)
+                for task in self.writer_tasks:
+                    if not task.done():
+                        task.cancel()
+        failures.extend(finalization.result())
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("pricing watcher finalization failed", failures)
+
+    async def settle_writers(self) -> None:
+        outcomes = await asyncio.wait_for(
+            asyncio.gather(*self.writer_tasks, return_exceptions=True),
+            CLOSE_WAIT_SECONDS,
+        )
+        failures = [value for value in outcomes if isinstance(value, BaseException)]
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("pricing writer operations failed", failures)
+
+    async def finalize(self) -> list[BaseException]:
+        outcomes: list[object] = list(
+            await asyncio.gather(self.settle_writers(), return_exceptions=True)
+        )
+        for database in self.writers.values():
+            outcomes.extend(
+                await asyncio.gather(database.close(), return_exceptions=True)
             )
-            self.finished.set()
-            assert self.observer is not None
-            await asyncio.wait_for(self.observer, CLOSE_WAIT_SECONDS)
+        self.finished.set()
+        outcomes.extend(
+            await asyncio.gather(self.join_observer(), return_exceptions=True)
+        )
+        outcomes.extend(
+            await asyncio.gather(self.verify_release(), return_exceptions=True)
+        )
+        outcomes.extend(
+            await asyncio.gather(self.detach_listeners(), return_exceptions=True)
+        )
+        return [value for value in outcomes if isinstance(value, BaseException)]
+
+    async def join_observer(self) -> None:
+        assert self.observer is not None
+        await asyncio.wait_for(self.observer, CLOSE_WAIT_SECONDS)
+
+    async def verify_release(self) -> None:
+        assert all(task.done() for task in self.writer_tasks)
+        assert all(
+            database.units_in_flight() == 0 for database in self.writers.values()
+        )
+        assert all(
+            ledger.opened == ledger.closed and ledger.outstanding == 0
+            for ledger in self.writer_ledgers
+        )
         assert self.database is not None
         assert self.ledger is not None
         assert self.database.units_in_flight() == 0
@@ -1503,15 +1551,30 @@ class PricingMigrationWatch:
             opened=self.ledger.opened,
             closed=self.ledger.closed,
         )
+
+    async def detach_listeners(self) -> None:
+        assert self.database is not None
         engine = self.database.writer_engine.sync_engine
-        event.remove(engine, "before_cursor_execute", self.before)
-        event.remove(engine, "after_cursor_execute", self.after)
-        event.remove(engine, "commit", self.commit)
-        event.remove(engine, "rollback", self.rollback)
-        event.remove(engine, "begin", self.begin)
-        event.remove(engine, "checkout", self.checkout)
-        event.remove(engine, "checkin", self.completed_transaction)
-        event.remove(engine, "handle_error", self.error)
+
+        async def remove(name: str, callback: Callable[..., None]) -> None:
+            event.remove(engine, name, callback)
+
+        outcomes = await asyncio.gather(
+            remove("before_cursor_execute", self.before),
+            remove("after_cursor_execute", self.after),
+            remove("commit", self.commit),
+            remove("rollback", self.rollback),
+            remove("begin", self.begin),
+            remove("checkout", self.checkout),
+            remove("checkin", self.completed_transaction),
+            remove("handle_error", self.error),
+            return_exceptions=True,
+        )
+        failures = [value for value in outcomes if isinstance(value, BaseException)]
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise BaseExceptionGroup("pricing listener detachment failed", failures)
 
 
 def sqlite_file_bytes(settings: DatabaseSettings, suffix: str) -> int:
