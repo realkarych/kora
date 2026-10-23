@@ -440,12 +440,14 @@ def test_nested_source_and_snapshot_containers_are_immutable() -> None:
                 )
             ],
             pricing_status="unpriced",
+            observed_at=NOW,
             usd_estimate=None,
             known_usd_estimate=None,
         ),
         run_payload(
             models=[model_payload()],
             pricing_status="partially_priced",
+            observed_at=NOW,
             usd_estimate=None,
             known_usd_estimate="0",
         ),
