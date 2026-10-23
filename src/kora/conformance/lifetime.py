@@ -113,6 +113,8 @@ class CleanupControl:
     selected: set[str] = field(default_factory=set[str])
     published: bool = False
     failed: bool = False
+    removing_root: bool = False
+    terminal_join: bool = False
 
 
 @dataclass
@@ -1011,8 +1013,29 @@ class ParentLifetime:
             self.closure_started.set()
         self._fence(control.selected)
         self.closures[resource_id] = control.result
+        if resource_id is not None and self.invocation_cleanup.result.done():
+            control.final = min(control.final, self.invocation_cleanup.final)
+            self._finish_terminal_join(resource_id, control)
+            return control.result
+        control.terminal_join = (
+            resource_id is not None and self.invocation_cleanup.removing_root
+        )
         self.cleanup_changed.set()
         return control.result
+
+    def _finish_terminal_join(
+        self, resource_id: ResourceId, control: CleanupControl
+    ) -> None:
+        full = self.invocation_cleanup.result.result()
+        self._finish_cleanup(
+            resource_id,
+            control,
+            safe=full.state is CleanupOutcome.CLOSED
+            and all(
+                self.records[key].entry.state is ResourceState.CLOSED
+                for key in control.selected
+            ),
+        )
 
     def _fence(self, selected: set[str]) -> None:
         for key in selected:
@@ -1181,6 +1204,7 @@ class ParentLifetime:
             len(records),
         )
         control.result.set_result(report)
+        self.cleanup_changed.set()
 
     def _advance_cleanup(
         self, resource_id: ResourceId | None, control: CleanupControl
@@ -1191,6 +1215,10 @@ class ParentLifetime:
         now = self.clock.monotonic_ns()
         if now >= control.final:
             self._finish_cleanup(resource_id, control, safe=False)
+            return
+        if resource_id is not None and control.terminal_join:
+            if self.invocation_cleanup.result.done():
+                self._finish_terminal_join(resource_id, control)
             return
         records = [
             record for key, record in self.records.items() if key in control.selected
@@ -1257,6 +1285,14 @@ class ParentLifetime:
             self._start_cleanup_effect(control, self._publish_cleanup(control))
             return
         if resource_id is None:
+            if any(
+                scoped.start is not None
+                and not scoped.result.done()
+                and not scoped.terminal_join
+                for key, scoped in self._cleanup_controls()
+                if key is not None
+            ):
+                return
             if self.endpoint_count:
                 self._finish_cleanup(resource_id, control, safe=False)
                 return
@@ -1265,6 +1301,7 @@ class ParentLifetime:
                 self._finish_cleanup(resource_id, control, safe=False)
                 return
             if not directory.closed:
+                control.removing_root = True
                 self._start_cleanup_effect(control, self._remove_cleanup_root(control))
                 return
         self._finish_cleanup(resource_id, control, safe=True)
