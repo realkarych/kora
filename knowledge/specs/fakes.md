@@ -112,6 +112,8 @@ Three classes are found after a `completed` session, by the code that checks the
 
 ## 5. The fake runtime
 
+The fake runtime implements the same [bounded grant-history and recovery DTOs](protocols.md#resumable-retained-dispatcher-history-issue-226), including receiver checkpoints, exact delivery dispositions and final frozen observations. Its conformance cases use injected clock/barriers for deadline, interruption and append traces. A fake passing does not establish local peer authentication, filesystem durability, process exit or resource release; those require the real-runtime cases. This capability remains pending with runtime and worker implementation.
+
 - **What it runs.** It implements the `Runtime` protocol of protocols.md section 2 in process and hosts the testing-runner core with the injected harness. Its `plan_executors` is `{"runner"}`. Command workloads take a scripted `{exit_code, stdout, stderr, output_file}`; resources are still materialised and re-hashed (protocols.md section 2, "Command resources").
 - **The same protocol shape as the local runtime** ([local runtime](protocols.md#local-runtime-issue-123)):
   - `submit` returns in phase `preparation` and starts no candidate; `transfer_in` is allowed only in `preparation`; `start` re-hashes every input and starts the candidate;
