@@ -19,7 +19,7 @@ uv 0.13.1 resolved the development dependencies into `uv.lock`. Locked versions 
 | referencing | 0.37.0 | Explicit in-memory schema reference registry |
 | rpds-py | 2026.9.1 | Immutable reference-registry data structures |
 
-The lock includes hashes and binary wheels, including rpds-py's supported Linux/macOS interpreter/platform combinations. Local installation used `uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project`, followed by the existing hash-constrained editable-project install. No dependency was built from source. CI repeats the locked no-build installation across the supported matrix; final scanner and matrix results remain required before merge.
+The lock includes hashes and binary wheels, including rpds-py's supported Linux/macOS interpreter/platform combinations. The project's `no-build-package` list includes `rpds-py`, applying the existing native test-support policy even to an ordinary `uv sync` without an explicit no-build flag. Local installation used `uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project`, followed by the existing hash-constrained editable-project install. No dependency was built from source. CI repeats the locked no-build installation across the supported matrix; final scanner and matrix results remain required before merge.
 
 ## Immutable boundary
 
