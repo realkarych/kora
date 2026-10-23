@@ -500,6 +500,8 @@ class RunCost(CostValue):
             self.completeness != "unavailable" or self.observed_at is not None
         ):
             raise refusal()
+        if self.models and self.completeness == "complete" and self.observed_at is None:
+            raise refusal()
         if self.observed_at is not None and self.observed_at > self.as_of:
             raise refusal()
         states = {"unavailable": 0, "partial": 1, "complete": 2}

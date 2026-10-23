@@ -389,23 +389,15 @@ def test_source_exact_canonical_byte_bound() -> None:
 
 
 def test_revision_exact_canonical_byte_bound() -> None:
-    prices = {f"{i:03d}": rates_payload() for i in range(200)}
-    payload = revision_payload(prices)
-    payload["effective_from"] = "2026-10-23T00:00:00Z"
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode()
-    padding = 65536 - len(encoded)
-    for i in range(200):
-        growth = min(padding, 253)
-        prices[f"{i:03d}" + "x" * growth] = prices.pop(f"{i:03d}")
-        padding -= growth
+    payload = revision_with_encoded_size("2026-10-23T00:00:00Z", 65536)
+    prices = cast("dict[str, dict[str, object]]", payload["prices"])
     exact = json.dumps(
         payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
     first = next(key for key in prices if len(key) < 256)
 
     revision = PriceRevision.model_validate_json(exact)
+    python_revision = PriceRevision.model_validate(payload)
     prices[first + "x"] = prices.pop(first)
     with pytest.raises(ValidationError):
         PriceRevision.model_validate(payload)
@@ -414,6 +406,7 @@ def test_revision_exact_canonical_byte_bound() -> None:
 
     assert len(exact.encode()) == 65536
     assert len(revision.prices) == 200
+    assert python_revision == revision
 
 
 def test_nested_source_and_snapshot_containers_are_immutable() -> None:
@@ -760,3 +753,75 @@ def test_source_marker_validation_errors_are_content_free(
     assert "SECRET" not in str(python_error.value) + str(json_error.value) + repr(
         python_safe
     )
+
+
+@pytest.mark.parametrize("raw_json", [False, True])
+def test_complete_nonempty_snapshot_requires_source_time(raw_json: bool) -> None:
+    payload = run_payload(models=[model_payload()])
+    payload["as_of"] = "2026-10-23T00:00:00Z"
+
+    if raw_json:
+        with pytest.raises(ValidationError):
+            RunCost.model_validate_json(json.dumps(payload))
+    else:
+        with pytest.raises(ValidationError):
+            RunCost.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {"models": [model_payload()], "completeness": "partial"},
+        {
+            "models": [model_payload()],
+            "completeness": "partial",
+            "attribution_gap_attempts": 1,
+            "pricing_status": "partially_priced",
+            "usd_estimate": None,
+        },
+        {
+            "models": [model_payload()],
+            "completeness": "partial",
+            "observation_gap_attempts": 1,
+            "pricing_status": "partially_priced",
+            "usd_estimate": None,
+        },
+        {
+            "completeness": "unavailable",
+            "missing_report_attempts": 1,
+            "pricing_status": "unpriced",
+            "usd_estimate": None,
+            "known_usd_estimate": None,
+        },
+    ],
+)
+def test_snapshot_preserves_legitimate_null_source_times(
+    changes: dict[str, object],
+) -> None:
+    payload = run_payload(**changes)
+
+    snapshot = RunCost.model_validate(payload)
+    restored = RunCost.model_validate_json(snapshot.model_dump_json())
+
+    assert snapshot.observed_at is None
+    assert restored == snapshot
+
+
+@pytest.mark.parametrize("completeness", ["complete", "partial", "unavailable"])
+def test_real_coverage_retains_nullable_source_time(completeness: str) -> None:
+    payload = dict(
+        version=1,
+        observation_id="source",
+        observation_sequence=0,
+        completeness=completeness,
+        observed_at=None,
+        attribution_gap=False,
+        observation_gap=False,
+    )
+
+    coverage = UsageCoverage.model_validate(payload)
+    restored = UsageCoverage.model_validate_json(coverage.model_dump_json())
+
+    assert coverage.observed_at is None
+    assert restored == coverage
