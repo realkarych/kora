@@ -12,6 +12,8 @@
 
 - First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
 
+- Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
+
 ## Context
 
 kora's positioning states that it is operated by agents as much as by people: whatever an engineer can do through the UI, the CLI or the API, their own Claude Code or Codex session must be able to do through kora's MCP server and a published skill. NFR-0.3 makes this a design constraint on every operation.
@@ -43,7 +45,7 @@ Parity is verified structurally: a CI coverage test checks that every API operat
 
 All errors are structured objects with a stable `code` and a safe message; clients branch on the code, never on prose. Compilation and validation findings use the shared [diagnostic contract](../../knowledge/specs/diagnostics.md): a nullable segmented document `path`, optional source `location` with file and line, independent Unicode code-point `offset`, node association and recovery hint. Runtime identifiers and HTTP request correlation belong to their enclosing error contracts.
 
-The MCP servers present the user's token and therefore have exactly the user's permissions; they add no state and no permission model of their own.
+The MCP servers present their configured personal token and therefore have exactly that token's permissions; they add no state and no permission model of their own. Standalone issues a separate default MCP token without `approve` or `platform`, as specified in [ADR-0011](0011-namespaces-and-personal-tokens.md).
 
 Agent nodes inside a graph have no access to kora's MCP server or API. They receive typed inputs through the workspace and the prompt and leave typed outputs for the worker to collect; the intermediate representation (IR) gives them only the MCP servers their resolved config lists. Consequently there is no operator allowlist, no per-attempt token, no child-run cost attribution and no recursion limit; the earlier requirement FR-0.5 was removed.
 
