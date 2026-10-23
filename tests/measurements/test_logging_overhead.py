@@ -23,6 +23,7 @@ from kora.observability import (
     bound_scope,
     configure_process,
 )
+from kora.observability.redaction import SecretRegistry, StreamMasker
 from tests.measurements.harness import (
     Report,
     Sample,
@@ -91,6 +92,18 @@ PRODUCER_THREADS: int = 4
 STEP_BUDGET_SECONDS: float = 300.0
 ROTATION_ROUNDS: int = 100
 MATCHER_RECORDS: int = 200
+MASKER_LINES: int = 100_000
+MASKER_LINE: bytes = b"x" * 199 + b"\n"
+MASKER_CHUNK_BYTES: int = 65_536
+MASKER_VALUE_COUNTS: tuple[int, ...] = (0, 16, 256)
+ADVERSARIAL_LINES: int = 10_000
+ADVERSARIAL_VALUE: str = "a" * 4095 + "c"
+ADVERSARIAL_LINE: bytes = b"a" * 199 + b"b"
+MASKER_BUDGET_SECONDS: float = 60.0
+SMALL_FEEDS: int = 4_000
+RUN_FORMS: int = 256
+NEAR_MISS_FORMS: int = 16
+NEAR_MISS_FEEDS: int = 64
 EXIT_MARGIN_SECONDS: float = 2.0
 IDLE_SHUTDOWN_SECONDS: float = 0.5
 HEAP_GROWTH_ALLOWANCE_BYTES: int = 1_048_576
@@ -201,6 +214,14 @@ def scattered_registry_values(count: int, length: int) -> list[str]:
     return values
 
 
+def diverse_text(length: int, seed: int) -> str:
+    words = [
+        hashlib.sha256(f"word-{seed}-{index}".encode()).hexdigest()[: 2 + index % 8]
+        for index in range(400)
+    ]
+    return " ".join(words)[:length]
+
+
 def near_miss_values() -> list[str]:
     return [
         family + "x" * length for family in ("ab", "cb") for length in range(6, 133)
@@ -212,6 +233,7 @@ def test_logging_overhead_and_resource_lifetime(report: Report) -> None:
 
     producer_workloads(report)
     redaction_workloads(report)
+    stream_masker_workloads(report)
     bridge_and_context_workloads(report)
     saturation_workloads(report)
     report.gates["process_exit_bounded"] = exit_on_full_pipe(report)
@@ -372,6 +394,22 @@ def redaction_workloads(report: Report) -> None:
         HEAVY_REPEATS,
         emit_scattered_miss,
     )
+    diverse = {
+        **{f"s{i:02d}": diverse_text(1024, i) for i in range(12)},
+        "exception": miss["exception"],
+    }
+
+    def emit_scattered_diverse() -> None:
+        for _ in range(MATCHER_RECORDS):
+            log.emit(MAXIMAL, **diverse)
+
+    repeat(
+        report,
+        "redaction_scattered_registry_diverse_text",
+        MATCHER_RECORDS,
+        HEAVY_REPEATS,
+        emit_scattered_diverse,
+    )
     for registration in random_registrations:
         registration.release()
     near_miss_registrations = [
@@ -404,6 +442,118 @@ def redaction_workloads(report: Report) -> None:
     diagnostics.shutdown()
     sink.close()
     report.durations["redaction_workloads"] = time.perf_counter() - started
+
+
+def masked_feed(
+    registry: SecretRegistry, chunks: list[bytes], held: list[int]
+) -> Callable[[], None]:
+    def feed() -> None:
+        with StreamMasker(registry, discard) as masker:
+            for chunk in chunks:
+                masker.feed(chunk)
+                held.append(masker.held)
+
+    return feed
+
+
+def discard(text: str) -> None:
+    return None
+
+
+def stream_masker_workloads(report: Report) -> None:
+    started = time.perf_counter()
+    lines = [MASKER_LINE] * MASKER_LINES
+    stream = b"".join(lines)
+    chunks = [
+        stream[start : start + MASKER_CHUNK_BYTES]
+        for start in range(0, len(stream), MASKER_CHUNK_BYTES)
+    ]
+    for count in MASKER_VALUE_COUNTS:
+        registry = SecretRegistry()
+        registrations = [registry.register(value) for value in registered_values(count)]
+        held: list[int] = []
+        repeat(
+            report,
+            f"stream_masker_per_line_{count}_values",
+            MASKER_LINES,
+            REPEATS,
+            masked_feed(registry, lines, held),
+        )
+        repeat(
+            report,
+            f"stream_masker_64kib_{count}_values",
+            MASKER_LINES,
+            REPEATS,
+            masked_feed(registry, chunks, held),
+        )
+        report.environment[f"stream_masker_{count}_values_max_held"] = max(held)
+        for registration in registrations:
+            registration.release()
+    registry = SecretRegistry()
+    registration = registry.register(ADVERSARIAL_VALUE)
+    held = []
+    repeat(
+        report,
+        "stream_masker_adversarial_prefix_per_line",
+        ADVERSARIAL_LINES,
+        REPEATS,
+        masked_feed(registry, [ADVERSARIAL_LINE] * ADVERSARIAL_LINES, held),
+    )
+    report.environment["stream_masker_adversarial_max_held"] = max(held)
+    small_feeds = [ADVERSARIAL_VALUE[index].encode() for index in range(SMALL_FEEDS)]
+    repeat(
+        report,
+        "stream_masker_small_feeds_with_held_tail",
+        SMALL_FEEDS,
+        REPEATS,
+        masked_feed(registry, small_feeds, held),
+    )
+    registration.release()
+    run_registry = SecretRegistry()
+    run_registrations = [
+        run_registry.register("a" * length) for length in range(8, 8 + RUN_FORMS)
+    ]
+    run = "a" * MASKER_CHUNK_BYTES
+    repeat(
+        report,
+        "stream_masker_self_overlapping_run",
+        1,
+        REPEATS,
+        masked_feed(run_registry, [run.encode()], held),
+    )
+    repeat(
+        report,
+        "redaction_self_overlapping_record",
+        1,
+        REPEATS,
+        lambda: discard(run_registry.mask(run, 1024)),
+    )
+    for run_registration in run_registrations:
+        run_registration.release()
+    near_registry = SecretRegistry()
+    near_registrations = [
+        near_registry.register("a" * (2000 + index) + "b" + "a" * 2000)
+        for index in range(NEAR_MISS_FORMS)
+    ]
+    near_feeds = [b"a" * 1024] * NEAR_MISS_FEEDS
+    repeat(
+        report,
+        "stream_masker_near_miss_small_feeds",
+        NEAR_MISS_FEEDS,
+        REPEATS,
+        masked_feed(near_registry, near_feeds, held),
+    )
+    for near_registration in near_registrations:
+        near_registration.release()
+    report.environment["stream_masker_rss_bytes"] = current_rss_bytes()
+    report.durations["stream_masker_workloads"] = time.perf_counter() - started
+    report.gates["stream_masker_budget"] = (
+        report.durations["stream_masker_workloads"] < MASKER_BUDGET_SECONDS
+    )
+    report.gates["stream_masker_ordinary_output_not_held"] = all(
+        report.environment[f"stream_masker_{count}_values_max_held"] == 0
+        for count in MASKER_VALUE_COUNTS
+    )
 
 
 def bridge_and_context_workloads(report: Report) -> None:

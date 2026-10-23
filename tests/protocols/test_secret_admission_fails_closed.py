@@ -1,7 +1,11 @@
 import pytest
 
 from kora.observability import LoggingSettings, SecretAdmissionError
-from kora.observability.settings import MAX_SECRET_BYTES, MAX_SECRETS
+from kora.observability.settings import (
+    MAX_SECRET_BYTES,
+    MAX_SECRET_VALUE_BYTES,
+    MAX_SECRETS,
+)
 from kora.protocols.secret_value import SecretScope, registered_forms
 from tests.protocols.conftest import StartCapture
 from tests.protocols.secret_support import ESCAPED, PLAIN, registry_state
@@ -9,6 +13,17 @@ from tests.protocols.secret_support import ESCAPED, PLAIN, registry_state
 
 def utf8_size(value: str) -> int:
     return len(value.encode("utf-8"))
+
+
+FILLER_BYTES: int = MAX_SECRET_VALUE_BYTES - 128
+
+
+def fill_bytes(scope: SecretScope, total: int) -> None:
+    count = -(-total // FILLER_BYTES)
+    sizes = [total // count] * count
+    sizes[-1] += total - sum(sizes)
+    for index, size in enumerate(sizes):
+        scope.admit(f"{index:08d}".ljust(size, "f"))
 
 
 def assert_refused_without_content(scope: SecretScope, value: str) -> None:
@@ -62,7 +77,7 @@ def test_admission_rolls_back_when_any_form_is_refused(
     forms = registered_forms(ESCAPED)
     room = sum(utf8_size(form) for form in forms[:refused_form])
     filler = SecretScope(capture.diagnostics)
-    filler.admit("f" * (MAX_SECRET_BYTES - room - 1))
+    fill_bytes(filler, MAX_SECRET_BYTES - room - 1)
     before = registry_state(capture.diagnostics)
 
     assert_refused_without_content(capture.scope, ESCAPED)

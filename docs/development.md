@@ -2,6 +2,8 @@
 
 IR control-configuration measurement amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #225](https://github.com/realkarych/kora/issues/225) on 2026-10-23.
 
+Secrets and redaction amendment dated 2026-10-23: the measurement text for `StreamMasker` and the per-form bound under [issue #192](https://github.com/realkarych/kora/issues/192); wording pending line-by-line owner review.
+
 Diagnostic value measurement amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #219](https://github.com/realkarych/kora/issues/219) on 2026-10-23.
 
 Browser verification amendment dated 2026-10-22: the project owner approved the [benchmark removal and matching documentation](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349), with delegated independent review and merge.
@@ -102,7 +104,7 @@ KORA_TEST_DATABASES=sqlite uv run --no-sync pytest -q
 
 The container runs without the reaper container that `testcontainers` starts by default, because the session fixture removes the database container itself on every exit path, readiness failure included; the fixture disables the reaper through the library's configuration when `TESTCONTAINERS_RYUK_DISABLED` is unset, CI sets the variable explicitly, and an explicit `false` re-enables the reaper, which mounts the Docker socket. Readiness is checked from the host with a content-free deadline, never through the library's `psql` probe, so no error carries the password. The container publishes a random port on every network interface of the host for the duration of the run, protected by a password generated for the session; a daemon configured with `"ip": "127.0.0.1"` keeps it on the loopback interface locally.
 
-The default pytest run excludes the `measurement` marker. The logging overhead and resource-lifetime measurement runs serially, writes its samples to the path in `KORA_MEASUREMENT_OUTPUT` (with the commit named by `KORA_MEASUREMENT_REVISION`, which CI sets to the pull request's head) and gates only the contract-derived criteria (queue bounds, bounded heap and resident-memory growth with threads and descriptors back at baseline over repeated configure-and-shutdown cycles, bounded process exit and idle shutdown); CI runs it in the Linux 3.11 lane after the parallel checks and uploads the artifact `logging-overhead-measurement`:
+The default pytest run excludes the `measurement` marker. The logging overhead and resource-lifetime measurement runs serially, writes its samples to the path in `KORA_MEASUREMENT_OUTPUT` (with the commit named by `KORA_MEASUREMENT_REVISION`, which CI sets to the pull request's head) and gates only the contract-derived criteria (queue bounds, bounded heap and resident-memory growth with threads and descriptors back at baseline over repeated configure-and-shutdown cycles, bounded process exit and idle shutdown, and `StreamMasker` within 60 s without holding back ordinary output); its redaction rows include a 256-value registry against diverse text and `StreamMasker` over 100,000 lines fed per line and in 64 KiB chunks with 0, 16 and 256 values, plus an adversarial per-line row against a 4 KiB value; CI runs it in the Linux 3.11 lane after the parallel checks and uploads the artifact `logging-overhead-measurement`:
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
@@ -141,7 +143,7 @@ KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
 ```
 
-The protocol model measurement runs under the same marker: the cold import of the protocol modules in three `python -I` child processes, the validation of 64 grant bindings, and the admission and release of secrets in six workloads (8-byte, 1 KiB and 16 KiB values, plain and needing JSON escapes). It gates only the contract-derived criteria: every workload registers its expected forms and leaves the registry empty, and heap growth stays bounded and does not grow from one cycle to the next. The timings are a baseline with no time gate. CI runs it after the provider loading measurement in the same lane and uploads the artifact `protocol-models-cost-measurement`:
+The protocol model measurement runs under the same marker: the cold import of the protocol modules in three `python -I` child processes, the validation of 64 grant bindings, and the admission and release of secrets in six workloads (8-byte, 1 KiB and values at the 4 KiB per-form bound, plain and needing JSON escapes). It gates only the contract-derived criteria: every workload registers its expected forms and leaves the registry empty, and heap growth stays bounded and does not grow from one cycle to the next. The timings are a baseline with no time gate. CI runs it after the provider loading measurement in the same lane and uploads the artifact `protocol-models-cost-measurement`:
 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
