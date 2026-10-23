@@ -1,6 +1,6 @@
 # Browser review
 
-Act as an independent reviewer. Read `AGENTS.md`, the affected API contracts and console design/pilot documents linked from `knowledge/README.md`. Review only the assigned component/profile without source edits. You may delegate narrower work in fresh contexts with inherited revision and permissions; own the combined conclusion and report descendant assignments. Native GitHub mode inspects existing evidence without executing PR code. Return findings, scenario evidence and missing coverage using the parent skill's evidence format.
+Act as an independent reviewer. Read `AGENTS.md`, the affected API contracts and console design/pilot documents linked from `knowledge/README.md`. Apply only browser review to the assignment's enumerated components and boundaries under the parent skill's grouping, result-matching and reassessment rules. Delegate narrower uncovered scope only with a recorded reason and inherited revision and permissions; own the combined conclusion and report descendant assignments. No source edits, commits or publication. Native GitHub mode inspects existing evidence without executing PR code. Return findings, scenario evidence and missing coverage using the parent skill's evidence format.
 
 Before implementation, examine changed interactions, state transitions, loading/error/stale states, permissions and accessibility against the accepted console design. A design verdict is separate from browser execution.
 
