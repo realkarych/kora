@@ -1,6 +1,6 @@
 # Implementation plan
 
-Bounded chunked-upload amendment dated 2026-10-23: the project owner [approved the #224 plan](https://github.com/realkarych/kora/issues/224#issuecomment-6368258293). The [API contract](../knowledge/specs/api-and-agent-surface.md#bounded-chunked-uploads-issue-224) defines fixed 16 MiB non-final parts, exact replay and explicit recovery, and distinguishes progress, ready-for-sealing and accepted results. Exact wording in this document remains pending line-by-line owner review. Runtime evidence remains pending the real consumers.
+Bounded chunked-upload amendment dated 2026-10-23: the project owner [approved the #224 plan](https://github.com/realkarych/kora/issues/224#issuecomment-6368258293). The [API contract](../knowledge/specs/api-and-agent-surface.md#bounded-chunked-uploads-issue-224) defines fixed 16 MiB non-final parts, exact replay and explicit recovery, and distinguishes progress, ready-for-sealing and accepted results. Exact wording was reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/251#issuecomment-6370152885) on 2026-10-23. Runtime evidence remains pending the real consumers.
 
 Retained dispatcher-history amendment dated 2026-10-23: the project owner approved the [contract plan and exact documentation wording](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702), [approval recorded](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030).
 
