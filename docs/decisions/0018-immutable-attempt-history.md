@@ -1,5 +1,7 @@
 # ADR-0018: Immutable deployment contracts and attempt-owned execution history
 
+Bounded-read amendment dated 2026-10-23: the project owner approved the contract plan and exact wording under [issue #227](https://github.com/realkarych/kora/issues/227#issuecomment-6371188973).
+
 - Status: direction and implementation plan accepted, 2026-10-17; document wording pending owner review
 - Reviewed: pending line-by-line project-owner review
 - Deciders: project owner
@@ -27,6 +29,8 @@ Historical attribution and the authority to perform another effect are different
 **Preserve current authorization.** API/namespace access, secret authorization, quotas, daily-budget admission and late publication authorization keep their current checks. A saved execution policy is historical evidence, not permission to bypass them. Updating a namespace policy does not promise to revoke already sealed execution immediately; cancellation, runtime retirement and external-service permissions retain their existing roles.
 
 **Expire content honestly.** Compact bindings, contracts, policy values, digests and attribution metadata remain durable. Rendered configuration/prompts, feedback and content-bearing summary/projection values follow resolved run payload retention, including inline copies: by default 30 days after run completion. APIs report expired, missing, not-recorded or unknown evidence without substituting current data. Manual retry requires available inputs and otherwise returns structured `API002` details before effects; internal execution reports `config_error`. Possible future retry does not pin terminal-run payloads forever. Active execution and unresolved recovery retain only their required references/checkpoints, with shared-reference-safe deletion. Prompt/feedback content and equivalent diff projections require the existing namespace `transcripts` capability across all clients.
+
+**Read identity and content separately.** Metadata preserves immutable contract, binding and digest identity while histories use bounded pages and saved values use explicit owner-scoped complete reads, byte pages or labelled text prefixes. A prefix is neither a complete value nor a valid replacement for its digest, JSON, URL or comparison. Source and summary owners remain independent; current access and owner availability are checked during transfer. Durable saved fields retain their existing lifetime even when their byte representation moves behind a descriptor. The original input manifest is read through its complete saved representation; byte paging introduces no normalized binding index or second history authority. Selected computed comparisons may refuse a finite work/output budget while both authorized complete originals remain readable. [Bounded read projections](../../knowledge/specs/bounded-read-projections.md) specifies these limits and their implementation gates.
 
 ## Alternatives considered
 
