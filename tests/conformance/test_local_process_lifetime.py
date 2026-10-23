@@ -117,6 +117,44 @@ async def test_channel_bounds_records_and_releases_cancelled_waiters() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["frame", "record_header", "record_chunk"])
+async def test_channel_refuses_length_above_reservation_without_body(
+    boundary: str,
+) -> None:
+    import socket
+
+    from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+
+    clock = SystemClock()
+    first, second = socket.socketpair()
+    receiver = BoundedChannel(second, clock)
+    prefix = (257).to_bytes(4, "big")
+    if boundary == "record_header":
+        prefix = (5).to_bytes(4, "big")
+    elif boundary == "record_chunk":
+        prefix = (
+            (4).to_bytes(4, "big") + (1).to_bytes(4, "big") + (2).to_bytes(4, "big")
+        )
+    first.sendall(prefix)
+    deadline = clock.monotonic_ns() + 100_000_000
+    receiving = (
+        receiver.read_frame(deadline, 256)
+        if boundary == "frame"
+        else receiver.read_record(deadline, 1)
+    )
+
+    try:
+        with pytest.raises(ChannelError) as refused:
+            await receiving
+    finally:
+        first.close()
+        receiver.close()
+
+    assert refused.value.reason is ChannelFailure.CAPACITY
+    assert receiver.closed
+
+
+@pytest.mark.asyncio
 async def test_channel_close_releases_a_pending_read_without_waiting_for_deadline() -> (
     None
 ):

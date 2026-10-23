@@ -150,21 +150,25 @@ class BoundedChannel:
                 raise ChannelError(ChannelFailure.CLOSED)
             remaining = remaining[written:]
 
-    async def _read_frame(self, deadline_ns: int) -> bytes:
+    async def _read_frame(self, deadline_ns: int, reservation: int) -> bytes:
         length = int.from_bytes(await self._read_exact(4, deadline_ns), "big")
-        if length > MAX_FRAME_BYTES:
+        if length > reservation:
             raise ChannelError(ChannelFailure.CAPACITY)
         return await self._read_exact(length, deadline_ns)
 
     async def _write_frame(self, value: bytes, deadline_ns: int) -> None:
         await self._write(struct.pack("!I", len(value)) + value, deadline_ns)
 
-    async def read_frame(self, deadline_ns: int) -> bytes:
+    async def read_frame(
+        self, deadline_ns: int, reservation: int = MAX_FRAME_BYTES
+    ) -> bytes:
+        if not 0 <= reservation <= MAX_FRAME_BYTES:
+            raise ChannelError(ChannelFailure.CAPACITY)
         if self._reading:
             raise ChannelError(ChannelFailure.BUSY)
         self._reading = True
         try:
-            return await self._read_frame(deadline_ns)
+            return await self._read_frame(deadline_ns, reservation)
         except (ChannelError, asyncio.CancelledError):
             self.close()
             raise
@@ -192,7 +196,7 @@ class BoundedChannel:
             raise ChannelError(ChannelFailure.BUSY)
         self._reading = True
         try:
-            header = await self._read_frame(deadline_ns)
+            header = await self._read_frame(deadline_ns, 4)
             if len(header) != 4:
                 raise ChannelError(ChannelFailure.MALFORMED)
             length = int.from_bytes(header, "big")
@@ -200,7 +204,9 @@ class BoundedChannel:
                 raise ChannelError(ChannelFailure.CAPACITY)
             result = bytearray()
             while len(result) < length:
-                chunk = await self._read_frame(deadline_ns)
+                chunk = await self._read_frame(
+                    deadline_ns, min(MAX_FRAME_BYTES, length - len(result))
+                )
                 if not chunk or len(chunk) > length - len(result):
                     raise ChannelError(ChannelFailure.MALFORMED)
                 result.extend(chunk)
