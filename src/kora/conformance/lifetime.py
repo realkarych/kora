@@ -15,6 +15,7 @@ from kora.conformance.io_helper import (
     HelperError,
     InstalledIOHelperLauncher,
     IOHelperLauncher,
+    OpenTreeMutation,
     RemoveTreeMutation,
 )
 from kora.conformance.journal import JournalEntry, JournalSnapshot
@@ -189,7 +190,8 @@ class ParentLifetime:
 
     async def _recover(self, reference: CleanupReference) -> None:
         self.admission_open = False
-        snapshot = await self.mutations.recover(reference, self.owner, self.deadline())
+        deadline = self.deadline()
+        snapshot = await self.mutations.recover(reference, self.owner, deadline)
         self.generation = snapshot.generation
         self.revision = snapshot.revision
         self.original_outcome = snapshot.original_outcome
@@ -236,7 +238,12 @@ class ParentLifetime:
                     inode=registration.inode,
                     owner_uid=registration.owner_uid,
                 )
-                record.directory = parent.open_child(identity)
+                result = await self.mutations.perform(
+                    OpenTreeMutation(directory=parent.identity, target=identity),
+                    parent,
+                    deadline,
+                )
+                record.directory = self.mutations.take_directory(result)
             elif not isinstance(
                 entry.registration, (BorrowedServiceRegistration, ProcessRegistration)
             ):
@@ -511,10 +518,9 @@ class ParentLifetime:
                 directory,
                 deadline,
             )
-            self.mutations.prune()
             if result.directory is None:
                 raise self._refuse(LifetimeReason.JOURNAL_UNAVAILABLE)
-            record.directory = directory.open_child(result.directory)
+            record.directory = self.mutations.take_directory(result)
             registration = TemporaryTreeRegistration(
                 resource_id=record.entry.resource_id,
                 parent_resource_id=request.parent_resource_id or self.invocation_id,

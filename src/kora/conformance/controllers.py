@@ -146,6 +146,23 @@ class MutationOwner:
         self.snapshot = result.journal
         self.prune()
 
+    def take_directory(self, result: MutationResult) -> DirectoryAnchor:
+        helper = next(
+            (helper for helper in self.helpers if helper.result is result), None
+        )
+        if (
+            result.directory is None
+            or result.descriptor_count != 1
+            or helper is None
+            or not helper.closed
+            or len(helper.descriptors) != 1
+        ):
+            raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
+        (descriptor,) = helper.take_descriptors()
+        directory = DirectoryAnchor(descriptor, result.directory)
+        self.prune()
+        return directory
+
     async def perform(
         self, mutation: Mutation, directory: DirectoryAnchor | None, deadline: int
     ) -> MutationResult:

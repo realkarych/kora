@@ -63,3 +63,60 @@ class ProbeIOHelperLauncher:
         finally:
             child.close()
         return IOHelper(process, parent, clock)
+
+
+async def stalled_recovery_parent(
+    home: Path, invocation_id: str, control: int, observation: int, fifo: int
+) -> None:
+    import asyncio
+
+    from kora.conformance.lifetime import ParentLifetime
+    from kora.protocols.lifetime import CleanupReference, LifetimeLimits
+    from kora.protocols.time import SystemClock
+    from kora.runner.channels import BoundedChannel
+
+    clock = SystemClock()
+    channel = BoundedChannel(socket.socket(fileno=control), clock)
+    launcher = ProbeIOHelperLauncher(home, observation, fifo, pause_at=2)
+    owner = ParentLifetime(
+        limits=LifetimeLimits(
+            cooperative_seconds=0.1,
+            term_seconds=0.1,
+            kill_observation_seconds=2.0,
+            drain_seconds=1.0,
+        ),
+        launcher=launcher,
+        recovery=CleanupReference(invocation_id=invocation_id),
+    )
+    loop = asyncio.get_running_loop()
+    deadline = owner.deadline()
+    while launcher.starts < 2:
+        if clock.monotonic_ns() >= deadline:
+            raise TimeoutError
+        wake: asyncio.Future[None] = loop.create_future()
+        loop.call_soon(wake.set_result, None)
+        await wake
+    helper = owner.mutations.helpers[-1]
+    if helper.identity is None:
+        raise RuntimeError("helper identity unavailable")
+    await channel.write_frame(helper.identity.model_dump_json().encode(), deadline)
+    if await channel.read_frame(deadline) != b"close":
+        raise ValueError("close control required")
+    report = await owner.close(None)
+    await channel.write_record(report.model_dump_json().encode(), deadline)
+    channel.close()
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(
+        stalled_recovery_parent(
+            Path(sys.argv[1]),
+            sys.argv[2],
+            int(sys.argv[3]),
+            int(sys.argv[4]),
+            int(sys.argv[5]),
+        )
+    )
+    sys.exit(1)

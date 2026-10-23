@@ -14,6 +14,7 @@ from kora.conformance.io_helper import (
     InstalledIOHelperLauncher,
     IOHelperLauncher,
     MutationResult,
+    OpenTreeMutation,
     PublishMutation,
     RemoveTreeMutation,
     open_claim,
@@ -61,7 +62,9 @@ async def entered_fifo(pid: int, observation: int, deadline: int, clock: Clock) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("effect", ["bootstrap", "tree", "refused", "failed_reply"])
+@pytest.mark.parametrize(
+    "effect", ["bootstrap", "tree", "refused", "failed_reply", "lost_tree_transfer"]
+)
 async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
     tmp_path: Path, effect: str
 ) -> None:
@@ -101,13 +104,18 @@ async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
         result = MutationResult.model_validate_json(
             await helper.channel.read_record(deadline, 1048576)
         )
-        if result.descriptor_count:
+        if effect == "lost_tree_transfer":
+            assert result.descriptor_count == 1
+            helper.channel.close()
+        elif result.descriptor_count:
             await helper.receive_descriptors(result.descriptor_count, deadline)
-            root_fd, invocation_fd, received_claim = helper.take_descriptors()
-            competitor = os.open(
-                "claim", os.O_RDWR | os.O_NOFOLLOW, dir_fd=invocation_fd
-            )
-            for descriptor in (root_fd, invocation_fd, received_claim):
+            received = helper.take_descriptors()
+            if effect == "bootstrap":
+                _root_fd, invocation_fd, _received_claim = received
+                competitor = os.open(
+                    "claim", os.O_RDWR | os.O_NOFOLLOW, dir_fd=invocation_fd
+                )
+            for descriptor in received:
                 os.close(descriptor)
     if effect != "bootstrap":
         competitor = os.open(
@@ -194,6 +202,22 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
         CreateTreeMutation(directory=invocation.identity, name="2" * 32), deadline
     )
     assert created.directory is not None
+    assert created.descriptor_count == 1
+    (child_descriptor,) = tree.take_descriptors()
+    child = DirectoryAnchor(child_descriptor, created.directory)
+    child.verify()
+    child.close()
+    opener = launcher.start((invocation_fd, claim), clock)
+    opened = await opener.execute(
+        OpenTreeMutation(directory=invocation.identity, target=created.directory),
+        deadline,
+    )
+    assert opened.directory == created.directory
+    assert opened.descriptor_count == 1
+    (reopened_descriptor,) = opener.take_descriptors()
+    reopened = DirectoryAnchor(reopened_descriptor, created.directory)
+    reopened.verify()
+    reopened.close()
     removal = launcher.start((invocation_fd, claim), clock)
     await removal.execute(
         RemoveTreeMutation(directory=invocation.identity, target=created.directory),
@@ -249,6 +273,9 @@ async def test_fixed_io_helper_acknowledges_actual_fifo_call_and_retains_claim(
         os.close(writer)
         result = await operation
         assert result.directory is not None
+        assert result.descriptor_count == 1
+        (transferred,) = helper.take_descriptors()
+        os.close(transferred)
     else:
         assert helper.signal(signal.SIGKILL)
         from kora.runner.channels import ChannelError

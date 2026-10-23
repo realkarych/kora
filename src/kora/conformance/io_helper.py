@@ -62,6 +62,12 @@ class CreateTreeMutation(BoundaryModel):
     name: InvocationId
 
 
+class OpenTreeMutation(BoundaryModel):
+    action: Literal["open_tree"] = "open_tree"
+    directory: DirectoryIdentity
+    target: DirectoryIdentity
+
+
 class RemoveTreeMutation(BoundaryModel):
     action: Literal["remove_tree"] = "remove_tree"
     directory: DirectoryIdentity
@@ -73,6 +79,7 @@ Mutation = Annotated[
     | RecoverMutation
     | PublishMutation
     | CreateTreeMutation
+    | OpenTreeMutation
     | RemoveTreeMutation,
     Field(discriminator="action"),
 ]
@@ -111,6 +118,7 @@ class IOHelper:
         )
         self.closed = False
         self.descriptors: tuple[int, ...] = ()
+        self.result: MutationResult | None = None
 
     async def execute(self, mutation: Mutation, deadline_ns: int) -> MutationResult:
         await self.channel.write_record(MUTATION.dump_json(mutation), deadline_ns)
@@ -125,6 +133,7 @@ class IOHelper:
             raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
         if result.reason is not LifetimeReason.COMPLETE:
             raise HelperError(result.reason)
+        self.result = result
         return result
 
     async def receive_descriptors(self, count: int, deadline_ns: int) -> None:
@@ -491,9 +500,18 @@ def mutate(
         ), ()
     if isinstance(mutation, CreateTreeMutation):
         child = create_directory(directory, mutation.name)
-        identity = child.identity
-        child.close()
-        return MutationResult(reason=LifetimeReason.COMPLETE, directory=identity), ()
+        return MutationResult(
+            reason=LifetimeReason.COMPLETE,
+            directory=child.identity,
+            descriptor_count=1,
+        ), (child.descriptor,)
+    if isinstance(mutation, OpenTreeMutation):
+        child = directory.open_child(mutation.target)
+        return MutationResult(
+            reason=LifetimeReason.COMPLETE,
+            directory=child.identity,
+            descriptor_count=1,
+        ), (child.descriptor,)
     remove_directory(directory, mutation.target)
     return MutationResult(reason=LifetimeReason.COMPLETE), ()
 
@@ -523,7 +541,12 @@ async def respond_mutation(
                 [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", returned))],
             )
     finally:
-        for descriptor in returned[:-1]:
+        releasable = (
+            returned[:-1]
+            if isinstance(mutation, (BootstrapMutation, RecoverMutation))
+            else returned
+        )
+        for descriptor in releasable:
             os.close(descriptor)
 
 
