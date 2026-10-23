@@ -1,12 +1,8 @@
 from collections.abc import Callable
-from typing import LiteralString
 
 from pydantic import BaseModel, ValidationError
 
-from kora.ir.errors import safe_field_errors
-from tests.ir.config_cases import CONFIG_FIELDS
-
-SAFE_MESSAGE: LiteralString = "the execution configuration is invalid"
+from tests.ir.support import configuration_errors
 
 
 def validate_config(
@@ -16,7 +12,7 @@ def validate_config(
         parsed = model.model_validate(document)
     except ValidationError as error:
         assert not valid
-        errors = safe_field_errors(error, CONFIG_FIELDS, SAFE_MESSAGE)
+        errors = configuration_errors(error)
         assert errors
         return errors
     assert valid

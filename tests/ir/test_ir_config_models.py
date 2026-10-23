@@ -12,13 +12,12 @@ from kora.ir import (
     NodeLimits,
     Workspace,
 )
-from kora.ir.errors import safe_field_errors
+from kora.ir.errors import PLACEHOLDER_LOCATION
 from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES
-from tests.ir.config_cases import CONFIG_FIELDS, DIGEST, MINIMAL, POPULATED, RESOURCE
-from tests.ir.support import nested
+from tests.ir.config_cases import DIGEST, MINIMAL, POPULATED, RESOURCE
+from tests.ir.support import CONFIG_ERROR_MESSAGE, configuration_errors, nested
 
 MARKER: str = "confidential-input-7319"
-SAFE_MESSAGE: str = "the execution configuration is invalid"
 ROUND_TRIPS: list[tuple[type[BaseModel], dict[str, object]]] = [
     *MINIMAL.items(),
     *POPULATED.items(),
@@ -259,14 +258,13 @@ SAFE_FAILURES: list[tuple[type[BaseModel], dict[str, object]]] = [
 def test_ir_config_errors_exclude_input_content(
     model: type[BaseModel], document: dict[str, object]
 ) -> None:
-    known = CONFIG_FIELDS
 
     with pytest.raises(ValidationError) as raised:
         model.model_validate(document)
-    safe = safe_field_errors(raised.value, known, SAFE_MESSAGE)
+    safe = configuration_errors(raised.value)
 
     assert MARKER not in repr(safe)
-    assert SAFE_MESSAGE in repr(safe)
+    assert CONFIG_ERROR_MESSAGE in repr(safe)
 
 
 @pytest.mark.parametrize("suffix", ["\n", "\r", "\r\n", "\v", "\f", "\x7f"])
@@ -311,7 +309,7 @@ def test_ir_config_models_reject_trailing_control_characters(
         failures.append(raised.value)
 
     for failure in failures:
-        safe = safe_field_errors(failure, CONFIG_FIELDS, SAFE_MESSAGE)
+        safe = configuration_errors(failure)
         assert safe
         assert all(
             value not in repr(safe) for value in (MARKER, alias, DIGEST, "7319s")
@@ -344,3 +342,45 @@ def test_ir_mcp_map_keys_preserve_unrestricted_strings() -> None:
     parsed = McpServer.model_validate(document)
 
     assert parsed.model_dump(mode="json", exclude_unset=True) == document
+
+
+@pytest.mark.parametrize("key", ["workspace", "type", "headers", "TOKEN", 7319, True])
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        (McpServer, "env"),
+        (McpServer, "headers"),
+        (McpServer, "secret_env"),
+        (CommandConfig, "env"),
+        (CommandConfig, "secret_env"),
+    ],
+)
+def test_ir_config_map_keys_never_become_safe_location_names(
+    model: type[BaseModel], field: str, key: str | int
+) -> None:
+    document = {**MINIMAL[model], field: {key: False}}
+
+    with pytest.raises(ValidationError) as raised:
+        model.model_validate(document)
+    raw = raised.value.errors(include_input=False, include_context=False)
+    safe = configuration_errors(raised.value)
+
+    assert safe
+    assert len(safe) == len(raw)
+    for filtered, original in zip(safe, raw, strict=True):
+        assert filtered.loc == tuple(PLACEHOLDER_LOCATION for _ in original["loc"])
+        assert filtered.type == original["type"]
+        assert filtered.msg == CONFIG_ERROR_MESSAGE
+
+
+def test_ir_config_safe_locations_redact_unproven_indexes() -> None:
+    document = {**MINIMAL[CommandConfig], "cmd": ["tool", False]}
+
+    with pytest.raises(ValidationError) as raised:
+        CommandConfig.model_validate(document)
+    safe = configuration_errors(raised.value)
+
+    assert len(safe) == 1
+    assert safe[0].loc == (PLACEHOLDER_LOCATION, PLACEHOLDER_LOCATION)
+    assert safe[0].type == "string_type"
+    assert safe[0].msg == CONFIG_ERROR_MESSAGE

@@ -59,6 +59,3 @@ POPULATED: dict[type[BaseModel], dict[str, object]] = {
         "vcs": "",
     },
 }
-CONFIG_FIELDS: frozenset[str] = frozenset(
-    key for document in POPULATED.values() for key in document
-)
