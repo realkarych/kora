@@ -1,5 +1,9 @@
 # Threat model
 
+IR structural evidence amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23. Actors, controls and deployment limitations are unchanged.
+
+The IR models and generated-schema checks under #218 provide structural evidence for TM-04 and TM-10, form/default/output-role preservation evidence for TM-08, and deterministic artifact and drift evidence for TM-12. Content exclusion in the test error projection provides evidence for TM-06/TM-07; public diagnostic conversion and bounded collection remain with the shared validator. These checks establish no namespace policy enforcement, saved execution identity, replay, authentication, webhook admission, publication or runtime isolation guarantee. Those controls retain their implementing owners and integration gates.
+
 VcsRef model amendment dated 2026-10-23: the project owner approved the #209 implementation plan and the exact typed-boundary evidence paragraph below. Existing threat actors, controls, remaining limitations and authority are unchanged.
 
 Retained dispatcher-history amendment dated 2026-10-23: the project owner approved the [contract plan and exact documentation wording](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702), [approval recorded](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030).

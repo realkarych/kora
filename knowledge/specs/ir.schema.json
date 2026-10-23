@@ -1,591 +1,2760 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://kora.dev/schemas/ir/1.0.json",
-  "title": "kora graph IR",
-  "description": "Draft JSON Schema for kora IR version 1.x. Root is lenient on unknown keys; typed sub-objects are strict. Keys prefixed with x- are allowed on IR record objects, including nested records. Named maps and embedded schemas retain their own rules.",
-  "type": "object",
-  "required": ["ir_version", "type_contracts", "graph", "runtime"],
-  "properties": {
-    "$schema": { "type": "string", "format": "uri" },
-    "ir_version": { "type": "string", "pattern": "^1\\.[0-9]+(?![\\s\\S])", "description": "IR format version (semver major.minor)" },
-    "meta": {
-      "type": "object",
-      "description": "Compiler provenance; never read by the scheduler",
-      "properties": {
-        "compiler": { "type": "string" },
-        "source_digest": { "$ref": "#/$defs/digest" },
-        "presets": { "type": "object", "additionalProperties": { "type": "object" } },
-        "defaults": { "type": "object" }
-      }
-    },
-    "type_contracts": {
-      "type": "object",
-      "description": "Authoritative used type closure. List[T] is derived from T. No runtime registry alias lookup.",
-      "propertyNames": {
-        "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*(?![\\s\\S])"
+  "$defs": {
+    "AgentConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
       },
-      "additionalProperties": {
-        "$ref": "#/$defs/typeContract"
-      }
-    },
-    "graph": { "$ref": "#/$defs/graph" },
-    "runtime": { "$ref": "#/$defs/runtimeSection" },
-    "secrets": {
-      "type": "object",
       "properties": {
-        "aliases": {
-          "type": "object",
-          "propertyNames": { "$ref": "#/$defs/envName" },
-          "additionalProperties": { "$ref": "#/$defs/secretRef" }
+        "harness": {
+          "pattern": "^[a-z][a-z0-9_]*(:[a-z0-9][a-z0-9_.-]*)?(?![\\s\\S])",
+          "title": "Harness",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "system_prompt_append": {
+          "title": "System Prompt Append",
+          "type": "string"
+        },
+        "skills": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Skills",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "subagents": {
+          "items": {
+            "$ref": "#/$defs/SubagentConfig"
+          },
+          "title": "Subagents",
+          "type": "array"
+        },
+        "hooks": {
+          "title": "Hooks",
+          "type": "object"
+        },
+        "mcp_servers": {
+          "additionalProperties": {
+            "$ref": "#/$defs/McpServer"
+          },
+          "title": "Mcp Servers",
+          "type": "object"
+        },
+        "tool_policy": {
+          "$ref": "#/$defs/ToolPolicy"
+        },
+        "permission_mode": {
+          "enum": [
+            "plan",
+            "accept_edits",
+            "dont_ask",
+            "bypass"
+          ],
+          "title": "Permission Mode",
+          "type": "string"
+        },
+        "sandbox": {
+          "enum": [
+            "read_only",
+            "workspace_write",
+            "full_access"
+          ],
+          "title": "Sandbox",
+          "type": "string"
+        },
+        "trust_repo_config": {
+          "title": "Trust Repo Config",
+          "type": "boolean"
+        },
+        "network_policy": {
+          "$ref": "#/$defs/NetworkPolicy"
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace"
+        },
+        "output_schema": {
+          "title": "Output Schema",
+          "type": "object"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "secret_env": {
+          "additionalProperties": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Secret Env",
+          "type": "object"
+        },
+        "runtime": {
+          "title": "Runtime",
+          "type": "string"
+        },
+        "vcs": {
+          "title": "Vcs",
+          "type": "string"
         }
       },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    }
-  },
-  "$defs": {
-    "typeBehavior": {
-      "type": "object",
+      "required": [
+        "harness",
+        "prompt",
+        "workspace"
+      ],
+      "title": "AgentConfig",
+      "type": "object"
+    },
+    "AgentNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "kind": {
+          "const": "agent",
+          "title": "Kind",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/OutputDecl"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "not": {
+                      "const": "AgentSession"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "properties": {
+            "session": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/OutputDecl"
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "AgentSession"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "required": [
+            "session"
+          ],
+          "title": "Outputs",
+          "type": "object"
+        },
+        "config": {
+          "$ref": "#/$defs/AgentConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "outputs",
+        "config"
+      ],
+      "title": "AgentNode",
+      "type": "object"
+    },
+    "BranchCase": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "when": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "When",
+          "type": "string"
+        },
+        "to": {
+          "items": {
+            "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "To",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "when",
+        "to"
+      ],
+      "title": "BranchCase",
+      "type": "object"
+    },
+    "BranchConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "cases": {
+          "items": {
+            "$ref": "#/$defs/BranchCase"
+          },
+          "minItems": 1,
+          "title": "Cases",
+          "type": "array"
+        },
+        "else": {
+          "items": {
+            "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Else",
+          "type": "array"
+        },
+        "else_reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Else Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cases"
+      ],
+      "title": "BranchConfig",
+      "type": "object"
+    },
+    "BranchNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutputDecl"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "object"
+        },
+        "kind": {
+          "const": "branch",
+          "title": "Kind",
+          "type": "string"
+        },
+        "config": {
+          "$ref": "#/$defs/BranchConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "config"
+      ],
+      "title": "BranchNode",
+      "type": "object"
+    },
+    "BuiltinTypeContract": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "builtin_revision": {
+          "minLength": 1,
+          "title": "Builtin Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "builtin_revision"
+      ],
+      "title": "BuiltinTypeContract",
+      "type": "object"
+    },
+    "CommandConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "cmd": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Cmd",
+          "type": "array"
+        },
+        "output_file": {
+          "title": "Output File",
+          "type": "string"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/CommandResource"
+          },
+          "maxItems": 64,
+          "title": "Resources",
+          "type": "array"
+        },
+        "resource_set_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
+          "title": "Resource Set Digest",
+          "type": "string"
+        },
+        "workspace": {
+          "$ref": "#/$defs/Workspace"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "secret_env": {
+          "additionalProperties": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Secret Env",
+          "type": "object"
+        },
+        "network_policy": {
+          "$ref": "#/$defs/NetworkPolicy"
+        },
+        "success_exit_codes": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Success Exit Codes",
+          "type": "array"
+        },
+        "runtime": {
+          "title": "Runtime",
+          "type": "string"
+        },
+        "vcs": {
+          "title": "Vcs",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd",
+        "workspace"
+      ],
+      "title": "CommandConfig",
+      "type": "object"
+    },
+    "CommandNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "kind": {
+          "const": "command",
+          "title": "Kind",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/OutputDecl"
+              },
+              {
+                "properties": {
+                  "type": {
+                    "not": {
+                      "const": "CommandResult"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "properties": {
+            "result": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/OutputDecl"
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "CommandResult"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "required": [
+            "result"
+          ],
+          "title": "Outputs",
+          "type": "object"
+        },
+        "config": {
+          "$ref": "#/$defs/CommandConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "outputs",
+        "config"
+      ],
+      "title": "CommandNode",
+      "type": "object"
+    },
+    "CommandResource": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "name": {
+          "pattern": "^(?!/)(?![\\s\\S]*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+(?![\\s\\S])",
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size": {
+          "maximum": 262144,
+          "minimum": 0,
+          "title": "Size",
+          "type": "integer"
+        },
+        "executable": {
+          "title": "Executable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "sha256",
+        "size",
+        "executable"
+      ],
+      "title": "CommandResource",
+      "type": "object"
+    },
+    "Concurrency": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "max_running_nodes": {
+          "minimum": 1,
+          "title": "Max Running Nodes",
+          "type": "integer"
+        },
+        "max_running_runs": {
+          "minimum": 1,
+          "title": "Max Running Runs",
+          "type": "integer"
+        }
+      },
+      "title": "Concurrency",
+      "type": "object"
+    },
+    "CronTrigger": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "kind": {
+          "const": "cron",
+          "title": "Kind",
+          "type": "string"
+        },
+        "expr": {
+          "title": "Expr",
+          "type": "string"
+        },
+        "timezone": {
+          "title": "Timezone",
+          "type": "string"
+        },
+        "params": {
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "expr"
+      ],
+      "title": "CronTrigger",
+      "type": "object"
+    },
+    "CustomTypeContract": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "schema": {
+          "properties": {
+            "$schema": {
+              "const": "https://json-schema.org/draft/2020-12/schema"
+            }
+          },
+          "required": [
+            "$schema"
+          ],
+          "title": "Schema",
+          "type": "object"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*(?![\\s\\S])",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parent"
+        },
+        "behavior": {
+          "$ref": "#/$defs/TypeBehavior"
+        }
+      },
+      "required": [
+        "schema",
+        "parent",
+        "behavior"
+      ],
+      "title": "CustomTypeContract",
+      "type": "object"
+    },
+    "ErrorClass": {
+      "enum": [
+        "harness_error",
+        "command_failed",
+        "timeout",
+        "events_exhausted",
+        "budget_exhausted",
+        "artifact_invalid",
+        "attempt_failed",
+        "approval_rejected",
+        "approval_expired",
+        "candidate_moved",
+        "wait_expired",
+        "stalled",
+        "provider_limited",
+        "protected_path_modified",
+        "secret_leak",
+        "integrity_error",
+        "infrastructure",
+        "cancelled",
+        "config_error"
+      ],
+      "title": "ErrorClass",
+      "type": "string"
+    },
+    "EventSelector": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "type": {
+          "enum": [
+            "webhook",
+            "graph"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "match": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Match",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "title": "EventSelector",
+      "type": "object"
+    },
+    "FanOutConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "body": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Body",
+          "type": "string"
+        },
+        "over": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Over",
+          "type": "string"
+        },
+        "max_parallel": {
+          "minimum": 1,
+          "title": "Max Parallel",
+          "type": "integer"
+        },
+        "skip_failures": {
+          "title": "Skip Failures",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "body",
+        "over"
+      ],
+      "title": "FanOutConfig",
+      "type": "object"
+    },
+    "FanOutNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutputDecl"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "object"
+        },
+        "kind": {
+          "const": "fan_out",
+          "title": "Kind",
+          "type": "string"
+        },
+        "config": {
+          "$ref": "#/$defs/FanOutConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "config"
+      ],
+      "title": "FanOutNode",
+      "type": "object"
+    },
+    "Graph": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "nodes": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "agent": "#/$defs/AgentNode",
+                "branch": "#/$defs/BranchNode",
+                "command": "#/$defs/CommandNode",
+                "fan_out": "#/$defs/FanOutNode",
+                "human_input": "#/$defs/HumanInputNode",
+                "subgraph": "#/$defs/SubgraphNode",
+                "timer": "#/$defs/TimerNode",
+                "wait_event": "#/$defs/WaitEventNode"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/AgentNode"
+              },
+              {
+                "$ref": "#/$defs/CommandNode"
+              },
+              {
+                "$ref": "#/$defs/HumanInputNode"
+              },
+              {
+                "$ref": "#/$defs/WaitEventNode"
+              },
+              {
+                "$ref": "#/$defs/TimerNode"
+              },
+              {
+                "$ref": "#/$defs/BranchNode"
+              },
+              {
+                "$ref": "#/$defs/FanOutNode"
+              },
+              {
+                "$ref": "#/$defs/SubgraphNode"
+              }
+            ]
+          },
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Nodes",
+          "type": "object"
+        },
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Id",
+          "type": "string"
+        },
+        "version": {
+          "title": "Version",
+          "type": "string"
+        },
+        "namespace": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Namespace",
+          "type": "string"
+        },
+        "params": {
+          "title": "Params",
+          "type": "object"
+        },
+        "triggers": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "cron": "#/$defs/CronTrigger",
+                "graph": "#/$defs/GraphTrigger",
+                "manual": "#/$defs/ManualTrigger",
+                "sensor": "#/$defs/SensorTrigger",
+                "webhook": "#/$defs/WebhookTrigger"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ManualTrigger"
+              },
+              {
+                "$ref": "#/$defs/CronTrigger"
+              },
+              {
+                "$ref": "#/$defs/WebhookTrigger"
+              },
+              {
+                "$ref": "#/$defs/SensorTrigger"
+              },
+              {
+                "$ref": "#/$defs/GraphTrigger"
+              }
+            ]
+          },
+          "title": "Triggers",
+          "type": "array"
+        },
+        "overlap": {
+          "enum": [
+            "allow",
+            "skip",
+            "queue"
+          ],
+          "title": "Overlap",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/TargetConfig"
+        },
+        "subgraphs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Subgraph"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Subgraphs",
+          "type": "object"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        }
+      },
+      "required": [
+        "nodes",
+        "id",
+        "namespace"
+      ],
+      "title": "Graph",
+      "type": "object"
+    },
+    "GraphTrigger": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "kind": {
+          "const": "graph",
+          "title": "Kind",
+          "type": "string"
+        },
+        "graph": {
+          "title": "Graph",
+          "type": "string"
+        },
+        "on": {
+          "enum": [
+            "run_succeeded",
+            "run_failed",
+            "run_finished"
+          ],
+          "title": "On",
+          "type": "string"
+        },
+        "params": {
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "graph",
+        "on"
+      ],
+      "title": "GraphTrigger",
+      "type": "object"
+    },
+    "HumanInputBinds": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "vcs_ref": {
+          "maxLength": 4096,
+          "title": "Vcs Ref",
+          "type": "string"
+        },
+        "gate_digests": {
+          "items": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "title": "Gate Digests",
+          "type": "array"
+        }
+      },
+      "title": "HumanInputBinds",
+      "type": "object"
+    },
+    "HumanInputConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "channel": {
+          "title": "Channel",
+          "type": "string"
+        },
+        "form": {
+          "default": {
+            "type": "object",
+            "properties": {
+              "decision": {
+                "enum": [
+                  "approve",
+                  "reject"
+                ],
+                "type": "string"
+              },
+              "comments": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "decision"
+            ],
+            "additionalProperties": false
+          },
+          "title": "Form",
+          "type": "object"
+        },
+        "timeout": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Timeout",
+          "type": "string"
+        },
+        "on_expiry": {
+          "enum": [
+            "fail",
+            "skip",
+            "default_value"
+          ],
+          "title": "On Expiry",
+          "type": "string"
+        },
+        "default_value": {
+          "title": "Default Value"
+        },
+        "binds": {
+          "$ref": "#/$defs/HumanInputBinds"
+        },
+        "approve_when": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Approve When",
+          "type": "string"
+        },
+        "context": {
+          "maxLength": 4096,
+          "title": "Context",
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel",
+        "timeout",
+        "on_expiry"
+      ],
+      "title": "HumanInputConfig",
+      "type": "object"
+    },
+    "HumanInputNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "kind": {
+          "const": "human_input",
+          "title": "Kind",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": false,
+          "properties": {
+            "response": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/OutputDecl"
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "StructuredOutput"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "required": [
+            "response"
+          ],
+          "title": "Outputs",
+          "type": "object"
+        },
+        "config": {
+          "$ref": "#/$defs/HumanInputConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "outputs",
+        "config"
+      ],
+      "title": "HumanInputNode",
+      "type": "object"
+    },
+    "InputRef": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "type": {
+          "pattern": "^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\\[(List\\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\\]+)(?![\\s\\S])",
+          "title": "Type",
+          "type": "string"
+        },
+        "from": {
+          "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])",
+          "title": "From",
+          "type": "string"
+        },
+        "output": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Output",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "title": "Path",
+          "type": "string"
+        },
+        "optional": {
+          "title": "Optional",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "InputRef",
+      "type": "object"
+    },
+    "IrSourceLocation": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "line": {
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ],
+      "title": "IrSourceLocation",
+      "type": "object"
+    },
+    "ManualTrigger": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "kind": {
+          "const": "manual",
+          "title": "Kind",
+          "type": "string"
+        },
+        "params": {
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "ManualTrigger",
+      "type": "object"
+    },
+    "McpServer": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "type": {
+          "enum": [
+            "stdio",
+            "http"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Env",
+          "type": "object"
+        },
+        "secret_env": {
+          "additionalProperties": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Secret Env",
+          "type": "object"
+        },
+        "network_policy": {
+          "$ref": "#/$defs/NetworkPolicy"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Headers",
+          "type": "object"
+        },
+        "digest": {
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
+          "title": "Digest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "McpServer",
+      "type": "object"
+    },
+    "NetworkPolicy": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "egress": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Egress",
+          "type": "array"
+        }
+      },
+      "title": "NetworkPolicy",
+      "type": "object"
+    },
+    "NodeLimits": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "timeout": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Timeout",
+          "type": "string"
+        },
+        "max_events": {
+          "maximum": 100000,
+          "minimum": 1,
+          "title": "Max Events",
+          "type": "integer"
+        },
+        "budget_usd": {
+          "exclusiveMinimum": 0,
+          "title": "Budget Usd",
+          "type": "number"
+        },
+        "stall_after": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Stall After",
+          "type": "string"
+        }
+      },
+      "title": "NodeLimits",
+      "type": "object"
+    },
+    "OutputDecl": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "type": {
+          "pattern": "^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\\[(List\\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\\]+)(?![\\s\\S])",
+          "title": "Type",
+          "type": "string"
+        },
+        "schema": {
+          "title": "Schema",
+          "type": "object"
+        },
+        "collect": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Collect",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "OutputDecl",
+      "type": "object"
+    },
+    "OutputTarget": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "from": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "From",
+          "type": "string"
+        },
+        "output": {
+          "minLength": 1,
+          "title": "Output",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "output",
+        "path"
+      ],
+      "title": "OutputTarget",
+      "type": "object"
+    },
+    "ParameterTarget": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "param": {
+          "minLength": 1,
+          "title": "Param",
+          "type": "string"
+        }
+      },
+      "required": [
+        "param"
+      ],
+      "title": "ParameterTarget",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": true,
+      "properties": {
+        "compiler": {
+          "title": "Compiler",
+          "type": "string"
+        },
+        "source_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])",
+          "title": "Source Digest",
+          "type": "string"
+        },
+        "presets": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "title": "Presets",
+          "type": "object"
+        },
+        "defaults": {
+          "title": "Defaults",
+          "type": "object"
+        }
+      },
+      "title": "Provenance",
+      "type": "object"
+    },
+    "ProviderRetry": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "max_wait": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Max Wait",
+          "type": "string"
+        }
+      },
+      "title": "ProviderRetry",
+      "type": "object"
+    },
+    "Retention": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "transcripts": {
+          "pattern": "^([0-9]+d|forever)(?![\\s\\S])",
+          "title": "Transcripts",
+          "type": "string"
+        },
+        "artifact_payloads": {
+          "pattern": "^([0-9]+d|forever)(?![\\s\\S])",
+          "title": "Artifact Payloads",
+          "type": "string"
+        }
+      },
+      "title": "Retention",
+      "type": "object"
+    },
+    "Retry": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "max_attempts": {
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "initial_interval": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Initial Interval",
+          "type": "string"
+        },
+        "backoff_coefficient": {
+          "minimum": 1,
+          "title": "Backoff Coefficient",
+          "type": "number"
+        },
+        "max_interval": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Max Interval",
+          "type": "string"
+        },
+        "retry_on": {
+          "items": {
+            "$ref": "#/$defs/ErrorClass"
+          },
+          "title": "Retry On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "non_retryable": {
+          "items": {
+            "$ref": "#/$defs/ErrorClass"
+          },
+          "title": "Non Retryable",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "predicate": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Predicate",
+          "type": "string"
+        },
+        "strategy": {
+          "enum": [
+            "fresh",
+            "resume",
+            "fresh_with_feedback"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        }
+      },
+      "title": "Retry",
+      "type": "object"
+    },
+    "RuntimeSection": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "runtime": {
+          "title": "Runtime",
+          "type": "string"
+        },
+        "vcs": {
+          "title": "Vcs",
+          "type": "string"
+        },
+        "artifact_storage": {
+          "title": "Artifact Storage",
+          "type": "string"
+        },
+        "approval_channels": {
+          "additionalProperties": {
+            "type": "object"
+          },
+          "title": "Approval Channels",
+          "type": "object"
+        },
+        "concurrency": {
+          "$ref": "#/$defs/Concurrency"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "budget_headroom_pct": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Budget Headroom Pct",
+          "type": "number"
+        },
+        "stall_after": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Stall After",
+          "type": "string"
+        },
+        "retention": {
+          "$ref": "#/$defs/Retention"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "infrastructure_retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "provider_retry": {
+          "$ref": "#/$defs/ProviderRetry"
+        }
+      },
+      "required": [
+        "runtime",
+        "vcs"
+      ],
+      "title": "RuntimeSection",
+      "type": "object"
+    },
+    "SecretsSection": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "aliases": {
+          "additionalProperties": {
+            "pattern": "^secret://[a-z][a-z0-9_-]*/[A-Za-z0-9_./-]+(?![\\s\\S])",
+            "type": "string"
+          },
+          "propertyNames": {
+            "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "object"
+        }
+      },
+      "title": "SecretsSection",
+      "type": "object"
+    },
+    "SensorPoll": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "sensor": {
+          "pattern": "^[a-z][a-z0-9_]*(?![\\s\\S])",
+          "title": "Sensor",
+          "type": "string"
+        },
+        "config": {
+          "title": "Config",
+          "type": "object"
+        },
+        "until": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Until",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sensor",
+        "until"
+      ],
+      "title": "SensorPoll",
+      "type": "object"
+    },
+    "SensorTrigger": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "kind": {
+          "const": "sensor",
+          "title": "Kind",
+          "type": "string"
+        },
+        "poll": {
+          "$ref": "#/$defs/SensorPoll"
+        },
+        "interval": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Interval",
+          "type": "string"
+        },
+        "params": {
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "poll",
+        "interval"
+      ],
+      "title": "SensorTrigger",
+      "type": "object"
+    },
+    "SubagentConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "prompt": {
+          "title": "Prompt",
+          "type": "string"
+        },
+        "tools": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "prompt"
+      ],
+      "title": "SubagentConfig",
+      "type": "object"
+    },
+    "Subgraph": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "nodes": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "agent": "#/$defs/AgentNode",
+                "branch": "#/$defs/BranchNode",
+                "command": "#/$defs/CommandNode",
+                "fan_out": "#/$defs/FanOutNode",
+                "human_input": "#/$defs/HumanInputNode",
+                "subgraph": "#/$defs/SubgraphNode",
+                "timer": "#/$defs/TimerNode",
+                "wait_event": "#/$defs/WaitEventNode"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/AgentNode"
+              },
+              {
+                "$ref": "#/$defs/CommandNode"
+              },
+              {
+                "$ref": "#/$defs/HumanInputNode"
+              },
+              {
+                "$ref": "#/$defs/WaitEventNode"
+              },
+              {
+                "$ref": "#/$defs/TimerNode"
+              },
+              {
+                "$ref": "#/$defs/BranchNode"
+              },
+              {
+                "$ref": "#/$defs/FanOutNode"
+              },
+              {
+                "$ref": "#/$defs/SubgraphNode"
+              }
+            ]
+          },
+          "minProperties": 1,
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Nodes",
+          "type": "object"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutputDecl"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SubgraphOutput"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "object"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        }
+      },
+      "required": [
+        "nodes"
+      ],
+      "title": "Subgraph",
+      "type": "object"
+    },
+    "SubgraphNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutputDecl"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "object"
+        },
+        "kind": {
+          "const": "subgraph",
+          "title": "Kind",
+          "type": "string"
+        },
+        "config": {
+          "$ref": "#/$defs/SubgraphNodeConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "config"
+      ],
+      "title": "SubgraphNode",
+      "type": "object"
+    },
+    "SubgraphNodeConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "body": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Body",
+          "type": "string"
+        }
+      },
+      "required": [
+        "body"
+      ],
+      "title": "SubgraphNodeConfig",
+      "type": "object"
+    },
+    "SubgraphOutput": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "type": {
+          "pattern": "^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\\[(List\\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\\]+)(?![\\s\\S])",
+          "title": "Type",
+          "type": "string"
+        },
+        "from": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "From",
+          "type": "string"
+        },
+        "output": {
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Output",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "from",
+        "output"
+      ],
+      "title": "SubgraphOutput",
+      "type": "object"
+    },
+    "TargetConfig": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ParameterTarget"
+            },
+            {
+              "$ref": "#/$defs/OutputTarget"
+            }
+          ],
+          "title": "Key"
+        },
+        "on_active": {
+          "enum": [
+            "allow",
+            "defer"
+          ],
+          "title": "On Active",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "title": "TargetConfig",
+      "type": "object"
+    },
+    "TimerConfig": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "duration"
+          ]
+        },
+        {
+          "required": [
+            "at"
+          ]
+        }
+      ],
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "duration": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Duration",
+          "type": "string"
+        },
+        "at": {
+          "format": "date-time",
+          "pattern": "^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,6})?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\\s\\S])",
+          "title": "At",
+          "type": "string"
+        }
+      },
+      "title": "TimerConfig",
+      "type": "object"
+    },
+    "TimerNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/OutputDecl"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "object"
+        },
+        "kind": {
+          "const": "timer",
+          "title": "Kind",
+          "type": "string"
+        },
+        "config": {
+          "$ref": "#/$defs/TimerConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "config"
+      ],
+      "title": "TimerNode",
+      "type": "object"
+    },
+    "ToolPolicy": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "allow": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allow",
+          "type": "array"
+        },
+        "deny": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Deny",
+          "type": "array"
+        }
+      },
+      "title": "ToolPolicy",
+      "type": "object"
+    },
+    "TypeBehavior": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "validation": {
+          "minLength": 1,
+          "title": "Validation",
+          "type": "string"
+        },
+        "digest_fields": {
+          "minLength": 1,
+          "title": "Digest Fields",
+          "type": "string"
+        },
+        "summary": {
+          "minLength": 1,
+          "title": "Summary",
+          "type": "string"
+        }
+      },
       "required": [
         "validation",
         "digest_fields",
         "summary"
       ],
-      "properties": {
-        "validation": {
-          "type": "string",
-          "minLength": 1
-        },
-        "digest_fields": {
-          "type": "string",
-          "minLength": 1
-        },
-        "summary": {
-          "type": "string",
-          "minLength": 1
-        }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
+      "title": "TypeBehavior",
+      "type": "object"
     },
-    "typeContract": {
+    "WaitEventConfig": {
+      "additionalProperties": false,
       "oneOf": [
         {
-          "type": "object",
           "required": [
-            "builtin_revision"
-          ],
-          "properties": {
-            "builtin_revision": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "patternProperties": { "^x-": {} },
-          "additionalProperties": false
-        },
-        {
-          "type": "object",
-          "required": [
-            "schema",
-            "parent",
-            "behavior"
-          ],
-          "properties": {
-            "schema": {
-              "type": "object",
-              "required": [
-                "$schema"
-              ],
-              "properties": {
-                "$schema": {
-                  "const": "https://json-schema.org/draft/2020-12/schema"
-                }
-              }
-            },
-            "parent": {
-              "oneOf": [
-                {
-                  "type": "null"
-                },
-                {
-                  "type": "string",
-                  "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*(?![\\s\\S])"
-                }
-              ]
-            },
-            "behavior": {
-              "$ref": "#/$defs/typeBehavior"
-            }
-          },
-          "patternProperties": { "^x-": {} },
-          "additionalProperties": false
-        }
-      ]
-    },
-    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])" },
-    "envName": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])" },
-    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])" },
-    "duration": { "type": "string", "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])" },
-    "retentionPeriod": { "type": "string", "pattern": "^([0-9]+d|forever)(?![\\s\\S])" },
-    "retention": {
-      "type": "object",
-      "description": "Graph-level retention; absent fields take the namespace default. Cleanup deletes payloads only; metadata stays.",
-      "properties": {
-        "transcripts": { "$ref": "#/$defs/retentionPeriod" },
-        "artifact_payloads": { "$ref": "#/$defs/retentionPeriod" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "expression": { "type": "string", "minLength": 1, "maxLength": 4096, "description": "CEL expression; limits and checking in ir.md section 7" },
-    "secretRef": { "type": "string", "pattern": "^secret://[a-z][a-z0-9_-]*/[A-Za-z0-9_./-]+(?![\\s\\S])" },
-    "artifactType": {"type": "string", "pattern": "^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\\[(List\\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\\]+)(?![\\s\\S])", "description": "Structural spelling only. Semantic validation parses recursive List[T] and rejects unbalanced nesting without imposing a depth limit."},
-    "errorClass": {
-      "type": "string",
-      "enum": ["harness_error", "command_failed", "timeout", "events_exhausted", "budget_exhausted",
-               "artifact_invalid", "attempt_failed", "approval_rejected", "approval_expired", "candidate_moved", "wait_expired",
-               "stalled", "provider_limited", "protected_path_modified", "secret_leak", "integrity_error", "infrastructure", "cancelled", "config_error"]
-    },
-    "triggerRule": {
-      "type": "string",
-      "enum": ["all_success", "all_done", "one_success", "one_failed", "none_failed", "all_skipped", "none_failed_min_one_success"]
-    },
-    "sourceLocation": {
-      "type": "object",
-      "required": ["file", "line"],
-      "properties": { "file": { "type": "string" }, "line": { "type": "integer", "minimum": 1 } },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "retry": {
-      "type": "object",
-      "properties": {
-        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "initial_interval": { "$ref": "#/$defs/duration" },
-        "backoff_coefficient": { "type": "number", "minimum": 1 },
-        "max_interval": { "$ref": "#/$defs/duration" },
-        "retry_on": { "type": "array", "items": { "$ref": "#/$defs/errorClass" }, "uniqueItems": true },
-        "non_retryable": { "type": "array", "items": { "$ref": "#/$defs/errorClass" }, "uniqueItems": true },
-        "predicate": { "$ref": "#/$defs/expression" },
-        "strategy": { "type": "string", "enum": ["fresh", "resume", "fresh_with_feedback"] }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "limits": {
-      "type": "object",
-      "properties": {
-        "timeout": { "$ref": "#/$defs/duration" },
-        "max_events": { "type": "integer", "minimum": 1, "maximum": 100000 },
-        "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
-        "stall_after": { "$ref": "#/$defs/duration" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "inputRef": {
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type": { "$ref": "#/$defs/artifactType" },
-        "from": { "type": "string", "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])" },
-        "output": { "$ref": "#/$defs/id" },
-        "path": { "type": "string", "maxLength": 4096, "description": "dotted path into the source artifact or params; for $inputs the subgraph input name" },
-        "optional": { "type": "boolean" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "outputDecl": {
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type": { "$ref": "#/$defs/artifactType" },
-        "schema": { "type": "object", "description": "JSON Schema of the payload for StructuredOutput and custom types" },
-        "collect": { "$ref": "#/$defs/id", "description": "fan_out nodes only: the body output collected into this List output" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "toolPolicy": {
-      "type": "object",
-      "description": "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns in the harness tool-pattern syntax, evaluated per layer together with the namespace policy: a deny in either layer wins, every layer with a non-empty allow list must match, and order inside an array has no effect",
-      "properties": {
-        "allow": { "type": "array", "items": { "type": "string" } },
-        "deny": { "type": "array", "items": { "type": "string" } }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "mcpServer": {
-      "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type": { "type": "string", "enum": ["stdio", "http"] },
-        "command": { "type": "string" },
-        "args": { "type": "array", "items": { "type": "string" } },
-        "url": { "type": "string" },
-        "env": { "type": "object", "additionalProperties": { "type": "string" } },
-        "secret_env": { "type": "object", "additionalProperties": { "$ref": "#/$defs/envName" } },
-        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "patternProperties": {"^x-": {}}, "additionalProperties": false },
-        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-        "digest": { "$ref": "#/$defs/digest", "description": "package or image digest the server is pinned to; filled at deploy when absent" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "workspace": {
-      "type": "object",
-      "required": ["repo"],
-      "properties": {
-        "repo": { "type": "string" },
-        "rev": { "type": "string", "description": "revision or template expression" },
-        "from_ref": { "type": "string", "maxLength": 4096, "description": "input path of a VcsRef to check out instead of rev" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "agentConfig": {
-      "type": "object",
-      "required": ["harness", "prompt", "workspace"],
-      "properties": {
-        "harness": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(:[a-z0-9][a-z0-9_.-]*)?(?![\\s\\S])", "description": "Harness adapter name (claude, codex in MVP); the form acp:<agent> is reserved for the ACP adapter after MVP and fails semantic validation with IR018 until that adapter is installed (ADR-0004)" },
-        "model": { "type": "string" },
-        "prompt": { "type": "string" },
-        "system_prompt_append": { "type": "string" },
-        "skills": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
-        "subagents": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["name", "description", "prompt"],
-            "properties": {
-              "name": { "type": "string" },
-              "description": { "type": "string" },
-              "prompt": { "type": "string" },
-              "tools": { "type": "array", "items": { "type": "string" } }
-            },
-            "patternProperties": { "^x-": {} },
-            "additionalProperties": false
-          }
-        },
-        "hooks": { "type": "object" },
-        "mcp_servers": { "type": "object", "additionalProperties": { "$ref": "#/$defs/mcpServer" } },
-        "tool_policy": { "$ref": "#/$defs/toolPolicy" },
-        "permission_mode": { "type": "string", "enum": ["plan", "accept_edits", "dont_ask", "bypass"] },
-        "sandbox": { "type": "string", "enum": ["read_only", "workspace_write", "full_access"] },
-        "trust_repo_config": { "type": "boolean" },
-        "network_policy": {
-          "type": "object",
-          "properties": { "egress": { "type": "array", "items": { "type": "string" } } },
-          "patternProperties": { "^x-": {} },
-          "additionalProperties": false
-        },
-        "workspace": { "$ref": "#/$defs/workspace" },
-        "output_schema": { "type": "object" },
-        "env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "type": "string" } },
-        "secret_env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "$ref": "#/$defs/envName" } },
-        "runtime": { "type": "string" },
-        "vcs": { "type": "string" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "commandConfig": {
-      "type": "object",
-      "required": ["cmd", "workspace"],
-      "properties": {
-        "cmd": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-        "output_file": { "type": "string" },
-        "resources": { "type": "array", "maxItems": 64, "items": { "type": "object", "required": ["name", "sha256", "size", "executable"], "properties": { "name": { "type": "string", "pattern": "^(?!/)(?![\\s\\S]*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+(?![\\s\\S])" }, "sha256": { "$ref": "#/$defs/digest" }, "size": { "type": "integer", "minimum": 0, "maximum": 262144 }, "executable": { "type": "boolean" } }, "patternProperties": {"^x-": {}}, "additionalProperties": false } },
-        "resource_set_digest": { "$ref": "#/$defs/digest" },
-        "workspace": { "$ref": "#/$defs/workspace" },
-        "env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "type": "string" } },
-        "secret_env": { "type": "object", "propertyNames": { "$ref": "#/$defs/envName" }, "additionalProperties": { "$ref": "#/$defs/envName" } },
-        "network_policy": { "type": "object", "properties": { "egress": { "type": "array", "items": { "type": "string" } } }, "patternProperties": {"^x-": {}}, "additionalProperties": false },
-        "success_exit_codes": { "type": "array", "items": { "type": "integer" } },
-        "runtime": { "type": "string" },
-        "vcs": { "type": "string" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "humanInputConfig": {
-      "type": "object",
-      "required": ["channel", "timeout", "on_expiry"],
-      "properties": {
-        "channel": { "type": "string" },
-        "form": {"type": "object", "default": {"type": "object", "properties": {"decision": {"type": "string", "enum": ["approve", "reject"]}, "comments": {"type": "string"}}, "required": ["decision"], "additionalProperties": false}, "description": "Absent selects the built-in decision/comments form. An explicit schema is preserved; response values are never filled from schema defaults."},
-        "timeout": { "$ref": "#/$defs/duration" },
-        "on_expiry": { "type": "string", "enum": ["fail", "skip", "default_value"] },
-        "default_value": {},
-        "binds": {
-          "type": "object",
-          "properties": {
-            "vcs_ref": { "type": "string", "maxLength": 4096 },
-            "gate_digests": { "type": "array", "items": { "type": "string", "maxLength": 4096 } }
-          },
-          "patternProperties": { "^x-": {} },
-          "additionalProperties": false
-        },
-        "approve_when": {"$ref": "#/$defs/expression", "description": "When absent, response.decision == 'approve' applies only when the effective form declares decision and the expression passes CEL checking; otherwise IR011. Explicit expressions are preserved."},
-        "context": { "type": "string", "maxLength": 4096, "description": "input path of the artifact shown to the approver, e.g. a ReviewBundle" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "waitEventConfig": {
-      "type": "object",
-      "required": ["timeout", "on_expiry"],
-      "oneOf": [ { "required": ["event"] }, { "required": ["poll"] } ],
-      "properties": {
-        "event": {
-          "type": "object",
-          "required": ["type", "name"],
-          "properties": {
-            "type": { "type": "string", "enum": ["webhook", "graph"] },
-            "name": { "type": "string" },
-            "match": { "$ref": "#/$defs/expression" }
-          },
-          "patternProperties": { "^x-": {} },
-          "additionalProperties": false
-        },
-        "poll": { "$ref": "#/$defs/sensorPoll" },
-        "interval": { "$ref": "#/$defs/duration" },
-        "timeout": { "$ref": "#/$defs/duration" },
-        "on_expiry": { "type": "string", "enum": ["fail", "skip"] }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "sensorPoll": {
-      "type": "object",
-      "required": ["sensor", "until"],
-      "properties": {
-        "sensor": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(?![\\s\\S])", "description": "sensor protocol implementation name; built-ins: change_request_status, ci_status, http" },
-        "config": { "type": "object", "description": "sensor-specific configuration, validated by the implementation" },
-        "until": { "$ref": "#/$defs/expression" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "timerConfig": {
-      "type": "object",
-      "oneOf": [ { "required": ["duration"] }, { "required": ["at"] } ],
-      "properties": {
-        "duration": { "$ref": "#/$defs/duration" },
-        "at": { "type": "string", "format": "date-time", "pattern": "^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,6})?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\\s\\S])", "description": "absolute wake time; no expressions" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "branchConfig": {
-      "type": "object",
-      "required": ["cases"],
-      "properties": {
-        "cases": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "required": ["when", "to"],
-            "properties": {
-              "when": { "$ref": "#/$defs/expression" },
-              "to": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])" }, "minItems": 1 },
-              "reason": { "$ref": "#/$defs/expression" }
-            },
-            "patternProperties": { "^x-": {} },
-            "additionalProperties": false
-          }
-        },
-        "else": { "type": "array", "items": { "type": "string", "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])" } },
-        "else_reason": { "$ref": "#/$defs/expression" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "fanOutConfig": {
-      "type": "object",
-      "required": ["body", "over"],
-      "properties": {
-        "body": { "$ref": "#/$defs/id" },
-        "over": { "$ref": "#/$defs/id", "description": "name of the node input (List typed) that is mapped; other inputs are bound unchanged to every instance" },
-        "max_parallel": { "type": "integer", "minimum": 1 },
-        "skip_failures": { "type": "boolean" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "subgraphNodeConfig": {
-      "type": "object",
-      "required": ["body"],
-      "properties": {
-        "body": { "$ref": "#/$defs/id" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "node": {
-      "type": "object",
-      "required": ["kind"],
-      "properties": {
-        "kind": { "type": "string", "enum": ["agent", "command", "human_input", "wait_event", "timer", "branch", "fan_out", "subgraph"] },
-        "description": { "type": "string" },
-        "source": { "$ref": "#/$defs/sourceLocation" },
-        "inputs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/inputRef" } },
-        "outputs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/outputDecl" } },
-        "depends_on": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
-        "trigger_rule": { "$ref": "#/$defs/triggerRule" },
-        "retry": { "$ref": "#/$defs/retry" },
-        "limits": { "$ref": "#/$defs/limits" },
-        "attempt_invariant": { "type": "boolean" },
-        "independent_of": { "type": "array", "items": { "$ref": "#/$defs/id" } },
-        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "node-level addition to runtime.protected_paths (DD-34)" },
-        "preset": { "type": "string", "description": "preset id the resolved config was built from" },
-        "config": { "type": "object" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false,
-      "allOf": [
-        {"if": {"properties": {"kind": {"const": "agent"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/agentConfig"}, "outputs": {"required": ["session"], "properties": {"session": {"properties": {"type": {"const": "AgentSession"}}}}, "additionalProperties": {"properties": {"type": {"not": {"const": "AgentSession"}}}}, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
-        {"if": {"properties": {"kind": {"const": "command"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/commandConfig"}, "outputs": {"required": ["result"], "properties": {"result": {"properties": {"type": {"const": "CommandResult"}}}}, "additionalProperties": {"properties": {"type": {"not": {"const": "CommandResult"}}}}, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
-        {"if": {"properties": {"kind": {"const": "human_input"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/humanInputConfig"}, "outputs": {"required": ["response"], "properties": {"response": {"properties": {"type": {"const": "StructuredOutput"}}}}, "additionalProperties": false, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
-        {"if": {"properties": {"kind": {"const": "wait_event"}}}, "then": {"required": ["config", "outputs"], "properties": {"config": {"$ref": "#/$defs/waitEventConfig"}, "outputs": {"required": ["event"], "properties": {"event": {"properties": {"type": {"const": "StructuredOutput"}}}}, "additionalProperties": false, "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."}}}},
-        { "if": { "properties": { "kind": { "const": "timer" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/timerConfig" } } } },
-        { "if": { "properties": { "kind": { "const": "branch" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/branchConfig" } } } },
-        { "if": { "properties": { "kind": { "const": "fan_out" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/fanOutConfig" } } } },
-        { "if": { "properties": { "kind": { "const": "subgraph" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/subgraphNodeConfig" } } } }
-      ]
-    },
-    "trigger": {
-      "type": "object",
-      "required": ["kind"],
-      "allOf": [
-        {"if": {"properties": {"kind": {"const": "manual"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params"]}, {"pattern": "^x-"}]}}},
-        {"if": {"properties": {"kind": {"const": "cron"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "expr", "timezone"]}, {"pattern": "^x-"}]}, "required": ["expr"]}},
-        {"if": {"properties": {"kind": {"const": "webhook"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "name", "auth", "params_from"]}, {"pattern": "^x-"}]}, "required": ["name", "auth"]}},
-        {"if": {"properties": {"kind": {"const": "sensor"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "poll", "interval"]}, {"pattern": "^x-"}]}, "required": ["poll", "interval"]}},
-        {"if": {"properties": {"kind": {"const": "graph"}}}, "then": {"propertyNames": {"anyOf": [{"enum": ["kind", "params", "graph", "on"]}, {"pattern": "^x-"}]}, "required": ["graph", "on"]}}
-      ],
-      "properties": {
-        "kind": { "type": "string", "enum": ["manual", "cron", "webhook", "sensor", "graph"] },
-        "expr": { "type": "string" },
-        "timezone": { "type": "string" },
-        "name": { "type": "string" },
-        "auth": {
-          "type": "object",
-          "required": ["kind", "secret"],
-          "properties": {
-            "kind": { "type": "string", "enum": ["hmac", "bearer"] },
-            "secret": { "$ref": "#/$defs/envName" }
-          },
-          "patternProperties": { "^x-": {} },
-          "additionalProperties": false
-        },
-        "params_from": { "type": "string", "enum": ["payload", "none"] },
-        "params": { "type": "object" },
-        "poll": { "$ref": "#/$defs/sensorPoll" },
-        "interval": { "$ref": "#/$defs/duration" },
-        "graph": { "type": "string" },
-        "on": { "type": "string", "enum": ["run_succeeded", "run_failed", "run_finished"] }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "targetConfig": {
-      "type": "object",
-      "required": ["key"],
-      "properties": {
-        "key": {
-          "oneOf": [
-            { "type": "object", "required": ["param"], "properties": { "param": { "type": "string", "minLength": 1, "description": "a run parameter of graph.params; bound when the run is created" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false },
-            { "type": "object", "required": ["from", "output", "path"], "properties": { "from": { "$ref": "#/$defs/id" }, "output": { "type": "string", "minLength": 1 }, "path": { "type": "string", "minLength": 1, "maxLength": 4096, "description": "one scalar string in a top-level node output; key binds once when the complete source result is atomically accepted (ADR-0019)" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false }
+            "event"
           ]
         },
-        "on_active": { "type": "string", "enum": ["allow", "defer"], "description": "what a new run does while another run of the namespace holds the same target; when absent: allow (FR-6.11, ADR-0014)" }
+        {
+          "required": [
+            "poll"
+          ]
+        }
+      ],
+      "patternProperties": {
+        "^x-": {}
       },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
-    },
-    "graphBody": {
-      "type": "object",
-      "required": ["nodes"],
       "properties": {
-        "description": { "type": "string" },
-        "nodes": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/node" }, "minProperties": 1 }
-      }
-    },
-    "subgraph": {
-      "allOf": [ { "$ref": "#/$defs/graphBody" } ],
-      "properties": {
-        "description": {},
-        "nodes": {},
-        "inputs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/outputDecl" } },
-        "outputs": {
-          "type": "object",
-          "propertyNames": { "$ref": "#/$defs/id" },
-          "additionalProperties": {
-            "type": "object",
-            "required": ["type", "from", "output"],
-            "properties": { "type": { "$ref": "#/$defs/artifactType" }, "from": { "$ref": "#/$defs/id" }, "output": { "$ref": "#/$defs/id" } },
-            "patternProperties": { "^x-": {} },
-            "additionalProperties": false
-          }
+        "event": {
+          "$ref": "#/$defs/EventSelector"
         },
-        "retry": { "$ref": "#/$defs/retry" },
-        "limits": { "$ref": "#/$defs/limits" },
-        "source": { "$ref": "#/$defs/sourceLocation" }
+        "poll": {
+          "$ref": "#/$defs/SensorPoll"
+        },
+        "interval": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Interval",
+          "type": "string"
+        },
+        "timeout": {
+          "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])",
+          "title": "Timeout",
+          "type": "string"
+        },
+        "on_expiry": {
+          "enum": [
+            "fail",
+            "skip"
+          ],
+          "title": "On Expiry",
+          "type": "string"
+        }
       },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
+      "required": [
+        "timeout",
+        "on_expiry"
+      ],
+      "title": "WaitEventConfig",
+      "type": "object"
+    },
+    "WaitEventNode": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/IrSourceLocation"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/InputRef"
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "object"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "trigger_rule": {
+          "enum": [
+            "all_success",
+            "all_done",
+            "one_success",
+            "one_failed",
+            "none_failed",
+            "all_skipped",
+            "none_failed_min_one_success"
+          ],
+          "title": "Trigger Rule",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retry"
+        },
+        "limits": {
+          "$ref": "#/$defs/NodeLimits"
+        },
+        "attempt_invariant": {
+          "title": "Attempt Invariant",
+          "type": "boolean"
+        },
+        "independent_of": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "title": "Independent Of",
+          "type": "array"
+        },
+        "protected_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Protected Paths",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        },
+        "kind": {
+          "const": "wait_event",
+          "title": "Kind",
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": false,
+          "properties": {
+            "event": {
+              "allOf": [
+                {
+                  "$ref": "#/$defs/OutputDecl"
+                },
+                {
+                  "properties": {
+                    "type": {
+                      "const": "StructuredOutput"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "propertyNames": {
+            "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])",
+            "type": "string"
+          },
+          "required": [
+            "event"
+          ],
+          "title": "Outputs",
+          "type": "object"
+        },
+        "config": {
+          "$ref": "#/$defs/WaitEventConfig"
+        }
+      },
+      "required": [
+        "kind",
+        "outputs",
+        "config"
+      ],
+      "title": "WaitEventNode",
+      "type": "object"
+    },
+    "WebhookAuth": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "kind": {
+          "enum": [
+            "hmac",
+            "bearer"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "secret": {
+          "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])",
+          "title": "Secret",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "secret"
+      ],
+      "title": "WebhookAuth",
+      "type": "object"
+    },
+    "WebhookTrigger": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "kind": {
+          "const": "webhook",
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "auth": {
+          "$ref": "#/$defs/WebhookAuth"
+        },
+        "params_from": {
+          "enum": [
+            "payload",
+            "none"
+          ],
+          "title": "Params From",
+          "type": "string"
+        },
+        "params": {
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "auth"
+      ],
+      "title": "WebhookTrigger",
+      "type": "object"
+    },
+    "Workspace": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^x-": {}
+      },
+      "properties": {
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "string"
+        },
+        "from_ref": {
+          "maxLength": 4096,
+          "title": "From Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo"
+      ],
+      "title": "Workspace",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "patternProperties": {
+    "^x-": {}
+  },
+  "properties": {
+    "$schema": {
+      "format": "uri",
+      "title": "$Schema",
+      "type": "string"
+    },
+    "ir_version": {
+      "pattern": "^1\\.[0-9]+(?![\\s\\S])",
+      "title": "Ir Version",
+      "type": "string"
+    },
+    "meta": {
+      "$ref": "#/$defs/Provenance"
+    },
+    "type_contracts": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BuiltinTypeContract"
+          },
+          {
+            "$ref": "#/$defs/CustomTypeContract"
+          }
+        ]
+      },
+      "propertyNames": {
+        "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*(?![\\s\\S])",
+        "type": "string"
+      },
+      "title": "Type Contracts",
+      "type": "object"
     },
     "graph": {
-      "allOf": [ { "$ref": "#/$defs/graphBody" } ],
-      "required": ["id", "namespace", "nodes"],
-      "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "version": { "type": "string", "description": "the author's own version of the graph; informational" },
-        "namespace": { "$ref": "#/$defs/id" },
-        "description": {},
-        "nodes": {},
-        "params": { "type": "object", "description": "JSON Schema for run parameters" },
-        "triggers": { "type": "array", "items": { "$ref": "#/$defs/trigger" } },
-        "overlap": { "type": "string", "enum": ["allow", "skip", "queue"], "description": "When absent: queue for webhook starts, allow for other triggers. Skip considers accepted pending/running runs; queue promotion selects the oldest pending run under the graph lock when none is running. Canonical accepted/skip outcomes are durable (FR-6.2, ADR-0020)." },
-        "target": { "$ref": "#/$defs/targetConfig" },
-        "subgraphs": { "type": "object", "propertyNames": { "$ref": "#/$defs/id" }, "additionalProperties": { "$ref": "#/$defs/subgraph" } },
-        "source": { "$ref": "#/$defs/sourceLocation" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
+      "$ref": "#/$defs/Graph"
     },
-    "runtimeSection": {
-      "type": "object",
-      "required": ["runtime", "vcs"],
-      "properties": {
-        "runtime": { "type": "string" },
-        "vcs": { "type": "string" },
-        "artifact_storage": { "type": "string" },
-        "approval_channels": { "type": "object", "additionalProperties": { "type": "object" } },
-        "concurrency": {
-          "type": "object",
-          "properties": {
-            "max_running_nodes": { "type": "integer", "minimum": 1, "description": "Live graph-wide cap on all non-terminal physical attempts across graph versions; cap source is the newest active graph version, or newest deployed when none is active (ADR-0020)." },
-            "max_running_runs": { "type": "integer", "minimum": 1, "description": "Live graph-wide cap on distinct runs with any non-terminal physical attempt, including historical or unknown work; no-attempt waits reserve no execution-run slot. Counts span versions and caps use the newest active graph version, or newest deployed when none is active (ADR-0020)." }
-          },
-          "patternProperties": { "^x-": {} },
-          "additionalProperties": false
-        },
-        "limits": { "$ref": "#/$defs/limits" },
-        "budget_headroom_pct": { "type": "number", "minimum": 0, "maximum": 100 },
-        "stall_after": { "$ref": "#/$defs/duration" },
-        "retention": { "$ref": "#/$defs/retention" },
-        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "glob patterns of gate files agent nodes may not edit and command gates verify against the base commit (DD-34)" },
-        "infrastructure_retry": { "$ref": "#/$defs/retry" },
-        "provider_retry": { "type": "object", "properties": { "max_wait": { "$ref": "#/$defs/duration" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false, "description": "waiting allowed for model-provider limits before failing with provider_limited (ADR-0024)" }
-      },
-      "patternProperties": { "^x-": {} },
-      "additionalProperties": false
+    "runtime": {
+      "$ref": "#/$defs/RuntimeSection"
+    },
+    "secrets": {
+      "$ref": "#/$defs/SecretsSection"
     }
-  }
+  },
+  "required": [
+    "ir_version",
+    "type_contracts",
+    "graph",
+    "runtime"
+  ],
+  "title": "GraphDocument",
+  "type": "object"
 }

@@ -63,6 +63,10 @@ from tests.measurements.ir_remaining_workload import (
     fixture_manifest,
     remaining_workloads,
 )
+from tests.measurements.ir_schema_workload import (
+    schema_fixture_manifest,
+    schema_workloads,
+)
 from tests.measurements.vcs_ref_workload import cases as vcs_ref_cases
 from tests.measurements.vcs_ref_workload import exercise as exercise_vcs_ref
 
@@ -92,6 +96,7 @@ def report(request: pytest.FixtureRequest) -> Iterator[Report]:
             declaration_fixture_manifest()
         )
         report.environment["document_fixture_manifest"] = document_fixture_manifest()
+        report.environment["schema_fixture_manifest"] = schema_fixture_manifest()
         yield report
 
 
@@ -465,6 +470,7 @@ WORKLOADS.update(control_workloads())
 WORKLOADS.update(remaining_workloads())
 WORKLOADS.update(declaration_workloads())
 WORKLOADS.update(document_workloads())
+WORKLOADS.update(schema_workloads())
 
 
 @pytest.mark.parametrize("workload", sorted(WORKLOADS))
@@ -533,6 +539,72 @@ def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
     report.environment["config_nested_extensions_aggregate_bytes"] = 64 * len(
         json.dumps(extension, separators=(",", ":")).encode()
     )
+
+
+@pytest.mark.parametrize("run", range(3))
+def test_ir_schema_repeated_lifetime(report: Report, run: int) -> None:
+    before = (open_descriptors(), threading.active_count())
+
+    completed = run_process(
+        [
+            sys.executable,
+            "-m",
+            "tests.measurements.ir_schema_lifetime",
+            report.revision,
+        ],
+        deadline_seconds=300,
+    )
+    report.environment[f"schema_lifetime_{run}"] = completed.stdout.decode()
+    report.environment[f"schema_lifetime_{run}_stderr"] = completed.stderr.decode()
+    report.environment[f"schema_lifetime_{run}_exit"] = completed.code
+    report.environment[f"schema_lifetime_{run}_timeout"] = completed.timed_out
+    report.environment[f"schema_lifetime_{run}_overflow"] = completed.overflow
+    after = (open_descriptors(), threading.active_count())
+    report.environment[f"schema_lifetime_{run}_parent_descriptors_before"] = before[0]
+    report.environment[f"schema_lifetime_{run}_parent_descriptors_after"] = after[0]
+    report.environment[f"schema_lifetime_{run}_parent_threads_before"] = before[1]
+    report.environment[f"schema_lifetime_{run}_parent_threads_after"] = after[1]
+
+    assert after == before
+    assert not completed.timed_out
+    assert not completed.overflow
+    assert completed.code == 0, completed.stderr.decode()
+    assert completed.stderr == b""
+    result = cast("dict[str, object]", json.loads(completed.stdout))
+    assert result["pid"] == completed.pid
+    assert result["revision"] == report.revision
+    assert result["platform"] == sys.platform
+    assert result["python"] == sys.version.split()[0]
+    assert result["cycles"] == 1000
+    assert result["warm_up"] == 3
+    assert result["action_counts"] == {
+        "validation": 334,
+        "serialization": 333,
+        "render_utf8": 333,
+    }
+    assert result["class_schemas_unchanged"] is True
+    manifest = cast("dict[str, object]", result["schema_manifest"])
+    assert result["class_schema_inventory"] == manifest["class_schema_inventory"]
+    assert manifest == json.loads(
+        cast("str", report.environment["schema_fixture_manifest"])
+    )
+    checkpoints = cast("list[dict[str, int | float | None]]", result["checkpoints"])
+    assert [checkpoint["cycles"] for checkpoint in checkpoints] == [250, 500, 750, 1000]
+    for checkpoint in checkpoints:
+        cycle = cast("int", checkpoint["cycles"])
+        report.samples.append(
+            Sample("schema_lifetime", run, cycle, cast("float", checkpoint["seconds"]))
+        )
+        passed = cast("int", checkpoint["retained_bytes"]) < RETAINED_LIMIT_BYTES
+        report.gates[f"schema_lifetime_{run}_{cycle}_retained"] = passed
+        assert passed
+        assert checkpoint["threads"] == result["baseline_threads"]
+        assert checkpoint["descriptors"] == result["baseline_descriptors"]
+        assert checkpoint["os_threads"] == result["baseline_os_threads"]
+        if sys.platform == "linux":
+            assert checkpoint["current_rss_bytes"] is not None
+            assert checkpoint["peak_rss_bytes"] is not None
+            assert checkpoint["os_threads"] is not None
 
 
 FAILURES: tuple[dict[str, object], ...] = (

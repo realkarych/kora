@@ -12,6 +12,7 @@ from tests.measurements.ir_measurement_evidence import expected_evidence
 ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
+SCHEMA_RUN = f"{MEASUREMENT}::test_ir_schema_repeated_lifetime"
 SUCCESS = {
     "IR_MATRIX_RESULT": "success",
     "IR_DOWNLOAD_OUTCOME": "success",
@@ -63,10 +64,15 @@ def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
             "run": 0,
             "pytest-arguments": (
                 f"{MEASUREMENT} '--deselect={RUN}[1]' '--deselect={RUN}[2]'"
+                f" '--deselect={SCHEMA_RUN}[0]' '--deselect={SCHEMA_RUN}[1]'"
+                f" '--deselect={SCHEMA_RUN}[2]'"
             ),
         },
         {"run": 1, "pytest-arguments": f"'{RUN}[1]'"},
         {"run": 2, "pytest-arguments": f"'{RUN}[2]'"},
+        {"run": 3, "pytest-arguments": f"'{SCHEMA_RUN}[0]'"},
+        {"run": 4, "pytest-arguments": f"'{SCHEMA_RUN}[1]'"},
+        {"run": 5, "pytest-arguments": f"'{SCHEMA_RUN}[2]'"},
     ]
     assert job["runs-on"] == "ubuntu-24.04"
     assert selected_steps["measurement"]["run"] == (
@@ -187,9 +193,19 @@ def collected_nodes(arguments: list[str]) -> tuple[int, frozenset[str]]:
 def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     expected = expected_evidence()
     arguments = [
-        [MEASUREMENT, f"--deselect={RUN}[1]", f"--deselect={RUN}[2]"],
+        [
+            MEASUREMENT,
+            f"--deselect={RUN}[1]",
+            f"--deselect={RUN}[2]",
+            f"--deselect={SCHEMA_RUN}[0]",
+            f"--deselect={SCHEMA_RUN}[1]",
+            f"--deselect={SCHEMA_RUN}[2]",
+        ],
         [f"{RUN}[1]"],
         [f"{RUN}[2]"],
+        [f"{SCHEMA_RUN}[0]"],
+        [f"{SCHEMA_RUN}[1]"],
+        [f"{SCHEMA_RUN}[2]"],
     ]
 
     collected = [collected_nodes(selection) for selection in arguments]
@@ -198,7 +214,7 @@ def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     assert default_code == 0
     assert default_nodes == expected.nodes
     assert all(code == 0 for code, _ in collected)
-    assert [len(nodes) for _, nodes in collected] == [328, 1, 1]
+    assert [len(nodes) for _, nodes in collected] == [332, 1, 1, 1, 1, 1]
     assert set().union(*(nodes for _, nodes in collected)) == expected.nodes
     assert sum(len(nodes) for _, nodes in collected) == len(expected.nodes)
 
