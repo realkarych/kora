@@ -310,6 +310,8 @@ INVALID_FIELDS: Sequence[tuple[type[BaseModel], str, object]] = (
             ["unknown"],
             ["timeout", "timeout"],
             [ErrorClass.TIMEOUT, "timeout"],
+            [b"timeout"],
+            [bytearray(b"timeout")],
         )
     ]
     + [

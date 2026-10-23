@@ -62,6 +62,15 @@ def unique_error_classes(values: tuple[ErrorClass, ...]) -> tuple[ErrorClass, ..
     return values
 
 
+def require_error_class_names(value: object) -> list[object] | tuple[object, ...]:
+    values = cast("list[object] | tuple[object, ...]", require_array(value))
+    if not all(isinstance(item, str) for item in values):
+        raise PydanticCustomError(
+            "ir_error_class_type", "an error class is not a string"
+        )
+    return values
+
+
 JsonInteger = Annotated[StrictInt, BeforeValidator(require_integer)]
 PositiveNumber = Annotated[
     int | float,
@@ -79,7 +88,7 @@ ResourceName = Annotated[
 ]
 ErrorClasses = Annotated[
     tuple[ErrorClass, ...],
-    BeforeValidator(require_array),
+    BeforeValidator(require_error_class_names),
     AfterValidator(unique_error_classes),
     Field(json_schema_extra={"uniqueItems": True}),
 ]
