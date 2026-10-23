@@ -1,0 +1,26 @@
+{
+  "name": "StructuredOutput",
+  "builtin_revision": "1",
+  "schema": "urn:kora:artifact:StructuredOutput",
+  "parent": null,
+  "behavior": {
+    "validation": "kora.structured-output-validation.v1",
+    "digest_fields": "kora.json-payload.v1",
+    "summary": "kora.json-payload.v1"
+  },
+  "validation": {
+    "max_raw_json_bytes": 1048576,
+    "max_canonical_json_bytes": 1048576,
+    "max_json_depth": 16,
+    "max_integer_bits": 14000
+  },
+  "canonicalization": "kora.structured-json.v1",
+  "compatibility": {
+    "execution_semantics": "kora.execution.v1",
+    "checker_view": "kora.structured-output-view.v1"
+  },
+  "digest_selection": [
+    ""
+  ],
+  "schema_sha256": "e924b9a44c0825f0b2a43b0291d1f98c4851425a50e291914dd85ba096ac6eae"
+}
