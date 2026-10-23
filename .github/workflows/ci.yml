@@ -207,16 +207,34 @@ jobs:
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
           printf 'KORA_PRICING_ISOLATION_VERIFIED=true\n' >> "$GITHUB_ENV"
       - name: Release pricing environment and retain lifecycle proof
+        id: pricing_release
         if: ${{ always() && steps.pricing_environment.outcome != 'skipped' && matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0' }}
         run: |
           "$PWD/.venv/bin/python" -c \
             'from tests.measurements.pricing_lifetime_support import pricing_environment_release; pricing_environment_release()'
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+      - name: Prepare bounded pricing publication
+        id: pricing_publication
         if: ${{ !cancelled() && steps.pricing_environment.outcome != 'skipped' && matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0' }}
+        env:
+          KORA_PRICING_MEASUREMENT_OUTCOME: ${{ steps.pricing_measurement.outcome }}
+          KORA_PRICING_RELEASE_OUTCOME: ${{ steps.pricing_release.outcome }}
+          KORA_PRICING_EVIDENCE: ${{ github.workspace }}/measurements/pricing-database-lifetime
+        run: |
+          "$PWD/.venv/bin/python" -c \
+            'from tests.measurements.pricing_lifetime_support import pricing_publication_prepare; pricing_publication_prepare()'
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ !cancelled() && steps.pricing_publication.outputs.ready == 'true' && matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0' }}
         with:
           name: pricing-database-lifetime-measurement
-          path: measurements/pricing-database-lifetime-sealed/
+          path: ${{ steps.pricing_publication.outputs.directory }}
           if-no-files-found: error
+      - name: Release pricing publication
+        if: ${{ always() && steps.pricing_publication.outputs.identity != '' && matrix.os == 'ubuntu-24.04' && matrix.python == '3.15.0' }}
+        env:
+          KORA_PRICING_PUBLICATION: ${{ steps.pricing_publication.outputs.identity }}
+        run: |
+          "$PWD/.venv/bin/python" -c \
+            'from tests.measurements.pricing_lifetime_support import pricing_publication_release; pricing_publication_release()'
 
   cel-measurements:
     name: CEL evaluator lifetime

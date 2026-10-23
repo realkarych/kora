@@ -1,3 +1,5 @@
+import glob
+import hashlib
 import json
 import os
 import shutil
@@ -23,13 +25,17 @@ from tests.measurements.pricing_lifetime_support import (
     PricingDatabaseFactory,
     PricingEvidence,
     PricingEvidenceError,
+    PricingPublication,
+    prepare_pricing_publication,
     pricing_command_run,
     pricing_containers,
     pricing_environment,
+    pricing_files,
     pricing_process_runs,
     pricing_provenance,
     register_pricing_ownership,
     release_pricing_environment,
+    release_pricing_publication,
     remove_pricing_request,
     validate_pricing_child,
 )
@@ -1046,3 +1052,300 @@ def test_pricing_noncooperative_owner_reaches_real_cleanup_deadline(
                 check=True,
                 capture_output=True,
             )
+
+
+@pytest.mark.parametrize("state", ["complete", "failure", "root_symlink", "subtree"])
+def test_pricing_final_publication_selects_only_validated_files(
+    tmp_path: Path, state: str
+) -> None:
+    directory = tmp_path / "evidence"
+    temporary = tmp_path / "runner"
+    temporary.mkdir()
+    environment = temporary / "environment"
+    environment.mkdir()
+    sealed = tmp_path / "evidence-sealed"
+    marker = b"private-publication-marker-937"
+    target = tmp_path / "unsafe-target"
+    unsafe = state in {"root_symlink", "subtree"}
+    if state == "complete":
+        evidence = PricingEvidence(directory, ("sqlite", "postgresql"))
+        payload = new_report().to_json().encode()
+        for name in evidence.expected:
+            if name not in {"parent.json", "manifest.json"}:
+                evidence.retain(
+                    name, b"" if name.endswith((".stdout", ".stderr")) else payload
+                )
+        evidence.finish(new_report(), {})
+    elif unsafe:
+        target = target if state == "root_symlink" else sealed / "completion.json"
+        target.mkdir(parents=True)
+        (target / "private.json").write_bytes(marker)
+        with (target / "oversized.json").open("wb") as output:
+            output.write(marker)
+            output.truncate(CHILD_LIMIT + 1)
+        if state == "root_symlink":
+            sealed.symlink_to(target, target_is_directory=True)
+    script = (
+        "import os,json,sys; from pathlib import Path; "
+        "owner=Path(os.environ['KORA_PRICING_OWNER']); "
+        f"owner.write_text(json.dumps({{'containers':[],'sessions':[],"
+        f"'secrets':[{marker.decode()!r}]}})); "
+        "\nif sys.argv[3]=='failure':\n"
+        " p=Path(sys.argv[2]); p.mkdir(); "
+        f"(p/'sqlite-native-0.stdout').write_bytes(b'diagnostic '+{marker!r})\n"
+        "raise SystemExit(int(sys.argv[1]))"
+    )
+    exit_code = 0 if state == "complete" else 29
+    descriptors = len(os.listdir("/dev/fd"))
+    before = pricing_containers()
+
+    if unsafe:
+        with pytest.raises(BaseExceptionGroup):
+            pricing_command_run(
+                directory,
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    script,
+                    str(exit_code),
+                    str(directory),
+                    state,
+                ],
+            )
+        with pytest.raises(BaseExceptionGroup):
+            release_pricing_environment(environment, temporary, directory, True)
+    else:
+        assert (
+            pricing_command_run(
+                directory,
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    script,
+                    str(exit_code),
+                    str(directory),
+                    state,
+                ],
+            )
+            == exit_code
+        )
+        release_pricing_environment(environment, temporary, directory, True)
+    publication = prepare_pricing_publication(
+        directory,
+        temporary,
+        "success" if state == "complete" else "failure",
+        "failure" if unsafe else "success",
+    )
+    selected = sorted(
+        path
+        for name in glob.iglob(str(publication.directory / "**/*"), recursive=True)
+        if not (path := Path(name)).is_dir()
+    )
+    (tmp_path / "publication-selection.json").write_text(
+        json.dumps(
+            {
+                "publication": json.loads(publication.model_dump_json()),
+                "selected": [
+                    {
+                        "path": str(path),
+                        "bytes": path.stat().st_size,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                    for path in selected
+                ],
+            }
+        )
+    )
+
+    try:
+        assert selected
+        assert all(marker not in path.read_bytes() for path in selected)
+        limits = pricing_files(("sqlite", "postgresql"))
+        limits["completion.json"] = COMPLETION_LIMIT
+        assert all(path.name in limits for path in selected)
+        assert all(path.is_file() and not path.is_symlink() for path in selected)
+        assert all(path.parent == publication.directory for path in selected)
+        assert all(path.stat().st_size <= limits[path.name] for path in selected)
+        assert sum(path.stat().st_size for path in selected) <= AGGREGATE_LIMIT
+        assert publication.directory.parent == temporary.resolve()
+        completion = json.loads(
+            (publication.directory / "completion.json").read_bytes()
+        )
+        (tmp_path / "publication-completion.json").write_text(json.dumps(completion))
+        (tmp_path / "publication-manifest.json").write_bytes(
+            (publication.directory / "manifest.json").read_bytes()
+        )
+        assert completion["complete"] is (state == "complete")
+        assert completion["command_exit_code"] == exit_code
+        assert completion["command_reaped"] is True
+        if state == "complete":
+            assert {path.name for path in selected} == set(limits)
+        if state == "failure":
+            assert (publication.directory / "sqlite-native-0.stdout").read_bytes() == (
+                b"diagnostic " + b"*" * len(marker)
+            )
+        if unsafe:
+            assert {path.name for path in selected} == {
+                "manifest.json",
+                "completion.json",
+            }
+            assert (target / "private.json").read_bytes() == marker
+            assert (target / "oversized.json").stat().st_size == CHILD_LIMIT + 1
+            assert completion["working_evidence_available"] is False
+        if state == "root_symlink":
+            assert sealed.is_symlink()
+        assert not environment.exists()
+        assert not (tmp_path / "evidence-owner.json").exists()
+        assert pricing_containers() == before
+        assert len(os.listdir("/dev/fd")) == descriptors
+    finally:
+        if publication.directory.parent == temporary.resolve():
+            proof = release_pricing_publication(publication, temporary)
+            (tmp_path / "publication-release.json").write_text(json.dumps(proof))
+            assert proof["publication_released"] is True
+    assert not publication.directory.exists()
+
+
+@pytest.mark.parametrize("fault", ["inode", "symlink"])
+def test_pricing_publication_release_refuses_changed_ownership(
+    tmp_path: Path, fault: str
+) -> None:
+    temporary = tmp_path / "runner"
+    temporary.mkdir()
+    directory = temporary / "kora-pricing-upload-owned"
+    directory.mkdir()
+    (directory / "sentinel").write_bytes(b"preserved")
+    metadata = directory.stat()
+    publication = PricingPublication(
+        directory=directory,
+        device=metadata.st_dev,
+        inode=metadata.st_ino + (1 if fault == "inode" else 0),
+    )
+    target = directory
+    if fault == "symlink":
+        target = temporary / "untouched-target"
+        directory.rename(target)
+        directory.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(PricingEvidenceError, match="ownership mismatch"):
+        release_pricing_publication(publication, temporary)
+
+    assert (target / "sentinel").read_bytes() == b"preserved"
+    assert directory.exists()
+
+
+def test_pricing_publication_output_failure_releases_allocated_directory(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "evidence"
+    sealed = tmp_path / "evidence-sealed"
+    sealed.mkdir()
+    (sealed / "manifest.json").write_text('{"command_complete":false}')
+    (sealed / "completion.json").write_text(
+        '{"complete":false,"command_exit_code":29,"command_reaped":true}'
+    )
+    temporary = tmp_path / "runner"
+    temporary.mkdir()
+    output = tmp_path / "nonregular-output"
+    output.mkdir()
+    environment = {
+        **os.environ,
+        "RUNNER_TEMP": str(temporary),
+        "GITHUB_OUTPUT": str(output),
+        "KORA_PRICING_EVIDENCE": str(directory),
+        "KORA_PRICING_MEASUREMENT_OUTCOME": "failure",
+        "KORA_PRICING_RELEASE_OUTCOME": "success",
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from tests.measurements.pricing_lifetime_support import "
+            "pricing_publication_prepare; pricing_publication_prepare()",
+        ],
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    (tmp_path / "publication.stdout").write_bytes(result.stdout)
+    (tmp_path / "publication.stderr").write_bytes(result.stderr)
+    assert result.returncode == 1
+    assert b"IsADirectoryError" in result.stderr
+    assert list(temporary.iterdir()) == []
+    assert output.is_dir()
+    assert (
+        json.loads((sealed / "completion.json").read_bytes())["command_exit_code"] == 29
+    )
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_pricing_fallback_handoff_is_ready_while_step_fails(
+    tmp_path: Path, malformed: bool
+) -> None:
+    directory = tmp_path / "evidence"
+    directory.mkdir()
+    marker = b"private-fallback-marker-381"
+    (directory / "completion.json").write_bytes(
+        b'{"private":"' + marker
+        if malformed
+        else b'{"command_exit_code":29,"command_reaped":true}'
+    )
+    target = tmp_path / "untouched"
+    target.mkdir()
+    (target / "private.json").write_bytes(marker)
+    (tmp_path / "evidence-sealed").symlink_to(target, target_is_directory=True)
+    temporary = tmp_path / "runner"
+    temporary.mkdir()
+    output = tmp_path / "workflow-output"
+    environment = {
+        **os.environ,
+        "RUNNER_TEMP": str(temporary),
+        "GITHUB_OUTPUT": str(output),
+        "KORA_PRICING_EVIDENCE": str(directory),
+        "KORA_PRICING_MEASUREMENT_OUTCOME": "failure",
+        "KORA_PRICING_RELEASE_OUTCOME": "failure",
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from tests.measurements.pricing_lifetime_support "
+            "import pricing_publication_prepare; pricing_publication_prepare()",
+        ],
+        env=environment,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+    outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    publication = PricingPublication.model_validate_json(outputs["identity"])
+
+    try:
+        (tmp_path / "publication.stderr").write_bytes(result.stderr)
+        assert result.returncode == 1
+        assert outputs["ready"] == "true"
+        assert outputs["directory"] == str(publication.directory)
+        assert marker not in result.stderr + result.stdout
+        assert {path.name for path in publication.directory.iterdir()} == {
+            "manifest.json",
+            "completion.json",
+        }
+        completion = json.loads(
+            (publication.directory / "completion.json").read_bytes()
+        )
+        assert completion["complete"] is False
+        assert completion["command_exit_code"] == (None if malformed else 29)
+        assert completion["working_proof_available"] is (not malformed)
+        assert all(
+            marker not in path.read_bytes() for path in publication.directory.iterdir()
+        )
+        assert (target / "private.json").read_bytes() == marker
+    finally:
+        release_pricing_publication(publication, temporary)
+    assert list(temporary.iterdir()) == []

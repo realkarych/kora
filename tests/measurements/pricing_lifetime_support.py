@@ -13,6 +13,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tracemalloc
@@ -3297,3 +3298,193 @@ def write_pricing_envelope(
         redact_pricing_bytes(json.dumps(completion).encode(), secrets),
         COMPLETION_LIMIT,
     )
+
+
+class PricingPublication(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+    directory: Path
+    device: int
+    inode: int
+    source_valid: bool = True
+    preparation_seconds: float | None = None
+    selected_bytes: int | None = None
+    selected_files: int | None = None
+
+
+class PricingPublicationOutcome(BaseModel):
+    model_config = ConfigDict(extra="ignore", strict=True, hide_input_in_errors=True)
+    command_exit_code: int | None = None
+    command_pid: int | None = None
+    command_reaped: bool | None = None
+    command_interruption: int | None = None
+    private_owner_removed: bool | None = None
+    private_owner_valid: bool | None = None
+
+
+def read_pricing_publication_envelope(
+    directory: Path, name: Literal["manifest.json", "completion.json"]
+) -> dict[str, JsonValue]:
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise PricingEvidenceError("publication source root is not a directory")
+    limit = MANIFEST_LIMIT if name == "manifest.json" else COMPLETION_LIMIT
+    raw = read_pricing_bytes(directory / name, limit)
+    if len(raw) > limit:
+        raise PricingEvidenceError("publication source envelope exceeds limit")
+    return parse_json_object(json.loads(raw))
+
+
+def prepare_pricing_publication(
+    directory: Path,
+    temporary: Path,
+    measurement_outcome: Literal["success", "failure", "cancelled", "skipped"],
+    release_outcome: Literal["success", "failure", "cancelled", "skipped"],
+) -> PricingPublication:
+    started = time.perf_counter()
+    if measurement_outcome not in {"success", "failure", "cancelled", "skipped"} or (
+        release_outcome not in {"success", "failure", "cancelled", "skipped"}
+    ):
+        raise PricingEvidenceError("invalid publication step outcome")
+    selected = Path(
+        tempfile.mkdtemp(prefix="kora-pricing-upload-", dir=temporary.resolve())
+    )
+    metadata = selected.stat()
+    ownership = PricingPublication(
+        directory=selected, device=metadata.st_dev, inode=metadata.st_ino
+    )
+    try:
+        source = directory.with_name(directory.name + "-sealed")
+        source_valid = True
+        source_failure: str | None = None
+        manifest: dict[str, JsonValue]
+        try:
+            completion = read_pricing_publication_envelope(source, "completion.json")
+            manifest = read_pricing_publication_envelope(source, "manifest.json")
+            if not isinstance(completion.get("complete"), bool) or (
+                validate_sealed_pricing_evidence(source, completion)
+            ):
+                raise PricingEvidenceError("publication source validation failed")
+            for name, limit in pricing_files(("sqlite", "postgresql")).items():
+                if name == "manifest.json" or not (source / name).exists():
+                    continue
+                raw = read_pricing_bytes(source / name, limit)
+                write_pricing_bytes(selected / name, raw, limit)
+        except (OSError, ValueError) as error:
+            source_valid = False
+            source_failure = type(error).__name__
+            for copied in selected.iterdir():
+                copied.unlink()
+            known = PricingPublicationOutcome()
+            working_proof_available = False
+            try:
+                known = PricingPublicationOutcome.model_validate(
+                    read_pricing_publication_envelope(directory, "completion.json")
+                )
+                working_proof_available = True
+            except (OSError, ValueError):
+                working_proof_available = False
+            completion = parse_json_object(json.loads(known.model_dump_json()))
+            completion.update(
+                complete=False,
+                working_evidence_available=False,
+                working_proof_available=working_proof_available,
+            )
+            manifest = {"command_complete": False}
+        if measurement_outcome != "success" or release_outcome != "success":
+            completion["complete"] = False
+            manifest["command_complete"] = False
+        publication_status: dict[str, JsonValue] = {
+            "source_valid": source_valid,
+            "source_failure": source_failure,
+            "measurement_outcome": measurement_outcome,
+            "environment_release_outcome": release_outcome,
+        }
+        manifest["final_publication"] = publication_status
+        write_pricing_envelope(selected, manifest, completion)
+        if validate_sealed_pricing_evidence(selected, completion):
+            raise PricingEvidenceError("final publication validation failed")
+        files = list(selected.iterdir())
+        selected_bytes = sum(path.stat().st_size for path in files)
+        return PricingPublication(
+            directory=selected,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            source_valid=source_valid,
+            preparation_seconds=time.perf_counter() - started,
+            selected_bytes=selected_bytes,
+            selected_files=len(files),
+        )
+    finally:
+        original = sys.exception()
+        if original is not None:
+            try:
+                release_pricing_publication(ownership, temporary)
+            except (OSError, ValueError) as cleanup:
+                raise BaseExceptionGroup(
+                    "publication preparation and release failures", [original, cleanup]
+                ) from None
+
+
+def release_pricing_publication(
+    publication: PricingPublication, temporary: Path
+) -> dict[str, JsonValue]:
+    started = time.perf_counter()
+    directory = publication.directory
+    metadata = directory.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or directory.parent != temporary.resolve()
+        or not directory.name.startswith("kora-pricing-upload-")
+        or (metadata.st_dev, metadata.st_ino) != (publication.device, publication.inode)
+    ):
+        raise PricingEvidenceError("publication cleanup ownership mismatch")
+    shutil.rmtree(directory)
+    return {
+        "publication_released": not directory.exists(),
+        "publication_release_seconds": time.perf_counter() - started,
+    }
+
+
+def pricing_publication_prepare() -> None:
+    publication = prepare_pricing_publication(
+        Path(os.environ["KORA_PRICING_EVIDENCE"]),
+        Path(os.environ["RUNNER_TEMP"]),
+        cast(
+            Literal["success", "failure", "cancelled", "skipped"],
+            os.environ["KORA_PRICING_MEASUREMENT_OUTCOME"],
+        ),
+        cast(
+            Literal["success", "failure", "cancelled", "skipped"],
+            os.environ["KORA_PRICING_RELEASE_OUTCOME"],
+        ),
+    )
+    try:
+        if "\n" in str(publication.directory) or "\r" in str(publication.directory):
+            raise PricingEvidenceError("publication path contains line separator")
+        with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+            output.write(f"directory={publication.directory}\n")
+            output.write(f"identity={publication.model_dump_json()}\n")
+            output.write("ready=true\n")
+    finally:
+        original = sys.exception()
+        if original is not None:
+            try:
+                release_pricing_publication(
+                    publication, Path(os.environ["RUNNER_TEMP"])
+                )
+            except (OSError, ValueError) as cleanup:
+                raise BaseExceptionGroup(
+                    "publication handoff and release failures", [original, cleanup]
+                ) from None
+    if not publication.source_valid:
+        raise PricingEvidenceError(
+            "unsafe publication source replaced with failure proof"
+        )
+
+
+def pricing_publication_release() -> None:
+    publication = PricingPublication.model_validate_json(
+        os.environ["KORA_PRICING_PUBLICATION"]
+    )
+    proof = release_pricing_publication(publication, Path(os.environ["RUNNER_TEMP"]))
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+        output.write(f"release={json.dumps(proof)}\n")
