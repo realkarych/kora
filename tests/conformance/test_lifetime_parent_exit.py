@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import socket
@@ -27,8 +28,9 @@ from tests.conformance.test_parent_lifetime import limits
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sink_mode", ["drained", "blocked", "broken"])
 async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_recovery(
-    tmp_path: Path,
+    tmp_path: Path, sink_mode: str
 ) -> None:
     probe = subprocess.run(
         [
@@ -52,6 +54,16 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
     reading, writing = os.pipe()
     first, second = socket.socketpair()
+    diagnostic_read, diagnostic_write = os.pipe()
+    os.set_blocking(diagnostic_write, False)
+    if sink_mode == "blocked":
+        while True:
+            try:
+                os.write(diagnostic_write, b"x" * 4096)
+            except BlockingIOError:
+                break
+    if sink_mode == "broken":
+        os.close(diagnostic_read)
     parent = subprocess.Popen(
         [
             sys.executable,
@@ -62,17 +74,20 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
             str(second.fileno()),
             str(writing),
             str(barrier.descriptor),
+            sink_mode,
         ],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=diagnostic_write,
         close_fds=True,
         pass_fds=(second.fileno(), writing, barrier.descriptor),
     )
     second.close()
+    os.close(diagnostic_write)
     channel = BoundedChannel(first, clock)
     anchor = ExitAnchor(parent.pid)
     deadline = clock.monotonic_ns() + 10_000_000_000
+    assert await channel.read_frame(deadline) == sink_mode.encode("ascii")
     identity = ProcessIdentity.model_validate_json(await channel.read_frame(deadline))
     helper_anchor = ExitAnchor(identity.pid, direct_child=False)
     await entered_fifo(identity.pid, reading, deadline, clock)
@@ -101,6 +116,21 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
         assert final.state is CleanupOutcome.CLOSED
         assert recovered.inventory().helpers.claim_descriptors == 0
         assert not tuple(tmp_path.rglob(reference.invocation_id))
+        if sink_mode == "drained":
+            encoded = os.read(diagnostic_read, 65536)
+            records: list[dict[str, object]] = [
+                json.loads(line) for line in encoded.splitlines()
+            ]
+            unknown = [
+                record
+                for record in records
+                if record.get("event") == "conformance.lifetime.unknown"
+            ]
+            assert len(unknown) == 1
+            assert unknown[0]["level"] == "WARNING"
+            assert unknown[0]["invocation_id"] == reference.invocation_id
+            assert str(tmp_path).encode() not in encoded
+            assert b"signal.pause" not in encoded
     finally:
         deadline = clock.monotonic_ns() + 5_000_000_000
         if parent.returncode is None:
@@ -121,6 +151,8 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
         channel.close()
         anchor.close()
         helper_anchor.close()
+        if sink_mode != "broken":
+            os.close(diagnostic_read)
         os.close(reading)
         os.close(writing)
         barrier.close()

@@ -66,15 +66,26 @@ class ProbeIOHelperLauncher:
 
 
 async def stalled_recovery_parent(
-    home: Path, invocation_id: str, control: int, observation: int, fifo: int
+    home: Path,
+    invocation_id: str,
+    control: int,
+    observation: int,
+    fifo: int,
+    sink_mode: str,
 ) -> None:
     import asyncio
 
+    from kora.conformance.common import utc_now
+    from kora.conformance.diagnostics import COMPONENT
     from kora.conformance.lifetime import ParentLifetime
+    from kora.observability import Level, LoggingSettings, configure_process
     from kora.protocols.lifetime import CleanupReference, LifetimeLimits
     from kora.protocols.time import SystemClock
     from kora.runner.channels import BoundedChannel
 
+    diagnostics = configure_process(
+        COMPONENT, LoggingSettings(level=Level.DEBUG), "lifetime-exit", utc_now
+    )
     clock = SystemClock()
     channel = BoundedChannel(socket.socket(fileno=control), clock)
     launcher = ProbeIOHelperLauncher(home, observation, fifo, pause_at=2)
@@ -96,13 +107,34 @@ async def stalled_recovery_parent(
         wake: asyncio.Future[None] = loop.create_future()
         loop.call_soon(wake.set_result, None)
         await wake
+    while (sink_mode == "broken" and not diagnostics.snapshot().sink_failed) or (
+        sink_mode == "blocked" and diagnostics.writer_is_idle()
+    ):
+        if clock.monotonic_ns() >= deadline:
+            raise TimeoutError
+        wake = loop.create_future()
+        loop.call_soon(wake.set_result, None)
+        await wake
+    await channel.write_frame(sink_mode.encode("ascii"), deadline)
     helper = owner.mutations.helpers[-1]
     if helper.identity is None:
         raise RuntimeError("helper identity unavailable")
     await channel.write_frame(helper.identity.model_dump_json().encode(), deadline)
     if await channel.read_frame(deadline) != b"close":
         raise ValueError("close control required")
+    final_deadline = clock.monotonic_ns() + int(
+        (
+            owner.limits.cooperative_seconds
+            + owner.limits.term_seconds
+            + owner.limits.kill_observation_seconds
+            + owner.limits.drain_seconds
+        )
+        * 1_000_000_000
+    )
     report = await owner.close(None)
+    diagnostics.shutdown(
+        max(0.0, min(1.0, (final_deadline - clock.monotonic_ns()) / 1_000_000_000))
+    )
     await channel.write_record(report.model_dump_json().encode(), deadline)
     channel.close()
 
@@ -117,6 +149,7 @@ if __name__ == "__main__":
             int(sys.argv[3]),
             int(sys.argv[4]),
             int(sys.argv[5]),
+            sys.argv[6],
         )
     )
     sys.exit(1)
