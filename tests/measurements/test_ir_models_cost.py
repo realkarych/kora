@@ -1,14 +1,18 @@
 import gc
+import json
+import subprocess
 import sys
 import threading
 import time
 import tracemalloc
 from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import cast
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
-from kora.ir import ToolPolicy
+from kora.ir import CommandConfig, CommandResource, McpServer, NodeLimits, ToolPolicy
 from kora.ir.json import (
     DEFAULT_MAX_DEPTH,
     MAX_CANONICAL_BYTES,
@@ -19,6 +23,7 @@ from kora.ir.json import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import parse_config_schema
+from tests.ir.config_cases import MINIMAL, POPULATED, RESOURCE
 from tests.measurements.cel_measurement_process import run_process
 from tests.measurements.diagnostic_workload import Lifecycle, cases, exercise
 from tests.measurements.harness import (
@@ -26,6 +31,11 @@ from tests.measurements.harness import (
     Sample,
     open_descriptors,
     report_lifecycle,
+)
+from tests.measurements.ir_config_workload import (
+    export_action,
+    round_trip_action,
+    validation_action,
 )
 
 pytestmark = pytest.mark.measurement
@@ -156,6 +166,147 @@ WORKLOADS: dict[str, tuple[Callable[[], object], int, bool, int]] = {
 }
 
 
+def configuration_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]]:
+    workloads: dict[str, tuple[Callable[[], object], int, bool, int]] = {}
+    for shape, configurations in (("minimal", MINIMAL), ("populated", POPULATED)):
+        for model, document in configurations.items():
+            workloads[f"config_{model.__name__}_{shape}"] = (
+                round_trip_action(model, document),
+                1,
+                True,
+                MEASURED,
+            )
+    for size in (1, 1000, 10000):
+        environment = {f"ENV_{index}": "value" for index in range(size)}
+        aliases = {f"ENV_{index}": "ALIAS" for index in range(size)}
+        egress = {"egress": ["host.example"] * size}
+        command: dict[str, object] = {
+            **MINIMAL[CommandConfig],
+            "cmd": ["value"] * size,
+            "env": environment,
+            "secret_env": aliases,
+            "success_exit_codes": [0] * size,
+            "network_policy": egress,
+        }
+        server: dict[str, object] = {
+            "type": "stdio",
+            "args": ["value"] * size,
+            "env": environment,
+            "secret_env": aliases,
+            "headers": {f"X-Header-{index}": "value" for index in range(size)},
+            "network_policy": egress,
+        }
+        for model, document in ((CommandConfig, command), (McpServer, server)):
+            for action_name, factory in (
+                ("validate", validation_action),
+                ("export", export_action),
+            ):
+                workloads[f"config_{model.__name__}_{size}_{action_name}"] = (
+                    factory(model, document),
+                    size,
+                    True,
+                    DENSE_MEASURED,
+                )
+        for valid in (True, False):
+            duration = "1" * size + ("s" if valid else "!")
+            resource = {
+                **RESOURCE,
+                "name": "/".join(["a"] * size) + ("" if valid else "/.."),
+            }
+            workloads[f"config_duration_{size}_{valid}"] = (
+                validation_action(NodeLimits, {"timeout": duration}, valid),
+                size,
+                True,
+                DENSE_MEASURED,
+            )
+            workloads[f"config_resource_path_{size}_{valid}"] = (
+                validation_action(CommandResource, resource, valid),
+                size,
+                True,
+                DENSE_MEASURED,
+            )
+        if size == 10000:
+            refusals: dict[str, tuple[type[BaseModel], dict[str, object]]] = {
+                "command_last_env": (
+                    CommandConfig,
+                    {**command, "env": {**environment, "LAST": False}},
+                ),
+                "server_last_alias": (
+                    McpServer,
+                    {**server, "secret_env": {**aliases, "LAST": "invalid"}},
+                ),
+                "command_many_errors": (
+                    CommandConfig,
+                    {**command, "cmd": [False] * size},
+                ),
+                "server_many_errors": (McpServer, {**server, "args": [False] * size}),
+            }
+            for name, (model, document) in refusals.items():
+                workloads[f"config_refused_{name}"] = (
+                    validation_action(model, document, False),
+                    size,
+                    True,
+                    DENSE_MEASURED,
+                )
+    long_path = "/".join(["a\u2028\u2029"] * 10000)
+    lexical_cases: dict[str, tuple[type[BaseModel], dict[str, object], bool]] = {
+        "duration_final_lf": (NodeLimits, {"timeout": "1" * 10000 + "s\n"}, False),
+        "resource_final_lf": (
+            CommandResource,
+            {**RESOURCE, "name": "/".join(["a"] * 10000) + "\n"},
+            False,
+        ),
+        "resource_unicode_segments": (
+            CommandResource,
+            {**RESOURCE, "name": long_path},
+            True,
+        ),
+        "resource_unicode_traversal": (
+            CommandResource,
+            {**RESOURCE, "name": long_path + "/../b"},
+            False,
+        ),
+    }
+    for name, (model, document, valid) in lexical_cases.items():
+        workloads[f"config_lexical_{name}"] = (
+            validation_action(model, document, valid),
+            10000,
+            True,
+            DENSE_MEASURED,
+        )
+    extended = {**RESOURCE, "x-meta": deep_extension(MAX_CANONICAL_BYTES - 4096)}
+    resources = [extended] * 64
+    nested_command: dict[str, object] = {
+        **MINIMAL[CommandConfig],
+        "resources": resources,
+    }
+    for action_name, factory in (
+        ("validate", validation_action),
+        ("export", export_action),
+    ):
+        workloads[f"config_nested_extensions_64_{action_name}"] = (
+            factory(CommandConfig, nested_command),
+            64,
+            True,
+            DENSE_MEASURED,
+        )
+    for name, last in (
+        ("resource", {**extended, "size": 262145}),
+        ("extension", {**RESOURCE, "x-meta": too_deep()}),
+    ):
+        document = {**nested_command, "resources": [*resources[:-1], last]}
+        workloads[f"config_refused_last_{name}"] = (
+            validation_action(CommandConfig, document, False),
+            64,
+            True,
+            DENSE_MEASURED,
+        )
+    return workloads
+
+
+WORKLOADS.update(configuration_workloads())
+
+
 @pytest.mark.parametrize("workload", sorted(WORKLOADS))
 def test_ir_model_validation_cost(report: Report, workload: str) -> None:
     action, count, expected, measured = WORKLOADS[workload]
@@ -182,6 +333,42 @@ def test_ir_model_validation_cost(report: Report, workload: str) -> None:
     report.environment[f"{workload}_retained_bytes"] = retained
     report.gates[f"{workload}_retained_at_baseline"] = retained < RETAINED_LIMIT_BYTES
     assert retained < RETAINED_LIMIT_BYTES
+
+
+@pytest.mark.parametrize("run", range(3))
+def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
+    root = Path(__file__).parents[2]
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "tests.measurements.ir_config_lifetime"],
+        cwd=root,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode()
+    assert completed.stderr == b""
+    result = cast("dict[str, object]", json.loads(completed.stdout))
+    report.environment[f"config_lifetime_{run}"] = completed.stdout.decode()
+    checkpoints = cast("list[dict[str, int | float | None]]", result["checkpoints"])
+    assert len(checkpoints) == 4
+    for checkpoint in checkpoints:
+        cycle = cast("int", checkpoint["cycles"])
+        report.samples.append(
+            Sample("config_lifetime", run, cycle, cast("float", checkpoint["seconds"]))
+        )
+        passed = cast("int", checkpoint["retained_bytes"]) < RETAINED_LIMIT_BYTES
+        report.gates[f"config_lifetime_{run}_{cycle}_retained"] = passed
+        assert passed
+        assert checkpoint["live_models"] == 0
+        assert checkpoint["threads"] == result["baseline_threads"]
+        assert checkpoint["descriptors"] == result["baseline_descriptors"]
+    extension = {"x-meta": deep_extension(MAX_CANONICAL_BYTES - 4096)}
+    report.environment["config_nested_extensions_records"] = 64
+    report.environment["config_nested_extensions_aggregate_bytes"] = 64 * len(
+        json.dumps(extension, separators=(",", ":")).encode()
+    )
 
 
 FAILURES: tuple[dict[str, object], ...] = (
