@@ -88,6 +88,7 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     anchor = ExitAnchor(parent.pid)
     deadline = clock.monotonic_ns() + 10_000_000_000
     assert await channel.read_frame(deadline) == sink_mode.encode("ascii")
+    assert await channel.read_frame(deadline) == reference.invocation_id.encode("ascii")
     identity = ProcessIdentity.model_validate_json(await channel.read_frame(deadline))
     helper_anchor = ExitAnchor(identity.pid, direct_child=False)
     await entered_fifo(identity.pid, reading, deadline, clock)

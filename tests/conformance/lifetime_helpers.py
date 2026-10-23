@@ -65,21 +65,30 @@ class ProbeIOHelperLauncher:
         return IOHelper(process, parent, clock)
 
 
-async def stalled_recovery_parent(
+async def stalled_lifetime_parent(
     home: Path,
     invocation_id: str,
     control: int,
     observation: int,
     fifo: int,
     sink_mode: str,
+    scenario: str = "reopen",
 ) -> None:
     import asyncio
 
     from kora.conformance.common import utc_now
     from kora.conformance.diagnostics import COMPONENT
-    from kora.conformance.lifetime import ParentLifetime
+    from kora.conformance.lifetime import LifetimeError, ParentLifetime
     from kora.observability import Level, LoggingSettings, configure_process
-    from kora.protocols.lifetime import CleanupReference, LifetimeLimits
+    from kora.protocols.lifetime import (
+        Acquisition,
+        CleanupReference,
+        LifetimeLimits,
+        ReservationRequest,
+        ResourceKind,
+        TemporaryTreeRequest,
+        new_operation_id,
+    )
     from kora.protocols.time import SystemClock
     from kora.runner.channels import BoundedChannel
 
@@ -88,7 +97,14 @@ async def stalled_recovery_parent(
     )
     clock = SystemClock()
     channel = BoundedChannel(socket.socket(fileno=control), clock)
-    launcher = ProbeIOHelperLauncher(home, observation, fifo, pause_at=2)
+    pause_at = 5 if scenario == "publisher" else 1 if scenario == "claim" else 2
+    launcher = ProbeIOHelperLauncher(
+        home,
+        observation,
+        fifo,
+        phase="after" if scenario == "claim" else "before",
+        pause_at=pause_at,
+    )
     owner = ParentLifetime(
         limits=LifetimeLimits(
             cooperative_seconds=0.1,
@@ -97,11 +113,23 @@ async def stalled_recovery_parent(
             drain_seconds=1.0,
         ),
         launcher=launcher,
-        recovery=CleanupReference(invocation_id=invocation_id),
+        recovery=None
+        if scenario == "publisher"
+        else CleanupReference(invocation_id=invocation_id),
     )
+    pending: asyncio.Task[Acquisition] | None = None
+    if scenario == "publisher":
+        tree = await owner.reserve(
+            ReservationRequest(
+                operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
+            )
+        )
+        pending = asyncio.create_task(
+            owner.acquire(tree.token, new_operation_id(), TemporaryTreeRequest())
+        )
     loop = asyncio.get_running_loop()
     deadline = owner.deadline()
-    while launcher.starts < 2:
+    while launcher.starts < pause_at:
         if clock.monotonic_ns() >= deadline:
             raise TimeoutError
         wake: asyncio.Future[None] = loop.create_future()
@@ -116,6 +144,7 @@ async def stalled_recovery_parent(
         loop.call_soon(wake.set_result, None)
         await wake
     await channel.write_frame(sink_mode.encode("ascii"), deadline)
+    await channel.write_frame(owner.invocation_id.encode("ascii"), deadline)
     helper = owner.mutations.helpers[-1]
     if helper.identity is None:
         raise RuntimeError("helper identity unavailable")
@@ -132,6 +161,12 @@ async def stalled_recovery_parent(
         * 1_000_000_000
     )
     report = await owner.close(None)
+    if pending is not None:
+        try:
+            await pending
+        except LifetimeError:
+            if not pending.done():
+                raise
     diagnostics.shutdown(
         max(0.0, min(1.0, (final_deadline - clock.monotonic_ns()) / 1_000_000_000))
     )
@@ -143,13 +178,14 @@ if __name__ == "__main__":
     import asyncio
 
     asyncio.run(
-        stalled_recovery_parent(
+        stalled_lifetime_parent(
             Path(sys.argv[1]),
             sys.argv[2],
             int(sys.argv[3]),
             int(sys.argv[4]),
             int(sys.argv[5]),
             sys.argv[6],
+            sys.argv[7] if len(sys.argv) > 7 else "reopen",
         )
     )
     sys.exit(1)
