@@ -37,3 +37,7 @@ The dedicated `tests/conformance/lifetime_full_disk.py` is explicitly collected 
 ## Status before the first physical run
 
 The instrumented helper's installed/probe/measured contract passed all three cases in 8.25 seconds. Architecture checks passed 90 cases in 11.46 seconds. Scoped static checks are required on the final preregistered source. No physical workload result, numerical budget, Linux full-disk result or final CI readiness is claimed by this preregistration. The existing #213 stream owns CI scheduling changes; this change supplies only the actual foundation registration after that accepted layout is available.
+
+## Invalid first attempt
+
+Revision `9c06768` failed before the first bootstrap with JOURNAL_UNAVAILABLE, in 2.28 seconds. The private directory supplied by `mkdtemp(dir="/tmp")` retained the macOS `/tmp` symlink spelling. The anchored no-follow implementation correctly refused that ancestor. The setup now resolves the newly created private directory before passing it to the constructor. No product behavior or check changes. All output and raw samples remain under `/tmp/kora-247-lifetime-evidence/attempt-1`; the failed private root is retained. An OS inventory after failure found no remaining workload, helper or client process. This invalid setup does not provide lifecycle performance evidence. The replacement repeats the complete preregistered population, with a fresh artifact directory and its own committed source revision.

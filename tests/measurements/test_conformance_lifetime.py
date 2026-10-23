@@ -44,7 +44,7 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
     for run in range(3):
         folder = artifacts / str(run)
         folder.mkdir(mode=0o700)
-        private = tempfile.mkdtemp(prefix="kora-life-", dir="/tmp")
+        private = str(Path(tempfile.mkdtemp(prefix="kora-life-", dir="/tmp")).resolve())
         (folder / "home.txt").write_text(private)
         with (folder / "stdout.json").open("xb") as stdout:
             with (folder / "stderr.txt").open("xb") as stderr:
