@@ -1,0 +1,2485 @@
+{
+  "provenance": {
+    "issue": 237,
+    "schema_path": "knowledge/specs/ir.schema.json",
+    "base_revision": "18a229427afecba74e2e8d402027508c739a9a81",
+    "schema_state": "approved remaining-configuration amendments before commit",
+    "normalized_schema_sha256": "c2a89d7e2b31f8d6142dc36e026e0cc89332ab3175c51e9833959130beeb3d3e",
+    "checker_version": "0.38.2",
+    "observed_python": "3.15.0",
+    "regex": "default",
+    "format_checking": true,
+    "purpose": "frozen verification evidence; no runtime authority",
+    "corroborating_python": "3.11.17",
+    "corroborating_matched_cases": 52
+  },
+  "schema_snapshot": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://kora.dev/schemas/ir/1.0.json",
+    "title": "kora graph IR",
+    "description": "Draft JSON Schema for kora IR version 1.x. Root is lenient on unknown keys; typed sub-objects are strict. Keys prefixed with x- are allowed on IR record objects, including nested records. Named maps and embedded schemas retain their own rules.",
+    "type": "object",
+    "required": [
+      "ir_version",
+      "type_contracts",
+      "graph",
+      "runtime"
+    ],
+    "properties": {
+      "$schema": {
+        "type": "string",
+        "format": "uri"
+      },
+      "ir_version": {
+        "type": "string",
+        "pattern": "^1\\.[0-9]+$",
+        "description": "IR format version (semver major.minor)"
+      },
+      "meta": {
+        "type": "object",
+        "description": "Compiler provenance; never read by the scheduler",
+        "properties": {
+          "compiler": {
+            "type": "string"
+          },
+          "source_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "presets": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object"
+            }
+          },
+          "defaults": {
+            "type": "object"
+          }
+        }
+      },
+      "type_contracts": {
+        "type": "object",
+        "description": "Authoritative used type closure. List[T] is derived from T. No runtime registry alias lookup.",
+        "propertyNames": {
+          "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*$"
+        },
+        "additionalProperties": {
+          "$ref": "#/$defs/typeContract"
+        }
+      },
+      "graph": {
+        "$ref": "#/$defs/graph"
+      },
+      "runtime": {
+        "$ref": "#/$defs/runtimeSection"
+      },
+      "secrets": {
+        "type": "object",
+        "properties": {
+          "aliases": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/envName"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/secretRef"
+            }
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      }
+    },
+    "$defs": {
+      "typeBehavior": {
+        "type": "object",
+        "required": [
+          "validation",
+          "digest_fields",
+          "summary"
+        ],
+        "properties": {
+          "validation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "digest_fields": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "typeContract": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "builtin_revision"
+            ],
+            "properties": {
+              "builtin_revision": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "required": [
+              "schema",
+              "parent",
+              "behavior"
+            ],
+            "properties": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "$schema"
+                ],
+                "properties": {
+                  "$schema": {
+                    "const": "https://json-schema.org/draft/2020-12/schema"
+                  }
+                }
+              },
+              "parent": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "pattern": "^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*$"
+                  }
+                ]
+              },
+              "behavior": {
+                "$ref": "#/$defs/typeBehavior"
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          }
+        ]
+      },
+      "id": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+      },
+      "envName": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9_]{0,63}(?![\\s\\S])"
+      },
+      "digest": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}(?![\\s\\S])"
+      },
+      "duration": {
+        "type": "string",
+        "pattern": "^[0-9]+(ms|s|m|h|d)(?![\\s\\S])"
+      },
+      "retentionPeriod": {
+        "type": "string",
+        "pattern": "^([0-9]+d|forever)$"
+      },
+      "retention": {
+        "type": "object",
+        "description": "Graph-level retention; absent fields take the namespace default. Cleanup deletes payloads only; metadata stays.",
+        "properties": {
+          "transcripts": {
+            "$ref": "#/$defs/retentionPeriod"
+          },
+          "artifact_payloads": {
+            "$ref": "#/$defs/retentionPeriod"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "expression": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "CEL expression; limits and checking in ir.md section 7"
+      },
+      "secretRef": {
+        "type": "string",
+        "pattern": "^secret://[a-z][a-z0-9_-]*/[A-Za-z0-9_./-]+$"
+      },
+      "artifactType": {
+        "type": "string",
+        "pattern": "^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\\[(List\\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\\]+)$",
+        "description": "Structural spelling only. Semantic validation parses recursive List[T] and rejects unbalanced nesting without imposing a depth limit."
+      },
+      "errorClass": {
+        "type": "string",
+        "enum": [
+          "harness_error",
+          "command_failed",
+          "timeout",
+          "events_exhausted",
+          "budget_exhausted",
+          "artifact_invalid",
+          "attempt_failed",
+          "approval_rejected",
+          "approval_expired",
+          "candidate_moved",
+          "wait_expired",
+          "stalled",
+          "provider_limited",
+          "protected_path_modified",
+          "secret_leak",
+          "integrity_error",
+          "infrastructure",
+          "cancelled",
+          "config_error"
+        ]
+      },
+      "triggerRule": {
+        "type": "string",
+        "enum": [
+          "all_success",
+          "all_done",
+          "one_success",
+          "one_failed",
+          "none_failed",
+          "all_skipped",
+          "none_failed_min_one_success"
+        ]
+      },
+      "sourceLocation": {
+        "type": "object",
+        "required": [
+          "file",
+          "line"
+        ],
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "retry": {
+        "type": "object",
+        "properties": {
+          "max_attempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "initial_interval": {
+            "$ref": "#/$defs/duration"
+          },
+          "backoff_coefficient": {
+            "type": "number",
+            "minimum": 1
+          },
+          "max_interval": {
+            "$ref": "#/$defs/duration"
+          },
+          "retry_on": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/errorClass"
+            },
+            "uniqueItems": true
+          },
+          "non_retryable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/errorClass"
+            },
+            "uniqueItems": true
+          },
+          "predicate": {
+            "$ref": "#/$defs/expression"
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "fresh",
+              "resume",
+              "fresh_with_feedback"
+            ]
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "limits": {
+        "type": "object",
+        "properties": {
+          "timeout": {
+            "$ref": "#/$defs/duration"
+          },
+          "max_events": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100000
+          },
+          "budget_usd": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "stall_after": {
+            "$ref": "#/$defs/duration"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "inputRef": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/$defs/artifactType"
+          },
+          "from": {
+            "type": "string",
+            "pattern": "^(\\$params|\\$inputs|\\$previous_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])"
+          },
+          "output": {
+            "$ref": "#/$defs/id"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "dotted path into the source artifact or params; for $inputs the subgraph input name"
+          },
+          "optional": {
+            "type": "boolean"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "outputDecl": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/$defs/artifactType"
+          },
+          "schema": {
+            "type": "object",
+            "description": "JSON Schema of the payload for StructuredOutput and custom types"
+          },
+          "collect": {
+            "$ref": "#/$defs/id",
+            "description": "fan_out nodes only: the body output collected into this List output"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "toolPolicy": {
+        "type": "object",
+        "description": "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns in the harness tool-pattern syntax, evaluated per layer together with the namespace policy: a deny in either layer wins, every layer with a non-empty allow list must match, and order inside an array has no effect",
+        "properties": {
+          "allow": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deny": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "mcpServer": {
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "stdio",
+              "http"
+            ]
+          },
+          "command": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "url": {
+            "type": "string"
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "secret_env": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/envName"
+            }
+          },
+          "network_policy": {
+            "type": "object",
+            "properties": {
+              "egress": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "digest": {
+            "$ref": "#/$defs/digest",
+            "description": "package or image digest the server is pinned to; filled at deploy when absent"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "workspace": {
+        "type": "object",
+        "required": [
+          "repo"
+        ],
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "string",
+            "description": "revision or template expression"
+          },
+          "from_ref": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "input path of a VcsRef to check out instead of rev"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "agentConfig": {
+        "type": "object",
+        "required": [
+          "harness",
+          "prompt",
+          "workspace"
+        ],
+        "properties": {
+          "harness": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*(:[a-z0-9][a-z0-9_.-]*)?(?![\\s\\S])",
+            "description": "Harness adapter name (claude, codex in MVP); the form acp:<agent> is reserved for the ACP adapter after MVP and fails semantic validation with IR018 until that adapter is installed (ADR-0004)"
+          },
+          "model": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "system_prompt_append": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "subagents": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "description",
+                "prompt"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "tools": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            }
+          },
+          "hooks": {
+            "type": "object"
+          },
+          "mcp_servers": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/mcpServer"
+            }
+          },
+          "tool_policy": {
+            "$ref": "#/$defs/toolPolicy"
+          },
+          "permission_mode": {
+            "type": "string",
+            "enum": [
+              "plan",
+              "accept_edits",
+              "dont_ask",
+              "bypass"
+            ]
+          },
+          "sandbox": {
+            "type": "string",
+            "enum": [
+              "read_only",
+              "workspace_write",
+              "full_access"
+            ]
+          },
+          "trust_repo_config": {
+            "type": "boolean"
+          },
+          "network_policy": {
+            "type": "object",
+            "properties": {
+              "egress": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          "workspace": {
+            "$ref": "#/$defs/workspace"
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "env": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/envName"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "secret_env": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/envName"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/envName"
+            }
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "vcs": {
+            "type": "string"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "commandConfig": {
+        "type": "object",
+        "required": [
+          "cmd",
+          "workspace"
+        ],
+        "properties": {
+          "cmd": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "output_file": {
+            "type": "string"
+          },
+          "resources": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "sha256",
+                "size",
+                "executable"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^(?!/)(?![\\s\\S]*(^|/)\\.{0,2}(/|$))[^\\u0000-\\u001f\\u007f\\\\]+(?![\\s\\S])"
+                },
+                "sha256": {
+                  "$ref": "#/$defs/digest"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 262144
+                },
+                "executable": {
+                  "type": "boolean"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            }
+          },
+          "resource_set_digest": {
+            "$ref": "#/$defs/digest"
+          },
+          "workspace": {
+            "$ref": "#/$defs/workspace"
+          },
+          "env": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/envName"
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "secret_env": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/envName"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/envName"
+            }
+          },
+          "network_policy": {
+            "type": "object",
+            "properties": {
+              "egress": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          "success_exit_codes": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          },
+          "runtime": {
+            "type": "string"
+          },
+          "vcs": {
+            "type": "string"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "humanInputConfig": {
+        "type": "object",
+        "required": [
+          "channel",
+          "timeout",
+          "on_expiry"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "form": {
+            "type": "object",
+            "default": {
+              "type": "object",
+              "properties": {
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "approve",
+                    "reject"
+                  ]
+                },
+                "comments": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "decision"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Absent selects the built-in decision/comments form. An explicit schema is preserved; response values are never filled from schema defaults."
+          },
+          "timeout": {
+            "$ref": "#/$defs/duration"
+          },
+          "on_expiry": {
+            "type": "string",
+            "enum": [
+              "fail",
+              "skip",
+              "default_value"
+            ]
+          },
+          "default_value": {},
+          "binds": {
+            "type": "object",
+            "properties": {
+              "vcs_ref": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "gate_digests": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 4096
+                }
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          "approve_when": {
+            "$ref": "#/$defs/expression",
+            "description": "When absent, response.decision == 'approve' applies only when the effective form declares decision and the expression passes CEL checking; otherwise IR011. Explicit expressions are preserved."
+          },
+          "context": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "input path of the artifact shown to the approver, e.g. a ReviewBundle"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "waitEventConfig": {
+        "type": "object",
+        "required": [
+          "timeout",
+          "on_expiry"
+        ],
+        "oneOf": [
+          {
+            "required": [
+              "event"
+            ]
+          },
+          {
+            "required": [
+              "poll"
+            ]
+          }
+        ],
+        "properties": {
+          "event": {
+            "type": "object",
+            "required": [
+              "type",
+              "name"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "webhook",
+                  "graph"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "match": {
+                "$ref": "#/$defs/expression"
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          "poll": {
+            "$ref": "#/$defs/sensorPoll"
+          },
+          "interval": {
+            "$ref": "#/$defs/duration"
+          },
+          "timeout": {
+            "$ref": "#/$defs/duration"
+          },
+          "on_expiry": {
+            "type": "string",
+            "enum": [
+              "fail",
+              "skip"
+            ]
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "sensorPoll": {
+        "type": "object",
+        "required": [
+          "sensor",
+          "until"
+        ],
+        "properties": {
+          "sensor": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*(?![\\s\\S])",
+            "description": "sensor protocol implementation name; built-ins: change_request_status, ci_status, http"
+          },
+          "config": {
+            "type": "object",
+            "description": "sensor-specific configuration, validated by the implementation"
+          },
+          "until": {
+            "$ref": "#/$defs/expression"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "timerConfig": {
+        "type": "object",
+        "oneOf": [
+          {
+            "required": [
+              "duration"
+            ]
+          },
+          {
+            "required": [
+              "at"
+            ]
+          }
+        ],
+        "properties": {
+          "duration": {
+            "$ref": "#/$defs/duration"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[Tt]([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,6})?([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\\s\\S])",
+            "description": "absolute wake time; no expressions"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "branchConfig": {
+        "type": "object",
+        "required": [
+          "cases"
+        ],
+        "properties": {
+          "cases": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "when",
+                "to"
+              ],
+              "properties": {
+                "when": {
+                  "$ref": "#/$defs/expression"
+                },
+                "to": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])"
+                  },
+                  "minItems": 1
+                },
+                "reason": {
+                  "$ref": "#/$defs/expression"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            }
+          },
+          "else": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(\\$fail_attempt|[a-z][a-z0-9_]{0,63})(?![\\s\\S])"
+            }
+          },
+          "else_reason": {
+            "$ref": "#/$defs/expression"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "fanOutConfig": {
+        "type": "object",
+        "required": [
+          "body",
+          "over"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/id"
+          },
+          "over": {
+            "$ref": "#/$defs/id",
+            "description": "name of the node input (List typed) that is mapped; other inputs are bound unchanged to every instance"
+          },
+          "max_parallel": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "skip_failures": {
+            "type": "boolean"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "subgraphNodeConfig": {
+        "type": "object",
+        "required": [
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "$ref": "#/$defs/id"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "node": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "command",
+              "human_input",
+              "wait_event",
+              "timer",
+              "branch",
+              "fan_out",
+              "subgraph"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/sourceLocation"
+          },
+          "inputs": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/id"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/inputRef"
+            }
+          },
+          "outputs": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/id"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/outputDecl"
+            }
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/id"
+            },
+            "uniqueItems": true
+          },
+          "trigger_rule": {
+            "$ref": "#/$defs/triggerRule"
+          },
+          "retry": {
+            "$ref": "#/$defs/retry"
+          },
+          "limits": {
+            "$ref": "#/$defs/limits"
+          },
+          "attempt_invariant": {
+            "type": "boolean"
+          },
+          "independent_of": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/id"
+            }
+          },
+          "protected_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "node-level addition to runtime.protected_paths (DD-34)"
+          },
+          "preset": {
+            "type": "string",
+            "description": "preset id the resolved config was built from"
+          },
+          "config": {
+            "type": "object"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "agent"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config",
+                "outputs"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/agentConfig"
+                },
+                "outputs": {
+                  "required": [
+                    "session"
+                  ],
+                  "properties": {
+                    "session": {
+                      "properties": {
+                        "type": {
+                          "const": "AgentSession"
+                        }
+                      }
+                    }
+                  },
+                  "additionalProperties": {
+                    "properties": {
+                      "type": {
+                        "not": {
+                          "const": "AgentSession"
+                        }
+                      }
+                    }
+                  },
+                  "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "command"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config",
+                "outputs"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/commandConfig"
+                },
+                "outputs": {
+                  "required": [
+                    "result"
+                  ],
+                  "properties": {
+                    "result": {
+                      "properties": {
+                        "type": {
+                          "const": "CommandResult"
+                        }
+                      }
+                    }
+                  },
+                  "additionalProperties": {
+                    "properties": {
+                      "type": {
+                        "not": {
+                          "const": "CommandResult"
+                        }
+                      }
+                    }
+                  },
+                  "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "human_input"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config",
+                "outputs"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/humanInputConfig"
+                },
+                "outputs": {
+                  "required": [
+                    "response"
+                  ],
+                  "properties": {
+                    "response": {
+                      "properties": {
+                        "type": {
+                          "const": "StructuredOutput"
+                        }
+                      }
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "wait_event"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config",
+                "outputs"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/waitEventConfig"
+                },
+                "outputs": {
+                  "required": [
+                    "event"
+                  ],
+                  "properties": {
+                    "event": {
+                      "properties": {
+                        "type": {
+                          "const": "StructuredOutput"
+                        }
+                      }
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Canonical IR requires the fixed role output; structural role violations map to IR003 in shared validation."
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "timer"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/timerConfig"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "branch"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/branchConfig"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "fan_out"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/fanOutConfig"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "subgraph"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config"
+              ],
+              "properties": {
+                "config": {
+                  "$ref": "#/$defs/subgraphNodeConfig"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "trigger": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "manual"
+                }
+              }
+            },
+            "then": {
+              "propertyNames": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "kind",
+                      "params"
+                    ]
+                  },
+                  {
+                    "pattern": "^x-"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "cron"
+                }
+              }
+            },
+            "then": {
+              "propertyNames": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "kind",
+                      "params",
+                      "expr",
+                      "timezone"
+                    ]
+                  },
+                  {
+                    "pattern": "^x-"
+                  }
+                ]
+              },
+              "required": [
+                "expr"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "webhook"
+                }
+              }
+            },
+            "then": {
+              "propertyNames": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "kind",
+                      "params",
+                      "name",
+                      "auth",
+                      "params_from"
+                    ]
+                  },
+                  {
+                    "pattern": "^x-"
+                  }
+                ]
+              },
+              "required": [
+                "name",
+                "auth"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "sensor"
+                }
+              }
+            },
+            "then": {
+              "propertyNames": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "kind",
+                      "params",
+                      "poll",
+                      "interval"
+                    ]
+                  },
+                  {
+                    "pattern": "^x-"
+                  }
+                ]
+              },
+              "required": [
+                "poll",
+                "interval"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "graph"
+                }
+              }
+            },
+            "then": {
+              "propertyNames": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "kind",
+                      "params",
+                      "graph",
+                      "on"
+                    ]
+                  },
+                  {
+                    "pattern": "^x-"
+                  }
+                ]
+              },
+              "required": [
+                "graph",
+                "on"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "cron",
+              "webhook",
+              "sensor",
+              "graph"
+            ]
+          },
+          "expr": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "auth": {
+            "type": "object",
+            "required": [
+              "kind",
+              "secret"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "hmac",
+                  "bearer"
+                ]
+              },
+              "secret": {
+                "$ref": "#/$defs/envName"
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          "params_from": {
+            "type": "string",
+            "enum": [
+              "payload",
+              "none"
+            ]
+          },
+          "params": {
+            "type": "object"
+          },
+          "poll": {
+            "$ref": "#/$defs/sensorPoll"
+          },
+          "interval": {
+            "$ref": "#/$defs/duration"
+          },
+          "graph": {
+            "type": "string"
+          },
+          "on": {
+            "type": "string",
+            "enum": [
+              "run_succeeded",
+              "run_failed",
+              "run_finished"
+            ]
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "targetConfig": {
+        "type": "object",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "param"
+                ],
+                "properties": {
+                  "param": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "a run parameter of graph.params; bound when the run is created"
+                  }
+                },
+                "patternProperties": {
+                  "^x-": {}
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "from",
+                  "output",
+                  "path"
+                ],
+                "properties": {
+                  "from": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "output": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": "one scalar string in a top-level node output; key binds once when the complete source result is atomically accepted (ADR-0019)"
+                  }
+                },
+                "patternProperties": {
+                  "^x-": {}
+                },
+                "additionalProperties": false
+              }
+            ]
+          },
+          "on_active": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "defer"
+            ],
+            "description": "what a new run does while another run of the namespace holds the same target; when absent: allow (FR-6.11, ADR-0014)"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "graphBody": {
+        "type": "object",
+        "required": [
+          "nodes"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "nodes": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/id"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/node"
+            },
+            "minProperties": 1
+          }
+        }
+      },
+      "subgraph": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/graphBody"
+          }
+        ],
+        "properties": {
+          "description": {},
+          "nodes": {},
+          "inputs": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/id"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/outputDecl"
+            }
+          },
+          "outputs": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/id"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "required": [
+                "type",
+                "from",
+                "output"
+              ],
+              "properties": {
+                "type": {
+                  "$ref": "#/$defs/artifactType"
+                },
+                "from": {
+                  "$ref": "#/$defs/id"
+                },
+                "output": {
+                  "$ref": "#/$defs/id"
+                }
+              },
+              "patternProperties": {
+                "^x-": {}
+              },
+              "additionalProperties": false
+            }
+          },
+          "retry": {
+            "$ref": "#/$defs/retry"
+          },
+          "limits": {
+            "$ref": "#/$defs/limits"
+          },
+          "source": {
+            "$ref": "#/$defs/sourceLocation"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "graph": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/graphBody"
+          }
+        ],
+        "required": [
+          "id",
+          "namespace",
+          "nodes"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/id"
+          },
+          "version": {
+            "type": "string",
+            "description": "the author's own version of the graph; informational"
+          },
+          "namespace": {
+            "$ref": "#/$defs/id"
+          },
+          "description": {},
+          "nodes": {},
+          "params": {
+            "type": "object",
+            "description": "JSON Schema for run parameters"
+          },
+          "triggers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/trigger"
+            }
+          },
+          "overlap": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "skip",
+              "queue"
+            ],
+            "description": "When absent: queue for webhook starts, allow for other triggers. Skip considers accepted pending/running runs; queue promotion selects the oldest pending run under the graph lock when none is running. Canonical accepted/skip outcomes are durable (FR-6.2, ADR-0020)."
+          },
+          "target": {
+            "$ref": "#/$defs/targetConfig"
+          },
+          "subgraphs": {
+            "type": "object",
+            "propertyNames": {
+              "$ref": "#/$defs/id"
+            },
+            "additionalProperties": {
+              "$ref": "#/$defs/subgraph"
+            }
+          },
+          "source": {
+            "$ref": "#/$defs/sourceLocation"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      },
+      "runtimeSection": {
+        "type": "object",
+        "required": [
+          "runtime",
+          "vcs"
+        ],
+        "properties": {
+          "runtime": {
+            "type": "string"
+          },
+          "vcs": {
+            "type": "string"
+          },
+          "artifact_storage": {
+            "type": "string"
+          },
+          "approval_channels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object"
+            }
+          },
+          "concurrency": {
+            "type": "object",
+            "properties": {
+              "max_running_nodes": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Live graph-wide cap on all non-terminal physical attempts across graph versions; cap source is the newest active graph version, or newest deployed when none is active (ADR-0020)."
+              },
+              "max_running_runs": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Live graph-wide cap on distinct runs with any non-terminal physical attempt, including historical or unknown work; no-attempt waits reserve no execution-run slot. Counts span versions and caps use the newest active graph version, or newest deployed when none is active (ADR-0020)."
+              }
+            },
+            "patternProperties": {
+              "^x-": {}
+            },
+            "additionalProperties": false
+          },
+          "limits": {
+            "$ref": "#/$defs/limits"
+          },
+          "budget_headroom_pct": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "stall_after": {
+            "$ref": "#/$defs/duration"
+          },
+          "retention": {
+            "$ref": "#/$defs/retention"
+          },
+          "protected_paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "glob patterns of gate files agent nodes may not edit and command gates verify against the base commit (DD-34)"
+          },
+          "infrastructure_retry": {
+            "$ref": "#/$defs/retry"
+          },
+          "provider_retry": {
+            "type": "object",
+            "properties": {
+              "max_wait": {
+                "$ref": "#/$defs/duration"
+              }
+            },
+            "additionalProperties": false,
+            "description": "waiting allowed for model-provider limits before failing with provider_limited (ADR-0024)"
+          }
+        },
+        "patternProperties": {
+          "^x-": {}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "cases": [
+    {
+      "name": "SubagentConfig_minimal",
+      "definition": "subagentConfig",
+      "document": {
+        "name": "",
+        "description": "",
+        "prompt": ""
+      },
+      "valid": true
+    },
+    {
+      "name": "AgentConfig_minimal",
+      "definition": "agentConfig",
+      "document": {
+        "harness": "claude",
+        "prompt": "",
+        "workspace": {
+          "repo": ""
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "HumanInputBinds_minimal",
+      "definition": "humanInputBinds",
+      "document": {},
+      "valid": true
+    },
+    {
+      "name": "HumanInputConfig_minimal",
+      "definition": "humanInputConfig",
+      "document": {
+        "channel": "cli",
+        "timeout": "0s",
+        "on_expiry": "fail"
+      },
+      "valid": true
+    },
+    {
+      "name": "EventSelector_minimal",
+      "definition": "eventSelector",
+      "document": {
+        "type": "webhook",
+        "name": ""
+      },
+      "valid": true
+    },
+    {
+      "name": "SensorPoll_minimal",
+      "definition": "sensorPoll",
+      "document": {
+        "sensor": "http",
+        "until": "true"
+      },
+      "valid": true
+    },
+    {
+      "name": "WaitEventConfig_minimal",
+      "definition": "waitEventConfig",
+      "document": {
+        "event": {
+          "type": "graph",
+          "name": ""
+        },
+        "timeout": "0s",
+        "on_expiry": "skip"
+      },
+      "valid": true
+    },
+    {
+      "name": "TimerConfig_minimal",
+      "definition": "timerConfig",
+      "document": {
+        "duration": "0s"
+      },
+      "valid": true
+    },
+    {
+      "name": "SubagentConfig_populated",
+      "definition": "subagentConfig",
+      "document": {
+        "name": "helper",
+        "description": "description",
+        "prompt": "{{raw}}",
+        "tools": [
+          "",
+          "Read"
+        ],
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "AgentConfig_populated",
+      "definition": "agentConfig",
+      "document": {
+        "harness": "claude",
+        "prompt": "",
+        "workspace": {
+          "repo": ""
+        },
+        "model": "",
+        "system_prompt_append": "{{raw}}",
+        "skills": [
+          "second",
+          "first"
+        ],
+        "subagents": [
+          {
+            "name": "",
+            "description": "",
+            "prompt": ""
+          },
+          {
+            "name": "other",
+            "description": "",
+            "prompt": ""
+          }
+        ],
+        "hooks": {
+          "custom": [
+            false,
+            null
+          ]
+        },
+        "mcp_servers": {
+          "": {
+            "type": "http"
+          },
+          "x-name": {
+            "type": "stdio",
+            "args": []
+          }
+        },
+        "tool_policy": {
+          "x-meta": false
+        },
+        "permission_mode": "dont_ask",
+        "sandbox": "workspace_write",
+        "trust_repo_config": false,
+        "network_policy": {
+          "egress": []
+        },
+        "output_schema": {
+          "properties": {
+            "first": true,
+            "second": false
+          }
+        },
+        "env": {
+          "A": "",
+          "B": "{{raw}}"
+        },
+        "secret_env": {
+          "A": "TOKEN",
+          "B": "OTHER"
+        },
+        "runtime": "",
+        "vcs": "",
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "HumanInputBinds_populated",
+      "definition": "humanInputBinds",
+      "document": {
+        "vcs_ref": "inputs.change",
+        "gate_digests": [
+          "inputs.a",
+          "inputs.b"
+        ],
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "HumanInputConfig_populated",
+      "definition": "humanInputConfig",
+      "document": {
+        "channel": "cli",
+        "timeout": "0s",
+        "on_expiry": "fail",
+        "form": {
+          "properties": {
+            "decision": true,
+            "other": false
+          }
+        },
+        "default_value": null,
+        "binds": {
+          "vcs_ref": "inputs.change",
+          "gate_digests": []
+        },
+        "approve_when": "true",
+        "context": "inputs.context",
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "EventSelector_populated",
+      "definition": "eventSelector",
+      "document": {
+        "type": "graph",
+        "name": "event",
+        "match": "true",
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "SensorPoll_populated",
+      "definition": "sensorPoll",
+      "document": {
+        "sensor": "http",
+        "config": {
+          "values": [
+            null,
+            false
+          ]
+        },
+        "until": "true",
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "WaitEventConfig_populated",
+      "definition": "waitEventConfig",
+      "document": {
+        "poll": {
+          "sensor": "http",
+          "until": "true",
+          "config": {}
+        },
+        "interval": "0001s",
+        "timeout": "0s",
+        "on_expiry": "fail",
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "TimerConfig_populated",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-02-29t23:59:59.120000-00:00",
+        "x-meta": false
+      },
+      "valid": true
+    },
+    {
+      "name": "SubagentConfig_invalid",
+      "definition": "subagentConfig",
+      "document": {
+        "name": "",
+        "description": false,
+        "prompt": ""
+      },
+      "valid": false
+    },
+    {
+      "name": "AgentConfig_invalid",
+      "definition": "agentConfig",
+      "document": {
+        "harness": false,
+        "prompt": "",
+        "workspace": {
+          "repo": ""
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "HumanInputBinds_invalid",
+      "definition": "humanInputBinds",
+      "document": {
+        "vcs_ref": false
+      },
+      "valid": false
+    },
+    {
+      "name": "HumanInputConfig_invalid",
+      "definition": "humanInputConfig",
+      "document": {
+        "channel": false,
+        "timeout": "0s",
+        "on_expiry": "fail"
+      },
+      "valid": false
+    },
+    {
+      "name": "EventSelector_invalid",
+      "definition": "eventSelector",
+      "document": {
+        "type": "wrong",
+        "name": ""
+      },
+      "valid": false
+    },
+    {
+      "name": "SensorPoll_invalid",
+      "definition": "sensorPoll",
+      "document": {
+        "sensor": "http",
+        "until": false
+      },
+      "valid": false
+    },
+    {
+      "name": "WaitEventConfig_invalid",
+      "definition": "waitEventConfig",
+      "document": {
+        "timeout": "0s",
+        "on_expiry": "fail"
+      },
+      "valid": false
+    },
+    {
+      "name": "TimerConfig_invalid",
+      "definition": "timerConfig",
+      "document": {
+        "duration": "0s",
+        "at": "2024-01-01T00:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_0",
+      "definition": "timerConfig",
+      "document": {
+        "at": "0001-01-01T00:00:00Z"
+      },
+      "valid": true
+    },
+    {
+      "name": "timestamp_1",
+      "definition": "timerConfig",
+      "document": {
+        "at": "9999-12-31t23:59:59z"
+      },
+      "valid": true
+    },
+    {
+      "name": "timestamp_2",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2000-02-29T01:02:03.1+23:59"
+      },
+      "valid": true
+    },
+    {
+      "name": "timestamp_3",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-02-29t23:59:59.120000-00:00"
+      },
+      "valid": true
+    },
+    {
+      "name": "timestamp_4",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00.123456Z"
+      },
+      "valid": true
+    },
+    {
+      "name": "timestamp_5",
+      "definition": "timerConfig",
+      "document": {
+        "at": "0000-01-01T00:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_6",
+      "definition": "timerConfig",
+      "document": {
+        "at": "1900-02-29T00:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_7",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-04-31T00:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_8",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T24:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_9",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:60:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_10",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:60Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_11",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00+24:00"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_12",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00+00:60"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_13",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00.Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_14",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00.1234567Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_15",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00,1Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_16",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_17",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01 00:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_18",
+      "definition": "timerConfig",
+      "document": {
+        "at": "\uff12\uff10\uff12\uff14-01-01T00:00:00Z"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_19",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00Z\n"
+      },
+      "valid": false
+    },
+    {
+      "name": "timestamp_20",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00Z "
+      },
+      "valid": false
+    },
+    {
+      "name": "none",
+      "definition": "timerConfig",
+      "document": {},
+      "valid": false
+    },
+    {
+      "name": "both",
+      "definition": "timerConfig",
+      "document": {
+        "at": "2024-01-01T00:00:00Z",
+        "duration": "0s"
+      },
+      "valid": false
+    },
+    {
+      "name": "null",
+      "definition": "timerConfig",
+      "document": {
+        "at": null
+      },
+      "valid": false
+    },
+    {
+      "name": "epoch",
+      "definition": "timerConfig",
+      "document": {
+        "at": 0
+      },
+      "valid": false
+    },
+    {
+      "name": "extension",
+      "definition": "timerConfig",
+      "document": {
+        "duration": "0s",
+        "x-metadata": [
+          false,
+          null
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "duration_huge",
+      "definition": "timerConfig",
+      "document": {
+        "duration": "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111s"
+      },
+      "valid": true
+    },
+    {
+      "name": "expression",
+      "definition": "timerConfig",
+      "document": {
+        "at": "{{value}}"
+      },
+      "valid": false
+    }
+  ]
+}

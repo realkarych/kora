@@ -5,18 +5,26 @@ import pytest
 from pydantic import TypeAdapter
 
 from kora.ir import (
+    AgentConfig,
     BranchCase,
     BranchConfig,
     CommandConfig,
     CommandResource,
     ErrorClass,
+    EventSelector,
     FanOutConfig,
+    HumanInputBinds,
+    HumanInputConfig,
     McpServer,
     NetworkPolicy,
     NodeLimits,
     Retry,
+    SensorPoll,
+    SubagentConfig,
     SubgraphNodeConfig,
+    TimerConfig,
     ToolPolicy,
+    WaitEventConfig,
     Workspace,
 )
 from tests.ir.support import schema_definition
@@ -33,6 +41,14 @@ GENERATED: dict[str, Callable[[], dict[str, object]]] = {
     ),
 }
 CONFIG_MODELS = {
+    "agentConfig": AgentConfig,
+    "subagentConfig": SubagentConfig,
+    "humanInputBinds": HumanInputBinds,
+    "humanInputConfig": HumanInputConfig,
+    "eventSelector": EventSelector,
+    "sensorPoll": SensorPoll,
+    "waitEventConfig": WaitEventConfig,
+    "timerConfig": TimerConfig,
     "branchCase": BranchCase,
     "branchConfig": BranchConfig,
     "fanOutConfig": FanOutConfig,
@@ -54,6 +70,15 @@ for definition, model in CONFIG_MODELS.items():
     )
 REFERENCES: frozenset[str] = frozenset(
     {
+        "SubagentConfig",
+        "HumanInputBinds",
+        "EventSelector",
+        "SensorPoll",
+        "McpServer",
+        "ToolPolicy",
+        "mcpServer",
+        "sensorPoll",
+        "toolPolicy",
         "duration",
         "digest",
         "envName",
@@ -66,6 +91,22 @@ REFERENCES: frozenset[str] = frozenset(
         "errorClass",
         "expression",
         "id",
+        "Concurrency",
+        "NodeLimits",
+        "Retry",
+        "Retention",
+        "ProviderRetry",
+        "TypeBehavior",
+        "ParameterTarget",
+        "OutputTarget",
+        "WebhookAuth",
+        "artifactType",
+        "retentionPeriod",
+        "secretRef",
+        "typeBehavior",
+        "limits",
+        "retry",
+        "retention",
     }
 )
 
@@ -76,6 +117,14 @@ def property_schema(record: str, name: str) -> object:
 
 
 def committed_schema(definition: str) -> object:
+    if definition == "subagentConfig":
+        return cast("dict[str, object]", property_schema("agentConfig", "subagents"))[
+            "items"
+        ]
+    if definition == "humanInputBinds":
+        return property_schema("humanInputConfig", "binds")
+    if definition == "eventSelector":
+        return property_schema("waitEventConfig", "event")
     if definition == "branchCase":
         cases = cast("dict[str, object]", property_schema("branchConfig", "cases"))
         return cases["items"]
@@ -142,3 +191,47 @@ def test_ir_models_match_schema_definitions(definition: str) -> None:
     assert normalised(inline_known_references(generated, definitions)) == normalised(
         inline_known_references(committed, {})
     )
+
+
+def test_human_input_form_default_is_an_annotation_without_inserted_values() -> None:
+    from kora.ir import export_ir
+
+    expected = {
+        "type": "object",
+        "properties": {
+            "decision": {"type": "string", "enum": ["approve", "reject"]},
+            "comments": {"type": "string"},
+        },
+        "required": ["decision"],
+        "additionalProperties": False,
+    }
+    committed = cast("dict[str, object]", property_schema("humanInputConfig", "form"))
+    generated = HumanInputConfig.model_json_schema()
+    properties = cast("dict[str, dict[str, object]]", generated["properties"])
+    document = {"channel": "cli", "timeout": "0s", "on_expiry": "fail"}
+
+    parsed = HumanInputConfig.model_validate(document)
+
+    assert committed["default"] == properties["form"]["default"] == expected
+    assert export_ir(parsed) == document
+
+
+def test_timer_timestamp_pattern_and_format_are_present_in_both_schema_modes() -> None:
+    expected = (
+        r"^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[Tt]"
+        r"([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?"
+        r"([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\s\S])"
+    )
+    committed = cast("dict[str, object]", property_schema("timerConfig", "at"))
+
+    schemas = [
+        TimerConfig.model_json_schema(),
+        TimerConfig.model_json_schema(mode="serialization"),
+    ]
+
+    assert committed["format"] == "date-time"
+    assert committed["pattern"] == expected
+    for schema in schemas:
+        timestamp = cast("dict[str, dict[str, object]]", schema["properties"])["at"]
+        assert timestamp["format"] == "date-time"
+        assert timestamp["pattern"] == expected

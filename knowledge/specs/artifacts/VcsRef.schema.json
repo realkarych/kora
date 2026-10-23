@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:kora:artifact:VcsRef",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "repo",
+    "branch",
+    "commit",
+    "base_commit",
+    "changed_paths",
+    "diff_stat",
+    "pushed_by"
+  ],
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])"
+    },
+    "commit": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+      "maxLength": 255
+    },
+    "base_commit": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+      "maxLength": 255
+    },
+    "changed_paths": {
+      "type": "array",
+      "maxItems": 10000,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": "^(?!\\.{1,2}(?:/|$))(?![\\s\\S]*?/\\.{1,2}(?:/|$))[^/\\u0000-\\u001f\\u007f\\\\]+(?:/[^/\\u0000-\\u001f\\u007f\\\\]+)*(?![\\s\\S])"
+      }
+    },
+    "diff_stat": {
+      "type": "string",
+      "pattern": "^[^\\u0000]*(?![\\s\\S])"
+    },
+    "pushed_by": {
+      "$ref": "#/$defs/PrincipalRef"
+    },
+    "url": {
+      "type": "string",
+      "pattern": "^https?://[^/?#@\\u0000-\\u0020\\u007f-\\u009f\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000\\ufeff\\\\]+(?:[/?#][^\\u0000-\\u0020\\u007f-\\u009f\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000\\ufeff\\\\]*)?(?![\\s\\S])"
+    },
+    "commit_url": {
+      "type": "string",
+      "pattern": "^https?://[^/?#@\\u0000-\\u0020\\u007f-\\u009f\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000\\ufeff\\\\]+(?:[/?#][^\\u0000-\\u0020\\u007f-\\u009f\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000\\ufeff\\\\]*)?(?![\\s\\S])"
+    },
+    "compare_url": {
+      "type": "string",
+      "pattern": "^https?://[^/?#@\\u0000-\\u0020\\u007f-\\u009f\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000\\ufeff\\\\]+(?:[/?#][^\\u0000-\\u0020\\u007f-\\u009f\\u00a0\\u1680\\u2000-\\u200a\\u2028-\\u2029\\u202f\\u205f\\u3000\\ufeff\\\\]*)?(?![\\s\\S])"
+    },
+    "opened_by": {
+      "$ref": "#/$defs/PrincipalRef"
+    }
+  },
+  "dependentRequired": {
+    "url": [
+      "opened_by"
+    ],
+    "opened_by": [
+      "url"
+    ]
+  },
+  "$defs": {
+    "PrincipalRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_instance",
+        "stable_id",
+        "kind",
+        "display_name"
+      ],
+      "properties": {
+        "provider_instance": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+          "maxLength": 255
+        },
+        "stable_id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+          "maxLength": 255
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "app",
+            "bot_user",
+            "service_user",
+            "user",
+            "local_service"
+          ]
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]*(?![\\s\\S])",
+          "maxLength": 255
+        }
+      }
+    }
+  }
+}

@@ -1,11 +1,15 @@
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, cast
 
 from pydantic import ValidationError
 from ruamel.yaml import YAML
+from ruamel.yaml.constructor import SafeConstructor
+from ruamel.yaml.nodes import ScalarNode
 
 from kora.ir.errors import PLACEHOLDER_LOCATION, SafeFieldError, safe_field_errors
+from kora.ir.json import JsonObject, JsonValue
 
 ROOT: Path = Path(__file__).parents[2]
 SCHEMA_PATH: Path = ROOT / "knowledge" / "specs" / "ir.schema.json"
@@ -39,8 +43,33 @@ class YamlLoader(Protocol):
     def load(self, stream: Path) -> object: ...
 
 
+class IrYamlConstructor(SafeConstructor):
+    pass
+
+
+def timestamp_string(constructor: IrYamlConstructor, node: ScalarNode) -> str:
+    return cast("TimestampScalar", node).value
+
+
+class TimestampScalar(Protocol):
+    value: str
+
+
+class TimestampConstructors(Protocol):
+    def add_constructor(
+        self, tag: str, constructor: Callable[[IrYamlConstructor, ScalarNode], str]
+    ) -> None: ...
+
+
+cast("TimestampConstructors", IrYamlConstructor).add_constructor(
+    "tag:yaml.org,2002:timestamp", timestamp_string
+)
+
+
 def load_yaml(path: Path) -> object:
-    loader = cast("YamlLoader", YAML(typ="safe"))
+    yaml = YAML(typ="safe")
+    yaml.Constructor = IrYamlConstructor
+    loader = cast("YamlLoader", yaml)
     return loader.load(path)
 
 
@@ -62,3 +91,19 @@ def error_forms(error: ValidationError) -> str:
             repr(safe),
         )
     )
+
+
+def agent_document(data: object) -> dict[str, object]:
+    return {
+        "harness": "claude",
+        "prompt": "",
+        "workspace": {"repo": ""},
+        "output_schema": data,
+    }
+
+
+def deep_data(depth: int) -> JsonObject:
+    value: JsonValue = 0
+    for index in reversed(range(depth)):
+        value = {"x": value} if index % 2 == 0 else [value]
+    return cast("JsonObject", value)

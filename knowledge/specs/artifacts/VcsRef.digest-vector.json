@@ -1,0 +1,20 @@
+{
+  "payload": {
+    "repo": "sample",
+    "branch": "kora/example/run/change/1",
+    "commit": "revision:2",
+    "base_commit": "revision:1",
+    "changed_paths": [
+      "src/café.txt"
+    ],
+    "diff_stat": "1 file changed\nquote: \" \\",
+    "pushed_by": {
+      "provider_instance": "local",
+      "stable_id": "publisher",
+      "kind": "service_user",
+      "display_name": "Publisher ñ"
+    }
+  },
+  "canonical_utf8": "{\"base_commit\":\"revision:1\",\"branch\":\"kora/example/run/change/1\",\"changed_paths\":[\"src/café.txt\"],\"commit\":\"revision:2\",\"diff_stat\":\"1 file changed\\nquote: \\\" \\\\\",\"pushed_by\":{\"display_name\":\"Publisher ñ\",\"kind\":\"service_user\",\"provider_instance\":\"local\",\"stable_id\":\"publisher\"},\"repo\":\"sample\"}",
+  "sha256": "e978ea1463001e37edfb3970b0e3352cc929fde73efe5958958aedd9c9b5c955"
+}
