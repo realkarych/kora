@@ -63,12 +63,12 @@ from tests.measurements.ir_remaining_workload import (
     fixture_manifest,
     remaining_workloads,
 )
-from tests.measurements.vcs_ref_workload import cases as vcs_ref_cases
-from tests.measurements.vcs_ref_workload import exercise as exercise_vcs_ref
 from tests.measurements.ir_schema_workload import (
     schema_fixture_manifest,
     schema_workloads,
 )
+from tests.measurements.vcs_ref_workload import cases as vcs_ref_cases
+from tests.measurements.vcs_ref_workload import exercise as exercise_vcs_ref
 
 pytestmark = pytest.mark.measurement
 
