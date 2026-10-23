@@ -4,7 +4,7 @@
 - Reviewed: by the project owner, 2026-10-16
 - Amended by: [ADR-0017](0017-execution-uncertainty-and-safe-replacement.md), 2026-10-17 (observation-gap completeness); wording pending owner review
 - Amended by: [ADR-0022](0022-inherited-execution-deadlines.md), 2026-10-17 (inherited lifecycle deadlines and expiry); wording pending owner review
-- Amended under: [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349), 2026-10-23 (immutable price ownership, normalized usage and approval cost); plan approved by the project owner, wording pending line-by-line owner review
+- Amended under: [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349), 2026-10-23 (immutable price ownership, normalized usage and approval cost); plan approved by the project owner, wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/221#issuecomment-6354160885) on 2026-10-23
 - Deciders: project owner, after the design review of 2026-10-15 (first cycle, production-readiness lens; second cycle, simplicity pass), see [review-2026-10-15.md](../../knowledge/reviews/review-2026-10-15.md)
 - Absorbs: DD-31, the cost-model requirements in FR section 9 and NFR section 8, the usage-completeness part of requirements decision 11, the `reasoning_tokens` item of DD-37
 - Related: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0007](0007-attempt-model-and-retries.md), [ADR-0008](0008-content-bound-approvals.md), [ADR-0011](0011-namespaces-and-personal-tokens.md), [ADR-0012](0012-no-transform-node.md)

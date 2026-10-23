@@ -1,6 +1,6 @@
 # Threat model
 
-Pricing evidence amendment dated 2026-10-23: pending negative-test pointers for immutable prices, usage coverage and approval snapshots under [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349). The plan is approved; wording pending line-by-line owner review. Actors, controls and deployment limitations are unchanged.
+Pricing evidence amendment dated 2026-10-23: pending negative-test pointers for immutable prices, usage coverage and approval snapshots under [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349). The plan is approved; wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/221#issuecomment-6354160885) on 2026-10-23. Actors, controls and deployment limitations are unchanged.
 
 Protocol foundation amendment dated 2026-10-22 (the TM-06/TM-07 and TM-12 evidence rows): the secret-value and conformance-plugin tests of [issue #204](https://github.com/realkarych/kora/issues/204), implementation plan approved by the project owner; wording pending line-by-line owner review.
 

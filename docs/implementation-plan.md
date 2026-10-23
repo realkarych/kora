@@ -1,6 +1,6 @@
 # Implementation plan
 
-Pricing amendment dated 2026-10-23: the project owner approved the ownership, normalization and approval-cost plan under [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349); wording pending line-by-line owner review. The contract is specified; [#213](https://github.com/realkarych/kora/issues/213) owns the pending models/arithmetic and metadata migration, with its own plan approval before code.
+Pricing amendment dated 2026-10-23: the project owner approved the ownership, normalization and approval-cost plan under [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/221#issuecomment-6354160885) on 2026-10-23. The contract is specified; [#213](https://github.com/realkarych/kora/issues/213) owns the pending models/arithmetic and metadata migration, with its own plan approval before code.
 
 Scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127) on 2026-10-19; wording pending line-by-line owner review.
 

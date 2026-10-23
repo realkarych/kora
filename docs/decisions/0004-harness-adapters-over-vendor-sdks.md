@@ -2,7 +2,7 @@
 
 - Status: accepted, 2026-10-15; amended 2026-10-16 (the ACP adapter moved after MVP, requirements decision 22); amended 2026-10-18 by [ADR-0024](0024-provider-limits-as-non-agent-failures.md) (adapters classify model-provider limits and report internal retries)
 - Reviewed: by the project owner, 2026-10-16
-- Usage amendment dated 2026-10-23: [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349) aligns completeness and the Codex observation carrier with ADR-0010; plan approved, wording pending line-by-line owner review.
+- Usage amendment dated 2026-10-23: [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349) aligns completeness and the Codex observation carrier with ADR-0010; plan approved, wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/221#issuecomment-6354160885) on 2026-10-23.
 - Deciders: project owner, after review of the first design drafts (DD-14, DD-20, DD-23) and after the design review of 2026-10-15 (first cycle: DD-27, DD-30)
 - Absorbs: DD-27, DD-14, DD-20, DD-23, DD-30; requirements decision 11; the harness part of requirements decisions 18 and 19
 - Related: [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0009](0009-target-repository-trust-boundary.md), [ADR-0010](0010-cost-accounting-and-limits.md)
