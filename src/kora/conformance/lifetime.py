@@ -48,6 +48,7 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import ChannelError, wait_future
 from kora.runner.filesystem import DirectoryAnchor, DirectoryIdentity, FilesystemError
+from kora.runner.gate import ExecutionConfig
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
 from kora.runner.processes import (
     GatedProcess,
@@ -152,6 +153,9 @@ class ParentLifetime:
         self.closures: dict[ResourceId | None, asyncio.Task[ClosureReport]] = {}
         self.control_bytes = 0
         self.execution_bytes = 0
+        self.transport_control_bytes = 0
+        self.transport_execution_bytes = 0
+        self.transport_pending = 0
         self.endpoint_count = 0
         self.borrowed_scopes: dict[str, ResourceId] = {}
         self.mutations = MutationOwner(
@@ -259,7 +263,9 @@ class ParentLifetime:
         self.revision += 1
         snapshot = self.snapshot()
         if (
-            len(snapshot.model_dump_json().encode()) + self.control_bytes
+            len(snapshot.model_dump_json().encode())
+            + self.control_bytes
+            + self.transport_control_bytes
             > self.limits.max_control_recovery_bytes
         ):
             self.admission_open = False
@@ -303,14 +309,23 @@ class ParentLifetime:
             if existing.request != request:
                 raise self._refuse(LifetimeReason.IDENTITY_MISMATCH)
             return existing.task
-        size = len(request.model_dump_json().encode())
         execution = isinstance(request, (ProcessLaunch, LocalRuntimeLaunch))
+        size = (
+            len(ExecutionConfig.from_launch(request).encode()[1])
+            if isinstance(request, ProcessLaunch)
+            else len(request.model_dump_json().encode())
+        )
         if sum(
             not operation.task.done() for operation in self.operations.values()
-        ) >= self.limits.max_outstanding_operations or (
-            self.execution_bytes + size > self.limits.max_execution_snapshot_bytes
+        ) + self.transport_pending >= self.limits.max_outstanding_operations or (
+            self.execution_bytes + self.transport_execution_bytes + size
+            > self.limits.max_execution_snapshot_bytes
             if execution
-            else self.control_bytes + size > self.limits.max_control_recovery_bytes
+            else self.control_bytes
+            + self.transport_control_bytes
+            + self.mutations.inventory().journal_bytes
+            + size
+            > self.limits.max_control_recovery_bytes
         ):
             coroutine.close()
             raise self._refuse(LifetimeReason.CAPACITY_EXCEEDED)
@@ -871,8 +886,8 @@ class ParentLifetime:
                 for record in self.records.values()
             ),
             endpoint_count=self.endpoint_count,
-            control_bytes=self.control_bytes,
-            execution_bytes=self.execution_bytes,
+            control_bytes=self.control_bytes + self.transport_control_bytes,
+            execution_bytes=self.execution_bytes + self.transport_execution_bytes,
             helpers=self.mutations.inventory(),
         )
 
