@@ -219,6 +219,15 @@ def cost_cases() -> list[CostCase]:
                     f"revision_{size}_{operation}", action, size <= 65536, "large", 200
                 )
             )
+    actions.append(
+        CostCase(
+            "revision_65536_round_trip",
+            partial(round_trip, PriceRevision, revision_with_encoded_size(NOW, 65536)),
+            True,
+            "large",
+            200,
+        )
+    )
     for size in (8191, 8192, 8193):
         source = {"x": "x" * (size - 8)}
         document = usage_payload(observed_at=NOW, source=source)
@@ -230,6 +239,18 @@ def cost_cases() -> list[CostCase]:
                 "large",
             )
         )
+    actions.append(
+        CostCase(
+            "source_8192_round_trip",
+            partial(
+                round_trip,
+                UsageRow,
+                usage_payload(observed_at=NOW, source={"x": "x" * 8184}),
+            ),
+            True,
+            "large",
+        )
+    )
     for size in (1048575, 1048576, 1048577):
         document = snapshot_at_bytes(size)
         for operation, action in (
@@ -245,6 +266,15 @@ def cost_cases() -> list[CostCase]:
                     1024,
                 )
             )
+    actions.append(
+        CostCase(
+            "snapshot_bytes_1048576_round_trip",
+            partial(round_trip, RunCost, snapshot_at_bytes(1048576)),
+            True,
+            "large",
+            1024,
+        )
+    )
     actions.append(
         CostCase(
             "snapshot_1025_refused",
@@ -364,13 +394,8 @@ def lifetime(
     report: Report,
     traced: bool,
     group: Group,
-    selected_name: str | None = None,
 ) -> None:
-    selected = [
-        case
-        for case in actions
-        if case.group == group and (selected_name is None or case.name == selected_name)
-    ]
+    selected = [case for case in actions if case.group == group]
     assert selected
     cycles = ORDINARY_CYCLES if group == "ordinary" else LARGE_CYCLES
     checkpoints = [0, cycles // 3, cycles * 2 // 3, cycles]
@@ -473,6 +498,10 @@ def main() -> None:
     report.environment["pid"] = os.getpid()
     environment(report)
     actions = cost_cases()
+    if len(sys.argv) == 6:
+        selected_names = frozenset(sys.argv[5].split(","))
+        actions = [case for case in actions if case.name in selected_names]
+        assert frozenset(case.name for case in actions) == selected_names
     if mode in {"representative", "representative_traced", "timing"}:
         if mode == "representative_traced":
             tracemalloc.start()
@@ -489,7 +518,6 @@ def main() -> None:
             report,
             mode == "traced",
             cast("Group", group),
-            sys.argv[5] if len(sys.argv) == 6 else None,
         )
     sys.stdout.write(report.to_json())
 

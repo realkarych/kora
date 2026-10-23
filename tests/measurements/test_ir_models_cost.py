@@ -97,31 +97,43 @@ def append_cost_report(report: Report, output: bytes) -> dict[str, object]:
 @pytest.mark.parametrize("run", range(3))
 @pytest.mark.parametrize("group", ["ordinary", "large"])
 def test_accounting_value_cost(report: Report, run: int, group: str) -> None:
-    identity = f"cost_timing_{group}_{run}"
-    argv = [
-        sys.executable,
-        "-m",
-        "tests.measurements.cost_workload",
-        "timing",
-        group,
-        report.revision,
-        identity,
-    ]
+    batches = [[case.name for case in cost_cases() if case.group == group]]
+    if group == "large":
+        batches = [
+            [
+                name
+                for name in batches[0]
+                if name.startswith("snapshot_bytes") is boundary
+            ]
+            for boundary in (False, True)
+        ]
     before = (open_descriptors(), threading.active_count())
 
-    started = time.perf_counter()
-    result = run_process(argv)
-    elapsed = time.perf_counter() - started
+    for batch_index, names in enumerate(batches):
+        identity = f"cost_timing_{group}_{batch_index}_{run}"
+        argv = [
+            sys.executable,
+            "-m",
+            "tests.measurements.cost_workload",
+            "timing",
+            group,
+            report.revision,
+            identity,
+            ",".join(names),
+        ]
+        started = time.perf_counter()
+        result = run_process(argv)
+        elapsed = time.perf_counter() - started
+        assert not result.timed_out
+        assert not result.overflow
+        assert result.code == 0, result.stderr.decode()
+        assert result.stderr == b""
+        report.environment[identity] = result.stdout.decode()
+        environment = append_cost_report(report, result.stdout)
+        assert environment["operations_per_batch"] == 1
+        report.samples.append(Sample(f"cost_{group}_timing_process", run, 1, elapsed))
 
-    assert not result.timed_out
-    assert not result.overflow
-    assert result.code == 0, result.stderr.decode()
-    assert result.stderr == b""
     assert (open_descriptors(), threading.active_count()) == before
-    report.environment[identity] = result.stdout.decode()
-    environment = append_cost_report(report, result.stdout)
-    assert environment["operations_per_batch"] == 1
-    report.samples.append(Sample(f"cost_{group}_timing_process", run, 1, elapsed))
 
 
 @pytest.mark.parametrize("run", range(3))
