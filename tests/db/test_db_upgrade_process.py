@@ -8,12 +8,15 @@ from pathlib import Path
 from typing import cast
 
 import pytest
+from sqlalchemy import text
 
-from kora.db.connection import Database, parse_database_url
-from tests.db.seed import Seeder
+from kora.db.connection import Database, DatabaseSettings, Dialect, parse_database_url
+from kora.db.migrations import current_revision
+from tests.db.seed import Seeder, seed_predecessor
+from tests.db.test_pricing_migration import price_check
 from tests.observability.conftest import ProcessResult, run_kora
 
-HEAD_REVISION: str = "0001"
+HEAD_REVISION: str = "0002"
 HIDDEN_MARKER: str = "PASSWORD-MARKER-4471"
 USER_MARKER: str = "usermarker4472"
 HOST_MARKER: str = "hostmarker4473.invalid"
@@ -62,7 +65,7 @@ def test_db_upgrade_succeeds_and_reruns_as_a_no_op(tmp_path: Path) -> None:
         for record in records(second)
         if record["event"] == "db.migration.finished"
     ]
-    assert first_finished[0]["steps"] == 1
+    assert first_finished[0]["steps"] == 2
     assert second_finished[0]["steps"] == 0
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     with closing(sqlite3.connect(path)) as connection:
@@ -171,5 +174,74 @@ async def companion_modes_during_a_write(path: Path) -> dict[str, int]:
                 for candidate in path.parent.iterdir()
                 if candidate.name.startswith(path.name)
             }
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+async def test_db_upgrade_partial_failure_is_content_free(
+    empty_database_settings: DatabaseSettings,
+) -> None:
+    database = Database(empty_database_settings)
+    marker = "PRIVATE-ACCOUNTING-MARKER"
+    try:
+        async with database.transaction() as connection:
+            await connection.run_sync(seed_predecessor)
+            if database.dialect is Dialect.POSTGRESQL:
+                await connection.exec_driver_sql(
+                    "ALTER TABLE price_table ADD COLUMN version INTEGER"
+                )
+                await connection.exec_driver_sql(
+                    "ALTER TABLE price_table ADD COLUMN normalization_version INTEGER"
+                )
+                await connection.execute(
+                    text(
+                        "UPDATE price_table SET version = 1, model = :marker "
+                        "WHERE id = 'old-price'"
+                    ),
+                    {"marker": marker},
+                )
+                await connection.exec_driver_sql(
+                    "ALTER TABLE price_table ADD CONSTRAINT "
+                    f"ck_price_table_revision CHECK ({price_check()}) NOT VALID"
+                )
+            else:
+                await connection.exec_driver_sql(
+                    "CREATE TABLE pricing_blocker (price_id VARCHAR(26) "
+                    "REFERENCES price_table(id))"
+                )
+                await connection.exec_driver_sql(
+                    "INSERT INTO pricing_blocker VALUES ('old-price')"
+                )
+        await database.close()
+        environment = {
+            "KORA_DATABASE_URL": empty_database_settings.url.render_as_string(
+                hide_password=False
+            )
+        }
+
+        failed = await asyncio.to_thread(upgrade, environment)
+        database = Database(empty_database_settings)
+        async with database.transaction() as connection:
+            revision = await connection.run_sync(current_revision)
+            if database.dialect is Dialect.POSTGRESQL:
+                await connection.exec_driver_sql(
+                    "UPDATE price_table SET version = NULL WHERE id = 'old-price'"
+                )
+            else:
+                await connection.exec_driver_sql("DROP TABLE pricing_blocker")
+        await database.close()
+        recovered = await asyncio.to_thread(upgrade, environment)
+
+        assert revision == "0001"
+        assert failed.code == 70
+        assert failed.stdout == b""
+        assert marker not in failed.stderr.decode()
+        assert "db.migration.finished" not in events(failed)
+        assert events(failed).count("db.transaction.failed") == 1
+        assert events(failed).count("db.migration.failed") == 1
+        assert recovered.code == 0
+        assert recovered.stdout == b"0002\n"
+        assert events(recovered).count("db.migration.finished") == 1
     finally:
         await database.close()

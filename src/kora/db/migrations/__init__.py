@@ -69,7 +69,7 @@ async def upgrade_database(
     started = perf_counter()
     try:
         database = open_database(settings)
-        async with database.transaction() as connection:
+        async with database.migration_connection() as connection:
             report = await connection.run_sync(upgrade_with_diagnostics)
         return record_finished(report, started)
     except Exception as error:
