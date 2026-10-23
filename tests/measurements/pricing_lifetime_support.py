@@ -2250,7 +2250,7 @@ class PricingEvidence:
     def validate_inventory(self, pending: set[str]) -> None:
         actual = {path.name for path in self.directory.iterdir()}
         if (
-            actual - set(self.expected) - {"completion.json"}
+            actual != (set(self.expected) - pending) | {"completion.json"}
             or set(self.entries) != set(self.expected) - pending
             or self.failures
         ):
@@ -2691,10 +2691,20 @@ def pricing_command() -> int:
 
 
 class PricingCommandOwner(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
     containers: list[str] = []
     sessions: list[str] = []
     secrets: list[str] = []
+
+
+def read_pricing_owner(path: Path) -> PricingCommandOwner:
+    try:
+        raw = read_pricing_bytes(path, REQUEST_LIMIT)
+        if len(raw) > REQUEST_LIMIT:
+            raise PricingEvidenceError("private pricing owner exceeds limit")
+        return PricingCommandOwner.model_validate_json(raw)
+    except (OSError, ValueError):
+        raise PricingEvidenceError("private pricing owner validation failed") from None
 
 
 def register_pricing_ownership(
@@ -2707,9 +2717,7 @@ def register_pricing_ownership(
     if raw is None:
         return
     path = Path(raw)
-    owner = PricingCommandOwner.model_validate_json(
-        read_pricing_bytes(path, REQUEST_LIMIT)
-    )
+    owner = read_pricing_owner(path)
     owner.containers = sorted(set(owner.containers) | containers)
     if session_id is not None:
         owner.sessions = sorted(set(owner.sessions) | {session_id})
@@ -2729,7 +2737,7 @@ def pricing_command_run(directory: Path, argv: list[str]) -> int:
     started = time.perf_counter()
     code: int | None = None
     child: subprocess.Popen[bytes] | None = None
-    descendants: set[int] = set()
+    descendants: dict[int, dict[str, JsonValue]] = {}
     interrupted: int | None = None
     interrupt_deadline: float | None = None
     failures: list[BaseException] = []
@@ -2793,9 +2801,11 @@ def pricing_command_run(directory: Path, argv: list[str]) -> int:
                     ["/bin/ps", "-o", "pid=", "-p", str(pid)], deadline_seconds=10
                 )
                 if observed.code == 1 and not observed.stdout:
-                    descendant_release[str(pid)] = (
-                        "absent after owner exit; nonchild reap unavailable"
-                    )
+                    descendant_release[str(pid)] = {
+                        **descendants[pid],
+                        "absent_after_owner_exit": True,
+                        "nonchild_reaped": None,
+                    }
                     break
                 if (
                     observed.timed_out
@@ -2805,15 +2815,18 @@ def pricing_command_run(directory: Path, argv: list[str]) -> int:
                     failures.append(
                         PricingEvidenceError("owned descendant release unverified")
                     )
-                    descendant_release[str(pid)] = "release_unverified"
+                    descendant_release[str(pid)] = {
+                        **descendants[pid],
+                        "absent_after_owner_exit": False,
+                        "nonchild_reaped": None,
+                    }
                     break
-        directory.mkdir(parents=True, exist_ok=True)
         owner = PricingCommandOwner()
+        owner_valid = False
         try:
-            owner = PricingCommandOwner.model_validate_json(
-                read_pricing_bytes(owner_path, REQUEST_LIMIT)
-            )
-        except (OSError, ValueError) as error:
+            owner = read_pricing_owner(owner_path)
+            owner_valid = True
+        except PricingEvidenceError as error:
             failures.append(error)
         known: dict[str, JsonValue] = {
             "complete": False,
@@ -2823,9 +2836,13 @@ def pricing_command_run(directory: Path, argv: list[str]) -> int:
             "command_interruption": interrupted,
             "pytest_process_seconds": elapsed,
             "escalated_descendant_release": descendant_release,
+            "private_owner_valid": owner_valid,
         }
         manifest, completion, collection = recover_pricing_envelope(
-            directory, known, tuple(value.encode() for value in owner.secrets)
+            directory,
+            known,
+            tuple(value.encode() for value in owner.secrets),
+            collect_working=owner_valid,
         )
         failures.extend(collection)
         try:
@@ -2901,14 +2918,18 @@ def pricing_command_run(directory: Path, argv: list[str]) -> int:
             completion["complete"] = False
             manifest["command_complete"] = False
             manifest["envelope_write_failure"] = type(error).__name__
-        failures.extend(
-            seal_pricing_evidence(
-                directory,
-                tuple(value.encode() for value in owner.secrets),
-                manifest,
-                completion,
+        try:
+            failures.extend(
+                seal_pricing_evidence(
+                    directory,
+                    tuple(value.encode() for value in owner.secrets),
+                    manifest,
+                    completion,
+                    collect_working=owner_valid,
+                )
             )
-        )
+        except (OSError, ValueError) as error:
+            failures.append(error)
         if failures:
             raise BaseExceptionGroup(
                 "pricing command and finalization failures", failures
@@ -2919,7 +2940,7 @@ def pricing_command_run(directory: Path, argv: list[str]) -> int:
     return code
 
 
-def release_pricing_descendants(parent: int) -> set[int]:
+def release_pricing_descendants(parent: int) -> dict[int, dict[str, JsonValue]]:
     result = run_process(["/bin/ps", "-axo", "pid=,ppid=,lstart="], deadline_seconds=10)
     if result.code or result.timed_out or result.overflow:
         raise PricingEvidenceError("owned process inventory unavailable")
@@ -2934,7 +2955,7 @@ def release_pricing_descendants(parent: int) -> set[int]:
         - owned
     ):
         owned.update(descendants)
-    released: set[int] = set()
+    released: dict[int, dict[str, JsonValue]] = {}
     for pid in reversed(list(ancestry)):
         if pid in owned and pid != parent:
             current = run_process(
@@ -2947,7 +2968,12 @@ def release_pricing_descendants(parent: int) -> set[int]:
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     continue
-                released.add(pid)
+                released[pid] = {
+                    "parent_pid": ppid,
+                    "started": birth,
+                    "signal": int(signal.SIGKILL),
+                    "signal_sent": True,
+                }
     return released
 
 
@@ -2963,28 +2989,48 @@ def remove_pricing_container(identity: str) -> None:
 
 
 def recover_pricing_envelope(
-    directory: Path, known: dict[str, JsonValue], secrets: tuple[bytes, ...]
+    directory: Path,
+    known: dict[str, JsonValue],
+    secrets: tuple[bytes, ...],
+    *,
+    reserve_directory: Path | None = None,
+    collect_working: bool = True,
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue], list[BaseException]]:
-    directory.mkdir(parents=True, exist_ok=True)
-    reserved = directory.with_name(directory.name + "-sealed")
-    reserved.mkdir(mode=0o700, exist_ok=True)
-    write_pricing_bytes(
-        reserved / "completion.json",
-        json.dumps({**known, "complete": False}).encode(),
-        COMPLETION_LIMIT,
-    )
     raw_inputs: dict[str, bytes] = {}
     failures: list[BaseException] = []
+    if directory.is_symlink():
+        failures.append(PricingEvidenceError("evidence directory ownership mismatch"))
+        collect_working = False
     for name, limit in (
         ("completion.json", COMPLETION_LIMIT),
         ("manifest.json", MANIFEST_LIMIT),
     ):
+        if not collect_working:
+            continue
         try:
             raw_inputs[name] = read_pricing_bytes(directory / name, limit)
         except FileNotFoundError:
             continue
         except (OSError, ValueError) as error:
             failures.append(error)
+    reserved = reserve_directory or directory.with_name(directory.name + "-sealed")
+    try:
+        if directory.is_symlink():
+            raise PricingEvidenceError("evidence directory ownership mismatch")
+        directory.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError) as error:
+        failures.append(error)
+    try:
+        if reserved.is_symlink():
+            raise PricingEvidenceError("evidence directory ownership mismatch")
+        reserved.mkdir(mode=0o700, exist_ok=True)
+        write_pricing_bytes(
+            reserved / "completion.json",
+            json.dumps({**known, "complete": False}).encode(),
+            COMPLETION_LIMIT,
+        )
+    except (OSError, ValueError) as error:
+        failures.append(error)
     documents: dict[str, dict[str, JsonValue]] = {}
     malformed: dict[str, JsonValue] = {}
     for name, raw in raw_inputs.items():
@@ -3019,6 +3065,8 @@ def seal_pricing_evidence(
     secrets: tuple[bytes, ...],
     manifest: dict[str, JsonValue],
     completion: dict[str, JsonValue],
+    *,
+    collect_working: bool = True,
 ) -> list[BaseException]:
     destination = directory.with_name(directory.name + "-sealed")
     if destination.is_symlink():
@@ -3048,7 +3096,7 @@ def seal_pricing_evidence(
     except OSError as error:
         failures.append(error)
     for name, limit in selected.items():
-        if name == "manifest.json":
+        if name == "manifest.json" or not collect_working:
             continue
         try:
             raw = read_pricing_bytes(directory / name, limit)
@@ -3071,7 +3119,14 @@ def seal_pricing_evidence(
             continue
         except (OSError, ValueError) as error:
             failures.append(error)
-    if failures:
+    missing = sorted(set(selected) - entries.keys() - {"manifest.json"})
+    if completion.get("complete") is True and missing:
+        failures.append(
+            PricingEvidenceError("complete upload inventory is missing selected files")
+        )
+    completion["upload_missing"] = list[JsonValue](missing)
+    completion["working_evidence_available"] = collect_working
+    if failures or completion.get("complete") is not True:
         completion["complete"] = False
         manifest["command_complete"] = False
     completion["upload_failures"] = [type(error).__name__ for error in failures]
@@ -3154,25 +3209,64 @@ def release_pricing_environment(
     except OSError as error:
         failures.append(error)
     proof["temporary_environment_released"] = not root.exists()
-    manifest, completion, collection = recover_pricing_envelope(directory, {}, ())
+    sanitized = directory.with_name(directory.name + "-sealed")
+    manifest, completion, collection = recover_pricing_envelope(
+        sanitized,
+        {},
+        (),
+        reserve_directory=sanitized,
+    )
     failures.extend(collection)
     manifest["environment_release"] = proof
+    failures.extend(validate_sealed_pricing_evidence(sanitized, completion))
     if failures or not isolation_verified:
         completion["complete"] = False
         manifest["command_complete"] = False
     completion["environment_failures"] = [type(error).__name__ for error in failures]
     try:
-        write_pricing_envelope(directory, manifest, completion)
+        write_pricing_envelope(sanitized, manifest, completion)
     except (OSError, ValueError) as error:
         failures.append(error)
-        completion["complete"] = False
-        manifest["command_complete"] = False
-        manifest["envelope_write_failure"] = type(error).__name__
-    failures.extend(seal_pricing_evidence(directory, (), manifest, completion))
     if failures:
         raise BaseExceptionGroup(
             "pricing environment evidence and cleanup failures", failures
         )
+
+
+def validate_sealed_pricing_evidence(
+    directory: Path,
+    completion: dict[str, JsonValue],
+) -> list[BaseException]:
+    expected = pricing_files(("sqlite", "postgresql"))
+    expected["completion.json"] = COMPLETION_LIMIT
+    failures: list[BaseException] = []
+    actual: set[str] = set()
+    used = 0
+    payload_bytes = 0
+    try:
+        if directory.is_symlink():
+            raise PricingEvidenceError("sealed evidence ownership mismatch")
+        for path in directory.iterdir():
+            metadata = path.lstat()
+            if path.name not in expected or not stat.S_ISREG(metadata.st_mode):
+                raise PricingEvidenceError(
+                    "sealed publication contains an unselected or nonregular entry"
+                )
+            if metadata.st_size > expected[path.name]:
+                raise PricingEvidenceError("sealed publication exceeds file limit")
+            actual.add(path.name)
+            used += metadata.st_size
+            if path.name not in {"manifest.json", "completion.json"}:
+                payload_bytes += metadata.st_size
+        if payload_bytes + MANIFEST_LIMIT + COMPLETION_LIMIT > AGGREGATE_LIMIT:
+            raise PricingEvidenceError("sealed publication exhausted envelope reserve")
+        if used > AGGREGATE_LIMIT:
+            raise PricingEvidenceError("sealed publication exceeds aggregate limit")
+        if completion.get("complete") is True and actual != set(expected):
+            raise PricingEvidenceError("complete sealed publication is missing files")
+    except (OSError, ValueError) as error:
+        failures.append(error)
+    return failures
 
 
 def write_pricing_envelope(
@@ -3181,6 +3275,8 @@ def write_pricing_envelope(
     completion: dict[str, JsonValue],
     secrets: tuple[bytes, ...] = (),
 ) -> None:
+    if directory.is_symlink():
+        raise PricingEvidenceError("evidence directory ownership mismatch")
     encoded = redact_pricing_bytes(json.dumps(manifest).encode(), secrets)
     entries = parse_json_object(completion.get("entries", {}))
     entry = parse_json_object(entries.get("manifest.json", {}))

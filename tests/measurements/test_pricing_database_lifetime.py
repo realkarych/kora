@@ -15,6 +15,7 @@ from tests.measurements.cel_measurement_process import run_process
 from tests.measurements.harness import Report, new_report, settled_counts
 from tests.measurements.metadata_lifetime_support import gate, record
 from tests.measurements.pricing_lifetime_support import (
+    AGGREGATE_LIMIT,
     CHILD_LIMIT,
     COMPLETION_LIMIT,
     MANIFEST_LIMIT,
@@ -611,9 +612,10 @@ def test_pricing_environment_removes_owned_root_after_provenance_failure(
     )
     assert not root.exists()
     assert len(os.listdir("/dev/fd")) == descriptors
-    manifest = json.loads((directory / "manifest.json").read_bytes())
+    sealed = directory.with_name(directory.name + "-sealed")
+    manifest = json.loads((sealed / "manifest.json").read_bytes())
     assert manifest["environment_release"]["temporary_environment_released"] is True
-    assert json.loads((directory / "completion.json").read_bytes())["complete"] is False
+    assert json.loads((sealed / "completion.json").read_bytes())["complete"] is False
 
 
 def test_pricing_outer_interrupt_releases_child_and_live_resource(
@@ -743,3 +745,304 @@ def test_pricing_finalization_observes_and_releases_parent_payload(
     assert manifest["pricing_workload_total"] >= 0
     assert manifest["excluded_parent_serialization_seconds"] >= 0
     assert manifest["parent_collector_memory"][-1]["phase"] == "report_payload_released"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "parent.json",
+        "sqlite-native-0.json",
+        "sqlite-native-0.native-cycle-0.json",
+        "sqlite-native-0.stdout",
+    ],
+)
+def test_pricing_complete_seal_refuses_removed_collected_file(
+    tmp_path: Path, missing: str
+) -> None:
+    evidence = PricingEvidence(tmp_path / "evidence", ("sqlite", "postgresql"))
+    payload = new_report().to_json().encode()
+    for name in evidence.expected:
+        if name not in {"parent.json", "manifest.json"}:
+            evidence.retain(
+                name, b"" if name.endswith((".stdout", ".stderr")) else payload
+            )
+    evidence.finish(new_report(), {})
+    assert evidence.complete
+    (evidence.directory / missing).unlink()
+
+    with pytest.raises(BaseExceptionGroup):
+        pricing_command_run(
+            evidence.directory, [sys.executable, "-I", "-c", "raise SystemExit(0)"]
+        )
+
+    sealed = tmp_path / "evidence-sealed"
+    completion = json.loads((sealed / "completion.json").read_bytes())
+    manifest = json.loads((sealed / "manifest.json").read_bytes())
+    assert completion["complete"] is False
+    assert manifest["command_complete"] is False
+    assert missing in completion["upload_missing"]
+    assert completion["command_exit_code"] == 0
+
+
+def test_pricing_environment_publication_preserves_command_redaction(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "evidence"
+    root = tmp_path / "owned-environment"
+    root.mkdir()
+    secret = b"composition-secret-2917"
+    url = b"postgresql+asyncpg://fixture:" + secret + b"@127.0.0.1/test"
+    script = (
+        "import os,json,sys; from pathlib import Path; "
+        "owner=Path(os.environ['KORA_PRICING_OWNER']); "
+        "owner.write_text(json.dumps({'containers':[],'sessions':[],"
+        f"'secrets':[{secret.decode()!r},{url.decode()!r}]}})); "
+        "p=Path(sys.argv[1]); p.mkdir(); "
+        f"(p/'sqlite-native-0.json').write_bytes(b'invalid '+{url!r}+b' '+{secret!r}); "
+        f"(p/'sqlite-native-0.stdout').write_bytes(b'prefix '+{secret[:12]!r}); "
+        "raise SystemExit(29)"
+    )
+
+    assert (
+        pricing_command_run(
+            directory, [sys.executable, "-I", "-c", script, str(directory)]
+        )
+        == 29
+    )
+    sealed = tmp_path / "evidence-sealed"
+    initial = {path.name: path.read_bytes() for path in sealed.iterdir()}
+    release_pricing_environment(root, tmp_path, directory, True)
+    final = {path.name: path.read_bytes() for path in sealed.iterdir()}
+
+    assert initial.keys() == final.keys()
+    for content in [*initial.values(), *final.values()]:
+        assert secret not in content
+        assert url not in content
+        assert secret[:12] not in content
+    assert final["sqlite-native-0.json"] == initial["sqlite-native-0.json"]
+    assert final["sqlite-native-0.stdout"] == initial["sqlite-native-0.stdout"]
+    assert sum(map(len, final.values())) <= AGGREGATE_LIMIT
+    completion = json.loads(final["completion.json"])
+    assert completion["command_exit_code"] == 29
+    assert completion["complete"] is False
+    assert not root.exists()
+    assert not (tmp_path / "evidence-owner.json").exists()
+
+
+@pytest.mark.parametrize("registration", [False, True])
+def test_pricing_private_owner_errors_are_content_free(
+    tmp_path: Path, registration: bool
+) -> None:
+    directory = tmp_path / "evidence"
+    secret = b"private-s2-marker".decode()
+    url = f"postgres://u:{secret}@local/db"
+    malformed = '{"secrets":["' + url + '","' + secret
+    inner = (
+        "import os; from pathlib import Path; "
+        f"Path(os.environ['KORA_PRICING_OWNER']).write_text({malformed!r}); "
+        + (
+            "from tests.measurements.pricing_lifetime_support import "
+            "register_pricing_ownership; register_pricing_ownership(set())"
+            if registration
+            else "raise SystemExit(31)"
+        )
+    )
+    outer = (
+        "import sys; from pathlib import Path; "
+        "from tests.measurements.pricing_lifetime_support import pricing_command_run; "
+        "sys.exit(pricing_command_run(Path(sys.argv[1]), "
+        "[sys.executable,'-c',sys.argv[2]]))"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", outer, str(directory), inner],
+        capture_output=True,
+        check=False,
+    )
+
+    (tmp_path / "outer.stdout").write_bytes(result.stdout)
+    (tmp_path / "outer.stderr").write_bytes(result.stderr)
+    assert result.returncode != 0
+    assert secret.encode() not in result.stdout + result.stderr
+    assert url.encode() not in result.stdout + result.stderr
+    assert b"private pricing owner validation failed" in result.stderr
+    sealed = tmp_path / "evidence-sealed"
+    for path in sealed.iterdir():
+        assert secret.encode() not in path.read_bytes()
+        assert url.encode() not in path.read_bytes()
+    completion = json.loads((sealed / "completion.json").read_bytes())
+    assert completion["command_exit_code"] == (1 if registration else 31)
+    assert completion["complete"] is False
+    assert completion["command_reaped"] is True
+    assert completion["private_owner_removed"] is True
+
+
+@pytest.mark.parametrize(
+    "fault", ["reserved_nonregular", "working_nonregular", "reserved_symlink"]
+)
+def test_pricing_reserved_write_failure_still_releases_owned_resources(
+    tmp_path: Path,
+    fault: str,
+) -> None:
+    docker = shutil.which("docker")
+    assert docker is not None
+    before = pricing_containers()
+    descriptors = len(os.listdir("/dev/fd"))
+    directory = tmp_path / "evidence"
+    identity_path = tmp_path / "owned-container.id"
+    reserved = tmp_path / "evidence-sealed" / "completion.json"
+    sentinel = tmp_path / "untouched-target"
+    if fault == "reserved_nonregular":
+        reserved.mkdir(parents=True)
+    elif fault == "working_nonregular":
+        directory.write_bytes(b"working sentinel")
+    else:
+        sentinel.mkdir()
+        (sentinel / "completion.json").write_bytes(b"reserved sentinel")
+        reserved.parent.symlink_to(sentinel, target_is_directory=True)
+    script = (
+        "import os,json,subprocess,sys; from pathlib import Path; "
+        "created=subprocess.run([sys.argv[1],'create','--entrypoint','/bin/true',"
+        "sys.argv[2]],check=True,capture_output=True); "
+        "identity=created.stdout.decode().strip(); "
+        "Path(sys.argv[3]).write_text(identity); "
+        "Path(os.environ['KORA_PRICING_OWNER']).write_text(json.dumps("
+        "{'containers':[identity],'sessions':[],'secrets':[]})); "
+        "subprocess.run([sys.argv[1],'start','--attach',identity],"
+        "check=True,capture_output=True); raise SystemExit(37)"
+    )
+
+    try:
+        with pytest.raises(BaseExceptionGroup) as caught:
+            pricing_command_run(
+                directory,
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    script,
+                    docker,
+                    f"{POSTGRES_TAG}@{POSTGRES_DIGEST}",
+                    str(identity_path),
+                ],
+            )
+        assert any(
+            isinstance(error, (OSError, PricingEvidenceError))
+            for error in caught.value.exceptions
+        )
+        assert pricing_containers() == before
+        assert not (tmp_path / "evidence-owner.json").exists()
+        if fault == "reserved_nonregular":
+            assert reserved.is_dir()
+        elif fault == "working_nonregular":
+            assert directory.read_bytes() == b"working sentinel"
+        else:
+            assert reserved.parent.is_symlink()
+            assert (sentinel / "completion.json").read_bytes() == b"reserved sentinel"
+        assert len(os.listdir("/dev/fd")) == descriptors
+        completion_path = (
+            reserved if fault == "working_nonregular" else directory / "completion.json"
+        )
+        completion = json.loads(completion_path.read_bytes())
+        assert completion["command_exit_code"] == 37
+        assert completion["command_reaped"] is True
+        assert completion["complete"] is False
+    finally:
+        if identity_path.exists() and identity_path.read_text() in pricing_containers():
+            subprocess.run(
+                [docker, "rm", "--force", identity_path.read_text()],
+                check=True,
+                capture_output=True,
+            )
+        (tmp_path / "evidence-owner.json").unlink(missing_ok=True)
+
+
+def test_pricing_noncooperative_owner_reaches_real_cleanup_deadline(
+    tmp_path: Path,
+) -> None:
+    docker = shutil.which("docker")
+    assert docker is not None
+    before = pricing_containers()
+    descriptors = len(os.listdir("/dev/fd"))
+    handlers = (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM))
+    directory = tmp_path / "evidence"
+    identity_path = tmp_path / "owned-container.id"
+    descendant_path = tmp_path / "descendant.pid"
+    script = "\n".join(
+        [
+            "import json,os,signal,subprocess,sys",
+            "from pathlib import Path",
+            "signal.signal(signal.SIGINT,signal.SIG_IGN)",
+            "created=subprocess.run([sys.argv[1],'create','-i','--entrypoint','/bin/cat',sys.argv[2]],check=True,capture_output=True)",
+            "identity=created.stdout.decode().strip()",
+            "Path(sys.argv[3]).write_text(identity)",
+            "Path(os.environ['KORA_PRICING_OWNER']).write_text(json.dumps({'containers':[identity],'sessions':[],'secrets':[]}))",
+            "subprocess.run([sys.argv[1],'start',identity],check=True,capture_output=True)",
+            "child=subprocess.Popen([sys.executable,'-I','-c',"
+            "'import os,signal; os.write(1,b\"ready\"); signal.pause()'],"
+            "stdout=subprocess.PIPE,start_new_session=True)",
+            "assert child.stdout.read(5)==b'ready'",
+            "child.stdout.close()",
+            "Path(sys.argv[4]).write_text(str(child.pid))",
+            "os.kill(os.getppid(),signal.SIGINT)",
+            "signal.pause()",
+        ]
+    )
+
+    try:
+        with pytest.raises(BaseExceptionGroup) as caught:
+            pricing_command_run(
+                directory,
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    script,
+                    docker,
+                    f"{POSTGRES_TAG}@{POSTGRES_DIGEST}",
+                    str(identity_path),
+                    str(descendant_path),
+                ],
+            )
+        manifest = json.loads((directory / "manifest.json").read_bytes())
+        completion = json.loads((directory / "completion.json").read_bytes())
+        descendant = int(descendant_path.read_text())
+        assert any(
+            isinstance(error, KeyboardInterrupt) for error in caught.value.exceptions
+        )
+        assert any(
+            isinstance(error, PricingEvidenceError)
+            and "cooperative cleanup deadline" in str(error)
+            for error in caught.value.exceptions
+        )
+        assert manifest["pytest_process_seconds"] >= 60.0
+        assert completion["command_exit_code"] == -signal.SIGKILL
+        assert completion["command_interruption"] == signal.SIGINT
+        assert completion["command_reaped"] is True
+        assert completion["complete"] is False
+        released = manifest["escalated_descendant_release"][str(descendant)]
+        assert released["parent_pid"] == completion["command_pid"]
+        assert released["signal"] == signal.SIGKILL
+        assert released["signal_sent"] is True
+        assert released["absent_after_owner_exit"] is True
+        assert released["nonchild_reaped"] is None
+        with pytest.raises(ChildProcessError):
+            os.waitpid(completion["command_pid"], os.WNOHANG)
+        with pytest.raises(ProcessLookupError):
+            os.kill(descendant, 0)
+        assert manifest["containers_owned"] == [identity_path.read_text()]
+        assert manifest["containers_released"] is True
+        assert pricing_containers() == before
+        assert not (tmp_path / "evidence-owner.json").exists()
+        assert len(os.listdir("/dev/fd")) == descriptors
+        assert (
+            signal.getsignal(signal.SIGINT),
+            signal.getsignal(signal.SIGTERM),
+        ) == handlers
+    finally:
+        if identity_path.exists() and identity_path.read_text() in pricing_containers():
+            subprocess.run(
+                [docker, "rm", "--force", identity_path.read_text()],
+                check=True,
+                capture_output=True,
+            )
