@@ -13,6 +13,8 @@
 
 - First-slice amendment dated 2026-10-23: provider listing/conformance and installed-distribution evidence remain required under #215; unsupported security controls are errors under ADR-0009. Scope and plan approved in #140; wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
+- Local conformance lifetime amendment dated 2026-10-23: wording reviewed and [accepted by the project owner](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23.
+
 - Staged-storage amendment dated 2026-10-23: the [plan for #229](https://github.com/realkarych/kora/issues/229#issuecomment-6368221981) was [approved by the project owner](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832). The operation inventory and lifecycle below replace the four-method storage boundary; exact wording pending line-by-line owner review. Runtime implementation and evidence remain separate.
 
 ## Context
@@ -44,6 +46,8 @@ Eleven protocols, each a Python `typing.Protocol` with a `name`, a `capabilities
 **Fakes are injected, never discovered** (amended 2026-10-21, [issue #136](https://github.com/realkarych/kora/issues/136)). kora's fakes are the one class of implementation that is constructed by injection and never discovered: no kora fake is a `kora.provider` entry point, provider loading refuses the name `fake` and the fake and testing modules, and only the testing compositions construct them. They pass the same conformance suites as production implementations, under the applicability matrix of [fakes.md](../../knowledge/specs/fakes.md#8-conformance-applicability).
 
 **Conformance suites.** Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformance` that take the provider under test from the fixtures of the opt-in plugin `kora.conformance.plugin` (amended 2026-10-22; entry-point parametrisation, `kora conformance runtime inhouse_ci`, is required before first-slice readiness under issue #215); the end-to-end suite runs the canonical graph on the fake harness against the runtime and VCS under test. kora's own test doubles are fakes validated by the same suites.
+
+**Local conformance lifetime** (amended 2026-10-23, [issue #231](https://github.com/realkarych/kora/issues/231)). Installed-provider conformance uses a parent-owned local lifetime interface before preparation acquires resources. The parent records acquisition intent, establishes identity and retains cleanup authority across fixture or pytest exit. A disposable test domain is removed only after every producer and earlier effect is closed; this outer teardown does not change runtime release or its retained tombstones. Closing seals further acquisition and requires observed resource closure and settlement of earlier operations; an acknowledgement, callback result, runtime receipt or pytest exit alone is insufficient. Uncertain cleanup fails with retained private recovery information and an explicit local cleanup operation. Borrowed services are not stopped; command-created local services remain owned. This is cooperative local lifecycle management, not hostile-process isolation or a general remote-resource manager. [Protocols section 13](../../knowledge/specs/protocols.md#local-conformance-command) defines the operations, bounds, runtime launch seam and pending implementation gates under #215.
 
 ### Staged storage and durable outcomes
 
