@@ -5,21 +5,29 @@ import pytest
 from pydantic import BaseModel
 
 from kora.ir import (
+    AgentConfig,
     BranchConfig,
     CommandConfig,
     FanOutConfig,
+    HumanInputConfig,
     McpServer,
     NetworkPolicy,
     NodeLimits,
     Retry,
     SubgraphNodeConfig,
+    TimerConfig,
     ToolPolicy,
+    WaitEventConfig,
     Workspace,
 )
 from tests.ir.support import EXAMPLES, load_yaml
 
 EXAMPLE_FILES: list[Path] = sorted(EXAMPLES.rglob("*.ir.yaml"))
 NODE_CONFIGS: dict[str, type[BaseModel]] = {
+    "agent": AgentConfig,
+    "human_input": HumanInputConfig,
+    "wait_event": WaitEventConfig,
+    "timer": TimerConfig,
     "command": CommandConfig,
     "branch": BranchConfig,
     "fan_out": FanOutConfig,
