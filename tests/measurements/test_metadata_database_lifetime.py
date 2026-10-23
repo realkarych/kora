@@ -2397,17 +2397,23 @@ def pricing_child() -> None:
 
 
 def merge_pricing_report(
-    report: Report, path: Path, kind: DatabaseKind, mode: str, repeat: int
+    report: Report,
+    path: Path,
+    kind: DatabaseKind,
+    mode: str,
+    repeat: int,
+    cycle: int | None = None,
 ) -> None:
     payload = cast(dict[str, object], json.loads(path.read_text()))
     environment = cast(
         dict[str, float | int | bool | str | None], payload["environment"]
     )
+    prefix = f"{kind.value}_pricing_{mode}_{repeat}"
+    if cycle is not None:
+        prefix += f"_cycle_{cycle}"
     for key, value in environment.items():
-        report.environment[f"{kind.value}_pricing_{mode}_{repeat}_{key}"] = value
-    report.environment[f"{kind.value}_pricing_{mode}_{repeat}_revision"] = cast(
-        str, payload["revision"]
-    )
+        report.environment[f"{prefix}_{key}"] = value
+    report.environment[f"{prefix}_revision"] = cast(str, payload["revision"])
     for raw in cast(list[dict[str, object]], payload["samples"]):
         report.samples.append(
             Sample(
@@ -2420,7 +2426,9 @@ def merge_pricing_report(
                     for key, value in raw.items()
                     if key
                     not in {"workload", "repeat", "count", "seconds", "us_per_record"}
-                },
+                }
+                | {"pricing_run": repeat, "pricing_mode": mode}
+                | ({} if cycle is None else {"pricing_cycle": cycle}),
             )
         )
     for name, passed in cast(dict[str, bool], payload["gates"]).items():
@@ -2483,10 +2491,13 @@ async def pricing_lifecycle_cycles(
 ) -> None:
     assert len(settings) == 12
     kind = DatabaseKind(settings[0].dialect.value)
+    warmup_start = len(report.samples)
     await pricing_failure_recovery(settings[0], report)
     await pricing_interruption(settings[1], report)
     await pricing_close_recovery(settings[2], report)
     await pricing_lease_outcomes(settings[2], report)
+    for sample in report.samples[warmup_start:]:
+        sample.extra["pricing_cycle"] = 0
     baseline_threads = {
         thread.ident
         for thread in threading.enumerate()
@@ -2593,8 +2604,8 @@ async def pricing_lifecycle_cycles(
             size_diff=item.size_diff,
             location=str(item.traceback),
         )
-    for path in fragments:
-        merge_pricing_report(report, path, kind, mode, 0)
+    for cycle, path in enumerate(fragments, 1):
+        merge_pricing_report(report, path, kind, mode, 0, cycle)
 
 
 def regular_descriptor_bytes(unlinked_only: bool = False) -> int:
