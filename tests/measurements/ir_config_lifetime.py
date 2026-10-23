@@ -13,24 +13,39 @@ from typing import cast
 from pydantic import BaseModel
 
 from kora.ir import (
+    BranchCase,
+    BranchConfig,
     CommandConfig,
     CommandResource,
+    FanOutConfig,
     McpServer,
     NetworkPolicy,
     NodeLimits,
+    Retry,
+    SubgraphNodeConfig,
     Workspace,
 )
 from tests.ir.config_cases import MINIMAL, POPULATED, RESOURCE
+from tests.ir.control_cases import POPULATED as CONTROL_POPULATED
 from tests.measurements.harness import current_rss_bytes, open_descriptors
 from tests.measurements.ir_config_workload import validate_config
 
 INVALID: dict[type[BaseModel], dict[str, object]] = {
+    BranchCase: {"when": "true", "to": [False]},
+    BranchConfig: {"cases": [{"when": "true", "to": ["a"]}], "else": [False]},
+    FanOutConfig: {"body": "body", "over": "items", "max_parallel": 0},
+    SubgraphNodeConfig: {"body": "body\n"},
+    Retry: {"retry_on": ["timeout", "timeout"]},
     NodeLimits: {"max_events": 0},
     Workspace: {"repo": False},
     NetworkPolicy: {"egress": [False]},
     McpServer: {"type": "invalid"},
     CommandResource: {**RESOURCE, "size": -1},
     CommandConfig: {**MINIMAL[CommandConfig], "cmd": [False]},
+}
+CONFIGURATIONS: dict[type[BaseModel], dict[str, object]] = {
+    **POPULATED,
+    **CONTROL_POPULATED,
 }
 
 
@@ -52,7 +67,7 @@ def model_references(value: object) -> list[weakref.ReferenceType[BaseModel]]:
 
 def cycle() -> int:
     references: list[weakref.ReferenceType[BaseModel]] = []
-    for model, document in POPULATED.items():
+    for model, document in CONFIGURATIONS.items():
         parsed = model.model_validate(document)
         references.extend(model_references(parsed))
         parsed.model_dump(mode="json", by_alias=True, exclude_unset=True)
@@ -130,7 +145,7 @@ def main() -> None:
         "baseline_descriptors": baseline_descriptors,
         "checkpoints": checkpoints,
         "cycles": 1000,
-        "models_per_cycle": 6,
+        "models_per_cycle": len(CONFIGURATIONS),
         "warm_up": 3,
         "rss_source": "/bin/ps rss KiB converted to bytes"
         if sys.platform == "darwin"

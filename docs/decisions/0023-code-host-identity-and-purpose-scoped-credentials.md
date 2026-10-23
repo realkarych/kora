@@ -6,6 +6,8 @@
 - Amends: [ADR-0008](0008-content-bound-approvals.md) (automation and self-approval checks), [ADR-0016](0016-trusted-execution-and-publication.md) (the credential behind late authorization)
 - Related: ADR-0005, ADR-0011, ADR-0013, ADR-0017, ADR-0018, ADR-0021
 
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
+
 ## Context
 
 kora checks out repositories, publishes prepared revisions, opens change requests, posts comments and reads review state on code hosts. Until now one credential from the VCS provider configuration did all of it, and nothing defined the identity kora acts under.
@@ -23,11 +25,27 @@ Three facts shape the answer:
 - Backends differ in what they enforce. A GitHub installation token can be narrowed to repositories and permissions but not to one push or branch. GitLab project tokens have date-based expiry and scope names of their own. A static service credential has whatever rights it was created with.
 - A login, a token id or a configured alias is not an account. ADR-0008's rule that kora's own bot and the change-request author cannot approve needs a stable identifier that survives token replacement.
 
+## First-slice amendment of 2026-10-23
+
+A saved trusted binding may explicitly select `local_credential_free` for an existing local bare repository. Missing, empty or failed credentials, a local-looking URL and caller flags never select that mode. `PublicationAuthorization` remains mandatory; its required `credential` field and `IssuedCredential.value` accept explicit null only in this mode, with no omission default. Credential-bearing modes continue to require registered secret values.
+
+The no-secret result has `rights=None`, `expires_at=None`, `replacement="not_applicable"` and `revocation="not_applicable"`. These values state that no upstream credential exists; they cannot satisfy a binding's minimum upstream credential-rights/expiry/revocation requirements, and null expiry never extends attempt authority. Contradictory combinations fail acquisition. The common model adds nullable rights and the two enum values without changing credential-bearing semantics.
+
+`PrincipalRef` gains `kind="local_service"`. Its provider instance scopes an immutable configured service identifier, preserved across restart and binding revisions. It is not a username, UID, path, binding alias, Git author or invented code-host account. `PublicationAuthorization.principal` carries the complete trusted principal snapshot; equality compares `(provider_instance, stable_id)` without resolving a separate identifier. The sealed request and trusted checkpoint pin the immutable binding identity, revision and credential mode before preparation; acquisition and late authorization cannot initialize or replace them. CredentialRequest, IssuedCredential and PublicationAuthorization carry that required tuple without defaults, with the bounds defined in protocols.md. Acquisition validates the requested tuple against trusted binding state before secret/issuer work and returns it for exact comparison. The acquired principal is saved before dispatch. Current aliases or candidate data cannot replace this context; configuration edits advance the binding revision.
+
+`Vcs.acquire_credential` remains in the first-slice protocol: checkout and publish return this no-secret metadata without resolving a secret or calling an issuer; API purpose is unsupported. `CheckoutPlan.credentials` is empty. Publish acquisition stays late, after inspection, and adoption reacquires only for the original saved binding tuple and operation. Changed or unavailable binding semantics refuse new publication without rewriting the checkpoint or settling unknown effects. Authorized read-only reconciliation and completed replay preserve the original destination and provenance; credential refresh under an unchanged binding remains allowed. Acquiring metadata grants no dispatch authority. After acquisition finishes, both credential modes require a fresh heartbeat carrying the saved binding/operation expectation and an exact successful current-authority echo before every effectful finalization or retry. The worker/API checks current lease, desired state, deadline and binding authorization, and the worker serializes response validation and dispatch with local gate closure, including closure during the wait; runtime/runner requires inspection, the saved checkpoint, current dispatcher, earlier dispatcher/publication closure and no retirement; the executor matches all identities, digests, principal/binding/mode and deadline before push. `PublishPermit` cannot replace the authorization. Mismatch fails `publication_authorization_mismatch` before publication; unknown outcomes retain reservations and recovery obligations.
+
+Local mode emits no `vcs.credential_issued`. Publication-related `runtime.phase` records carry the scoped principal, binding identity/revision, mode and explicit phase/outcome. The runtime owns their authenticated source; worker/API promotion preserves append-only audit provenance and a compact checkpoint mirror. Authorization does not assert that a push occurred. The audit provenance survives checkpoint release and payload retention without storing secret values or secret-derived hashes.
+
+The destination is an absolute POSIX path or `file:///absolute/path` with empty authority, naming an existing bare repository. Network/scp/helper/relative forms, URL authority/userinfo/query/fragment, malformed encodings and decoded traversal are refused. Normalize once and pin/recheck directory identity across checkout, head reads, publication and reconciliation; reject symlink/parent replacement and changed binding revisions. This restricts Git transport and does not prove a physically local filesystem. Fresh trusted Git metadata and a constructed environment exclude inherited config/includes/rewrites/pushurl, helpers, SSH/askpass, candidate hooks/filters and object alternates. Destination-side hooks/configuration remain operator-trusted under the cooperative local model, not suppressed by client cleanup.
+
+The exact contract and conformance cases are in [protocols.md](../../knowledge/specs/protocols.md#credential-free-local-publication). Local authorization, principal and recovery evidence remain required now. Remote issuer, rotation, expiry, credential re-scan and code-host identity tests activate with their corresponding backend; the general MVP backend design below is not a first-slice implementation claim.
+
 ## Decision
 
 **Credentials are acquired per purpose by trusted code, never resolved into the workload.** The VCS integration gains one operation, `acquire_credential`. Only the worker, its private worker-host executor and the control-plane providers call it, and never from the candidate domain. A request binds:
 
-- the deployment binding and the repository;
+- the immutable deployment binding, its revision and credential mode, and the repository;
 - one purpose: `checkout`, `publish` or `api`;
 - for `publish`, the operation id, the prepared digest and the destination digest of the `PreparedPublication`.
 

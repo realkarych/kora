@@ -62,10 +62,15 @@ class IrRecord(BaseModel):
             raise PydanticCustomError(*cls.shape_error)
         fields: dict[str, object] = {}
         extensions: dict[str, object] = {}
+        wire_fields = {
+            field.alias if field.alias is not None else name
+            for name, field in cls.model_fields.items()
+            if name != "extensions"
+        }
         for key, item in cast("Mapping[object, object]", value).items():
             if type(key) is str and key.startswith("x-"):
                 extensions[key] = item
-            elif type(key) is str and key != "extensions" and key in cls.model_fields:
+            elif type(key) is str and key in wire_fields:
                 fields[key] = item
             else:
                 raise PydanticCustomError(*cls.field_error)

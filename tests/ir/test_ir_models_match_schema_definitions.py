@@ -5,12 +5,17 @@ import pytest
 from pydantic import TypeAdapter
 
 from kora.ir import (
+    BranchCase,
+    BranchConfig,
     CommandConfig,
     CommandResource,
     ErrorClass,
+    FanOutConfig,
     McpServer,
     NetworkPolicy,
     NodeLimits,
+    Retry,
+    SubgraphNodeConfig,
     ToolPolicy,
     Workspace,
 )
@@ -28,6 +33,11 @@ GENERATED: dict[str, Callable[[], dict[str, object]]] = {
     ),
 }
 CONFIG_MODELS = {
+    "branchCase": BranchCase,
+    "branchConfig": BranchConfig,
+    "fanOutConfig": FanOutConfig,
+    "subgraphNodeConfig": SubgraphNodeConfig,
+    "retry": Retry,
     "limits": NodeLimits,
     "workspace": Workspace,
     "mcpServer": McpServer,
@@ -51,6 +61,11 @@ REFERENCES: frozenset[str] = frozenset(
         "Workspace",
         "NetworkPolicy",
         "CommandResource",
+        "BranchCase",
+        "ErrorClass",
+        "errorClass",
+        "expression",
+        "id",
     }
 )
 
@@ -61,6 +76,9 @@ def property_schema(record: str, name: str) -> object:
 
 
 def committed_schema(definition: str) -> object:
+    if definition == "branchCase":
+        cases = cast("dict[str, object]", property_schema("branchConfig", "cases"))
+        return cases["items"]
     if definition == "commandResource":
         resources = cast(
             "dict[str, object]", property_schema("commandConfig", "resources")
