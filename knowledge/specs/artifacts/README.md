@@ -10,6 +10,18 @@ The project owner approved the VcsRef revision-1 contract and implementation pla
 
 The schema is draft 2020-12, with no parent. The manifest's `schema_sha256` identifies the exact UTF-8 schema file bytes, including its final newline. The manifest and the semantics specified here are immutable for this revision. Adding another type cannot change this per-type manifest. A future incompatible definition requires a new revision and behavior identity. Deployment expands the schema and exact behavior descriptors by value into the saved closure; the manifest's schema URN is resolved only from that closure, never through a network lookup. Unsupported or mismatched bindings fail before the affected operation, following [IR section 2.1](../ir.md#21-authoritative-type-contracts-adr-0018).
 
+### Python boundary implementation
+
+[Issue #209](https://github.com/realkarych/kora/issues/209) implements the frozen `VcsRef` and `PrincipalRef` values in `kora.ir.vcs_ref` and exports them from `kora.ir`. `parse_vcs_ref(object)` admits exact built-in JSON objects and exact model instances, revalidating unchecked constructed/copied values. Direct constructors and `model_validate` enforce the same ordered checks. Principals are immutable snapshots; `PrincipalRef.identity()` compares only provider instance and stable ID. Model equality includes the complete recorded snapshot.
+
+`parse_vcs_ref_json(bytes)` is the designated untrusted raw boundary. `VcsRef.model_validate_json` routes through that bounded preflight, including when callers request relaxed native flags. Inherited `PrincipalRef.model_validate_json` and generic `TypeAdapter.validate_json` are not supported untrusted raw ingress: their native decoders run before the artifact preflight and may already have discarded duplicate-member evidence. Admit a principal through its strict object boundary or extract it from a validated VcsRef.
+
+`canonical_vcs_ref`, `vcs_ref_digest` and `summarize_vcs_ref` revalidate their model input. They return canonical bytes, the complete-payload SHA-256 and a fresh identity projection respectively. Ordinary Pydantic serialization preserves values and omission but is not the canonical-byte API. Optional fields use absence rather than null; absent fields stay omitted regardless of unset/default/none serialization flags. Both actual schema modes match the published structural schema after removing nonsemantic titles.
+
+`require_vcs_ref_revision(object)` checks the complete closed published manifest, including schema hash, every behavior parameter, parent and digest selection. It is a fixed revision-1 compatibility boundary, performs no network lookup and supplies no deployment-closure authentication or generic artifact registry.
+
+Every payload refusal raises `VcsRefValidationError` carrying one shared `ContractViolation`. Codes `VCS001`–`VCS007` identify raw size, JSON decoding, closed shape, aggregate path bytes, semantic URL, canonical size and unsupported revision respectively. Messages are fixed; paths contain only known field names and array indexes. Submitted content, unknown keys and native decoder exceptions are excluded from the public error and its chaining. These values return to consumers without starting a logger or emitting payload diagnostics.
+
 ## 2. VcsRef publication facts
 
 The closed object has required fields `repo`, `branch`, `commit`, `base_commit`, `changed_paths`, `diff_stat` and `pushed_by`. It has no extension map or mutable status field.

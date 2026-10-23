@@ -28,8 +28,11 @@ from kora.ir.diagnostics import (
 )
 from kora.ir.export import export_ir, render_ir_json
 from kora.ir.node import ErrorClass, ToolPolicy
+from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "PrincipalRef",
+    "VcsRef",
     "IrJsonObjectField",
     "IrJsonValueField",
     "AgentConfig",
