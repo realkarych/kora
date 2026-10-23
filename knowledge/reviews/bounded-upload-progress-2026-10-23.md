@@ -31,7 +31,7 @@ The ASCII marker `\n[transcript truncated]\n` is 24 bytes. An over-cap transcrip
 | Source 16777216: index 0 final size 16777216 | Completes with no empty follow-up part |
 | Index 1 arrives with no committed index 0 | API002 upload_part_order; no append |
 | Exact retained index 0 receipt replay | Original prefix acknowledgment, no new receipt, append or renewed expiry |
-| Same index with changed declaration or validated bytes | API002 upload_part_conflict; original winner remains |
+| Same index with changed declaration or validated bytes | API002 upload_part_conflict; original winner and owner remain usable for the next index after request-local cleanup |
 | Two instances race for the next index | One winner; identical loser reconciles, conflicting loser refuses, unresolved effect stays pending |
 | Lost part response, then recover | Current committed prefix without accepting bytes; next data is exactly the needed immutable part |
 | Lost terminal response after stage cleanup | Current authorized saved descriptor through recover; no parsing, promotion or fabricated part acknowledgment |
@@ -52,6 +52,8 @@ Planning used thirteen fresh component/profile contexts for the shared storage/u
 | Artifact storage | Generic part-layout/conformance reference and incomplete-prefix bound; owns provider receipt/effect/reader closure, distinct from wire acknowledgment | correctness, security, performance |
 
 Propagation stops at unchanged runtime/supervisor authority, target-result atomic acceptance, saved artifact validation/approval identity and ordinary descriptor reads. No new endpoint, client business logic or console journey is introduced. Source/test/tooling/dependency changes are absent, so readiness condensation does not activate; storage abstraction condensation was independently reviewed in planning. Existing browser smoke and all existing executable checks remain required.
+
+A metadata correctness finding identified an inherited refusal rule that could retire a valid shared upload after a losing replay conflicted. The contract now distinguishes request-local conflict/order/layout rejection from whole-owner authority loss, expiry, cancellation or validation failure. The former preserves committed progress and closes only its own resources; unknown effects remain charged. The named atomic-conflict case must prove the next valid index remains usable after cleanup. This resolves the ambiguity without weakening whole-owner retirement or provider closure.
 
 ## Runtime activation and evidence limits
 
