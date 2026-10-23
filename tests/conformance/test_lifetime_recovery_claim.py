@@ -21,7 +21,12 @@ from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
+from tests.conformance.test_lifetime_cleanup_controls import (
+    close_recovered_test_owner,
+    dispose_test_owner,
+)
 from tests.conformance.test_lifetime_io_helper import entered_fifo
+from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
 
@@ -93,6 +98,8 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
     if scenario == "publisher":
         assert identity not in snapshot.helpers
         assert snapshot.pending_effects
+    recovery_clock = ControlledLifetimeClock()
+    recovered: ParentLifetime | None = None
 
     try:
         for stage in ("live_parent", "dead_parent"):
@@ -120,6 +127,7 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
         await helper_anchor.wait(deadline, clock)
         published = JournalSnapshot.model_validate_json(path.read_bytes())
         recovered = ParentLifetime(
+            clock=recovery_clock,
             limits=limits(),
             recovery=reference,
             launcher=InstalledIOHelperLauncher(
@@ -127,7 +135,9 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
             ),
         )
         await recovered.ready()
-        report = await recovered.close(None)
+        report = await close_recovered_test_owner(
+            recovered, recovery_clock, () if independent is None else (independent,)
+        )
 
         assert published.generation == snapshot.generation
         assert published.owner == snapshot.owner
@@ -159,6 +169,8 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
             )
             await independent.settle(deadline)
             independent.release(deadline)
+        if recovered is not None:
+            await dispose_test_owner(recovered, recovery_clock)
         channel.close()
         anchor.close()
         helper_anchor.close()

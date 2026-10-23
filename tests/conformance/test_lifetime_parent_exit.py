@@ -23,7 +23,12 @@ from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
+from tests.conformance.test_lifetime_cleanup_controls import (
+    close_recovered_test_owner,
+    dispose_test_owner,
+)
 from tests.conformance.test_lifetime_io_helper import entered_fifo
+from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
 
@@ -92,6 +97,8 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     identity = ProcessIdentity.model_validate_json(await channel.read_frame(deadline))
     helper_anchor = ExitAnchor(identity.pid, direct_child=False)
     await entered_fifo(identity.pid, reading, deadline, clock)
+    recovery_clock = ControlledLifetimeClock()
+    recovered: ParentLifetime | None = None
 
     try:
         await channel.write_frame(b"close", deadline)
@@ -102,6 +109,7 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
         parent.wait(timeout=0)
         await helper_anchor.wait(deadline, clock)
         recovered = ParentLifetime(
+            clock=recovery_clock,
             limits=limits(),
             recovery=reference,
             launcher=InstalledIOHelperLauncher(
@@ -109,7 +117,9 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
             ),
         )
         await recovered.ready()
-        final = await recovered.close(None)
+        final = await close_recovered_test_owner(
+            recovered, recovery_clock, (independent,)
+        )
 
         assert report.state is CleanupOutcome.UNKNOWN
         assert parent.returncode == 1
@@ -149,6 +159,8 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
         )
         await independent.settle(deadline)
         independent.release(deadline)
+        if recovered is not None:
+            await dispose_test_owner(recovered, recovery_clock)
         channel.close()
         anchor.close()
         helper_anchor.close()

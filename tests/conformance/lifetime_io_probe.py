@@ -38,6 +38,11 @@ def pause(directory: int) -> None:
     os.close(descriptor)
 
 
+def acknowledge_term(signal_number: int, frame: FrameType | None) -> None:
+    if signal_number == signal.SIGTERM:
+        os.write(PROBE, b"t")
+
+
 async def run() -> None:
     endpoint = socket.socket(fileno=int(os.environ["KORA_IO_CONTROL_FD"]))
     descriptors = tuple(
@@ -50,6 +55,8 @@ async def run() -> None:
     phase = os.environ["KORA_TEST_PAUSE_PHASE"]
     if fifo_directory is not None:
         signal.signal(signal.SIGUSR1, acknowledge_call)
+        if os.environ["KORA_TEST_RESIST_TERM"] == "1":
+            signal.signal(signal.SIGTERM, acknowledge_term)
     try:
         mutation = MUTATION.validate_json(await channel.read_record(deadline, 1048576))
         if fifo_directory is not None and phase in ("before", "both"):

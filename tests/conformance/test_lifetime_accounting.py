@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,8 @@ from kora.protocols.lifetime import (
     ResourceState,
     new_operation_id,
 )
+from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
+from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
 
@@ -94,17 +97,19 @@ def test_control_reservations_cover_maximum_closed_wire_values() -> None:
 async def test_prepaid_control_capacity_refuses_before_effect_and_keeps_close_usable(
     tmp_path: Path,
 ) -> None:
+    clock = ControlledLifetimeClock()
     owner = ParentLifetime(
+        clock=clock,
         limits=limits().model_copy(update={"max_control_recovery_bytes": 100000}),
         launcher=InstalledIOHelperLauncher(
             home=tmp_path, state_home=tmp_path / "state"
         ),
     )
-    await owner.ready()
     admitted: list[Reservation] = []
     refusal = None
 
     try:
+        await owner.ready()
         while refusal is None:
             try:
                 admitted.append(
@@ -118,7 +123,7 @@ async def test_prepaid_control_capacity_refuses_before_effect_and_keeps_close_us
             except LifetimeError as error:
                 refusal = error.reason
         before = tuple(owner.records)
-        report = await owner.close(None)
+        report = await asyncio.wait_for(owner.close(None), 5)
 
         assert refusal is LifetimeReason.CAPACITY_EXCEEDED
         assert 0 < len(admitted) < owner.limits.max_resource_records
@@ -131,4 +136,4 @@ async def test_prepaid_control_capacity_refuses_before_effect_and_keeps_close_us
         assert report.state is CleanupOutcome.CLOSED
         assert not owner.ordinary_slots
     finally:
-        await owner.close(None)
+        await dispose_test_owner(owner, clock)

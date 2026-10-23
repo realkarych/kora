@@ -163,14 +163,17 @@ class IOHelper:
                 raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
             return
 
-    def signal(self, requested: signal.Signals) -> bool:
+    def signal(self, requested: signal.Signals, deadline_ns: int | None = None) -> bool:
         if requested not in (signal.SIGTERM, signal.SIGKILL):
             raise ValueError("fixed helper signal required")
         if self.anchor.exited:
             return True
+        if deadline_ns is not None and self.clock.monotonic_ns() >= deadline_ns:
+            return False
         observation = self.identities.read(self.process.pid)
         if (
-            self.identity is None
+            (deadline_ns is not None and self.clock.monotonic_ns() >= deadline_ns)
+            or self.identity is None
             or not complete_identity(self.identity)
             or observation.state is not IdentityState.PRESENT
             or observation.process is None

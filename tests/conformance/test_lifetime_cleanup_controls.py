@@ -1,15 +1,22 @@
 import asyncio
 import os
 import signal
+import sys
+from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 
+from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.protocols.lifetime import (
     CleanupOutcome,
+    ClosureReport,
+    ProcessDomain,
+    ProcessLaunch,
+    ProcessOutput,
     ReservationRequest,
     ResourceKind,
     TemporaryTreeRequest,
@@ -17,10 +24,33 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
+from kora.runner.processes import GatedProcess, RecoveredProcess
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
+
+
+async def close_recovered_test_owner(
+    owner: ParentLifetime,
+    clock: ControlledLifetimeClock,
+    observers: Sequence[RecoveredProcess],
+) -> ClosureReport:
+    actual = SystemClock()
+    closing = owner.request_close(None)
+    clock.advance(duration_ns(owner.limits.cooperative_seconds) + 1)
+    deadline = actual.monotonic_ns() + 5_000_000_000
+    while not all(observer.observe(deadline).settled for observer in observers):
+        assert actual.monotonic_ns() < deadline
+        wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(wake.set_result, None)
+        await wake
+    if observers and owner.cleanup_effect is None:
+        clock.advance(duration_ns(owner.limits.term_seconds) + 1)
+    return await asyncio.wait_for(
+        asyncio.shield(closing),
+        max(0, (deadline - actual.monotonic_ns()) / 1_000_000_000),
+    )
 
 
 async def dispose_test_owner(
@@ -28,19 +58,125 @@ async def dispose_test_owner(
 ) -> None:
     closing = owner.request_close(None)
     clock.advance(40_000_000_000)
-    for helper in tuple(owner.mutations.helpers):
-        if not helper.closed:
-            helper.signal(signal.SIGKILL)
-            assert await asyncio.wait_for(
-                helper.settle(clock.monotonic_ns() + 5_000_000_000), 5
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    async with asyncio.timeout(5):
+        for helper in tuple(owner.mutations.helpers):
+            if not helper.closed:
+                helper.signal(signal.SIGKILL)
+                assert await helper.settle(deadline)
+        await asyncio.shield(closing)
+        assert owner.inventory().cleanup_effect_tasks == 0
+        assert owner.inventory().cleanup_driver_tasks == 0
+        for record in owner.records.values():
+            process = record.process or record.recovered
+            if process is not None and not process.closed:
+                process.signal(signal.SIGKILL, deadline)
+                await process.settle(deadline)
+                if isinstance(process, GatedProcess):
+                    await process.drain(deadline)
+                process.release(deadline)
+            if record.directory is not None:
+                record.directory.close()
+        assert owner.inventory().retained_processes == 0
+        owner.mutations.release()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("activated", [False, True])
+async def test_failure_disposal_releases_prepared_and_active_process_owners(
+    tmp_path: Path, activated: bool
+) -> None:
+    clock = ControlledLifetimeClock()
+    actual = SystemClock()
+    owner = ParentLifetime(
+        clock=clock,
+        limits=limits(),
+        launcher=InstalledIOHelperLauncher(
+            home=tmp_path, state_home=tmp_path / "state"
+        ),
+    )
+    process: GatedProcess | None = None
+    pid: int | None = None
+
+    async def fail_after_preparation() -> None:
+        try:
+            raise RuntimeError("original owned test failure")
+        finally:
+            await dispose_test_owner(owner, clock)
+
+    try:
+        tree = await owner.reserve(
+            ReservationRequest(
+                operation_id=new_operation_id(),
+                kind=ResourceKind.TEMPORARY_TREE,
             )
-    await asyncio.wait_for(asyncio.shield(closing), 5)
-    assert owner.inventory().cleanup_effect_tasks == 0
-    assert owner.inventory().cleanup_driver_tasks == 0
-    for record in owner.records.values():
-        if record.directory is not None:
-            record.directory.close()
-    owner.mutations.release()
+        )
+        await owner.acquire(tree.token, new_operation_id(), TemporaryTreeRequest())
+        reservation = await owner.reserve(
+            ReservationRequest(
+                operation_id=new_operation_id(),
+                kind=ResourceKind.PROCESS_DOMAIN,
+                parent_resource_id=tree.token.resource_id,
+            )
+        )
+        acquired = await owner.acquire(
+            reservation.token,
+            new_operation_id(),
+            ProcessLaunch(
+                executable=sys.executable,
+                argv=(
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    "import os, signal; os.write(1, b'x'); signal.pause()",
+                ),
+                environment=(),
+                working_directory_resource_id=tree.token.resource_id,
+                stdin=None,
+                stdout=ProcessOutput.CAPTURE,
+                stderr=ProcessOutput.CAPTURE,
+                domain=ProcessDomain.INVOCATION,
+            ),
+        )
+        process = owner.records[reservation.token.resource_id].process
+        assert process is not None
+        observed = process.observe()
+        assert len(observed.live_members) == 1
+        pid = observed.live_members[0].pid
+        if activated:
+            await owner.acknowledge(
+                reservation.token, acquired.operation_id, acquired.revision
+            )
+            deadline = actual.monotonic_ns() + 5_000_000_000
+            while process.capture_bytes == 0:
+                assert actual.monotonic_ns() < deadline
+                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_soon(wake.set_result, None)
+                await wake
+
+        with pytest.raises(RuntimeError, match="original owned test failure"):
+            await fail_after_preparation()
+
+        assert process is not None
+        assert process.closed
+        assert owner.request_close(None).result().state is CleanupOutcome.UNKNOWN
+        assert process.returncode is not None
+        assert process.observe().capture_eof
+        assert process.readiness() == ()
+        assert owner.inventory().retained_processes == 0
+        assert owner.inventory().helpers.retained_helpers == 0
+        assert owner.inventory().helpers.claim_descriptors == 0
+        assert pid is not None
+        with pytest.raises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
+    finally:
+        if process is not None and not process.closed:
+            deadline = clock.monotonic_ns() + 5_000_000_000
+            process.signal(signal.SIGKILL, deadline)
+            await asyncio.wait_for(process.settle(deadline), 5)
+            await asyncio.wait_for(process.drain(deadline), 5)
+            process.release(deadline)
+        await dispose_test_owner(owner, clock)
 
 
 @pytest.mark.asyncio

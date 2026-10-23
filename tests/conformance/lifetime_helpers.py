@@ -15,12 +15,14 @@ class ProbeIOHelperLauncher:
         fifo_directory: int | None = None,
         phase: str = "before",
         pause_at: int | None = None,
+        resist_term: bool = False,
     ) -> None:
         self.home = home
         self.observation_descriptor = observation_descriptor
         self.fifo_directory = fifo_directory
         self.phase = phase
         self.pause_at = pause_at
+        self.resist_term = resist_term
         self.starts = 0
 
     def start(self, descriptors: tuple[int, ...], clock: Clock) -> IOHelper:
@@ -38,6 +40,7 @@ class ProbeIOHelperLauncher:
             "KORA_IO_DESCRIPTORS": ",".join(str(value) for value in descriptors),
             "KORA_TEST_OBSERVATION_FD": str(self.observation_descriptor),
             "KORA_TEST_PAUSE_PHASE": self.phase,
+            "KORA_TEST_RESIST_TERM": "1" if self.resist_term else "0",
         }
         if self.fifo_directory is not None:
             inherited = (*inherited, self.fifo_directory)

@@ -11,7 +11,14 @@ from typing import TypeAlias, TypeVar, cast
 
 from pydantic import TypeAdapter
 
-from kora.conformance.controllers import HelperInventory, MutationOwner
+from kora.conformance.controllers import (
+    HELPER_ORIGIN_BYTES,
+    CleanupPermit,
+    HelperInventory,
+    HelperOrigin,
+    MutationOwner,
+    duration_ns,
+)
 from kora.conformance.diagnostics import LifetimeDiagnostics
 from kora.conformance.io_helper import (
     CreateTreeMutation,
@@ -121,6 +128,7 @@ class CleanupControl:
 class CleanupEffect:
     task: asyncio.Task[None]
     control: CleanupControl
+    permit: CleanupPermit
 
 
 @dataclass(eq=False)
@@ -232,7 +240,11 @@ class ParentLifetime:
         self.operations: dict[tuple[str, str], RecordedOperation] = {}
         self.ordinary_slots: set[OrdinarySlot] = set()
         self.closures: dict[ResourceId | None, asyncio.Future[ClosureReport]] = {}
-        self.control_bytes = CLOSURE_CONTROL_BYTES + CLEANUP_DRIVER_BYTES
+        self.control_bytes = (
+            CLOSURE_CONTROL_BYTES
+            + CLEANUP_DRIVER_BYTES
+            + (self.limits.max_outstanding_operations + 1) * HELPER_ORIGIN_BYTES
+        )
         if recovery is not None:
             self.control_bytes += RECOVERY_ATTEMPT_BYTES
         if self.control_bytes > self.limits.max_control_recovery_bytes:
@@ -255,6 +267,7 @@ class ParentLifetime:
             launcher if launcher is not None else InstalledIOHelperLauncher(),
             self.clock,
             self.limits,
+            self.cleanup_changed,
         )
         self.diagnostics = LifetimeDiagnostics(self.invocation_id)
         self._bootstrap = asyncio.create_task(
@@ -282,9 +295,7 @@ class ParentLifetime:
         admission = CALL_ADMISSION.get()
         if admission is not None and admission.owner is self:
             return admission.deadline
-        return self.clock.monotonic_ns() + int(
-            self.limits.acquisition_seconds * 1_000_000_000
-        )
+        return self.clock.monotonic_ns() + duration_ns(self.limits.acquisition_seconds)
 
     async def _establish(self) -> None:
         await self.mutations.bootstrap(self.snapshot(), self.deadline())
@@ -996,16 +1007,12 @@ class ParentLifetime:
             return control.result
         start = self.clock.monotonic_ns()
         control.start = start
-        control.cooperative = start + int(
-            self.limits.cooperative_seconds * 1_000_000_000
+        control.cooperative = start + duration_ns(self.limits.cooperative_seconds)
+        control.term = control.cooperative + duration_ns(self.limits.term_seconds)
+        control.killed = control.term + duration_ns(
+            self.limits.kill_observation_seconds
         )
-        control.term = control.cooperative + int(
-            self.limits.term_seconds * 1_000_000_000
-        )
-        control.killed = control.term + int(
-            self.limits.kill_observation_seconds * 1_000_000_000
-        )
-        control.final = control.killed + int(self.limits.drain_seconds * 1_000_000_000)
+        control.final = control.killed + duration_ns(self.limits.drain_seconds)
         control.selected = self._selected(resource_id)
         if resource_id is None:
             self.admission_open = False
@@ -1020,6 +1027,7 @@ class ParentLifetime:
         control.terminal_join = (
             resource_id is not None and self.invocation_cleanup.removing_root
         )
+        self._tighten_helper_constraints()
         self.cleanup_changed.set()
         return control.result
 
@@ -1072,11 +1080,74 @@ class ParentLifetime:
         self.cleanup_changed.set()
 
     def _start_cleanup_effect(
-        self, control: CleanupControl, effect: Coroutine[object, object, None]
+        self,
+        control: CleanupControl,
+        resource_id: ResourceId | None,
+        effect: Coroutine[object, object, None],
     ) -> None:
+        permit = CleanupPermit(resource_id, control.final)
         task = asyncio.create_task(effect)
-        self.cleanup_effect = CleanupEffect(task, control)
+        self.cleanup_effect = CleanupEffect(task, control, permit)
+        self.mutations.cleanup_task = task
+        self.mutations.cleanup_permit = permit
+        self._tighten_helper_constraints()
         task.add_done_callback(self._cleanup_done)
+
+    def _owns_helper(
+        self,
+        resource_id: ResourceId | None,
+        control: CleanupControl,
+        origin: HelperOrigin,
+    ) -> bool:
+        if resource_id is None:
+            return True
+        if origin.cleanup is not None:
+            return origin.cleanup.resource_id in control.selected
+        return any(
+            operation.task is origin.task and operation.resource_id in control.selected
+            for operation in self.operations.values()
+        )
+
+    def _tighten_helper_constraints(self) -> None:
+        effect = self.cleanup_effect
+        for resource_id, control in self._cleanup_controls():
+            if control.start is None:
+                continue
+            if effect is not None and (
+                resource_id is None or effect.permit.resource_id in control.selected
+            ):
+                effect.permit.final = min(effect.permit.final, control.final)
+            for origin in self.mutations.origins.values():
+                if self._owns_helper(resource_id, control, origin):
+                    origin.tighten(
+                        control.cooperative, control.term, control.final, self.limits
+                    )
+
+    def _signal_cleanup_helpers(self) -> None:
+        for helper, origin in self.mutations.origins.items():
+            now = self.clock.monotonic_ns()
+            if (
+                helper.closed
+                or helper.anchor.exited
+                or origin.final is None
+                or now >= origin.final
+            ):
+                continue
+            stage = (
+                2
+                if origin.kill is not None and now >= origin.kill
+                else 1
+                if origin.term is not None and now >= origin.term
+                else 0
+            )
+            if stage > origin.signalled and helper.signal(
+                signal.SIGKILL if stage == 2 else signal.SIGTERM,
+                origin.final,
+            ):
+                origin.signalled = stage
+                self.diagnostics.emit(
+                    "escalated", LifetimeReason.RESOURCE_LIVE, len(self.records)
+                )
 
     async def _remove_cleanup_tree(self, record: ResourceRecord, deadline: int) -> None:
         directory = record.directory
@@ -1234,15 +1305,6 @@ class ParentLifetime:
         if self.clock.monotonic_ns() >= control.final:
             self._finish_cleanup(resource_id, control, safe=False)
             return
-        if (
-            resource_id is None
-            and now >= control.cooperative
-            and not helpers_settled
-            and self.cleanup_effect is None
-        ):
-            self.mutations.signal(
-                signal.SIGKILL if now >= control.term else signal.SIGTERM
-            )
         if pending or not helpers_settled or not settled:
             return
         inventory_ready = (
@@ -1269,7 +1331,9 @@ class ParentLifetime:
         for record in reversed(records):
             if record.directory is not None and not record.directory.closed:
                 self._start_cleanup_effect(
-                    control, self._remove_cleanup_tree(record, control.final)
+                    control,
+                    record.entry.resource_id,
+                    self._remove_cleanup_tree(record, control.final),
                 )
                 return
         for record in records:
@@ -1282,7 +1346,9 @@ class ParentLifetime:
                     }
                 )
         if not control.published:
-            self._start_cleanup_effect(control, self._publish_cleanup(control))
+            self._start_cleanup_effect(
+                control, resource_id, self._publish_cleanup(control)
+            )
             return
         if resource_id is None:
             if any(
@@ -1302,7 +1368,9 @@ class ParentLifetime:
                 return
             if not directory.closed:
                 control.removing_root = True
-                self._start_cleanup_effect(control, self._remove_cleanup_root(control))
+                self._start_cleanup_effect(
+                    control, None, self._remove_cleanup_root(control)
+                )
                 return
         self._finish_cleanup(resource_id, control, safe=True)
 
@@ -1314,6 +1382,8 @@ class ParentLifetime:
                 if effect.task.cancelled() or effect.task.exception() is not None:
                     effect.control.failed = True
                 self.cleanup_effect = None
+                self.mutations.cleanup_task = None
+                self.mutations.cleanup_permit = None
             for helper in self.mutations.helpers:
                 if (
                     not self.mutations.pending
@@ -1323,6 +1393,8 @@ class ParentLifetime:
                 ):
                     helper.release()
             self.mutations.prune()
+            self._tighten_helper_constraints()
+            self._signal_cleanup_helpers()
             active = [
                 (key, control)
                 for key, control in self._cleanup_controls()
@@ -1343,7 +1415,7 @@ class ParentLifetime:
             now = self.clock.monotonic_ns()
             if any(control.final <= now for _, control in active):
                 continue
-            deadline = min(
+            control_deadline = min(
                 instant
                 for _, control in active
                 for instant in (
@@ -1353,6 +1425,18 @@ class ParentLifetime:
                     control.final,
                 )
                 if instant > now
+            )
+            deadline = min(
+                (
+                    control_deadline,
+                    *(
+                        instant
+                        for origin in self.mutations.origins.values()
+                        if origin.final is not None and now < origin.final
+                        for instant in (origin.term, origin.kill, origin.final)
+                        if instant is not None and instant > now
+                    ),
+                )
             )
             changed = asyncio.create_task(self.cleanup_changed.wait())
             timeout = asyncio.create_task(self.clock.sleep_until(deadline))

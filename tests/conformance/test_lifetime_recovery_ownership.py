@@ -395,17 +395,31 @@ def concurrent_resume(
     reference: CleanupReference,
     home: Path,
 ) -> None:
+    async def owned_resume() -> ClosureReport:
+        clock = ControlledLifetimeClock()
+        try:
+            return await asyncio.wait_for(
+                registry.resume(
+                    reference,
+                    limits(),
+                    launcher=launcher,
+                    clock=clock,
+                    home=str(home),
+                    state_home=str(home / "state"),
+                ),
+                5,
+            )
+        finally:
+            context = registry.context
+            if (
+                context is not None
+                and context.binding.loop is asyncio.get_running_loop()
+            ):
+                await settle_recovery_attempts(registry, clock)
+
     gate.wait(timeout=5)
     try:
-        result = asyncio.run(
-            registry.resume(
-                reference,
-                limits(),
-                launcher=launcher,
-                home=str(home),
-                state_home=str(home / "state"),
-            )
-        )
+        result = asyncio.run(owned_resume())
     except LifetimeError as error:
         results.put(error.reason)
     else:

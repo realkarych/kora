@@ -134,7 +134,9 @@ async def test_mutation_queue_deadline_does_not_cancel_earlier_publisher(
     os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
     reading, writing = os.pipe()
     launcher = ProbeIOHelperLauncher(tmp_path, writing, barrier.descriptor, pause_at=3)
-    owner = ParentLifetime(limits=limits(), launcher=launcher)
+    clock = ControlledLifetimeClock()
+    actual = SystemClock()
+    owner = ParentLifetime(limits=limits(), launcher=launcher, clock=clock)
     tree = await owner.reserve(
         ReservationRequest(
             operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
@@ -143,25 +145,31 @@ async def test_mutation_queue_deadline_does_not_cancel_earlier_publisher(
     operation = asyncio.create_task(
         owner.acquire(tree.token, new_operation_id(), TemporaryTreeRequest())
     )
-    deadline = owner.deadline()
-    assert await read_probe(reading, deadline, owner.clock) == b"r"
+    deadline = actual.monotonic_ns() + 5_000_000_000
+    assert await read_probe(reading, deadline, actual) == b"r"
     helper = owner.mutations.helpers[-1]
     while True:
         os.kill(helper.process.pid, signal.SIGUSR1)
-        if await read_probe(reading, deadline, owner.clock) == b"e":
+        if await read_probe(reading, deadline, actual) == b"e":
             break
     directory = owner.mutations.directory
     assert directory is not None
     queued = CreateTreeMutation(directory=directory.identity, name="e" * 32)
+    queued_call = asyncio.create_task(
+        owner.mutations.perform(queued, directory, clock.monotonic_ns() + 100_000_000)
+    )
 
     try:
+        while owner.mutations.pending != 2:
+            assert actual.monotonic_ns() < deadline
+            if queued_call.done():
+                await queued_call
+            wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(wake.set_result, None)
+            await wake
+        clock.advance(100_000_000)
         with pytest.raises(HelperError):
-            await asyncio.wait_for(
-                owner.mutations.perform(
-                    queued, directory, owner.clock.monotonic_ns() + 100_000_000
-                ),
-                1,
-            )
+            await asyncio.wait_for(queued_call, 1)
         assert not helper.anchor.exited
         assert not operation.done()
         assert owner.mutations.pending == 1
@@ -172,8 +180,9 @@ async def test_mutation_queue_deadline_does_not_cancel_earlier_publisher(
             "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
         )
         os.close(writer)
-        await operation
-        report = await owner.close(None)
+        await asyncio.gather(queued_call, return_exceptions=True)
+        await asyncio.wait_for(operation, 5)
+        report = await asyncio.wait_for(owner.close(None), 5)
         assert report.state is CleanupOutcome.CLOSED
         os.close(reading)
         os.close(writing)
