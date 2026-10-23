@@ -58,7 +58,7 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
     owner = ParentLifetime(
         limits=limits().model_copy(update={"acquisition_seconds": 1.0}),
         launcher=launcher,
-        clock=ControlledLifetimeClock() if case == "late_acquire" else None,
+        clock=ControlledLifetimeClock() if case != "timeout" else None,
     )
     tree = await owner.reserve(
         ReservationRequest(
@@ -117,6 +117,7 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
         assert helper.closed
         assert owner.inventory().helpers.live_helpers == 0
     finally:
+        await owner.close(None)
         if not helper.closed:
             helper.signal(signal.SIGKILL)
             assert await helper.settle(deadline)
