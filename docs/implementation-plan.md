@@ -450,3 +450,7 @@ The remaining configuration foundation of work item 2 includes agent, human-inpu
 IR declaration amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23.
 
 The declaration foundation of work item 2 includes inputs, outputs, IR source metadata, type-contract references, trigger variants, target declarations, runtime settings and secret aliases. These are structural records. Built-in payload resolution, type assignability, provider support, first-slice retry normalization and trusted conversion of source metadata to public diagnostics remain with their actual consumers. The shared diagnostic values remain the existing foundation; IR source metadata is not itself a public diagnostic location.
+
+IR document amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23.
+
+The document foundation of work item 2 includes all eight node envelopes, graph and subgraph definitions, provenance and the complete IR root. Structural models enforce canonical output roles and retain content-free evidence for ignored root fields. The shared validator still owns public warnings and semantic checks. Subgraph composition uses the graph's shared definition registry; no nested definition registry is added. Reproducible whole-schema generation remains with #218.

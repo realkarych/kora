@@ -10,6 +10,7 @@ from pydantic import MISSING
 from pydantic_core import to_json
 
 from kora.ir.data import IrDataValue, IrJsonObjectField, detach_ir_data, invalid_ir_data
+from kora.ir.document import Provenance
 from kora.ir.json import JsonObject, JsonValue, parse_json_object
 from kora.ir.record import IrRecord, wire_name
 
@@ -65,13 +66,13 @@ def export_ir_object_map(value: object) -> JsonObject:
     return result
 
 
-def require_ir_root(value: object) -> IrRecord:
-    if not isinstance(value, IrRecord):
+def require_ir_root(value: object) -> IrRecord | Provenance:
+    if not isinstance(value, IrRecord | Provenance):
         raise invalid_ir_data()
     return value
 
 
-def export_ir(root: IrRecord) -> JsonObject:
+def export_ir(root: IrRecord | Provenance) -> JsonObject:
     root = require_ir_root(root)
     result: list[JsonValue] = [None]
     stack: list[Visit | Leave] = [Visit(root, result, 0)]
@@ -97,7 +98,7 @@ def export_ir(root: IrRecord) -> JsonObject:
             raise invalid_ir_data()
         active.add(identity)
         stack.append(Leave(identity))
-        if isinstance(value, IrRecord):
+        if isinstance(value, IrRecord | Provenance):
             data: JsonObject = {}
             store_value(task.target, task.key, data)
             for name, field in type(value).model_fields.items():
@@ -118,10 +119,18 @@ def export_ir(root: IrRecord) -> JsonObject:
                     data[alias] = export_ir_object_map(cast("object", item))
                 else:
                     stack.append(Visit(cast("object", item), data, alias))
-            extensions = parse_json_object(value.extensions)
-            if any(not name.startswith("x-") for name in extensions):
-                raise invalid_ir_data()
-            data.update(extensions)
+            if isinstance(value, IrRecord):
+                extensions = parse_json_object(value.extensions)
+                if any(not name.startswith("x-") for name in extensions):
+                    raise invalid_ir_data()
+                data.update(extensions)
+            elif value.__pydantic_extra__ is not None:
+                for name, item in cast(
+                    "dict[str, object]", value.__pydantic_extra__
+                ).items():
+                    if type(name) is not str:
+                        raise invalid_ir_data()
+                    data[name] = detach_ir_data(item)
         elif isinstance(value, dict):
             data = {}
             store_value(task.target, task.key, data)
@@ -150,7 +159,7 @@ def render_entries(
     return enumerate(JsonArray.__iter__(value))
 
 
-def render_ir_json(root: IrRecord) -> str:
+def render_ir_json(root: IrRecord | Provenance) -> str:
     data = export_ir(root)
     fragments = ["{"]
     entries = [render_entries(data)]

@@ -56,6 +56,12 @@ secrets:                      # section (c): references only
 
 `meta.presets` and `meta.defaults` are **informational snapshots**: the scheduler reads only each node's resolved `config` (FR-3.2); they let a reviewer diff a preset change and a UI show provenance.
 
+`GraphDocument` is the structural root, with eight kind-specific envelopes behind the discriminated `Node` union. `GraphBody` and `Subgraph` carry stored nodes; `Graph` owns the shared body registry. These records preserve authored omissions and never insert role outputs, predicates, overlap defaults or scheduling settings. Timer and branch output declarations remain structurally optional and may be authored; semantic validation must refuse nonempty declarations before execution.
+
+Unknown root keys are discarded without traversing their values. `inspect_ir_root` counts them before nested validation, and a successful parse retains only `unknown_root_key_count` as non-wire metadata, excluded from schema and canonical export. Root `x-` metadata follows the existing bounded extension contract and is not counted. The Python spelling `schema_` is an ignored root key; only wire `$schema` binds that field. `$schema` retains its raw strict string with `format: uri` as an annotation, without normalization, resolver authority or a claim of URI admission. Public warnings, diagnostic codes and bounded collection remain with the future shared validator.
+
+`Provenance` retains typed compiler, source digest and raw partial preset/default snapshots plus arbitrary detached JSON members. It is informational data, including `x-` members, and supplies no execution authority. `export_ir` and `render_ir_json` accept validated IR records and the explicit standalone `Provenance` root. They exclude private parse metadata and preserve wire aliases, authored field sets, map order and list order through iterative canonical export. Arbitrary Pydantic models and sequence roots are not supported.
+
 ### 2.1. Authoritative type contracts (ADR-0018)
 
 The unreleased IR 1.0 uses `kora.execution.v1` interpretation. `type_contracts` is required in this format and contains every used non-list type and its parent/reference closure. A graph that uses no artifact types, such as a timer-only graph, has an empty `type_contracts: {}` closure. `List[T]` derives its contract from the fixed list semantics and `T`; it has no separate registry alias. The compiler emits definitions from author-side models, including an explicit `$schema`, and installed immutable built-in revisions. It performs no registration/network write during compilation.
@@ -286,7 +292,7 @@ candidates:
 
 A fan-out materialises one **instance** of the body subgraph per element of the `over` input at run time (NFR-3.3), node ids suffixed `[i]`; inside the body, `$inputs.hypothesis` is the element, every other input is the bound value. The fan-out node's own outputs are lists collected from the body outputs named by `collect`; there is no separate fan-in node. `skip_failures: true` collects the successful instances and succeeds when at least one succeeded; `false` fails on the first failed instance. An empty `over` list materialises no instance, and the fan-out succeeds with empty lists whatever `skip_failures` says; a non-empty list in which every instance failed still fails. A consumer of the empty list decides what an empty input means. Nested fan-out inside a body is allowed (NFR-1.4). A `subgraph` node has the same shape without `over`, `max_parallel` and `skip_failures`, and its outputs are the body's outputs unwrapped.
 
-A `subgraphs` entry has the same shape as `graph` minus `triggers`, plus `inputs` and `outputs` declarations and its own `retry` and `limits`, which apply to the body as a unit (FR-2.7).
+A `subgraphs` entry has `description`, required nonempty `nodes`, `inputs`, `outputs`, `retry`, `limits` and `source`. The optional `retry` and `limits` apply to the body as a unit (FR-2.7). Definitions live only in `graph.subgraphs`; nested `fan_out` and `subgraph` nodes refer to that shared registry by name. A body has no nested definition registry or graph `id`, `version`, `namespace`, `params`, `triggers`, `target` or `overlap`. Reference resolution and cycles remain semantic checks.
 
 ### 4.5 Branch ownership and selection
 
