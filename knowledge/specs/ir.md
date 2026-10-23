@@ -175,6 +175,8 @@ config:
 
 ### 4.2 Human-input node config (FR-2.2, FR-7)
 
+The [first-slice chain](first-slice.md#refusal-contract) uses direct CLI bindings to its published `VcsRef` and command `CommandResult`, as in [dependency-upgrade.ir.yaml](examples/dependency-upgrade.ir.yaml). A ReviewBundle is an optional context artifact, not a requirement for this CLI path; its fact/narrative ownership remains unchanged when used.
+
 Only an absent `form` selects the built-in default form:
 
 ```json
