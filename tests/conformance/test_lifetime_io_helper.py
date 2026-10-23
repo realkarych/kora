@@ -27,6 +27,7 @@ from kora.runner.channels import DescriptorReadiness, wait_future
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
+from tests.measurements.lifetime_measurement_support import MeasuredIOHelperLauncher
 
 
 def initial_snapshot() -> JournalSnapshot:
@@ -146,7 +147,7 @@ async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("implementation", ["installed", "probe"])
+@pytest.mark.parametrize("implementation", ["installed", "probe", "measured"])
 async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
     tmp_path: Path, implementation: str
 ) -> None:
@@ -155,6 +156,8 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
     launcher: IOHelperLauncher = (
         InstalledIOHelperLauncher(home=tmp_path, state_home=tmp_path / "state")
         if implementation == "installed"
+        else MeasuredIOHelperLauncher(tmp_path, writing)
+        if implementation == "measured"
         else ProbeIOHelperLauncher(tmp_path, writing)
     )
     deadline = clock.monotonic_ns() + 10_000_000_000
