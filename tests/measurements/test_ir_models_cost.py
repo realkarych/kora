@@ -1,10 +1,14 @@
 import gc
 import json
+import shutil
 import sys
+import tarfile
 import threading
 import time
 import tracemalloc
 from collections.abc import Callable, Iterator
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 
 import pytest
@@ -54,6 +58,8 @@ from tests.measurements.ir_remaining_workload import (
     fixture_manifest,
     remaining_workloads,
 )
+from tests.measurements.vcs_ref_workload import cases as vcs_ref_cases
+from tests.measurements.vcs_ref_workload import exercise as exercise_vcs_ref
 
 pytestmark = pytest.mark.measurement
 
@@ -637,3 +643,151 @@ def test_shared_diagnostic_resource_lifetime(
             for p in payload.points
         )
     report.gates[f"{name}_resources_released"] = True
+
+
+def test_vcs_ref_action_cost(report: Report) -> None:
+    actions, manifest = vcs_ref_cases()
+    report.environment["vcs_ref_fixture_manifest"] = json.dumps(
+        manifest, sort_keys=True
+    )
+    for case in actions:
+        for _ in range(WARM_UP):
+            exercise_vcs_ref(case)
+
+    for case in actions:
+        for repeat in range(DENSE_MEASURED):
+            started = time.perf_counter()
+            exercise_vcs_ref(case)
+            elapsed = time.perf_counter() - started
+            report.samples.append(Sample(case.name, repeat, 1, elapsed))
+        gc.collect()
+        tracemalloc.start()
+        baseline = tracemalloc.get_traced_memory()[0]
+        exercise_vcs_ref(case)
+        gc.collect()
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        retained = current - baseline
+        report.environment[f"{case.name}_peak_bytes"] = peak
+        report.environment[f"{case.name}_retained_bytes"] = retained
+        report.gates[f"{case.name}_retained"] = retained < RETAINED_LIMIT_BYTES
+        assert retained < RETAINED_LIMIT_BYTES
+
+
+@pytest.mark.parametrize(
+    ("repeat", "traced"),
+    [(0, True), (0, False), (1, True), (1, False), (2, True), (2, False)],
+)
+def test_vcs_ref_validation_lifetime(report: Report, repeat: int, traced: bool) -> None:
+    mode = "traced" if traced else "untraced"
+    name = f"vcs_ref_{mode}_{repeat}"
+    before = (open_descriptors(), threading.active_count())
+    argv = [
+        sys.executable,
+        "-m",
+        "tests.measurements.vcs_ref_workload",
+        mode,
+        report.revision,
+        name,
+    ]
+
+    started = time.perf_counter()
+    result = run_process(argv)
+    elapsed = time.perf_counter() - started
+    report.environment[f"{name}_stdout"] = result.stdout.decode()
+    report.environment[f"{name}_stderr"] = result.stderr.decode()
+    report.environment[f"{name}_exit"] = result.code
+    report.samples.append(Sample(f"{name}_process", repeat, 500, elapsed))
+
+    assert not result.timed_out
+    assert not result.overflow
+    assert result.code == 0, result.stderr.decode()
+    assert result.stderr == b""
+    assert (open_descriptors(), threading.active_count()) == before
+    payload = Lifecycle.model_validate_json(result.stdout)
+    assert payload.traced is traced
+    assert payload.pid == result.pid
+    assert payload.revision == report.revision
+    assert payload.run == name
+    assert payload.successes == 284
+    assert payload.refusals == 216
+    assert [point.cycle for point in payload.points] == list(range(0, 501, 25))
+    assert len(payload.retaining_paths) == 2
+    for counter in ("descriptors", "threads", "os_threads"):
+        values = [getattr(point, counter) for point in payload.points]
+        assert all(value == values[0] for value in values)
+    if payload.platform == "linux":
+        assert all(
+            point.rss is not None
+            and point.high_water is not None
+            and point.os_threads is not None
+            for point in payload.points
+        )
+    if traced:
+        baseline = payload.points[0].heap
+        assert baseline is not None
+        assert all(
+            point.heap is not None and point.heap - baseline < RETAINED_LIMIT_BYTES
+            for point in payload.points
+        )
+    else:
+        assert all(
+            point.heap is None and point.peak is None and point.tracer is None
+            for point in payload.points
+        )
+    report.gates[f"{name}_lifecycle_assertions_passed"] = True
+    report.environment[f"{name}_native_growth_review"] = "required"
+
+
+@pytest.mark.parametrize("repeat", range(3))
+def test_vcs_ref_cold_public_import(report: Report, repeat: int) -> None:
+    base = "41ea853883201665adaeb7d730da9d15be148456"
+    before = (open_descriptors(), threading.active_count())
+    source = Path(__file__).parents[2] / "src"
+
+    with TemporaryDirectory(prefix="kora-vcs-ref-import-") as directory:
+        temporary = Path(directory)
+        archive = temporary / "base.tar"
+        archived = run_process(
+            ["git", "archive", f"--output={archive}", base, "src/kora"]
+        )
+        assert archived.code == 0, archived.stderr.decode()
+        assert not archived.timed_out
+        assert not archived.overflow
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(temporary, filter="data")
+        copied_head = temporary / "head"
+        shutil.copytree(
+            source,
+            copied_head,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        for name, selected in (("base", temporary / "src"), ("head", copied_head)):
+            completed = run_process(
+                [
+                    sys.executable,
+                    "-m",
+                    "tests.measurements.vcs_ref_import",
+                    str(selected),
+                ]
+            )
+            report.environment[f"vcs_import_{name}_{repeat}"] = (
+                completed.stdout.decode()
+            )
+            assert not completed.timed_out
+            assert not completed.overflow
+            assert completed.code == 0, completed.stderr.decode()
+            assert completed.stderr == b""
+            measured = cast("dict[str, object]", json.loads(completed.stdout))
+            assert measured["descriptors_before"] == measured["descriptors_after"]
+            assert measured["threads_before"] == measured["threads_after"]
+            if measured["platform"] == "linux":
+                assert measured["rss_before"] is not None
+                assert measured["rss_after"] is not None
+            seconds = measured["seconds"]
+            assert isinstance(seconds, float)
+            report.samples.append(Sample(f"vcs_import_{name}", repeat, 1, seconds))
+
+    assert not temporary.exists()
+    assert (open_descriptors(), threading.active_count()) == before
+    report.gates[f"vcs_import_{repeat}_resources_released"] = True
