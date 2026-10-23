@@ -29,6 +29,21 @@ class DirectoryIdentity(BoundaryModel):
         return value
 
 
+class FileIdentity(DirectoryIdentity):
+    pass
+
+
+def file_identity(descriptor: int, name: str) -> FileIdentity:
+    verify_private(descriptor, directory=False)
+    metadata = os.fstat(descriptor)
+    return FileIdentity(
+        name=name,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        owner_uid=metadata.st_uid,
+    )
+
+
 def identity_of(descriptor: int, name: str) -> DirectoryIdentity:
     metadata = os.fstat(descriptor)
     if not stat.S_ISDIR(metadata.st_mode):
@@ -58,16 +73,23 @@ def verify_private(descriptor: int, *, directory: bool) -> None:
 
 
 class DirectoryAnchor:
-    def __init__(self, descriptor: int, identity: DirectoryIdentity) -> None:
+    def __init__(
+        self,
+        descriptor: int,
+        identity: DirectoryIdentity,
+        ancestors: tuple[DirectoryIdentity, ...] = (),
+    ) -> None:
         self.descriptor = descriptor
         self.identity = identity
         self.closed = False
+        self.ancestors = ancestors
 
     @classmethod
     def open_path(cls, path: Path) -> "DirectoryAnchor":
         if not path.is_absolute() or ".." in path.parts:
             raise FilesystemError("absolute_directory_required")
         descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        ancestors: list[DirectoryIdentity] = []
         try:
             for component in path.parts[1:]:
                 following = os.open(
@@ -77,8 +99,12 @@ class DirectoryAnchor:
                 )
                 os.close(descriptor)
                 descriptor = following
+                metadata = os.fstat(descriptor)
+                if metadata.st_uid not in (0, os.getuid()):
+                    raise FilesystemError("foreign_ancestor")
+                ancestors.append(identity_of(descriptor, component))
             verify_private(descriptor, directory=True)
-            return cls(descriptor, identity_of(descriptor, path.name or "/"))
+            return cls(descriptor, identity_of(descriptor, path.name), tuple(ancestors))
         except (OSError, FilesystemError):
             os.close(descriptor)
             raise

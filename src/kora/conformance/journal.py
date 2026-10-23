@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, StrictBool
 
 from kora.protocols.common import BoundaryModel
 from kora.protocols.identity import ProcessIdentity
@@ -16,7 +16,7 @@ from kora.protocols.lifetime import (
     ResourceState,
     Revision,
 )
-from kora.runner.filesystem import DirectoryIdentity
+from kora.runner.filesystem import DirectoryIdentity, FileIdentity
 
 
 class JournalEntry(BoundaryModel):
@@ -37,8 +37,9 @@ class JournalSnapshot(BoundaryModel):
     owner: ProcessIdentity
     generation: Generation
     revision: Revision
-    admission_open: bool
+    admission_open: StrictBool
     original_outcome: OriginalOutcome
+    claim: FileIdentity | None = None
     root: DirectoryIdentity | None = None
     directory: DirectoryIdentity | None = None
     ancestors: Annotated[tuple[DirectoryIdentity, ...], Field(max_length=256)] = ()

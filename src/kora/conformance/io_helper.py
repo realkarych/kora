@@ -27,6 +27,7 @@ from kora.runner.filesystem import (
     DirectoryIdentity,
     FilesystemError,
     create_directory,
+    file_identity,
     identity_of,
     remove_directory,
     verify_private,
@@ -40,6 +41,12 @@ class BootstrapMutation(BoundaryModel):
     invocation_id: InvocationId
     journal: JournalSnapshot
     capacity: Annotated[StrictInt, Field(gt=0, le=32)]
+
+
+class RecoverMutation(BoundaryModel):
+    action: Literal["recover"] = "recover"
+    invocation_id: InvocationId
+    owner: ProcessIdentity
 
 
 class PublishMutation(BoundaryModel):
@@ -62,7 +69,11 @@ class RemoveTreeMutation(BoundaryModel):
 
 
 Mutation = Annotated[
-    BootstrapMutation | PublishMutation | CreateTreeMutation | RemoveTreeMutation,
+    BootstrapMutation
+    | RecoverMutation
+    | PublishMutation
+    | CreateTreeMutation
+    | RemoveTreeMutation,
     Field(discriminator="action"),
 ]
 MUTATION: TypeAdapter[Mutation] = TypeAdapter(Mutation)
@@ -250,6 +261,7 @@ def state_directory() -> Path:
 def establish_state_root() -> DirectoryAnchor:
     path = state_directory()
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    ancestors: list[DirectoryIdentity] = []
     try:
         for component in path.parts[1:]:
             try:
@@ -268,8 +280,14 @@ def establish_state_root() -> DirectoryAnchor:
                 )
             os.close(descriptor)
             descriptor = following
+            metadata = os.fstat(descriptor)
+            if metadata.st_uid not in (0, os.getuid()):
+                raise FilesystemError("foreign_ancestor")
+            ancestors.append(identity_of(descriptor, component))
         verify_private(descriptor, directory=True)
-        return DirectoryAnchor(descriptor, identity_of(descriptor, path.name))
+        return DirectoryAnchor(
+            descriptor, identity_of(descriptor, path.name), tuple(ancestors)
+        )
     except (OSError, FilesystemError):
         os.close(descriptor)
         raise
@@ -293,6 +311,10 @@ def open_claim(directory: DirectoryAnchor, name: str) -> int:
 
 def publish(directory: DirectoryAnchor, journal: JournalSnapshot) -> None:
     directory.verify()
+    observed = NativeIdentityReader().read(os.getpid())
+    if observed.process is None or not complete_identity(observed.process.identity):
+        raise HelperError(LifetimeReason.IDENTITY_UNKNOWN)
+    journal = journal.model_copy(update={"helpers": (observed.process.identity,)})
     encoded = journal.model_dump_json().encode("utf-8")
     if len(encoded) > 1048576:
         raise HelperError(LifetimeReason.CAPACITY_EXCEEDED)
@@ -338,9 +360,15 @@ def bootstrap(mutation: BootstrapMutation) -> tuple[MutationResult, tuple[int, .
         invocation = create_directory(root, mutation.invocation_id)
         claim = open_claim(invocation, "claim")
         snapshot = mutation.journal.model_copy(
-            update={"root": root.identity, "directory": invocation.identity}
+            update={
+                "root": root.identity,
+                "directory": invocation.identity,
+                "ancestors": root.ancestors,
+                "claim": file_identity(claim, "claim"),
+            }
         )
         publish(invocation, snapshot)
+        snapshot = read_journal(invocation)
         result = MutationResult(
             reason=LifetimeReason.COMPLETE,
             directory=invocation.identity,
@@ -353,9 +381,68 @@ def bootstrap(mutation: BootstrapMutation) -> tuple[MutationResult, tuple[int, .
         os.close(admission)
 
 
+def recover(mutation: RecoverMutation) -> tuple[MutationResult, tuple[int, ...]]:
+    root = DirectoryAnchor.open_path(state_directory())
+    invocation_fd = os.open(
+        mutation.invocation_id,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        dir_fd=root.descriptor,
+    )
+    invocation = DirectoryAnchor(
+        invocation_fd, identity_of(invocation_fd, mutation.invocation_id)
+    )
+    claim = os.open(
+        "claim", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=invocation_fd
+    )
+    verify_private(claim, directory=False)
+    fcntl.flock(claim, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    snapshot = read_journal(invocation)
+    if (
+        snapshot.invocation_id != mutation.invocation_id
+        or snapshot.directory != invocation.identity
+        or snapshot.root != root.identity
+        or snapshot.ancestors != root.ancestors
+        or snapshot.claim != file_identity(claim, "claim")
+    ):
+        raise HelperError(LifetimeReason.IDENTITY_MISMATCH)
+    identities = NativeIdentityReader()
+    for identity in (snapshot.owner, *snapshot.helpers):
+        observed = identities.read(identity.pid)
+        if observed.state is IdentityState.UNKNOWN:
+            raise HelperError(LifetimeReason.IDENTITY_UNKNOWN)
+        if observed.process is not None:
+            if observed.process.identity != identity:
+                raise HelperError(LifetimeReason.IDENTITY_MISMATCH)
+            if not observed.process.dead:
+                raise HelperError(LifetimeReason.OWNER_BUSY)
+    if snapshot.pending_effects:
+        raise HelperError(LifetimeReason.EFFECT_UNSETTLED)
+    snapshot = snapshot.model_copy(
+        update={
+            "owner": mutation.owner,
+            "generation": snapshot.generation + 1,
+            "revision": snapshot.revision + 1,
+            "admission_open": False,
+        }
+    )
+    publish(invocation, snapshot)
+    snapshot = read_journal(invocation)
+    return MutationResult(
+        reason=LifetimeReason.COMPLETE,
+        directory=invocation.identity,
+        root=root.identity,
+        descriptor_count=3,
+        journal=snapshot,
+    ), (root.descriptor, invocation_fd, claim)
+
+
 def mutate(
     mutation: Mutation, descriptors: tuple[int, ...]
 ) -> tuple[MutationResult, tuple[int, ...]]:
+    if isinstance(mutation, RecoverMutation):
+        if descriptors:
+            raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
+        return recover(mutation)
     if isinstance(mutation, BootstrapMutation):
         if descriptors:
             raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
@@ -374,10 +461,16 @@ def mutate(
             or mutation.journal.owner != previous.owner
             or mutation.journal.generation != previous.generation
             or mutation.journal.invocation_id != previous.invocation_id
+            or mutation.journal.directory != previous.directory
+            or mutation.journal.root != previous.root
+            or mutation.journal.ancestors != previous.ancestors
+            or mutation.journal.claim != previous.claim
         ):
             raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
         publish(directory, mutation.journal)
-        return MutationResult(reason=LifetimeReason.COMPLETE), ()
+        return MutationResult(
+            reason=LifetimeReason.COMPLETE, journal=read_journal(directory)
+        ), ()
     if isinstance(mutation, CreateTreeMutation):
         child = create_directory(directory, mutation.name)
         identity = child.identity

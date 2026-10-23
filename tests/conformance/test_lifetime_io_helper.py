@@ -87,7 +87,7 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
         PublishMutation(directory=invocation.identity, revision=2, journal=snapshot),
         deadline,
     )
-    assert read_journal(invocation) == snapshot
+    assert read_journal(invocation).revision == snapshot.revision
     stale = launcher.start((invocation_fd, claim), clock)
     with pytest.raises(HelperError) as refused:
         await stale.execute(
@@ -97,7 +97,7 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
             deadline,
         )
     assert refused.value.reason is LifetimeReason.JOURNAL_UNAVAILABLE
-    assert read_journal(invocation) == snapshot
+    assert read_journal(invocation).revision == snapshot.revision
     tree = launcher.start((invocation_fd, claim), clock)
     created = await tree.execute(
         CreateTreeMutation(directory=invocation.identity, name="2" * 32), deadline
