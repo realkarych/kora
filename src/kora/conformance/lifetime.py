@@ -160,6 +160,8 @@ class ParentLifetime:
         self.transport_execution_bytes = 0
         self.transport_pending = 0
         self.endpoint_count = 0
+        self.closure_started = asyncio.Event()
+        self.cooperative_deadline_ns: int | None = None
         self.borrowed_scopes: dict[str, ResourceId] = {}
         self.mutations = MutationOwner(
             launcher if launcher is not None else InstalledIOHelperLauncher(),
@@ -261,8 +263,9 @@ class ParentLifetime:
             pending_effects=tuple(
                 record.entry.acquisition_id
                 for record in self.records.values()
-                if record.entry.state is ResourceState.ACQUIRING
-                and record.entry.acquisition_id is not None
+                if record.entry.acquisition_id is not None
+                and record.entry.registration is None
+                and record.entry.state is not ResourceState.CLOSED
             ),
         )
 
@@ -658,17 +661,20 @@ class ParentLifetime:
         if existing is not None:
             return await asyncio.shield(existing)
         selected = self._selected(resource_id)
+        start = self.clock.monotonic_ns()
         if resource_id is None:
             self.admission_open = False
+            self.cooperative_deadline_ns = start + int(
+                self.limits.cooperative_seconds * 1_000_000_000
+            )
+            self.closure_started.set()
         for key in selected:
             record = self.records[key]
             record.fenced = True
             if record.process is not None:
                 record.process.close_gate()
         earlier = tuple(self.closures.values())
-        task = asyncio.create_task(
-            self._close(resource_id, selected, earlier, self.clock.monotonic_ns())
-        )
+        task = asyncio.create_task(self._close(resource_id, selected, earlier, start))
         task.add_done_callback(consume_task_failure)
         self.closures[resource_id] = task
         return await asyncio.shield(task)
@@ -766,8 +772,7 @@ class ParentLifetime:
                             "escalated", LifetimeReason.RESOURCE_LIVE, len(records)
                         )
                         process.signal(requested, final)
-            if self.mutations.pending:
-                self.mutations.signal(requested)
+            self.mutations.signal(requested)
             for record in records:
                 await self._settle_process(record, phase)
             await self._wait_operations(selected, phase)
@@ -780,6 +785,14 @@ class ParentLifetime:
             and helpers_settled
             and not self.mutations.failed
         )
+        for record in records:
+            if record.entry.kind is ResourceKind.BORROWED_SERVICE:
+                scope = self.records.get(record.dependency or "")
+                process = None if scope is None else scope.process or scope.recovered
+                if process is None or (
+                    record.dependency not in selected and not process.closed
+                ):
+                    safe = False
         if safe:
             for record in records:
                 process = record.process or record.recovered

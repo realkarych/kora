@@ -118,7 +118,7 @@ class IOHelper:
             await self.channel.read_record(deadline_ns, 1048576)
         )
         if result.descriptor_count:
-            await self._receive_descriptors(result.descriptor_count, deadline_ns)
+            await self.receive_descriptors(result.descriptor_count, deadline_ns)
         await self.anchor.wait(deadline_ns, self.clock)
         self.release()
         if self.process.returncode != 0:
@@ -127,7 +127,7 @@ class IOHelper:
             raise HelperError(result.reason)
         return result
 
-    async def _receive_descriptors(self, count: int, deadline_ns: int) -> None:
+    async def receive_descriptors(self, count: int, deadline_ns: int) -> None:
         while True:
             try:
                 payload, messages, flags, _ = self.endpoint.recvmsg(
@@ -406,7 +406,23 @@ def recover(mutation: RecoverMutation) -> tuple[MutationResult, tuple[int, ...]]
     ):
         raise HelperError(LifetimeReason.IDENTITY_MISMATCH)
     identities = NativeIdentityReader()
+    current = identities.read(os.getpid())
+    if (
+        current.state is not IdentityState.PRESENT
+        or current.process is None
+        or not complete_identity(current.process.identity)
+    ):
+        raise HelperError(LifetimeReason.IDENTITY_UNKNOWN)
+    scope = current.process.identity
     for identity in (snapshot.owner, *snapshot.helpers):
+        if not complete_identity(identity):
+            raise HelperError(LifetimeReason.IDENTITY_UNKNOWN)
+        if (
+            identity.host_id != scope.host_id
+            or identity.boot_id != scope.boot_id
+            or identity.pid_namespace != scope.pid_namespace
+        ):
+            raise HelperError(LifetimeReason.IDENTITY_MISMATCH)
         observed = identities.read(identity.pid)
         if observed.state is IdentityState.UNKNOWN:
             raise HelperError(LifetimeReason.IDENTITY_UNKNOWN)
@@ -417,6 +433,8 @@ def recover(mutation: RecoverMutation) -> tuple[MutationResult, tuple[int, ...]]
                 raise HelperError(LifetimeReason.OWNER_BUSY)
     if snapshot.pending_effects:
         raise HelperError(LifetimeReason.EFFECT_UNSETTLED)
+    if snapshot.generation >= 2**64 - 1 or snapshot.revision >= 2**64 - 1:
+        raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
     snapshot = snapshot.model_copy(
         update={
             "owner": mutation.owner,
@@ -505,7 +523,7 @@ async def respond_mutation(
                 [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", returned))],
             )
     finally:
-        for descriptor in returned:
+        for descriptor in returned[:-1]:
             os.close(descriptor)
 
 
@@ -551,7 +569,7 @@ def main() -> int:
         return 1
     finally:
         endpoint.close()
-        for descriptor in descriptors:
+        for descriptor in descriptors[:-1]:
             os.close(descriptor)
     return 0
 

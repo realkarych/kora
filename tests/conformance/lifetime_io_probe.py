@@ -32,6 +32,12 @@ def acknowledge_call(signal_number: int, frame: FrameType | None) -> None:
     os.write(PROBE, b"e" if entered else b"n")
 
 
+def pause(directory: int) -> None:
+    os.write(PROBE, b"r")
+    descriptor = stall_open(directory)
+    os.close(descriptor)
+
+
 async def run() -> None:
     endpoint = socket.socket(fileno=int(os.environ["KORA_IO_CONTROL_FD"]))
     descriptors = tuple(
@@ -40,19 +46,21 @@ async def run() -> None:
     clock = SystemClock()
     deadline = clock.monotonic_ns() + 30_000_000_000
     channel = BoundedChannel(endpoint, clock)
+    fifo_directory = os.environ.get("KORA_TEST_FIFO_DIRECTORY_FD")
+    phase = os.environ["KORA_TEST_PAUSE_PHASE"]
+    if fifo_directory is not None:
+        signal.signal(signal.SIGUSR1, acknowledge_call)
     try:
         mutation = MUTATION.validate_json(await channel.read_record(deadline, 1048576))
-        fifo_directory = os.environ.get("KORA_TEST_FIFO_DIRECTORY_FD")
-        if fifo_directory is not None:
-            signal.signal(signal.SIGUSR1, acknowledge_call)
-            os.write(PROBE, b"r")
-            descriptor = stall_open(int(fifo_directory))
-            os.close(descriptor)
+        if fifo_directory is not None and phase in ("before", "both"):
+            pause(int(fifo_directory))
         await respond_mutation(endpoint, channel, mutation, descriptors, deadline)
     finally:
         channel.close()
-        for descriptor in descriptors:
+        for descriptor in descriptors[:-1]:
             os.close(descriptor)
+        if fifo_directory is not None and phase in ("after", "both"):
+            pause(int(fifo_directory))
         os.close(PROBE)
 
 

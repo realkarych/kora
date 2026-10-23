@@ -357,6 +357,7 @@ class LifetimeEndpoint:
                 self._reserve_bytes(frame_reservation, 0)
                 reserved_control = frame_reservation
                 reserved_execution = 0
+                queued = False
                 try:
                     encoded = await self.channel.read_frame(deadline)
                     if len(encoded) > frame_reservation:
@@ -402,16 +403,11 @@ class LifetimeEndpoint:
                         PendingCall(call, launch, reserved_control, reserved_execution)
                     )
                     self.owner.transport_pending += 1
+                    queued = True
                     del encoded, call, launch
-                except (
-                    ChannelError,
-                    ValidationError,
-                    UnicodeError,
-                    asyncio.QueueFull,
-                    OSError,
-                ):
-                    self._release_bytes(reserved_control, reserved_execution)
-                    raise
+                finally:
+                    if not queued:
+                        self._release_bytes(reserved_control, reserved_execution)
         except (
             ChannelError,
             ValidationError,

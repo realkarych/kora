@@ -7,11 +7,13 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.io_helper import (
+    MUTATION,
     BootstrapMutation,
     CreateTreeMutation,
     HelperError,
     InstalledIOHelperLauncher,
     IOHelperLauncher,
+    MutationResult,
     PublishMutation,
     RemoveTreeMutation,
     open_claim,
@@ -46,6 +48,93 @@ async def read_probe(descriptor: int, deadline: int, clock: Clock) -> bytes:
         return os.read(descriptor, 1)
     finally:
         readiness.close()
+
+
+async def entered_fifo(pid: int, observation: int, deadline: int, clock: Clock) -> None:
+    assert await read_probe(observation, deadline, clock) == b"r"
+    while True:
+        os.kill(pid, signal.SIGUSR1)
+        response = await read_probe(observation, deadline, clock)
+        assert response in (b"e", b"n")
+        if response == b"e":
+            return
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effect", ["bootstrap", "tree", "refused", "failed_reply"])
+async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
+    tmp_path: Path, effect: str
+) -> None:
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 10_000_000_000
+    barrier = DirectoryAnchor.open_path(tmp_path)
+    fifo_directory = os.dup(barrier.descriptor)
+    os.mkfifo("stall", 0o600, dir_fd=fifo_directory)
+    reading, writing = os.pipe()
+    launcher = ProbeIOHelperLauncher(
+        tmp_path,
+        writing,
+        fifo_directory,
+        "both" if effect == "failed_reply" else "after",
+    )
+    inherited: tuple[int, ...] = ()
+    claim = None
+    competitor = None
+    if effect == "bootstrap":
+        mutation = BootstrapMutation(
+            invocation_id="1" * 32, journal=initial_snapshot(), capacity=32
+        )
+    else:
+        claim = open_claim(barrier, "claim")
+        inherited = (barrier.descriptor, claim)
+        if effect == "refused":
+            os.mkdir("2" * 32, 0o700, dir_fd=barrier.descriptor)
+        mutation = CreateTreeMutation(directory=barrier.identity, name="2" * 32)
+    helper = launcher.start(inherited, clock)
+    await helper.channel.write_record(MUTATION.dump_json(mutation), deadline)
+    if effect == "failed_reply":
+        await entered_fifo(helper.process.pid, reading, deadline, clock)
+        helper.channel.close()
+        writer = os.open("stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=fifo_directory)
+        os.close(writer)
+    else:
+        result = MutationResult.model_validate_json(
+            await helper.channel.read_record(deadline, 1048576)
+        )
+        if result.descriptor_count:
+            await helper.receive_descriptors(result.descriptor_count, deadline)
+            root_fd, invocation_fd, received_claim = helper.take_descriptors()
+            competitor = os.open(
+                "claim", os.O_RDWR | os.O_NOFOLLOW, dir_fd=invocation_fd
+            )
+            for descriptor in (root_fd, invocation_fd, received_claim):
+                os.close(descriptor)
+    if effect != "bootstrap":
+        competitor = os.open(
+            "claim", os.O_RDWR | os.O_NOFOLLOW, dir_fd=barrier.descriptor
+        )
+    if claim is not None:
+        os.close(claim)
+    await entered_fifo(helper.process.pid, reading, deadline, clock)
+
+    assert competitor is not None
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert not helper.anchor.exited
+        writer = os.open("stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=fifo_directory)
+        os.close(writer)
+        assert await helper.settle(deadline)
+        fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        assert helper.closed
+    finally:
+        if not helper.closed:
+            helper.signal(signal.SIGKILL)
+            assert await helper.settle(deadline)
+        for descriptor in (competitor, reading, writing, fifo_directory):
+            os.close(descriptor)
+        barrier.close()
 
 
 @pytest.mark.asyncio
@@ -87,7 +176,9 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
         PublishMutation(directory=invocation.identity, revision=2, journal=snapshot),
         deadline,
     )
-    assert read_journal(invocation).revision == snapshot.revision
+    assert publication.identity is not None
+    expected = snapshot.model_copy(update={"helpers": (publication.identity,)})
+    assert read_journal(invocation) == expected
     stale = launcher.start((invocation_fd, claim), clock)
     with pytest.raises(HelperError) as refused:
         await stale.execute(
@@ -97,7 +188,7 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
             deadline,
         )
     assert refused.value.reason is LifetimeReason.JOURNAL_UNAVAILABLE
-    assert read_journal(invocation).revision == snapshot.revision
+    assert read_journal(invocation) == expected
     tree = launcher.start((invocation_fd, claim), clock)
     created = await tree.execute(
         CreateTreeMutation(directory=invocation.identity, name="2" * 32), deadline

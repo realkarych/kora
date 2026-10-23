@@ -2,7 +2,12 @@ import asyncio
 import socket
 import sys
 
-from kora.conformance.transport import LifetimeClient, LifetimeTransportError
+from kora.conformance.transport import (
+    CALL,
+    LifetimeClient,
+    LifetimeTransportError,
+    ProcessCall,
+)
 from kora.protocols.lifetime import (
     ProcessDomain,
     ProcessLaunch,
@@ -12,9 +17,10 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.runner.channels import ChannelFailure
+from kora.runner.gate import ExecutionConfig
 
 
-async def run(address: str, terminal: bool) -> None:
+async def run(address: str, mode: str, feedback_address: str) -> None:
     endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     endpoint.connect(address)
     client = LifetimeClient(endpoint)
@@ -55,7 +61,32 @@ async def run(address: str, terminal: bool) -> None:
     }
     report = await client.close(tree.token.resource_id)
     assert report.cleanup_reference is None
-    if terminal:
+    if mode in ("cancel_frame", "cancel_execution"):
+        if mode == "cancel_frame":
+            await asyncio.get_running_loop().sock_sendall(
+                endpoint, (65536).to_bytes(4, "big") + b"{"
+            )
+        else:
+            metadata, payload = ExecutionConfig.from_launch(request).encode()
+            call = ProcessCall(
+                token=process.token,
+                operation_id=new_operation_id(),
+                working_directory_resource_id=tree.token.resource_id,
+                stdout=None,
+                stderr=None,
+                domain=ProcessDomain.INVOCATION,
+                execution_bytes=len(payload),
+            )
+            deadline = client.clock.monotonic_ns() + 5_000_000_000
+            await client.channel.write_frame(CALL.dump_json(call), deadline)
+            await client.channel.write_frame(metadata, deadline)
+            await client.channel.write_frame(len(payload).to_bytes(4, "big"), deadline)
+            await client.channel.write_frame(payload[:1], deadline)
+        feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        feedback.sendto(b"p", feedback_address)
+        feedback.close()
+        assert await asyncio.get_running_loop().sock_recv(endpoint, 1) == b""
+    if mode == "terminal":
         failure = None
         try:
             await client.close(None)
@@ -68,4 +99,4 @@ async def run(address: str, terminal: bool) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run(sys.argv[1], sys.argv[2] == "terminal"))
+    asyncio.run(run(sys.argv[1], sys.argv[2], sys.argv[3]))

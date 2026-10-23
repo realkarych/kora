@@ -1,6 +1,8 @@
 import asyncio
 import os
 import signal
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from kora.conformance.io_helper import (
@@ -47,6 +49,37 @@ class MutationOwner:
         self.pending = 0
         self.failed = False
         self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def _mutation_slot(self, deadline: int) -> AsyncGenerator[None]:
+        if self.clock.monotonic_ns() >= deadline:
+            raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
+        acquisition = asyncio.create_task(self._lock.acquire())
+        timeout = asyncio.create_task(self.clock.sleep_until(deadline))
+        try:
+            await asyncio.wait(
+                (acquisition, timeout), return_when=asyncio.FIRST_COMPLETED
+            )
+            if not acquisition.done() or self.clock.monotonic_ns() >= deadline:
+                raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
+            acquisition.result()
+            yield
+        finally:
+            acquisition.cancel()
+            timeout.cancel()
+            try:
+                granted = await acquisition
+            except asyncio.CancelledError:
+                if not acquisition.cancelled():
+                    raise
+            else:
+                if granted:
+                    self._lock.release()
+            try:
+                await timeout
+            except asyncio.CancelledError:
+                if not timeout.cancelled():
+                    raise
 
     async def bootstrap(
         self, snapshot: JournalSnapshot, deadline: int
@@ -122,7 +155,7 @@ class MutationOwner:
             raise HelperError(LifetimeReason.CAPACITY_EXCEEDED)
         self.pending += 1
         try:
-            async with self._lock:
+            async with self._mutation_slot(deadline):
                 if self.failed or self.clock.monotonic_ns() >= deadline:
                     raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
                 descriptors: tuple[int, ...] = ()

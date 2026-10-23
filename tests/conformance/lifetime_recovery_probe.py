@@ -25,7 +25,7 @@ async def retain(home: Path, mode: str) -> None:
         )
     )
     await owner.acquire(tree.token, new_operation_id(), TemporaryTreeRequest())
-    if mode != "tree":
+    for _ in range(0 if mode == "tree" else 2 if mode == "pair" else 1):
         process = await owner.reserve(
             ReservationRequest(
                 operation_id=new_operation_id(),

@@ -69,7 +69,7 @@ async def test_conformance_fixture_resources_are_released(
     operation_id = new_operation_id()
     launch = ProcessLaunch(
         executable=sys.executable,
-        argv=("-I", "-c", "pass"),
+        argv=(sys.executable, "-I", "-c", "pass"),
         environment=(),
         working_directory_resource_id=tree.token.resource_id,
         stdin=None,
@@ -100,7 +100,9 @@ async def test_conformance_fixture_resources_are_released(
                     reservation.token,
                     operation_id,
                     launch.model_copy(
-                        update={"argv": ("-I", "-c", "raise SystemExit(9)")}
+                        update={
+                            "argv": (sys.executable, "-I", "-c", "raise SystemExit(9)")
+                        }
                     ),
                 )
         if case != "close_before_ack":
@@ -240,3 +242,58 @@ async def test_conformance_fixture_resources_are_released_after_dead_owner_recov
     assert report.state is CleanupOutcome.CLOSED
     assert lifetime.inventory().helpers.claim_descriptors == 0
     assert not tuple(tmp_path.rglob(reference.invocation_id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["owner", "helper"])
+@pytest.mark.parametrize("field", ["host_id", "boot_id", "pid_namespace", "incomplete"])
+async def test_recovery_refuses_absent_writer_from_unproved_scope(
+    tmp_path: Path, role: str, field: str
+) -> None:
+    import subprocess
+
+    from kora.conformance.journal import JournalSnapshot
+    from kora.protocols.lifetime import CleanupReference
+
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "tree",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
+    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    journal = JournalSnapshot.model_validate_json(path.read_bytes())
+    original = journal.owner if role == "owner" else journal.helpers[0]
+    changed = original.model_copy(
+        update={
+            "pid": 2**31 - 1,
+            "host_id" if field == "incomplete" else field: None
+            if field == "incomplete"
+            else "foreign",
+        }
+    )
+    replacement = journal.model_copy(
+        update={"owner": changed} if role == "owner" else {"helpers": (changed,)}
+    )
+    retained = replacement.model_dump_json().encode()
+    path.write_bytes(retained)
+    owner = ParentLifetime(
+        limits=limits(),
+        recovery=reference,
+        launcher=InstalledIOHelperLauncher(
+            home=tmp_path, state_home=tmp_path / "state"
+        ),
+    )
+
+    try:
+        with pytest.raises(LifetimeError):
+            await owner.ready()
+        assert path.read_bytes() == retained
+    finally:
+        await owner.close(None)
