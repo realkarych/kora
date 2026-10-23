@@ -41,6 +41,7 @@ from kora.ir.diagnostics import (
     Diagnostic,
     SourceLocation,
 )
+from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
 from kora.ir.export import export_ir, render_ir_json
 from kora.ir.node import ErrorClass, ToolPolicy
 from kora.ir.runtime import (
@@ -49,6 +50,20 @@ from kora.ir.runtime import (
     Retention,
     RuntimeSection,
     SecretsSection,
+)
+from kora.ir.topology import (
+    AgentNode,
+    BranchNode,
+    CommandNode,
+    FanOutNode,
+    Graph,
+    GraphBody,
+    HumanInputNode,
+    Node,
+    Subgraph,
+    SubgraphNode,
+    TimerNode,
+    WaitEventNode,
 )
 from kora.ir.trigger import (
     CronTrigger,
@@ -64,6 +79,21 @@ from kora.ir.vcs_ref import PrincipalRef, VcsRef
 __all__ = [
     "PrincipalRef",
     "VcsRef",
+    "GraphDocument",
+    "Provenance",
+    "inspect_ir_root",
+    "AgentNode",
+    "CommandNode",
+    "HumanInputNode",
+    "WaitEventNode",
+    "TimerNode",
+    "BranchNode",
+    "FanOutNode",
+    "SubgraphNode",
+    "Node",
+    "GraphBody",
+    "Subgraph",
+    "Graph",
     "BuiltinTypeContract",
     "CustomTypeContract",
     "TypeBehavior",

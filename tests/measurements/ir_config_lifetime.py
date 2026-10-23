@@ -22,6 +22,7 @@ from kora.ir import (
     McpServer,
     NetworkPolicy,
     NodeLimits,
+    Provenance,
     Retry,
     SubgraphNodeConfig,
     Workspace,
@@ -32,6 +33,8 @@ from tests.ir.config_cases import MINIMAL, POPULATED, RESOURCE
 from tests.ir.control_cases import POPULATED as CONTROL_POPULATED
 from tests.ir.declaration_cases import INVALID as DECLARATION_INVALID
 from tests.ir.declaration_cases import POPULATED as DECLARATION_POPULATED
+from tests.ir.document_cases import INVALID as DOCUMENT_INVALID
+from tests.ir.document_cases import POPULATED as DOCUMENT_POPULATED
 from tests.ir.remaining_config_cases import INVALID as REMAINING_INVALID
 from tests.ir.remaining_config_cases import POPULATED as REMAINING_POPULATED
 from tests.measurements.harness import current_rss_bytes, open_descriptors
@@ -39,6 +42,10 @@ from tests.measurements.ir_config_workload import validate_config
 from tests.measurements.ir_declaration_workload import (
     TRIGGER_ARRAY,
     trigger_lifetime_cycle,
+)
+from tests.measurements.ir_document_workload import (
+    document_lifetime_cycle,
+    warm_document_lifetime,
 )
 from tests.measurements.ir_remaining_workload import supplemental_cycle
 
@@ -60,10 +67,12 @@ CONFIGURATIONS: dict[type[BaseModel], dict[str, object]] = {
     **CONTROL_POPULATED,
     **REMAINING_POPULATED,
     **DECLARATION_POPULATED,
+    **DOCUMENT_POPULATED,
 }
 
 INVALID.update((model, document) for model, document in REMAINING_INVALID.items())
 INVALID.update((model, document) for model, document in DECLARATION_INVALID.items())
+INVALID.update((model, document) for model, document in DOCUMENT_INVALID.items())
 
 
 def model_references(value: object) -> list[weakref.ReferenceType[BaseModel]]:
@@ -91,8 +100,14 @@ def cycle(index: int = 0) -> int:
     for model, document in CONFIGURATIONS.items():
         parsed = model.model_validate(document)
         references.extend(model_references(parsed))
-        if isinstance(parsed, IrRecord) and (
-            type(parsed) in REMAINING_POPULATED or type(parsed) in DECLARATION_POPULATED
+        if (
+            isinstance(parsed, Provenance)
+            or isinstance(parsed, IrRecord)
+            and (
+                type(parsed) in REMAINING_POPULATED
+                or type(parsed) in DECLARATION_POPULATED
+                or type(parsed) in DOCUMENT_POPULATED
+            )
         ):
             export_ir(parsed)
         else:
@@ -103,6 +118,9 @@ def cycle(index: int = 0) -> int:
     references.extend(model_references(triggers))
     del triggers
     supplemental_cycle(index)
+    graph = document_lifetime_cycle(index)
+    references.extend(model_references(graph))
+    del graph
     return sum(reference() is not None for reference in references)
 
 
@@ -139,6 +157,7 @@ def main() -> None:
     for index in range(14):
         for _ in range(3):
             supplemental_cycle(index)
+    warm_document_lifetime()
     checkpoints: list[dict[str, object]] = [{} for _ in range(4)]
     baseline_rss = rss_bytes()
     baseline_peak_rss = peak_rss_bytes()
@@ -204,6 +223,14 @@ def main() -> None:
         "supplemental_fixtures": 14,
         "trigger_union_array_size": 5,
         "trigger_union_schema_unchanged": True,
+        "document_miniature_nodes": 22,
+        "document_full_size_slots": 10,
+        "document_full_size_rotation": {
+            "flat_valid": 3,
+            "flat_final_invalid": 3,
+            "flat_all_invalid": 2,
+            "nested_valid": 2,
+        },
         "warm_up": 3,
         "rss_source": "/bin/ps rss KiB converted to bytes"
         if sys.platform == "darwin"
