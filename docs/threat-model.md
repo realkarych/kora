@@ -1,5 +1,7 @@
 # Threat model
 
+Retained dispatcher-history amendment dated 2026-10-23: the project owner approved the [contract plan and exact documentation wording](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702), [approval recorded](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030).
+
 Local conformance lifetime amendment dated 2026-10-23: wording reviewed and [accepted by the project owner](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968) on 2026-10-23.
 
 Staged-storage amendment dated 2026-10-23: the project owner [approved the #229 plan](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832), covering TM-09/TM-10/TM-11 and TM-06/TM-07 evidence. Exact wording was [reviewed line by line and approved by the project owner](https://github.com/realkarych/kora/pull/245#issuecomment-6369119893) on 2026-10-23. The contract supplies no runtime enforcement or isolation evidence.
@@ -196,6 +198,16 @@ For TM-06/TM-07, API and local-client failures use reviewed fixed text and safe 
 The ADR-0011 installation-metrics grant requires a personal platform token with all current namespace grants, including an empty namespace set. It includes the reviewed historical global aggregates; no approve/transcripts capability is required. The scraper still possesses its platform mutation rights. Success/refusal reveals complete namespace coverage, and new namespaces stop scrapes until grants are updated. Current credential and all-collector generation checks prevent unauthorized partial metric output. Public fixed probes reveal one availability bit and permit anonymous bounded database-check load. These are explicit TM-01/TM-07/TM-10 residuals; no per-token rate-limit promise is added.
 
 The required future evidence is `test_unauthenticated_requests_return_api009`, `test_route_authorization_table_covers_every_operation`, `test_api_transient_failures_preserve_idempotency`, `test_client_distinguishes_transport_and_api_failures`, `test_follow_stream_revalidates_authority`, `test_health_probes_expose_only_fixed_status` and `test_metrics_requires_platform_and_complete_namespace_scope`, together with dense-invalid/overflow validation and existing safe-content/stdout/request-ID checks. [Implementation-plan sections 7–8](implementation-plan.md#7-named-contracts-by-work-item) assign component owners, both-database integration and resource workloads. All new runtime enforcement remains pending its implementing issues.
+
+### Retained dispatcher history evidence and activation
+
+Resumable dispatcher-history transfer binds every page and receiver checkpoint to the authenticated attempt, original execution domain and current worker grant. Partial, replayed or stale snapshots establish no complete closure or effect authority. The #226 continuation, concurrent-append, crash-recovery and resource-release cases activate with #156, work items 9–11/17 and #195–197; the design supplies no executed containment or runtime evidence. Existing local-runtime trust assumptions and publication fences remain unchanged.
+
+Grant-history reads accept only a currently authorized worker service credential. Foreign and absent attempts share the existing scoped refusal; snapshot or position validity is never disclosed before principal, object and current-grant authorization. Digests establish immutable content identity, never caller authority. Diagnostic content exclusions remain in force. Under a full-disk fence, new first attachments requiring an undurable identity record refuse retryably; existing durable bindings may reconnect observationally, while stopping remains independent.
+
+API refusal dispositions advance evidence delivery only. Each accepted or refused disposition names the exact frozen closure item; refused evidence remains durable and unresolved. Later evidence and observation passes may proceed, while authoritative grant closure, current authority, publication fences and replacement conditions remain independently enforced.
+
+These amendments cover TM-01/TM-02 and TM-08/TM-09/TM-10/TM-11, with the existing TM-06/TM-07 diagnostic exclusions. The [shared history contract](../knowledge/specs/protocols.md#resumable-retained-dispatcher-history-issue-226) defines the future cases and their activation owners.
 
 ### Staged storage controls and evidence
 
