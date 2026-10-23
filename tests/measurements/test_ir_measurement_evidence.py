@@ -26,6 +26,7 @@ from tests.measurements.ir_measurement_evidence import (
     configuration_evidence,
     expected_evidence,
     junit_nodes,
+    shard_evidence,
     verify_configuration_payloads,
     verify_report,
     verify_union,
@@ -235,6 +236,12 @@ def accounting_document() -> str:
     return rendered_report(accounting_evidence())
 
 
+@pytest.fixture(scope="module")
+def shard_documents() -> tuple[str, str, str]:
+    first, timing, lifetime = shard_evidence()
+    return rendered_report(first), rendered_report(timing), rendered_report(lifetime)
+
+
 def replace_accounting_output(
     report: MeasurementReport, identity: str, raw: str
 ) -> None:
@@ -263,6 +270,42 @@ def test_ir_report_accepts_every_accounting_child(accounting_document: str) -> N
 
 
 @pytest.mark.parametrize(
+    ("run", "gates", "samples", "children"),
+    [(0, 438, 7783, 0), (1, 175, 2551, 27), (2, 598, 202, 99)],
+)
+def test_ir_report_accepts_complete_owned_shard(
+    shard_documents: tuple[str, str, str],
+    run: int,
+    gates: int,
+    samples: int,
+    children: int,
+) -> None:
+    expected = shard_evidence()[run]
+
+    report = verify_report(
+        shard_documents[run], rendered_junit(expected), REVISION, expected
+    )
+
+    assert len(report.gates) == gates
+    assert len(report.samples) == samples
+    assert (
+        len(
+            [
+                key
+                for key in report.environment
+                if key.startswith("cost_") and key.endswith("_process")
+            ]
+        )
+        == children
+    )
+    assert (
+        len([key for key in report.environment if key.startswith("cost_")])
+        == children * 2
+    )
+    assert f"config_lifetime_{run}" in report.environment
+
+
+@pytest.mark.parametrize(
     "mutation",
     [
         "missing_node",
@@ -278,10 +321,10 @@ def test_ir_report_accepts_every_accounting_child(accounting_document: str) -> N
     ],
 )
 def test_ir_report_refuses_tampered_accounting_inventory(
-    accounting_document: str, mutation: str
+    shard_documents: tuple[str, str, str], mutation: str
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[2]
+    report = MeasurementReport.model_validate_json(shard_documents[2])
     nodes = cast(
         list[str], json.loads(cast(str, report.environment["selected_test_nodes"]))
     )
@@ -343,10 +386,10 @@ def test_ir_report_refuses_tampered_accounting_inventory(
     ],
 )
 def test_ir_report_refuses_missing_or_substituted_accounting_outcomes(
-    accounting_document: str, mutation: str
+    shard_documents: tuple[str, str, str], mutation: str
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[1]
+    report = MeasurementReport.model_validate_json(shard_documents[1])
     identity = "cost_timing_ordinary_0_0"
     if mutation == "missing_process":
         report.environment.pop(f"{identity}_process")
@@ -406,10 +449,10 @@ def test_ir_report_refuses_missing_or_substituted_accounting_outcomes(
     ],
 )
 def test_ir_report_refuses_invalid_accounting_process_fields(
-    accounting_document: str, field: str, value: object
+    shard_documents: tuple[str, str, str], field: str, value: object
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[1]
+    report = MeasurementReport.model_validate_json(shard_documents[1])
     key = "cost_timing_ordinary_0_0_process"
     process = cast(dict[str, object], json.loads(cast(str, report.environment[key])))
     process[field] = value
@@ -423,10 +466,10 @@ def test_ir_report_refuses_invalid_accounting_process_fields(
 
 @pytest.mark.parametrize("field", ["pid", "code", "stdout_base64", "output_scope"])
 def test_ir_report_requires_accounting_process_fields(
-    accounting_document: str, field: str
+    shard_documents: tuple[str, str, str], field: str
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[1]
+    report = MeasurementReport.model_validate_json(shard_documents[1])
     key = "cost_timing_ordinary_0_0_process"
     process = cast(dict[str, object], json.loads(cast(str, report.environment[key])))
     process.pop(field)
@@ -450,10 +493,10 @@ def test_ir_report_requires_accounting_process_fields(
     ],
 )
 def test_ir_report_refuses_corrupt_accounting_child_report(
-    accounting_document: str, mutation: str
+    shard_documents: tuple[str, str, str], mutation: str
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[1]
+    report = MeasurementReport.model_validate_json(shard_documents[1])
     identity = "cost_timing_ordinary_0_0"
     child = MeasurementReport.model_validate_json(
         cast(str, report.environment[identity])
@@ -497,10 +540,10 @@ def test_ir_report_refuses_corrupt_accounting_child_report(
     ],
 )
 def test_ir_report_refuses_invalid_accounting_child_metadata(
-    accounting_document: str, field: str, value: object
+    shard_documents: tuple[str, str, str], field: str, value: object
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[2]
+    report = MeasurementReport.model_validate_json(shard_documents[2])
     identity = "cost_traced_ordinary_all_0"
     child = cast(dict[str, object], json.loads(cast(str, report.environment[identity])))
     environment = cast(dict[str, object], child["environment"])
@@ -525,10 +568,10 @@ def test_ir_report_refuses_invalid_accounting_child_metadata(
     ],
 )
 def test_ir_report_refuses_invalid_accounting_checkpoints(
-    accounting_document: str, field: str, value: object
+    shard_documents: tuple[str, str, str], field: str, value: object
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[2]
+    report = MeasurementReport.model_validate_json(shard_documents[2])
     identity = "cost_traced_ordinary_all_0"
     child = cast(dict[str, object], json.loads(cast(str, report.environment[identity])))
     environment = cast(dict[str, object], child["environment"])
@@ -550,10 +593,10 @@ def test_ir_report_refuses_invalid_accounting_checkpoints(
     [("rss", 8389609), ("heap", 100), ("high_water", -1), ("threads", 2)],
 )
 def test_ir_report_refuses_invalid_accounting_native_checkpoints(
-    accounting_document: str, field: str, value: int
+    shard_documents: tuple[str, str, str], field: str, value: int
 ) -> None:
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
+    expected = shard_evidence()[2]
+    report = MeasurementReport.model_validate_json(shard_documents[2])
     identity = "cost_native_ordinary_all_0"
     child = cast(dict[str, object], json.loads(cast(str, report.environment[identity])))
     environment = cast(dict[str, object], child["environment"])
@@ -585,16 +628,45 @@ def test_ir_configuration_shard_refuses_accounting_outcomes(
         )
 
 
+@pytest.mark.parametrize(
+    ("run", "identity"),
+    [
+        (0, "cost_timing_ordinary_0_0"),
+        (0, "cost_traced_ordinary_all_0"),
+        (1, "cost_traced_ordinary_all_0"),
+        (2, "cost_timing_ordinary_0_0"),
+    ],
+)
+def test_ir_shard_refuses_another_shards_valid_accounting_pair(
+    shard_documents: tuple[str, str, str],
+    accounting_document: str,
+    run: int,
+    identity: str,
+) -> None:
+    expected = shard_evidence()[run]
+    report = MeasurementReport.model_validate_json(shard_documents[run])
+    accounting = MeasurementReport.model_validate_json(accounting_document)
+    for key in (identity, f"{identity}_process"):
+        report.environment[key] = accounting.environment[key]
+
+    with pytest.raises(ValueError, match="IR accounting"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize("run", [1, 2])
 @pytest.mark.parametrize("key_suffix", ["", "_process"])
 @pytest.mark.parametrize("shape", ["mapping", "sequence"])
 def test_ir_accounting_outer_wrong_types_do_not_echo_input(
-    accounting_document: str, key_suffix: str, shape: str
+    shard_documents: tuple[str, str, str], run: int, key_suffix: str, shape: str
 ) -> None:
     sentinel = "sensitive-artifact-" + "outer-type-must-not-escape"
-    expected = accounting_evidence()
-    document = cast(dict[str, object], json.loads(accounting_document))
+    expected = shard_evidence()[run]
+    document = cast(dict[str, object], json.loads(shard_documents[run]))
     environment = cast(dict[str, object], document["environment"])
-    environment[f"cost_timing_ordinary_0_0{key_suffix}"] = (
+    identity = "cost_timing_ordinary_0_0" if run == 1 else "cost_traced_ordinary_all_0"
+    environment[f"{identity}{key_suffix}"] = (
         {"sensitive": sentinel} if shape == "mapping" else [sentinel]
     )
 
@@ -609,27 +681,31 @@ def test_ir_accounting_outer_wrong_types_do_not_echo_input(
 
 
 @pytest.mark.parametrize(
-    "boundary",
+    ("run", "boundary"),
     [
-        "envelope",
-        "child",
-        "checkpoints",
-        "retaining_paths",
-        "oversized_encoded",
-        "decoded_cap",
-        "oversized_child",
-        "unicode",
-        "invalid_utf8",
-        "typed_field",
+        (2, "envelope"),
+        (2, "child"),
+        (2, "checkpoints"),
+        (2, "retaining_paths"),
+        (2, "oversized_encoded"),
+        (2, "decoded_cap"),
+        (2, "oversized_child"),
+        (2, "unicode"),
+        (2, "invalid_utf8"),
+        (2, "typed_field"),
+        (1, "envelope"),
+        (1, "child"),
+        (1, "oversized_encoded"),
+        (1, "typed_field"),
     ],
 )
 def test_ir_accounting_raw_refusals_are_bounded_and_content_free(
-    accounting_document: str, boundary: str
+    shard_documents: tuple[str, str, str], run: int, boundary: str
 ) -> None:
     sentinel = "sensitive-artifact-" + "must-not-escape"
-    expected = accounting_evidence()
-    report = MeasurementReport.model_validate_json(accounting_document)
-    identity = "cost_traced_ordinary_all_0"
+    expected = shard_evidence()[run]
+    report = MeasurementReport.model_validate_json(shard_documents[run])
+    identity = "cost_timing_ordinary_0_0" if run == 1 else "cost_traced_ordinary_all_0"
     key = f"{identity}_process"
     process = cast(dict[str, object], json.loads(cast(str, report.environment[key])))
     deep = "[" * 2000 + json.dumps(sentinel) + "]" * 2000
@@ -718,6 +794,53 @@ def test_ir_evidence_inventory_preserves_every_named_action_and_sample() -> None
     assert all(worker.nodes <= expected.nodes for worker in workers)
     assert all(worker.gates <= expected.gates for worker in workers)
     assert all(worker.samples <= expected.samples for worker in workers)
+
+
+def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None:
+    expected = expected_evidence()
+    accepted = accepted_evidence()
+    shards = shard_evidence()
+    children = accounting_children()
+
+    combined_samples = sum(
+        (shard.samples for shard in shards), Counter[tuple[str, int, int]]()
+    )
+
+    assert [
+        (len(shard.nodes), len(shard.gates), sum(shard.samples.values()))
+        for shard in shards
+    ] == [(328, 438, 7783), (11, 175, 2551), (13, 598, 202)]
+    assert set().union(*(shard.nodes for shard in shards)) == expected.nodes
+    assert sum(len(shard.nodes) for shard in shards) == len(expected.nodes)
+    assert set().union(*(shard.gates for shard in shards)) == expected.gates
+    assert sum(len(shard.gates) for shard in shards) == len(expected.gates)
+    assert combined_samples == expected.samples
+    assert [
+        sum(child.node in shard.nodes for child in children) for shard in shards
+    ] == [0, 27, 99]
+    assert all(
+        child.node in shards[1 if child.mode == "timing" else 2].nodes
+        for child in children
+    )
+    assert (
+        shards[0].nodes
+        | configuration_evidence(1).nodes
+        | configuration_evidence(2).nodes
+        == accepted.nodes
+    )
+    assert (
+        shards[0].gates
+        | configuration_evidence(1).gates
+        | configuration_evidence(2).gates
+        == accepted.gates
+    )
+    assert (
+        shards[0].samples
+        + configuration_evidence(1).samples
+        + configuration_evidence(2).samples
+        == accepted.samples
+    )
+    assert len(cost_cases()) == 48
 
 
 @pytest.mark.parametrize("outcome", ["failure", "error", "skipped"])
@@ -826,20 +949,80 @@ def test_ir_report_requires_selected_accounting_child_outcome() -> None:
 
 
 @pytest.mark.parametrize(
-    "mutation", [None, "missing", "duplicate", "revision", "manifest"]
+    "mutation",
+    [
+        None,
+        "missing",
+        "duplicate",
+        "revision",
+        "manifest",
+        "extra_file",
+        "missing_receipt",
+        "swapped_content",
+        "accounting_move",
+        "accounting_copy",
+        "accounting_swap",
+    ],
 )
 def test_ir_union_checks_all_artifact_identities(
     tmp_path: Path, mutation: str | None
 ) -> None:
     full = expected_evidence()
-    worker1 = configuration_evidence(1)
-    worker2 = configuration_evidence(2)
-    first = Evidence(
-        full.nodes - worker1.nodes - worker2.nodes,
-        full.gates - worker1.gates - worker2.gates,
-        full.samples - worker1.samples - worker2.samples,
-    )
-    for run, inventory in enumerate((first, worker1, worker2)):
+    inventories = list(shard_evidence())
+    if mutation in {"accounting_move", "accounting_copy", "accounting_swap"}:
+        children = accounting_children()
+        timing = accounting_evidence(
+            [child for child in children if child.mode == "timing"]
+        )
+        lifetime = accounting_evidence(
+            [child for child in children if child.mode != "timing"]
+        )
+        worker1 = configuration_evidence(1)
+        worker2 = configuration_evidence(2)
+        if mutation == "accounting_swap":
+            inventories[1] = Evidence(
+                worker1.nodes | lifetime.nodes,
+                worker1.gates | lifetime.gates,
+                worker1.samples + lifetime.samples,
+            )
+            inventories[2] = Evidence(
+                worker2.nodes | timing.nodes,
+                worker2.gates | timing.gates,
+                worker2.samples + timing.samples,
+            )
+        else:
+            inventories[2] = Evidence(
+                inventories[2].nodes | timing.nodes,
+                inventories[2].gates | timing.gates,
+                inventories[2].samples + timing.samples,
+            )
+            if mutation == "accounting_move":
+                inventories[1] = worker1
+        if mutation != "accounting_copy":
+            assert (
+                set().union(*(inventory.nodes for inventory in inventories))
+                == full.nodes
+            )
+            assert sum(len(inventory.nodes) for inventory in inventories) == len(
+                full.nodes
+            )
+            assert (
+                set().union(*(inventory.gates for inventory in inventories))
+                == full.gates
+            )
+            assert sum(len(inventory.gates) for inventory in inventories) == len(
+                full.gates
+            )
+            assert (
+                sum(
+                    (inventory.samples for inventory in inventories),
+                    Counter[tuple[str, int, int]](),
+                )
+                == full.samples
+            )
+    if mutation == "swapped_content":
+        inventories[1], inventories[2] = inventories[2], inventories[1]
+    for run, inventory in enumerate(inventories):
         shard = tmp_path / f"ir-models-cost-measurement-{REVISION}-{run}"
         shard.mkdir()
         document = rendered_report(inventory)
@@ -859,6 +1042,16 @@ def test_ir_union_checks_all_artifact_identities(
         ).unlink()
     elif mutation == "duplicate":
         (tmp_path / f"ir-models-cost-measurement-{REVISION}-3").mkdir()
+    elif mutation == "extra_file":
+        (
+            tmp_path / f"ir-models-cost-measurement-{REVISION}-1" / "unexpected.json"
+        ).write_text("{}")
+    elif mutation == "missing_receipt":
+        (
+            tmp_path
+            / f"ir-models-cost-measurement-{REVISION}-2"
+            / "ir-checkout-revision-2.txt"
+        ).unlink()
 
     if mutation is None:
         result = verify_union(tmp_path, REVISION)
@@ -877,7 +1070,7 @@ def test_ir_union_checks_all_artifact_identities(
 def test_ir_report_requires_only_its_selected_configuration_payload(
     mutation: str,
 ) -> None:
-    expected = configuration_evidence(1)
+    expected = shard_evidence()[1]
     report = MeasurementReport.model_validate_json(rendered_report(expected))
     if mutation == "missing":
         report.environment.pop("config_lifetime_1")

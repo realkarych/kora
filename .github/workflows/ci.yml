@@ -246,13 +246,13 @@ jobs:
         include:
           - run: 0
             pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime'
           - run: 1
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]'
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost'
           - run: 2
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime'
     env:
       KORA_TEST_DATABASES: sqlite
       KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}

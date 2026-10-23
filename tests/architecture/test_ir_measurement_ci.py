@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -7,7 +8,7 @@ from typing import Protocol, cast
 import pytest
 from ruamel.yaml import YAML
 
-from tests.measurements.ir_measurement_evidence import expected_evidence
+from tests.measurements.ir_measurement_evidence import expected_evidence, shard_evidence
 
 ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
@@ -62,11 +63,36 @@ def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
         {
             "run": 0,
             "pytest-arguments": (
-                f"{MEASUREMENT} '--deselect={RUN}[1]' '--deselect={RUN}[2]'"
+                f"{MEASUREMENT} '--deselect={RUN}[1]' '--deselect={RUN}[2]' "
+                f"'--deselect={MEASUREMENT}::"
+                "test_cost_checker_refuses_unexpected_acceptance' "
+                f"'--deselect={MEASUREMENT}::"
+                "test_cost_checker_refuses_unexpected_rejection' "
+                f"'--deselect={MEASUREMENT}::test_cost_checker_releases_nested_values' "
+                f"'--deselect={MEASUREMENT}::"
+                "test_cost_process_failure_preserves_lossless_evidence' "
+                f"'--deselect={MEASUREMENT}::test_accounting_value_cost' "
+                f"'--deselect={MEASUREMENT}::test_accounting_value_lifetime'"
             ),
         },
-        {"run": 1, "pytest-arguments": f"'{RUN}[1]'"},
-        {"run": 2, "pytest-arguments": f"'{RUN}[2]'"},
+        {
+            "run": 1,
+            "pytest-arguments": (
+                f"'{RUN}[1]' "
+                f"'{MEASUREMENT}::test_cost_checker_refuses_unexpected_acceptance' "
+                f"'{MEASUREMENT}::test_cost_checker_refuses_unexpected_rejection' "
+                f"'{MEASUREMENT}::test_cost_checker_releases_nested_values' "
+                f"'{MEASUREMENT}::"
+                "test_cost_process_failure_preserves_lossless_evidence' "
+                f"'{MEASUREMENT}::test_accounting_value_cost'"
+            ),
+        },
+        {
+            "run": 2,
+            "pytest-arguments": (
+                f"'{RUN}[2]' '{MEASUREMENT}::test_accounting_value_lifetime'"
+            ),
+        },
     ]
     assert job["runs-on"] == "ubuntu-24.04"
     assert selected_steps["measurement"]["run"] == (
@@ -160,7 +186,7 @@ def test_required_measurement_shell_gate_fails_closed(field: str, outcome: str) 
     assert (result.returncode == 0) is (outcome == SUCCESS[field])
 
 
-def collected_nodes(arguments: list[str]) -> tuple[int, frozenset[str]]:
+def collected_nodes(arguments: list[str]) -> tuple[int, tuple[str, ...]]:
     result = subprocess.run(
         [
             sys.executable,
@@ -177,7 +203,7 @@ def collected_nodes(arguments: list[str]) -> tuple[int, frozenset[str]]:
         check=False,
         timeout=30,
     )
-    return result.returncode, frozenset(
+    return result.returncode, tuple(
         line
         for line in result.stdout.splitlines()
         if line.startswith(MEASUREMENT + "::")
@@ -186,19 +212,37 @@ def collected_nodes(arguments: list[str]) -> tuple[int, frozenset[str]]:
 
 def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     expected = expected_evidence()
+    shards = shard_evidence()
+    job = table(workflow_jobs()["ir-measurements"])
+    includes = cast(list[object], table(table(job["strategy"])["matrix"])["include"])
     arguments = [
-        [MEASUREMENT, f"--deselect={RUN}[1]", f"--deselect={RUN}[2]"],
-        [f"{RUN}[1]"],
-        [f"{RUN}[2]"],
+        shlex.split(str(table(entry)["pytest-arguments"])) for entry in includes
     ]
 
     collected = [collected_nodes(selection) for selection in arguments]
     default_code, default_nodes = collected_nodes([MEASUREMENT])
 
     assert default_code == 0
-    assert default_nodes == expected.nodes
+    assert frozenset(default_nodes) == expected.nodes
+    assert len(default_nodes) == len(expected.nodes)
     assert all(code == 0 for code, _ in collected)
-    assert [len(nodes) for _, nodes in collected] == [350, 1, 1]
+    assert [len(nodes) for _, nodes in collected] == [328, 11, 13]
+    assert [frozenset(nodes) for _, nodes in collected] == [
+        shard.nodes for shard in shards
+    ]
+    assert collected[0][1] == tuple(
+        node for node in default_nodes if node in shards[0].nodes
+    )
+    for run in (1, 2):
+        worker = f"{RUN}[{run}]"
+        assert collected[run][1] == (
+            worker,
+            *(
+                node
+                for node in default_nodes
+                if node in shards[run].nodes and node != worker
+            ),
+        )
     assert set().union(*(nodes for _, nodes in collected)) == expected.nodes
     assert sum(len(nodes) for _, nodes in collected) == len(expected.nodes)
 
@@ -213,4 +257,4 @@ def test_ir_unknown_or_empty_selection_fails(
     code, nodes = collected_nodes(selection)
 
     assert code == expected_code
-    assert nodes == frozenset()
+    assert nodes == ()

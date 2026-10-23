@@ -235,7 +235,8 @@ def accounting_children(actions: list[CostCase] | None = None) -> list[Accountin
     return children
 
 
-def accounting_evidence() -> Evidence:
+def accounting_evidence(children: list[AccountingChild] | None = None) -> Evidence:
+    selected = accounting_children() if children is None else children
     nodes = {
         f"{NODE}{name}"
         for name in (
@@ -244,10 +245,11 @@ def accounting_evidence() -> Evidence:
             "test_cost_checker_releases_nested_values",
             "test_cost_process_failure_preserves_lossless_evidence",
         )
+        if any(child.mode == "timing" for child in selected)
     }
     gates: set[str] = set()
     samples: Counter[tuple[str, int, int]] = Counter()
-    for child in accounting_children():
+    for child in selected:
         nodes.add(child.node)
         gates.add(f"{child.identity}_completed")
         if child.mode == "timing":
@@ -377,6 +379,42 @@ def expected_evidence() -> Evidence:
         accepted.nodes | accounting.nodes,
         accepted.gates | accounting.gates,
         accepted.samples + accounting.samples,
+    )
+
+
+def shard_evidence() -> tuple[Evidence, Evidence, Evidence]:
+    accepted = accepted_evidence()
+    worker1 = configuration_evidence(1)
+    worker2 = configuration_evidence(2)
+    children = accounting_children()
+    timing = accounting_evidence(
+        [child for child in children if child.mode == "timing"]
+    )
+    lifetime = accounting_evidence(
+        [child for child in children if child.mode != "timing"]
+    )
+    return (
+        Evidence(
+            accepted.nodes - worker1.nodes - worker2.nodes,
+            accepted.gates - worker1.gates - worker2.gates,
+            Counter(
+                {
+                    key: count
+                    for key, count in accepted.samples.items()
+                    if key not in worker1.samples and key not in worker2.samples
+                }
+            ),
+        ),
+        Evidence(
+            worker1.nodes | timing.nodes,
+            worker1.gates | timing.gates,
+            worker1.samples + timing.samples,
+        ),
+        Evidence(
+            worker2.nodes | lifetime.nodes,
+            worker2.gates | lifetime.gates,
+            worker2.samples + lifetime.samples,
+        ),
     )
 
 
@@ -806,17 +844,7 @@ def verify_report(
 
 def verify_union(directory: Path, revision: str) -> dict[str, object]:
     full = expected_evidence()
-    worker1 = configuration_evidence(1)
-    worker2 = configuration_evidence(2)
-    expected = (
-        Evidence(
-            full.nodes - worker1.nodes - worker2.nodes,
-            full.gates - worker1.gates - worker2.gates,
-            full.samples - worker1.samples - worker2.samples,
-        ),
-        worker1,
-        worker2,
-    )
+    expected = shard_evidence()
     required_directories = {
         f"ir-models-cost-measurement-{revision}-{run}" for run in range(3)
     }
