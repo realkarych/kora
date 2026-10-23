@@ -180,6 +180,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 build = [
+    "editables==0.6",
     "hatchling==1.32.4",
 ]
 dev = [

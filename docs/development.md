@@ -64,6 +64,7 @@ uv pip install --python "$PWD/.venv/bin/python" \
   --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
 uv pip install --python "$PWD/.venv/bin/python" --no-deps \
   --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+  --require-build-hashes \
   --editable .
 pnpm --dir web install --frozen-lockfile
 ```
