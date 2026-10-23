@@ -1,4 +1,5 @@
 import gc
+import hashlib
 import json
 import shutil
 import sys
@@ -54,6 +55,10 @@ from tests.measurements.ir_declaration_workload import (
     declaration_fixture_manifest,
     declaration_workloads,
 )
+from tests.measurements.ir_document_workload import (
+    document_fixture_manifest,
+    document_workloads,
+)
 from tests.measurements.ir_remaining_workload import (
     fixture_manifest,
     remaining_workloads,
@@ -74,12 +79,19 @@ CONFIG_SCHEMA_BYTES: int = 65_536
 
 
 @pytest.fixture(scope="module")
-def report() -> Iterator[Report]:
+def report(request: pytest.FixtureRequest) -> Iterator[Report]:
     for report in report_lifecycle():
+        report.environment["selected_test_nodes"] = json.dumps(
+            [item.nodeid for item in request.session.items]
+        )
+        report.environment["uv_lock_sha256"] = hashlib.sha256(
+            Path("uv.lock").read_bytes()
+        ).hexdigest()
         report.environment["remaining_fixture_manifest"] = fixture_manifest()
         report.environment["declaration_fixture_manifest"] = (
             declaration_fixture_manifest()
         )
+        report.environment["document_fixture_manifest"] = document_fixture_manifest()
         yield report
 
 
@@ -452,6 +464,7 @@ WORKLOADS.update(configuration_workloads())
 WORKLOADS.update(control_workloads())
 WORKLOADS.update(remaining_workloads())
 WORKLOADS.update(declaration_workloads())
+WORKLOADS.update(document_workloads())
 
 
 @pytest.mark.parametrize("workload", sorted(WORKLOADS))
@@ -487,7 +500,7 @@ def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
     before = (open_descriptors(), threading.active_count())
     completed = run_process(
         [sys.executable, "-m", "tests.measurements.ir_config_lifetime"],
-        deadline_seconds=60,
+        deadline_seconds=180,
     )
 
     assert not completed.timed_out

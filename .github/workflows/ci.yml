@@ -155,8 +155,72 @@ jobs:
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
+  ir-measurements:
+    name: IR model measurements (${{ matrix.run }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - run: 0
+            pytest-arguments: >-
+              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+          - run: 1
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]'
+          - run: 2
+            pytest-arguments: >-
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+    env:
+      KORA_TEST_DATABASES: sqlite
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_MEASUREMENT_OUTPUT: measurements/ir-models-cost-${{ matrix.run }}.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: ir-measurements-${{ matrix.run }}
+      - name: Install locked editable project for IR child processes
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          KORA_IR_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_IR_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_IR_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-build-hashes \
+            --editable .
+      - name: Record actual IR checkout revision
+        run: |
+          mkdir -p measurements
+          git rev-parse HEAD > measurements/ir-checkout-revision-${{ matrix.run }}.txt
+          test "$(cat measurements/ir-checkout-revision-${{ matrix.run }}.txt)" = "$KORA_MEASUREMENT_REVISION"
+      - name: Measure required IR shard
+        id: measurement
+        run: |
+          uv run --no-sync pytest -q -p no:logging -m measurement ${{ matrix.pytest-arguments }} --junitxml=measurements/ir-models-cost-${{ matrix.run }}.xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: ir_upload
+        if: ${{ always() }}
+        with:
+          name: ir-models-cost-measurement-${{ env.KORA_MEASUREMENT_REVISION }}-${{ matrix.run }}
+          path: measurements/
+          if-no-files-found: error
+
   cel-measurements:
     name: CEL evaluator lifetime
+    needs: [ir-measurements]
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -185,15 +249,24 @@ jobs:
           git rev-parse HEAD > measurements/cel-checkout-revision.txt
       - name: Measure evaluator lifetime and diagnostics
         id: measurement
+        if: ${{ needs.ir-measurements.result == 'success' && !cancelled() }}
         run: uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_evaluator_lifetime.py
       - name: Check representative evaluation cost
         id: cost_regression
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && needs.ir-measurements.result == 'success' }}
         env:
           KORA_CEL_COST_OUTPUT: measurements/cel-cost-smoke.json
         run: uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_cost_regression.py
+      - name: Check required CEL evidence files
+        id: cel_artifacts
+        if: ${{ always() && needs.ir-measurements.result == 'success' && !cancelled() }}
+        run: |
+          test -s measurements/cel-evaluator-lifetime.json
+          test -s measurements/cel-cost-smoke.json
+          test "$(cat measurements/cel-checkout-revision.txt)" = "$KORA_MEASUREMENT_REVISION"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: ${{ !cancelled() && steps.cost_regression.outcome != 'skipped' }}
+        id: cost_upload
+        if: ${{ always() && steps.cost_regression.outcome != 'skipped' }}
         with:
           name: cel-cost-regression-measurement
           path: |
@@ -201,36 +274,64 @@ jobs:
             measurements/cel-checkout-revision.txt
           if-no-files-found: error
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
+        id: lifetime_upload
+        if: ${{ always() && steps.measurement.outcome != 'skipped' }}
         with:
           name: cel-evaluator-lifetime-measurement
           path: |
             measurements/cel-evaluator-lifetime.json
             measurements/cel-checkout-revision.txt
           if-no-files-found: error
-      - name: Install the locked editable project for IR measurements
-        if: ${{ !cancelled() }}
-        run: |
-          KORA_IR_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
-          uv export --locked --only-group build --no-emit-project \
-            --format requirements.txt \
-            --output-file "$KORA_IR_BUILD_CONSTRAINT_DIR/constraints.txt"
-          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
-            --build-constraints "$KORA_IR_BUILD_CONSTRAINT_DIR/constraints.txt" \
-            --require-build-hashes \
-            --editable .
-      - name: Measure IR model validation cost
-        id: ir_models_measurement
-        if: ${{ !cancelled() }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/ir-models-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_ir_models_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        if: ${{ !cancelled() && steps.ir_models_measurement.outcome != 'skipped' }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: ir_download
+        if: ${{ always() && !cancelled() }}
         with:
-          name: ir-models-cost-measurement
-          path: measurements/ir-models-cost.json
+          pattern: ir-models-cost-measurement-${{ env.KORA_MEASUREMENT_REVISION }}-*
+          path: measurements/ir-shards
+          merge-multiple: false
+      - name: Verify exact IR test, action, gate and sample union
+        id: ir_inventory
+        if: ${{ always() && !cancelled() && steps.ir_download.outcome == 'success' }}
+        run: |
+          uv run --no-sync python -m tests.measurements.ir_measurement_evidence \
+            measurements/ir-shards "$KORA_MEASUREMENT_REVISION" \
+            > measurements/ir-shard-union.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: ir_union_upload
+        if: ${{ always() && steps.ir_inventory.outcome != 'skipped' }}
+        with:
+          name: ir-models-cost-union-${{ env.KORA_MEASUREMENT_REVISION }}
+          path: measurements/ir-shard-union.json
           if-no-files-found: error
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require every measurement and artifact
+        id: required_measurements
+        if: ${{ always() }}
+        env:
+          IR_MATRIX_RESULT: ${{ needs.ir-measurements.result }}
+          IR_DOWNLOAD_OUTCOME: ${{ steps.ir_download.outcome }}
+          IR_INVENTORY_OUTCOME: ${{ steps.ir_inventory.outcome }}
+          IR_UNION_UPLOAD_OUTCOME: ${{ steps.ir_union_upload.outcome }}
+          CEL_LIFETIME_OUTCOME: ${{ steps.measurement.outcome }}
+          CEL_COST_OUTCOME: ${{ steps.cost_regression.outcome }}
+          CEL_ARTIFACTS_OUTCOME: ${{ steps.cel_artifacts.outcome }}
+          CEL_LIFETIME_UPLOAD_OUTCOME: ${{ steps.lifetime_upload.outcome }}
+          CEL_COST_UPLOAD_OUTCOME: ${{ steps.cost_upload.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$IR_MATRIX_RESULT" = success
+          test "$IR_DOWNLOAD_OUTCOME" = success
+          test "$IR_INVENTORY_OUTCOME" = success
+          test "$IR_UNION_UPLOAD_OUTCOME" = success
+          test "$CEL_LIFETIME_OUTCOME" = success
+          test "$CEL_COST_OUTCOME" = success
+          test "$CEL_ARTIFACTS_OUTCOME" = success
+          test "$CEL_LIFETIME_UPLOAD_OUTCOME" = success
+          test "$CEL_COST_UPLOAD_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
 
   browser:
     name: Console browser checks
