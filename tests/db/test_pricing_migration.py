@@ -97,6 +97,110 @@ def price_check() -> str:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("table_name", "column_name", "default"),
+    [
+        ("price_table", "model", "'unexpected-price-model'"),
+        ("usage_record", "model", "'unexpected-usage-model'"),
+        ("usage_record", "usd_estimate", "0"),
+    ],
+)
+async def test_pricing_migration_refuses_altered_column_defaults(
+    empty_database_settings: DatabaseSettings,
+    table_name: str,
+    column_name: str,
+    default: str,
+) -> None:
+    database = Database(empty_database_settings)
+    original_default: str | None = None
+    try:
+        async with database.transaction() as connection:
+            before = await connection.run_sync(seed_predecessor)
+            if database.dialect is Dialect.POSTGRESQL:
+                await connection.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ALTER COLUMN {column_name} "
+                    f"SET DEFAULT {default}"
+                )
+                original_default = await connection.run_sync(
+                    lambda sync: next(
+                        column["default"]
+                        for column in inspect(sync).get_columns(table_name)
+                        if column["name"] == column_name
+                    )
+                )
+        await database.close()
+
+        if empty_database_settings.dialect is Dialect.POSTGRESQL:
+            with pytest.raises(RuntimeError, match="incompatible schema"):
+                await upgrade_database(empty_database_settings)
+            database = Database(empty_database_settings)
+            async with database.transaction() as connection:
+                revision = await connection.run_sync(current_revision)
+                after = await connection.run_sync(
+                    lambda sync: predecessor_snapshot(sync, before.columns)
+                )
+                retained_default = await connection.run_sync(
+                    lambda sync: next(
+                        column["default"]
+                        for column in inspect(sync).get_columns(table_name)
+                        if column["name"] == column_name
+                    )
+                )
+                assert revision == "0001"
+                assert after == before
+                assert retained_default == original_default
+                assert retained_default is not None
+                await connection.exec_driver_sql(
+                    f"ALTER TABLE {table_name} ALTER COLUMN {column_name} DROP DEFAULT"
+                )
+            await database.close()
+        recovered = await upgrade_database(empty_database_settings)
+        database = Database(empty_database_settings)
+        async with database.transaction() as connection:
+            after = await connection.run_sync(
+                lambda sync: predecessor_snapshot(sync, before.columns)
+            )
+            await connection.execute(
+                usage_record.insert().values(
+                    id="modern-unknown",
+                    attempt_id="old-attempt",
+                    model="modern-model",
+                    input_tokens=0,
+                    cached_input_tokens=0,
+                    cache_creation_tokens=0,
+                    output_tokens=0,
+                    reasoning_tokens=0,
+                    completeness="partial",
+                    basis="harness_list",
+                    billing_class="api_key",
+                    delta_of_session_totals=False,
+                    source={},
+                    normalization_version=1,
+                    known_token_fields=[],
+                    observation_id="unknown-cost-observation",
+                    observation_sequence=0,
+                    observed_at=START,
+                    created_at=START,
+                    updated_at=START,
+                )
+            )
+            amounts = (
+                await connection.execute(
+                    select(
+                        usage_record.c.usd_estimate, usage_record.c.reported_usd
+                    ).where(usage_record.c.id == "modern-unknown")
+                )
+            ).one()
+
+        assert recovered.to_revision == "0002"
+        assert recovered.steps == 1
+        assert after == before
+        assert tuple(amounts) == (None, None)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_pricing_migration_recovers_after_failure(
     empty_database_settings: DatabaseSettings,
 ) -> None:

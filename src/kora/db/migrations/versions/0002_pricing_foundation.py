@@ -220,6 +220,8 @@ def prepare_postgresql(connection: Connection) -> None:
             for column in inspect(connection).get_columns(table_name)
             if column["name"] == column_name
         )
+        if column.get("default") is not None:
+            raise incompatible()
         actual = str(column["type"].compile(dialect=connection.dialect))
         if table_name == "usage_record" and column_name == "model":
             if (
