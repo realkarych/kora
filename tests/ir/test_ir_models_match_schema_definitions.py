@@ -91,6 +91,22 @@ REFERENCES: frozenset[str] = frozenset(
         "errorClass",
         "expression",
         "id",
+        "Concurrency",
+        "NodeLimits",
+        "Retry",
+        "Retention",
+        "ProviderRetry",
+        "TypeBehavior",
+        "ParameterTarget",
+        "OutputTarget",
+        "WebhookAuth",
+        "artifactType",
+        "retentionPeriod",
+        "secretRef",
+        "typeBehavior",
+        "limits",
+        "retry",
+        "retention",
     }
 )
 

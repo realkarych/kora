@@ -53,3 +53,31 @@ HarnessName = Annotated[
 SensorName = Annotated[
     StrictStr, Field(pattern=re.compile(r"^[a-z][a-z0-9_]*(?![\s\S])"))
 ]
+IrVersion = Annotated[StrictStr, Field(pattern=re.compile(r"^1\.[0-9]+(?![\s\S])"))]
+TypeContractName = Annotated[
+    StrictStr,
+    Field(pattern=re.compile(r"^([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*(?![\s\S])")),
+]
+RetentionPeriod = Annotated[
+    StrictStr, Field(pattern=re.compile(r"^([0-9]+d|forever)(?![\s\S])"))
+]
+SecretRef = Annotated[
+    StrictStr,
+    Field(pattern=re.compile(r"^secret://[a-z][a-z0-9_-]*/[A-Za-z0-9_./-]+(?![\s\S])")),
+]
+ArtifactType = Annotated[
+    StrictStr,
+    Field(
+        pattern=re.compile(
+            r"^(([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*|List\[(List\[)*([a-z][a-z0-9_]*/)?[A-Z][A-Za-z0-9]*\]+)(?![\s\S])"
+        )
+    ),
+]
+InputSource = Annotated[
+    StrictStr,
+    Field(
+        pattern=re.compile(
+            r"^(\$params|\$inputs|\$previous_attempt|[a-z][a-z0-9_]{0,63})(?![\s\S])"
+        )
+    ),
+]

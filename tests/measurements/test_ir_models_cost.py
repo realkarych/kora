@@ -46,6 +46,10 @@ from tests.measurements.ir_config_workload import (
     round_trip_action,
     validation_action,
 )
+from tests.measurements.ir_declaration_workload import (
+    declaration_fixture_manifest,
+    declaration_workloads,
+)
 from tests.measurements.ir_remaining_workload import (
     fixture_manifest,
     remaining_workloads,
@@ -67,6 +71,9 @@ CONFIG_SCHEMA_BYTES: int = 65_536
 def report() -> Iterator[Report]:
     for report in report_lifecycle():
         report.environment["remaining_fixture_manifest"] = fixture_manifest()
+        report.environment["declaration_fixture_manifest"] = (
+            declaration_fixture_manifest()
+        )
         yield report
 
 
@@ -438,6 +445,7 @@ def control_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]
 WORKLOADS.update(configuration_workloads())
 WORKLOADS.update(control_workloads())
 WORKLOADS.update(remaining_workloads())
+WORKLOADS.update(declaration_workloads())
 
 
 @pytest.mark.parametrize("workload", sorted(WORKLOADS))

@@ -432,3 +432,7 @@ For Codex, the stream-volume and lifetime measurements cover the app-server proc
 Remaining IR configuration amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23.
 
 The remaining configuration foundation of work item 2 includes agent, human-input, event-wait and timer records. Subagent records use a closed vocabulary; hooks, embedded schemas and user data retain their explicit JSON-data boundaries. Timer values preserve their authored strings under the defined timestamp profile. These models preserve omissions and do not resolve providers, execute templates or expressions, enforce installation support or schedule waits. Full-document assembly and schema generation remain with #218.
+
+IR declaration amendment dated 2026-10-23: the project owner reviewed and accepted this wording under issue #218 on 2026-10-23.
+
+The declaration foundation of work item 2 includes inputs, outputs, IR source metadata, type-contract references, trigger variants, target declarations, runtime settings and secret aliases. These are structural records. Built-in payload resolution, type assignability, provider support, first-slice retry normalization and trusted conversion of source metadata to public diagnostics remain with their actual consumers. The shared diagnostic values remain the existing foundation; IR source metadata is not itself a public diagnostic location.
