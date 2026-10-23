@@ -1,5 +1,7 @@
 # Threat model
 
+Staged-storage amendment dated 2026-10-23: the project owner [approved the #229 plan](https://github.com/realkarych/kora/issues/229#issuecomment-6368257832), covering TM-09/TM-10/TM-11 and TM-06/TM-07 evidence. Exact wording is pending line-by-line owner review. The contract supplies no runtime enforcement or isolation evidence.
+
 API error and authorization amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #135](https://github.com/realkarych/kora/issues/135) on 2026-10-23.
 
 Secrets and redaction amendment dated 2026-10-23 (the TM-06/TM-07 evidence row): the `env` provider and captured-stream redaction tests of [issue #192](https://github.com/realkarych/kora/issues/192); wording pending line-by-line owner review.
@@ -188,6 +190,19 @@ For TM-06/TM-07, API and local-client failures use reviewed fixed text and safe 
 The ADR-0011 installation-metrics grant requires a personal platform token with all current namespace grants, including an empty namespace set. It includes the reviewed historical global aggregates; no approve/transcripts capability is required. The scraper still possesses its platform mutation rights. Success/refusal reveals complete namespace coverage, and new namespaces stop scrapes until grants are updated. Current credential and all-collector generation checks prevent unauthorized partial metric output. Public fixed probes reveal one availability bit and permit anonymous bounded database-check load. These are explicit TM-01/TM-07/TM-10 residuals; no per-token rate-limit promise is added.
 
 The required future evidence is `test_unauthenticated_requests_return_api009`, `test_route_authorization_table_covers_every_operation`, `test_api_transient_failures_preserve_idempotency`, `test_client_distinguishes_transport_and_api_failures`, `test_follow_stream_revalidates_authority`, `test_health_probes_expose_only_fixed_status` and `test_metrics_requires_platform_and_complete_namespace_scope`, together with dense-invalid/overflow validation and existing safe-content/stdout/request-ID checks. [Implementation-plan sections 7–8](implementation-plan.md#7-named-contracts-by-work-item) assign component owners, both-database integration and resource workloads. All new runtime enforcement remains pending its implementing issues.
+
+### Staged storage controls and evidence
+
+The [storage contract](../knowledge/specs/protocols.md#7-artifact-storage-fr-44) assigns byte effects and actual closure to providers, and current authorization, immutable validation and full-address owner admission to core. Its [conformance cases](../knowledge/specs/protocols.md#artifact-storage-contracts-issue-229) activate with the local provider in work item 8; API/metadata/retention integration activates with 11/12/17 and #216 on both databases. Concrete S3 evidence activates with that backend. All these runtime cases remain pending implementation.
+
+| Existing threat | Required control and evidence |
+|---|---|
+| TM-09 | Durable exact mutation intents and truthful creation attribution survive response loss. Issuance and every issued effect must actually close before stage/deletion evidence is compacted. A delayed operation cannot reopen a retired stage or delete recreated accepted content. Neither timeout, cancellation, restart, database generation nor observed absence proves closure. Exercise lost responses, old live issuers, reader closure, crash/restart and both owner-admission/deletion commit orders. |
+| TM-10 | Finite private-byte, stage and deletion capacity remains charged through unresolved effects and accepted cleanup backlog. One core finalizer prevents duplicate reads/parsing/preparation; candidate copies and readers are accounted before allocation. Bounded inventory must limit actual work as well as page size. Measure peak/settled memory, tasks, connections, descriptors, temporary bytes and receipt counts, plus real owner-query work and unrelated progress. These controls do not establish aggregate RSS, worker-spool or request-rate guarantees; unresolved safety state may remain charged indefinitely. |
+| TM-11 | First-call and replay checks bind every physical store/stage/part/seal/preparation/destination to provider-owned immutable records. Complete raw bytes match their ingress identity before transformation; publication matches the selected prepared bytes. Incomplete transcript prefixes cannot claim complete source integrity or publish directly. Path/symlink substitution and forged references are refused. Storage identity never substitutes for authorization or approval-selected identity. |
+| TM-06/TM-07 | Caller-bound diagnostics carry safe codes/counts/durations, never payload digests, private paths/references, credentials or backend response/exception text. Current-authorized terminal recovery exposes only the owner's current saved descriptor and cannot restore expired content, renew retention or disclose another owner's identity. Common diagnostic marker tests and real transformed-recovery/cleanup cases supply evidence. |
+
+Local roots and cooperative provider code do not isolate hostile same-user code. A concrete backend must prove create-only publication attribution and authoritative mutation closure; compatibility branding alone cannot establish those properties. The [implementation plan](implementation-plan.md#6-work-items) assigns the real consumers and separately approved local implementation, preserving every existing check and release-cycle obligation.
 
 ## Maintenance and review
 
