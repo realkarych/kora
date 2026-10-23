@@ -413,8 +413,12 @@ class GatedProcess:
         if registration.process.pid not in tuple(pid for pid, _ in group.members):
             return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
         member_pids = {pid for pid, _ in group.members}
+        omitted_pending = False
         for pid, (_, previous_anchor) in tuple(self._members.items()):
-            if pid not in member_pids and previous_anchor.exited:
+            if pid not in member_pids:
+                if previous_anchor.unknown or not previous_anchor.exited:
+                    omitted_pending = True
+                    continue
                 previous_anchor.close()
                 del self._members[pid]
         live: list[ProcessIdentity] = []
@@ -460,6 +464,10 @@ class GatedProcess:
                         )
             else:
                 dead[pid] = process.identity
+        if omitted_pending:
+            return ProcessObservation(
+                ProcessCondition.UNKNOWN, tuple(live), exited, eof
+            )
         condition = (
             ProcessCondition.SETTLED if exited and not live else ProcessCondition.LIVE
         )

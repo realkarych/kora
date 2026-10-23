@@ -578,8 +578,9 @@ class FilteredIdentityReader:
         from dataclasses import replace
 
         result = self._native.group(process_group_id, deadline_ns)
-        if self.failure == "omit_once":
-            self.failure = None
+        if self.failure in ("omit_once", "omit"):
+            if self.failure == "omit_once":
+                self.failure = None
             return replace(
                 result,
                 members=tuple(
@@ -587,6 +588,89 @@ class FilteredIdentityReader:
                 ),
             )
         return result
+
+
+@pytest.mark.asyncio
+async def test_known_live_member_omitted_from_both_scans_prevents_release(
+    tmp_path: Path,
+) -> None:
+    import asyncio
+    import socket
+    import tempfile
+
+    from kora.runner.processes import (
+        ExitAnchor,
+        ProcessCondition,
+        ProcessError,
+        start_gated,
+    )
+
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    script = Path(__file__).resolve().parents[1] / "support/local_lifetime_child.py"
+    source = FilteredIdentityReader()
+    with tempfile.TemporaryDirectory(prefix="kl-") as endpoint_directory:
+        endpoint = str(Path(endpoint_directory) / "s")
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        listener.bind(endpoint)
+        listener.listen(1)
+        listener.setblocking(False)
+        request = launch("", ProcessDomain.INVOCATION).model_copy(
+            update={
+                "argv": (sys.executable, "-I", str(script), "descendant", endpoint),
+                "stdout": None,
+                "stderr": None,
+            }
+        )
+        directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        owner = start_gated(request, "c" * 32, directory, deadline, clock, source)
+        os.close(directory)
+        peer: socket.socket | None = None
+        member_anchor: ExitAnchor | None = None
+        try:
+            await owner.prepare()
+            await owner.acknowledge()
+            loop = asyncio.get_running_loop()
+            peer, _ = await asyncio.wait_for(loop.sock_accept(listener), 2)
+            ready = await asyncio.wait_for(loop.sock_recv(peer, 128), 2)
+            member_pid = int(ready)
+            member_anchor = ExitAnchor(member_pid, direct_child=False)
+            await owner.wait_exit(deadline)
+            visible = owner.observe(deadline)
+            assert tuple(member.pid for member in visible.live_members) == (member_pid,)
+
+            source.failure = "omit"
+            omitted = owner.observe(deadline)
+            with pytest.raises(ProcessError) as refused:
+                owner.release(deadline)
+            retained_returncode = owner.returncode
+            retained_owner = not owner.closed
+            retained_member = not member_anchor.exited
+        finally:
+            source.failure = None
+            try:
+                if peer is not None:
+                    await asyncio.get_running_loop().sock_sendall(peer, b"x")
+                if member_anchor is not None:
+                    await member_anchor.wait(deadline, clock)
+                if not owner.closed:
+                    owner.signal(signal.SIGKILL, deadline)
+                    await owner.settle(deadline)
+                    await owner.drain(deadline)
+                    owner.release(deadline)
+            finally:
+                if member_anchor is not None:
+                    member_anchor.close()
+                if peer is not None:
+                    peer.close()
+                listener.close()
+
+    assert omitted.condition is ProcessCondition.UNKNOWN
+    assert omitted.capture_eof
+    assert refused.value.condition is ProcessCondition.UNKNOWN
+    assert retained_returncode is None
+    assert retained_owner
+    assert retained_member
 
 
 @pytest.mark.asyncio
