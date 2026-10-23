@@ -13,6 +13,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 from kora.ir import CommandConfig, CommandResource, McpServer, NodeLimits, ToolPolicy
+from kora.ir.cost import PriceRevision, parse_money
 from kora.ir.json import (
     DEFAULT_MAX_DEPTH,
     MAX_CANONICAL_BYTES,
@@ -24,7 +25,9 @@ from kora.ir.json import (
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import parse_config_schema
 from tests.ir.config_cases import MINIMAL, POPULATED, RESOURCE
+from tests.ir.test_cost_models import rates_payload, revision_payload
 from tests.measurements.cel_measurement_process import run_process
+from tests.measurements.cost_workload import CostCase, cost_cases, exercise_cost
 from tests.measurements.diagnostic_workload import Lifecycle, cases, exercise
 from tests.measurements.harness import (
     Report,
@@ -48,6 +51,132 @@ FAILURE_CYCLES: int = 1_000
 RETAINED_LIMIT_BYTES: int = 65_536
 LEAF_BYTES: int = 1024
 CONFIG_SCHEMA_BYTES: int = 65_536
+
+
+def test_cost_checker_refuses_unexpected_acceptance() -> None:
+    case = CostCase("unexpected_acceptance", lambda: object(), False)
+
+    with pytest.raises(AssertionError):
+        exercise_cost(case)
+
+
+def test_cost_checker_refuses_unexpected_rejection() -> None:
+    def reject() -> object:
+        return parse_money(True)
+
+    case = CostCase("unexpected_rejection", reject)
+
+    with pytest.raises(AssertionError):
+        exercise_cost(case)
+
+
+def test_cost_checker_releases_nested_values() -> None:
+    document = revision_payload({"model": rates_payload()})
+    case = CostCase("nested_values", lambda: PriceRevision.model_validate(document))
+
+    live_models = exercise_cost(case)
+
+    assert live_models == 0
+
+
+def append_cost_report(report: Report, output: bytes) -> dict[str, object]:
+    payload = cast("dict[str, object]", json.loads(output))
+    samples = cast("list[dict[str, object]]", payload["samples"])
+    for sample in samples:
+        report.samples.append(
+            Sample(
+                cast("str", sample["workload"]),
+                cast("int", sample["repeat"]),
+                cast("int", sample["count"]),
+                cast("float", sample["seconds"]),
+            )
+        )
+    return cast("dict[str, object]", payload["environment"])
+
+
+@pytest.mark.parametrize("run", range(3))
+@pytest.mark.parametrize("group", ["ordinary", "large"])
+def test_accounting_value_cost(report: Report, run: int, group: str) -> None:
+    identity = f"cost_timing_{group}_{run}"
+    argv = [
+        sys.executable,
+        "-m",
+        "tests.measurements.cost_workload",
+        "timing",
+        group,
+        report.revision,
+        identity,
+    ]
+    before = (open_descriptors(), threading.active_count())
+
+    started = time.perf_counter()
+    result = run_process(argv)
+    elapsed = time.perf_counter() - started
+
+    assert not result.timed_out
+    assert not result.overflow
+    assert result.code == 0, result.stderr.decode()
+    assert result.stderr == b""
+    assert (open_descriptors(), threading.active_count()) == before
+    report.environment[identity] = result.stdout.decode()
+    environment = append_cost_report(report, result.stdout)
+    assert environment["operations_per_batch"] == 1
+    report.samples.append(Sample(f"cost_{group}_timing_process", run, 1, elapsed))
+
+
+@pytest.mark.parametrize("run", range(3))
+@pytest.mark.parametrize("group", ["ordinary", "large"])
+@pytest.mark.parametrize("traced", [True, False])
+def test_accounting_value_lifetime(
+    report: Report, run: int, group: str, traced: bool
+) -> None:
+    names: list[str | None] = (
+        [case.name for case in cost_cases() if case.group == group]
+        if traced and group == "large"
+        else [None]
+    )
+    mode = "traced" if traced else "native"
+    before = (open_descriptors(), threading.active_count())
+
+    for name in names:
+        identity = f"cost_{mode}_{group}_{name or 'all'}_{run}"
+        argv = [
+            sys.executable,
+            "-m",
+            "tests.measurements.cost_workload",
+            mode,
+            group,
+            report.revision,
+            identity,
+        ]
+        if name is not None:
+            argv.append(name)
+        started = time.perf_counter()
+        result = run_process(argv)
+        elapsed = time.perf_counter() - started
+        report.environment[identity] = result.stdout.decode()
+        assert not result.timed_out
+        assert not result.overflow
+        assert result.code == 0, result.stderr.decode()
+        assert result.stderr == b""
+        environment = append_cost_report(report, result.stdout)
+        points = cast(
+            "list[dict[str, int]]", json.loads(cast("str", environment["checkpoints"]))
+        )
+        assert len(points) == 4
+        assert points[0]["cycle"] == 0
+        assert points[-1]["cycle"] == (1000 if group == "ordinary" else 3)
+        for resource in ("descriptors", "threads"):
+            assert all(point[resource] == points[0][resource] for point in points)
+        for point in points:
+            assert (point["heap"] >= 0) is traced
+            assert (point["rss"] >= 0) is not traced
+        report.samples.append(
+            Sample(f"cost_{mode}_{group}_lifetime_process", run, 1, elapsed)
+        )
+        report.gates[f"{identity}_owned_resources_released"] = True
+
+    assert (open_descriptors(), threading.active_count()) == before
 
 
 @pytest.fixture(scope="module")
