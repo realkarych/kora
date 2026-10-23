@@ -1,4 +1,6 @@
 import gc
+import sys
+import threading
 import time
 import tracemalloc
 from collections.abc import Callable, Iterator
@@ -17,7 +19,14 @@ from kora.ir.json import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import parse_config_schema
-from tests.measurements.harness import Report, Sample, report_lifecycle
+from tests.measurements.cel_measurement_process import run_process
+from tests.measurements.diagnostic_workload import Lifecycle, cases, exercise
+from tests.measurements.harness import (
+    Report,
+    Sample,
+    open_descriptors,
+    report_lifecycle,
+)
 
 pytestmark = pytest.mark.measurement
 
@@ -210,3 +219,89 @@ def test_repeated_failures_return_to_baseline(report: Report) -> None:
     report.environment["failure_cycles_retained_bytes"] = retained
     report.gates["failure_cycles_return_to_baseline"] = retained < RETAINED_LIMIT_BYTES
     assert retained < RETAINED_LIMIT_BYTES
+
+
+def test_shared_diagnostic_action_cost(report: Report) -> None:
+    actions, lengths = cases()
+    for fixture, fields in lengths.items():
+        for field, value in fields.items():
+            report.environment[f"diagnostic_{fixture}_{field}"] = value
+    for action in actions:
+        for _ in range(WARM_UP):
+            exercise(action)
+
+    for action in actions:
+        for repeat in range(MEASURED):
+            started = time.perf_counter()
+            exercise(action)
+            elapsed = time.perf_counter() - started
+            report.samples.append(
+                Sample(f"diagnostic_{action.name}", repeat, 1, elapsed)
+            )
+
+    assert len(actions) == 44
+
+
+@pytest.mark.parametrize(
+    ("repeat", "traced"),
+    [(0, True), (0, False), (1, True), (1, False), (2, True), (2, False)],
+)
+def test_shared_diagnostic_resource_lifetime(
+    report: Report,
+    repeat: int,
+    traced: bool,
+) -> None:
+    mode = "traced" if traced else "untraced"
+    name = f"diagnostic_{mode}_{repeat}"
+    before = (open_descriptors(), threading.active_count())
+    argv = [
+        sys.executable,
+        "-m",
+        "tests.measurements.diagnostic_workload",
+        mode,
+        report.revision,
+        name,
+    ]
+
+    started = time.perf_counter()
+    result = run_process(argv)
+    elapsed = time.perf_counter() - started
+    report.environment[f"{name}_stdout"] = result.stdout.decode()
+    report.environment[f"{name}_stderr"] = result.stderr.decode()
+    report.environment[f"{name}_exit"] = result.code
+    report.samples.append(Sample(f"{name}_process", repeat, 1, elapsed))
+
+    assert not result.timed_out
+    assert not result.overflow
+    assert result.code == 0
+    assert result.stderr == b""
+    assert (open_descriptors(), threading.active_count()) == before
+    payload = Lifecycle.model_validate_json(result.stdout)
+    assert payload.traced is traced
+    assert payload.pid == result.pid
+    assert payload.revision == report.revision
+    assert payload.run == name
+    assert payload.successes == 26_000
+    assert payload.refusals == 18_000
+    assert [p.cycle for p in payload.points] == list(range(0, 1001, 100))
+    for resource in ("descriptors", "threads", "os_threads"):
+        values = [getattr(p, resource) for p in payload.points]
+        assert all(value == values[0] for value in values)
+    if payload.platform == "linux":
+        assert all(
+            p.rss is not None and p.high_water is not None and p.os_threads is not None
+            for p in payload.points
+        )
+    if traced:
+        baseline = payload.points[0].heap
+        assert baseline is not None
+        assert all(
+            p.heap is not None and p.heap - baseline < RETAINED_LIMIT_BYTES
+            for p in payload.points
+        )
+    else:
+        assert all(
+            p.heap is None and p.peak is None and p.tracer is None
+            for p in payload.points
+        )
+    report.gates[f"{name}_resources_released"] = True
