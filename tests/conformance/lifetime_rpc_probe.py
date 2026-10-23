@@ -8,8 +8,10 @@ from kora.conformance.transport import (
     HEADER,
     LifetimeClient,
     LifetimeTransportError,
+    ObserveCall,
     OrdinaryHeader,
     ProcessCall,
+    ReserveCall,
 )
 from kora.protocols.lifetime import (
     Acquisition,
@@ -157,6 +159,62 @@ async def partial_input(
     client.disconnect()
 
 
+async def invalid_header(
+    client: LifetimeClient,
+    endpoint: socket.socket,
+    mode: str,
+    feedback_address: str,
+) -> None:
+    feedback = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    feedback.bind(feedback_address + "-child")
+    feedback.setblocking(False)
+    loop = asyncio.get_running_loop()
+    try:
+        await loop.sock_sendto(feedback, b"r", feedback_address)
+        assert await loop.sock_recv(feedback, 1) == b"s"
+        deadline = client.clock.monotonic_ns() + 5_000_000_000
+        if mode == "header_partial":
+            await loop.sock_sendall(endpoint, (32).to_bytes(4, "big")[:2])
+        elif mode == "header_oversized":
+            await loop.sock_sendall(endpoint, (257).to_bytes(4, "big"))
+        elif mode == "header_malformed":
+            await client.channel.write_frame(b"{", deadline)
+        else:
+            call = (
+                ReserveCall(
+                    request=ReservationRequest(
+                        operation_id=new_operation_id(),
+                        kind=ResourceKind.TEMPORARY_TREE,
+                    )
+                )
+                if mode == "header_verb"
+                else ObserveCall(resource_id=None)
+            )
+            encoded = CALL.dump_json(call)
+            await client.channel.write_frame(
+                HEADER.dump_json(
+                    OrdinaryHeader(
+                        request_id=1
+                        if mode == "header_replayed"
+                        else client.next_request_id,
+                        verb="observe",
+                        control_bytes=len(encoded),
+                        execution_bytes=0,
+                    )
+                ),
+                deadline,
+            )
+            if mode == "header_verb":
+                await client.channel.write_frame(encoded, deadline)
+        await loop.sock_sendto(feedback, b"p", feedback_address)
+        await client.reader
+        assert client.closed
+        assert client.channel.closed
+    finally:
+        feedback.close()
+        client.disconnect()
+
+
 async def run(address: str, mode: str, feedback_address: str) -> None:
     endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     endpoint.connect(address)
@@ -168,6 +226,9 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
     progress(feedback_address, mode, b"r")
     assert await client.reserve(reservation_request) == tree
     progress(feedback_address, mode, b"d")
+    if mode.startswith("header_"):
+        await invalid_header(client, endpoint, mode, feedback_address)
+        return
     if mode in ("cancel_frame", "cancel_execution"):
         await partial_input(client, endpoint, tree, mode, feedback_address)
         return

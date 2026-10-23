@@ -5,9 +5,12 @@ import sys
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
+from types import CoroutineType
+from typing import cast
 
 import pytest
 
+from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.conformance.transport import ENDPOINT_CONTROL_BYTES, LifetimeEndpoint
@@ -22,17 +25,60 @@ from kora.protocols.lifetime import (
     TemporaryTreeRequest,
     new_operation_id,
 )
+from kora.runner.channels import BoundedChannel
+from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
+from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+
+
+def partial_header_is_waiting(
+    running: asyncio.Task[ClosureReport], channel: BoundedChannel, deadline: int
+) -> bool:
+    frames = running.get_stack()
+    value: object = frames[0].f_locals.get("reader") if frames else None
+    if not isinstance(value, asyncio.Task):
+        return False
+    reader = cast(asyncio.Task[None], value)
+    current: object = reader.get_coro()
+    while isinstance(current, CoroutineType):
+        frame = current.cr_frame
+        waiting: object = current.cr_await
+        if (
+            frame is not None
+            and frame.f_code.co_name == "_read_exact"
+            and frame.f_locals.get("self") is channel
+            and frame.f_locals.get("result") == bytearray(b"\x00\x00")
+            and isinstance(waiting, CoroutineType)
+            and waiting.cr_code.co_name == "_wait"
+        ):
+            assert frame.f_locals["size"] == 4
+            assert frame.f_locals["deadline_ns"] == deadline
+            return True
+        current = current.cr_await
+    return False
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode", ["eof", "terminal", "cancel_frame", "cancel_execution"]
+    "mode",
+    [
+        "eof",
+        "terminal",
+        "cancel_frame",
+        "cancel_execution",
+        "header_partial",
+        "header_oversized",
+        "header_malformed",
+        "header_replayed",
+        "header_verb",
+    ],
 )
 async def test_conformance_fixture_resources_are_released_through_real_client_process(
     tmp_path: Path, mode: str
 ) -> None:
     with ExitStack() as resources:
+        clock = ControlledLifetimeClock() if mode.startswith("header_") else None
         owner = ParentLifetime(
+            clock=clock,
             limits=LifetimeLimits(
                 cooperative_seconds=0.5,
                 term_seconds=0.1,
@@ -100,7 +146,49 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                 )
                 parent = LifetimeEndpoint(owner, child.token.resource_id, endpoint)
 
-                if mode.startswith("cancel"):
+                if mode.startswith("header_"):
+                    assert clock is not None
+                    running = asyncio.create_task(parent.run())
+                    loop = asyncio.get_running_loop()
+                    frontier_deadline = loop.time() + 5
+                    marker, peer = await asyncio.wait_for(
+                        loop.sock_recvfrom(feedback, 1),
+                        max(0, frontier_deadline - loop.time()),
+                    )
+                    assert marker == b"r"
+                    retained = parent.control_bytes
+                    resource_count = len(owner.records)
+                    original_interval = duration_ns(owner.limits.acquisition_seconds)
+                    original_deadline = clock.monotonic_ns() + original_interval
+                    if mode == "header_partial":
+                        clock.advance(original_interval // 2)
+                    await loop.sock_sendto(feedback, b"s", peer)
+                    assert (
+                        await asyncio.wait_for(
+                            loop.sock_recv(feedback, 1),
+                            max(0, frontier_deadline - loop.time()),
+                        )
+                        == b"p"
+                    )
+                    if mode == "header_partial":
+                        while not partial_header_is_waiting(
+                            running, parent.channel, original_deadline
+                        ):
+                            if running.done():
+                                await running
+                            assert loop.time() < frontier_deadline
+                            entered: asyncio.Future[None] = loop.create_future()
+                            loop.call_soon(entered.set_result, None)
+                            await entered
+                        assert not parent.pending
+                        assert not owner.ordinary_slots
+                        assert parent.control_bytes == retained
+                        clock.advance(original_interval - original_interval // 2 + 1)
+                    report = await asyncio.wait_for(
+                        running, max(0, frontier_deadline - loop.time())
+                    )
+                    assert len(owner.records) == resource_count
+                elif mode.startswith("cancel"):
                     running = asyncio.create_task(parent.run())
                     loop = asyncio.get_running_loop()
                     frontier_deadline = loop.time() + 5
@@ -156,6 +244,8 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                 except asyncio.CancelledError:
                     if not running.cancelled():
                         raise
+            if clock is not None:
+                await dispose_test_owner(owner, clock)
             await owner.close(None)
             deadline = owner.clock.monotonic_ns() + 5_000_000_000
             for record in owner.records.values():
