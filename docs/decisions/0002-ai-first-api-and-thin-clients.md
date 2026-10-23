@@ -10,6 +10,8 @@
 - Diagnostic amendment dated 2026-10-23: shared source and document locations under [issue #207](https://github.com/realkarych/kora/issues/207); exact amendment wording reviewed and approved by the project owner on 2026-10-23.
 - Navigation amendment dated 2026-10-17: scope and implementation plan approved under [issue #76](https://github.com/realkarych/kora/issues/76); wording pending line-by-line owner review.
 
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
+
 - Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
 
 - API error and authorization amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #135](https://github.com/realkarych/kora/issues/135) on 2026-10-23.
@@ -20,6 +22,12 @@ kora's positioning states that it is operated by agents as much as by people: wh
 
 Two questions had to be settled: how the agent-facing surface is produced (a first draft generated one MCP tool per API operation, which the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#curated-mcp-tools) judged noisy for agents), and whether agent nodes inside a graph may call kora.
 
+## First-slice amendment of 2026-10-23
+
+A separate authoring `kora_validate` tool validates compiled IR through `POST /validate`. The complete future inventory is sixteen tools; this explicitly supersedes the fifteen-tool cap. The first slice exposes the ten stdio tools and complete included-operation mappings in [first-slice.md](../../knowledge/specs/first-slice.md#included-operation-and-parity-contract). Compile/test pair-presence and skill-reference parity activate with their implementations; Python compilation and scenario execution remain prohibited on the server at all times.
+
+Exactly `GET /healthz`, `GET /readyz` and `GET /metrics` are excluded from CLI/MCP operation parity as infrastructure probes, alongside the existing worker and auth exclusions. This is not an authentication exemption: the route-authorization contract governs each probe. Doctor, provider listing/conformance, database maintenance and standalone remain local operations, not remotely callable API work.
+
 ## Decision
 
 The HTTP API (`/api/v1`) is the only implementation of every operation. Its OpenAPI document at `/api/v1/openapi.json` is the generation source: the web TypeScript client is generated from it, the hand-written Python client is contract-tested against it, and the parity coverage test reads it.
@@ -27,11 +35,11 @@ The HTTP API (`/api/v1`) is the only implementation of every operation. Its Open
 Every other surface is a thin client with no logic of its own:
 
 - the Typer CLI over the shared Python client, returning completed API responses and errors verbatim under `--json`, with distinct content-free records for local failures;
-- two curated MCP servers, `kora-authoring` and `kora-operating`, with fifteen task-shaped tools in total (ADR-0014; the fifteenth, `kora_test`, from issue #46, amended 2026-10-19); execution reconciliation uses existing `kora_admin` (ADR-0017); tools that start work (`kora_trigger`, `kora_retry`) return their outcome at once, `kora_plan` returns its plan, and waiting for a run is a bounded option of reading it through `kora_runs` (amended 2026-10-19); both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
+- two curated MCP servers, `kora-authoring` and `kora-operating`, with sixteen task-shaped tools in the complete inventory (ADR-0014; `kora_test` from issue #46 and `kora_validate` from issue #140); execution reconciliation uses existing `kora_admin` (ADR-0017); tools that start work (`kora_trigger`, `kora_retry`) return their outcome at once, `kora_plan` returns its plan, and waiting for a run is a bounded option of reading it through `kora_runs` (amended 2026-10-19); both run as the stdio process `kora mcp` for a local session and are mounted on the API at `/mcp/authoring` and `/mcp/operating`;
 - one skill package per harness (a Claude Code plugin, Codex skills), generated from the same reference material as the `kora_reference` tool and kept as files in each harness's own format;
 - the `kora web` console, whose only HTTP dependency is the generated TypeScript client.
 
-Parity is verified structurally: a CI coverage test checks that every API operation is reachable through at least one CLI command and at least one MCP tool, plus schema-coverage checks on the shared client; worker-facing routes and the frontend sign-in routes under `/auth/` are the only exclusions. A failing line blocks the release.
+Parity is verified structurally: a CI coverage test checks that every API operation is reachable through at least one CLI command and at least one MCP tool, plus schema-coverage checks on the shared client; the only exclusions are worker-facing routes, frontend sign-in routes under `/auth/`, and exactly `GET /healthz`, `GET /readyz` and `GET /metrics`. A failing line blocks the release.
 
 **Compilation is client-side** (amended 2026-10-16). Compiling Python sources into the intermediate representation is a pure function of the shared compiler library, executed in the author's own process: `kora compile`, or the stdio `kora mcp` authoring server. It is not an API operation, and it does not become one without a new decision record: importing a graph module executes its code, so the control plane never imports graph authors' Python. There is no compile route, the API accepts only compiled documents (`/validate`, deploy), and the HTTP-mounted authoring server omits `kora_compile`. Parity for compile is the presence of the CLI command and the stdio MCP tool; the coverage test lists compile as a client-side operation and fails if an operation that compiles sources appears in the OpenAPI document. Running a graph's behavioural scenarios (`kora test`, the stdio `kora_test`) imports graph modules too and is client-side on the same terms (issue #46): `kora_test` returns when its scenarios finish and has no duration cap of its own, so a suite longer than a client's tool-call timeout runs with `kora test`; the HTTP-mounted authoring server omits `kora_test`, and the coverage test lists scenario runs as a client-side operation and fails if an operation that runs scenarios appears (amended 2026-10-19).
 

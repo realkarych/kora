@@ -6,6 +6,8 @@
 - Amends: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md) (the adapter classifies provider limits), [ADR-0010](0010-cost-accounting-and-limits.md) (the provider pause sits with the other admission limits)
 - Related: ADR-0007, ADR-0017, ADR-0020, ADR-0021, ADR-0022
 
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
+
 ## Context
 
 kora has no notion of a model provider's rate limit or quota. A harness session that hits one ends as `harness_error`, which a node's retry policy normally retries within minutes, so all attempts are spent and the run fails. A quota that resets five hours later would have let it succeed. When a `fan_out` and other runs share one credential, every attempt hits the limit and retries on its own. After the reset they all wake together and hit it again.
@@ -29,6 +31,12 @@ Three things are not confirmed:
 - the exact fields of Claude's `api_retry` message;
 - the ordering between the limit signal and the terminal result.
 
+## First-slice amendment of 2026-10-23
+
+First-slice installations create no new attempt after an agent, infrastructure or provider failure, and have no provider-pause scheduler. Retry/pause configuration and defaults that enable those behaviors are refused. Existing classification, internal harness retry observations, interruption, permitted collection/publication of completed partial work and usage completeness remain required independently for both harnesses. Bounded transport retries and adoption of the same live attempt remain required; lease expiry is never proof of loss. [First-slice.md](../../knowledge/specs/first-slice.md#required-and-pending-test-cases) splits each mixed test into required and later retry/pause legs; the complete future behavior below activates with those implementations.
+
+For first-slice installations, omitted `runtime.provider_retry`, an empty object and any schema-valid zero `max_wait` resolve to `{max_wait: "0s"}`, the disabled policy. This built-in default is chosen before the enabled-feature namespace/six-hour fallback. An explicit positive value or a positive default in namespace, binding, standalone or `kora.toml` configuration is refused before effects, never silently replaced. Malformed/null values retain schema errors. Save the normalized zero in the execution contract so a later installation upgrade cannot reinterpret omission. Numeric budget zero remains refused independently. Disabled mode creates no provider pause, provider-wait deadline, backoff or replacement attempt. Provider observations and terminal failure retain ordinary usage, interruption, recovery and closure rules.
+
 ## Decision
 
 **A new error class, `provider_limited`.** The harness adapter maps the vendor signal to a normalised event that carries:
@@ -39,7 +47,7 @@ Three things are not confirmed:
 
 The scheduler contains no vendor-specific code. Credits or billing exhaustion and account holds are `config_error`, never retried, because waiting does not help. Authentication failures stay `config_error`. Overload and server errors stay `harness_error` under the node's retry policy.
 
-**It does not consume agent attempts.** As with `infrastructure` (NFR-2.4), a separate policy decides: `runtime.provider_retry`, with a namespace default. The policy is bounded by a persisted deadline, `max_wait` (default 6 hours, which covers a five-hour subscription window) after the node's first provider limit or its first admission refusal by a provider pause, whichever comes first, not by a count. The second case covers a node that has never executed and is held back by a limit another node observed on a shared quota. Every wake is capped at that deadline, quota-caused admission waits count towards it, and at the deadline the node fails with `provider_limited` even when the reset is days away.
+**It does not consume agent attempts.** As with `infrastructure` (NFR-2.4), a separate policy decides: `runtime.provider_retry`, with a namespace default. The policy is bounded by a persisted deadline, `max_wait` (default 6 hours when this feature is enabled, which covers a five-hour subscription window) after the node's first provider limit or its first admission refusal by a provider pause, whichever comes first, not by a count. The second case covers a node that has never executed and is held back by a limit another node observed on a shared quota. Every wake is capped at that deadline, quota-caused admission waits count towards it, and at the deadline the node fails with `provider_limited` even when the reset is days away.
 
 **The wait holds nothing.** The node gets an ordinary `wait` row:
 
