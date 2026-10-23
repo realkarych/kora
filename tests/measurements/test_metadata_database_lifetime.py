@@ -1479,11 +1479,18 @@ class PricingMigrationWatch:
             raise BaseExceptionGroup("pricing watcher finalization failed", failures)
 
     async def settle_writers(self) -> None:
-        outcomes = await asyncio.wait_for(
-            asyncio.gather(*self.writer_tasks, return_exceptions=True),
-            CLOSE_WAIT_SECONDS,
-        )
+        deadline_error: TimeoutError | None = None
+        try:
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(*self.writer_tasks, return_exceptions=True),
+                CLOSE_WAIT_SECONDS,
+            )
+        except TimeoutError as error:
+            deadline_error = error
+            outcomes = await asyncio.gather(*self.writer_tasks, return_exceptions=True)
         failures = [value for value in outcomes if isinstance(value, BaseException)]
+        if deadline_error is not None:
+            failures.append(deadline_error)
         if len(failures) == 1:
             raise failures[0]
         if failures:
