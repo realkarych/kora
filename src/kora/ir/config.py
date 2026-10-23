@@ -54,7 +54,9 @@ Strings = Annotated[tuple[StrictStr, ...], BeforeValidator(require_array)]
 ResourceName = Annotated[
     StrictStr,
     Field(
-        pattern=re.compile(r"^(?!/)(?!.*(^|/)\.{0,2}(/|$))[^\u0000-\u001f\u007f\\]+$")
+        pattern=re.compile(
+            r"^(?!/)(?![\s\S]*(^|/)\.{0,2}(/|$))[^\u0000-\u001f\u007f\\]+(?![\s\S])"
+        )
     ),
 ]
 

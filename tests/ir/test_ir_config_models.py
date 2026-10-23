@@ -25,6 +25,7 @@ ROUND_TRIPS: list[tuple[type[BaseModel], dict[str, object]]] = [
     (McpServer, {"type": "http"}),
     (NodeLimits, {"budget_usd": 10**400}),
     (NodeLimits, {"timeout": "0s", "stall_after": "1" * 10000 + "d"}),
+    *[(NodeLimits, {"timeout": "0001" + unit}) for unit in ("ms", "s", "m", "h", "d")],
     (Workspace, {"repo": "", "from_ref": "a" * 4096}),
     (CommandResource, {**RESOURCE, "size": 0, "name": "a.../e\u0301"}),
     (CommandConfig, {**MINIMAL[CommandConfig], "resources": [RESOURCE]}),
@@ -266,3 +267,80 @@ def test_ir_config_errors_exclude_input_content(
 
     assert MARKER not in repr(safe)
     assert SAFE_MESSAGE in repr(safe)
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r", "\r\n", "\v", "\f", "\x7f"])
+@pytest.mark.parametrize("encoded", [False, True])
+def test_ir_config_models_reject_trailing_control_characters(
+    suffix: str, encoded: bool
+) -> None:
+    alias = "CONFIDENTIAL_INPUT_7319"
+    cases: list[tuple[type[BaseModel], dict[str, object]]] = [
+        (NodeLimits, {"timeout": "7319s" + suffix}),
+        (NodeLimits, {"stall_after": "7319s" + suffix}),
+        (McpServer, {"type": "http", "digest": DIGEST + suffix}),
+        (CommandResource, {**RESOURCE, "name": MARKER + suffix}),
+        (CommandResource, {**RESOURCE, "sha256": DIGEST + suffix}),
+        (
+            CommandConfig,
+            {**MINIMAL[CommandConfig], "resource_set_digest": DIGEST + suffix},
+        ),
+        (
+            CommandConfig,
+            {**MINIMAL[CommandConfig], "env": {alias + suffix: MARKER}},
+        ),
+        (
+            CommandConfig,
+            {**MINIMAL[CommandConfig], "secret_env": {alias + suffix: "TOKEN"}},
+        ),
+        (
+            CommandConfig,
+            {**MINIMAL[CommandConfig], "secret_env": {"TOKEN": alias + suffix}},
+        ),
+        (McpServer, {"type": "http", "secret_env": {MARKER: alias + suffix}}),
+    ]
+
+    failures: list[ValidationError] = []
+    for model, document in cases:
+        if encoded:
+            with pytest.raises(ValidationError) as raised:
+                model.model_validate_json(json.dumps(document))
+        else:
+            with pytest.raises(ValidationError) as raised:
+                model.model_validate(document)
+        failures.append(raised.value)
+
+    for failure in failures:
+        safe = safe_field_errors(failure, CONFIG_FIELDS, SAFE_MESSAGE)
+        assert safe
+        assert all(
+            value not in repr(safe) for value in (MARKER, alias, DIGEST, "7319s")
+        )
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+@pytest.mark.parametrize("ending", ["/b", "/../b", "/./b", "//b", "/"])
+def test_ir_resource_names_preserve_unicode_segments(
+    separator: str, ending: str
+) -> None:
+    document = {**RESOURCE, "name": "a" + separator + ending}
+
+    if ending == "/b":
+        parsed = CommandResource.model_validate(document)
+        assert parsed.model_dump(mode="json", exclude_unset=True) == document
+    else:
+        with pytest.raises(ValidationError):
+            CommandResource.model_validate(document)
+
+
+def test_ir_mcp_map_keys_preserve_unrestricted_strings() -> None:
+    document = {
+        "type": "http",
+        "env": {"key\n": "value"},
+        "headers": {"key\n": "value"},
+        "secret_env": {"key\n": "TOKEN"},
+    }
+
+    parsed = McpServer.model_validate(document)
+
+    assert parsed.model_dump(mode="json", exclude_unset=True) == document

@@ -240,6 +240,32 @@ def configuration_workloads() -> dict[str, tuple[Callable[[], object], int, bool
                     True,
                     DENSE_MEASURED,
                 )
+    long_path = "/".join(["a\u2028\u2029"] * 10000)
+    lexical_cases: dict[str, tuple[type[BaseModel], dict[str, object], bool]] = {
+        "duration_final_lf": (NodeLimits, {"timeout": "1" * 10000 + "s\n"}, False),
+        "resource_final_lf": (
+            CommandResource,
+            {**RESOURCE, "name": "/".join(["a"] * 10000) + "\n"},
+            False,
+        ),
+        "resource_unicode_segments": (
+            CommandResource,
+            {**RESOURCE, "name": long_path},
+            True,
+        ),
+        "resource_unicode_traversal": (
+            CommandResource,
+            {**RESOURCE, "name": long_path + "/../b"},
+            False,
+        ),
+    }
+    for name, (model, document, valid) in lexical_cases.items():
+        workloads[f"config_lexical_{name}"] = (
+            validation_action(model, document, valid),
+            10000,
+            True,
+            DENSE_MEASURED,
+        )
     extended = {**RESOURCE, "x-meta": deep_extension(MAX_CANONICAL_BYTES - 4096)}
     resources = [extended] * 64
     nested_command: dict[str, object] = {
