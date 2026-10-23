@@ -11,7 +11,7 @@
 - Provider-loading amendment dated 2026-10-21: entry-point names encode the protocol and loading is selective, decided by the project owner under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
 - Opt-in conformance amendment dated 2026-10-22: the conformance cases ship as the opt-in pytest plugin `kora.conformance.plugin`, whose fixtures take the provider under test by injection, and carry the `kora_conformance` marker; entry-point parametrisation returns with `kora conformance` under [issue #215](https://github.com/realkarych/kora/issues/215). Decided in the [#156 plan](https://github.com/realkarych/kora/issues/156#issuecomment-6296106167) and implemented under [issue #204](https://github.com/realkarych/kora/issues/204); wording pending line-by-line owner review.
 
-- First-slice amendment dated 2026-10-23: provider listing/conformance and installed-distribution evidence remain required under #215; unsupported security controls are errors under ADR-0009. Scope and plan approved in #140; wording pending line-by-line owner review.
+- First-slice amendment dated 2026-10-23: provider listing/conformance and installed-distribution evidence remain required under #215; unsupported security controls are errors under ADR-0009. Scope and plan approved in #140; wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## Context
 

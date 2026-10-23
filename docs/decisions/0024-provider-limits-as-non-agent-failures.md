@@ -6,7 +6,7 @@
 - Amends: [ADR-0004](0004-harness-adapters-over-vendor-sdks.md) (the adapter classifies provider limits), [ADR-0010](0010-cost-accounting-and-limits.md) (the provider pause sits with the other admission limits)
 - Related: ADR-0007, ADR-0017, ADR-0020, ADR-0021, ADR-0022
 
-- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## Context
 

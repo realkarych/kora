@@ -34,7 +34,7 @@ Tool-policy coverage amendment dated 2026-10-19 (FR-8b.1): scope and implementat
 
 CEL amendment dated 2026-10-19: decisions taken and implementation plan approved by the project owner under [issue #126](https://github.com/realkarych/kora/issues/126); wording pending line-by-line owner review. See [ADR-0006](../decisions/0006-graph-definition-dsl-and-yaml-representation.md).
 
-MCP-count amendment dated 2026-10-23 (FR-0.1): the sixteen-tool full inventory and ten-tool first slice are approved under #140; wording pending line-by-line owner review.
+MCP-count amendment dated 2026-10-23 (FR-0.1): the sixteen-tool full inventory and ten-tool first slice are approved under #140; wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## 0. AI-first parity
 

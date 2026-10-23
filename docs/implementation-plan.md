@@ -54,7 +54,7 @@ Token separation amendment dated 2026-10-23: reviewed and accepted by the projec
 
 Diagnostic value foundation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #219](https://github.com/realkarych/kora/issues/219) on 2026-10-23.
 
-First-slice boundary amendment dated 2026-10-23: scope and implementation plan approved under [#140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+First-slice boundary amendment dated 2026-10-23: scope and implementation plan approved under [#140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## 1. Slice 1
 

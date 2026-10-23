@@ -8,7 +8,7 @@
 - Discovery amendment dated 2026-10-21: the consequence on provider discovery, under [issue #150](https://github.com/realkarych/kora/issues/150); wording pending line-by-line owner review.
 - Related: [ADR-0002](0002-ai-first-api-and-thin-clients.md), [ADR-0003](0003-scheduler-and-workers-over-http.md), [ADR-0004](0004-harness-adapters-over-vendor-sdks.md), [ADR-0005](0005-eleven-protocols-with-conformance-suites.md), [ADR-0006](0006-graph-definition-dsl-and-yaml-representation.md), [ADR-0016](0016-trusted-execution-and-publication.md)
 
-- First-slice amendment dated 2026-10-23: dry-run import activation is deferred under #140; scope and plan approved, wording pending line-by-line owner review.
+- First-slice amendment dated 2026-10-23: dry-run import activation is deferred under #140; scope and plan approved, wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## Context
 

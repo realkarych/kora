@@ -12,7 +12,7 @@
 - Slice-scope amendment dated 2026-10-19: scope decided by the project owner under [issue #122](https://github.com/realkarych/kora/issues/122); wording pending line-by-line owner review.
 - Harness-scope amendment dated 2026-10-21: scope and implementation plan approved by the project owner under [issue #172](https://github.com/realkarych/kora/issues/172); wording pending line-by-line owner review.
 
-- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## Context
 

@@ -10,7 +10,7 @@
 - Absorbs: requirements decision 26
 - Related: [0006-graph-definition-dsl-and-yaml-representation.md](0006-graph-definition-dsl-and-yaml-representation.md), [0007-attempt-model-and-retries.md](0007-attempt-model-and-retries.md), [0008-content-bound-approvals.md](0008-content-bound-approvals.md), [0011-namespaces-and-personal-tokens.md](0011-namespaces-and-personal-tokens.md)
 
-- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## Context
 

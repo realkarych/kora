@@ -28,7 +28,7 @@ Local-runner amendment dated 2026-10-21 (the `local` deployment row, TM-09 and t
 
 Fake-contract amendment dated 2026-10-21 (the fake runtime/harness deployment row, TM-12 and its evidence row): fakes are injected, never discovered and never reach a serving process, under [issue #136](https://github.com/realkarych/kora/issues/136); implementation plan approved by the project owner, wording pending line-by-line owner review.
 
-First-slice boundary amendment dated 2026-10-23 (TM-01/02/03/05/06/07/09/10/11/12): scope and implementation plan approved under [#140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+First-slice boundary amendment dated 2026-10-23 (TM-01/02/03/05/06/07/09/10/11/12): scope and implementation plan approved under [#140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
 

@@ -16,7 +16,7 @@ Harness-scope amendment dated 2026-10-21: both Claude and Codex are required in 
 
 Implementation-plan amendment dated 2026-10-19: next step 1 links the [implementation plan](implementation-plan.md); scope and implementation plan approved by the project owner under [issue #127](https://github.com/realkarych/kora/issues/127); wording pending line-by-line owner review.
 
-First-slice boundary amendment dated 2026-10-23: scope and implementation plan approved under [#140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+First-slice boundary amendment dated 2026-10-23: scope and implementation plan approved under [#140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## Where the project stands
 

@@ -6,7 +6,7 @@
 - Amends: [ADR-0008](0008-content-bound-approvals.md) (automation and self-approval checks), [ADR-0016](0016-trusted-execution-and-publication.md) (the credential behind late authorization)
 - Related: ADR-0005, ADR-0011, ADR-0013, ADR-0017, ADR-0018, ADR-0021
 
-- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording pending line-by-line owner review.
+- First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 ## Context
 
