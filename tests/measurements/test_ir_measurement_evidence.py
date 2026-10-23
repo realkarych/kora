@@ -1,8 +1,10 @@
 import hashlib
 import json
 import sys
+from collections import Counter
 from html import escape
 from pathlib import Path
+from traceback import format_exception
 from typing import cast
 
 import pytest
@@ -20,6 +22,7 @@ from tests.measurements.ir_measurement_evidence import (
     verify_report,
     verify_union,
 )
+from tests.measurements.vcs_ref_workload import cases as vcs_ref_cases
 
 REVISION = "a" * 40
 
@@ -84,11 +87,34 @@ def rendered_report(inventory: Evidence) -> str:
         }
     )
     report.gates.update(dict.fromkeys(inventory.gates, True))
+    if any(node.endswith("::test_vcs_ref_action_cost") for node in inventory.nodes):
+        report.environment["vcs_ref_fixture_manifest"] = json.dumps(vcs_ref_cases()[1])
     for run in range(3):
         if configuration_evidence(run).nodes <= inventory.nodes:
             report.environment[f"config_lifetime_{run}"] = json.dumps(
                 configuration_payload()
             )
+        for traced in (True, False):
+            if any(
+                node.endswith(f"::test_vcs_ref_validation_lifetime[{run}-{traced}]")
+                for node in inventory.nodes
+            ):
+                mode = "traced" if traced else "untraced"
+                prefix = f"vcs_ref_{mode}_{run}"
+                report.environment.update(
+                    {
+                        f"{prefix}_stdout": "{}",
+                        f"{prefix}_stderr": "",
+                        f"{prefix}_exit": 0,
+                        f"{prefix}_native_growth_review": "required",
+                    }
+                )
+        if any(
+            node.endswith(f"::test_vcs_ref_cold_public_import[{run}]")
+            for node in inventory.nodes
+        ):
+            for source in ("base", "head"):
+                report.environment[f"vcs_import_{source}_{run}"] = "{}"
     for (name, repeat, count), multiplicity in inventory.samples.items():
         report.samples.extend(
             Sample(name, repeat, count, 0.1) for _ in range(multiplicity)
@@ -113,9 +139,9 @@ def test_ir_evidence_inventory_preserves_every_named_action_and_sample() -> None
 
     workers = [configuration_evidence(run) for run in range(3)]
 
-    assert len(expected.nodes) == 320
-    assert len(expected.gates) == 328
-    assert sum(expected.samples.values()) == 6689
+    assert len(expected.nodes) == 330
+    assert len(expected.gates) == 446
+    assert sum(expected.samples.values()) == 7791
     assert all(len(worker.nodes) == 1 for worker in workers)
     assert all(len(worker.gates) == 4 for worker in workers)
     assert all(sum(worker.samples.values()) == 4 for worker in workers)
@@ -237,7 +263,7 @@ def test_ir_union_checks_all_artifact_identities(
     if mutation is None:
         result = verify_union(tmp_path, REVISION)
 
-        assert (result["tests"], result["gates"], result["samples"]) == (320, 328, 6689)
+        assert (result["tests"], result["gates"], result["samples"]) == (330, 446, 7791)
     else:
         with pytest.raises(ValueError, match="IR"):
             verify_union(tmp_path, REVISION)
@@ -358,3 +384,202 @@ def test_linux_configuration_evidence_requires_native_counters(field: str) -> No
 
     with pytest.raises(ValueError, match="IR configuration"):
         verify_configuration_payloads(report, expected)
+
+
+def test_ir_evidence_preserves_every_upstream_vcs_ref_identity() -> None:
+    actions, _ = vcs_ref_cases()
+    expected_nodes = {
+        "tests/measurements/test_ir_models_cost.py::test_vcs_ref_action_cost",
+        *(
+            "tests/measurements/test_ir_models_cost.py::"
+            f"test_vcs_ref_validation_lifetime[{run}-{traced}]"
+            for run in range(3)
+            for traced in (True, False)
+        ),
+        *(
+            "tests/measurements/test_ir_models_cost.py::"
+            f"test_vcs_ref_cold_public_import[{run}]"
+            for run in range(3)
+        ),
+    }
+    expected_gates = (
+        {f"{action.name}_retained" for action in actions}
+        | {
+            f"vcs_ref_{mode}_{run}_lifecycle_assertions_passed"
+            for run in range(3)
+            for mode in ("traced", "untraced")
+        }
+        | {f"vcs_import_{run}_resources_released" for run in range(3)}
+    )
+    expected_samples = Counter(
+        (action.name, repeat, 1) for action in actions for repeat in range(10)
+    )
+    expected_samples.update(
+        (f"vcs_ref_{mode}_{run}_process", run, 500)
+        for run in range(3)
+        for mode in ("traced", "untraced")
+    )
+    expected_samples.update(
+        (f"vcs_import_{source}", run, 1)
+        for run in range(3)
+        for source in ("base", "head")
+    )
+
+    evidence = expected_evidence()
+
+    assert len(actions) == 109
+    assert {
+        node for node in evidence.nodes if "::test_vcs_ref_" in node
+    } == expected_nodes
+    assert {
+        gate for gate in evidence.gates if gate.startswith("vcs_")
+    } == expected_gates
+    assert len(expected_nodes) == 10
+    assert len(expected_gates) == 118
+    assert (
+        Counter(
+            {
+                identity: multiplicity
+                for identity, multiplicity in evidence.samples.items()
+                if identity[0].startswith("vcs_")
+            }
+        )
+        == expected_samples
+    )
+    assert (
+        sum(
+            multiplicity
+            for (workload, _, _), multiplicity in evidence.samples.items()
+            if workload.startswith("vcs_")
+        )
+        == 1102
+    )
+    assert len(evidence.nodes - expected_nodes) == 320
+    assert len(evidence.gates - expected_gates) == 328
+    assert (
+        sum(
+            multiplicity
+            for (workload, _, _), multiplicity in evidence.samples.items()
+            if not workload.startswith("vcs_")
+        )
+        == 6689
+    )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "wrong", "bool_count"])
+def test_ir_vcs_ref_manifest_must_match_its_source(mutation: str) -> None:
+    expected = Evidence(
+        frozenset(
+            {"tests/measurements/test_ir_models_cost.py::test_vcs_ref_action_cost"}
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    if mutation == "missing":
+        report.environment.pop("vcs_ref_fixture_manifest")
+    elif mutation == "wrong":
+        report.environment["vcs_ref_fixture_manifest"] = "{}"
+    else:
+        report.environment["vcs_ref_fixture_manifest"] = (
+            '{"vcs_decode_1024":{"json_bytes":true}}'
+        )
+
+    with pytest.raises(ValueError, match="IR VcsRef"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+def test_ir_worker_shard_refuses_an_unselected_vcs_ref_manifest() -> None:
+    expected = configuration_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.environment["vcs_ref_fixture_manifest"] = json.dumps(vcs_ref_cases()[1])
+
+    with pytest.raises(ValueError, match="IR VcsRef"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("vcs_ref_traced_0_stdout", ""),
+        ("vcs_ref_traced_0_stderr", "failed"),
+        ("vcs_ref_traced_0_exit", 1),
+        ("vcs_ref_traced_0_exit", False),
+    ],
+)
+def test_ir_vcs_ref_lifetime_requires_its_transport_evidence(
+    field: str, value: str | int | bool
+) -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                "tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime[0-True]"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.environment[field] = value
+
+    with pytest.raises(ValueError, match="IR VcsRef"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+def test_ir_vcs_ref_cold_import_requires_both_sources() -> None:
+    expected = Evidence(
+        frozenset(
+            {
+                "tests/measurements/test_ir_models_cost.py::test_vcs_ref_cold_public_import[0]"
+            }
+        ),
+        frozenset(),
+        Counter(),
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    report.environment.pop("vcs_import_base_0")
+
+    with pytest.raises(ValueError, match="IR VcsRef"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize("boundary", ["configuration", "vcs_manifest"])
+def test_ir_new_payload_refusals_do_not_echo_input_in_tracebacks(boundary: str) -> None:
+    sentinel = "artifact-input-" + "must-remain-private"
+    expected = (
+        configuration_evidence(1)
+        if boundary == "configuration"
+        else Evidence(
+            frozenset(
+                {"tests/measurements/test_ir_models_cost.py::test_vcs_ref_action_cost"}
+            ),
+            frozenset(),
+            Counter(),
+        )
+    )
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    if boundary == "configuration":
+        payload = configuration_payload()
+        payload["baseline_threads"] = sentinel
+        report.environment["config_lifetime_1"] = json.dumps(payload)
+    else:
+        report.environment["vcs_ref_fixture_manifest"] = json.dumps(
+            {"vcs_decode_1024": {"json_bytes": sentinel}}
+        )
+
+    with pytest.raises(ValueError, match="IR") as raised:
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+    rendered = "".join(format_exception(raised.value))
+
+    assert sentinel not in rendered
+    assert "IR" in rendered

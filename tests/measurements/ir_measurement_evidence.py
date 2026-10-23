@@ -14,6 +14,7 @@ from tests.measurements.ir_declaration_workload import LIFETIME_TRIGGERS
 from tests.measurements.ir_document_workload import LIFETIME_DOCUMENT, graph_inventory
 from tests.measurements.ir_remaining_workload import OPEN, REFUSED_OPEN
 from tests.measurements.test_ir_models_cost import (
+    DENSE_MEASURED,
     FAILURE_CYCLES,
     FAILURES,
     MEASURED,
@@ -22,11 +23,14 @@ from tests.measurements.test_ir_models_cost import (
     WORKLOADS,
     cases,
 )
+from tests.measurements.vcs_ref_workload import BATCHES, INTERVAL
+from tests.measurements.vcs_ref_workload import cases as vcs_ref_cases
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = "tests/measurements/test_ir_models_cost.py"
 NODE = f"{MODULE}::"
 SELECTED_NODES = TypeAdapter(list[str])
+VCS_REF_MANIFEST = TypeAdapter(dict[str, dict[str, int]])
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,20 @@ def expected_evidence() -> Evidence:
             nodes.add(f"{NODE}test_shared_diagnostic_resource_lifetime[{run}-{traced}]")
             gates.add(f"diagnostic_{mode}_{run}_resources_released")
             samples[(f"diagnostic_{mode}_{run}_process", run, 1)] += 1
+    nodes.add(f"{NODE}test_vcs_ref_action_cost")
+    for action in vcs_ref_cases()[0]:
+        gates.add(f"{action.name}_retained")
+        samples.update((action.name, repeat, 1) for repeat in range(DENSE_MEASURED))
+    for run in range(3):
+        nodes.add(f"{NODE}test_vcs_ref_cold_public_import[{run}]")
+        gates.add(f"vcs_import_{run}_resources_released")
+        for source in ("base", "head"):
+            samples[(f"vcs_import_{source}", run, 1)] += 1
+        for traced in (True, False):
+            mode = "traced" if traced else "untraced"
+            nodes.add(f"{NODE}test_vcs_ref_validation_lifetime[{run}-{traced}]")
+            gates.add(f"vcs_ref_{mode}_{run}_lifecycle_assertions_passed")
+            samples[(f"vcs_ref_{mode}_{run}_process", run, BATCHES * INTERVAL)] += 1
     return Evidence(frozenset(nodes), frozenset(gates), samples)
 
 
@@ -194,8 +212,8 @@ def verify_configuration_payloads(
             raise ValueError("incomplete IR configuration lifetime evidence")
         try:
             payload = ConfigurationLifetime.model_validate_json(raw)
-        except ValidationError as error:
-            raise ValueError("incomplete IR configuration lifetime evidence") from error
+        except ValidationError:
+            raise ValueError("incomplete IR configuration lifetime evidence") from None
         cycles = sorted(count for _, _, count in configuration_evidence(run).samples)
         if (
             payload.cycles != cycles[-1]
@@ -245,6 +263,45 @@ def verify_configuration_payloads(
                 raise ValueError("inconsistent IR configuration lifetime checkpoint")
 
 
+def verify_vcs_ref_evidence(report: MeasurementReport, expected: Evidence) -> None:
+    manifest = report.environment.get("vcs_ref_fixture_manifest")
+    if f"{NODE}test_vcs_ref_action_cost" in expected.nodes:
+        if not isinstance(manifest, str):
+            raise ValueError("incomplete IR VcsRef fixture manifest")
+        try:
+            recorded = VCS_REF_MANIFEST.validate_json(manifest, strict=True)
+        except ValidationError:
+            raise ValueError("incomplete IR VcsRef fixture manifest") from None
+        if recorded != vcs_ref_cases()[1]:
+            raise ValueError("inconsistent IR VcsRef fixture manifest")
+    elif "vcs_ref_fixture_manifest" in report.environment:
+        raise ValueError("unselected IR VcsRef fixture manifest")
+    for run in range(3):
+        if f"{NODE}test_vcs_ref_cold_public_import[{run}]" in expected.nodes:
+            for source in ("base", "head"):
+                output = report.environment.get(f"vcs_import_{source}_{run}")
+                if not isinstance(output, str) or not output.strip():
+                    raise ValueError("incomplete IR VcsRef import evidence")
+        for traced in (True, False):
+            if (
+                f"{NODE}test_vcs_ref_validation_lifetime[{run}-{traced}]"
+                not in expected.nodes
+            ):
+                continue
+            mode = "traced" if traced else "untraced"
+            prefix = f"vcs_ref_{mode}_{run}"
+            output = report.environment.get(f"{prefix}_stdout")
+            code = report.environment.get(f"{prefix}_exit")
+            if (
+                not isinstance(output, str)
+                or not output.strip()
+                or report.environment.get(f"{prefix}_stderr") != ""
+                or type(code) is not int
+                or code != 0
+            ):
+                raise ValueError("incomplete IR VcsRef lifetime evidence")
+
+
 def verify_report(
     document: str, junit: str, revision: str, expected: Evidence
 ) -> MeasurementReport:
@@ -272,6 +329,7 @@ def verify_report(
     ):
         raise ValueError("incomplete IR shard evidence")
     verify_configuration_payloads(report, expected)
+    verify_vcs_ref_evidence(report, expected)
     repeats = Counter(sample.workload for sample in report.samples)
     if set(report.summary) != set(repeats) or any(
         report.summary[name].get("repeats") != count for name, count in repeats.items()
@@ -352,7 +410,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         frozenset(selected) != full.nodes
         or frozenset(gates) != full.gates
         or samples != full.samples
-        or (len(selected), len(gates), sum(samples.values())) != (320, 328, 6689)
+        or (len(selected), len(gates), sum(samples.values())) != (330, 446, 7791)
     ):
         raise ValueError("incomplete IR evidence union")
     return {

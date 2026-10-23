@@ -88,6 +88,7 @@ def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
     assert entries[0]["with"] == {
         "persist-credentials": False,
         "ref": "${{ github.event.pull_request.head.sha || github.sha }}",
+        "fetch-depth": 0,
     }
     assert entries[1]["uses"] == (
         "astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
@@ -197,7 +198,7 @@ def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     assert default_code == 0
     assert default_nodes == expected.nodes
     assert all(code == 0 for code, _ in collected)
-    assert [len(nodes) for _, nodes in collected] == [318, 1, 1]
+    assert [len(nodes) for _, nodes in collected] == [328, 1, 1]
     assert set().union(*(nodes for _, nodes in collected)) == expected.nodes
     assert sum(len(nodes) for _, nodes in collected) == len(expected.nodes)
 
