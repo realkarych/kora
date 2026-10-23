@@ -14,6 +14,7 @@ import threading
 import time
 import tracemalloc
 from array import array
+from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -2798,6 +2799,24 @@ PRICING_CHECKPOINT_FIELDS: tuple[str, ...] = (
 )
 
 
+def pricing_live_objects(objects: list[object]) -> dict[type[object], int]:
+    types = Counter(type(item) for item in objects)
+    return {
+        category: sum(
+            count
+            for value_type, count in types.items()
+            if issubclass(value_type, category)
+        )
+        for category in (
+            sqlite3.Cursor,
+            Database,
+            PricingMigrationWatch,
+            Report,
+            PGDialect,
+        )
+    }
+
+
 def capture_pricing_checkpoint(
     checkpoints: array[float], position: int, cycle: int, started: float, traced: bool
 ) -> None:
@@ -2813,13 +2832,16 @@ def capture_pricing_checkpoint(
         threading.active_count(),
         sum(thread.name.startswith("asyncio_") for thread in threading.enumerate()),
         len(asyncio.all_tasks()),
-        sum(isinstance(item, sqlite3.Cursor) for item in gc.get_objects()),
-        sum(isinstance(item, Database) for item in gc.get_objects()),
-        sum(isinstance(item, PricingMigrationWatch) for item in gc.get_objects()),
-        sum(isinstance(item, Report) for item in gc.get_objects()),
+    )
+    live_objects = pricing_live_objects(gc.get_objects())
+    values += (
+        live_objects[sqlite3.Cursor],
+        live_objects[Database],
+        live_objects[PricingMigrationWatch],
+        live_objects[Report],
         sum(info[3] for info in pricing_reflection_cache_info().values()),
         sum(info[2] for info in pricing_reflection_cache_info().values()),
-        sum(isinstance(item, PGDialect) for item in gc.get_objects()),
+        live_objects[PGDialect],
     )
     offset = position * len(PRICING_CHECKPOINT_FIELDS)
     for index, value in enumerate(values):
