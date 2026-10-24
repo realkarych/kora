@@ -140,6 +140,7 @@ class LocalState:
             refuse("storage_busy")
         with gate:
             connection: sqlite3.Connection | None = None
+            recovery = False
             try:
                 try:
                     os.stat(
@@ -155,7 +156,7 @@ class LocalState:
                 connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
                 yield connection
                 connection.commit()
-                if write or synchronize or recovery:
+                if (write or synchronize) and not recovery:
                     self.root.synchronize_directory(self.root.fd)
             except ValueError:
                 refuse("storage_integrity")
@@ -169,9 +170,13 @@ class LocalState:
                     refuse("storage_busy")
                 refuse("storage_io")
             finally:
-                if connection is not None:
-                    connection.close()
-                    self.connections -= 1
+                try:
+                    if connection is not None:
+                        connection.close()
+                        self.connections -= 1
+                finally:
+                    if recovery:
+                        self.root.synchronize_directory(self.root.fd)
 
     def initialize(self) -> None:
         creating = not self.root.manifest.control_initialized

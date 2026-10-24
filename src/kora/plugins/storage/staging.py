@@ -77,10 +77,11 @@ class StagedPayloads:
     def lookup(
         self, operation: StorageOperationRef, stage: StageRef, ctx: ProtocolContext
     ) -> tuple[int, MutationObservation | None]:
-        with self.state.transaction() as connection:
+        with self.state.transaction(synchronize=False) as connection:
             saved = self.state.receipt(connection, operation)
             record = self.state.stage(connection, stage)
             if saved is not None and saved.state == "settled":
+                self.root.synchronize_directory(self.root.fd)
                 return -1, saved
             require_deadline(ctx)
             self.state.admit_epoch(connection, self.receiver_epoch)
@@ -478,7 +479,7 @@ class StagedPayloads:
         def inspect() -> tuple[
             tuple[str, MutationObservation, PrivateFile | None], ...
         ]:
-            with self.state.transaction() as connection:
+            with self.state.transaction(synchronize=False) as connection:
                 return self.state.stage_observations(connection, stage)
 
         observations = await self.runner(inspect, control=True)

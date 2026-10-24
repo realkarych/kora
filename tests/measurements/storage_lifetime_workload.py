@@ -326,26 +326,7 @@ async def cycle(
                 async with reader:
                     async for _ in reader:
                         pass
-                request_arguments = PromotionArguments(
-                    version=1,
-                    content=selected_prepared,
-                    address=ContentAddress(
-                        version=1,
-                        storage_identity=provider.identity(),
-                        payload_digest=selected_prepared.payload_digest,
-                    ),
-                    content_generation=1,
-                )
-                request = PromotionRequest(
-                    version=1,
-                    operation=operation(
-                        provider.identity(),
-                        label + "-publish",
-                        "promote",
-                        request_arguments,
-                    ),
-                    arguments=request_arguments,
-                )
+                request = promotion(provider, selected_prepared, label + "-publish")
             else:
                 request = promotion(provider, upload.content, label + "-publish")
             if workload.ending == "replay_conflict":

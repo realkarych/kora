@@ -687,9 +687,10 @@ class LocalArtifactStorage:
     ) -> StorageReleaseResult:
         async def release() -> StorageReleaseResult:
             def locate() -> int | None:
-                with self._state.transaction() as connection:
+                with self._state.transaction(synchronize=False) as connection:
                     record = self._state.stage(connection, request.stage)
                     if record is None:
+                        self._root.synchronize_directory(self._root.fd)
                         return None
                     return record[0]
 

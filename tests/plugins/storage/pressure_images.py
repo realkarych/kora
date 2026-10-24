@@ -126,6 +126,8 @@ def linux_attachment(directory: Path, stamp: ImageStamp) -> Attachment | None:
     inventory = LoopDevices.model_validate_json(
         command(
             (
+                "/usr/bin/sudo",
+                "-n",
                 "/usr/sbin/losetup",
                 "--json",
                 "--list",

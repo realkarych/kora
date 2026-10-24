@@ -23,7 +23,7 @@ def add_inventory_page(
 ) -> str | None:
     remaining = [key for key in keys if cursor is None or key > cursor]
     selected = remaining[:128]
-    continuation = selected[-1] if len(remaining) > 128 else None
+    continuation = selected[-1] if len(selected) == 128 else None
     report.samples.append(
         Sample(
             f"storage.inventory.{phase}",
@@ -214,6 +214,7 @@ def test_qualification_parser_accepts_complete_boundary_evidence() -> None:
         "refusals",
         "missing_concurrent",
         "duplicate_page",
+        "premature_probe_exhaustion",
     ],
 )
 def test_qualification_parser_rejects_false_boundary_success(defect: str) -> None:
@@ -233,6 +234,18 @@ def test_qualification_parser_rejects_false_boundary_success(defect: str) -> Non
             update={
                 "environment": report.environment.model_copy(
                     update={"checkout_clean": False}
+                )
+            }
+        )
+    elif defect == "premature_probe_exhaustion":
+        changed = report.model_copy(
+            update={
+                "samples": tuple(
+                    sample.model_copy(update={"next_key": None})
+                    if sample.workload == "storage.inventory.first"
+                    and sample.repeat == 256
+                    else sample
+                    for sample in report.samples
                 )
             }
         )

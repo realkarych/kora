@@ -330,7 +330,7 @@ def validate_boundaries(
                 page.cursor_key != cursor
                 or keys != remaining[: len(keys)]
                 or not keys
-                or (page.next_key is None) != (len(keys) == len(remaining))
+                or (page.next_key is None and len(keys) != len(remaining))
             ):
                 raise EvidenceFailure(
                     "an inventory probe differs from its keyset position"

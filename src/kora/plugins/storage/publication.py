@@ -50,11 +50,12 @@ class ContentPublisher:
     def lookup(
         self, request: PromotionRequest, ctx: ProtocolContext
     ) -> int | PromotionResult:
-        with self.state.transaction() as connection:
+        with self.state.transaction(synchronize=False) as connection:
             saved = self.state.receipt(connection, request.operation)
             if saved is not None and saved.state == "settled":
                 if not isinstance(saved.result, PromotionResult):
                     refuse("storage_conflict")
+                self.root.synchronize_directory(self.root.fd)
                 return saved.result
             require_deadline(ctx)
             self.state.admit_epoch(connection, self.staging.receiver_epoch)
@@ -124,7 +125,7 @@ class ContentPublisher:
             return witness
         content = request.arguments.content
         if isinstance(content, PreparedContentRef):
-            with self.state.transaction() as connection:
+            with self.state.transaction(synchronize=False) as connection:
                 temporary = self.state.file_identity(connection, content.operation)
             if temporary is None:
                 refuse("storage_integrity")
@@ -148,7 +149,7 @@ class ContentPublisher:
         self, work: PublicationWork, request: PromotionRequest, verify: bool
     ) -> PromotionResult | None:
         target = self.contents.locate(work.reference.address)
-        with self.state.transaction() as connection:
+        with self.state.transaction(synchronize=False) as connection:
             indexed = self.state.content(connection, work.reference.address)
         if target is None:
             if indexed is not None:
@@ -291,7 +292,7 @@ class ContentPublisher:
 
     async def recover(self, stage: StageRef, slot: int, ctx: ProtocolContext) -> None:
         def pending() -> PromotionRequest | None:
-            with self.state.transaction() as connection:
+            with self.state.transaction(synchronize=False) as connection:
                 row = row_values(
                     connection.execute(
                         "SELECT operation, arguments FROM receipts WHERE "
@@ -322,7 +323,7 @@ class ContentPublisher:
             async with ctx.activity.span("storage.promote.reconcile"):
 
                 def reconcile() -> None:
-                    with self.state.transaction() as connection:
+                    with self.state.transaction(synchronize=False) as connection:
                         work = self.recovery_work(connection, request, slot)
                         row = row_values(
                             connection.execute(

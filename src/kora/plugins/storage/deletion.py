@@ -209,9 +209,10 @@ class ContentDeleter:
         self, request: DeleteReleaseRequest, ctx: ProtocolContext
     ) -> StorageReleaseResult:
         def locate() -> int | None:
-            with self.state.transaction() as connection:
+            with self.state.transaction(synchronize=False) as connection:
                 saved = self.state.receipt(connection, request.operation)
                 if saved is None:
+                    self.root.synchronize_directory(self.root.fd)
                     return None
                 if (
                     not isinstance(saved.result, DeleteResult)

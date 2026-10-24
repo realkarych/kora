@@ -32,11 +32,12 @@ class ContentPreparer:
     def lookup(
         self, request: ContentPreparation, ctx: ProtocolContext
     ) -> int | PreparedContentRef:
-        with self.state.transaction() as connection:
+        with self.state.transaction(synchronize=False) as connection:
             saved = self.state.receipt(connection, request.operation)
             if saved is not None and saved.state == "settled":
                 if not isinstance(saved.result, PreparedContentRef):
                     refuse("storage_conflict")
+                self.root.synchronize_directory(self.root.fd)
                 return saved.result
             require_deadline(ctx)
             self.state.admit_epoch(connection, self.staging.receiver_epoch)
