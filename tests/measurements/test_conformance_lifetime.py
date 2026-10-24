@@ -1,6 +1,6 @@
+import asyncio
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.measurements.harness import Report, Sample, report_lifecycle
+from tests.measurements.harness import Report, Sample, new_report, write_report
+from tests.measurements.lifetime_cohorts import Cohort, run_cohorts
 from tests.measurements.lifetime_measurement_support import (
     HELPER_MEASUREMENT,
     ColdHelperMeasurement,
@@ -23,7 +24,14 @@ pytestmark = pytest.mark.measurement
 
 @pytest.fixture
 def report() -> Iterator[Report]:
-    yield from report_lifecycle()
+    result = new_report()
+    yield result
+    write_report(result)
+    deadline = result.environment.get("command_deadline_monotonic")
+    if isinstance(deadline, float) and time.monotonic() >= deadline:
+        result.gates["within_command_deadline"] = False
+        write_report(result)
+        raise AssertionError("measurement report exceeded command deadline")
 
 
 def test_conformance_fixture_resources_are_released(report: Report) -> None:
@@ -45,33 +53,42 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
         direct_environment_bytes=440000,
         wire_environment_bytes=220000,
         artifacts=str(artifacts),
+        cohort_scheduling="three_concurrent_independent_parents",
+        command_deadline_seconds=600,
+        normal_completion_deadline_seconds=595,
+        shared_failure_guardian_seconds=5,
+        command_deadline_monotonic=deadline,
     )
 
+    cohorts: list[Cohort] = []
     for run in range(3):
         folder = artifacts / str(run)
         folder.mkdir(mode=0o700)
         private = str(Path(tempfile.mkdtemp(prefix="kora-life-", dir="/tmp")).resolve())
         (folder / "home.txt").write_text(private)
-        with (folder / "stdout.json").open("xb") as stdout:
-            with (folder / "stderr.txt").open("xb") as stderr:
-                completed = subprocess.run(
-                    [
-                        sys.executable,
-                        "-X",
-                        "tracemalloc=1",
-                        "-m",
-                        "tests.measurements.lifetime_workload",
-                        private,
-                        str(folder),
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    stdout=stdout,
-                    stderr=stderr,
-                    timeout=max(0, deadline - time.monotonic()),
-                    check=False,
-                )
-        assert completed.returncode == 0, (folder / "stderr.txt").read_text()
+        cohorts.append(
+            Cohort(
+                arguments=(
+                    sys.executable,
+                    "-X",
+                    "tracemalloc=1",
+                    "-m",
+                    "tests.measurements.lifetime_workload",
+                    private,
+                    str(folder),
+                ),
+                home=Path(private),
+                folder=folder,
+            )
+        )
+    parents = asyncio.run(run_cohorts(tuple(cohorts), deadline))
+    assert len(parents) == 3
+    assert all(parent.reaped and parent.returncode == 0 for parent in parents)
+    for run, cohort in enumerate(cohorts):
+        assert time.monotonic() < deadline
+        folder = cohort.folder
         result = RunResult.model_validate_json((folder / "stdout.json").read_bytes())
+        assert time.monotonic() < deadline
         helpers = tuple(
             HELPER_MEASUREMENT.validate_json(line)
             for line in (folder / "helpers.jsonl").read_bytes().splitlines()
@@ -80,6 +97,7 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
             Point.model_validate_json(line)
             for line in (folder / "points.jsonl").read_bytes().splitlines()
         )
+        assert time.monotonic() < deadline
         assert tuple(cycle.workload for cycle in result.cycles) == SEQUENCE
         assert len(result.cycles) == 80
         assert len(result.settled) == 8
@@ -145,7 +163,8 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
                     },
                 )
             )
-        shutil.rmtree(private)
+        assert time.monotonic() < deadline
+        shutil.rmtree(cohort.home)
         report.environment[f"parent_{run}_heap_peak_bytes"] = max(
             point.heap_peak_bytes for point in points
         )
@@ -163,4 +182,5 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
         report.gates[f"parent_{run}_explicit_settlement"] = True
 
     report.gates["all_240_cycles"] = len(report.samples) == 240
+    report.gates["within_command_deadline"] = time.monotonic() < deadline
     assert all(report.gates.values())
