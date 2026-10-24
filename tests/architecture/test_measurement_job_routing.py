@@ -18,6 +18,14 @@ PRODUCER_STEPS = {
         "provider_upload",
         "protocol_models_measurement",
         "protocol_upload",
+        "full_disk_prepare",
+        "full_disk",
+        "full_disk_evidence",
+        "full_disk_cleanup",
+        "full_disk_upload",
+        "lifetime_measurement",
+        "lifetime_evidence",
+        "lifetime_upload",
         "final_sync",
     ),
     "pricing-measurements": (
@@ -79,7 +87,7 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
         {"os": "ubuntu-24.04", "python": "3.15.0", "databases": "sqlite,postgresql"},
         {"os": "macos-15", "python": "3.11.17", "databases": "sqlite"},
     ]
-    assert "uv run --no-sync pytest -q" in commands
+    assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
     assert "pricing_command" not in commands
     for required in (
@@ -161,6 +169,103 @@ def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> Non
         for identity in selected
         if identity.endswith("_upload")
     )
+
+
+def test_lifetime_route_preserves_private_evidence_before_disposal() -> None:
+    selected = steps(table(workflow_jobs()["resource-measurements"]))
+    required = (
+        "protocol_upload",
+        "full_disk_prepare",
+        "full_disk",
+        "full_disk_evidence",
+        "full_disk_cleanup",
+        "full_disk_upload",
+        "lifetime_measurement",
+        "lifetime_evidence",
+        "lifetime_upload",
+        "final_sync",
+    )
+
+    positions = [list(selected).index(identity) for identity in required]
+
+    assert positions == sorted(positions)
+    preparation = str(selected["full_disk_prepare"]["run"])
+    assert 'mktemp -d "$RUNNER_TEMP/kora-full-disk.XXXXXX"' in preparation
+    assert preparation.index('>> "$GITHUB_ENV"') < preparation.index("sudo mount")
+    assert (
+        'sudo mount -t tmpfs -o "size=16m,uid=$(id -u),gid=$(id -g),'
+        'mode=0700,nodev,nosuid" tmpfs "$KORA_FULL_DISK_MOUNT"'
+    ) in preparation
+    assert selected["full_disk"]["run"] == (
+        "uv run --no-sync pytest -q "
+        "--junitxml=measurements/conformance-full-disk/tests.xml "
+        "tests/conformance/lifetime_full_disk.py\n"
+    )
+    assert selected["full_disk_cleanup"]["run"] == (
+        'test "$FULL_DISK_EVIDENCE_OUTCOME" = success\n'
+        'test -n "$KORA_LIFETIME_FULL_DISK_ROOT"\n'
+        'sudo umount "$KORA_LIFETIME_FULL_DISK_ROOT"\n'
+        'rmdir "$KORA_LIFETIME_FULL_DISK_ROOT"\n'
+    )
+    assert table(selected["full_disk_cleanup"]["env"]) == {
+        "FULL_DISK_EVIDENCE_OUTCOME": "${{ steps.full_disk_evidence.outcome }}"
+    }
+    assert str(selected["full_disk_evidence"]["run"]).startswith(
+        'test "$FULL_DISK_PREPARE_OUTCOME" = success\n'
+    )
+    assert (
+        "uv run --no-sync python -m tests.measurements.lifetime_evidence "
+        'full-disk "$KORA_LIFETIME_FULL_DISK_ROOT" '
+        '"$PWD/measurements/conformance-full-disk"\n'
+    ) in str(selected["full_disk_evidence"]["run"])
+    assert (
+        'KORA_MEASUREMENT_OUTPUT="$PWD/measurements/conformance-lifetime/report.json"'
+        " \\\n"
+        "  uv run --no-sync pytest -q -p no:logging -m measurement "
+        "--junitxml=measurements/conformance-lifetime/tests.xml "
+        "tests/measurements/test_conformance_lifetime.py\n"
+    ) in str(selected["lifetime_measurement"]["run"])
+    assert selected["lifetime_evidence"]["run"] == (
+        "uv run --no-sync python -m tests.measurements.lifetime_evidence "
+        'cohorts "$PWD/measurements/conformance-lifetime" '
+        '"$KORA_LIFETIME_MEASUREMENT_OUTCOME" /tmp\n'
+    )
+    assert table(selected["lifetime_evidence"]["env"]) == {
+        "KORA_LIFETIME_MEASUREMENT_OUTCOME": (
+            "${{ steps.lifetime_measurement.outcome }}"
+        )
+    }
+    for identity in ("full_disk_evidence", "full_disk_cleanup", "full_disk_upload"):
+        assert selected[identity]["if"] == (
+            "${{ always() && !cancelled() && "
+            "steps.full_disk_prepare.outcome != 'skipped' }}"
+        )
+    for identity in ("lifetime_evidence", "lifetime_upload"):
+        assert selected[identity]["if"] == (
+            "${{ always() && !cancelled() && "
+            "steps.lifetime_measurement.outcome != 'skipped' }}"
+        )
+    for identity in ("full_disk_evidence", "lifetime_measurement"):
+        environment = table(selected[identity]["env"])
+        assert environment["KORA_LIFETIME_CHECKOUT_REVISION"] == (
+            "${{ steps.source_revision.outputs.checkout_revision }}"
+        )
+        assert environment["KORA_MEASUREMENT_REVISION"] == (
+            "${{ github.event.pull_request.head.sha || github.sha }}"
+        )
+    for identity, directory, artifact in (
+        ("full_disk_upload", "conformance-full-disk", "conformance-full-disk-evidence"),
+        ("lifetime_upload", "conformance-lifetime", "conformance-lifetime-measurement"),
+    ):
+        assert selected[identity]["uses"] == (
+            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+        )
+        assert table(selected[identity]["with"]) == {
+            "name": artifact,
+            "path": f"measurements/{directory}",
+            "if-no-files-found": "error",
+            **({"include-hidden-files": True} if identity == "lifetime_upload" else {}),
+        }
 
 
 @pytest.mark.parametrize(
