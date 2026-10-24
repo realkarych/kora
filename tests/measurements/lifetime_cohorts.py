@@ -43,38 +43,43 @@ class Parent:
 async def wait_parents(
     parents: list[Parent], deadline: float, *, successful: bool, fallback: bool
 ) -> None:
-    while True:
-        pending: set[asyncio.Future[None]] = set()
-        for parent in parents:
-            process = parent.process
-            code = process.poll()
-            anchor = parent.anchor
-            if code is None and anchor is not None and anchor.exited:
-                code = process.wait()
-            if code is not None:
-                if successful and code != 0:
-                    raise RuntimeError(
-                        f"measurement parent {process.pid} exited {code}"
-                    )
-                continue
-            if anchor is None or anchor.unknown:
-                if not fallback:
-                    raise RuntimeError("measurement parent exit observation unknown")
-                try:
-                    process.wait(timeout=max(0, deadline - time.monotonic()))
-                except subprocess.TimeoutExpired as failure:
-                    raise TimeoutError("measurement parent reap deadline") from failure
-                continue
-            pending.add(anchor.readiness)
-        if not pending:
-            return
-        completed, _ = await asyncio.wait(
-            pending,
-            timeout=max(0, deadline - time.monotonic()),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if not completed:
-            raise TimeoutError("measurement cohort deadline")
+    cutoff: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    try:
+        while True:
+            pending: set[asyncio.Future[None]] = {cutoff}
+            live = 0
+            for parent in parents:
+                process = parent.process
+                code = process.poll()
+                anchor = parent.anchor
+                if code is None and anchor is not None and anchor.exited:
+                    code = process.wait()
+                if code is not None:
+                    if successful and code != 0:
+                        raise RuntimeError(
+                            f"measurement parent {process.pid} exited {code}"
+                        )
+                    continue
+                live += 1
+                if anchor is None or anchor.unknown:
+                    if not fallback:
+                        raise RuntimeError(
+                            "measurement parent exit observation unknown"
+                        )
+                    continue
+                pending.add(anchor.readiness)
+            if not live:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("measurement cohort deadline")
+            await asyncio.wait(
+                pending,
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+    finally:
+        cutoff.cancel()
 
 
 def signal_parents(parents: list[Parent], value: signal.Signals) -> None:
