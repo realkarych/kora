@@ -74,3 +74,13 @@ def kora_secrets_forbidden_reference() -> object:
 @pytest.fixture
 def kora_secrets_listed_prefix() -> object:
     raise ConformanceFixtureMissing("kora_secrets_listed_prefix")
+
+
+@pytest.fixture
+def kora_artifact_storage_factory() -> object:
+    raise ConformanceFixtureMissing("kora_artifact_storage_factory")
+
+
+@pytest.fixture
+def kora_artifact_storage_exercise() -> object:
+    raise ConformanceFixtureMissing("kora_artifact_storage_exercise")
