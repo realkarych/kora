@@ -37,6 +37,7 @@ from kora.ir.json import (
 
 MAX_TOKEN: int = 2_147_483_647
 MAX_SUM: int = 9_007_199_254_740_991
+MAX_IDENTIFIER_LENGTH: int = 256
 MAX_MONEY: Decimal = Decimal("99999999999999.9999999999")
 MONEY_PATTERN: re.Pattern[str] = re.compile(
     r"(?:0|[1-9][0-9]{0,13})(?:\.[0-9]{0,9}[1-9])?"
@@ -116,7 +117,7 @@ def quantize_money(value: Decimal) -> str:
 
 
 def identifier(value: str) -> str:
-    if not value or len(value) > 256 or not value.isprintable():
+    if not value or len(value) > MAX_IDENTIFIER_LENGTH or not value.isprintable():
         raise refusal()
     return value
 
@@ -218,7 +219,13 @@ class CostValue(BaseModel):
         cls, value: object, handler: ModelWrapValidatorHandler[Self]
     ) -> Self:
         try:
-            preflight(value, CanonicalBudget(cls.byte_limit))
+            if isinstance(value, Mapping):
+                entries = cast("Mapping[object, object]", value)
+                for name in ("id", "namespace_id", "model", "observation_id"):
+                    item = entries.get(name)
+                    if type(item) is str and len(item) > MAX_IDENTIFIER_LENGTH:
+                        raise refusal()
+            preflight(cast("object", value), CanonicalBudget(cls.byte_limit))
             if isinstance(value, Mapping):
                 for key in cast("Mapping[object, object]", value):
                     if not isinstance(key, str) or key not in cls.model_fields:

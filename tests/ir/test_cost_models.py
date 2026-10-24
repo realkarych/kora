@@ -1,5 +1,7 @@
 import json
 from datetime import UTC, datetime
+from traceback import format_exception
+from types import MappingProxyType
 from typing import cast
 
 import pytest
@@ -346,6 +348,99 @@ def test_cost_validation_errors_are_content_free(payload: dict[str, object]) -> 
 
     assert "SECRET" not in rendered
     assert safe
+
+
+@pytest.mark.parametrize("input_form", ["direct", "mapping", "json"])
+@pytest.mark.parametrize(
+    ("model_type", "field", "payload"),
+    [
+        (PriceRevision, "id", revision_payload({})),
+        (PriceRevision, "namespace_id", revision_payload({})),
+        (UsageRow, "model", usage_payload()),
+        (UsageRow, "observation_id", usage_payload()),
+    ],
+)
+def test_identifier_exact_length_remains_valid(
+    model_type: type[PriceRevision] | type[UsageRow],
+    field: str,
+    payload: dict[str, object],
+    input_form: str,
+) -> None:
+    identifier = "x" * 256
+    original = model_type.model_validate(payload).model_dump(mode="json")
+    original[field] = identifier
+    encoded = json.dumps(original)
+
+    if input_form == "json":
+        value = model_type.model_validate_json(encoded)
+    else:
+        value = model_type.model_validate(
+            MappingProxyType(original) if input_form == "mapping" else original
+        )
+
+    assert value.model_dump(mode="json")[field] == identifier
+    assert json.dumps(original) == encoded
+
+
+@pytest.mark.parametrize("input_form", ["direct", "mapping", "json"])
+@pytest.mark.parametrize(
+    ("model_type", "field", "payload"),
+    [
+        (PriceRevision, "id", revision_payload({})),
+        (PriceRevision, "namespace_id", revision_payload({})),
+        (UsageRow, "model", usage_payload()),
+        (UsageRow, "observation_id", usage_payload()),
+    ],
+)
+def test_identifier_overlength_refusal_is_content_free_without_mutation(
+    model_type: type[PriceRevision] | type[UsageRow],
+    field: str,
+    payload: dict[str, object],
+    input_form: str,
+) -> None:
+    original = model_type.model_validate(payload).model_dump(mode="json")
+    original[field] = "IDENTIFIER_SECRET".ljust(257, "x")
+    encoded = json.dumps(original)
+
+    if input_form == "json":
+        with pytest.raises(
+            ValidationError, match="invalid accounting value"
+        ) as refused:
+            model_type.model_validate_json(encoded)
+    else:
+        with pytest.raises(
+            ValidationError, match="invalid accounting value"
+        ) as refused:
+            model_type.model_validate(
+                MappingProxyType(original) if input_form == "mapping" else original
+            )
+    safe = safe_field_errors(
+        refused.value, frozenset(model_type.model_fields), "Invalid cost value."
+    )
+
+    assert safe[0].type == "cost_invalid"
+    assert "SECRET" not in "".join(format_exception(refused.value)) + repr(safe)
+    assert json.dumps(original) == encoded
+
+
+@pytest.mark.parametrize("input_form", ["direct", "mapping", "json"])
+def test_opaque_source_does_not_apply_typed_identifier_limits(input_form: str) -> None:
+    identifiers = dict.fromkeys(
+        ("id", "namespace_id", "model", "observation_id"), "x" * 257
+    )
+    source = {**identifiers, "nested": [{"values": dict(identifiers)}]}
+    payload = usage_payload(source=source, observed_at="2026-10-23T00:00:00Z")
+    encoded = json.dumps(payload)
+
+    if input_form == "json":
+        value = UsageRow.model_validate_json(encoded)
+    else:
+        value = UsageRow.model_validate(
+            MappingProxyType(payload) if input_form == "mapping" else payload
+        )
+
+    assert value.model_dump(mode="json")["source"] == source
+    assert json.dumps(payload) == encoded
 
 
 @pytest.mark.parametrize(
