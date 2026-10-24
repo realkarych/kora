@@ -112,6 +112,12 @@ def test_storage_required_gate_keeps_failed_dependencies_and_evidence_visible() 
     assert "steps.download.outcome == 'success'" in str(checks["union"]["if"])
     assert checks["upload"]["if"] == "${{ always() }}"
     assert table(checks["upload"]["with"])["if-no-files-found"] == "error"
+    assert "workflow_cancellation" in checks
+    assert checks["workflow_cancellation"]["if"] == "${{ cancelled() }}"
+    assert checks["workflow_cancellation"]["run"] == "exit 0"
+    assert table(final["env"])["WORKFLOW_CANCELLED"] == (
+        "${{ steps.workflow_cancellation.outcome != 'skipped' }}"
+    )
 
 
 @pytest.mark.parametrize(

@@ -190,6 +190,10 @@ jobs:
           name: storage-union-${{ env.KORA_MEASUREMENT_REVISION }}
           path: measurements/storage-union.json
           if-no-files-found: error
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
       - name: Require both platforms and complete evidence
         if: ${{ always() }}
         env:
@@ -199,7 +203,7 @@ jobs:
           DOWNLOAD_RESULT: ${{ steps.download.outcome }}
           UNION_RESULT: ${{ steps.union.outcome }}
           UPLOAD_RESULT: ${{ steps.upload.outcome }}
-          WORKFLOW_CANCELLED: ${{ cancelled() }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
           test "$LINUX_RESULT" = success
           test "$MACOS_RESULT" = success
