@@ -38,6 +38,8 @@ The repository contains an importable typed Python package with the logging boot
 
 ## Tool setup
 
+Local-storage implementation amendment dated 2026-10-23: the [#255 plan](https://github.com/realkarych/kora/issues/255#issuecomment-6371758782) was approved by the project owner. Exact verification wording remains pending line-by-line owner review in the implementation PR. The local provider owns mandatory Linux/macOS conformance, real filesystem-pressure recovery and resource evidence; private SQLite is separate from metadata-database test selection.
+
 Use Linux or macOS, Git, Bash, ripgrep and the pinned uv, Python, Node and pnpm toolchain. The default development interpreter is recorded in [`.python-version`](../.python-version); Node is recorded in [`web/.node-version`](../web/.node-version), pnpm in [`web/package.json`](../web/package.json), and Python tools in [`pyproject.toml`](../pyproject.toml) and [`uv.lock`](../uv.lock). The [dated research](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md) records exact versions and selection evidence.
 
 Install the pinned uv with its versioned installer, following the [official installation instructions](https://docs.astral.sh/uv/getting-started/installation/) to make it available in your shell:
@@ -299,3 +301,21 @@ IR document measurement amendment dated 2026-10-23: reviewed and accepted by the
 The required IR measurement includes complete materialized documents at 1, 100 and 1,000 nodes, nested body composition, serialization and early, late and dense-invalid refusals. Repeated workers trace model references through records, arrays and maps and record peak and retained Python memory, native-inclusive RSS and owned threads, descriptors and subprocesses. Existing workloads, samples and resource-release gates remain. These measurements do not implement fan-out expansion, semantic validation or scheduling.
 
 IR measurement capacity amendment dated 2026-10-23: the project owner reviewed and approved the independent-runner schedule and process watchdog limits under issue #218 on 2026-10-23.
+
+## Local artifact storage qualification
+
+The local provider's [selected contract](../knowledge/specs/protocols.md#74-local-provider-implementation-contract-issue-255) is qualified separately from future API/metadata/retention consumers. Run its real integration, protocol and reusable conformance checks with the locked development environment:
+
+```bash
+uv run --no-sync pytest -q tests/plugins/storage tests/protocols
+uv run --no-sync pytest -q tests/conformance/test_artifact_storage_conformance.py
+KORA_MEASUREMENT_REVISION="$(git rev-parse HEAD)" \
+  KORA_STORAGE_EVIDENCE=/absolute/path/to/storage-evidence \
+  uv run --no-sync pytest -q -m measurement tests/measurements/test_artifact_storage_lifetime.py
+```
+
+The numerical command runs three independent long-lived processes. Its manifest fixes the selected small size for every ending, 100 cycles with one warmup, ten-cycle quiescent points and allocation evidence at 50/100; maximum 16 MiB/256 MiB traces retain one warmup and three cycles per process. Preserve raw reports, executed/captured status, actual source/revision and separate observation timings. A fixed binary row checkpoint records completed cycles outside the timed region; after actual child exit the parent preserves partial results with failed completion gates. It provides process-timeout evidence, without a power-loss durability claim. Set KORA_STORAGE_LOAD_CONTEXT=shared_local_sessions when other local sessions may execute concurrently; the approved shared-host policy does not change cycles, limits or acceptance thresholds. The [evidence record](../knowledge/reviews/local-artifact-storage-2026-10-23.md) distinguishes implemented-provider evidence from pending consumers and records baseline/budget qualification.
+
+Real filesystem-pressure tests use a bounded 64 MiB image and a separate fixture owner. Linux requires `mkfs.ext4`, `losetup`, `mount`, `umount` and passwordless fixed-argument `sudo -n` attach/mount/detach operations. macOS uses `hdiutil` with an HFS+ image without sudo; ordinary provider tests run on APFS/HFS+ or ext4. Missing tools or privileges fail rather than skip. The unprivileged workload never fills the host filesystem. Preserve unknown ownership manifests; the explicit `python -m tests.plugins.storage.pressure_controller --recover /absolute/path/pressure-manifest.json` path proves old process closure and exact image/device identity before cleanup.
+
+The [storage workflow](../.github/workflows/storage.yml) runs mandatory Linux/macOS producers and an always-running evidence gate independently of existing IR/CEL and scaffold jobs. Every producer checks out the requested head, verifies the installed source, preserves failure output and uploads its raw evidence. A separate qualification job per operating system runs boundary, sink, pressure and crash scenarios, with fixture recovery and raw ownership export in an always-step. The gate requires successful producer jobs, exact Linux/macOS process/workload/test inventories and matching source/revision; missing, failed, skipped, cancelled or duplicate evidence fails. Existing CI obligations and the ten-minute whole-pipeline limit remain unchanged.
