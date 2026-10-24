@@ -2,19 +2,21 @@ import asyncio
 from typing import cast
 
 import pytest
-from sqlalchemy import Connection, event, text
+from sqlalchemy import Connection, event, inspect, text
 
 from kora.db import DB_COMPONENT
 from kora.db.connection import (
     Database,
     DatabaseClosedError,
     DatabaseSettings,
+    Dialect,
     Lifecycle,
 )
 from kora.db.migrations import upgrade_database
 from kora.observability import Level, LoggingSettings
 from tests.db.closing import ShutdownDuringClose, narrow_database, until
-from tests.db.seed import Seeder
+from tests.db.seed import Seeder, seed_predecessor
+from tests.db.test_pricing_migration import retained_index_progress, wait_for_index
 from tests.observability.conftest import Configure, Pipe
 
 DB_EVENTS: frozenset[str] = frozenset(
@@ -74,7 +76,7 @@ async def test_a_refused_commit_records_failure_and_never_finished(
     diagnostics.shutdown()
     finished_output(pipe)
 
-    assert report.steps == 1
+    assert report.steps == 2
     assert db_events(pipe) == [
         "db.transaction.failed",
         "db.migration.started",
@@ -104,9 +106,14 @@ async def test_a_refused_migration_commit_leaves_no_finished_record(
     ]
 
 
+def refuse_migration_commit(connection: Connection) -> None:
+    if inspect(connection).has_table("alembic_version"):
+        raise CommitRefused()
+
+
 def refusing_commits(settings: DatabaseSettings) -> Database:
     database = Database(settings)
-    event.listen(database.writer_engine.sync_engine, "commit", refuse_commit)
+    event.listen(database.writer_engine.sync_engine, "commit", refuse_migration_commit)
     return database
 
 
@@ -314,3 +321,56 @@ def test_a_close_cancelled_by_loop_shutdown_records_nothing(
 
     assert db_events(pipe) == []
     assert shutdown.lifecycle_after_shutdown() is Lifecycle.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pricing_upgrade_keeps_diagnostics_content_free(
+    configure: Configure, pipe: Pipe, empty_database_settings: DatabaseSettings
+) -> None:
+    if empty_database_settings.dialect is Dialect.POSTGRESQL:
+        await retained_index_progress(empty_database_settings)
+    else:
+        initial = Database(empty_database_settings)
+        try:
+            async with initial.transaction() as connection:
+                await connection.run_sync(seed_predecessor)
+        finally:
+            await initial.close()
+    diagnostics = configure(
+        LoggingSettings(
+            level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
+        ),
+        pipe.write_end,
+    )
+    pipe.reader.start()
+    database = Database(empty_database_settings)
+    opened: list[Database] = []
+
+    def open_upgrade(settings: DatabaseSettings) -> Database:
+        migration = Database(settings)
+        opened.append(migration)
+        return migration
+
+    try:
+        async with database.transaction() as holder:
+            await holder.exec_driver_sql(
+                "UPDATE price_table SET model = model WHERE id = 'old-price'"
+            )
+            task = asyncio.create_task(
+                upgrade_database(empty_database_settings, open_upgrade)
+            )
+            if database.dialect is Dialect.POSTGRESQL:
+                await wait_for_index(database)
+            else:
+                await until(lambda: bool(opened) and opened[0].units_in_flight() == 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        diagnostics.shutdown()
+        finished_output(pipe)
+
+        assert set(db_events(pipe)) <= {"db.migration.started"}
+        assert opened[0].units_in_flight() == 0
+        assert opened[0].lifecycle is Lifecycle.CLOSED
+    finally:
+        await database.close()

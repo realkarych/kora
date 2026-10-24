@@ -37,7 +37,7 @@ def run_migrations() -> None:
         target_metadata=metadata,
         compare_type=column_types_differ,
         render_item=render_item,
-        transaction_per_migration=False,
+        transaction_per_migration=connection.dialect.name == "postgresql",
     )
     with context.begin_transaction():
         context.run_migrations()

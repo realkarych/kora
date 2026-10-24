@@ -1,19 +1,37 @@
+import base64
 import hashlib
 import json
+import statistics
 import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, cast
 from xml.parsers.expat import ParserCreate
 
 from pydantic import BaseModel, ConfigDict, StrictBool, TypeAdapter, ValidationError
 
+from tests.measurements.cost_workload import (
+    DENSE_MEASURED as COST_DENSE_MEASURED,
+)
+from tests.measurements.cost_workload import (
+    LARGE_CYCLES,
+    ORDINARY_CYCLES,
+    SUMMARY_BYTES,
+    CostCase,
+    cost_cases,
+)
+from tests.measurements.cost_workload import MEASURED as COST_MEASURED
+from tests.measurements.cost_workload import WARM_UP as COST_WARM_UP
 from tests.measurements.harness import ExtraValue
 from tests.measurements.ir_config_lifetime import CONFIGURATIONS
 from tests.measurements.ir_declaration_workload import LIFETIME_TRIGGERS
 from tests.measurements.ir_document_workload import LIFETIME_DOCUMENT, graph_inventory
 from tests.measurements.ir_remaining_workload import OPEN, REFUSED_OPEN
 from tests.measurements.test_ir_models_cost import (
+    COST_RETAINED_LIMIT_BYTES,
+    COST_RSS_LIMIT_BYTES,
+    COST_TIMING_LIMIT_SECONDS,
     DENSE_MEASURED,
     FAILURE_CYCLES,
     FAILURES,
@@ -31,6 +49,14 @@ MODULE = "tests/measurements/test_ir_models_cost.py"
 NODE = f"{MODULE}::"
 SELECTED_NODES = TypeAdapter(list[str])
 VCS_REF_MANIFEST = TypeAdapter(dict[str, dict[str, int]])
+ACCOUNTING_OUTPUT_LIMIT: int = 262_144
+ACCOUNTING_ENCODED_LIMIT: int = ((ACCOUNTING_OUTPUT_LIMIT + 2) // 3) * 4
+ACCOUNTING_ENVELOPE_LIMIT: int = 2 * ACCOUNTING_ENCODED_LIMIT + 8192
+ACCOUNTING_CHECKPOINTS: TypeAdapter[list[dict[str, int]]] = TypeAdapter(
+    list[dict[str, int]]
+)
+ACCOUNTING_PATHS: TypeAdapter[list[str]] = TypeAdapter(list[str])
+ACCOUNTING_CASES: TypeAdapter[dict[str, list[str]]] = TypeAdapter(dict[str, list[str]])
 
 
 @dataclass(frozen=True)
@@ -62,6 +88,185 @@ class MeasurementReport(BaseModel):
     gates: dict[str, StrictBool]
     durations_seconds: dict[str, float]
     samples: list[MeasurementSample]
+
+
+class AccountingProcess(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    revision: str
+    run: int
+    mode: Literal["timing", "traced", "native"]
+    group: Literal["ordinary", "large"]
+    batch: int
+    cases: list[str]
+    pid: int
+    code: int
+    timed_out: StrictBool
+    overflow: StrictBool
+    elapsed_seconds: float
+    stdout_base64: str
+    stderr_base64: str
+    output_scope: str
+
+
+class AccountingEnvironment(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    run: str
+    pid: int
+    pydantic: str
+    pydantic_core: str
+    executable: str
+    cwd: str
+    warm_up: int
+    ordinary_measured: int
+    large_measured: int
+    operations_per_batch: int
+    ordinary_cycles: int
+    large_cycles: int
+    rss_source: str
+    peak_rss_source: str
+    unowned_resources: str
+
+
+class AccountingLifetimeEnvironment(AccountingEnvironment):
+    traced: StrictBool
+    cycles: int
+    successes: int
+    refusals: int
+    retaining_paths: str
+    checkpoints: str
+
+
+@dataclass(frozen=True)
+class AccountingChild:
+    identity: str
+    node: str
+    run: int
+    mode: Literal["timing", "traced", "native"]
+    group: Literal["ordinary", "large"]
+    batch: int
+    cases: tuple[CostCase, ...]
+
+    def samples(self) -> Counter[tuple[str, int, int]]:
+        if self.mode == "timing":
+            return Counter(
+                (f"cost_{case.name}", repeat, case.records)
+                for case in self.cases
+                for repeat in range(
+                    COST_MEASURED if self.group == "ordinary" else COST_DENSE_MEASURED
+                )
+            )
+        return Counter(
+            {(f"cost_{self.group}_{self.mode}_lifetime", 0, self.cycles()): 1}
+        )
+
+    def cycles(self) -> int:
+        return ORDINARY_CYCLES if self.group == "ordinary" else LARGE_CYCLES
+
+    def parent_sample(self) -> tuple[str, int, int]:
+        workload = (
+            f"cost_{self.group}_timing_process"
+            if self.mode == "timing"
+            else f"cost_{self.mode}_{self.group}_lifetime_process"
+        )
+        return workload, self.run, 1
+
+
+def accounting_children(actions: list[CostCase] | None = None) -> list[AccountingChild]:
+    if actions is None:
+        actions = cost_cases()
+    children: list[AccountingChild] = []
+    groups: tuple[Literal["ordinary", "large"], ...] = ("ordinary", "large")
+    modes: tuple[Literal["traced", "native"], ...] = ("traced", "native")
+    for run in range(3):
+        for group in groups:
+            selected = tuple(case for case in actions if case.group == group)
+            timing_batches = [selected]
+            if group == "large":
+                timing_batches = [
+                    tuple(
+                        case
+                        for case in selected
+                        if not case.name.startswith("snapshot_bytes")
+                    )
+                ]
+                timing_batches.extend(
+                    (case,)
+                    for case in selected
+                    if case.name.startswith("snapshot_bytes")
+                )
+            for batch, batch_cases in enumerate(timing_batches):
+                children.append(
+                    AccountingChild(
+                        f"cost_timing_{group}_{batch}_{run}",
+                        f"{NODE}test_accounting_value_cost[{group}-{run}]",
+                        run,
+                        "timing",
+                        group,
+                        batch,
+                        batch_cases,
+                    )
+                )
+            for mode in modes:
+                batches = (
+                    [(case,) for case in selected]
+                    if mode == "traced" and group == "large"
+                    else [selected]
+                )
+                for batch, batch_cases in enumerate(batches):
+                    name = (
+                        batch_cases[0].name
+                        if mode == "traced" and group == "large"
+                        else "all"
+                    )
+                    children.append(
+                        AccountingChild(
+                            f"cost_{mode}_{group}_{name}_{run}",
+                            f"{NODE}test_accounting_value_lifetime"
+                            f"[{mode == 'traced'}-{group}-{run}]",
+                            run,
+                            mode,
+                            group,
+                            batch,
+                            batch_cases,
+                        )
+                    )
+    return children
+
+
+def accounting_evidence(children: list[AccountingChild] | None = None) -> Evidence:
+    selected = accounting_children() if children is None else children
+    nodes = {
+        f"{NODE}{name}"
+        for name in (
+            "test_cost_checker_refuses_unexpected_acceptance",
+            "test_cost_checker_refuses_unexpected_rejection",
+            "test_cost_checker_releases_nested_values",
+            "test_cost_process_failure_preserves_lossless_evidence",
+        )
+        if any(child.mode == "timing" for child in selected)
+    }
+    gates: set[str] = set()
+    samples: Counter[tuple[str, int, int]] = Counter()
+    for child in selected:
+        nodes.add(child.node)
+        gates.add(f"{child.identity}_completed")
+        if child.mode == "timing":
+            gates.update(
+                f"{child.identity}_cost_{case.name}_p95" for case in child.cases
+            )
+        else:
+            resource = "heap" if child.mode == "traced" else "rss"
+            cycles = child.cycles()
+            gates.update(
+                f"{child.identity}_{cycle}_{resource}_retained"
+                for cycle in (0, cycles // 3, cycles * 2 // 3, cycles)
+            )
+            gates.add(f"{child.identity}_owned_resources_released")
+        samples.update(child.samples())
+        samples[child.parent_sample()] += 1
+    return Evidence(frozenset(nodes), frozenset(gates), samples)
 
 
 class AllocationDifference(BaseModel):
@@ -122,7 +327,7 @@ def configuration_evidence(run: int) -> Evidence:
     )
 
 
-def expected_evidence() -> Evidence:
+def accepted_evidence() -> Evidence:
     nodes = {f"{NODE}test_ir_model_validation_cost[{name}]" for name in WORKLOADS} | {
         f"{NODE}test_repeated_failures_return_to_baseline",
         f"{NODE}test_shared_diagnostic_action_cost",
@@ -165,6 +370,52 @@ def expected_evidence() -> Evidence:
             gates.add(f"vcs_ref_{mode}_{run}_lifecycle_assertions_passed")
             samples[(f"vcs_ref_{mode}_{run}_process", run, BATCHES * INTERVAL)] += 1
     return Evidence(frozenset(nodes), frozenset(gates), samples)
+
+
+def expected_evidence() -> Evidence:
+    accepted = accepted_evidence()
+    accounting = accounting_evidence()
+    return Evidence(
+        accepted.nodes | accounting.nodes,
+        accepted.gates | accounting.gates,
+        accepted.samples + accounting.samples,
+    )
+
+
+def shard_evidence() -> tuple[Evidence, Evidence, Evidence]:
+    accepted = accepted_evidence()
+    worker1 = configuration_evidence(1)
+    worker2 = configuration_evidence(2)
+    children = accounting_children()
+    timing = accounting_evidence(
+        [child for child in children if child.mode == "timing"]
+    )
+    lifetime = accounting_evidence(
+        [child for child in children if child.mode != "timing"]
+    )
+    return (
+        Evidence(
+            accepted.nodes - worker1.nodes - worker2.nodes,
+            accepted.gates - worker1.gates - worker2.gates,
+            Counter(
+                {
+                    key: count
+                    for key, count in accepted.samples.items()
+                    if key not in worker1.samples and key not in worker2.samples
+                }
+            ),
+        ),
+        Evidence(
+            worker1.nodes | timing.nodes,
+            worker1.gates | timing.gates,
+            worker1.samples + timing.samples,
+        ),
+        Evidence(
+            worker2.nodes | lifetime.nodes,
+            worker2.gates | lifetime.gates,
+            worker2.samples + lifetime.samples,
+        ),
+    )
 
 
 def junit_nodes(document: str) -> frozenset[str]:
@@ -302,10 +553,262 @@ def verify_vcs_ref_evidence(report: MeasurementReport, expected: Evidence) -> No
                 raise ValueError("incomplete IR VcsRef lifetime evidence")
 
 
+def accounting_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("incomplete IR accounting evidence")
+    return result
+
+
+def accounting_json(raw: object, limit: int) -> object:
+    if not isinstance(raw, str) or len(raw) > limit or len(raw.encode()) > limit:
+        raise ValueError("incomplete IR accounting evidence")
+    return cast(object, json.loads(raw, object_pairs_hook=accounting_object))
+
+
+def accounting_stream(encoded: str) -> bytes:
+    if len(encoded) > ACCOUNTING_ENCODED_LIMIT or not encoded.isascii():
+        raise ValueError("incomplete IR accounting evidence")
+    decoded = base64.b64decode(encoded, validate=True)
+    if (
+        len(decoded) > ACCOUNTING_OUTPUT_LIMIT
+        or base64.b64encode(decoded).decode("ascii") != encoded
+    ):
+        raise ValueError("incomplete IR accounting evidence")
+    return decoded
+
+
+def accounting_sample_values(
+    samples: list[MeasurementSample],
+) -> Counter[tuple[str, int, int, float, float]]:
+    return Counter(
+        (
+            sample.workload,
+            sample.repeat,
+            sample.count,
+            sample.seconds,
+            sample.us_per_record,
+        )
+        for sample in samples
+    )
+
+
+def verify_accounting_lifetime(
+    environment: AccountingLifetimeEnvironment, child: AccountingChild
+) -> None:
+    points = ACCOUNTING_CHECKPOINTS.validate_python(
+        accounting_json(environment.checkpoints, ACCOUNTING_OUTPUT_LIMIT), strict=True
+    )
+    paths = ACCOUNTING_PATHS.validate_python(
+        accounting_json(environment.retaining_paths, ACCOUNTING_OUTPUT_LIMIT),
+        strict=True,
+    )
+    cycles = child.cycles()
+    traced = child.mode == "traced"
+    if (
+        environment.traced is not traced
+        or environment.cycles != cycles
+        or environment.successes != cycles * sum(case.accepted for case in child.cases)
+        or environment.refusals
+        != cycles * sum(not case.accepted for case in child.cases)
+        or len(points) != 4
+        or len(paths) != 3
+        or any(len(path.encode()) > SUMMARY_BYTES for path in paths)
+        or not traced
+        and any(paths)
+    ):
+        raise ValueError("inconsistent IR accounting lifetime evidence")
+    fields = {
+        "cycle",
+        "heap",
+        "peak",
+        "tracer",
+        "rss",
+        "high_water",
+        "descriptors",
+        "threads",
+    }
+    if any(set(point) != fields for point in points) or [
+        point["cycle"] for point in points
+    ] != [0, cycles // 3, cycles * 2 // 3, cycles]:
+        raise ValueError("inconsistent IR accounting lifetime evidence")
+    for point in points:
+        if (
+            any(
+                point[name] < 0 or point[name] != points[0][name]
+                for name in ("descriptors", "threads")
+            )
+            or any(
+                point[name] < 0 if traced else point[name] != -1
+                for name in ("heap", "peak", "tracer")
+            )
+            or any(
+                point[name] != -1 if traced else point[name] < 0
+                for name in ("rss", "high_water")
+            )
+            or traced
+            and point["heap"] - points[0]["heap"] > COST_RETAINED_LIMIT_BYTES
+            or not traced
+            and point["rss"] - points[0]["rss"] > COST_RSS_LIMIT_BYTES
+        ):
+            raise ValueError("inconsistent IR accounting lifetime evidence")
+
+
+def verify_accounting_child(
+    report: MeasurementReport, child: AccountingChild
+) -> Counter[tuple[str, int, int, float, float]]:
+    process = AccountingProcess.model_validate(
+        accounting_json(
+            report.environment.get(f"{child.identity}_process"),
+            ACCOUNTING_ENVELOPE_LIMIT,
+        )
+    )
+    if (
+        process.revision != report.revision
+        or (process.run, process.mode, process.group, process.batch)
+        != (child.run, child.mode, child.group, child.batch)
+        or process.cases != [case.name for case in child.cases]
+        or process.pid <= 0
+        or process.code != 0
+        or process.timed_out
+        or process.overflow
+        or process.elapsed_seconds < 0
+        or process.output_scope != "all_runner_retained_bytes_capped_per_stream"
+    ):
+        raise ValueError("inconsistent IR accounting process evidence")
+    raw = report.environment.get(child.identity)
+    if not isinstance(raw, str) or len(raw) > ACCOUNTING_OUTPUT_LIMIT:
+        raise ValueError("incomplete IR accounting child evidence")
+    stdout = accounting_stream(process.stdout_base64)
+    stderr = accounting_stream(process.stderr_base64)
+    if stderr or stdout.decode() != raw:
+        raise ValueError("inconsistent IR accounting child evidence")
+    payload = MeasurementReport.model_validate(
+        accounting_json(raw, ACCOUNTING_OUTPUT_LIMIT)
+    )
+    environment = (
+        AccountingEnvironment.model_validate(payload.environment)
+        if child.mode == "timing"
+        else AccountingLifetimeEnvironment.model_validate(payload.environment)
+    )
+    if (
+        (payload.revision, payload.platform, payload.python)
+        != (report.revision, report.platform, report.python)
+        or environment.run != child.identity
+        or environment.pid != process.pid
+        or not all(
+            (
+                environment.pydantic,
+                environment.pydantic_core,
+                environment.executable,
+                environment.cwd,
+            )
+        )
+        or environment.warm_up != COST_WARM_UP
+        or environment.ordinary_measured != COST_MEASURED
+        or environment.large_measured != COST_DENSE_MEASURED
+        or environment.operations_per_batch != 1
+        or environment.ordinary_cycles != ORDINARY_CYCLES
+        or environment.large_cycles != LARGE_CYCLES
+        or environment.rss_source
+        != (
+            "/bin/ps rss KiB converted to bytes"
+            if report.platform == "darwin"
+            else "/proc/self/statm resident pages converted to bytes"
+        )
+        or environment.peak_rss_source
+        != "getrusage RUSAGE_SELF ru_maxrss converted to bytes"
+        or environment.unowned_resources
+        != "no tasks, connections, timers or subscriptions acquired"
+        or payload.gates
+        or payload.durations_seconds
+        or Counter(
+            (sample.workload, sample.repeat, sample.count) for sample in payload.samples
+        )
+        != child.samples()
+    ):
+        raise ValueError("inconsistent IR accounting child evidence")
+    grouped: dict[str, list[float]] = {}
+    for sample in payload.samples:
+        if (
+            sample.seconds < 0
+            or sample.us_per_record != sample.seconds / sample.count * 1_000_000
+        ):
+            raise ValueError("inconsistent IR accounting sample evidence")
+        grouped.setdefault(sample.workload, []).append(sample.us_per_record)
+    summaries = {
+        name: {
+            "median_us_per_record": statistics.median(values),
+            "p95_us_per_record": sorted(values)[max(0, int(len(values) * 0.95) - 1)],
+            "repeats": len(values),
+        }
+        for name, values in grouped.items()
+    }
+    if payload.summary != summaries:
+        raise ValueError("inconsistent IR accounting sample evidence")
+    if isinstance(environment, AccountingLifetimeEnvironment):
+        verify_accounting_lifetime(environment, child)
+    elif any(
+        summaries[f"cost_{case.name}"]["p95_us_per_record"] * case.records / 1_000_000
+        > COST_TIMING_LIMIT_SECONDS[f"cost_{case.name}"]
+        for case in child.cases
+    ):
+        raise ValueError("inconsistent IR accounting timing evidence")
+    samples = accounting_sample_values(payload.samples)
+    name, repeat, count = child.parent_sample()
+    samples[
+        (
+            name,
+            repeat,
+            count,
+            process.elapsed_seconds,
+            process.elapsed_seconds * 1_000_000,
+        )
+    ] += 1
+    return samples
+
+
+def verify_accounting_evidence(report: MeasurementReport, expected: Evidence) -> None:
+    actions = cost_cases()
+    selected = [
+        child for child in accounting_children(actions) if child.node in expected.nodes
+    ]
+    identities = {child.identity for child in selected}
+    required = identities | {f"{identity}_process" for identity in identities}
+    if {name for name in report.environment if name.startswith("cost_")} != required:
+        raise ValueError("incomplete IR accounting child evidence")
+    try:
+        if selected:
+            inventory: dict[str, list[str]] = {"ordinary": [], "large": []}
+            for case in actions:
+                inventory[case.group].append(case.name)
+            recorded = ACCOUNTING_CASES.validate_python(
+                accounting_json(
+                    report.environment.get("accounting_case_inventory"),
+                    ACCOUNTING_OUTPUT_LIMIT,
+                ),
+                strict=True,
+            )
+            if recorded != inventory:
+                raise ValueError("inconsistent IR accounting case inventory")
+        samples: Counter[tuple[str, int, int, float, float]] = Counter()
+        for child in selected:
+            samples.update(verify_accounting_child(report, child))
+        if samples != accounting_sample_values(
+            [sample for sample in report.samples if sample.workload.startswith("cost_")]
+        ):
+            raise ValueError("inconsistent IR accounting sample evidence")
+    except (ValueError, RecursionError):
+        raise ValueError("incomplete IR accounting evidence") from None
+
+
 def verify_report(
     document: str, junit: str, revision: str, expected: Evidence
 ) -> MeasurementReport:
-    report = MeasurementReport.model_validate_json(document)
+    try:
+        report = MeasurementReport.model_validate_json(document)
+    except ValidationError:
+        raise ValueError("incomplete IR shard evidence") from None
     selected = report.environment.get("selected_test_nodes")
     if not isinstance(selected, str):
         raise ValueError("incomplete IR test inventory")
@@ -330,6 +833,7 @@ def verify_report(
         raise ValueError("incomplete IR shard evidence")
     verify_configuration_payloads(report, expected)
     verify_vcs_ref_evidence(report, expected)
+    verify_accounting_evidence(report, expected)
     repeats = Counter(sample.workload for sample in report.samples)
     if set(report.summary) != set(repeats) or any(
         report.summary[name].get("repeats") != count for name, count in repeats.items()
@@ -340,17 +844,7 @@ def verify_report(
 
 def verify_union(directory: Path, revision: str) -> dict[str, object]:
     full = expected_evidence()
-    worker1 = configuration_evidence(1)
-    worker2 = configuration_evidence(2)
-    expected = (
-        Evidence(
-            full.nodes - worker1.nodes - worker2.nodes,
-            full.gates - worker1.gates - worker2.gates,
-            full.samples - worker1.samples - worker2.samples,
-        ),
-        worker1,
-        worker2,
-    )
+    expected = shard_evidence()
     required_directories = {
         f"ir-models-cost-measurement-{revision}-{run}" for run in range(3)
     }
@@ -410,7 +904,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         frozenset(selected) != full.nodes
         or frozenset(gates) != full.gates
         or samples != full.samples
-        or (len(selected), len(gates), sum(samples.values())) != (330, 446, 7791)
+        or (len(selected), len(gates), sum(samples.values())) != (352, 1211, 10536)
     ):
         raise ValueError("incomplete IR evidence union")
     return {

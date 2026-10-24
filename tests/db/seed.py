@@ -1,12 +1,28 @@
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import insert
+from alembic import command
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    Connection,
+    DateTime,
+    Integer,
+    MetaData,
+    Text,
+    insert,
+    select,
+    table,
+)
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.elements import ColumnClause
 
 from kora.db.identifiers import IdentifierGenerator
+from kora.db.migrations.environment import alembic_config
 from kora.db.tables import (
     api_token,
     attempt,
@@ -19,7 +35,8 @@ from kora.db.tables import (
     usage_record,
     worker,
 )
-from kora.db.types import JsonValue
+from kora.db.types import TIMESTAMP_TEXT_FORMAT, JsonValue
+from tests.support.warning_filters import expression_index_warnings_ignored
 
 START: datetime = datetime(2026, 10, 20, 12, 0, 0, tzinfo=UTC)
 DIGEST: str = "0" * 64
@@ -362,3 +379,312 @@ class Seeder:
             )
         )
         return worker_id
+
+
+@dataclass(frozen=True)
+class PredecessorHistory:
+    columns: dict[str, tuple[str, ...]]
+    rows: dict[str, tuple[dict[str, object], ...]]
+
+
+def predecessor_value(column: Column[object]) -> object:
+    if column.nullable:
+        return None
+    if column.foreign_keys:
+        target = next(iter(column.foreign_keys)).column.table.name
+        return f"old-{target}"
+    if isinstance(column.type, Boolean):
+        return False
+    if isinstance(column.type, Integer):
+        return 1
+    if isinstance(column.type, DateTime):
+        return START
+    if isinstance(column.type, JSON):
+        return {}
+    if isinstance(column.type, Text):
+        return "{}"
+    if column.name in {
+        "created_at",
+        "updated_at",
+        "effective_from",
+        "at",
+        "granted_at",
+        "uploaded_at",
+        "deployed_at",
+        "last_seen_at",
+    }:
+        return START.strftime(TIMESTAMP_TEXT_FORMAT)
+    return "predecessor"
+
+
+def predecessor_snapshot(
+    connection: Connection, columns: dict[str, tuple[str, ...]]
+) -> PredecessorHistory:
+    rows: dict[str, tuple[dict[str, object], ...]] = {}
+    for table_name, names in columns.items():
+        source = table(table_name, *(ColumnClause[object](name) for name in names))
+        rows[table_name] = tuple(
+            dict(row)
+            for row in connection.execute(select(source).order_by(*source.c)).mappings()
+        )
+    return PredecessorHistory(columns, rows)
+
+
+def seed_predecessor(connection: Connection) -> PredecessorHistory:
+    command.upgrade(alembic_config(connection), "0001")
+    frozen = MetaData()
+    with expression_index_warnings_ignored():
+        frozen.reflect(connection)
+    rows: tuple[tuple[str, dict[str, object]], ...] = (
+        ("namespace", {"id": "old-namespace", "name": "old"}),
+        ("namespace", {"id": "other-namespace", "name": "other"}),
+        ("graph", {"id": "old-graph"}),
+        ("graph_version", {"id": "old-graph_version"}),
+        ("run", {"id": "old-run", "status": "running"}),
+        ("node_instance", {"id": "old-node_instance", "status": "running"}),
+        ("api_token", {"id": "old-api_token"}),
+        ("worker", {"id": "old-worker"}),
+        (
+            "attempt",
+            {"id": "old-attempt", "price_table_id": "old-price", "status": "running"},
+        ),
+        (
+            "attempt",
+            {
+                "id": "old-terminal",
+                "number": 2,
+                "price_table_id": "missing-price",
+                "status": "failed",
+            },
+        ),
+        (
+            "attempt",
+            {
+                "id": "old-unpriced",
+                "number": 3,
+                "price_table_id": None,
+                "status": "succeeded",
+            },
+        ),
+        ("attempt_dispatcher", {"id": "old-dispatcher", "mode": "execute"}),
+        ("wait", {"id": "old-wait", "attempt_id": "old-attempt"}),
+        (
+            "approval_request",
+            {
+                "id": "old-approval",
+                "run_cost": {"version": 1, "arbitrary": "historical"},
+            },
+        ),
+        (
+            "approval_request",
+            {"id": "old-other-approval", "run_cost": ["arbitrary", -4]},
+        ),
+        (
+            "price_table",
+            {
+                "id": "old-price",
+                "model": "model-a",
+                "prices": {"legacy": "0.10000000000"},
+            },
+        ),
+        (
+            "price_table",
+            {"id": "old-duplicate", "model": "model-b", "prices": {"legacy": 8}},
+        ),
+        (
+            "price_table",
+            {
+                "id": "old-scoped",
+                "namespace_id": "old-namespace",
+                "model": "model-c",
+                "prices": {"legacy": None},
+            },
+        ),
+        (
+            "price_table",
+            {
+                "id": "old-other-scoped",
+                "namespace_id": "other-namespace",
+                "model": "model-d",
+                "prices": {},
+            },
+        ),
+        (
+            "price_table",
+            {
+                "id": "old-later",
+                "model": "model-a",
+                "effective_from": START + timedelta(days=1),
+                "prices": {"changed": True},
+            },
+        ),
+        (
+            "usage_record",
+            {
+                "id": "old-zero",
+                "model": "model-a",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_tokens": 0,
+                "usd_estimate": "0.0000000000",
+                "source": {"old": [0, "source"]},
+            },
+        ),
+        (
+            "usage_record",
+            {
+                "id": "old-out-of-domain",
+                "attempt_id": "old-terminal",
+                "model": "model-b",
+                "input_tokens": -1,
+                "output_tokens": 0,
+                "reasoning_tokens": 7,
+                "usd_estimate": "-1.2345678901",
+                "source": {"vendor": "untouched"},
+            },
+        ),
+        ("artifact_version", {"id": "old-artifact", "attempt_id": "old-attempt"}),
+        (
+            "artifact_version",
+            {"id": "old-artifact-child", "attempt_id": "old-terminal"},
+        ),
+        (
+            "artifact_lineage",
+            {
+                "artifact_version_id": "old-artifact-child",
+                "consumed_artifact_version_id": "old-artifact",
+            },
+        ),
+        ("session_segment", {"attempt_id": "old-attempt", "offset": 0}),
+        (
+            "event",
+            {
+                "id": "old-event",
+                "run_id": "old-run",
+                "node_instance_id": "old-node_instance",
+                "attempt_id": "old-attempt",
+            },
+        ),
+    )
+    for table_name, overrides in rows:
+        table = frozen.tables[table_name]
+        values = {column.name: predecessor_value(column) for column in table.columns}
+        values.update(overrides)
+        for key, value in values.items():
+            if connection.dialect.name == "sqlite":
+                if isinstance(value, dict | list):
+                    values[key] = json.dumps(value, ensure_ascii=False)
+                elif isinstance(value, datetime):
+                    values[key] = value.strftime(TIMESTAMP_TEXT_FORMAT)
+            elif key == "usd_estimate":
+                values[key] = Decimal(str(value))
+        connection.execute(insert(table).values(**values))
+    if connection.dialect.name == "sqlite":
+        connection.exec_driver_sql(
+            "UPDATE usage_record SET input_tokens = 2147483648, usd_estimate = "
+            "'0.1234567890123456789012345' WHERE id = 'old-out-of-domain'"
+        )
+    columns = {
+        name: tuple(column.name for column in frozen.tables[name].columns)
+        for name in {name for name, _ in rows}
+    }
+    return predecessor_snapshot(connection, columns)
+
+
+def seed_pricing_measurement_history(connection: Connection) -> None:
+    seed_predecessor(connection)
+    frozen = MetaData()
+    with expression_index_warnings_ignored():
+        frozen.reflect(connection)
+
+    def clone(table_name: str, overrides: list[dict[str, object]]) -> None:
+        target = frozen.tables[table_name]
+        original = dict(connection.execute(select(target).limit(1)).mappings().one())
+        rows = [{**original, **values} for values in overrides]
+        connection.execute(insert(target), rows)
+
+    def payload(size: int) -> object:
+        value = {"historical": "x" * (size - 17)}
+        encoded = json.dumps(value, separators=(",", ":"))
+        assert len(encoded.encode()) == size
+        return encoded if connection.dialect.name == "sqlite" else value
+
+    clone(
+        "namespace",
+        [{"id": f"scope-{i}", "name": f"scope-{i}"} for i in range(8)],
+    )
+    scopes = ["old-namespace", "other-namespace", *(f"scope-{i}" for i in range(8))]
+    clone(
+        "run",
+        [
+            {"id": f"ledger-{i}", "namespace_id": scope, "idempotency_key": f"key-{i}"}
+            for i, scope in enumerate(scopes[1:], 1)
+        ],
+    )
+    clone(
+        "node_instance",
+        [{"id": f"ledger-node-{i}", "run_id": f"ledger-{i}"} for i in range(1, 10)],
+    )
+    clone(
+        "attempt",
+        [
+            {
+                "id": f"history-attempt-{i:03d}",
+                "node_instance_id": "old-node_instance"
+                if i % 10 == 0
+                else f"ledger-node-{i % 10}",
+                "number": i + 4,
+                "status": "running" if i % 2 else "succeeded",
+                "price_table_id": None if i % 3 == 0 else "old-price",
+            }
+            for i in range(97)
+        ],
+    )
+    connection.execute(
+        frozen.tables["price_table"].update().values(prices=payload(512))
+    )
+    clone(
+        "price_table",
+        [
+            {
+                "id": f"history-price-{i:04d}",
+                "namespace_id": None if i % 10 == 0 else scopes[i % 10 - 1],
+                "model": f"model-{i}",
+                "prices": payload(512),
+            }
+            for i in range(995)
+        ],
+    )
+    connection.execute(
+        frozen.tables["usage_record"].update().values(source=payload(256))
+    )
+    clone(
+        "usage_record",
+        [
+            {
+                "id": f"history-usage-{i:04d}",
+                "attempt_id": f"history-attempt-{i % 97:03d}",
+                "model": f"usage-model-{i}",
+                "source": payload(256),
+            }
+            for i in range(998)
+        ],
+    )
+    clone(
+        "usage_record",
+        [
+            {
+                "id": "oversized-source",
+                "attempt_id": "old-attempt",
+                "model": "oversized",
+                "source": payload(1_048_576),
+            }
+        ],
+    )
+    connection.execute(
+        frozen.tables["approval_request"].update().values(run_cost=payload(4096))
+    )
+    clone(
+        "approval_request",
+        [{"id": f"history-approval-{i}", "run_cost": payload(4096)} for i in range(23)],
+    )
