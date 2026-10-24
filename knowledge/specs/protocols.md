@@ -267,15 +267,7 @@ class RawEvent:
     kind: str                         # a NormalisedEvent kind, `output`, `command_exited` or a supervisor kind
     data: JsonObject
 
-@dataclass(frozen=True)
-class UsageCoverage:
-    version: Literal[1]
-    observation_id: str | None
-    observation_sequence: int | None
-    completeness: Literal["complete", "partial", "unavailable"]
-    observed_at: datetime | None
-    attribution_gap: bool
-    observation_gap: bool
+from kora.ir.cost import UsageCoverage
 
 @dataclass(frozen=True)
 class Liveness:
@@ -756,25 +748,7 @@ class OutputCandidate:
     source: Literal["structured_output", "result_text"]
     value: JsonValue
 
-@dataclass(frozen=True)
-class UsageRow:
-    model: str
-    input_tokens: int
-    cached_input_tokens: int
-    cache_creation_tokens: int
-    output_tokens: int
-    reasoning_tokens: int
-    known_token_fields: frozenset[str]
-    cache_creation_by_ttl: Mapping[Literal["5m", "1h"], int] | None
-    reported_usd: str | None
-    observation_id: str
-    observation_sequence: int
-    observed_at: datetime
-    completeness: Literal["complete", "partial", "unavailable"]
-    basis: Literal["harness_list", "harness_managed", "price_table", "gateway"]   # the usage_record basis of data-model section 2
-    billing_class: Literal["api_key", "subscription", "gateway", "managed"]
-    delta_of_session_totals: bool
-    source: JsonObject              # the raw harness entry, at most 8 KiB
+from kora.ir.cost import UsageRow
 
 @dataclass(frozen=True)
 class SessionResult:
@@ -797,7 +771,7 @@ class SessionResult:
     policy_bypass: bool
 ```
 
-`UsageRow`, `UsageCoverage` and live monetary fields follow [data-model section 7](data-model.md#7-usage-records-and-completeness-fr-91). `known_token_fields` is a closed set of the five token column names; omitted dimensions remain unknown even when their observed lower bound is zero. Observation identity/order is stable within the attempt and preserved by relay/replay, including across grants; it cannot be regenerated from a heartbeat receipt. Unknown-model observations set an attribution gap instead of creating a synthetic row. Monetary strings use the exact decimal contract; the runner derives pricing coverage, and the engine derives persisted USD. The attempt-level coverage survives an empty `usage` tuple; its independent identity/sequence, initial null state and replay/refusal rules are defined in data-model section 7.2 and also apply to `Liveness`. Polls retain the source revision instead of generating new accounting evidence. A final result alone cannot clear an observation gap. The shared closed models, including bounds and validation, belong to #213 and #156.
+`UsageRow`, `UsageCoverage` and live monetary fields follow [data-model section 7](data-model.md#7-usage-records-and-completeness-fr-91). `known_token_fields` is a closed set of the five token column names; omitted dimensions remain unknown even when their observed lower bound is zero. Observation identity/order is stable within the attempt and preserved by relay/replay, including across grants; it cannot be regenerated from a heartbeat receipt. Unknown-model observations set an attribution gap instead of creating a synthetic row. Monetary strings use the exact decimal contract; the runner derives pricing coverage, and the engine derives persisted USD. The attempt-level coverage survives an empty `usage` tuple; its independent identity/sequence, initial null state and replay/refusal rules are defined in data-model section 7.2 and also apply to `Liveness`. Polls retain the source revision instead of generating new accounting evidence. A final result alone cannot clear an observation gap. The authoritative closed `UsageRow` and `UsageCoverage` models are implemented by #213 in `kora.ir.cost`; the signatures above import those values rather than define another schema. #156 owns their use in the protocol envelopes and #199 owns runner integration. Adapter work item 15 owns native SDK normalization; engine 9 owns persisted USD and ordered acceptance, while API 11 and worker 17 own authorized relay. These consumers remain pending. `PriceRevision`, `PriceRates`, `ModelCost` and `RunCost` share that value module; normalized monetary inputs follow the exact lexical and compatibility rules in data-model sections 7.3 and 7.5. Model validation alone supplies no grant, namespace, attempt or snapshot transaction authority.
 
 `EventSummary` is the adapter's incremental state that `finalise` reads: the harness's parsed result fields (`ResultMessage` on `claude`), per-call usage accumulators by message id, the count of distinct message ids, decided `tool_use_id`s, held error results, harness-denial entries with the count of unmatched ones, whether usage arrived after the first result, and the output-channel decision. Every collection in it is capped by `max_events` or by a fixed limit below, with an overflow count. Usage is not a counted `max_events` kind: its identity/order state must remain bounded independently, using current cumulative model totals, at most 1,024 open messages and bounded source high-water state, never an ever-growing id set. Eviction cannot permit recounting; loss of exact deduplication preserves a gap. `ConfigWarning` and `ContractViolation` (section 12) are aliases of the [shared `Diagnostic`](diagnostics.md), owned by `kora.ir`, with the same source/path/offset and safe-message rules. `check_config` returns configuration-relative warning paths, with `IR008` only for unsupported non-security fields; its consumer rebases them before global ordering. The shared per-call list bounds apply before accumulation; overflow raises the fixed `diagnostics_limit` protocol error and returns no partial success list. The runner validates `SessionResult.output` against the bound `ArtifactType` before returning, so it produces `artifact_invalid` itself; the worker adds duration and provenance (issue #139), and issue #138 maps the result into `AgentSession`. The result's harness identity comes from `SessionSpec.harness` and the worker's provenance, so it is `fake` under the testing composition (issue #136).
 
@@ -1293,6 +1267,7 @@ Identifiers use the existing protocol Identifier domain (1–256 printable non-s
 | promote(request) -> PromotionResult | Create-only publication of the exact selected immutable publishable reference (PreparedContentRef, or unchanged complete SealedStage), never replace; atomic effect-to-creator binding survives lost response/process crash; exact replay yields original created attribution; a new content generation requires a new promotion operation and current stage ownership |
 | observe(operation) -> MutationObservation | Read-only reconciliation from durable evidence; an absent record/object or transport error is not confirmed no-effect/closure |
 | retire_stage(operation, stage) -> StageRetirement | Permanently closes mutation admission for that stage, settles or authoritatively fences all issued stage effects, deletes staging-only data, then returns completed; repeated cleanup never deletes shared content |
+| get_range(content, offset, length) -> closeable async byte stream | Exact bounded range over the same immutable content reference; actual seek, core clipping and empty-EOF handling, typed failure and reader closure follow [bounded range reads](#bounded-storage-range-reads-issue-227) |
 | get(content) -> closeable async byte stream; exists(address) -> content reference or None | Bounded content access; absence is observational and grants no owner/result/closure authority |
 | delete_content(request) -> DeleteResult | Retention only after durable owner fence; idempotent same-operation outcome, unknown remains unknown; core retains fence until every issued call/attempt cannot execute later |
 | release_stage(request) -> pending or released | Acknowledge persisted outcomes and closed issuance after retirement; provider independently verifies stage effects and readers closed before compacting receipts/tombstone. Replays after release cannot recreate stage data |
@@ -1470,6 +1445,12 @@ Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformanc
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2), through the testing runner of [fakes.md section 3](fakes.md#3-the-testing-runner-and-the-scenario-composition).
 
 Which of these cases the fakes pass, which do not apply to them and which they never claim is the applicability matrix of [fakes.md section 8](fakes.md#8-conformance-applicability); their own contracts are in [fakes.md section 10](fakes.md#10-contracts-and-measurements).
+
+### Bounded storage range reads (issue #227)
+
+Add `get_range(content, offset, length)` over the exact immutable content reference of ArtifactStorage, with the same closeable async stream and failure types as `get`. The core validates nonnegative offset, length 1–65,536, clips to known remaining bytes and handles empty content/end offset without opening a provider reader. The provider seeks the requested range and returns exactly that span or a typed failure; streaming/discarding the prefix, short successful EOF and extra bytes are forbidden. `get` remains the complete-content read. Range identity creates no permission, retention owner or durable cursor. Current API authority and original-owner eligibility are rechecked before submission units; physical open readers never renew eligibility. Closure and uncertain cleanup keep the existing ownership contract.
+
+Work item 8 implements this additive method with every real storage provider's existing conformance, following #229. `test_artifact_storage_range_reads_are_exact` covers empty/end offsets, invalid bounds, exact/near-limit spans, missing bytes and actual offset-independent seek. `test_artifact_storage_range_lifetime` covers slow consumers, refusal, cancellation and shutdown, including uncertain cleanup and deletion races. Measure actual readers/tasks/descriptors/buffers and settle repeated applicable endings under [the bounded-read workloads](bounded-read-projections.md#10-activation-observability-and-verification). Retention #216 and API/metadata 5/11/12 own eligibility/shared-owner integration; provider conformance is not their substitute. No provider/fake implementation is introduced by this contract.
 
 ### Artifact-storage contracts (issue #229)
 

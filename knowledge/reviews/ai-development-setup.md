@@ -82,6 +82,12 @@ The ceiling leaves `29.116898204` seconds, approximately `12.83%`, above that re
 
 ## Activation and completion
 
+### Shared accounting foundation
+
+[Issue #213](https://github.com/realkarych/kora/issues/213) activates the shared immutable values and arithmetic, bounded metadata reads, decimal storage, predecessor-compatible forward migration and their content-free refusal/diagnostic tests. The exact active cases and remaining integration contracts are in [data-model section 7.5](../specs/data-model.md#75-future-evidence-and-activation); [the dated evidence record](../research/pricing-foundation-evidence-2026-10-23.md) retains complete component measurements, adverse shared observations, release evidence and failed campaign limits.
+
+Engine price installation, attempt pinning and aggregation; runner observation/replay; adapter normalization; worker/API authorization and relay; approval transactions and surface parity; and budget activation remain pending with their named implementing owners. A successful value or database test cannot satisfy those consumer obligations. The real consumer issues activate their existing correctness, security, resource-lifetime and observability requirements; no duplicate review process or implicit deactivation follows from the completed foundation.
+
 ### Component diagnostics
 
 [Structured component diagnostics](../specs/observability.md) applies across every component row above, beyond the observability-exporter protocol. Its [activation matrix](../specs/observability.md#7-component-coverage-and-activation) names component and all eleven provider obligations; its [future evidence table](../specs/observability.md#8-future-executable-evidence) defines named integration/conformance scenarios. Issue #91 owns pending inventory until each implementation issue assumes its rows before code starts. The first real backend consumer ships shared logging infrastructure and tests; subsequent component PRs include their applicable diagnostics and evidence. The existing shell's functional browser and owned-resource release obligations remain active, with the numerical exclusion below.
