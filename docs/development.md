@@ -1,6 +1,6 @@
 # Development
 
-Parallel measurement scheduling amendment dated 2026-10-24: the owner approved the placement and evidence-gate changes under [issue #213](https://github.com/realkarych/kora/issues/213); the wording below is pending line-by-line owner review.
+Parallel measurement scheduling amendment dated 2026-10-24: the project owner approved the placement and evidence-gate changes under [issue #213](https://github.com/realkarych/kora/issues/213); the wording was reviewed line by line and [approved by the project owner on 2026-10-24](https://github.com/realkarych/kora/issues/213#issuecomment-6377551455).
 
 Review-routing amendment dated 2026-10-23: the implementation plan and replacement local/native review paragraph were approved under [issue #252](https://github.com/realkarych/kora/issues/252#issuecomment-6369819638); final amendment wording remains subject to line-by-line owner review in its PR.
 

@@ -1,6 +1,6 @@
 # Threat model
 
-Pricing foundation amendment dated 2026-10-24: [issue #213](https://github.com/realkarych/kora/issues/213) implements the shared accounting values and metadata foundation; the updated implementation and test evidence wording remains pending line-by-line owner review. Future consumer activation and authority are unchanged.
+Pricing foundation amendment dated 2026-10-24: [issue #213](https://github.com/realkarych/kora/issues/213) implements the shared accounting values and metadata foundation; the updated implementation and test evidence wording was reviewed line by line and [approved by the project owner on 2026-10-24](https://github.com/realkarych/kora/issues/213#issuecomment-6377551455). Future consumer activation and authority are unchanged.
 
 Bounded-read amendment dated 2026-10-23: the project owner approved the contract plan and exact wording under [issue #227](https://github.com/realkarych/kora/issues/227#issuecomment-6371188973).
 
