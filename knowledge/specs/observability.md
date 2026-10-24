@@ -184,7 +184,7 @@ Every provider inherits the injected `ProtocolContext.logger` and the common con
 | Observability exporter | Export degradation/recovery and counted drops | No recursive export of its diagnostics; existing slow/down event-export conformance remains separate |
 | Authentication | Authentication/authorization outcome | No bearer/cookie/login-code values; denied claimed scope does not become canonical context |
 | Sensor | Poll degradation/recovery, timeout/stale observation | No full responses/URLs; unchanged successful polls remain DEBUG |
-| Policy | Decision/outcome and unsupported interception | No tool arguments/secret paths; diagnostic output never replaces durable denial/audit evidence |
+| Policy | Decision/outcome and unsupported interception; active for `allow_deny` under issue #233 (`policy.allow_deny.allowed`, `policy.allow_deny.denied` with its reason and cause, `policy.allow_deny.refused` with its code) | No tool arguments/secret paths, pattern text or tool names; diagnostic output never replaces durable denial/audit evidence |
 
 First-slice activation follows [first-slice.md](first-slice.md): doctor integration is #214, provider CLI/installed-fixture integration is #215, and retention integration is #216. Their startup/client/provider/metadata/storage/scheduler/API diagnostics ship with those components. Existing bootstrap, registry and injected-provider evidence stays active. External exporter and product console/skills rows wait for those implementations; the runnable shell smoke remains active. Local publication `runtime.phase` provenance is a durable domain/audit event, not an operational diagnostic or execution-authority source; the runtime/worker/API own it under [data-model.md](data-model.md#local-publication-provenance).
 

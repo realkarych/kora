@@ -1,18 +1,55 @@
 import gc
 import json
+import statistics
 import time
 import tracemalloc
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
-from kora.conformance.capture import captured
+import kora.conformance.capture as capture_module
+from kora.conformance.capture import Capture, captured
 from kora.conformance.common import CONFORMANCE_COMPONENT
+from kora.ir.json import JsonObject, JsonValue
 from kora.observability import LoggingSettings, ProcessDiagnostics
+from kora.plugins.policy.allow_deny import (
+    DECISION_FUEL,
+    PREPARED_ENTRIES,
+    AllowDenyPolicy,
+)
+from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
 from kora.protocols.identity import GrantBinding
 from kora.protocols.secret_value import SecretScope
-from tests.measurements.harness import Report, Sample, report_lifecycle
+from tests.measurements.harness import (
+    Report,
+    Sample,
+    current_rss_bytes,
+    open_descriptors,
+    peak_rss_bytes,
+    report_lifecycle,
+)
+from tests.measurements.harness_workload import (
+    WORKLOADS,
+    build,
+    encoded_bytes,
+    maximal_result,
+    traced_batch,
+    traced_cycles,
+)
+from tests.measurements.policy_workload import (
+    DECIDED_ROWS,
+    FLOOR_SHARE,
+    FLOORED,
+    REALISTIC,
+    ROWS,
+    PolicyCall,
+    composite_variant,
+    decide,
+    spend,
+)
+from tests.support.heap import recurring_lines, snapshot, top_growth
 from tests.support.observability import run_python
 
 pytestmark = pytest.mark.measurement
@@ -26,6 +63,14 @@ HEAD_BYTES: int = 8
 TRACED_CYCLES: int = 2
 RETAINED_FLOOR_BYTES: int = 4096
 HEAP_GROWTH_LIMIT_BYTES: int = 262_144
+ROW_WARM_UP: int = 3
+ROW_MEASURED: int = 30
+ROW_DENSE_MEASURED: int = 10
+ROW_RETAINED_LIMIT_BYTES: int = 65_536
+POLICY_CEILING_SECONDS: float = 0.1
+POLICY_PEAK_LIMIT_BYTES: int = 16 * 1024 * 1024
+POLICY_CACHE_ENTRY_LIMIT_BYTES: int = 5 * 1024 * 1024
+CAPTURE_MODULE: str = capture_module.__file__ or ""
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
     "start = time.perf_counter()\n"
@@ -172,3 +217,205 @@ def test_secret_registration_cost(report: Report, workload: str) -> None:
         assert diagnostics.registry.count() == 0
         assert growth < HEAP_GROWTH_LIMIT_BYTES
         assert later_growth < retained_limit(count, size)
+
+
+def peak_scope(workload: str, count: int) -> str:
+    kind = "result" if workload.startswith("session_result") else "event"
+    return f"{count} {kind}{'' if count == 1 else 's'} validated per action"
+
+
+def harness_repeats(workload: str) -> int:
+    return ROW_MEASURED if "mixed_small" in workload else ROW_DENSE_MEASURED
+
+
+@pytest.mark.parametrize("workload", WORKLOADS)
+def test_harness_model_validation_cost(report: Report, workload: str) -> None:
+    action, count = build(workload)
+    report.environment[f"{workload}_rss_start_bytes"] = current_rss_bytes()
+    process_peak_before = peak_rss_bytes()
+    for _ in range(ROW_WARM_UP):
+        action()
+    report.environment[f"{workload}_rss_warm_bytes"] = current_rss_bytes()
+
+    for repeat in range(harness_repeats(workload)):
+        start = time.perf_counter()
+        action()
+        report.samples.append(
+            Sample(workload, repeat, count, time.perf_counter() - start)
+        )
+    cycles = traced_cycles(workload)
+    batch = traced_batch(workload)
+    tracemalloc.start()
+    before = snapshot()
+    for _ in range((cycles // 2) * batch):
+        action()
+    middle = snapshot()
+    for _ in range((cycles - cycles // 2) * batch):
+        action()
+    after = snapshot()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    report.environment[f"{workload}_rss_end_bytes"] = current_rss_bytes()
+    report.environment[f"{workload}_process_peak_rss_bytes"] = peak_rss_bytes()
+    report.environment[f"{workload}_process_peak_rss_growth_bytes"] = (
+        peak_rss_bytes() - process_peak_before
+    )
+
+    retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
+    lines = recurring_lines(before, middle, after, cycles * batch)
+    recurring = sum(stat.size_diff for stat in lines)
+    report.environment[f"{workload}_top_growth"] = "; ".join(top_growth(lines, 3))
+    report.environment[f"{workload}_peak_bytes"] = peak
+    report.environment[f"{workload}_peak_scope"] = peak_scope(workload, count)
+    report.environment[f"{workload}_retained_bytes"] = retained
+    report.environment[f"{workload}_recurring_growth_bytes"] = recurring
+    report.gates[f"{workload}_retained_at_baseline"] = (
+        retained < ROW_RETAINED_LIMIT_BYTES and recurring < ROW_RETAINED_LIMIT_BYTES
+    )
+    assert retained < ROW_RETAINED_LIMIT_BYTES
+    assert recurring < ROW_RETAINED_LIMIT_BYTES
+
+
+def test_maximal_session_result_size(report: Report) -> None:
+    document = maximal_result()
+
+    size = encoded_bytes(document)
+
+    report.environment["session_result_maximal_bytes"] = size
+    assert size > 1_048_576
+
+
+def expected_outcome(row: str) -> str:
+    return "decided" if row in REALISTIC or row in DECIDED_ROWS else "exhausted"
+
+
+def cold_decisions(subject: PolicyCall, capture: Capture) -> list[float]:
+    seconds: list[float] = []
+    for _ in range(ROW_DENSE_MEASURED):
+        provider = AllowDenyPolicy()
+        start = time.perf_counter()
+        decide(subject, capture, provider)
+        seconds.append(time.perf_counter() - start)
+    return seconds
+
+
+def timed_decisions(
+    subject: PolicyCall, capture: Capture, provider: AllowDenyPolicy
+) -> list[float]:
+    for _ in range(ROW_WARM_UP):
+        decide(subject, capture, provider)
+    seconds: list[float] = []
+    for _ in range(ROW_DENSE_MEASURED):
+        start = time.perf_counter()
+        decide(subject, capture, provider)
+        seconds.append(time.perf_counter() - start)
+    return seconds
+
+
+def outside_capture(snapshot: tracemalloc.Snapshot) -> int:
+    kept = snapshot.filter_traces([tracemalloc.Filter(False, CAPTURE_MODULE)])
+    return sum(statistic.size for statistic in kept.statistics("filename"))
+
+
+def traced_decision(
+    subject: PolicyCall, capture: Capture, provider: AllowDenyPolicy
+) -> tuple[int, int]:
+    gc.collect()
+    tracemalloc.start()
+    baseline = outside_capture(tracemalloc.take_snapshot())
+    decide(subject, capture, provider)
+    gc.collect()
+    peak = tracemalloc.get_traced_memory()[1]
+    retained = outside_capture(tracemalloc.take_snapshot()) - baseline
+    tracemalloc.stop()
+    return retained, peak
+
+
+@pytest.mark.parametrize("row", sorted(ROWS | REALISTIC))
+def test_policy_decision_cost(report: Report, row: str, tmp_path: Path) -> None:
+    subject = (ROWS | REALISTIC)[row](tmp_path)
+    descriptors = open_descriptors()
+    spent = spend(subject, DECISION_FUEL)
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(), "policy", utc_now
+    ) as capture:
+        cold = cold_decisions(subject, capture)
+        _, cold_peak = traced_decision(subject, capture, AllowDenyPolicy())
+        provider = AllowDenyPolicy()
+        seconds = timed_decisions(subject, capture, provider)
+        retained, peak = traced_decision(subject, capture, provider)
+
+    for repeat, value in enumerate(seconds):
+        report.samples.append(Sample(row, repeat, 1, value))
+    for repeat, value in enumerate(cold):
+        report.samples.append(Sample(f"{row}_cold", repeat, 1, value))
+    report.gates[f"{row}_cold_within_ceiling"] = max(cold) < POLICY_CEILING_SECONDS
+    report.environment[f"{row}_outcome"] = spent.outcome
+    report.environment[f"{row}_fuel_spent"] = spent.units
+    report.environment[f"{row}_peak_bytes"] = peak
+    report.environment[f"{row}_cold_peak_bytes"] = cold_peak
+    report.environment[f"{row}_retained_bytes"] = retained
+    report.environment[f"{row}_ns_per_unit"] = (
+        statistics.median(seconds) * 1e9 / max(spent.units, 1)
+    )
+    report.gates[f"{row}_within_ceiling"] = max(seconds) < POLICY_CEILING_SECONDS
+    assert open_descriptors() == descriptors
+    assert retained < ROW_RETAINED_LIMIT_BYTES
+    assert peak < POLICY_PEAK_LIMIT_BYTES
+    assert cold_peak < POLICY_PEAK_LIMIT_BYTES
+    assert spent.outcome == expected_outcome(row)
+    if row in FLOORED:
+        assert spent.units <= DECISION_FUEL * FLOOR_SHARE
+
+
+def test_policy_validate_cost(report: Report) -> None:
+    malformed: list[JsonValue] = ["("] * MAX_PATTERNS
+    document: JsonObject = {"allow": malformed, "deny": malformed}
+    provider = AllowDenyPolicy()
+    for _ in range(ROW_WARM_UP):
+        provider.validate(document)
+
+    seconds: list[float] = []
+    found: list[object] = []
+    for repeat in range(ROW_DENSE_MEASURED):
+        start = time.perf_counter()
+        found = list(provider.validate(document))
+        seconds.append(time.perf_counter() - start)
+        report.samples.append(Sample("policy_validate", repeat, 1, seconds[-1]))
+
+    report.gates["policy_validate_within_ceiling"] = (
+        max(seconds) < POLICY_CEILING_SECONDS
+    )
+    assert len(found) == 2 * MAX_PATTERNS
+
+
+def test_policy_configuration_cache_retention(report: Report, tmp_path: Path) -> None:
+    gc.collect()
+    tracemalloc.start()
+    baseline = outside_capture(tracemalloc.take_snapshot())
+    provider = AllowDenyPolicy()
+    entry_sizes: list[int] = []
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(), "policy", utc_now
+    ) as capture:
+        for index in range(PREPARED_ENTRIES + 2):
+            before = outside_capture(tracemalloc.take_snapshot())
+            decide(
+                composite_variant(tmp_path / f"root{index}", index), capture, provider
+            )
+            gc.collect()
+            entry_sizes.append(outside_capture(tracemalloc.take_snapshot()) - before)
+        held = outside_capture(tracemalloc.take_snapshot()) - baseline
+        entries = len(provider.configurations)
+        del provider
+    gc.collect()
+    released = outside_capture(tracemalloc.take_snapshot()) - baseline
+    tracemalloc.stop()
+
+    report.environment["policy_cache_held_bytes"] = held
+    report.environment["policy_cache_entry_bytes"] = max(entry_sizes[:PREPARED_ENTRIES])
+    report.environment["policy_cache_released_bytes"] = released
+    assert entries == PREPARED_ENTRIES
+    assert max(entry_sizes[:PREPARED_ENTRIES]) <= POLICY_CACHE_ENTRY_LIMIT_BYTES
+    assert held <= PREPARED_ENTRIES * POLICY_CACHE_ENTRY_LIMIT_BYTES
+    assert released < ROW_RETAINED_LIMIT_BYTES
