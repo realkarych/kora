@@ -2,7 +2,16 @@ import pytest
 from pydantic import ValidationError
 
 from kora.protocols.common import BoundaryModel
+from kora.protocols.harness import SessionFile, SessionResult, SessionSpec
 from kora.protocols.identity import MAX_COUNT, MAX_PID, GrantBinding, ProcessIdentity
+from kora.protocols.vcs import WorkspaceRef, WorkspaceTarget
+from tests.protocols.harness_documents import (
+    SESSION_FILE,
+    SESSION_SPEC,
+    WORKSPACE_REF,
+    WORKSPACE_TARGET,
+    session_result,
+)
 
 IDENTITY: dict[str, object] = {
     "host_id": "host-1",
@@ -19,6 +28,15 @@ BINDING: dict[str, object] = {
     "lease_epoch": 3,
     "execution_domain_id": "domain-1",
     "process": IDENTITY,
+}
+DOCUMENTS: dict[type[BoundaryModel], dict[str, object]] = {
+    ProcessIdentity: IDENTITY,
+    GrantBinding: BINDING,
+    WorkspaceRef: WORKSPACE_REF,
+    WorkspaceTarget: WORKSPACE_TARGET,
+    SessionFile: SESSION_FILE,
+    SessionSpec: SESSION_SPEC,
+    SessionResult: session_result(),
 }
 REFUSED_IDENTITIES: list[dict[str, object]] = [
     {**IDENTITY, "pid": 0},
@@ -48,15 +66,23 @@ def test_the_boundary_base_is_closed_and_hides_input() -> None:
     assert config.get("hide_input_in_errors") is True
 
 
-@pytest.mark.parametrize("model", [ProcessIdentity, GrantBinding])
+@pytest.mark.parametrize("model", list(DOCUMENTS), ids=lambda model: model.__name__)
 def test_protocol_models_are_closed(model: type[BoundaryModel]) -> None:
-    document = BINDING if model is GrantBinding else IDENTITY
+    document = DOCUMENTS[model]
 
     parsed = model.model_validate(document)
     restored = model.model_validate_json(parsed.model_dump_json())
 
     assert restored == parsed
     assert parsed.model_dump(mode="json") == document
+
+
+@pytest.mark.parametrize("model", list(DOCUMENTS), ids=lambda model: model.__name__)
+def test_protocol_models_refuse_unknown_fields(model: type[BoundaryModel]) -> None:
+    document = {**DOCUMENTS[model], "unknown": 1}
+
+    with pytest.raises(ValidationError):
+        model.model_validate(document)
 
 
 @pytest.mark.parametrize("document", REFUSED_IDENTITIES)

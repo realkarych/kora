@@ -12,7 +12,22 @@ from kora.conformance.common import CONFORMANCE_COMPONENT
 from kora.observability import LoggingSettings, ProcessDiagnostics
 from kora.protocols.identity import GrantBinding
 from kora.protocols.secret_value import SecretScope
-from tests.measurements.harness import Report, Sample, report_lifecycle
+from tests.measurements.harness import (
+    Report,
+    Sample,
+    current_rss_bytes,
+    peak_rss_bytes,
+    report_lifecycle,
+)
+from tests.measurements.harness_workload import (
+    WORKLOADS,
+    build,
+    encoded_bytes,
+    maximal_result,
+    traced_batch,
+    traced_cycles,
+)
+from tests.support.heap import recurring_lines, snapshot, top_growth
 from tests.support.observability import run_python
 
 pytestmark = pytest.mark.measurement
@@ -26,6 +41,10 @@ HEAD_BYTES: int = 8
 TRACED_CYCLES: int = 2
 RETAINED_FLOOR_BYTES: int = 4096
 HEAP_GROWTH_LIMIT_BYTES: int = 262_144
+HARNESS_WARM_UP: int = 3
+HARNESS_MEASURED: int = 30
+HARNESS_DENSE_MEASURED: int = 10
+HARNESS_RETAINED_LIMIT_BYTES: int = 65_536
 IMPORT_PROBE: str = (
     "import json, sys, time\n"
     "start = time.perf_counter()\n"
@@ -172,3 +191,70 @@ def test_secret_registration_cost(report: Report, workload: str) -> None:
         assert diagnostics.registry.count() == 0
         assert growth < HEAP_GROWTH_LIMIT_BYTES
         assert later_growth < retained_limit(count, size)
+
+
+def peak_scope(workload: str, count: int) -> str:
+    kind = "result" if workload.startswith("session_result") else "event"
+    return f"{count} {kind}{'' if count == 1 else 's'} validated per action"
+
+
+def harness_repeats(workload: str) -> int:
+    return HARNESS_MEASURED if "mixed_small" in workload else HARNESS_DENSE_MEASURED
+
+
+@pytest.mark.parametrize("workload", WORKLOADS)
+def test_harness_model_validation_cost(report: Report, workload: str) -> None:
+    action, count = build(workload)
+    report.environment[f"{workload}_rss_start_bytes"] = current_rss_bytes()
+    process_peak_before = peak_rss_bytes()
+    for _ in range(HARNESS_WARM_UP):
+        action()
+    report.environment[f"{workload}_rss_warm_bytes"] = current_rss_bytes()
+
+    for repeat in range(harness_repeats(workload)):
+        start = time.perf_counter()
+        action()
+        report.samples.append(
+            Sample(workload, repeat, count, time.perf_counter() - start)
+        )
+    cycles = traced_cycles(workload)
+    batch = traced_batch(workload)
+    tracemalloc.start()
+    before = snapshot()
+    for _ in range((cycles // 2) * batch):
+        action()
+    middle = snapshot()
+    for _ in range((cycles - cycles // 2) * batch):
+        action()
+    after = snapshot()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    report.environment[f"{workload}_rss_end_bytes"] = current_rss_bytes()
+    report.environment[f"{workload}_process_peak_rss_bytes"] = peak_rss_bytes()
+    report.environment[f"{workload}_process_peak_rss_growth_bytes"] = (
+        peak_rss_bytes() - process_peak_before
+    )
+
+    retained = sum(stat.size_diff for stat in after.compare_to(before, "lineno"))
+    lines = recurring_lines(before, middle, after, cycles * batch)
+    recurring = sum(stat.size_diff for stat in lines)
+    report.environment[f"{workload}_top_growth"] = "; ".join(top_growth(lines, 3))
+    report.environment[f"{workload}_peak_bytes"] = peak
+    report.environment[f"{workload}_peak_scope"] = peak_scope(workload, count)
+    report.environment[f"{workload}_retained_bytes"] = retained
+    report.environment[f"{workload}_recurring_growth_bytes"] = recurring
+    report.gates[f"{workload}_retained_at_baseline"] = (
+        retained < HARNESS_RETAINED_LIMIT_BYTES
+        and recurring < HARNESS_RETAINED_LIMIT_BYTES
+    )
+    assert retained < HARNESS_RETAINED_LIMIT_BYTES
+    assert recurring < HARNESS_RETAINED_LIMIT_BYTES
+
+
+def test_maximal_session_result_size(report: Report) -> None:
+    document = maximal_result()
+
+    size = encoded_bytes(document)
+
+    report.environment["session_result_maximal_bytes"] = size
+    assert size > 1_048_576

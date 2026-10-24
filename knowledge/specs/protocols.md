@@ -673,8 +673,7 @@ class HarnessAdapter(Protocol):
         # AgentSession fields, StructuredOutput payload, usage records with completeness, stop reason, error class
     def installed_version(self) -> str: ...     # reported by the SDK at connect and in its init message, checked against the trusted values of the installation; recorded on AgentSession, never compared with a node (DD-14)
 
-@dataclass(frozen=True)
-class SessionFile:
+class SessionFile(BoundaryModel):
     name: str                       # no `/`, `..` or control characters; a skill's directory name
     digest: str                     # file digest, or a skill directory's resolved content digest
     placement: Literal["mcp_config", "skill"]
@@ -702,8 +701,7 @@ class LaunchContext(Protocol):
     placements: Mapping[Placement, Path]        # supervisor-resolved per-attempt directories
     async def allocate(self, inputs: LaunchInputs) -> Launch: ...   # one launch; raises KoraProtocolError with `launch_rejected`
 
-@dataclass(frozen=True)
-class SessionSpec:
+class SessionSpec(BoundaryModel):
     harness: str
     adapter_version: str
     options: JsonObject             # a closed per-adapter model, validated by the adapter
@@ -713,12 +711,14 @@ class SessionSpec:
     price_table_id: str
     price_table: JsonObject
 
-@dataclass(frozen=True)
-class NormalisedEvent:
+NormalisedEvent = SessionStartedEvent | TurnEvent | ToolCallEvent | ToolResultEvent | PermissionDeniedEvent | UsageEvent | ProviderLimitedEvent | ProviderRetryingEvent | ResultEvent | ErrorEvent
+                                    # tagged on `kind`; every parse goes through EVENT_ADAPTER (below)
+
+class TurnEvent(BoundaryModel):     # one envelope model per kind; the other nine have the same form
     i: int
     at: datetime
-    kind: Literal["session_started", "turn", "tool_call", "tool_result", "permission_denied", "usage", "provider_limited", "provider_retrying", "result", "error"]
-    data: JsonObject
+    kind: Literal["turn"]
+    data: TurnData                  # the closed data model of the kind's row in the session-event table
 
 RunnerCause = Literal["completed", "max_events", "budget", "stall", "deadline", "cancel", "provider_limit", "policy_bypass", "version_mismatch", "plugin_mismatch", "integrity_mismatch", "config_check_failed", "policy_error", "policy_timeout", "journal_unavailable", "cli_exit_without_result", "oversized_message", "launch_rejected", "launch_failed", "launcher_died"]
 
@@ -743,37 +743,87 @@ class RunnerOutcome:
     exit_code: int | None
     signal: int | None
 
-@dataclass(frozen=True)
-class OutputCandidate:
+class OutputCandidate(BoundaryModel):
     source: Literal["structured_output", "result_text"]
-    value: JsonValue
+    value: JsonValue                # at most 1 MiB of canonical JSON
 
 from kora.ir.cost import UsageRow
 
-@dataclass(frozen=True)
-class SessionResult:
+class ErrorSummary(BoundaryModel):  # content-free
+    source: str
+    error_count: int
+    contract_digest: str
+    code: str
+
+class DenialSample(BoundaryModel):
+    items: tuple[PermissionDeniedData, ...]     # at most 1,000, each the `permission_denied` data model
+    total: int                                  # at least len(items)
+
+class UnconfirmedCall(BoundaryModel):
+    tool: str
+    tool_use_id: str
+
+class UnconfirmedSample(BoundaryModel):
+    items: tuple[UnconfirmedCall, ...]          # at most 1,000
+    total: int                                  # at least len(items)
+
+class SessionResult(BoundaryModel):
+    harness: str
     session_id: str | None
     installed_version: str | None
     billing_class: str | None
     stop_reason: str
     terminal_reason: str | None
     api_error_status: int | None
-    error_class: str | None
-    error_summary: JsonObject | None    # {source, error_count, contract_digest, code}, content-free
+    error_class: ErrorClass | None
+    error_summary: ErrorSummary | None
     output: OutputCandidate | None
     output_diagnostic: str | None        # content-free code
-    usage: tuple[UsageRow, ...]
+    usage: tuple[UsageRow, ...]          # at most 64 rows
     usage_coverage: UsageCoverage
     turns: int
-    denials: JsonObject                  # capped sample with a count
+    denials: DenialSample                # capped sample with a count
     denials_complete: bool
-    unconfirmed_calls: JsonObject        # capped sample with a count
+    unconfirmed_calls: UnconfirmedSample # capped sample with a count
     policy_bypass: bool
 ```
 
 `UsageRow`, `UsageCoverage` and live monetary fields follow [data-model section 7](data-model.md#7-usage-records-and-completeness-fr-91). `known_token_fields` is a closed set of the five token column names; omitted dimensions remain unknown even when their observed lower bound is zero. Observation identity/order is stable within the attempt and preserved by relay/replay, including across grants; it cannot be regenerated from a heartbeat receipt. Unknown-model observations set an attribution gap instead of creating a synthetic row. Monetary strings use the exact decimal contract; the runner derives pricing coverage, and the engine derives persisted USD. The attempt-level coverage survives an empty `usage` tuple; its independent identity/sequence, initial null state and replay/refusal rules are defined in data-model section 7.2 and also apply to `Liveness`. Polls retain the source revision instead of generating new accounting evidence. A final result alone cannot clear an observation gap. The authoritative closed `UsageRow` and `UsageCoverage` models are implemented by #213 in `kora.ir.cost`; the signatures above import those values rather than define another schema. #156 owns their use in the protocol envelopes and #199 owns runner integration. Adapter work item 15 owns native SDK normalization; engine 9 owns persisted USD and ordered acceptance, while API 11 and worker 17 own authorized relay. These consumers remain pending. `PriceRevision`, `PriceRates`, `ModelCost` and `RunCost` share that value module; normalized monetary inputs follow the exact lexical and compatibility rules in data-model sections 7.3 and 7.5. Model validation alone supplies no grant, namespace, attempt or snapshot transaction authority.
 
 `EventSummary` is the adapter's incremental state that `finalise` reads: the harness's parsed result fields (`ResultMessage` on `claude`), per-call usage accumulators by message id, the count of distinct message ids, decided `tool_use_id`s, held error results, harness-denial entries with the count of unmatched ones, whether usage arrived after the first result, and the output-channel decision. Every collection in it is capped by `max_events` or by a fixed limit below, with an overflow count. Usage is not a counted `max_events` kind: its identity/order state must remain bounded independently, using current cumulative model totals, at most 1,024 open messages and bounded source high-water state, never an ever-growing id set. Eviction cannot permit recounting; loss of exact deduplication preserves a gap. `ConfigWarning` and `ContractViolation` (section 12) are aliases of the [shared `Diagnostic`](diagnostics.md), owned by `kora.ir`, with the same source/path/offset and safe-message rules. `check_config` returns configuration-relative warning paths, with `IR008` only for unsupported non-security fields; its consumer rebases them before global ordering. The shared per-call list bounds apply before accumulation; overflow raises the fixed `diagnostics_limit` protocol error and returns no partial success list. The runner validates `SessionResult.output` against the bound `ArtifactType` before returning, so it produces `artifact_invalid` itself; the worker adds duration and provenance (issue #139), and issue #138 maps the result into `AgentSession`. The result's harness identity comes from `SessionSpec.harness` and the worker's provenance, so it is `fake` under the testing composition (issue #136).
+
+**Protocol model types (issue #236).** `kora.protocols.harness`, `kora.protocols.policy` and `kora.protocols.vcs` implement this section, section 12 and the workspace types of section 4.
+
+- **Boundary models.** A type that crosses the control channel, a worker route, the journal or a checkpoint is a model on `BoundaryModel` (section 1): `SessionSpec`, `SessionFile`, the ten event envelopes and their data models, `SessionResult` with `OutputCandidate`, `ErrorSummary` and both samples, `WorkspaceRef` and `WorkspaceTarget`. A type nested in one is one too. `HarnessCapabilities`, `LaunchInputs`, `LaunchEnd`, `Enforcement` and `RunnerOutcome` stay frozen dataclasses, and `Enforcement` refuses a `cause` unless `action` is `terminate`.
+- **Events.** `NormalisedEvent` is a tagged union of one envelope model per kind, with `i`, `at`, a literal `kind` and that kind's closed `data` model, with the `?` fields of the session-event table optional. Exactly one model validates an event, in Python and JSON mode alike. The models resolve a duplicate JSON key last-wins, so the decoder that reads events and results back (the journal consumer) refuses a document with a duplicate key. Every parse goes through the module's `EVENT_ADAPTER`, which hides the input in errors and reports an unknown or missing `kind` with a fixed error that names no tag. A consumer renders a validation error only through `safe_field_errors` (section 1), never `str(error)` or `errors()`, which can carry key names from the input. `tool_call` has no input field, so tool input cannot be represented in an event.
+- **Field types.**
+
+  | field | type |
+  |---|---|
+  | `tool`, `tool_use_id`, `agent_id`, `session_id`, `message_id`, `harness`, `adapter_version`, `price_table_id`, `resume_handle`, `storage_ref`, `installed_version`, `harness_version`, `binding` | the protocol identifier: 1 to 256 printable ASCII characters without spaces |
+  | `vendor_group` | the protocol identifier, or `None` for an event that names no group, which pauses the whole resource; required and nullable |
+  | the `usage` fields that `UsageRow` shares | the `kora.ir.cost` type of the same `UsageRow` field, with the same checks: `reasoning_tokens` within `output_tokens`, and a `cache_creation_by_ttl` split, held read-only, that names both TTLs and adds up to a known `cache_creation_tokens` and is serialised `5m` first; `known_token_fields` is serialised sorted, so identical events encode to identical bytes; `coverage` is `UsageCoverage` |
+  | `model` in `provider_limited` and `provider_retrying` | the `kora.ir.cost` identifier |
+  | `permission_denied.pattern` | a deny rule id (section 12), only with `code: denied` from `source: policy`; section 12 maps a decision onto the pattern and the code |
+  | `permission_denied.code` | a `PolicyReason` (section 12) for `source: policy`; `harness_rule`, `policy_error` or `policy_timeout` for `source: harness` |
+  | `subtype`, `terminal_reason`, `stop_reason`, `output_diagnostic`, `error.code`, `ErrorSummary.source` and `.code` | a protocol error code (`ERROR_CODE`) |
+  | `billing_class` | `BillingClass` of `kora.ir.cost` |
+  | `retry_after` | a timestamp: the matching window's reset time; required and nullable on `provider_limited`, optional on `provider_retrying` |
+  | `at`; `i` | a timestamp; a `kora.ir.cost` `Sum` |
+  | `retry_number`, `turns`, `ErrorSummary.error_count` | a `kora.ir.cost` `Token` |
+  | `api_error_status` | an integer from 100 to 599, or `None` |
+  | `mcp_sources`; `SessionSpec.files` | at most 64 identifiers; at most 64 entries |
+  | `plugins_digest`, `SessionFile.digest`, `ErrorSummary.contract_digest` | a `sha256:` digest |
+  | `SessionFile.name` | 1 to 255 UTF-8 bytes of printable characters (no control, line or paragraph separator or bidi character; an inner ASCII space is allowed, leading or trailing white space is not), with no `/`, no `..`, and not `.`; the names of one `SessionSpec` stay distinct after case folding and NFC |
+  | `WorkspaceRef.root`, `.repo`; `WorkspaceTarget.root`, `.host_path` | 1 to 4,096 printable characters; a root is not yet required to be absolute (section 4) |
+  | `WorkspaceRef.attempt_id`, `.commit`, `.base_commit`, `.branch` | the protocol identifier; `branch` is nullable |
+  | `SessionSpec.prompt` | at most 1 MiB of UTF-8 |
+  | `SessionSpec.options`, `SessionSpec.price_table` | a bounded JSON object of `kora.ir.json`, held as a plain parsed object like `OutputCandidate.value`, so a consumer copies it and never mutates it |
+  | `turn.text`, `tool_result.content`, `error.text` | at most 60 KiB of canonical JSON, escaping included, so an accepted event fits the 64 KiB record; the adapter truncates before it emits, and the runner's encoder still checks the record bound |
+
+- **`SessionResult`.** `harness` names the adapter that produced the result. `error_class` is `ErrorClass`; which classes a worker may report stays the engine's check (#139). The validator checks every field bound, and no bound covers the whole result: at its field bounds a result is about 3 MiB of JSON with identifiers at their bounds, above the 1 MiB control-channel frame, and a `SessionSpec` can reach about 3 MiB. #139's report contract decides the result's channel and whole-object bound; the workload of the VCS-bearing protocol part decides the spec's. Validating the maximal result from JSON raises process memory to a bounded plateau of about 0.5 GiB on macOS, native memory that pydantic-core takes for the dense output value; decoding the JSON first and validating the parsed object stays flat, so the journal consumer of work item 15 decodes before it validates. `test_harness_model_validation_cost` records process memory for every row: the current RSS where the platform reports it, and the process-wide peak with its growth across the row.
+- **`EventSummary`** is an empty protocol. Each adapter's `finalise` accepts any summary and narrows it to its own type, so no type parameter spreads to every holder of an adapter.
+- **`build_session_spec`** types `feedback` as `None` until `Feedback` has fields.
 
 | `RunnerOutcome.cause` | meaning | class |
 |---|---|---|
@@ -785,7 +835,7 @@ class SessionResult:
 | `version_mismatch`, `plugin_mismatch` | the installed harness version or built-in plugin list did not match the trusted values | `config_error` |
 | `integrity_mismatch` | the binary digest did not match; a skill directory digest mismatch keeps the open class question below | `integrity_error` |
 | `config_check_failed` | a check after connect failed: a `claudeai` server, or a repository MCP server named like a node server | `config_error` |
-| `policy_error`, `policy_timeout` | `decide` raised, or timed out | `config_error`, `infrastructure` |
+| `policy_error`, `policy_timeout` | `decide` raised or timed out; the runner refused the `ToolCallRequest` (section 12), including arguments over the 1 MiB or depth-16 bound; or `decide` returned anything other than an exact `PolicyDecision` | `config_error`, `infrastructure` |
 | `journal_unavailable` | the journal writer failed or stayed behind past its bound | `infrastructure` |
 | `cli_exit_without_result`, `oversized_message` | the CLI exited by itself without a result, or a message exceeded its bound | `harness_error` |
 | `launch_rejected` | a pre-launch check of the runner failed, such as an output schema over the platform's argument limit | `config_error` |
@@ -808,7 +858,7 @@ The class of a cause holds also when the stop escalated to a kill; the precedenc
 | `result` | `{subtype, is_error, terminal_reason}` | content-free |
 | `error` | `{code, text?, truncated}` | bounded content |
 
-- **Bounded content** (turn text, tool-result content, `error` diagnostic text and command `output` lines) is redacted before journal append and upload, cut with the truncation marker, and stored in `session_segment` under the `transcripts` capability and payload retention; the journal holds the same truncated content and nothing more. Audit `event` rows promoted from `permission_denied` never carry content, and `PolicyDecision.reason` is a code or a pattern id, never echoed arguments.
+- **Bounded content** (turn text, tool-result content, `error` diagnostic text and command `output` lines) is redacted before journal append and upload, cut with the truncation marker, and stored in `session_segment` under the `transcripts` capability and payload retention; the journal holds the same truncated content and nothing more. Audit `event` rows promoted from `permission_denied` never carry content, and `PolicyDecision.reason` is a rule id or a `PolicyReason` (section 12), never echoed arguments.
 - **Bounds.** These values are proposals the owner approved under issue #134; the runner work item enforces them.
   - A whole record, envelope `{i, at, kind}` included, is at most 64 KiB after canonical JSON encoding, below the 1 MiB control-channel frame payload.
   - Identifiers from the candidate (`tool_use_id`, `agent_id`, `session_id`, `message_id`, `model`, `vendor_group`) are at most 256 printable characters.
@@ -907,8 +957,7 @@ class ReviewerRequestOutcome:
     rejected: tuple[str, ...]
     reason: str | None
 
-@dataclass(frozen=True)
-class WorkspaceTarget:
+class WorkspaceTarget(BoundaryModel):
     root: str
     host_path: str | None
 
@@ -960,8 +1009,7 @@ class PublishPlan:
     inspect: tuple[PlanStep, ...]
     publish: tuple[PlanStep, ...]
 
-@dataclass(frozen=True)
-class WorkspaceRef:
+class WorkspaceRef(BoundaryModel):
     attempt_id: str
     root: str
     repo: str
@@ -1062,6 +1110,8 @@ class Vcs(Protocol):
 **First-slice activation.** [First-slice.md](first-slice.md) determines installed support: nonempty node hooks/skills/subagents/MCP servers and `trust_repo_config: true` are refused, not passed through or merely warned. Future harness mapping rows below activate with their implementation. Real hook interception of built-in subagent/helper/tool behavior and controlled conformance fixtures remains required for both harnesses.
 
 **Pending models (issue #134).** Three models get their fields with the first slice that needs them: `Feedback`, with the first slice that has a `fresh_with_feedback` retry or a `vcs` approval channel, whose `comments` reuse `FeedbackComment` of section 5; `ChangeRequestStatus` and `CiStatus`, with the first slice that has a code host or a `wait_event` sensor. `ChangeRequestStatus` keeps a `status` field with a `merged` value, which [ir.md](ir.md) and `examples/dependency-upgrade.ir.yaml` already read. The slice-1 git provider supports `head_sha` and declares `change_requests`, `review_comments`, `ci_status`, `head_sha_watch` and `reviewer_requests` false; capability checks refuse the unsupported operations before the call. The slice-1 `Vcs` protocol class leaves out `open_change_request`, `change_request_status`, `post_comment`, `ci_status` and `request_reviewers` until the first slice with a code host, so strict typing needs no placeholder; `HarnessAdapter.build_session_spec` receives `feedback=None` in slice 1 (section 3).
+
+**Workspace values (issue #236).** `WorkspaceRef` and `WorkspaceTarget` check only the bounds of section 3: a root need not be absolute or normalized, and `commit`, `base_commit` and `branch` are protocol identifiers that may start with `-`. Their producers are the runtime and the VCS provider, not the candidate, and a consumer must not assume more. Requiring an absolute normalized root, checking commit and ref forms, or passing `--end-of-options` to every VCS command is decided with the VCS-bearing part of work item 3.
 
 ### Credential-free local publication
 
@@ -1398,9 +1448,9 @@ class ToolCallRequest:
     tool: str                       # harness tool name, e.g. "Bash", "Edit", "mcp__yt__query"
     tool_use_id: str
     agent_id: str | None
-    arguments: JsonObject
+    arguments: JsonObject           # repr=False; runner-local, never journalled
     workspace: WorkspaceRef
-    node_path: str
+    node_path: str                  # at most 1,024 printable ASCII characters, no space
 
 @dataclass(frozen=True)
 class ToolPolicy:
@@ -1413,23 +1463,39 @@ class PolicyLayers:
     namespace: ToolPolicy
     node: ToolPolicy
 
+PolicyReason = Literal["allowed", "denied", "protected_path", "not_allowed", "request_invalid", "argument_invalid"]
+
 @dataclass(frozen=True)
 class PolicyDecision:
-    allow: bool
-    reason: str                     # a code or a pattern id, never echoed arguments
+    allow: bool                     # exactly a bool
+    reason: str                     # a rule id or a PolicyReason, never echoed arguments
+
+@dataclass(frozen=True)
+class PolicyCapabilities:
+    pass
 
 class Policy(Protocol):
     name: str
     config_schema: JsonObject       # schema of the `tool_policy` object nodes carry
+    def capabilities(self) -> PolicyCapabilities: ...
     def validate(self, policy: JsonObject) -> list[ContractViolation]: ...   # kora validate, IR013
     async def decide(self, request: ToolCallRequest, layers: PolicyLayers, protected_paths: tuple[str, ...], ctx: ProtocolContext) -> PolicyDecision: ...
 ```
 
 One policy applies to every call (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md), amended 2026-10-21): the node's `tool_policy` and the namespace's `tool_policy` (set by the platform team, DD-32 `platform` flag) are evaluated **per layer**, and `decide` receives both layers, not a merged value. A call is allowed only when no `deny` pattern of either layer matches it and every layer with a non-empty `allow` has a matching pattern, so a namespace deny always wins and a node never widens a namespace allow list. An empty `allow` adds no restriction; a layer with only denies relies on its deny patterns. Order inside an array has no effect. `allow_deny` ignores `tool_use_id` and `agent_id`, so decisions stay deterministic for identical requests; `agent_id` is read only by the adapter's output-channel exception (section 3). The one exception is the harness's own output channel: on `claude` the adapter allows the synthetic `StructuredOutput` tool without consulting the policy, only under the closed exceptions of section 3 (exact name, `output_format` passed, main session, and never after `max_events`), without evaluating either layer. An exception or timeout in `decide` denies the call and fails the attempt with cause `policy_error` or `policy_timeout` (section 3). `IR013`, checked by kora's own validator for every policy implementation and wherever a `tool_policy` is validated, the namespace's included, rejects a pattern whose tool name is exactly `StructuredOutput`; a wildcard pattern stays valid and never applies to the output channel (ADR-0009, amended 2026-10-19). The MVP implementation `allow_deny` matches the allow and deny patterns of each layer in the harness's tool-pattern syntax. A shell call with chaining metacharacters, `-c`, `--exec` or other indirection matches every `Bash(...)` deny of either layer, so a deny cannot be bypassed through a wrapper, and an allow pattern never matches such a call, so it is denied whenever a layer with a non-empty `allow` applies (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)). "Other indirection" (`env`, `xargs`, `find -exec`, a shell script) stays open-ended: argv matching is the hook layer, not proof that an effect is absent (three layers above). It denies `Edit` and `Write` on `protected_paths` whether or not an allow matches (DD-34). Cedar and OPA arrive as plugins through the same interface, reading their own `x-` fields per layer, without an IR change. The policy runs inside the runner, so the decision is local to the session and never requires the agent to reach kora.
 
+**Decision reasons (issue #236).** A `PolicyDecision.reason` is either a rule id or a `PolicyReason`, so no argument text can reach a decision:
+
+- **A rule id** has the form `<layer>.<allow|deny>.<index>`: `<layer>` is `namespace` or `node`, and `<index>` is the pattern's zero-based position in that layer's array, written as `0` or a decimal without a leading zero below 10,000, as in `namespace.deny.3`. Pattern text never appears. A provider that cannot cite a rule by position, including one whose array is longer, uses `denied` for a deny and `allowed` for an allow.
+- **A `PolicyReason`** is one of a closed set: `allowed`, `denied`, `protected_path`, `not_allowed`, `request_invalid` and `argument_invalid`. A provider with other refusals maps them onto it.
+- **The reason agrees with the decision.** `allow` is true exactly when the reason is `allowed` or an allow rule id.
+- **A decision becomes a `permission_denied` event** (section 3) like this: a deny rule id gives `pattern: <rule id>` and `code: denied`; any other refusal gives `pattern: None` and the reason as the `code`; `allowed` never reaches an event. A harness denial carries no `pattern`.
+
+`ToolCallRequest` and `PolicyDecision` check their fields when constructed, with fixed messages: exact `str` identifier fields, an exact `str` `node_path`, a parsed bounded `arguments` object, an exact `bool` for `allow` and the reason form above. A request the check refuses is a denied call, never an allowed one: the runner denies it with `request_invalid` and fails the attempt with cause `policy_error`; it emits the `permission_denied` event only when the call's `tool` and `tool_use_id` are valid event fields, and otherwise counts the denial without one, because the refusal names only the first field it refused. A `decide` that raises, times out or returns anything other than an exact `PolicyDecision` fails the attempt with cause `policy_error` or `policy_timeout` and emits `permission_denied` with `source: harness`, `pattern: null` and that cause as its code. These two codes are records the runner writes on the supervisor side (section 2); section 3 files them under `source: harness` because `PolicyReason` has no failure codes. `arguments` is a plain parsed `dict`, so the runner builds a fresh `ToolCallRequest` for each `decide` and never reads it back afterwards. `Policy.capabilities` returns an empty `PolicyCapabilities`, as section 1 requires of every protocol.
+
 ## 13. Conformance suites (NFR-10.2)
 
-Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformance` that an adopter imports into a test module. The cases take the provider under test from fixtures of the opt-in plugin `kora.conformance.plugin` (`kora_<protocol>_provider`, `kora_<protocol>_exercise`, and for secrets `kora_secrets_resolvable`, `kora_secrets_missing_reference`, `kora_secrets_forbidden_reference` and `kora_secrets_listed_prefix`), which raise until the adopter overrides them; entry-point command integration and an isolated built-and-installed third-party fixture are required by first-slice readiness under [#215](https://github.com/realkarych/kora/issues/215); the injected foundation does not claim that evidence. The plugin imports only pytest, and `kora.conformance` needs the `kora[conformance]` extra (issue #204). Every protocol module also carries the common cases of section 1: frozen and consistent capabilities, an object `config_schema`, a bounded content-free `KoraProtocolError` for the exercise's failing input, and provider logging through `ctx.logger` without root reconfiguration. Outline:
+Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformance` that an adopter imports into a test module. The cases take the provider under test from fixtures of the opt-in plugin `kora.conformance.plugin` (`kora_<protocol>_provider`, `kora_<protocol>_exercise`, for secrets `kora_secrets_resolvable`, `kora_secrets_missing_reference`, `kora_secrets_forbidden_reference` and `kora_secrets_listed_prefix`, and for the policy `kora_policy_calls`), which raise until the adopter overrides them; entry-point command integration and an isolated built-and-installed third-party fixture are required by first-slice readiness under [#215](https://github.com/realkarych/kora/issues/215); the injected foundation does not claim that evidence. The plugin imports only pytest, and `kora.conformance` needs the `kora[conformance]` extra (issue #204). Every protocol module also carries the common cases of section 1: frozen and consistent capabilities, an object `config_schema`, a bounded content-free `KoraProtocolError` for the exercise's failing input, and provider logging through `ctx.logger` without root reconfiguration. Outline:
 
 - **Runtime**: idempotent submit and workload-digest conflict; authoritative absence versus unreachable lookup; original-domain adoption and protected journal offset; declared portable recovery state; constructed candidate environment; local deadlines and cancellation; one logical handle/capacity reservation through publication; late `finalize` only after inspection, binding checks and serialization; no candidate-visible publication credential; preparation crash recovery through the supervisor checkpoint; release removes bulky candidate/control/publication roots but retains the retirement/dispatcher registry. ADR-0017 adds the execution-recovery gates below. `test_workspace_preparation_recovers_after_worker_crash` uses the configured fake runtime with no shared host filesystem, crashes at phase barriers and recovers the same trusted `WorkspaceRef`. OS isolation is verified only on actual protected runtimes (table below).
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call the harness does not reject itself, installed version recorded and checked against `tested_versions`. The `claude` adapter's cases are the [Claude adapter contracts](#claude-adapter-contracts-issue-125).
@@ -1442,6 +1508,17 @@ Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformanc
 - **Authentication**: scope enforcement per operation; revoked tokens are refused. Ordinary requests retain a per-credential cache of at most the [bounded run-read wait](api-and-agent-surface.md#bounded-run-read-wait-adr-0002) re-check interval when validation is not a bounded local read. For `requires_current_authority=True`, warm that ordinary cache, then commit revocation/expiry or remove platform/namespace/transcript rights behind an explicit barrier. No current-authority request may reuse stale rights. Expected invalidity raises `authentication_rejected`; inability to establish current authority raises `authentication_unavailable` with no anonymous result or cached fallback. Real API integration proves no new protected stream record or metric bytes are submitted. Ordinary bounded-read cache cases remain separately required.
 - **Sensor**: cooperative cancellation, declared serial dependency calls and bounded decoded results; `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
 - **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every call kind the adapter declares in `policy_coverage`, under every permission mode**, for every call the harness does not reject itself, through the adapter's `PreToolUse` hook (Claude: the SDK callback; Codex: the managed command hook; after MVP ACP `session/request_permission` for the kinds the agent declares), and the denied call never reaches the tool (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)); a pattern on a kind outside the coverage is rejected by validation (`IR019` for namespace policy, `IR028` for a node-only rule); a node allow cannot widen a non-empty namespace allow list, and a call with chaining metacharacters, `-c`, `--exec` or other indirection matches every `Bash(...)` deny and no allow pattern (`test_tool_policy_layers`); a protected path cannot be edited; a pattern whose tool name is exactly `StructuredOutput` is rejected with `IR013` for every implementation. `test_required_policy_is_enforced_or_rejected` runs the matrix of section 12 against the real harness interface with a deterministic driver (recorded streams where the interface allows no driver): for every covered kind and permission mode an allowed and a denied shell command, file edit and MCP tool call, judged by whether the side effect happened, not by the presence of a `permission_denied` event; for every uncovered kind and supported permission/sandbox mode, a namespace pattern returns `IR019`, and a node-only pattern with no covering namespace restriction returns `IR028`. Exercise each case through both validate and deploy, assert the same code and safe segmented field path, no warning-only success and no provider/secret/execution side effects. Malformed patterns retain `IR013`. On `claude` the matrix runs on the scripted-model layer of the [Claude adapter contracts](#claude-adapter-contracts-issue-125), with no derived `allowed_tools` or `disallowed_tools` list, in every mode including `dont_ask` and `plan`: a callback allow runs the call, except that `plan` still blocks a call that is not read-only; a deny blocks it; an allow-listed command still reaches the callback; a protected-path `Edit`, `-c` indirection inside an allow-listed command, a subagent's call and a hosted tool's call are denied when the policy denies them; each is judged by its side effect. A live smoke test against a model is a manual experiment outside CI, recorded with the harness version; the fake adapter proves the runner's handling of a decision, never a real hook.
+  - **`kora.conformance.policy`** (issue #236) holds the cases that hold for any policy. Every decision they receive must be an exact `PolicyDecision` with an exact `bool` for `allow` and a `reason` that is a rule id or a `PolicyReason`, agrees with the decision (section 12) and contains no part of the conformance marker, which each request carries as the extra argument `kora_conformance_marker`. The reason form already excludes the marker; the check stays as defence in depth. Each case runs with `agent_id` unset and set, with different `tool_use_id`s and with a nested `node_path`, and runs its decisions on one event loop:
+    - `test_policy_validate_refuses_a_malformed_policy`: a `ContractViolation` with a path, carrying none of the policy's text;
+    - `test_policy_deny_in_either_layer_denies`: a matching deny in either layer, placed after one or two non-matching ones, before one or between two, denies whether each layer's allow list is empty or matches, whether the other layer denies something else, whether either layer allows a narrower pattern that matches the call and whether protected paths are set, for the shell request and for every edit request at the unprotected path `src/case.py`; a rule-id reason must cite that deny's position;
+    - `test_policy_allow_list_restricts_in_either_layer`: a non-empty allow list of one or two entries that does not match denies, whatever the other layer allows and whether protected paths are set, for the same requests;
+    - `test_policy_allows_what_no_rule_refuses`: the positive control, with no rule, matching allow lists, allow lists of the narrower pattern or the pattern naming the path, or a non-matching deny, for the same requests while protected paths are set, so a fixture whose narrower or naming patterns match nothing fails;
+    - `test_policy_protected_path_is_denied`: an edit of a path under `tests/**`, of a path matching the file glob `config/*.lock`, or of a literal entry such as `Makefile`, alone or listed after one or two decoy entries, is denied, and the denial cites no rule for every file-edit tool of the coverage matrix for each harness the adopter names, whatever the layers say, an allow that names the path included. The path is relative, nested, absolute under the workspace root, or in a `./`, inner `/./`, `..`, doubled-slash, `<root>/../<root name>/` or `../<root name>/` form. The case refuses a fixture with no edit call, a harness outside the coverage matrix, a builder whose request names another tool, or a harness whose file-edit tools are not all covered under that harness;
+    - `test_policy_decisions_are_deterministic`: interleaved requests with different outcomes keep their own decisions and reasons on one instance, over three rounds that each build their requests afresh: shell requests under a deny, and for every edit tool an unprotected edit against a protected one, a guarded edit without and then with its protected paths, and an edit under a matching deny against one under none.
+
+    Every rule-id reason must index an existing pattern of the named layer and kind. The cases assume an honest provider: they cannot exclude a policy that changes its behaviour after more decisions than they make, and the conformance marker in `arguments` is visible to a provider, so a policy must ignore argument keys it does not read. `apply_patch` multi-file and `Move to` paths are proven by `allow_deny`'s own tests (#233). The cases do not require a policy to fold letter case or to resolve symlinks; `allow_deny` proves both in its own tests.
+
+    The fixture `kora_policy_calls` supplies, in the provider's own pattern syntax, a shell request with a matching, a narrower matching and a non-matching pattern, a second shell request the matching pattern does not match, an edit request builder per file-edit tool with a pattern matching every call of that tool and a function that names one path in an allow pattern, and a malformed policy document. The other policy legs have their own owners: the chaining, `-c` and indirection rule is `allow_deny`'s (#233); the `IR013` `StructuredOutput` refusal and the `IR019`/`IR028` coverage checks are the validator's, with the adapters' declared coverage; the deny across call kinds and permission modes through the hook is the adapters' and the runner's.
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2), through the testing runner of [fakes.md section 3](fakes.md#3-the-testing-runner-and-the-scenario-composition).
 
 Which of these cases the fakes pass, which do not apply to them and which they never claim is the applicability matrix of [fakes.md section 8](fakes.md#8-conformance-applicability); their own contracts are in [fakes.md section 10](fakes.md#10-contracts-and-measurements).
