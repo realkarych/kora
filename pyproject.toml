@@ -129,6 +129,7 @@ select = [
 "src/kora/observability/bootstrap.py" = ["BLE001"]
 "src/kora/cel_eval/thread.py" = ["BLE001"]
 "src/kora/observability/sink.py" = ["BLE001"]
+"src/kora/runner/gate.py" = ["S606"]
 "tests/support/warning_filters.py" = ["TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
