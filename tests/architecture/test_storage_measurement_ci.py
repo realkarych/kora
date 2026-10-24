@@ -78,6 +78,10 @@ def test_storage_ci_requires_exact_platform_producers_and_always_qualification()
         )
     qualification = table(jobs["storage-qualification"])
     selected = job_steps(qualification)
+    fixtures = next(step for step in selected if step.get("id") == "fixtures")
+    measurement = next(
+        step for step in selected if "run" in step and "pytest" in str(step["run"])
+    )
     recovery = next(
         step
         for step in selected
@@ -90,6 +94,13 @@ def test_storage_ci_requires_exact_platform_producers_and_always_qualification()
     ]
     assert recovery["if"] == "${{ always() }}"
     assert "tests.measurements.storage_pressure_evidence" in str(recovery["run"])
+    assert "mktemp -d /tmp/kora-storage-qualification.XXXXXXXX" in str(fixtures["run"])
+    for step in (measurement, recovery):
+        assert table(step["env"])["KORA_STORAGE_FIXTURES"] == (
+            "${{ steps.fixtures.outputs.path }}"
+        )
+        assert "$KORA_STORAGE_FIXTURES/fixtures" in str(step["run"])
+        assert "$RUNNER_TEMP" not in str(step["run"])
     assert selected[-1]["if"] == "${{ always() }}"
 
 

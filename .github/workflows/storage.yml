@@ -137,13 +137,24 @@ jobs:
           uv export --locked --only-group build --no-emit-project --format requirements.txt --output-file "$KORA_STORAGE_BUILD/constraints.txt"
           uv pip install --python "$PWD/.venv/bin/python" --no-deps --build-constraints "$KORA_STORAGE_BUILD/constraints.txt" --require-build-hashes --editable .
           test "$(git rev-parse HEAD)" = "$KORA_MEASUREMENT_REVISION"
-      - name: Qualify actual boundaries, pressure, crashes and diagnostic failure
+      - name: Allocate private qualification fixtures
+        id: fixtures
         run: |
-          uv run --no-sync pytest -q tests/plugins/storage/test_lifetime_boundaries.py tests/plugins/storage/test_sink_progress.py tests/plugins/storage/test_pressure_controller.py tests/plugins/storage/test_crash_recovery.py --basetemp="$RUNNER_TEMP/storage-fixtures" --junitxml=measurements/${{ matrix.platform }}-qualification/qualification.xml
+          KORA_STORAGE_FIXTURES="$(mktemp -d /tmp/kora-storage-qualification.XXXXXXXX)"
+          printf 'path=%s\n' "$KORA_STORAGE_FIXTURES" >> "$GITHUB_OUTPUT"
+      - name: Qualify actual boundaries, pressure, crashes and diagnostic failure
+        env:
+          KORA_STORAGE_FIXTURES: ${{ steps.fixtures.outputs.path }}
+        run: |
+          test -n "$KORA_STORAGE_FIXTURES"
+          uv run --no-sync pytest -q tests/plugins/storage/test_lifetime_boundaries.py tests/plugins/storage/test_sink_progress.py tests/plugins/storage/test_pressure_controller.py tests/plugins/storage/test_crash_recovery.py --basetemp="$KORA_STORAGE_FIXTURES/fixtures" --junitxml=measurements/${{ matrix.platform }}-qualification/qualification.xml
       - name: Recover fixture ownership and preserve reports
         if: ${{ always() }}
+        env:
+          KORA_STORAGE_FIXTURES: ${{ steps.fixtures.outputs.path }}
         run: |
-          uv run --no-sync python -m tests.measurements.storage_pressure_evidence "$RUNNER_TEMP/storage-fixtures" measurements/${{ matrix.platform }}-qualification/pressure
+          test -n "$KORA_STORAGE_FIXTURES"
+          uv run --no-sync python -m tests.measurements.storage_pressure_evidence "$KORA_STORAGE_FIXTURES/fixtures" measurements/${{ matrix.platform }}-qualification/pressure
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
         with:
