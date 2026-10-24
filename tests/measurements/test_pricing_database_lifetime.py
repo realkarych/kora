@@ -48,6 +48,7 @@ from tests.support.databases import (
 )
 
 pytestmark = pytest.mark.measurement
+STEP_BUDGET_SECONDS: float = 256.0
 
 
 def test_pricing_failure_retains_invalid_bytes_and_actual_exit(tmp_path: Path) -> None:
@@ -404,6 +405,9 @@ def test_pricing_database_lifetime(
         provenance["workload_started"] = started
         provenance["excluded_common_postgresql_fixture"] = fixture_seconds
         evidence.finish(report, provenance)
+
+    assert evidence.workload_seconds is not None
+    assert evidence.workload_seconds < STEP_BUDGET_SECONDS
 
 
 def test_pricing_complete_artifact_inventory_fails_aggregate_exhaustion(

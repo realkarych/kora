@@ -14,15 +14,22 @@ ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
 SUCCESS = {
+    "SCAFFOLD_RESULT": "success",
     "IR_MATRIX_RESULT": "success",
+    "RESOURCE_RESULT": "success",
+    "RESOURCE_VERIFIED": "true",
+    "PRICING_RESULT": "success",
+    "PRICING_VERIFIED": "true",
+    "CEL_RESULT": "success",
+    "CEL_VERIFIED": "true",
+    "DEPENDENCIES_OUTCOME": "success",
+    "SOURCE_REVISION_OUTCOME": "success",
     "IR_DOWNLOAD_OUTCOME": "success",
     "IR_INVENTORY_OUTCOME": "success",
     "IR_UNION_UPLOAD_OUTCOME": "success",
-    "CEL_LIFETIME_OUTCOME": "success",
-    "CEL_COST_OUTCOME": "success",
-    "CEL_ARTIFACTS_OUTCOME": "success",
-    "CEL_LIFETIME_UPLOAD_OUTCOME": "success",
-    "CEL_COST_UPLOAD_OUTCOME": "success",
+    "CEL_LIFETIME_DOWNLOAD_OUTCOME": "success",
+    "CEL_COST_DOWNLOAD_OUTCOME": "success",
+    "CEL_INVENTORY_OUTCOME": "success",
     "WORKFLOW_CANCELLED": "false",
 }
 
@@ -138,19 +145,32 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
     gate = selected_steps["required_measurements"]
 
     assert job["name"] == "CEL evaluator lifetime"
-    assert job["needs"] == ["ir-measurements"]
+    assert job["needs"] == [
+        "scaffold",
+        "ir-measurements",
+        "resource-measurements",
+        "pricing-measurements",
+        "cel-producer",
+    ]
     assert job["if"] == "${{ always() }}"
     assert gate["if"] == "${{ always() }}"
     assert table(gate["env"]) == {
+        "SCAFFOLD_RESULT": "${{ needs.scaffold.result }}",
         "IR_MATRIX_RESULT": "${{ needs.ir-measurements.result }}",
+        "RESOURCE_RESULT": "${{ needs.resource-measurements.result }}",
+        "RESOURCE_VERIFIED": "${{ needs.resource-measurements.outputs.verified }}",
+        "PRICING_RESULT": "${{ needs.pricing-measurements.result }}",
+        "PRICING_VERIFIED": "${{ needs.pricing-measurements.outputs.verified }}",
+        "CEL_RESULT": "${{ needs.cel-producer.result }}",
+        "CEL_VERIFIED": "${{ needs.cel-producer.outputs.verified }}",
+        "DEPENDENCIES_OUTCOME": "${{ steps.dependencies.outcome }}",
+        "SOURCE_REVISION_OUTCOME": "${{ steps.source_revision.outcome }}",
         "IR_DOWNLOAD_OUTCOME": "${{ steps.ir_download.outcome }}",
         "IR_INVENTORY_OUTCOME": "${{ steps.ir_inventory.outcome }}",
         "IR_UNION_UPLOAD_OUTCOME": "${{ steps.ir_union_upload.outcome }}",
-        "CEL_LIFETIME_OUTCOME": "${{ steps.measurement.outcome }}",
-        "CEL_COST_OUTCOME": "${{ steps.cost_regression.outcome }}",
-        "CEL_ARTIFACTS_OUTCOME": "${{ steps.cel_artifacts.outcome }}",
-        "CEL_LIFETIME_UPLOAD_OUTCOME": "${{ steps.lifetime_upload.outcome }}",
-        "CEL_COST_UPLOAD_OUTCOME": "${{ steps.cost_upload.outcome }}",
+        "CEL_LIFETIME_DOWNLOAD_OUTCOME": "${{ steps.cel_lifetime_download.outcome }}",
+        "CEL_COST_DOWNLOAD_OUTCOME": "${{ steps.cel_cost_download.outcome }}",
+        "CEL_INVENTORY_OUTCOME": "${{ steps.cel_inventory.outcome }}",
         "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
     }
     assert selected_steps["workflow_cancellation"]["if"] == "${{ cancelled() }}"
@@ -167,7 +187,7 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
         (field, outcome)
         for field in SUCCESS
         if field != "WORKFLOW_CANCELLED"
-        for outcome in ("success", "failure", "cancelled", "skipped", "")
+        for outcome in (SUCCESS[field], "failure", "cancelled", "skipped", "", "false")
     ]
     + [("WORKFLOW_CANCELLED", "true"), ("WORKFLOW_CANCELLED", "")],
 )
