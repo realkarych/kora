@@ -29,6 +29,7 @@ class DiagnosticsSnapshot:
     sink_recoveries: int
     queue_records: int
     queue_bytes: int
+    in_flight_bytes: int
     sink_failed: bool
 
     def rejected_total(self) -> int:
@@ -51,6 +52,7 @@ class DiagnosticsState:
     sink_recoveries: int = 0
     queue_records: int = 0
     queue_bytes: int = 0
+    in_flight_bytes: int = 0
     sink_failed: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -84,6 +86,20 @@ class DiagnosticsState:
             self.queue_records = records
             self.queue_bytes = size
 
+    def take_batch(self, records: int, size: int, in_flight: int) -> None:
+        with self.lock:
+            self.queue_records = records
+            self.queue_bytes = size
+            self.in_flight_bytes = in_flight
+
+    def finish_batch(self) -> None:
+        with self.lock:
+            self.in_flight_bytes = 0
+
+    def is_idle(self) -> bool:
+        with self.lock:
+            return self.queue_records == 0 and self.in_flight_bytes == 0
+
     def snapshot(self) -> DiagnosticsSnapshot:
         with self.lock:
             return DiagnosticsSnapshot(
@@ -95,6 +111,7 @@ class DiagnosticsState:
                 sink_recoveries=self.sink_recoveries,
                 queue_records=self.queue_records,
                 queue_bytes=self.queue_bytes,
+                in_flight_bytes=self.in_flight_bytes,
                 sink_failed=self.sink_failed,
             )
 
@@ -141,11 +158,12 @@ class BoundedQueue:
                 item = self._items.popleft()
                 batch.append(item)
                 total += len(item)
+            joined = b"".join(batch)
             self._size -= total
-            self._state.set_queue(len(self._items), self._size)
+            self._state.take_batch(len(self._items), self._size, total)
             if not self._items:
                 self._condition.notify_all()
-            return b"".join(batch)
+            return joined
 
     def is_empty(self) -> bool:
         with self._condition:
@@ -191,8 +209,6 @@ class StreamWriter:
         self._state = state
         self._on_exit = on_exit
         self._stop = threading.Event()
-        self._idle = threading.Event()
-        self._idle.set()
         self._thread = threading.Thread(
             target=self._run, name="kora-diagnostics-writer", daemon=True
         )
@@ -208,12 +224,11 @@ class StreamWriter:
                     if self._stop.is_set() and self._queue.is_empty():
                         return
                     continue
-                self._idle.clear()
                 try:
                     if not self._write_all(item):
                         return
                 finally:
-                    self._idle.set()
+                    self._state.finish_batch()
         except BaseException:
             self._fail()
         finally:
@@ -251,4 +266,4 @@ class StreamWriter:
         return self._thread.is_alive()
 
     def is_idle(self) -> bool:
-        return self._idle.is_set() and self._queue.is_empty()
+        return self._state.is_idle()
