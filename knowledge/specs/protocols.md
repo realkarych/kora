@@ -267,15 +267,7 @@ class RawEvent:
     kind: str                         # a NormalisedEvent kind, `output`, `command_exited` or a supervisor kind
     data: JsonObject
 
-@dataclass(frozen=True)
-class UsageCoverage:
-    version: Literal[1]
-    observation_id: str | None
-    observation_sequence: int | None
-    completeness: Literal["complete", "partial", "unavailable"]
-    observed_at: datetime | None
-    attribution_gap: bool
-    observation_gap: bool
+from kora.ir.cost import UsageCoverage
 
 @dataclass(frozen=True)
 class Liveness:
@@ -756,25 +748,7 @@ class OutputCandidate:
     source: Literal["structured_output", "result_text"]
     value: JsonValue
 
-@dataclass(frozen=True)
-class UsageRow:
-    model: str
-    input_tokens: int
-    cached_input_tokens: int
-    cache_creation_tokens: int
-    output_tokens: int
-    reasoning_tokens: int
-    known_token_fields: frozenset[str]
-    cache_creation_by_ttl: Mapping[Literal["5m", "1h"], int] | None
-    reported_usd: str | None
-    observation_id: str
-    observation_sequence: int
-    observed_at: datetime
-    completeness: Literal["complete", "partial", "unavailable"]
-    basis: Literal["harness_list", "harness_managed", "price_table", "gateway"]   # the usage_record basis of data-model section 2
-    billing_class: Literal["api_key", "subscription", "gateway", "managed"]
-    delta_of_session_totals: bool
-    source: JsonObject              # the raw harness entry, at most 8 KiB
+from kora.ir.cost import UsageRow
 
 @dataclass(frozen=True)
 class SessionResult:
@@ -797,7 +771,7 @@ class SessionResult:
     policy_bypass: bool
 ```
 
-`UsageRow`, `UsageCoverage` and live monetary fields follow [data-model section 7](data-model.md#7-usage-records-and-completeness-fr-91). `known_token_fields` is a closed set of the five token column names; omitted dimensions remain unknown even when their observed lower bound is zero. Observation identity/order is stable within the attempt and preserved by relay/replay, including across grants; it cannot be regenerated from a heartbeat receipt. Unknown-model observations set an attribution gap instead of creating a synthetic row. Monetary strings use the exact decimal contract; the runner derives pricing coverage, and the engine derives persisted USD. The attempt-level coverage survives an empty `usage` tuple; its independent identity/sequence, initial null state and replay/refusal rules are defined in data-model section 7.2 and also apply to `Liveness`. Polls retain the source revision instead of generating new accounting evidence. A final result alone cannot clear an observation gap. The shared closed models, including bounds and validation, belong to #213 and #156.
+`UsageRow`, `UsageCoverage` and live monetary fields follow [data-model section 7](data-model.md#7-usage-records-and-completeness-fr-91). `known_token_fields` is a closed set of the five token column names; omitted dimensions remain unknown even when their observed lower bound is zero. Observation identity/order is stable within the attempt and preserved by relay/replay, including across grants; it cannot be regenerated from a heartbeat receipt. Unknown-model observations set an attribution gap instead of creating a synthetic row. Monetary strings use the exact decimal contract; the runner derives pricing coverage, and the engine derives persisted USD. The attempt-level coverage survives an empty `usage` tuple; its independent identity/sequence, initial null state and replay/refusal rules are defined in data-model section 7.2 and also apply to `Liveness`. Polls retain the source revision instead of generating new accounting evidence. A final result alone cannot clear an observation gap. The authoritative closed `UsageRow` and `UsageCoverage` models are implemented by #213 in `kora.ir.cost`; the signatures above import those values rather than define another schema. #156 owns their use in the protocol envelopes and #199 owns runner integration. Adapter work item 15 owns native SDK normalization; engine 9 owns persisted USD and ordered acceptance, while API 11 and worker 17 own authorized relay. These consumers remain pending. `PriceRevision`, `PriceRates`, `ModelCost` and `RunCost` share that value module; normalized monetary inputs follow the exact lexical and compatibility rules in data-model sections 7.3 and 7.5. Model validation alone supplies no grant, namespace, attempt or snapshot transaction authority.
 
 `EventSummary` is the adapter's incremental state that `finalise` reads: the harness's parsed result fields (`ResultMessage` on `claude`), per-call usage accumulators by message id, the count of distinct message ids, decided `tool_use_id`s, held error results, harness-denial entries with the count of unmatched ones, whether usage arrived after the first result, and the output-channel decision. Every collection in it is capped by `max_events` or by a fixed limit below, with an overflow count. Usage is not a counted `max_events` kind: its identity/order state must remain bounded independently, using current cumulative model totals, at most 1,024 open messages and bounded source high-water state, never an ever-growing id set. Eviction cannot permit recounting; loss of exact deduplication preserves a gap. `ConfigWarning` and `ContractViolation` (section 12) are aliases of the [shared `Diagnostic`](diagnostics.md), owned by `kora.ir`, with the same source/path/offset and safe-message rules. `check_config` returns configuration-relative warning paths, with `IR008` only for unsupported non-security fields; its consumer rebases them before global ordering. The shared per-call list bounds apply before accumulation; overflow raises the fixed `diagnostics_limit` protocol error and returns no partial success list. The runner validates `SessionResult.output` against the bound `ArtifactType` before returning, so it produces `artifact_invalid` itself; the worker adds duration and provenance (issue #139), and issue #138 maps the result into `AgentSession`. The result's harness identity comes from `SessionSpec.harness` and the worker's provenance, so it is `fake` under the testing composition (issue #136).
 

@@ -1,6 +1,10 @@
+import base64
 import gc
 import hashlib
+import inspect
 import json
+import os
+import platform
 import shutil
 import sys
 import tarfile
@@ -24,6 +28,7 @@ from kora.ir import (
     Retry,
     ToolPolicy,
 )
+from kora.ir.cost import PriceRevision, parse_money
 from kora.ir.json import (
     DEFAULT_MAX_DEPTH,
     MAX_CANONICAL_BYTES,
@@ -32,17 +37,21 @@ from kora.ir.json import (
     JsonValue,
     parse_json_object,
 )
+from kora.ir.pricing import estimate_usage_usd
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.metadata import parse_config_schema
 from tests.ir.config_cases import MINIMAL, POPULATED, RESOURCE
 from tests.ir.control_cases import CASE
 from tests.ir.control_cases import MINIMAL as CONTROL_MINIMAL
 from tests.ir.control_cases import POPULATED as CONTROL_POPULATED
-from tests.measurements.cel_measurement_process import run_process
+from tests.ir.test_cost_models import rates_payload, revision_payload
+from tests.measurements.cel_measurement_process import ProcessResult, run_process
+from tests.measurements.cost_workload import CostCase, cost_cases, exercise_cost
 from tests.measurements.diagnostic_workload import Lifecycle, cases, exercise
 from tests.measurements.harness import (
     Report,
     Sample,
+    new_report,
     open_descriptors,
     report_lifecycle,
 )
@@ -77,10 +86,405 @@ RETAINED_LIMIT_BYTES: int = 65_536
 LEAF_BYTES: int = 1024
 CONFIG_SCHEMA_BYTES: int = 65_536
 
+COST_RETAINED_LIMIT_BYTES: int = 262_144
+COST_RSS_LIMIT_BYTES: int = 8_388_608
+COST_TIMING_LIMIT_SECONDS: dict[str, float] = {
+    "cost_union_1": 2.0**-16,
+    "cost_union_16": 2.0**-14,
+    "cost_union_64": 2.0**-10,
+    "cost_union_65_refused": 2.0**-10,
+    "cost_coverage_complete": 2.0**-13,
+    "cost_coverage_initial": 2.0**-14,
+    "cost_coverage_gap_refused": 2.0**-13,
+    "cost_coverage_sequence_refused": 2.0**-14,
+    "cost_observation_valid": 2.0**-12,
+    "cost_observation_tokens_refused": 2.0**-13,
+    "cost_observation_ttl_refused": 2.0**-12,
+    "cost_observation_reasoning_refused": 2.0**-12,
+    "cost_snapshot_1_validate": 2.0**-10,
+    "cost_snapshot_1_round_trip": 2.0**-10,
+    "cost_pricing_max_products": 2.0**-14,
+    "cost_pricing_overflow_refused": 2.0**-16,
+    "cost_pricing_unknown": 2.0**-18,
+    "cost_pricing_subscription": 2.0**-19,
+    "cost_snapshot_64_validate": 2.0**-6,
+    "cost_snapshot_64_round_trip": 2.0**-5,
+    "cost_snapshot_1024_validate": 2.0**-2,
+    "cost_snapshot_1024_round_trip": 2.0**-1,
+    "cost_revision_65535_validate": 2.0**-5,
+    "cost_revision_65535_parse": 2.0**-6,
+    "cost_revision_65536_validate": 2.0**-6,
+    "cost_revision_65536_parse": 2.0**-6,
+    "cost_revision_65537_validate": 2.0**-8,
+    "cost_revision_65537_parse": 2.0**-15,
+    "cost_revision_65536_round_trip": 2.0**-4,
+    "cost_revision_normalized_growth_refused": 2.0**-6,
+    "cost_source_8191": 2.0**-11,
+    "cost_source_8192": 2.0**-11,
+    "cost_source_8193": 2.0**-13,
+    "cost_source_8192_round_trip": 2.0**-11,
+    "cost_source_8192_dense_round_trip": 2.0**-6,
+    "cost_source_depth_refused": 2.0**-13,
+    "cost_source_cycle_refused": 2.0**-13,
+    "cost_snapshot_subtotal_refused": 2.0**-2,
+    "cost_snapshot_1025_refused": 2.0**-4,
+    "cost_lexical_money_refused": 2.0**-17,
+    "cost_lexical_identifier_refused": 2.0**-9,
+    "cost_snapshot_bytes_1048575_validate": 2.0**-2,
+    "cost_snapshot_bytes_1048575_parse": 2.0**-2,
+    "cost_snapshot_bytes_1048576_validate": 2.0**-2,
+    "cost_snapshot_bytes_1048576_parse": 2.0**-2,
+    "cost_snapshot_bytes_1048577_validate": 2.0**-4,
+    "cost_snapshot_bytes_1048577_parse": 2.0**-9,
+    "cost_snapshot_bytes_1048576_round_trip": 2.0**-1,
+}
+
+
+def test_cost_checker_refuses_unexpected_acceptance() -> None:
+    case = CostCase("unexpected_acceptance", lambda: object(), False)
+
+    with pytest.raises(AssertionError):
+        exercise_cost(case)
+
+
+def test_cost_checker_refuses_unexpected_rejection() -> None:
+    def reject() -> object:
+        return parse_money(True)
+
+    case = CostCase("unexpected_rejection", reject)
+
+    with pytest.raises(AssertionError):
+        exercise_cost(case)
+
+
+def test_cost_checker_releases_nested_values() -> None:
+    document = revision_payload({"model": rates_payload()})
+    case = CostCase("nested_values", lambda: PriceRevision.model_validate(document))
+
+    live_models = exercise_cost(case)
+
+    assert live_models == 0
+
+
+def append_cost_report(report: Report, output: bytes) -> dict[str, object]:
+    payload = cast("dict[str, object]", json.loads(output))
+    samples = cast("list[dict[str, object]]", payload["samples"])
+    for sample in samples:
+        report.samples.append(
+            Sample(
+                cast("str", sample["workload"]),
+                cast("int", sample["repeat"]),
+                cast("int", sample["count"]),
+                cast("float", sample["seconds"]),
+            )
+        )
+    return payload
+
+
+def require_cost_process(
+    report: Report,
+    identity: str,
+    result: ProcessResult,
+    elapsed: float,
+    run: int,
+    mode: str,
+    group: str,
+    batch: int,
+    names: list[str],
+) -> None:
+    report.gates[f"{identity}_completed"] = False
+    report.environment[f"{identity}_process"] = json.dumps(
+        {
+            "revision": report.revision,
+            "run": run,
+            "mode": mode,
+            "group": group,
+            "batch": batch,
+            "cases": names,
+            "pid": result.pid,
+            "code": result.code,
+            "timed_out": result.timed_out,
+            "overflow": result.overflow,
+            "elapsed_seconds": elapsed,
+            "stdout_base64": base64.b64encode(result.stdout).decode("ascii"),
+            "stderr_base64": base64.b64encode(result.stderr).decode("ascii"),
+            "output_scope": "all_runner_retained_bytes_capped_per_stream",
+        }
+    )
+    assert not result.timed_out
+    assert not result.overflow
+    assert result.code == 0, (identity, result.code)
+    assert result.stderr == b""
+
+
+def test_cost_process_failure_preserves_lossless_evidence() -> None:
+    created = new_report()
+    identity = "cost_failure_evidence"
+    source = (
+        "import os,sys;os.write(1,b'partial\\xff');"
+        "os.write(2,b'failure\\x00\\xfe');sys.exit(7)"
+    )
+    started = time.perf_counter()
+    result = run_process([sys.executable, "-I", "-c", source])
+
+    with pytest.raises(AssertionError):
+        require_cost_process(
+            created,
+            identity,
+            result,
+            time.perf_counter() - started,
+            0,
+            "timing",
+            "large",
+            1,
+            ["snapshot_bytes_1048576_validate"],
+        )
+
+    envelope = cast(
+        "dict[str, object]",
+        json.loads(cast("str", created.environment[f"{identity}_process"])),
+    )
+    assert base64.b64decode(cast("str", envelope["stdout_base64"])) == b"partial\xff"
+    assert (
+        base64.b64decode(cast("str", envelope["stderr_base64"])) == b"failure\x00\xfe"
+    )
+    assert envelope["pid"] == result.pid
+    assert envelope["code"] == 7
+    assert envelope["cases"] == ["snapshot_bytes_1048576_validate"]
+    assert not created.gates[f"{identity}_completed"]
+    assert created.samples == []
+
+
+def accounting_file(path: Path) -> tuple[bytes, bool] | None:
+    try:
+        with path.open("rb") as source:
+            data = source.read(262_145)
+    except FileNotFoundError:
+        return None
+    return data[:262_144], len(data) > 262_144
+
+
+def accounting_cpu_quota() -> dict[str, object]:
+    membership = accounting_file(Path("/proc/self/cgroup"))
+    if membership is None or membership[1]:
+        return {"status": "unavailable", "reason": "no_bounded_cgroup_membership"}
+    unified = [
+        line[3:]
+        for line in membership[0].decode().splitlines()
+        if line.startswith("0::")
+    ]
+    if len(unified) != 1 or ".." in Path(unified[0]).parts:
+        return {"status": "unavailable", "reason": "unresolved_cgroup_v2_membership"}
+    root = Path("/sys/fs/cgroup")
+    current = root / unified[0].lstrip("/")
+    limits: list[float] = []
+    for _ in range(32):
+        value = accounting_file(current / "cpu.max")
+        if value is None or value[1]:
+            return {"status": "unavailable", "reason": "unresolved_visible_cpu_max"}
+        quota, period = value[0].decode().split()
+        if quota != "max":
+            limits.append(int(quota) / int(period))
+        if current == root:
+            return {
+                "status": "available",
+                "scope": "minimum_visible_cgroup_v2_ancestor_quota",
+                "cpu_quota": min(limits) if limits else None,
+                "unlimited": not limits,
+            }
+        current = current.parent
+    return {"status": "unavailable", "reason": "visible_hierarchy_exceeds_32_levels"}
+
+
+def accounting_environment(report: Report) -> None:
+    evidence: dict[str, object] = {
+        "scope": "parent_host_once_before_child_action_timing",
+        "pid": os.getpid(),
+        "platform": sys.platform,
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "python": sys.version,
+        "executable": sys.executable,
+        "revision": report.revision,
+        "cpu_count": os.cpu_count(),
+    }
+    if sys.platform == "darwin":
+        model = run_process(["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"])
+        evidence["cpu_model"] = {
+            "source": "sysctl_machdep.cpu.brand_string",
+            "code": model.code,
+            "timed_out": model.timed_out,
+            "overflow": model.overflow,
+            "value": model.stdout.decode(errors="replace").strip()[:256]
+            if model.code == 0 and not model.timed_out and not model.overflow
+            else None,
+        }
+        evidence["effective_cpu_quota"] = {"status": "not_applicable_darwin"}
+    else:
+        cpuinfo = accounting_file(Path("/proc/cpuinfo"))
+        models = (
+            []
+            if cpuinfo is None
+            else [
+                line.split(":", 1)[1].strip()[:256]
+                for line in cpuinfo[0].decode(errors="replace").splitlines()
+                if line.startswith("model name") and ":" in line
+            ]
+        )
+        evidence["cpu_model"] = {
+            "source": "/proc/cpuinfo_first_262144_bytes",
+            "value": models[0] if models else None,
+            "truncated": cpuinfo is not None and cpuinfo[1],
+        }
+        evidence["cpu_affinity_count"] = len(os.sched_getaffinity(0))
+        evidence["effective_cpu_quota"] = accounting_cpu_quota()
+    identities: list[dict[str, object]] = []
+    for path in (
+        Path(__file__),
+        Path(inspect.getfile(cost_cases)),
+        Path(inspect.getfile(PriceRevision)),
+        Path(inspect.getfile(estimate_usage_usd)),
+    ):
+        source = accounting_file(path)
+        identities.append(
+            {
+                "path": str(path.resolve()),
+                "sha256": hashlib.sha256(source[0]).hexdigest()
+                if source is not None and not source[1]
+                else None,
+                "complete": source is not None and not source[1],
+            }
+        )
+    evidence["sources"] = identities
+    report.environment["accounting_host"] = json.dumps(evidence)
+    inventory: dict[str, list[str]] = {"ordinary": [], "large": []}
+    for case in cost_cases():
+        inventory[case.group].append(case.name)
+    report.environment["accounting_case_inventory"] = json.dumps(inventory)
+
+
+@pytest.mark.parametrize("run", range(3))
+@pytest.mark.parametrize("group", ["ordinary", "large"])
+def test_accounting_value_cost(report: Report, run: int, group: str) -> None:
+    batches = [[case.name for case in cost_cases() if case.group == group]]
+    if group == "large":
+        names = batches[0]
+        batches = [[name for name in names if not name.startswith("snapshot_bytes")]]
+        batches.extend([name] for name in names if name.startswith("snapshot_bytes"))
+    before = (open_descriptors(), threading.active_count())
+
+    for batch_index, names in enumerate(batches):
+        identity = f"cost_timing_{group}_{batch_index}_{run}"
+        argv = [
+            sys.executable,
+            "-m",
+            "tests.measurements.cost_workload",
+            "timing",
+            group,
+            report.revision,
+            identity,
+            ",".join(names),
+        ]
+        started = time.perf_counter()
+        result = run_process(argv)
+        elapsed = time.perf_counter() - started
+        require_cost_process(
+            report, identity, result, elapsed, run, "timing", group, batch_index, names
+        )
+        report.environment[identity] = result.stdout.decode()
+        payload = append_cost_report(report, result.stdout)
+        environment = cast("dict[str, object]", payload["environment"])
+        assert environment["operations_per_batch"] == 1
+        summaries = cast("dict[str, dict[str, float]]", payload["summary"])
+        counts = {sample.workload: sample.count for sample in report.samples}
+        for name, summary in summaries.items():
+            seconds = summary["p95_us_per_record"] * counts[name] / 1_000_000
+            passed = seconds <= COST_TIMING_LIMIT_SECONDS[name]
+            report.gates[f"{identity}_{name}_p95"] = passed
+            assert passed, (name, seconds, COST_TIMING_LIMIT_SECONDS[name])
+        report.samples.append(Sample(f"cost_{group}_timing_process", run, 1, elapsed))
+        report.gates[f"{identity}_completed"] = True
+
+    assert (open_descriptors(), threading.active_count()) == before
+
+
+@pytest.mark.parametrize("run", range(3))
+@pytest.mark.parametrize("group", ["ordinary", "large"])
+@pytest.mark.parametrize("traced", [True, False])
+def test_accounting_value_lifetime(
+    report: Report, run: int, group: str, traced: bool
+) -> None:
+    names: list[str | None] = (
+        [case.name for case in cost_cases() if case.group == group]
+        if traced and group == "large"
+        else [None]
+    )
+    mode = "traced" if traced else "native"
+    before = (open_descriptors(), threading.active_count())
+    inventory = cast(
+        "dict[str, list[str]]",
+        json.loads(cast("str", report.environment["accounting_case_inventory"])),
+    )
+
+    for batch, name in enumerate(names):
+        identity = f"cost_{mode}_{group}_{name or 'all'}_{run}"
+        argv = [
+            sys.executable,
+            "-m",
+            "tests.measurements.cost_workload",
+            mode,
+            group,
+            report.revision,
+            identity,
+        ]
+        if name is not None:
+            argv.append(name)
+        started = time.perf_counter()
+        result = run_process(argv)
+        elapsed = time.perf_counter() - started
+        require_cost_process(
+            report,
+            identity,
+            result,
+            elapsed,
+            run,
+            mode,
+            group,
+            batch,
+            inventory[group] if name is None else [name],
+        )
+        report.environment[identity] = result.stdout.decode()
+        payload = append_cost_report(report, result.stdout)
+        environment = cast("dict[str, object]", payload["environment"])
+        points = cast(
+            "list[dict[str, int]]", json.loads(cast("str", environment["checkpoints"]))
+        )
+        assert len(points) == 4
+        assert points[0]["cycle"] == 0
+        assert points[-1]["cycle"] == (1000 if group == "ordinary" else 3)
+        for resource in ("descriptors", "threads"):
+            assert all(point[resource] == points[0][resource] for point in points)
+        for point in points:
+            assert (point["heap"] >= 0) is traced
+            assert (point["rss"] >= 0) is not traced
+            resource = "heap" if traced else "rss"
+            limit = COST_RETAINED_LIMIT_BYTES if traced else COST_RSS_LIMIT_BYTES
+            passed = point[resource] - points[0][resource] <= limit
+            report.gates[f"{identity}_{point['cycle']}_{resource}_retained"] = passed
+            assert passed, (identity, point, limit)
+        report.samples.append(
+            Sample(f"cost_{mode}_{group}_lifetime_process", run, 1, elapsed)
+        )
+        report.gates[f"{identity}_owned_resources_released"] = True
+        report.gates[f"{identity}_completed"] = True
+
+    assert (open_descriptors(), threading.active_count()) == before
+
 
 @pytest.fixture(scope="module")
 def report(request: pytest.FixtureRequest) -> Iterator[Report]:
     for report in report_lifecycle():
+        accounting_environment(report)
         report.environment["selected_test_nodes"] = json.dumps(
             [item.nodeid for item in request.session.items]
         )

@@ -195,7 +195,7 @@ Because the transaction is atomic and revokes result authority (section 3) in th
 
 ## 7. Usage records and completeness (FR-9.1)
 
-The ownership and arithmetic contract was approved under [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349). It is a **forward contract**: [issue #213](https://github.com/realkarych/kora/issues/213) owns the shared models/arithmetic and the migration from the implemented per-model `price_table` and non-null `usage_record.usd_estimate`. No engine, runner or adapter implementation is established by this specification. Migration preserves predecessor facts and explicitly missing historical snapshots; it never reconstructs them from current prices.
+The ownership and arithmetic contract was approved under [issue #142](https://github.com/realkarych/kora/issues/142#issuecomment-6353409349). [Issue #213](https://github.com/realkarych/kora/issues/213) implements the shared immutable values in `kora.ir.cost`, pure arithmetic in `kora.ir.pricing`, scoped typed reads in `kora.db.cost_reads` and forward migration `0002_pricing_foundation`. Engine installation/pinning/aggregation, runner and adapter adoption, approval transactions and public cost projections remain **forward contracts** with the owners below. Accepting a value establishes neither execution nor accounting-write authority. Migration preserves predecessor facts and explicitly missing historical snapshots; it never reconstructs them from current prices.
 
 ### 7.1. Immutable price ownership and handoff
 
@@ -228,6 +228,8 @@ A replacement cannot lower token counts or completeness recorded by another gran
 ### 7.3. Live observations and bounds
 
 Normalized money crosses kora's JSON, API, request and journal boundaries as canonical finite nonnegative fixed-point decimal strings, without exponent notation or binary-float conversion. Rates and stored/reported/aggregate USD use the existing `Numeric(24,10)` domain, up to `99999999999999.9999999999`. Parse length/digits/scale before Decimal construction; use enough intermediate precision for all bounded products and sums. Round once per cumulative model row to ten fractional digits, `ROUND_HALF_EVEN`. Live pricing likewise accumulates exact products before cumulative quantization; totals sum stored decimals, not display-rounded or per-call-rounded amounts. Overflow and invalid subsets are explicit, never clamped.
+
+The implemented lexical form is `(?:0|[1-9][0-9]{0,13})(?:\.[0-9]{0,9}[1-9])?`, matched against the entire string, at most 25 characters. Zero is `"0"`; signs, whitespace, redundant leading zeros, a trailing decimal point, trailing fractional zeros, exponent notation and numeric inputs are refused. Accepted examples include `"0.0000000001"` and `"99999999999999.9999999999"`; `"0.0"`, `"01"` and `1.0` are invalid normalized money. Arithmetic and storage formatting use their own Decimal contexts, independent of the caller. Aware timestamps normalize to UTC and serialize with `Z`; numeric epoch strings and UTC overflow are refused. These strict boundaries apply equally to direct construction and raw JSON admission.
 
 The native adapter ingress is the sole monetary conversion exception: a supported SDK can already expose a cumulative model estimate as an integer or binary float. Reject booleans, negative, non-finite and out-of-range values; convert the finite value's shortest decimal representation to Decimal and quantize once to the canonical `reported_usd` string. This preserves the SDK estimate, not unrecoverable original wire precision. No rate or normalized monetary field in an event, `UsageRow` or worker/API payload accepts a float; engine arithmetic is decimal-only. Bounded opaque `source` may retain the native representation as non-authoritative evidence, never as a pricing input. The adapter uses its supported SDK interface; it does not replace the transport with CLI JSONL parsing to recover precision. The engine consumes only normalized `reported_usd`, never opaque vendor `source`.
 
@@ -266,7 +268,19 @@ Aggregation uses indexed run-scoped bounded batches/cursors, linear work in atte
 
 ### 7.5. Future evidence and activation
 
-All new executable cases below are **pending implementation**. [#213](https://github.com/realkarych/kora/issues/213) owns the foundation; engine/scheduler/API/worker/approval refer to work items 9/10/11/17/18 of the [implementation plan](../../docs/implementation-plan.md). The actual implementing issues assume their rows before code. Existing metadata checks stay active.
+The shared values, exact arithmetic, bounded typed metadata reads and forward migration are implemented under [#213](https://github.com/realkarych/kora/issues/213). The [implementation evidence](../research/pricing-foundation-evidence-2026-10-23.md) records their tests, measurements and limits. The following foundation checks are active:
+
+| Implemented boundary | Active evidence |
+|---|---|
+| Immutable owned state and explicit bounds | `test_cost_values_own_their_nested_state`, `test_nested_source_and_snapshot_containers_are_immutable`, `test_price_and_approval_bounds_are_explicit`, `test_attempt_model_union_is_cumulative_and_preserves_input` |
+| Exact formula, lexical money and context-independent storage | `test_usage_pricing_avoids_double_counting`, `test_direct_money_parser_refuses_noncanonical_input`, `test_money_storage_formatting_is_exact_and_context_independent`, `test_price_snapshot_decimal_round_trip` |
+| Historical distinction, scoped reads and retention | `test_cost_reads_preserve_predecessor_distinctions`, `test_nullable_usage_usd_is_not_zero`, `test_price_table_namespace_override_is_explicit`, `test_price_snapshot_survives_request_retention` on both databases |
+| Forward migration, interrupted recovery and owned release | `test_price_schema_upgrade_preserves_history`, `test_pricing_migration_recovers_after_failure`, `test_pricing_migration_recovers_after_index_interruption`, `test_migration_lease_restores_session_and_releases_lock` |
+| Content-free refusals and diagnostics | `test_cost_validation_errors_are_content_free`, `test_raw_json_refusal_is_content_free_and_bounded`, `test_cancelled_pricing_upgrade_keeps_diagnostics_content_free` |
+
+Nullable historical version tags remain predecessor records, not version-1 values with invented defaults. Typed reads distinguish absent, unmatched, predecessor and version-1 data. Historical missing USD and missing snapshots do not become zero or current-price snapshots. Version-1 price maps and approval snapshots round-trip exact decimal strings; malformed or oversized records refuse with content-free errors. Price lookup is scoped and indexed; usage pages are ordered, default to 64 rows and accept at most 128, without preloading source payloads or price maps. SQL projection bounds large stored fields before driver decoding. Migration preserves history and has no downgrade: recovery uses a backup. PostgreSQL migration checkpoints and SQLite batch migration retain their different database mechanics.
+
+The table below retains the complete consumer contracts. A shared test name establishes only its implemented foundation part; it does not establish engine selection/fallback, request or checkpoint relay, API authorization, replay or approval transactions. Those parts remain **pending implementation**. Engine/scheduler/API/worker/approval refer to work items 9/10/11/17/18 of the [implementation plan](../../docs/implementation-plan.md); implementing issues assume their rows before code. Existing metadata checks stay active.
 
 | Contract | Required evidence | Owner |
 |---|---|---|

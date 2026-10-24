@@ -87,62 +87,6 @@ jobs:
           pnpm --dir web run build
       - name: Run tests
         run: uv run --no-sync pytest -q
-      - name: Measure logging overhead and resource lifetime
-        id: measurement
-        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
-        with:
-          name: logging-overhead-measurement
-          path: measurements/logging-overhead.json
-          if-no-files-found: error
-      - name: Measure metadata database lifetime
-        id: database_measurement
-        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
-            uv run --no-sync pytest -q -m measurement tests/measurements/test_metadata_database_lifetime.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        if: ${{ !cancelled() && steps.database_measurement.outcome != 'skipped' }}
-        with:
-          name: metadata-database-lifetime-measurement
-          path: measurements/metadata-database-lifetime.json
-          if-no-files-found: error
-      - name: Measure provider loading cost
-        id: provider_loading_measurement
-        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        if: ${{ !cancelled() && steps.provider_loading_measurement.outcome != 'skipped' }}
-        with:
-          name: provider-loading-cost-measurement
-          path: measurements/provider-loading-cost.json
-          if-no-files-found: error
-      - name: Measure protocol model and secret registration cost
-        id: protocol_models_measurement
-        if: matrix.os == 'ubuntu-24.04' && matrix.python == '3.11.17'
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        if: ${{ !cancelled() && steps.protocol_models_measurement.outcome != 'skipped' }}
-        with:
-          name: protocol-models-cost-measurement
-          path: measurements/protocol-models-cost.json
-          if-no-files-found: error
       - name: Build isolated distributions offline
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
@@ -155,6 +99,327 @@ jobs:
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
 
+  resource-measurements:
+    name: Logging, metadata and provider measurements
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      verified: ${{ steps.required_measurements.outputs.verified }}
+      checkout_revision: ${{ steps.source_revision.outputs.checkout_revision }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_TEST_DATABASES: sqlite,postgresql
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: resource-measurements
+      - name: Install locked dependencies
+        id: dependencies
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" \
+            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+            --require-hashes \
+            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-build-hashes \
+            --editable .
+          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
+      - name: Record actual and requested source revisions
+        id: source_revision
+        env:
+          KORA_WORKFLOW_REVISION: ${{ github.sha }}
+          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
+          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
+          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
+          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
+      - name: Measure logging overhead and resource lifetime
+        id: measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        id: logging_upload
+        if: ${{ !cancelled() && steps.measurement.outcome != 'skipped' }}
+        with:
+          name: logging-overhead-measurement
+          path: measurements/logging-overhead.json
+          if-no-files-found: error
+      - name: Measure metadata database lifetime
+        id: database_measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
+            uv run --no-sync pytest -q -m measurement tests/measurements/test_metadata_database_lifetime.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        id: database_upload
+        if: ${{ !cancelled() && steps.database_measurement.outcome != 'skipped' }}
+        with:
+          name: metadata-database-lifetime-measurement
+          path: measurements/metadata-database-lifetime.json
+          if-no-files-found: error
+      - name: Measure provider loading cost
+        id: provider_loading_measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        id: provider_upload
+        if: ${{ !cancelled() && steps.provider_loading_measurement.outcome != 'skipped' }}
+        with:
+          name: provider-loading-cost-measurement
+          path: measurements/provider-loading-cost.json
+          if-no-files-found: error
+      - name: Measure protocol model and secret registration cost
+        id: protocol_models_measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        id: protocol_upload
+        if: ${{ !cancelled() && steps.protocol_models_measurement.outcome != 'skipped' }}
+        with:
+          name: protocol-models-cost-measurement
+          path: measurements/protocol-models-cost.json
+          if-no-files-found: error
+      - name: Check the synced environment and unchanged dependency files
+        id: final_sync
+        if: ${{ always() && !cancelled() }}
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require every producer step
+        id: required_measurements
+        if: ${{ always() }}
+        env:
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
+          MEASUREMENT_OUTCOME: ${{ steps.measurement.outcome }}
+          LOGGING_UPLOAD_OUTCOME: ${{ steps.logging_upload.outcome }}
+          DATABASE_MEASUREMENT_OUTCOME: ${{ steps.database_measurement.outcome }}
+          DATABASE_UPLOAD_OUTCOME: ${{ steps.database_upload.outcome }}
+          PROVIDER_LOADING_MEASUREMENT_OUTCOME: ${{ steps.provider_loading_measurement.outcome }}
+          PROVIDER_UPLOAD_OUTCOME: ${{ steps.provider_upload.outcome }}
+          PROTOCOL_MODELS_MEASUREMENT_OUTCOME: ${{ steps.protocol_models_measurement.outcome }}
+          PROTOCOL_UPLOAD_OUTCOME: ${{ steps.protocol_upload.outcome }}
+          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$SOURCE_REVISION_OUTCOME" = success
+          test "$MEASUREMENT_OUTCOME" = success
+          test "$LOGGING_UPLOAD_OUTCOME" = success
+          test "$DATABASE_MEASUREMENT_OUTCOME" = success
+          test "$DATABASE_UPLOAD_OUTCOME" = success
+          test "$PROVIDER_LOADING_MEASUREMENT_OUTCOME" = success
+          test "$PROVIDER_UPLOAD_OUTCOME" = success
+          test "$PROTOCOL_MODELS_MEASUREMENT_OUTCOME" = success
+          test "$PROTOCOL_UPLOAD_OUTCOME" = success
+          test "$FINAL_SYNC_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
+          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+
+  pricing-measurements:
+    name: Pricing database lifetime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      verified: ${{ steps.required_measurements.outputs.verified }}
+      checkout_revision: ${{ steps.source_revision.outputs.checkout_revision }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_TEST_DATABASES: sqlite,postgresql
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.15.0
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: pricing-measurements
+      - name: Install locked dependencies
+        id: dependencies
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" \
+            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+            --require-hashes \
+            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-build-hashes \
+            --editable .
+          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
+      - name: Record actual and requested source revisions
+        id: source_revision
+        env:
+          KORA_WORKFLOW_REVISION: ${{ github.sha }}
+          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
+          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
+          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
+          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
+      - name: Provision isolated Python 3.11 pricing environment
+        id: pricing_environment
+        run: |
+          KORA_PRICING_ROOT="$(mktemp -d "$RUNNER_TEMP/kora-pricing.XXXXXXXX")"
+          printf 'KORA_PRICING_ROOT=%s\n' "$KORA_PRICING_ROOT" >> "$GITHUB_ENV"
+          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
+          sha256sum .venv/pyvenv.cfg > "$KORA_PRICING_ROOT/original-environment.sha256"
+          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/original-packages.txt"
+          sha256sum pyproject.toml uv.lock web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml > "$KORA_PRICING_ROOT/dependencies.sha256"
+          uv python install 3.11.17
+          KORA_PRICING_BASE="$(uv python find --managed-python 3.11.17)"
+          export UV_PROJECT_ENVIRONMENT="$KORA_PRICING_ROOT/environment"
+          export UV_PYTHON="$KORA_PRICING_BASE"
+          uv sync --python "$KORA_PRICING_BASE" --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          uv export --python "$KORA_PRICING_BASE" --locked --only-group build --no-emit-project \
+            --format requirements.txt --output-file "$KORA_PRICING_ROOT/constraints.txt"
+          uv pip install --python "$KORA_PRICING_ROOT/environment/bin/python" \
+            --target "$KORA_PRICING_ROOT/backend" --require-hashes \
+            --requirements "$KORA_PRICING_ROOT/constraints.txt"
+          uv pip install --python "$KORA_PRICING_ROOT/environment/bin/python" --no-deps \
+            --build-constraints "$KORA_PRICING_ROOT/constraints.txt" --require-build-hashes --editable .
+          "$KORA_PRICING_ROOT/environment/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 11, 17)'
+          sha256sum --check "$KORA_PRICING_ROOT/original-environment.sha256"
+          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/packages-after.txt"
+          cmp "$KORA_PRICING_ROOT/original-packages.txt" "$KORA_PRICING_ROOT/packages-after.txt"
+          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
+          sha256sum --check "$KORA_PRICING_ROOT/dependencies.sha256"
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+      - name: Measure complete pricing database lifetime
+        id: pricing_measurement
+        env:
+          KORA_TEST_DATABASES: sqlite,postgresql
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          KORA_PRICING_EVIDENCE: ${{ github.workspace }}/measurements/pricing-database-lifetime
+        run: |
+          "$KORA_PRICING_ROOT/environment/bin/python" -c \
+            'import sys; from tests.measurements.pricing_lifetime_support import pricing_command; sys.exit(pricing_command())'
+      - name: Verify pricing isolation
+        id: pricing_isolation
+        if: ${{ !cancelled() && steps.pricing_environment.outcome != 'skipped' }}
+        run: |
+          "$PWD/.venv/bin/python" -c 'import sys; assert sys.version_info[:3] == (3, 15, 0)'
+          sha256sum --check "$KORA_PRICING_ROOT/original-environment.sha256"
+          uv pip freeze --python "$PWD/.venv/bin/python" > "$KORA_PRICING_ROOT/packages-final.txt"
+          cmp "$KORA_PRICING_ROOT/original-packages.txt" "$KORA_PRICING_ROOT/packages-final.txt"
+          sha256sum --check "$KORA_PRICING_ROOT/dependencies.sha256"
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+          printf 'KORA_PRICING_ISOLATION_VERIFIED=true\n' >> "$GITHUB_ENV"
+      - name: Release pricing environment and retain lifecycle proof
+        id: pricing_release
+        if: ${{ always() && steps.pricing_environment.outcome != 'skipped' }}
+        run: |
+          "$PWD/.venv/bin/python" -c \
+            'from tests.measurements.pricing_lifetime_support import pricing_environment_release; pricing_environment_release()'
+      - name: Prepare bounded pricing publication
+        id: pricing_publication
+        if: ${{ !cancelled() && steps.pricing_environment.outcome != 'skipped' }}
+        env:
+          KORA_PRICING_MEASUREMENT_OUTCOME: ${{ steps.pricing_measurement.outcome }}
+          KORA_PRICING_RELEASE_OUTCOME: ${{ steps.pricing_release.outcome }}
+          KORA_PRICING_EVIDENCE: ${{ github.workspace }}/measurements/pricing-database-lifetime
+        run: |
+          "$PWD/.venv/bin/python" -c \
+            'from tests.measurements.pricing_lifetime_support import pricing_publication_prepare; pricing_publication_prepare()'
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: pricing_upload
+        if: ${{ !cancelled() && steps.pricing_publication.outputs.ready == 'true' }}
+        with:
+          name: pricing-database-lifetime-measurement
+          path: ${{ steps.pricing_publication.outputs.directory }}
+          if-no-files-found: error
+      - name: Release pricing publication
+        id: pricing_publication_release
+        if: ${{ always() && steps.pricing_publication.outputs.identity != '' }}
+        env:
+          KORA_PRICING_PUBLICATION: ${{ steps.pricing_publication.outputs.identity }}
+        run: |
+          "$PWD/.venv/bin/python" -c \
+            'from tests.measurements.pricing_lifetime_support import pricing_publication_release; pricing_publication_release()'
+      - name: Check the synced environment and unchanged dependency files
+        id: final_sync
+        if: ${{ always() && !cancelled() }}
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require every producer step
+        id: required_measurements
+        if: ${{ always() }}
+        env:
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
+          PRICING_ENVIRONMENT_OUTCOME: ${{ steps.pricing_environment.outcome }}
+          PRICING_MEASUREMENT_OUTCOME: ${{ steps.pricing_measurement.outcome }}
+          PRICING_ISOLATION_OUTCOME: ${{ steps.pricing_isolation.outcome }}
+          PRICING_RELEASE_OUTCOME: ${{ steps.pricing_release.outcome }}
+          PRICING_PUBLICATION_OUTCOME: ${{ steps.pricing_publication.outcome }}
+          PRICING_UPLOAD_OUTCOME: ${{ steps.pricing_upload.outcome }}
+          PRICING_PUBLICATION_RELEASE_OUTCOME: ${{ steps.pricing_publication_release.outcome }}
+          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$SOURCE_REVISION_OUTCOME" = success
+          test "$PRICING_ENVIRONMENT_OUTCOME" = success
+          test "$PRICING_MEASUREMENT_OUTCOME" = success
+          test "$PRICING_ISOLATION_OUTCOME" = success
+          test "$PRICING_RELEASE_OUTCOME" = success
+          test "$PRICING_PUBLICATION_OUTCOME" = success
+          test "$PRICING_UPLOAD_OUTCOME" = success
+          test "$PRICING_PUBLICATION_RELEASE_OUTCOME" = success
+          test "$FINAL_SYNC_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
+          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+
   ir-measurements:
     name: IR model measurements (${{ matrix.run }})
     runs-on: ubuntu-24.04
@@ -165,13 +430,13 @@ jobs:
         include:
           - run: 0
             pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime'
           - run: 1
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]'
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost'
           - run: 2
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]'
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime'
     env:
       KORA_TEST_DATABASES: sqlite
       KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -217,10 +482,10 @@ jobs:
           path: measurements/
           if-no-files-found: error
 
-  cel-measurements:
-    name: CEL evaluator lifetime
-    needs: [ir-measurements]
-    if: ${{ always() }}
+  cel-producer:
+    name: CEL lifetime and representative cost
+    outputs:
+      verified: ${{ steps.required_measurements.outputs.verified }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -242,24 +507,26 @@ jobs:
           cache-dependency-glob: uv.lock
           cache-suffix: cel-measurements
       - name: Install locked wheel dependencies
+        id: dependencies
         run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
       - name: Record checked-out revision
+        id: source_revision
         run: |
           mkdir -p measurements
           git rev-parse HEAD > measurements/cel-checkout-revision.txt
       - name: Measure evaluator lifetime and diagnostics
         id: measurement
-        if: ${{ needs.ir-measurements.result == 'success' && !cancelled() }}
+        if: ${{ !cancelled() }}
         run: uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_evaluator_lifetime.py
       - name: Check representative evaluation cost
         id: cost_regression
-        if: ${{ !cancelled() && needs.ir-measurements.result == 'success' }}
+        if: ${{ !cancelled() }}
         env:
           KORA_CEL_COST_OUTPUT: measurements/cel-cost-smoke.json
         run: uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_cel_cost_regression.py
       - name: Check required CEL evidence files
         id: cel_artifacts
-        if: ${{ always() && needs.ir-measurements.result == 'success' && !cancelled() }}
+        if: ${{ always() && !cancelled() }}
         run: |
           test -s measurements/cel-evaluator-lifetime.json
           test -s measurements/cel-cost-smoke.json
@@ -282,6 +549,64 @@ jobs:
             measurements/cel-evaluator-lifetime.json
             measurements/cel-checkout-revision.txt
           if-no-files-found: error
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require every producer step
+        id: required_measurements
+        if: ${{ always() }}
+        env:
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
+          MEASUREMENT_OUTCOME: ${{ steps.measurement.outcome }}
+          COST_REGRESSION_OUTCOME: ${{ steps.cost_regression.outcome }}
+          CEL_ARTIFACTS_OUTCOME: ${{ steps.cel_artifacts.outcome }}
+          COST_UPLOAD_OUTCOME: ${{ steps.cost_upload.outcome }}
+          LIFETIME_UPLOAD_OUTCOME: ${{ steps.lifetime_upload.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$SOURCE_REVISION_OUTCOME" = success
+          test "$MEASUREMENT_OUTCOME" = success
+          test "$COST_REGRESSION_OUTCOME" = success
+          test "$CEL_ARTIFACTS_OUTCOME" = success
+          test "$COST_UPLOAD_OUTCOME" = success
+          test "$LIFETIME_UPLOAD_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
+          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+
+  cel-measurements:
+    name: CEL evaluator lifetime
+    needs: [scaffold, ir-measurements, resource-measurements, pricing-measurements, cel-producer]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src
+      KORA_TEST_DATABASES: sqlite
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: cel-measurements
+      - name: Install locked wheel dependencies
+        id: dependencies
+        run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+      - name: Record checked-out revision
+        id: source_revision
+        run: |
+          mkdir -p measurements
+          git rev-parse HEAD > measurements/cel-checkout-revision.txt
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         id: ir_download
         if: ${{ always() && !cancelled() }}
@@ -303,6 +628,38 @@ jobs:
           name: ir-models-cost-union-${{ env.KORA_MEASUREMENT_REVISION }}
           path: measurements/ir-shard-union.json
           if-no-files-found: error
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: cel_lifetime_download
+        if: ${{ always() && !cancelled() }}
+        with:
+          name: cel-evaluator-lifetime-measurement
+          path: measurements/cel-lifetime
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: cel_cost_download
+        if: ${{ always() && !cancelled() }}
+        with:
+          name: cel-cost-regression-measurement
+          path: measurements/cel-cost
+      - name: Verify exact CEL evidence and both source receipts
+        id: cel_inventory
+        if: ${{ always() && !cancelled() && steps.cel_lifetime_download.outcome == 'success' && steps.cel_cost_download.outcome == 'success' }}
+        run: |
+          test -d measurements/cel-lifetime
+          test ! -L measurements/cel-lifetime
+          test -d measurements/cel-cost
+          test ! -L measurements/cel-cost
+          test "$(find measurements/cel-lifetime -mindepth 1 -print | LC_ALL=C sort)" = "$(printf '%s\n' measurements/cel-lifetime/cel-checkout-revision.txt measurements/cel-lifetime/cel-evaluator-lifetime.json)"
+          test "$(find measurements/cel-cost -mindepth 1 -print | LC_ALL=C sort)" = "$(printf '%s\n' measurements/cel-cost/cel-checkout-revision.txt measurements/cel-cost/cel-cost-smoke.json)"
+          for path in measurements/cel-lifetime/cel-evaluator-lifetime.json measurements/cel-cost/cel-cost-smoke.json; do
+            test -f "$path"
+            test ! -L "$path"
+            test -s "$path"
+          done
+          for path in measurements/cel-lifetime/cel-checkout-revision.txt measurements/cel-cost/cel-checkout-revision.txt; do
+            test -f "$path"
+            test ! -L "$path"
+            test "$(cat "$path")" = "$KORA_MEASUREMENT_REVISION"
+          done
       - name: Record workflow cancellation
         id: workflow_cancellation
         if: ${{ cancelled() }}
@@ -311,26 +668,40 @@ jobs:
         id: required_measurements
         if: ${{ always() }}
         env:
+          SCAFFOLD_RESULT: ${{ needs.scaffold.result }}
           IR_MATRIX_RESULT: ${{ needs.ir-measurements.result }}
+          RESOURCE_RESULT: ${{ needs.resource-measurements.result }}
+          RESOURCE_VERIFIED: ${{ needs.resource-measurements.outputs.verified }}
+          PRICING_RESULT: ${{ needs.pricing-measurements.result }}
+          PRICING_VERIFIED: ${{ needs.pricing-measurements.outputs.verified }}
+          CEL_RESULT: ${{ needs.cel-producer.result }}
+          CEL_VERIFIED: ${{ needs.cel-producer.outputs.verified }}
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
           IR_DOWNLOAD_OUTCOME: ${{ steps.ir_download.outcome }}
           IR_INVENTORY_OUTCOME: ${{ steps.ir_inventory.outcome }}
           IR_UNION_UPLOAD_OUTCOME: ${{ steps.ir_union_upload.outcome }}
-          CEL_LIFETIME_OUTCOME: ${{ steps.measurement.outcome }}
-          CEL_COST_OUTCOME: ${{ steps.cost_regression.outcome }}
-          CEL_ARTIFACTS_OUTCOME: ${{ steps.cel_artifacts.outcome }}
-          CEL_LIFETIME_UPLOAD_OUTCOME: ${{ steps.lifetime_upload.outcome }}
-          CEL_COST_UPLOAD_OUTCOME: ${{ steps.cost_upload.outcome }}
+          CEL_LIFETIME_DOWNLOAD_OUTCOME: ${{ steps.cel_lifetime_download.outcome }}
+          CEL_COST_DOWNLOAD_OUTCOME: ${{ steps.cel_cost_download.outcome }}
+          CEL_INVENTORY_OUTCOME: ${{ steps.cel_inventory.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
+          test "$SCAFFOLD_RESULT" = success
           test "$IR_MATRIX_RESULT" = success
+          test "$RESOURCE_RESULT" = success
+          test "$PRICING_RESULT" = success
+          test "$CEL_RESULT" = success
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$SOURCE_REVISION_OUTCOME" = success
           test "$IR_DOWNLOAD_OUTCOME" = success
           test "$IR_INVENTORY_OUTCOME" = success
           test "$IR_UNION_UPLOAD_OUTCOME" = success
-          test "$CEL_LIFETIME_OUTCOME" = success
-          test "$CEL_COST_OUTCOME" = success
-          test "$CEL_ARTIFACTS_OUTCOME" = success
-          test "$CEL_LIFETIME_UPLOAD_OUTCOME" = success
-          test "$CEL_COST_UPLOAD_OUTCOME" = success
+          test "$CEL_LIFETIME_DOWNLOAD_OUTCOME" = success
+          test "$CEL_COST_DOWNLOAD_OUTCOME" = success
+          test "$CEL_INVENTORY_OUTCOME" = success
+          test "$RESOURCE_VERIFIED" = true
+          test "$PRICING_VERIFIED" = true
+          test "$CEL_VERIFIED" = true
           test "$WORKFLOW_CANCELLED" = false
 
   browser:
