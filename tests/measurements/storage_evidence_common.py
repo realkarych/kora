@@ -25,8 +25,8 @@ def nonfinite(value: str) -> None:
     raise EvidenceFailure("nonfinite evidence numbers")
 
 
-def junit_nodes(path: Path) -> frozenset[str]:
-    if path.stat().st_size > 4194304:
+def junit_nodes(path: Path, maximum: int = 4194304) -> frozenset[str]:
+    if path.stat().st_size > maximum:
         raise EvidenceFailure("the storage test evidence exceeds its bound")
     nodes: set[str] = set()
 

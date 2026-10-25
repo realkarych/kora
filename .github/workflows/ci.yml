@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  scaffold:
-    name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
+  scaffold-tests:
+    name: Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -26,27 +26,56 @@ jobs:
           - os: ubuntu-24.04
             python: 3.11.17
             databases: sqlite,postgresql
+            lane: general
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+          - os: ubuntu-24.04
+            python: 3.11.17
+            databases: sqlite,postgresql
+            lane: storage
+            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py
           - os: ubuntu-24.04
             python: 3.15.0
             databases: sqlite,postgresql
+            lane: general
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+          - os: ubuntu-24.04
+            python: 3.15.0
+            databases: sqlite,postgresql
+            lane: storage
+            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py
           - os: macos-15
             python: 3.11.17
             databases: sqlite
+            lane: general
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+          - os: macos-15
+            python: 3.11.17
+            databases: sqlite
+            lane: storage
+            pytest-arguments: tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py
     defaults:
       run:
         shell: bash
     env:
       KORA_TEST_DATABASES: ${{ matrix.databases }}
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      KORA_SCAFFOLD_DIRECTORY: ${{ github.workspace }}/scaffold-evidence/scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
+      KORA_SCAFFOLD_RUN: ${{ github.run_id }}
+      KORA_SCAFFOLD_ATTEMPT: ${{ github.run_attempt }}
+      KORA_WORKFLOW_REVISION: ${{ github.sha }}
+      KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_PYTEST_ARGUMENTS: ${{ matrix.pytest-arguments }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+      - if: ${{ matrix.lane == 'general' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
+      - if: ${{ matrix.lane == 'general' }}
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
         with:
           package_json_file: web/package.json
           run_install: false
@@ -58,8 +87,9 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-          cache-suffix: scaffold-${{ matrix.python }}
+          cache-suffix: scaffold-${{ matrix.python }}-${{ matrix.lane }}
       - name: Install locked dependencies
+        id: dependencies
         run: |
           uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
@@ -75,8 +105,13 @@ jobs:
             --require-build-hashes \
             --editable .
           printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
-          pnpm --dir web install --frozen-lockfile
+      - name: Install locked frontend dependencies
+        id: frontend_dependencies
+        if: ${{ matrix.lane == 'general' }}
+        run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
+        id: static_checks
+        if: ${{ matrix.lane == 'general' }}
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
@@ -85,19 +120,168 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
-      - name: Run tests
-        run: uv run --no-sync pytest -q
+      - name: Collect and execute the exact test lane
+        id: tests
+        run: |
+          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
+          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
+          mkdir -p "$KORA_SCAFFOLD_DIRECTORY"
+          read -r -a KORA_SCAFFOLD_ARGUMENTS <<< "$KORA_PYTEST_ARGUMENTS"
+          if test '${{ matrix.lane }}' = general; then
+            if uv run --no-sync pytest --collect-only -q > "$KORA_SCAFFOLD_DIRECTORY/complete.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/complete.stderr"; then
+              printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
+            else
+              KORA_EXIT="$?"
+              printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
+              exit "$KORA_EXIT"
+            fi
+          fi
+          if uv run --no-sync pytest --collect-only -q "${KORA_SCAFFOLD_ARGUMENTS[@]}" > "$KORA_SCAFFOLD_DIRECTORY/selected.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/selected.stderr"; then
+            printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/collection.exit"
+          else
+            KORA_EXIT="$?"
+            printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/collection.exit"
+            exit "$KORA_EXIT"
+          fi
+          if uv run --no-sync pytest -q "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
+            printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"
+          else
+            KORA_EXIT="$?"
+            printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"
+            tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
+            tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"
+            exit "$KORA_EXIT"
+          fi
+          uv run --no-sync python -m tests.scaffold_evidence record \
+            "$KORA_SCAFFOLD_DIRECTORY" "$KORA_SCAFFOLD_RUN" "$KORA_SCAFFOLD_ATTEMPT" \
+            "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION" \
+            '${{ matrix.os }}' '${{ matrix.python }}' '${{ matrix.databases }}' '${{ matrix.lane }}' \
+            "${KORA_SCAFFOLD_ARGUMENTS[@]}"
+          tail -c 2048 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: evidence_upload
+        if: ${{ always() }}
+        with:
+          name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
+          path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
+          if-no-files-found: error
       - name: Build isolated distributions offline
+        id: distributions
+        if: ${{ matrix.lane == 'general' }}
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
             --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
             --require-hashes --clear
       - name: Check the synced environment and unchanged dependency files
+        id: final_sync
         run: |
           uv sync --locked --no-build --group build --extra postgres --extra cel
           git diff --exit-code -- pyproject.toml uv.lock web/package.json \
             web/pnpm-lock.yaml web/pnpm-workspace.yaml
+
+      - name: Record lane workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require complete lane execution
+        if: ${{ always() }}
+        env:
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          FRONTEND_OUTCOME: ${{ steps.frontend_dependencies.outcome }}
+          STATIC_OUTCOME: ${{ steps.static_checks.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.evidence_upload.outcome }}
+          DISTRIBUTIONS_OUTCOME: ${{ steps.distributions.outcome }}
+          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$TESTS_OUTCOME" = success
+          test "$UPLOAD_OUTCOME" = success
+          test "$FINAL_SYNC_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
+          if test '${{ matrix.lane }}' = general; then
+            test "$FRONTEND_OUTCOME" = success
+            test "$STATIC_OUTCOME" = success
+            test "$DISTRIBUTIONS_OUTCOME" = success
+          else
+            test "$FRONTEND_OUTCOME" = skipped
+            test "$STATIC_OUTCOME" = skipped
+            test "$DISTRIBUTIONS_OUTCOME" = skipped
+          fi
+
+  scaffold:
+    name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
+    if: ${{ always() }}
+    needs: [scaffold-tests]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: 3.11.17
+          - os: ubuntu-24.04
+            python: 3.15.0
+          - os: macos-15
+            python: 3.11.17
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: scaffold-join
+      - name: Install locked evidence dependencies
+        id: dependencies
+        run: uv sync --locked --no-build --all-extras --no-install-project
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: evidence_download
+        with:
+          pattern: scaffold-tests-*
+          path: scaffold-evidence
+      - name: Verify six lanes and complete collection coverage
+        id: verification
+        env:
+          KORA_SCAFFOLD_RUN: ${{ github.run_id }}
+          KORA_SCAFFOLD_ATTEMPT: ${{ github.run_attempt }}
+          KORA_WORKFLOW_REVISION: ${{ github.sha }}
+          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
+          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
+          uv run --no-sync python -m tests.scaffold_evidence verify \
+            scaffold-evidence "$KORA_SCAFFOLD_RUN" "$KORA_SCAFFOLD_ATTEMPT" \
+            "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
+      - name: Record join workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require all test lanes and collection evidence
+        if: ${{ always() }}
+        env:
+          LANES_RESULT: ${{ needs.scaffold-tests.result }}
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.evidence_download.outcome }}
+          VERIFICATION_OUTCOME: ${{ steps.verification.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$LANES_RESULT" = success
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$DOWNLOAD_OUTCOME" = success
+          test "$VERIFICATION_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
 
   resource-measurements:
     name: Logging, metadata and provider measurements
