@@ -246,27 +246,29 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                     assert process is not None
                     assert process.returncode == 0
         finally:
-            if running is not None:
-                running.cancel()
-                try:
-                    await running
-                except asyncio.CancelledError:
-                    if not running.cancelled():
-                        raise
-            await dispose_test_owner(owner, clock)
-            await owner.close(None)
-            deadline = owner.clock.monotonic_ns() + 5_000_000_000
-            for record in owner.records.values():
-                process = record.process
-                if process is not None and not process.closed:
-                    process.signal(signal.SIGKILL, deadline)
-                    await process.settle(deadline)
-                    await process.drain(deadline)
-                    process.release(deadline)
-                if record.directory is not None:
-                    record.directory.close()
-            for helper in owner.mutations.helpers:
-                if not helper.closed:
-                    helper.signal(signal.SIGKILL)
-                    assert await helper.settle(deadline)
-            assert owner.mutations.dispose_settled()
+            try:
+                if running is not None:
+                    running.cancel()
+                    try:
+                        await running
+                    except asyncio.CancelledError:
+                        if not running.cancelled():
+                            raise
+            finally:
+                await dispose_test_owner(owner, clock)
+                await owner.close(None)
+                deadline = owner.clock.monotonic_ns() + 5_000_000_000
+                for record in owner.records.values():
+                    process = record.process
+                    if process is not None and not process.closed:
+                        process.signal(signal.SIGKILL, deadline)
+                        await process.settle(deadline)
+                        await process.drain(deadline)
+                        process.release(deadline)
+                    if record.directory is not None:
+                        record.directory.close()
+                for helper in owner.mutations.helpers:
+                    if not helper.closed:
+                        helper.signal(signal.SIGKILL)
+                        assert await helper.settle(deadline)
+                assert owner.mutations.dispose_settled()
