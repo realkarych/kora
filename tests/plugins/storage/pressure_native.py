@@ -38,7 +38,7 @@ def process_token(pid: int, *, include_exited: bool = False) -> ProcessToken | N
     info.restype = ctypes.c_int
     state = ctypes.create_string_buffer(56)
     ctypes.set_errno(0)
-    count = info(pid, 17, 0, state, len(state))
+    count = info(pid, 17, int(include_exited), state, len(state))
     if count == 0 and ctypes.get_errno() == errno.ESRCH:
         return None
     if count != 56:

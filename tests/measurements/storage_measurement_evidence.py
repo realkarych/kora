@@ -8,6 +8,14 @@ from pydantic import Field, StrictBool, StrictInt, StrictStr
 
 from kora.ir.json import JsonValue
 from kora.protocols.common import BoundaryModel
+from tests.measurements.storage_budgets import (
+    GROWTH_FIELDS,
+    GrowthBudget,
+    read_budgets,
+    require_budget,
+    sampled_payload_bytes,
+    validate_growth,
+)
 from tests.measurements.storage_checkpoint import read_checkpoint
 from tests.measurements.storage_evidence_common import (
     EvidenceFailure,
@@ -205,6 +213,9 @@ def validate_report(report: StorageReport, revision: str, digest: str) -> None:
             if (
                 min(
                     sample.python_peak_bytes,
+                    sample.python_current_bytes,
+                    sample.python_post_gc_bytes,
+                    sample.tracer_bytes,
                     sample.rss_bytes,
                     sample.cumulative_maxrss_bytes,
                     sample.database_bytes,
@@ -214,6 +225,16 @@ def validate_report(report: StorageReport, revision: str, digest: str) -> None:
                 raise EvidenceFailure(
                     "a required native/Python/disk counter is unavailable"
                 )
+            if (
+                sample.phase == "cycle"
+                and min(
+                    sample.phase_peak_rss_bytes,
+                    sample.phase_peak_unique_bytes,
+                    sample.phase_peak_allocated_bytes,
+                )
+                <= 0
+            ):
+                raise EvidenceFailure("a required measured counter is unavailable")
             if sample.private_files or sample.payload_links or sample.unlinked_bytes:
                 raise EvidenceFailure("settled payload resources remain")
     if set(RESOURCE_FIELDS) - set(StorageSample.model_fields):
@@ -235,6 +256,63 @@ def validate_report(report: StorageReport, revision: str, digest: str) -> None:
             raise EvidenceFailure(
                 "the storage timing summary includes non-cycle samples "
                 "or differs from raw evidence"
+            )
+    validate_budgets(report)
+
+
+def validate_budgets(report: StorageReport) -> None:
+    budget = read_budgets().platforms[report.platform]
+    for workload in WORKLOADS:
+        points = tuple(
+            sample
+            for sample in report.samples
+            if sample.workload == workload.name and sample.resource_sample
+        )
+        for field in GROWTH_FIELDS:
+            growth: object = getattr(budget, field)
+            if not isinstance(growth, GrowthBudget):
+                raise EvidenceFailure("a required growth budget is unavailable")
+            values = tuple(
+                (sample.cycle, int(getattr(sample, field))) for sample in points
+            )
+            baseline = (
+                points[0].rss_bytes if field == "phase_peak_rss_bytes" else values[0][1]
+            )
+            validate_growth(values, baseline, growth, workload.name + "." + field)
+        payload = sampled_payload_bytes(workload)
+        for sample in points:
+            if sample.phase != "cycle":
+                continue
+            require_budget(
+                max(sample.python_peak_bytes, sample.python_current_bytes),
+                budget.python_peak_bytes,
+                workload.name + ".sampled_python_peak_bytes",
+            )
+            require_budget(
+                sample.phase_peak_unique_bytes,
+                payload + budget.phase_unique_overhead_bytes,
+                workload.name + ".phase_peak_unique_bytes",
+            )
+            require_budget(
+                sample.phase_peak_allocated_bytes,
+                payload + budget.phase_allocated_overhead_bytes,
+                workload.name + ".phase_peak_allocated_bytes",
+            )
+        timing = budget.workloads[workload.name]
+        require_budget(
+            report.summary[workload.name]["p95_us_per_record"] / 1000000,
+            timing.legacy_p95_seconds,
+            workload.name + ".legacy_p95_seconds",
+        )
+        if timing.maximum_cycle_seconds is not None:
+            require_budget(
+                max(
+                    sample.seconds
+                    for sample in report.samples
+                    if sample.workload == workload.name and sample.phase == "cycle"
+                ),
+                timing.maximum_cycle_seconds,
+                workload.name + ".maximum_cycle_seconds",
             )
 
 

@@ -7,6 +7,7 @@ from pydantic import Field, StrictBool, StrictInt, StrictStr, TypeAdapter
 
 from kora.ir.scalars import Digest
 from kora.protocols.common import BoundaryModel
+from tests.measurements.storage_budgets import read_budgets, require_budget
 from tests.measurements.storage_evidence_common import (
     EvidenceFailure,
     junit_nodes,
@@ -445,6 +446,19 @@ def validate_boundaries(
         ):
             raise EvidenceFailure(
                 "unavailable diagnostics prevented provider closure/progress"
+            )
+    budget = read_budgets().platforms[report.platform]
+    for sample in report.samples:
+        if isinstance(sample, InventoryPage):
+            require_budget(
+                sample.query_steps,
+                budget.inventory_query_steps,
+                "inventory.query_steps",
+            )
+            require_budget(
+                sample.seconds,
+                budget.inventory_page_seconds,
+                "inventory.page_seconds",
             )
 
 

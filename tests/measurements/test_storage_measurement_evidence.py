@@ -177,7 +177,13 @@ def report_data(platform: str = "linux", repeat: int = 0) -> dict[str, object]:
         sample.extra["resource_sample"] = point
         if point:
             for name in (
+                "phase_peak_rss_bytes",
+                "phase_peak_unique_bytes",
+                "phase_peak_allocated_bytes",
+                "python_current_bytes",
+                "python_post_gc_bytes",
                 "python_peak_bytes",
+                "tracer_bytes",
                 "rss_bytes",
                 "cumulative_maxrss_bytes",
                 "database_bytes",
@@ -189,6 +195,53 @@ def report_data(platform: str = "linux", repeat: int = 0) -> dict[str, object]:
     report.durations["complete"] = 30
     data: object = json.loads(storage_report_json(report))
     return dict[str, object](parse_json_object(data))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "phase_peak_rss_bytes",
+        "phase_peak_unique_bytes",
+        "phase_peak_allocated_bytes",
+        "python_current_bytes",
+        "python_post_gc_bytes",
+        "tracer_bytes",
+    ],
+)
+def test_storage_evidence_refuses_unavailable_measured_resource_counters(
+    field: str,
+) -> None:
+    report = StorageReport.model_validate(report_data())
+    changed = report.samples[10].model_copy(update={field: 0})
+    report = report.model_copy(
+        update={"samples": (*report.samples[:10], changed, *report.samples[11:])}
+    )
+
+    with pytest.raises(EvidenceFailure, match="counter is unavailable"):
+        validate_report(report, REVISION, DIGEST)
+
+
+def test_storage_evidence_refuses_excessive_settled_python_memory() -> None:
+    report = StorageReport.model_validate(report_data())
+    changed = report.samples[10].model_copy(update={"python_post_gc_bytes": 16777216})
+    report = report.model_copy(
+        update={"samples": (*report.samples[:10], changed, *report.samples[11:])}
+    )
+
+    with pytest.raises(EvidenceFailure, match="budget"):
+        validate_report(report, REVISION, DIGEST)
+
+
+@pytest.mark.parametrize(
+    "field", ["python_current_bytes", "python_post_gc_bytes", "tracer_bytes"]
+)
+def test_storage_evidence_refuses_unavailable_warmed_baseline(field: str) -> None:
+    report = StorageReport.model_validate(report_data())
+    baseline = report.samples[0].model_copy(update={field: 0})
+    report = report.model_copy(update={"samples": (baseline, *report.samples[1:])})
+
+    with pytest.raises(EvidenceFailure, match="counter is unavailable"):
+        validate_report(report, REVISION, DIGEST)
 
 
 @pytest.mark.parametrize("platform", ["linux", "darwin"])

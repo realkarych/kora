@@ -10,12 +10,56 @@ from tests.measurements.storage_evidence_common import (
     validate_execution,
 )
 from tests.measurements.storage_qualification_evidence import (
+    InventoryPage,
     QualificationReport,
+    QualificationSample,
     validate_boundaries,
 )
 
 REVISION: str = "a" * 40
 DIGEST: str = "b" * 64
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["page", "first", "middle", "final", "restart", "concurrent", "concurrent_page"],
+)
+@pytest.mark.parametrize("field", ["seconds", "query_steps"])
+def test_inventory_budgets_cover_every_online_page_form(phase: str, field: str) -> None:
+    report = qualification_report()
+    changed: list[QualificationSample] = []
+    for sample in report.samples:
+        if (
+            isinstance(sample, InventoryPage)
+            and sample.workload == "storage.inventory." + phase
+        ):
+            sample = sample.model_copy(
+                update={"seconds": 10.0, "us_per_record": 10000000.0}
+                if field == "seconds"
+                else {"query_steps": 100000}
+            )
+        changed.append(sample)
+    report = report.model_copy(update={"samples": tuple(changed)})
+
+    with pytest.raises(EvidenceFailure, match="inventory\\."):
+        validate_boundaries(report, REVISION, DIGEST)
+
+
+def test_inventory_budget_excludes_offline_seeding() -> None:
+    report = qualification_report()
+    changed = tuple(
+        sample.model_copy(
+            update={"seconds": 100.0, "us_per_record": 100000000.0 / sample.count}
+        )
+        if sample.workload == "storage.inventory.seed"
+        else sample
+        for sample in report.samples
+    )
+    report = report.model_copy(update={"samples": changed})
+
+    validate_boundaries(report, REVISION, DIGEST)
+
+    assert report.samples[0].seconds == 100.0
 
 
 def add_inventory_page(
