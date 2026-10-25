@@ -26,8 +26,12 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
+from kora.runner.channels import ChannelError
 from kora.runner.filesystem import DirectoryAnchor
-from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
+from tests.conformance.lifetime_helpers import (
+    ProbeIOHelperLauncher,
+    lifetime_failure_state,
+)
 from tests.conformance.test_lifetime_io_helper import read_probe
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
@@ -73,6 +77,8 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
         running: asyncio.Task[ClosureReport] | None = None
         replay_inputs: list[weakref.ReferenceType[ProcessLaunch]] = []
         direct_acquisitions: list[asyncio.Task[Acquisition]] = []
+        probe_replies: dict[bytes, int] = {b"e": 0, b"n": 0}
+        probe_ready_remaining_ns: int | None = None
         try:
             tree = await owner.reserve(
                 ReservationRequest(
@@ -135,10 +141,13 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 deadline = actual_clock.monotonic_ns() + 5_000_000_000
 
                 assert await read_probe(reading, deadline, actual_clock) == b"r"
+                probe_ready_remaining_ns = deadline - actual_clock.monotonic_ns()
                 helper = owner.mutations.helpers[-1]
                 while True:
                     os.kill(helper.process.pid, signal.SIGUSR1)
-                    if await read_probe(reading, deadline, actual_clock) == b"e":
+                    response = await read_probe(reading, deadline, actual_clock)
+                    probe_replies[response] += 1
+                    if response == b"e":
                         break
                 if not tree_workload:
                     assert any(
@@ -296,6 +305,11 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 assert process.returncode == 0
                 gc.collect()
                 assert all(reference() is None for reference in replay_inputs)
+        except ChannelError as failure:
+            failure.add_note(f"probe_starts={launcher.starts}, replies={probe_replies}")
+            failure.add_note(f"probe_ready_remaining_ns={probe_ready_remaining_ns}")
+            failure.add_note(lifetime_failure_state(owner))
+            raise
         finally:
             for direct in direct_acquisitions:
                 direct.cancel()

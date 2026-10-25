@@ -1,11 +1,11 @@
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from kora.observability.policy import CONTEXT_IDENTIFIER
-
 ScopeKind = Literal["run", "subgraph", "attempt"]
 
+SCOPE_IDENTIFIER: re.Pattern[str] = re.compile(r"\A[\x21-\x7e]{1,256}\Z")
 SCOPE_KINDS: frozenset[str] = frozenset({"run", "subgraph", "attempt"})
 DEADLINE_GRACE: timedelta = timedelta(seconds=30)
 
@@ -34,7 +34,7 @@ def is_scope_kind(value: object) -> bool:
 
 
 def is_scope_identifier(value: object) -> bool:
-    return isinstance(value, str) and CONTEXT_IDENTIFIER.match(value) is not None
+    return isinstance(value, str) and SCOPE_IDENTIFIER.match(value) is not None
 
 
 @dataclass(frozen=True)

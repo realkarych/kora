@@ -1,10 +1,42 @@
+import asyncio
 import socket
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kora.conformance.io_helper import InstalledIOHelperLauncher, IOHelper
 from kora.protocols.time import Clock
+
+if TYPE_CHECKING:
+    from kora.conformance.lifetime import ParentLifetime
+
+
+def lifetime_failure_state(owner: "ParentLifetime") -> str:
+    control = owner.invocation_cleanup
+    return repr(
+        {
+            "clock": owner.clock.monotonic_ns(),
+            "close": (control.start, control.cooperative, control.term, control.final),
+            "closure": (control.result.done(), control.failed, control.published),
+            "inventory": owner.inventory(),
+            "helpers": tuple(
+                (
+                    helper.process.pid,
+                    helper.closed,
+                    helper.anchor.exited,
+                    helper.anchor.unknown,
+                    helper.process.returncode,
+                )
+                for helper in owner.mutations.helpers[:16]
+            ),
+            "tasks": tuple(
+                (frame.f_code.co_name[:64], frame.f_lineno)
+                for task in tuple(asyncio.all_tasks())[:16]
+                for frame in task.get_stack(limit=1)
+            ),
+        }
+    )
 
 
 class ProbeIOHelperLauncher:

@@ -14,7 +14,7 @@ from pydantic import (
 )
 
 from kora.ir.scalars import Digest
-from kora.protocols.common import BoundaryModel
+from kora.protocols.boundary import BoundaryModel
 from kora.protocols.identity import Count, Identifier, Pid, ProcessIdentity
 
 InvocationId = Annotated[

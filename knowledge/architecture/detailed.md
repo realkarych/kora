@@ -156,6 +156,8 @@ Paths below are planned package locations from the stack decision and [ADR-0026]
 
 Cross-component changes also consult the owners of [content-bound approvals](../../docs/decisions/0008-content-bound-approvals.md), [cost accounting](../../docs/decisions/0010-cost-accounting-and-limits.md), [redaction and secrets](../specs/protocols.md#6-secrets-fr-101), [metrics](../specs/scheduler.md#11-metrics-and-health-nfr-73) and [inherited deadlines](../../docs/decisions/0022-inherited-execution-deadlines.md). These links replace a second catalog of rules and future test names.
 
+The immutable model base is defined once in `kora.protocols.boundary` and re-exported by `kora.protocols.common`. Fixed filesystem helpers and their identity, lifetime and filesystem records import this data-only base directly. Deadline identifiers use the same bounded visible-ASCII language locally, so importing clock and filesystem records does not initialize provider context or structured logging.
+
 ## Package layers
 
 Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), which states the invariant and the rules; `tests/architecture/test_import_layers.py` mirrors this table and checks both. A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is listed in `y`'s row; a module under `plugins` belongs to its longest listed family prefix, and `mcp.stdio` is matched before `mcp`. The composition roots `kora.__main__`, `kora.standalone`, `kora.testing` and `kora.conformance` may import anything, and no package imports a root. A new package enters the table in the change that creates it; widening a row is approved in that change's issue plan.

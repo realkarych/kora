@@ -12,7 +12,7 @@ from typing import Annotated, Literal, Protocol
 from pydantic import Field, StrictInt, TypeAdapter, ValidationError
 
 from kora.conformance.journal import JournalSnapshot
-from kora.protocols.common import BoundaryModel
+from kora.protocols.boundary import BoundaryModel
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.lifetime import InvocationId, LifetimeReason, Revision
 from kora.protocols.time import Clock, SystemClock

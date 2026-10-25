@@ -26,6 +26,7 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.runner.channels import BoundedChannel
+from tests.conformance.lifetime_helpers import lifetime_failure_state
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 
@@ -245,6 +246,9 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                     process = owner.records[child.token.resource_id].process
                     assert process is not None
                     assert process.returncode == 0
+        except TimeoutError as failure:
+            failure.add_note(lifetime_failure_state(owner))
+            raise
         finally:
             try:
                 if running is not None:

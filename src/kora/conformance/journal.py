@@ -2,7 +2,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, StrictBool, model_validator
 
-from kora.protocols.common import BoundaryModel
+from kora.protocols.boundary import BoundaryModel
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.lifetime import (
     BorrowedServiceRegistration,

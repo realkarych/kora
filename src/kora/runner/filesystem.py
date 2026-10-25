@@ -5,7 +5,7 @@ from typing import Annotated
 
 from pydantic import Field, StrictStr, field_validator
 
-from kora.protocols.common import BoundaryModel
+from kora.protocols.boundary import BoundaryModel
 from kora.protocols.lifetime import Uint32, Uint64
 
 
