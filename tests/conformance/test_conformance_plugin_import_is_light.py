@@ -36,7 +36,8 @@ def test_conformance_plugin_import_is_light() -> None:
 
 
 @pytest.mark.parametrize(
-    "module", ["kora.conformance.common", "kora.conformance.secrets"]
+    "module",
+    ["kora.conformance.common", "kora.conformance.secrets", "kora.conformance.vcs"],
 )
 def test_case_modules_import_no_fakes(module: str) -> None:
     found = loaded(module, FORBIDDEN_FOR_CASES)

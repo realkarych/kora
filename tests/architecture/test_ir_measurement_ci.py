@@ -22,6 +22,8 @@ SUCCESS = {
     "PRICING_VERIFIED": "true",
     "CEL_RESULT": "success",
     "CEL_VERIFIED": "true",
+    "GIT_PUBLICATION_RESULT": "success",
+    "GIT_PUBLICATION_VERIFIED": "true",
     "DEPENDENCIES_OUTCOME": "success",
     "SOURCE_REVISION_OUTCOME": "success",
     "IR_DOWNLOAD_OUTCOME": "success",
@@ -151,6 +153,7 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
         "resource-measurements",
         "pricing-measurements",
         "cel-producer",
+        "git-publication-measurements",
     ]
     assert job["if"] == "${{ always() }}"
     assert gate["if"] == "${{ always() }}"
@@ -163,6 +166,10 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
         "PRICING_VERIFIED": "${{ needs.pricing-measurements.outputs.verified }}",
         "CEL_RESULT": "${{ needs.cel-producer.result }}",
         "CEL_VERIFIED": "${{ needs.cel-producer.outputs.verified }}",
+        "GIT_PUBLICATION_RESULT": "${{ needs.git-publication-measurements.result }}",
+        "GIT_PUBLICATION_VERIFIED": (
+            "${{ needs.git-publication-measurements.outputs.verified }}"
+        ),
         "DEPENDENCIES_OUTCOME": "${{ steps.dependencies.outcome }}",
         "SOURCE_REVISION_OUTCOME": "${{ steps.source_revision.outcome }}",
         "IR_DOWNLOAD_OUTCOME": "${{ steps.ir_download.outcome }}",

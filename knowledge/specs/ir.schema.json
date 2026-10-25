@@ -210,7 +210,7 @@
     },
     "toolPolicy": {
       "type": "object",
-      "description": "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns in the harness tool-pattern syntax, evaluated per layer together with the namespace policy: a deny in either layer wins, every layer with a non-empty allow list must match, and order inside an array has no effect",
+      "description": "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns in kora's tool-pattern grammar (protocols.md section 12), evaluated per layer together with the namespace policy: a deny in either layer wins, every layer with a non-empty allow list must match, and order inside an array has no effect",
       "properties": {
         "allow": { "type": "array", "items": { "type": "string" } },
         "deny": { "type": "array", "items": { "type": "string" } }
@@ -441,7 +441,7 @@
         "limits": { "$ref": "#/$defs/limits" },
         "attempt_invariant": { "type": "boolean" },
         "independent_of": { "type": "array", "items": { "$ref": "#/$defs/id" } },
-        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "node-level addition to runtime.protected_paths (DD-34)" },
+        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "node-level addition to runtime.protected_paths (DD-34), path globs in the syntax of ir.md section 4.1" },
         "preset": { "type": "string", "description": "preset id the resolved config was built from" },
         "config": { "type": "object" }
       },
@@ -580,7 +580,7 @@
         "budget_headroom_pct": { "type": "number", "minimum": 0, "maximum": 100 },
         "stall_after": { "$ref": "#/$defs/duration" },
         "retention": { "$ref": "#/$defs/retention" },
-        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "glob patterns of gate files agent nodes may not edit and command gates verify against the base commit (DD-34)" },
+        "protected_paths": { "type": "array", "items": { "type": "string" }, "description": "path globs (ir.md section 4.1 syntax) of gate files agent nodes may not edit and command gates verify against the base commit (DD-34)" },
         "infrastructure_retry": { "$ref": "#/$defs/retry" },
         "provider_retry": { "type": "object", "properties": { "max_wait": { "$ref": "#/$defs/duration" } }, "patternProperties": { "^x-": {} }, "additionalProperties": false, "description": "waiting allowed for model-provider limits before failing with provider_limited (ADR-0024)" }
       },

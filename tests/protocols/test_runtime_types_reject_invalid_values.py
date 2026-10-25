@@ -4,13 +4,9 @@ from typing import cast
 
 import pytest
 
-from kora.protocols.runtime import (
-    CAPABILITY_FLAGS,
-    ExecutionDeadline,
-    PlanExecutor,
-    RuntimeCapabilities,
-    ScopeKind,
-)
+from kora.protocols.deadlines import ExecutionDeadline, ScopeKind
+from kora.protocols.runtime import CAPABILITY_FLAGS, RuntimeCapabilities
+from kora.protocols.vcs import PlanExecutor
 
 CAPABILITIES: RuntimeCapabilities = RuntimeCapabilities(
     supports_resume=False,
@@ -50,6 +46,8 @@ DEADLINE_CASES: list[tuple[str, object]] = [
     ("scope_kind", "node"),
     ("scope_id", ""),
     ("scope_id", 1),
+    ("scope_id", "run 1"),
+    ("scope_id", "r" * 257),
     ("clock_uncertainty", timedelta(microseconds=-1)),
     ("grace", timedelta(seconds=29)),
     ("grace", 30),

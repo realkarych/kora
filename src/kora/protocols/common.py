@@ -1,13 +1,20 @@
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
 
-from kora.ir.json import JsonObject
+from kora.ir.json import (
+    DEFAULT_MAX_DEPTH,
+    CanonicalBudget,
+    JsonObject,
+    JsonObjectField,
+    JsonShapeError,
+    parse_object,
+)
 from kora.observability import ComponentLogger
 from kora.observability.policy import CONTEXT_IDENTIFIER
 from kora.protocols.activity import ActivityReporter
-from kora.protocols.runtime import ExecutionDeadline
+from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.secret_value import SecretAdmission, SecretScope, SecretValue
 from kora.protocols.time import Clock
 
@@ -54,3 +61,21 @@ class ProtocolContext:
         for name in ("run_id", "attempt_id", "request_digest"):
             if not is_optional_identifier(getattr(self, name)):
                 raise ValueError(f"{name} is None or a bounded identifier")
+
+
+@dataclass(frozen=True)
+class Pending:
+    issue: int
+
+
+def budgeted_object(value: object, limit: int) -> JsonObjectField | None:
+    if not isinstance(value, dict):
+        return None
+    budget = CanonicalBudget(limit)
+    try:
+        parsed = parse_object(
+            cast("dict[object, object]", value), DEFAULT_MAX_DEPTH, 1, budget
+        )
+    except JsonShapeError:
+        return None
+    return JsonObjectField(parsed)

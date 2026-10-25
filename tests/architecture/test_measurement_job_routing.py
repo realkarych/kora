@@ -40,6 +40,13 @@ PRODUCER_STEPS = {
         "pricing_publication_release",
         "final_sync",
     ),
+    "git-publication-measurements": (
+        "dependencies",
+        "source_revision",
+        "git_publication_measurement",
+        "git_publication_upload",
+        "final_sync",
+    ),
     "cel-producer": (
         "dependencies",
         "source_revision",
@@ -145,7 +152,10 @@ def test_producer_proof_covers_every_required_step(job_id: str) -> None:
     assert set(required) <= selected.keys()
 
 
-@pytest.mark.parametrize("job_id", ["resource-measurements", "pricing-measurements"])
+@pytest.mark.parametrize(
+    "job_id",
+    ["resource-measurements", "pricing-measurements", "git-publication-measurements"],
+)
 def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> None:
     jobs = workflow_jobs()
     selected = steps(table(jobs[job_id]))
