@@ -16,8 +16,8 @@ from kora.conformance.storage_support import (
 )
 from kora.plugins.storage.local import LocalStorageConfiguration
 from kora.protocols.common import ProtocolContext
+from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.storage_models import (
     ContentAddress,
     ContentPreparation,

@@ -43,6 +43,7 @@ from kora.protocols.storage_models import (
     PromotionResult,
     SealedStage,
     StageManifest,
+    StageRef,
     StageWrite,
 )
 
@@ -249,16 +250,23 @@ def test_artifact_storage_promotion_is_create_only(
             context,
         )
         forged = (
-            first.model_copy(
-                update={
-                    "stage": first.stage.model_copy(
-                        update={"stage_id": "foreign-stage"}
-                    )
+            SealedStage.model_validate(
+                {
+                    **first.model_dump(),
+                    "stage": StageRef.model_validate(
+                        {**first.stage.model_dump(), "stage_id": "foreign-stage"}
+                    ),
                 }
             ),
-            first.model_copy(update={"seal_identity": "foreign-seal"}),
-            prepared.model_copy(update={"content_identity": "foreign-candidate"}),
-            prepared.model_copy(update={"source": first}),
+            SealedStage.model_validate(
+                {**first.model_dump(), "seal_identity": "foreign-seal"}
+            ),
+            PreparedContentRef.model_validate(
+                {**prepared.model_dump(), "content_identity": "foreign-candidate"}
+            ),
+            PreparedContentRef.model_validate(
+                {**prepared.model_dump(), "source": first}
+            ),
         )
         for index, content in enumerate(forged):
             with pytest.raises(KoraProtocolError):
@@ -323,7 +331,9 @@ def test_artifact_storage_promotion_is_create_only(
         )
         manifest = single_manifest(binding, part_spec, part.part_identity)
         foreign_part = single_manifest(binding, part_spec, "foreign-part")
-        foreign_stage = manifest.model_copy(update={"stage": first.stage})
+        foreign_stage = StageManifest.model_validate(
+            {**manifest.model_dump(), "stage": first.stage}
+        )
         for index, invalid in enumerate((foreign_part, foreign_stage)):
             with pytest.raises(KoraProtocolError):
                 await kora_provider.seal_stage(

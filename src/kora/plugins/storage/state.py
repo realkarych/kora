@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from typing import Final, TypeAlias, cast
 
 from kora.plugins.storage.errors import refuse
-from kora.plugins.storage.files import FileLease, RootAnchor
+from kora.plugins.storage.files import FileLease, RootAnchor, RootManifest
 from kora.plugins.storage.payload import PayloadFiles, PrivateFile
 from kora.protocols.identity import MAX_COUNT
 from kora.protocols.storage_models import (
@@ -202,8 +202,12 @@ class LocalState:
                 info = os.stat(
                     "control.sqlite", dir_fd=self.root.fd, follow_symlinks=False
                 )
-                updated = self.root.manifest.model_copy(
-                    update={"control_initialized": True, "control_inode": info.st_ino}
+                updated = RootManifest.model_validate(
+                    {
+                        **self.root.manifest.model_dump(),
+                        "control_initialized": True,
+                        "control_inode": info.st_ino,
+                    }
                 )
                 self.root.replace_manifest(updated)
 

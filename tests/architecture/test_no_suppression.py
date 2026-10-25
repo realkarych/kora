@@ -289,6 +289,10 @@ RUFF_TABLE: dict[str, object] = {
         ],
         "per-file-ignores": {
             "hatch_build.py": ["S603"],
+            "src/kora/executor/launcher.py": ["S603"],
+            "src/kora/plugins/vcs/git/decoder.py": ["S603"],
+            "src/kora/plugins/vcs/git/export.py": ["S603"],
+            "src/kora/plugins/vcs/git/tree_build.py": ["S603"],
             "tests/**": ["S101", "S603"],
             "src/kora/__main__.py": ["BLE001"],
             "src/kora/observability/bootstrap.py": ["BLE001"],

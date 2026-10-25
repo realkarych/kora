@@ -24,7 +24,13 @@ from kora.conformance.common import (
 from kora.observability.redaction import StreamMasker
 from kora.protocols.common import BoundaryModel
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
-from kora.protocols.secret_value import SecretTransfer, SecretValue, registered_forms
+from kora.protocols.secret_value import (
+    TRANSFER_SCOPE_KEY,
+    SecretScope,
+    SecretTransfer,
+    SecretValue,
+    registered_forms,
+)
 from kora.protocols.secrets import SecretsProvider
 
 __all__ = [
@@ -69,13 +75,15 @@ def renderings(value: SecretValue) -> tuple[str, ...]:
     return (repr(value), str(value), format(value), f"{value}", f"{value!r}")
 
 
-def check_never_rendered(value: SecretValue, plain: str) -> None:
+def check_never_rendered(value: SecretValue, plain: str, scope: SecretScope) -> None:
     for rendered in renderings(value):
         check(plain not in rendered, "no rendering shows the secret")
     check(refuses(lambda: pickle.dumps(value)), "pickling a secret is refused")
     check(refuses(lambda: copy.copy(value)), "copying a secret is refused")
     check(refuses(lambda: copy.deepcopy(value)), "deep-copying a secret is refused")
-    holder = TransferHolder.model_construct(value=value)
+    holder = TransferHolder.model_validate(
+        {"value": value}, context={TRANSFER_SCOPE_KEY: scope}
+    )
     check(plain not in repr(holder), "a model's repr does not show the secret")
     check(
         refuses_serialisation(holder),
@@ -149,7 +157,7 @@ def test_secrets_resolution_returns_a_masked_value(
     if not isinstance(value, SecretValue):
         fail("resolve returns a SecretValue")
     check(value.reveal() == expected, "resolve returns the referenced value")
-    check_never_rendered(value, expected)
+    check_never_rendered(value, expected, kora_capture.scope)
     check_absent_from_records(kora_capture, expected)
 
 

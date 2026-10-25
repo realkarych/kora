@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from types import MappingProxyType
-from typing import Annotated, ClassVar, Literal, Self, TypeAlias, cast
+from typing import Annotated, ClassVar, Literal, Protocol, Self, TypeAlias, cast
 
 from pydantic import (
     AfterValidator,
@@ -334,7 +334,64 @@ def unique_sequence(value: object) -> object:
     return values
 
 
-KnownFields = Annotated[frozenset[TokenField], BeforeValidator(unique_sequence)]
+def sorted_fields(value: frozenset[TokenField]) -> list[TokenField]:
+    return sorted(value)
+
+
+KnownFields = Annotated[
+    frozenset[TokenField],
+    BeforeValidator(unique_sequence),
+    PlainSerializer(sorted_fields, return_type=list[TokenField]),
+]
+
+
+def owned_ttl(
+    value: Mapping[Literal["5m", "1h"], int],
+) -> Mapping[Literal["5m", "1h"], int]:
+    return MappingProxyType(dict(value))
+
+
+TtlWire: TypeAlias = dict[Literal["5m", "1h"], Token]
+
+
+def serialized_ttl(value: Mapping[Literal["5m", "1h"], int]) -> TtlWire:
+    return {"5m": value["5m"], "1h": value["1h"]}
+
+
+TtlSplit = Annotated[
+    Mapping[Literal["5m", "1h"], Token],
+    AfterValidator(owned_ttl),
+    PlainSerializer(serialized_ttl, return_type=TtlWire),
+]
+
+
+class TokenCounts(Protocol):
+    @property
+    def output_tokens(self) -> int: ...
+
+    @property
+    def reasoning_tokens(self) -> int: ...
+
+    @property
+    def cache_creation_tokens(self) -> int: ...
+
+    @property
+    def known_token_fields(self) -> frozenset[TokenField]: ...
+
+    @property
+    def cache_creation_by_ttl(self) -> Mapping[Literal["5m", "1h"], int] | None: ...
+
+
+def tokens_coherent(counts: TokenCounts) -> bool:
+    split = counts.cache_creation_by_ttl
+    return counts.reasoning_tokens <= counts.output_tokens and (
+        split is None
+        or (
+            set(split) == {"5m", "1h"}
+            and "cache_creation_tokens" in counts.known_token_fields
+            and sum(split.values()) == counts.cache_creation_tokens
+        )
+    )
 
 
 class UsageRow(CostValue):
@@ -345,7 +402,7 @@ class UsageRow(CostValue):
     output_tokens: Token
     reasoning_tokens: Token
     known_token_fields: KnownFields
-    cache_creation_by_ttl: Mapping[Literal["5m", "1h"], Token] | None
+    cache_creation_by_ttl: TtlSplit | None
     reported_usd: Money | None
     observation_id: Identifier
     observation_sequence: Sum
@@ -369,30 +426,9 @@ class UsageRow(CostValue):
     def serialize_source(self, value: Mapping[str, FrozenJson]) -> JsonObject:
         return {key: thaw_json(item) for key, item in value.items()}
 
-    @field_validator("cache_creation_by_ttl", mode="after")
-    @classmethod
-    def own_ttl(
-        cls, value: Mapping[Literal["5m", "1h"], int] | None
-    ) -> Mapping[Literal["5m", "1h"], int] | None:
-        return None if value is None else MappingProxyType(dict(value))
-
-    @field_serializer("cache_creation_by_ttl")
-    def serialize_ttl(
-        self, value: Mapping[Literal["5m", "1h"], int] | None
-    ) -> dict[str, int] | None:
-        return (
-            None if value is None else {str(key): item for key, item in value.items()}
-        )
-
     @model_validator(mode="after")
     def coherent_tokens(self) -> Self:
-        if self.reasoning_tokens > self.output_tokens:
-            raise refusal()
-        if self.cache_creation_by_ttl is not None and (
-            set(self.cache_creation_by_ttl) != {"5m", "1h"}
-            or "cache_creation_tokens" not in self.known_token_fields
-            or sum(self.cache_creation_by_ttl.values()) != self.cache_creation_tokens
-        ):
+        if not tokens_coherent(self):
             raise refusal()
         return self
 

@@ -234,8 +234,8 @@ class RootAnchor:
                     ownership.enter_context(exclusive)
                 self.create_layout(creating)
                 if creating:
-                    updated = self.manifest.model_copy(
-                        update={"files_initialized": True}
+                    updated = RootManifest.model_validate(
+                        {**self.manifest.model_dump(), "files_initialized": True}
                     )
                     self.replace_manifest(updated)
             self._lifetime = self.try_lock("lifetime", shared=True)

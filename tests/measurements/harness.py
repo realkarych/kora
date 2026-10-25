@@ -1,5 +1,6 @@
 import json
 import os
+import resource
 import statistics
 import sys
 import threading
@@ -134,6 +135,11 @@ def current_rss_bytes() -> int | None:
         return None
     resident_pages = int(statm.read_text().split()[1])
     return resident_pages * os.sysconf("SC_PAGE_SIZE")
+
+
+def peak_rss_bytes() -> int:
+    scale = 1024 if sys.platform == "linux" else 1
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale
 
 
 def new_report() -> Report:

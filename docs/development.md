@@ -1,5 +1,7 @@
 # Development
 
+Git publication measurement amendment dated 2026-10-25: the measurement job and command of [issue #159](https://github.com/realkarych/kora/issues/159); wording pending line-by-line owner review.
+
 Parallel measurement scheduling amendment dated 2026-10-24: the project owner approved the placement and evidence-gate changes under [issue #213](https://github.com/realkarych/kora/issues/213); the wording was reviewed line by line and [approved by the project owner on 2026-10-24](https://github.com/realkarych/kora/issues/213#issuecomment-6377551455).
 
 Review-routing amendment dated 2026-10-23: the implementation plan and replacement local/native review paragraph were approved under [issue #252](https://github.com/realkarych/kora/issues/252#issuecomment-6369819638); final amendment wording remains subject to line-by-line owner review in its PR.
@@ -145,6 +147,13 @@ The metadata database lifetime measurement runs under the same marker, on every 
 ```sh
 KORA_MEASUREMENT_OUTPUT=measurements/metadata-database-lifetime.json \
   uv run --no-sync pytest -q -m measurement tests/measurements/test_metadata_database_lifetime.py
+```
+
+The git publication measurement runs serially in the independent `git-publication-measurements` Linux 3.11.17 job, which the `CEL evaluator lifetime` status joins. It runs a warm-up and 20 cycles of each publication outcome on a 1,000-file repository, gating zero descriptor, process and zombie growth and retained publication storage equal to the sealed input and prepared repository; three independent processes each for a 1 MiB file, a 256 MiB file and a 20,000-file repository plus one near-cap import, gating peak memory of the 256 MiB scan within 64 MiB of the 1 MiB scan; and the protected-path fuel rows (realistic, per-path cap, adversarial exhaustion and cancellation within one slice). It uploads the artifact `git-publication-cost-measurement`:
+
+```bash
+KORA_MEASUREMENT_OUTPUT=measurements/git-publication-cost.json \
+  uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_git_publication_cost.py
 ```
 
 The complete pricing database lifetime suite runs in the independent pricing job on both databases. Its authoritative workload timer must remain strictly below 256 seconds. The check runs after evidence finalization, preserving cleanup and retained evidence even when the time limit fails; a failed pytest result cannot qualify final command completion. Only the existing common PostgreSQL fixture interval and parent JSON encoding/write interval are excluded from that timer. Pricing-specific migrations, scenarios, child collection, owned factory and payload release, and memory-observer close remain included. The [fixed-budget rationale](../knowledge/reviews/ai-development-setup.md#pricing-workload-regression-budget) records the complete retained baseline and prospective tolerance; it does not guarantee hosted-run variance or permit retries.

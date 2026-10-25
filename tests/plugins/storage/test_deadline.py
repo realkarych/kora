@@ -9,8 +9,8 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.conformance.storage_support import acknowledge_stage, seal_repeated
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.storage_models import StorageLimits
 from tests.plugins.storage.clock import StorageClock
 from tests.plugins.storage.support import operation, stage_spec
