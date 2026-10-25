@@ -1,6 +1,6 @@
 import re
 from collections.abc import Mapping
-from typing import Annotated, Self, cast
+from typing import TYPE_CHECKING, Annotated, Self, cast
 
 from pydantic import (
     AfterValidator,
@@ -13,7 +13,8 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from kora.cel.diagnostics import Diagnostic as CelDiagnostic
+if TYPE_CHECKING:
+    from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 
 MAX_INTEGER: int = 9_007_199_254_740_991
 CODE: re.Pattern[str] = re.compile(r"[A-Za-z][A-Za-z0-9_.-]{0,63}")
@@ -133,7 +134,7 @@ ContractViolation = Diagnostic
 
 
 def from_cel(
-    diagnostic: CelDiagnostic,
+    diagnostic: "CelDiagnostic",
     *,
     path: tuple[str | int, ...] | None,
     exact_expression_field: bool,

@@ -117,6 +117,74 @@ async def test_channel_bounds_records_and_releases_cancelled_waiters() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "completion", ["data", "busy", "local_close", "peer_close", "cancel"]
+)
+async def test_idle_channel_owns_and_releases_one_reader(completion: str) -> None:
+    import asyncio
+    import socket
+
+    from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+
+    first, second = socket.socketpair()
+    clock = ControlledLifetimeClock()
+    receiver = BoundedChannel(first, clock)
+    entered = asyncio.Event()
+
+    async def wait() -> None:
+        entered.set()
+        await receiver.wait_readable()
+
+    pending = asyncio.create_task(wait())
+    try:
+        await entered.wait()
+        clock.advance(60_000_000_000)
+        assert not clock.waiters
+        assert not pending.done()
+        if completion == "busy":
+            with pytest.raises(ChannelError) as busy:
+                await receiver.read_frame(clock.monotonic_ns() + 1_000_000_000)
+            assert busy.value.reason is ChannelFailure.BUSY
+            assert not receiver.closed
+        if completion in ("data", "busy"):
+            second.sendall((4).to_bytes(4, "big") + b"data")
+            await asyncio.wait_for(pending, 5)
+            value = await receiver.read_frame(clock.monotonic_ns() + 1_000_000_000)
+
+            assert value == b"data"
+            assert not receiver.closed
+        elif completion == "cancel":
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+
+            assert receiver.closed
+        else:
+            if completion == "local_close":
+                receiver.close()
+                with pytest.raises(ChannelError) as closed:
+                    await asyncio.wait_for(pending, 5)
+                assert closed.value.reason is ChannelFailure.CLOSED
+            else:
+                second.close()
+                await asyncio.wait_for(pending, 5)
+                with pytest.raises(ChannelError) as closed:
+                    await receiver.read_frame(clock.monotonic_ns() + 1_000_000_000)
+                assert closed.value.reason is ChannelFailure.CLOSED
+
+            assert receiver.closed
+    finally:
+        receiver.close()
+        second.close()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+    assert not clock.waiters
+    assert pending.done()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("boundary", ["frame", "record_header", "record_chunk"])
 async def test_channel_refuses_length_above_reservation_without_body(
     boundary: str,

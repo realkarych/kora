@@ -158,6 +158,8 @@ Cross-component changes also consult the owners of [content-bound approvals](../
 
 The immutable model base is defined once in `kora.protocols.boundary` and re-exported by `kora.protocols.common`. Fixed filesystem helpers and their identity, lifetime and filesystem records import this data-only base directly. Deadline identifiers use the same bounded visible-ASCII language locally, so importing clock and filesystem records does not initialize provider context or structured logging.
 
+IR diagnostic models retain eager Pydantic initialization; their CEL conversion parameter imports its exact diagnostic type only for static checking. A fixed filesystem helper therefore does not activate the CEL checker through that annotation. Generic channels own idle readability separately from bounded frame transfer. Conformance recovery alone reconciles the fixed unpublished `next` file after verified exclusive ownership and earlier-effect settlement; its contents never replace the authoritative journal.
+
 ## Package layers
 
 Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), which states the invariant and the rules; `tests/architecture/test_import_layers.py` mirrors this table and checks both. A module of package `kora.<y>` may import `kora.<x>` only when `x` is `y` or is listed in `y`'s row; a module under `plugins` belongs to its longest listed family prefix, and `mcp.stdio` is matched before `mcp`. The composition roots `kora.__main__`, `kora.standalone`, `kora.testing` and `kora.conformance` may import anything, and no package imports a root. A new package enters the table in the change that creates it; widening a row is approved in that change's issue plan.

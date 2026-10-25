@@ -64,6 +64,7 @@ def partial_header_is_waiting(
     [
         "eof",
         "terminal",
+        "idle",
         "cancel_frame",
         "cancel_execution",
         "header_partial",
@@ -153,7 +154,19 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
 
                     frontier_deadline = asyncio.get_running_loop().time() + 5
                     async with asyncio.timeout_at(frontier_deadline):
-                        if mode.startswith("header_"):
+                        if mode == "idle":
+                            running = asyncio.create_task(parent.run())
+                            loop = asyncio.get_running_loop()
+                            marker, peer = await loop.sock_recvfrom(feedback, 1)
+                            assert marker == b"r"
+                            clock.advance(
+                                2 * duration_ns(owner.limits.acquisition_seconds)
+                            )
+                            await loop.sock_sendto(feedback, b"s", peer)
+                            assert await loop.sock_recv(feedback, 1) == b"p"
+                            assert owner.admission_open
+                            report = await running
+                        elif mode.startswith("header_"):
                             running = asyncio.create_task(parent.run())
                             loop = asyncio.get_running_loop()
                             marker, peer = await asyncio.wait_for(
@@ -166,9 +179,9 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                             original_interval = duration_ns(
                                 owner.limits.acquisition_seconds
                             )
-                            original_deadline = clock.monotonic_ns() + original_interval
                             if mode == "header_partial":
                                 clock.advance(original_interval // 2)
+                            original_deadline = clock.monotonic_ns() + original_interval
                             await loop.sock_sendto(feedback, b"s", peer)
                             assert (
                                 await asyncio.wait_for(
@@ -190,6 +203,13 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 assert not parent.pending
                                 assert not owner.ordinary_slots
                                 assert parent.control_bytes == retained
+                                clock.advance(original_interval // 2)
+                                progressed: asyncio.Future[None] = loop.create_future()
+                                loop.call_soon(progressed.set_result, None)
+                                await progressed
+                                assert partial_header_is_waiting(
+                                    running, parent.channel, original_deadline
+                                )
                                 clock.advance(
                                     original_interval - original_interval // 2 + 1
                                 )

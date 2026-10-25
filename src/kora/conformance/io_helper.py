@@ -4,6 +4,7 @@ import fcntl
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -399,6 +400,36 @@ def bootstrap(mutation: BootstrapMutation) -> tuple[MutationResult, tuple[int, .
         os.close(admission)
 
 
+def discard_recovery_staging(directory: DirectoryAnchor) -> None:
+    directory.verify()
+    try:
+        descriptor = os.open(
+            "next",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory.descriptor,
+        )
+    except FileNotFoundError:
+        return
+    try:
+        expected = file_identity(descriptor, "next")
+        directory.verify()
+        current = os.stat("next", dir_fd=directory.descriptor, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != expected.device
+            or current.st_ino != expected.inode
+            or current.st_uid != expected.owner_uid
+            or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_nlink != 1
+        ):
+            raise HelperError(LifetimeReason.IDENTITY_MISMATCH)
+        verify_private(descriptor, directory=False)
+        os.unlink("next", dir_fd=directory.descriptor)
+        os.fsync(directory.descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def recover(mutation: RecoverMutation) -> tuple[MutationResult, tuple[int, ...]]:
     root = DirectoryAnchor.open_path(state_directory())
     if mutation.expected_root is not None and root.identity != mutation.expected_root:
@@ -456,6 +487,7 @@ def recover(mutation: RecoverMutation) -> tuple[MutationResult, tuple[int, ...]]
         raise HelperError(LifetimeReason.EFFECT_UNSETTLED)
     if snapshot.generation >= 2**64 - 1 or snapshot.revision >= 2**64 - 1:
         raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
+    discard_recovery_staging(invocation)
     snapshot = JournalSnapshot.model_validate(
         {
             **snapshot.model_dump(),

@@ -1,3 +1,4 @@
+import os
 import signal
 import subprocess
 import sys
@@ -8,7 +9,12 @@ import pytest
 from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.journal import JournalSnapshot
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
-from kora.protocols.lifetime import CleanupReference, ProcessRegistration, ResourceKind
+from kora.protocols.lifetime import (
+    CleanupOutcome,
+    CleanupReference,
+    ProcessRegistration,
+    ResourceKind,
+)
 from kora.protocols.time import SystemClock
 from kora.runner.identity import (
     GroupObservation,
@@ -18,6 +24,83 @@ from kora.runner.identity import (
 )
 from kora.runner.processes import RecoveredProcess, SignalResult
 from tests.conformance.test_parent_lifetime import limits
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "staging",
+    ["empty", "partial", "garbage", "symlink", "directory", "fifo", "hardlink", "mode"],
+)
+async def test_recovery_discards_only_verified_abandoned_journal_staging(
+    tmp_path: Path, staging: str
+) -> None:
+    original = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "tree",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    reference = CleanupReference(invocation_id=original.stdout.decode("ascii"))
+    journal_path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    saved = journal_path.read_bytes()
+    journal = JournalSnapshot.model_validate_json(saved)
+    path = journal_path.with_name("next")
+    target = tmp_path / "retained-target"
+    target.write_bytes(b"preserved")
+    target.chmod(0o600)
+    eligible = staging in ("empty", "partial", "garbage")
+    if staging == "symlink":
+        path.symlink_to(target)
+    elif staging == "directory":
+        path.mkdir(mode=0o700)
+    elif staging == "fifo":
+        os.mkfifo(path, 0o600)
+    elif staging == "hardlink":
+        os.link(target, path)
+    else:
+        path.write_bytes(
+            b"" if staging == "empty" else b"{" if staging == "partial" else b"invalid"
+        )
+        path.chmod(0o644 if staging == "mode" else 0o600)
+    staged_identity = path.lstat()
+    owner = ParentLifetime(
+        limits=limits(),
+        recovery=reference,
+        launcher=InstalledIOHelperLauncher(
+            home=tmp_path, state_home=tmp_path / "state"
+        ),
+    )
+
+    try:
+        if eligible:
+            await owner.ready()
+            recovered = JournalSnapshot.model_validate_json(journal_path.read_bytes())
+
+            assert recovered.generation == journal.generation + 1
+            assert recovered.invocation_id == journal.invocation_id
+            assert recovered.entries == journal.entries
+            assert not path.exists()
+            assert (await owner.close(None)).state is CleanupOutcome.CLOSED
+            assert not journal_path.parent.exists()
+        else:
+            with pytest.raises(LifetimeError):
+                await owner.ready()
+
+            assert journal_path.read_bytes() == saved
+            retained = path.lstat()
+            assert (retained.st_dev, retained.st_ino, retained.st_mode) == (
+                staged_identity.st_dev,
+                staged_identity.st_ino,
+                staged_identity.st_mode,
+            )
+        assert target.read_bytes() == b"preserved"
+    finally:
+        await owner.close(None)
 
 
 @pytest.mark.asyncio

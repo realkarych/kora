@@ -380,6 +380,7 @@ class LifetimeClient:
     async def _read(self) -> None:
         try:
             while not self.closed:
+                await self.channel.wait_readable()
                 deadline = self.clock.monotonic_ns() + duration_ns(
                     self.limits.acquisition_seconds
                 )
@@ -399,6 +400,8 @@ class LifetimeClient:
                         or envelope.report.invocation_id != self.invocation_id
                     ):
                         raise ChannelError(ChannelFailure.MALFORMED)
+                    if self.clock.monotonic_ns() >= control.deadline:
+                        raise ChannelError(ChannelFailure.DEADLINE)
                     control.future.set_result(envelope.report)
                     self.changed.set()
                     continue
@@ -709,6 +712,7 @@ class LifetimeEndpoint:
     async def _read(self) -> None:
         try:
             while not self._closing:
+                await self.channel.wait_readable()
                 deadline = self.owner.deadline()
                 header = HEADER.validate_json(
                     await self.channel.read_frame(deadline, HEADER_BYTES)

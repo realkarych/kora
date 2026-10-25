@@ -251,6 +251,15 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
         tree.token, new_operation_id(), TemporaryTreeRequest()
     )
     await client.acknowledge(tree.token, acquired.operation_id, acquired.revision)
+    if mode == "idle":
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as feedback:
+            feedback.bind(feedback_address + "-child")
+            feedback.setblocking(False)
+            loop = asyncio.get_running_loop()
+            await loop.sock_sendto(feedback, b"r", feedback_address)
+            assert await loop.sock_recv(feedback, 1) == b"s"
+            assert await client.observe(tree.token.resource_id)
+            await loop.sock_sendto(feedback, b"p", feedback_address)
     process = await client.reserve(
         ReservationRequest(
             operation_id=new_operation_id(),

@@ -53,6 +53,12 @@ def test_fixed_lifetime_helper_imports_no_provider_context_or_logging() -> None:
     assert found == []
 
 
+def test_fixed_lifetime_helper_imports_no_cel_checker() -> None:
+    found = loaded("kora.conformance.io_helper", ("kora.cel",))
+
+    assert found == []
+
+
 @pytest.mark.parametrize(
     "module",
     ["kora.conformance.common", "kora.conformance.secrets", "kora.conformance.vcs"],

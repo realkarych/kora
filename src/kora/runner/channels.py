@@ -98,20 +98,39 @@ class BoundedChannel:
             self._endpoint.close()
             self._closed = True
 
-    async def _wait(self, deadline_ns: int, *, writing: bool) -> None:
+    async def _wait(self, deadline_ns: int | None, *, writing: bool) -> None:
         waiter = DescriptorReadiness(self._endpoint.fileno(), writing=writing)
         if writing:
             self._writer = waiter
         else:
             self._reader = waiter
         try:
-            await wait_future(waiter.ready, deadline_ns, self._clock)
+            if deadline_ns is None:
+                await waiter.ready
+            else:
+                await wait_future(waiter.ready, deadline_ns, self._clock)
         finally:
             waiter.close()
             if writing:
                 self._writer = None
             else:
                 self._reader = None
+
+    async def wait_readable(self) -> None:
+        if self._reading:
+            raise ChannelError(ChannelFailure.BUSY)
+        self._reading = True
+        try:
+            if self._closed:
+                raise ChannelError(ChannelFailure.CLOSED)
+            await self._wait(None, writing=False)
+            if self._closed:
+                raise ChannelError(ChannelFailure.CLOSED)
+        except (ChannelError, asyncio.CancelledError):
+            self.close()
+            raise
+        finally:
+            self._reading = False
 
     async def _read_exact(self, size: int, deadline_ns: int) -> bytes:
         result = bytearray()
