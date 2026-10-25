@@ -79,6 +79,47 @@ def test_stream_reads_obey_root_data_work_admission(
     asyncio.run(scenario())
 
 
+def test_reader_validation_refusal_closes_both_acquired_leases(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async def scenario() -> None:
+        configured = tmp_path / "store"
+        limits = StorageLimits(version=1)
+        provider = LocalArtifactStorage(
+            LocalStorageConfiguration(root=str(configured), limits=limits)
+        )
+        with RootAnchor.open(configured, limits) as anchor:
+            readers = ReaderManager(anchor, provider.io, provider.start_read)
+            (configured / "manifest.json").write_bytes(b'{"version":1}')
+
+            try:
+                with pytest.raises(KoraProtocolError, match="storage_identity"):
+                    await readers.open(
+                        (),
+                        "stage-0",
+                        anchor.refresh_manifest,
+                        0,
+                        0,
+                        context_for(kora_capture),
+                    )
+                reader = anchor.try_lock("reader-0")
+                owner = anchor.try_lock("stage-0")
+                try:
+                    assert reader is not None
+                    assert owner is not None
+                    assert readers.handles == 0
+                    assert not readers.streams
+                finally:
+                    if owner is not None:
+                        owner.close()
+                    if reader is not None:
+                        reader.close()
+            finally:
+                await provider.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_provider_shutdown_closes_all_readers_after_read_failure(
     tmp_path: Path, kora_capture: Capture
 ) -> None:

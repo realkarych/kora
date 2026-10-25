@@ -139,6 +139,7 @@ class RootAnchor:
         self.path = path
         self.fd = fd
         self.manifest = manifest
+        self.manifest_bytes: bytes | None = None
         self.identity = manifest.identity
         self.new_identity = new_identity
         self.closed = False
@@ -273,7 +274,8 @@ class RootAnchor:
                 ) as file:
                     private_file(file.fd, self.manifest.device)
                     self._lock_inodes[name] = os.fstat(file.fd).st_ino
-            os.fsync(locks)
+            if creating:
+                os.fsync(locks)
         finally:
             os.close(locks)
 
@@ -300,6 +302,7 @@ class RootAnchor:
         )
         self.synchronize_directory(self.fd)
         self.manifest = manifest
+        self.manifest_bytes = encoded
 
     def synchronize_directory(self, descriptor: int) -> None:
         os.fsync(descriptor)
@@ -312,6 +315,8 @@ class RootAnchor:
             encoded = source.read(16385)
         if len(encoded) > 16384:
             refuse("storage_identity")
+        if encoded == self.manifest_bytes:
+            return
         try:
             actual = RootManifest.model_validate_json(encoded)
         except ValueError:
@@ -331,6 +336,7 @@ class RootAnchor:
         ):
             refuse("storage_identity")
         self.manifest = actual
+        self.manifest_bytes = encoded
 
     def validate_anchor(self) -> None:
         try:
@@ -431,6 +437,7 @@ class RootAnchor:
     def close(self) -> None:
         if not self.closed:
             self.closed = True
+            self.manifest_bytes = None
             self.close_lifetime()
             os.close(self.fd)
 

@@ -2,7 +2,6 @@ from kora.plugins.storage.content_files import ContentFiles, address_lock, conte
 from kora.plugins.storage.errors import refuse, require_deadline
 from kora.plugins.storage.payload import FileRunner, FileSegment
 from kora.plugins.storage.readers import LocalReadStream, ReaderManager
-from kora.plugins.storage.staging import close_lease
 from kora.plugins.storage.state import LocalState
 from kora.protocols.common import ProtocolContext
 from kora.protocols.storage_models import ContentAddress, ContentRef
@@ -59,15 +58,12 @@ class ContentAccess:
     ) -> ContentRef | None:
         if address.storage_identity != self.root.identity:
             refuse("storage_conflict")
-        stripe = await self.runner(
-            lambda: self.root.try_lock(address_lock(address), shared=True),
-            on_cancel=close_lease,
-        )
-        if stripe is None:
-            refuse("storage_busy")
-        with stripe:
 
-            def inspect() -> ContentRef | None:
+        def inspect() -> ContentRef | None:
+            stripe = self.root.try_lock(address_lock(address), shared=True)
+            if stripe is None:
+                refuse("storage_busy")
+            with stripe:
                 with self.state.transaction(synchronize=False) as connection:
                     require_deadline(ctx)
                     self.state.admit_epoch(connection, self.epoch)
@@ -85,4 +81,4 @@ class ContentAccess:
                     refuse("storage_integrity")
                 return indexed[0]
 
-            return await self.runner(inspect)
+        return await self.runner(inspect)

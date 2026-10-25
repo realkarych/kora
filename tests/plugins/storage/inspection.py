@@ -47,5 +47,6 @@ class InspectedStorage(LocalArtifactStorage):
             or self._data_count
             or self._control_count
             or not self._root.closed
+            or self._root.manifest_bytes is not None
         ):
             raise AssertionError("actual provider resources remain after shutdown")

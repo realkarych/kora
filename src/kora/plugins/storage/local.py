@@ -128,7 +128,7 @@ class LocalArtifactStorage:
         )
         try:
             self._state = LocalState(self._root)
-            self._epoch = self._state.current_epoch()
+            self._epoch = self._state.initial_epoch
         except BaseException:
             self._root.close()
             raise
@@ -265,6 +265,7 @@ class LocalArtifactStorage:
 
         def completed(job: asyncio.Task[object]) -> None:
             self._jobs.discard(job)
+            self._read_jobs.discard(job)
             if not job.cancelled():
                 job.exception()
 
@@ -296,7 +297,6 @@ class LocalArtifactStorage:
         task = self.start_job("reader", read, ctx)
         owned = cast("asyncio.Task[object]", task)
         self._read_jobs.add(owned)
-        owned.add_done_callback(self._read_jobs.discard)
         return task
 
     async def begin_stage(

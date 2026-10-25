@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from kora.plugins.storage.files import RootAnchor
+from kora.plugins.storage.files import RootAnchor, RootManifest
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import StorageLimits
+from kora.protocols.storage_models import StorageIdentity, StorageLimits
 
 
 def test_local_storage_identity_is_physical(tmp_path: Path) -> None:
@@ -50,6 +50,50 @@ def test_local_storage_root_configuration_is_immutable(tmp_path: Path) -> None:
 
     with pytest.raises(KoraProtocolError, match="storage_identity"):
         RootAnchor.open(configured, StorageLimits(version=1, stage_slots=9))
+
+
+@pytest.mark.parametrize("change", ["identity", "malformed", "oversized", "mode"])
+def test_refreshed_manifest_refuses_changed_input_after_a_validated_hit(
+    tmp_path: Path, change: str
+) -> None:
+    configured = tmp_path / "store"
+    with RootAnchor.open(configured, StorageLimits(version=1)) as root:
+        root.refresh_manifest()
+        root.refresh_manifest()
+        path = configured / "manifest.json"
+        if change == "identity":
+            document = RootManifest.model_validate_json(path.read_bytes())
+            changed = RootManifest.model_validate(
+                {
+                    **document.model_dump(),
+                    "identity": StorageIdentity(
+                        version=1, store_id="different-physical-store"
+                    ),
+                }
+            )
+            path.write_text(changed.model_dump_json())
+        elif change == "malformed":
+            path.write_bytes(b'{"version":1}')
+        elif change == "oversized":
+            path.write_bytes(b" " * 16385)
+        else:
+            path.chmod(0o644)
+
+        with pytest.raises(KoraProtocolError, match="storage_identity|storage_path"):
+            root.refresh_manifest()
+
+
+def test_validated_manifest_bytes_leave_the_closed_root(tmp_path: Path) -> None:
+    with RootAnchor.open(tmp_path / "store", StorageLimits(version=1)) as root:
+        root.refresh_manifest()
+        root.refresh_manifest()
+        retained = root.manifest_bytes
+
+        root.close()
+
+        assert retained is not None
+        assert len(retained) <= 16384
+        assert root.manifest_bytes is None
 
 
 def test_local_storage_refuses_unsafe_ancestors(tmp_path: Path) -> None:

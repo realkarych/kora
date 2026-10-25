@@ -1,6 +1,7 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator, Callable
+from contextlib import ExitStack
 from typing import Protocol, Self
 
 from kora.plugins.storage.errors import refuse
@@ -196,19 +197,19 @@ class ReaderManager:
             )
             if reader is None:
                 refuse("storage_busy")
-            try:
+            with ExitStack() as ownership:
+                ownership.callback(reader.close)
                 owner = self.root.try_lock(owner_lock, shared=True)
                 if owner is None:
                     refuse("storage_busy")
-            except BaseException:
-                reader.close()
-                raise
-            return reader, owner
+                ownership.callback(owner.close)
+                validate()
+                ownership.pop_all()
+                return reader, owner
 
         leases: tuple[FileLease, ...] = ()
         try:
             leases = await self.runner(acquire, on_cancel=close_leases)
-            await self.runner(validate)
             stream = LocalReadStream(
                 self.files,
                 segments,

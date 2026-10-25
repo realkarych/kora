@@ -74,7 +74,7 @@ class LocalState:
         self.root = root
         self.connections = 0
         self.peak_connections = 0
-        self.initialize()
+        self.initial_epoch = self.initialize()
 
     def validate_files(self, creating: bool) -> None:
         self.root.validate_anchor()
@@ -178,7 +178,7 @@ class LocalState:
                     if recovery:
                         self.root.synchronize_directory(self.root.fd)
 
-    def initialize(self) -> None:
+    def initialize(self) -> int:
         creating = not self.root.manifest.control_initialized
         with self.transaction(
             write=creating, creating=creating, synchronize=creating
@@ -192,8 +192,7 @@ class LocalState:
                 if existing is None:
                     for statement in SCHEMA:
                         connection.execute(statement)
-                else:
-                    self.epoch(connection)
+            initial_epoch = self.epoch(connection)
         if creating:
             gate = self.root.try_lock("root")
             if gate is None:
@@ -210,6 +209,7 @@ class LocalState:
                     }
                 )
                 self.root.replace_manifest(updated)
+        return initial_epoch
 
     def epoch(self, connection: sqlite3.Connection) -> int:
         row = row_values(
