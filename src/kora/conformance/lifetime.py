@@ -773,20 +773,23 @@ class ParentLifetime:
             record.dependency = scope
         else:
             raise self._refuse(LifetimeReason.ACQUISITION_FAILED)
-        record.entry = record.entry.model_copy(
-            update={
-                "state": ResourceState.ACQUIRING,
-                "revision": self.revision + 1,
-                "acquisition_id": operation_id,
-                "tree_name": record.entry.resource_id
-                if isinstance(request, TemporaryTreeRequest)
-                else None,
+        record.entry = JournalEntry.model_validate(
+            {
+                **record.entry.model_dump(),
+                **{
+                    "state": ResourceState.ACQUIRING,
+                    "revision": self.revision + 1,
+                    "acquisition_id": operation_id,
+                    "tree_name": record.entry.resource_id
+                    if isinstance(request, TemporaryTreeRequest)
+                    else None,
+                },
             }
         )
         await self._persist(deadline)
         if record.fenced or not self.admission_open:
-            record.entry = record.entry.model_copy(
-                update={"state": ResourceState.CLOSING}
+            record.entry = JournalEntry.model_validate(
+                {**record.entry.model_dump(), **{"state": ResourceState.CLOSING}}
             )
             raise self._refuse(LifetimeReason.EFFECT_UNSETTLED)
         if isinstance(request, ProcessLaunch) and directory is not None:
@@ -834,13 +837,16 @@ class ParentLifetime:
             registration=registration,
         )
         record.acquisition = acquisition
-        record.entry = record.entry.model_copy(
-            update={
-                "state": ResourceState.CLOSING
-                if record.fenced
-                else ResourceState.GATED,
-                "revision": acquisition.revision,
-                "registration": registration,
+        record.entry = JournalEntry.model_validate(
+            {
+                **record.entry.model_dump(),
+                **{
+                    "state": ResourceState.CLOSING
+                    if record.fenced
+                    else ResourceState.GATED,
+                    "revision": acquisition.revision,
+                    "registration": registration,
+                },
             }
         )
         await self._persist(deadline)
@@ -892,13 +898,20 @@ class ParentLifetime:
         ):
             raise self._refuse(LifetimeReason.IDENTITY_MISMATCH)
         if record.fenced or not self.admission_open:
-            return request.model_copy(update={"result": ActivationResult.CLOSING})
-        record.entry = record.entry.model_copy(
-            update={"state": ResourceState.ACTIVE, "revision": self.revision + 1}
+            return ActivationAcknowledgement.model_validate(
+                {**request.model_dump(), **{"result": ActivationResult.CLOSING}}
+            )
+        record.entry = JournalEntry.model_validate(
+            {
+                **record.entry.model_dump(),
+                **{"state": ResourceState.ACTIVE, "revision": self.revision + 1},
+            }
         )
         await self._persist(deadline)
         if record.fenced or not self.admission_open:
-            return request.model_copy(update={"result": ActivationResult.CLOSING})
+            return ActivationAcknowledgement.model_validate(
+                {**request.model_dump(), **{"result": ActivationResult.CLOSING}}
+            )
         if record.process is not None:
             await record.process.acknowledge()
         self.diagnostics.emit("activated", LifetimeReason.COMPLETE, len(self.records))
@@ -1239,10 +1252,13 @@ class ParentLifetime:
         if not safe:
             for record in records:
                 if record.entry.state is not ResourceState.CLOSED:
-                    record.entry = record.entry.model_copy(
-                        update={
-                            "state": ResourceState.UNKNOWN,
-                            "reason": LifetimeReason.EFFECT_UNSETTLED,
+                    record.entry = JournalEntry.model_validate(
+                        {
+                            **record.entry.model_dump(),
+                            **{
+                                "state": ResourceState.UNKNOWN,
+                                "reason": LifetimeReason.EFFECT_UNSETTLED,
+                            },
                         }
                     )
         unresolved = [
@@ -1338,11 +1354,14 @@ class ParentLifetime:
                 return
         for record in records:
             if record.entry.state is not ResourceState.CLOSED:
-                record.entry = record.entry.model_copy(
-                    update={
-                        "state": ResourceState.CLOSED,
-                        "reason": LifetimeReason.COMPLETE,
-                        "revision": self.revision + 1,
+                record.entry = JournalEntry.model_validate(
+                    {
+                        **record.entry.model_dump(),
+                        **{
+                            "state": ResourceState.CLOSED,
+                            "reason": LifetimeReason.COMPLETE,
+                            "revision": self.revision + 1,
+                        },
                     }
                 )
         if not control.published:

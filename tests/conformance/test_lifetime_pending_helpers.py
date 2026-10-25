@@ -1,10 +1,12 @@
 import asyncio
 import os
 import signal
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 
+from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import CreateTreeMutation, HelperError
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
 from kora.protocols.lifetime import (
@@ -51,79 +53,97 @@ class ControlledLifetimeClock(SystemClock):
 async def test_conformance_fixture_resources_are_released_with_pending_helper(
     tmp_path: Path, case: str
 ) -> None:
-    barrier = DirectoryAnchor.open_path(tmp_path)
-    os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-    reading, writing = os.pipe()
-    launcher = ProbeIOHelperLauncher(tmp_path, writing, barrier.descriptor, pause_at=4)
-    owner = ParentLifetime(
-        limits=limits().model_copy(update={"acquisition_seconds": 1.0}),
-        launcher=launcher,
-        clock=ControlledLifetimeClock() if case != "timeout" else None,
-    )
-    tree = await owner.reserve(
-        ReservationRequest(
-            operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
+    with ExitStack() as resources:
+        barrier = DirectoryAnchor.open_path(tmp_path)
+        resources.callback(barrier.close)
+        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
+        reading, writing = os.pipe()
+        resources.callback(os.close, reading)
+        resources.callback(os.close, writing)
+        launcher = ProbeIOHelperLauncher(
+            tmp_path, writing, barrier.descriptor, pause_at=4
         )
-    )
-    operation_id = new_operation_id()
-    operation = asyncio.create_task(
-        owner.acquire(tree.token, operation_id, TemporaryTreeRequest())
-    )
-    deadline = owner.clock.monotonic_ns() + 5_000_000_000
-    assert await read_probe(reading, deadline, owner.clock) == b"r"
-    helper = owner.mutations.helpers[-1]
-    while True:
-        os.kill(helper.process.pid, signal.SIGUSR1)
-        response = await read_probe(reading, deadline, owner.clock)
-        if response == b"e":
-            break
-        assert response == b"n"
-
-    try:
-        if case == "timeout":
-            with pytest.raises(LifetimeError):
-                await operation
-            assert owner.mutations.pending == 0
-            assert not helper.anchor.exited
-            report = await owner.close(None)
-            assert report.state is CleanupOutcome.UNKNOWN
-        else:
-            closing = None
-            if case == "cancel_during":
-                operation.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await operation
-            else:
-                closing = asyncio.create_task(owner.close(None))
-                await owner.closure_started.wait()
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
-            os.close(writer)
-            if case == "cancel_during":
-                acquisition = await owner.acquire(
-                    tree.token, operation_id, TemporaryTreeRequest()
+        clock = ControlledLifetimeClock()
+        actual = SystemClock()
+        owner = ParentLifetime(
+            limits=limits().model_copy(update={"acquisition_seconds": 1.0}),
+            launcher=launcher,
+            clock=clock,
+        )
+        operation = None
+        try:
+            async with asyncio.timeout(10):
+                tree = await owner.reserve(
+                    ReservationRequest(
+                        operation_id=new_operation_id(),
+                        kind=ResourceKind.TEMPORARY_TREE,
+                    )
                 )
-                assert acquisition.token == tree.token
-                report = await owner.close(None)
-            else:
-                with pytest.raises(LifetimeError):
-                    await operation
-                assert closing is not None
-                report = await asyncio.wait_for(closing, 5)
-            assert report.state is CleanupOutcome.CLOSED
+                operation_id = new_operation_id()
+                operation = asyncio.create_task(
+                    owner.acquire(tree.token, operation_id, TemporaryTreeRequest())
+                )
+                deadline = actual.monotonic_ns() + 5_000_000_000
+                assert await read_probe(reading, deadline, actual) == b"r"
+                helper = owner.mutations.helpers[-1]
+                while True:
+                    os.kill(helper.process.pid, signal.SIGUSR1)
+                    response = await read_probe(reading, deadline, actual)
+                    if response == b"e":
+                        break
+                    assert response == b"n"
 
-        assert helper.anchor.exited
-        assert helper.closed
-        assert owner.inventory().helpers.live_helpers == 0
-    finally:
-        await owner.close(None)
-        if not helper.closed:
-            helper.signal(signal.SIGKILL)
-            assert await helper.settle(deadline)
-        os.close(reading)
-        os.close(writing)
-        barrier.close()
+                if case == "timeout":
+                    clock.advance(duration_ns(owner.limits.acquisition_seconds) + 1)
+                    with pytest.raises(LifetimeError):
+                        await operation
+                    assert owner.mutations.pending == 0
+                    assert not helper.anchor.exited
+                    closing = owner.request_close(None)
+                    clock.advance(duration_ns(owner.limits.cooperative_seconds) + 1)
+                    await helper.anchor.wait(deadline, actual)
+                    report = await closing
+                    assert report.state is CleanupOutcome.UNKNOWN
+                else:
+                    closing = None
+                    if case == "cancel_during":
+                        operation.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await operation
+                    else:
+                        closing = asyncio.create_task(owner.close(None))
+                        await owner.closure_started.wait()
+                    writer = os.open(
+                        "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
+                    )
+                    os.close(writer)
+                    if case == "cancel_during":
+                        acquisition = await owner.acquire(
+                            tree.token, operation_id, TemporaryTreeRequest()
+                        )
+                        assert acquisition.token == tree.token
+                        report = await owner.close(None)
+                    else:
+                        with pytest.raises(LifetimeError):
+                            await operation
+                        assert closing is not None
+                        report = await asyncio.wait_for(closing, 5)
+                    assert report.state is CleanupOutcome.CLOSED
+
+                assert helper.anchor.exited
+                assert helper.closed
+                assert owner.inventory().helpers.live_helpers == 0
+        finally:
+            from tests.conformance.test_lifetime_cleanup_controls import (
+                dispose_test_owner,
+            )
+
+            try:
+                await dispose_test_owner(owner, clock)
+            finally:
+                if operation is not None:
+                    operation.cancel()
+                    await asyncio.gather(operation, return_exceptions=True)
 
 
 @pytest.mark.asyncio

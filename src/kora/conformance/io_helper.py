@@ -327,7 +327,9 @@ def publish(directory: DirectoryAnchor, journal: JournalSnapshot) -> None:
     observed = NativeIdentityReader().read(os.getpid())
     if observed.process is None or not complete_identity(observed.process.identity):
         raise HelperError(LifetimeReason.IDENTITY_UNKNOWN)
-    journal = journal.model_copy(update={"helpers": (observed.process.identity,)})
+    journal = JournalSnapshot.model_validate(
+        {**journal.model_dump(), **{"helpers": (observed.process.identity,)}}
+    )
     encoded = journal.model_dump_json().encode("utf-8")
     if len(encoded) > 1048576:
         raise HelperError(LifetimeReason.CAPACITY_EXCEEDED)
@@ -372,12 +374,15 @@ def bootstrap(mutation: BootstrapMutation) -> tuple[MutationResult, tuple[int, .
                     raise HelperError(LifetimeReason.CAPACITY_EXCEEDED)
         invocation = create_directory(root, mutation.invocation_id)
         claim = open_claim(invocation, "claim")
-        snapshot = mutation.journal.model_copy(
-            update={
-                "root": root.identity,
-                "directory": invocation.identity,
-                "ancestors": root.ancestors,
-                "claim": file_identity(claim, "claim"),
+        snapshot = JournalSnapshot.model_validate(
+            {
+                **mutation.journal.model_dump(),
+                **{
+                    "root": root.identity,
+                    "directory": invocation.identity,
+                    "ancestors": root.ancestors,
+                    "claim": file_identity(claim, "claim"),
+                },
             }
         )
         publish(invocation, snapshot)
@@ -451,12 +456,15 @@ def recover(mutation: RecoverMutation) -> tuple[MutationResult, tuple[int, ...]]
         raise HelperError(LifetimeReason.EFFECT_UNSETTLED)
     if snapshot.generation >= 2**64 - 1 or snapshot.revision >= 2**64 - 1:
         raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
-    snapshot = snapshot.model_copy(
-        update={
-            "owner": mutation.owner,
-            "generation": snapshot.generation + 1,
-            "revision": snapshot.revision + 1,
-            "admission_open": False,
+    snapshot = JournalSnapshot.model_validate(
+        {
+            **snapshot.model_dump(),
+            **{
+                "owner": mutation.owner,
+                "generation": snapshot.generation + 1,
+                "revision": snapshot.revision + 1,
+                "admission_open": False,
+            },
         }
     )
     publish(invocation, snapshot)

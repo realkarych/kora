@@ -35,6 +35,15 @@ def test_conformance_plugin_import_is_light() -> None:
     assert found == []
 
 
+def test_fixed_lifetime_helper_imports_no_graph_models() -> None:
+    found = loaded(
+        "kora.conformance.io_helper",
+        ("kora.ir.config", "kora.ir.topology", "kora.ir.document", "kora.ir.export"),
+    )
+
+    assert found == []
+
+
 @pytest.mark.parametrize(
     "module",
     ["kora.conformance.common", "kora.conformance.secrets", "kora.conformance.vcs"],
