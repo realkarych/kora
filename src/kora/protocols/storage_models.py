@@ -13,7 +13,7 @@ from pydantic import (
 from pydantic.config import ExtraValues
 from pydantic_core import PydanticCustomError
 
-from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
+from kora.ir.json import MAX_INTEGER_BITS, JsonObject, JsonShapeError, parse_json_object
 from kora.ir.scalars import Digest
 from kora.ir.vcs_ref_json import lexical_depth_valid, refuse_constant, unique_object
 from kora.protocols.common import BoundaryModel
@@ -36,6 +36,13 @@ StorageOperationKind = Literal[
 ]
 StorageScanKind = Literal["stages", "content"]
 PayloadSize = Annotated[StrictInt, Field(ge=0, le=MAX_PAYLOAD_BYTES)]
+
+
+def storage_json_integer(encoded: str) -> int:
+    value = int(encoded)
+    if value.bit_length() > MAX_INTEGER_BITS:
+        raise ValueError("storage metadata integer exceeds its JSON boundary")
+    return value
 
 
 class StorageModel(BoundaryModel):
@@ -85,12 +92,22 @@ class StorageModel(BoundaryModel):
                 encoded.decode("utf-8"),
                 object_pairs_hook=unique_object,
                 parse_constant=refuse_constant,
+                parse_int=storage_json_integer,
             )
-            document = parse_json_object(value, max_bytes=MAX_STORAGE_METADATA)
+            if not isinstance(value, dict):
+                raise ValueError("storage metadata must be a JSON object")
+            canonical = json.dumps(
+                value,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            if len(canonical) > MAX_STORAGE_METADATA:
+                raise ValueError("storage metadata exceeds its JSON boundary")
         except (ValueError, RecursionError):
             raise ValueError("invalid storage JSON metadata") from None
         return cls.model_validate(
-            document,
+            value,
             strict=strict,
             extra=extra,
             context=context,

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from typing import Literal
 
 import pytest
 from pydantic import ValidationError
@@ -104,6 +105,48 @@ def test_storage_metadata_rejects_raw_oversize_duplicate_and_deep_json() -> None
     for payload in invalid:
         with pytest.raises(ValueError, match="storage"):
             StorageIdentity.model_validate_json(payload)
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        (StorageIdentity, "[]"),
+        (StorageIdentity, "null"),
+        (StorageIdentity, '"private-invalid-root"'),
+        (StorageIdentity, '{"version":1,"store_id":NaN}'),
+        (StorageIdentity, '{"version":1,"store_id":Infinity}'),
+        (StorageIdentity, '{"version":1,"store_id":"a","extra":{"x":1,"x":2}}'),
+        (StorageIdentity, b'{"version":1,"store_id":"\xff"}'),
+        (StorageLimits, '{"version":1,"private_bytes":1e500}'),
+        (StageSpec, json.dumps({**SPEC, "content_type": "\ud800"})),
+        (StageSpec, json.dumps({**SPEC, "total_size": True})),
+    ],
+)
+def test_storage_json_decode_refuses_invalid_raw_and_typed_values(
+    model: type[StorageModel], payload: str | bytes
+) -> None:
+    with pytest.raises(ValueError, match="storage|validation error") as failure:
+        model.model_validate_json(payload)
+
+    assert "private-invalid-root" not in str(failure.value)
+
+
+@pytest.mark.parametrize("extra", ["ignore", "allow"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"version":1,"store_id":"s","ignored":1e500}',
+        '{"version":1,"store_id":"s","ignored":"\\ud800"}',
+        '{"version":1,"store_id":"s","\\ud800":1}',
+        '{"version":1,"store_id":"s","ignored":' + str(2**14000) + "}",
+        '{"version":1,"store_id":"s","ignored":[' + "1e1," * 3499 + "1e1]}",
+    ],
+)
+def test_storage_json_preflight_validates_discarded_values(
+    payload: str, extra: Literal["ignore", "allow"]
+) -> None:
+    with pytest.raises(ValueError, match="storage"):
+        StorageIdentity.model_validate_json(payload, extra=extra)
 
 
 def test_storage_manifest_is_compact_and_fits_at_maximum_identifiers() -> None:
