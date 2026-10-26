@@ -143,11 +143,77 @@ jobs:
             printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/collection.exit"
             exit "$KORA_EXIT"
           fi
-          if uv run --no-sync pytest -q "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
-            printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"
+          KORA_EXIT=0
+          if test '${{ matrix.lane }}' = general; then
+            KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
+            export KORA_ORDINARY_OUTPUT
+            if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
+          read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
+          first=(
+            tests/conformance/test_conformance_cases_detect_broken_providers.py
+            tests/conformance/test_lifetime_helper_phases.py
+            tests/conformance/test_lifetime_measurement_cohorts.py
+            tests/conformance/test_lifetime_parent_exit.py
+            tests/conformance/test_lifetime_pending_helpers.py
+            tests/conformance/test_lifetime_resume.py
+            tests/conformance/test_lifetime_rpc_concurrency.py
+            tests/conformance/test_lifetime_services.py
+            tests/conformance/test_local_process_lifetime.py
+            tests/conformance/test_parent_lifetime.py
+            tests/conformance/test_recovered_process_lifetime.py
+          )
+          second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py)
+          for path in "${first[@]}"; do
+            second+=("--ignore=$path")
+          done
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage)
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" "${general[@]}" > "$KORA_ORDINARY_OUTPUT/full.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.collection"
+          uv run --no-sync python -m tests.support.ordinary_inventory "$KORA_ORDINARY_OUTPUT" > "$KORA_ORDINARY_OUTPUT/inventory.json"
+          pids=()
+          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
+          pids+=("$!")
+          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
+          pids+=("$!")
+          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
+          pids+=("$!")
+          result=0
+          names=(first second other)
+          for index in "${!pids[@]}"; do
+            if wait "${pids[$index]}"; then
+              status=0
+            else
+              status="$?"
+              result=1
+            fi
+            printf '%s\n' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"
+          done
+          for name in full.collection first.collection second.collection other.collection inventory.json first.log second.log other.log first.xml second.xml other.xml first.exit second.exit other.exit; do
+            test -f "$KORA_ORDINARY_OUTPUT/$name"
+            test ! -L "$KORA_ORDINARY_OUTPUT/$name"
+            test -s "$KORA_ORDINARY_OUTPUT/$name"
+          done
+          cat "$KORA_ORDINARY_OUTPUT/inventory.json" "$KORA_ORDINARY_OUTPUT/first.log" "$KORA_ORDINARY_OUTPUT/second.log" "$KORA_ORDINARY_OUTPUT/other.log"
+          exit "$result"
+          KORA_ORDINARY_SCRIPT
+              KORA_EXIT=0
+            else
+              KORA_EXIT="$?"
+            fi
+            for name in full.collection first.collection second.collection other.collection inventory.json first.log second.log other.log first.xml second.xml other.xml first.exit second.exit other.exit; do
+              if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
+                cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
+              fi
+            done
+          elif uv run --no-sync pytest -q "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
+            KORA_EXIT=0
           else
             KORA_EXIT="$?"
-            printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"
+          fi
+          printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/tests.exit"
+          if test "$KORA_EXIT" != 0; then
             tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
             tail -c 65536 "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"
             exit "$KORA_EXIT"
@@ -390,6 +456,46 @@ jobs:
           name: protocol-models-cost-measurement
           path: measurements/protocol-models-cost.json
           if-no-files-found: error
+      - name: Prepare bounded full-disk mount
+        id: full_disk_prepare
+        run: |
+          mkdir -m 700 measurements/conformance-full-disk
+          KORA_FULL_DISK_MOUNT="$(mktemp -d "$RUNNER_TEMP/kora-full-disk.XXXXXX")"
+          printf 'KORA_LIFETIME_FULL_DISK_ROOT=%s\n' "$KORA_FULL_DISK_MOUNT" >> "$GITHUB_ENV"
+          sudo mount -t tmpfs -o "size=16m,uid=$(id -u),gid=$(id -g),mode=0700,nodev,nosuid" tmpfs "$KORA_FULL_DISK_MOUNT"
+          findmnt -n --output SOURCE,FSTYPE,TARGET,OPTIONS --target "$KORA_FULL_DISK_MOUNT" > measurements/conformance-full-disk/mount.txt
+      - name: Exercise full-disk admission and registration
+        id: full_disk
+        run: |
+          uv run --no-sync pytest -q --junitxml=measurements/conformance-full-disk/tests.xml tests/conformance/lifetime_full_disk.py
+      - name: Preserve full-disk private evidence
+        id: full_disk_evidence
+        if: ${{ always() && !cancelled() && steps.full_disk_prepare.outcome != 'skipped' }}
+        env:
+          FULL_DISK_PREPARE_OUTCOME: ${{ steps.full_disk_prepare.outcome }}
+          KORA_LIFETIME_CHECKOUT_REVISION: ${{ steps.source_revision.outputs.checkout_revision }}
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$FULL_DISK_PREPARE_OUTCOME" = success
+          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_LIFETIME_CHECKOUT_REVISION" "$KORA_MEASUREMENT_REVISION" > measurements/conformance-full-disk/source-revision.txt
+          uv run --no-sync python -m tests.measurements.lifetime_evidence full-disk "$KORA_LIFETIME_FULL_DISK_ROOT" "$PWD/measurements/conformance-full-disk"
+      - name: Dispose captured full-disk mount
+        id: full_disk_cleanup
+        if: ${{ always() && !cancelled() && steps.full_disk_prepare.outcome != 'skipped' }}
+        env:
+          FULL_DISK_EVIDENCE_OUTCOME: ${{ steps.full_disk_evidence.outcome }}
+        run: |
+          test "$FULL_DISK_EVIDENCE_OUTCOME" = success
+          test -n "$KORA_LIFETIME_FULL_DISK_ROOT"
+          sudo umount "$KORA_LIFETIME_FULL_DISK_ROOT"
+          rmdir "$KORA_LIFETIME_FULL_DISK_ROOT"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: full_disk_upload
+        if: ${{ always() && !cancelled() && steps.full_disk_prepare.outcome != 'skipped' }}
+        with:
+          name: conformance-full-disk-evidence
+          path: measurements/conformance-full-disk
+          if-no-files-found: error
       - name: Check the synced environment and unchanged dependency files
         id: final_sync
         if: ${{ always() && !cancelled() }}
@@ -415,6 +521,11 @@ jobs:
           PROVIDER_UPLOAD_OUTCOME: ${{ steps.provider_upload.outcome }}
           PROTOCOL_MODELS_MEASUREMENT_OUTCOME: ${{ steps.protocol_models_measurement.outcome }}
           PROTOCOL_UPLOAD_OUTCOME: ${{ steps.protocol_upload.outcome }}
+          FULL_DISK_PREPARE_OUTCOME: ${{ steps.full_disk_prepare.outcome }}
+          FULL_DISK_OUTCOME: ${{ steps.full_disk.outcome }}
+          FULL_DISK_EVIDENCE_OUTCOME: ${{ steps.full_disk_evidence.outcome }}
+          FULL_DISK_CLEANUP_OUTCOME: ${{ steps.full_disk_cleanup.outcome }}
+          FULL_DISK_UPLOAD_OUTCOME: ${{ steps.full_disk_upload.outcome }}
           FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
@@ -428,6 +539,11 @@ jobs:
           test "$PROVIDER_UPLOAD_OUTCOME" = success
           test "$PROTOCOL_MODELS_MEASUREMENT_OUTCOME" = success
           test "$PROTOCOL_UPLOAD_OUTCOME" = success
+          test "$FULL_DISK_PREPARE_OUTCOME" = success
+          test "$FULL_DISK_OUTCOME" = success
+          test "$FULL_DISK_EVIDENCE_OUTCOME" = success
+          test "$FULL_DISK_CLEANUP_OUTCOME" = success
+          test "$FULL_DISK_UPLOAD_OUTCOME" = success
           test "$FINAL_SYNC_OUTCOME" = success
           test "$WORKFLOW_CANCELLED" = false
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"

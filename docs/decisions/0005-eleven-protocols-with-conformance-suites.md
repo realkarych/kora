@@ -21,7 +21,7 @@ Bounded-read amendment dated 2026-10-23: the project owner approved the contract
 
 ## Context
 
-Local-storage implementation amendment dated 2026-10-23: the [plan for #255](https://github.com/realkarych/kora/issues/255#issuecomment-6371758782) was [approved by the project owner](https://github.com/realkarych/kora/issues/255#issuecomment-6373658551). Exact wording of this amendment remains pending line-by-line owner review in its implementation PR.
+Local-storage implementation amendment dated 2026-10-23: the [plan for #255](https://github.com/realkarych/kora/issues/255#issuecomment-6371758782) was [approved by the project owner](https://github.com/realkarych/kora/issues/255#issuecomment-6373658551). Exact wording approval must be recorded in the implementing PR before merge.
 
 kora is designed for an instance shared by many teams on an organisation's own infrastructure (NFR-0.1). The first adopter runs an in-house enterprise CI runtime and a non-git version control system, neither of which kora's authors can ship. Extensibility is therefore a release gate: an implementation that passes the conformance suite must run the canonical graph unchanged (NFR-0.2), and MVP acceptance requires the canonical graph to run unchanged on a second runtime/VCS pair written by an adopter (requirements decision 14, which placed the protocols second in the MVP spine). The requirements named nine protocols; `sensor` was added so that waiting on an external condition is pluggable (DD-2), and `policy` after the [design review of 2026-10-15](../../knowledge/reviews/review-2026-10-15.md#central-tool-call-policy) found no central decision point for tool calls (DD-29).
 

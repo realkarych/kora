@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from pydantic import BaseModel, ConfigDict
-
 from kora.ir.json import (
     DEFAULT_MAX_DEPTH,
     CanonicalBudget,
@@ -14,13 +12,10 @@ from kora.ir.json import (
 from kora.observability import ComponentLogger
 from kora.observability.policy import CONTEXT_IDENTIFIER
 from kora.protocols.activity import ActivityReporter
+from kora.protocols.boundary import BoundaryModel as BoundaryModel
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.secret_value import SecretAdmission, SecretScope, SecretValue
 from kora.protocols.time import Clock
-
-
-class BoundaryModel(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
 
 
 class SecretResolver(Protocol):

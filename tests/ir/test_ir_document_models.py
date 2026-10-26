@@ -5,9 +5,50 @@ from pydantic import MISSING, BaseModel, Field, StrictBool, StrictStr, Validatio
 from pydantic_core import PydanticCustomError
 
 import kora.ir as ir
+from kora.ir import (
+    config,
+    contracts,
+    data,
+    declarations,
+    diagnostics,
+    export,
+    node,
+    runtime,
+    topology,
+    trigger,
+    vcs_ref,
+)
+from kora.ir import document as document_models
 from kora.ir.record import IrRecord
 from tests.ir.document_cases import INVALID, MINIMAL, POPULATED, document
 from tests.ir.support import EXAMPLES, deep_data, load_yaml
+
+
+def test_ir_public_exports_preserve_canonical_leaf_identity() -> None:
+    modules = (
+        config,
+        contracts,
+        data,
+        declarations,
+        diagnostics,
+        document_models,
+        export,
+        node,
+        runtime,
+        topology,
+        trigger,
+        vcs_ref,
+    )
+
+    resolved = {name: getattr(ir, name) for name in ir.__all__}
+
+    assert set(resolved) <= set(dir(ir))
+    assert all(
+        value is getattr(module, name)
+        for module in modules
+        for name, value in resolved.items()
+        if name in vars(module)
+    )
 
 
 def test_ir_document_models_accept_examples() -> None:

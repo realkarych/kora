@@ -93,10 +93,17 @@ def expected_files(lane: str) -> frozenset[str]:
         "tests.stdout",
         "tests.stderr",
         "tests.exit",
-        "junit.xml",
     }
     if lane == "general":
         files.update({"complete.txt", "complete.stderr", "complete.exit"})
+        files.update({"full.collection", "inventory.json"})
+        files.update(
+            f"{name}.{suffix}"
+            for name in ("first", "second", "other")
+            for suffix in ("collection", "log", "xml", "exit")
+        )
+    else:
+        files.add("junit.xml")
     return frozenset(files)
 
 
@@ -118,9 +125,26 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
         if filename.endswith(".exit") and encoded != b"0\n":
             raise EvidenceFailure("scaffold execution did not succeed")
     selected = collection_nodes(directory / "selected.txt")
-    if junit_nodes(directory / "junit.xml", 16777216) != selected:
+    if receipt.lane == "general":
+        validate_cohorts(directory, selected)
+    elif junit_nodes(directory / "junit.xml", 16777216) != selected:
         raise EvidenceFailure("scaffold JUnit differs from its collected inventory")
     return selected
+
+
+def validate_cohorts(directory: Path, selected: frozenset[str]) -> None:
+    if collection_nodes(directory / "full.collection") != selected:
+        raise EvidenceFailure("ordinary full collection differs from lane inventory")
+    combined: set[str] = set()
+    for name in ("first", "second", "other"):
+        nodes = collection_nodes(directory / f"{name}.collection")
+        if junit_nodes(directory / f"{name}.xml", 16777216) != nodes:
+            raise EvidenceFailure("ordinary JUnit differs from its collected inventory")
+        if nodes & combined:
+            raise EvidenceFailure("ordinary cohorts overlap")
+        combined.update(nodes)
+    if frozenset(combined) != selected:
+        raise EvidenceFailure("ordinary cohorts do not partition the lane inventory")
 
 
 def record_lane(

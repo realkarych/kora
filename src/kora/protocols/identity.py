@@ -17,7 +17,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from kora.ir.json import JsonObjectField
-from kora.protocols.common import BoundaryModel
+from kora.protocols.boundary import BoundaryModel
 
 Identifier = Annotated[
     str, StringConstraints(strict=True, pattern=r"^[\x21-\x7e]{1,256}$")
