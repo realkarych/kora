@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, TypeVar
@@ -7,6 +7,7 @@ from typing import Final, TypeVar
 import pytest
 
 from kora.conformance.common import (
+    await_protocol_error,
     check,
     fail,
     kora_capture,
@@ -27,10 +28,12 @@ from kora.executor.entry import (
     PreparedRevision,
     PublishOutcome,
     PublishPermit,
+    RemoteState,
 )
 from kora.executor.failures import ExecutorError
 from kora.executor.steps import Areas
 from kora.ir import VcsRef
+from kora.ir.json import JsonObject
 from kora.ir.node import ErrorClass
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
@@ -39,6 +42,7 @@ from kora.protocols.runtime import PublicationAuthorization
 from kora.protocols.vcs import (
     CheckoutRequest,
     CredentialRequest,
+    IssuedCredential,
     PublicationInput,
     PublishPlan,
     PublishRequest,
@@ -101,6 +105,16 @@ class VcsBench:
 @dataclass(frozen=True)
 class VcsBinding:
     binding: TrustedBinding
+
+
+@dataclass(frozen=True)
+class VcsConformanceInputs:
+    failure: Callable[[Vcs, JsonObject, ProtocolContext, str], Awaitable[object]]
+    remote: VcsRemote
+    head_remote: VcsRemote
+    binding: VcsBinding
+    bench: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[VcsBench]]
+    configuration_effect: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[None]]
 
 
 class Kept:
@@ -284,6 +298,23 @@ def failure_class(work: Callable[[], object]) -> ErrorClass | None:
     return None
 
 
+async def attempted_async(work: Awaitable[ResultT], message: str) -> ResultT:
+    try:
+        return await work
+    except (ExecutorError, KoraProtocolError):
+        fail(message)
+
+
+async def failure_class_async(work: Awaitable[object]) -> ErrorClass | None:
+    try:
+        await work
+    except ExecutorError as error:
+        return error.failure_class
+    except KoraProtocolError as error:
+        return ErrorClass.INFRASTRUCTURE if error.retryable else ErrorClass.CONFIG_ERROR
+    return None
+
+
 @pytest.fixture
 def kora_provider(kora_vcs_provider: Vcs) -> Vcs:
     return kora_vcs_provider
@@ -338,6 +369,53 @@ def test_vcs_checkout_captures_requested_base(
         )
     )
 
+    check_checkout_captures_requested_base(checkout, remote, missing, unreachable)
+
+
+async def check_vcs_checkout_captures_requested_base(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_executor: VcsBench,
+    kora_vcs_context: ProtocolContext,
+) -> None:
+    (remote, bench, ctx) = (kora_vcs_remote, kora_vcs_executor, kora_vcs_context)
+    checkout = await checked_out(
+        kora_vcs_provider,
+        bench.executor,
+        bench.areas(),
+        remote.repo,
+        remote.revision,
+        ctx,
+    )
+    missing = await failure_class_async(
+        checked_out(
+            kora_vcs_provider,
+            bench.executor,
+            bench.areas(),
+            remote.repo,
+            remote.missing_revision,
+            ctx,
+        )
+    )
+    unreachable = await failure_class_async(
+        checked_out(
+            kora_vcs_provider,
+            bench.executor,
+            bench.areas(),
+            remote.unreachable_repo,
+            remote.revision,
+            ctx,
+        )
+    )
+    check_checkout_captures_requested_base(checkout, remote, missing, unreachable)
+
+
+def check_checkout_captures_requested_base(
+    checkout: Checkout,
+    remote: VcsRemote,
+    missing: ErrorClass | None,
+    unreachable: ErrorClass | None,
+) -> None:
     check(
         checkout.result.commit == remote.revision,
         "checkout captures the requested revision",
@@ -385,6 +463,28 @@ def test_vcs_private_files_stay_outside_candidate(
             kora_vcs_context,
         )
     )
+    check_private_files_stay_outside_candidate(checkout)
+
+
+async def check_vcs_private_files_stay_outside_candidate(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_executor: VcsBench,
+    kora_vcs_context: ProtocolContext,
+) -> None:
+    (remote, bench) = (kora_vcs_remote, kora_vcs_executor)
+    checkout = await checked_out(
+        kora_vcs_provider,
+        bench.executor,
+        bench.areas(),
+        remote.repo,
+        remote.revision,
+        kora_vcs_context,
+    )
+    check_private_files_stay_outside_candidate(checkout)
+
+
+def check_private_files_stay_outside_candidate(checkout: Checkout) -> None:
     control = checkout.areas.control
 
     check(
@@ -433,6 +533,44 @@ def test_vcs_sealed_transfer_fixes_inspected_revision(
     verified = run(bench.executor.verify_sealed(sealed, checkout.areas))
     paths = prepared.result.publication.changed_paths
 
+    check_sealed_transfer_fixes_inspected_revision(paths, sealed, verified)
+
+
+async def check_vcs_sealed_transfer_fixes_inspected_revision(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_executor: VcsBench,
+    kora_vcs_context: ProtocolContext,
+    kora_vcs_binding: VcsBinding,
+) -> None:
+    (remote, bench, ctx) = (kora_vcs_remote, kora_vcs_executor, kora_vcs_context)
+    checkout = await checked_out(
+        kora_vcs_provider,
+        bench.executor,
+        bench.areas(),
+        remote.repo,
+        remote.revision,
+        ctx,
+    )
+    write_candidate(checkout, SEALED_FILE, "sealed\n")
+    (plan, sealed) = await sealed_input(
+        kora_vcs_provider, bench.executor, remote, checkout, ctx
+    )
+    write_candidate(checkout, LATE_FILE, "late\n")
+    prepared = await attempted_async(
+        prepared_from(
+            bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
+        ),
+        "the sealed change prepares",
+    )
+    verified = await bench.executor.verify_sealed(sealed, checkout.areas)
+    paths = prepared.result.publication.changed_paths
+    check_sealed_transfer_fixes_inspected_revision(paths, sealed, verified)
+
+
+def check_sealed_transfer_fixes_inspected_revision(
+    paths: tuple[str, ...], sealed: PublicationInput, verified: PublicationInput
+) -> None:
     check(SEALED_FILE in paths, "the prepared revision holds the sealed content")
     check(LATE_FILE not in paths, "content written after sealing is not published")
     check(verified.digest == sealed.digest, "the sealed digest is stable")
@@ -471,6 +609,41 @@ def test_vcs_repeated_finalize_returns_one_ref(
     second = run(published(bench.executor, prepared, ctx))
     state = run(bench.executor.reconcile(prepared.result, ctx))
 
+    check_repeated_finalize_returns_one_ref(first, second, state)
+
+
+async def check_vcs_repeated_finalize_returns_one_ref(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_executor: VcsBench,
+    kora_vcs_context: ProtocolContext,
+    kora_vcs_binding: VcsBinding,
+) -> None:
+    (remote, bench, ctx) = (kora_vcs_remote, kora_vcs_executor, kora_vcs_context)
+    checkout = await checked_out(
+        kora_vcs_provider,
+        bench.executor,
+        bench.areas(),
+        remote.repo,
+        remote.revision,
+        ctx,
+    )
+    write_candidate(checkout, SEALED_FILE, "repeated\n")
+    (plan, sealed) = await sealed_input(
+        kora_vcs_provider, bench.executor, remote, checkout, ctx
+    )
+    prepared = await prepared_from(
+        bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
+    )
+    first = await published(bench.executor, prepared, ctx)
+    second = await published(bench.executor, prepared, ctx)
+    state = await bench.executor.reconcile(prepared.result, ctx)
+    check_repeated_finalize_returns_one_ref(first, second, state)
+
+
+def check_repeated_finalize_returns_one_ref(
+    first: PublishOutcome, second: PublishOutcome, state: RemoteState
+) -> None:
     check(first.ref is not None, "the first finalize publishes a ref")
     check(first.ref == second.ref, "repeated finalize returns one ref")
     check(state.value == "equal", "the destination holds the prepared revision")
@@ -518,6 +691,50 @@ def test_vcs_head_sha(
     head = run(kora_vcs_provider.head_sha(ref, ctx))
     missing_error = refusal(lambda: run(kora_vcs_provider.head_sha(missing, ctx)))
 
+    check_head_sha(head, ref, missing_error)
+
+
+async def check_vcs_head_sha(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_executor: VcsBench,
+    kora_vcs_context: ProtocolContext,
+    kora_vcs_binding: VcsBinding,
+) -> None:
+    (remote, bench, ctx) = (kora_vcs_remote, kora_vcs_executor, kora_vcs_context)
+    checkout = await checked_out(
+        kora_vcs_provider,
+        bench.executor,
+        bench.areas(),
+        remote.repo,
+        remote.revision,
+        ctx,
+    )
+    write_candidate(checkout, SEALED_FILE, "head\n")
+    (plan, sealed) = await sealed_input(
+        kora_vcs_provider, bench.executor, remote, checkout, ctx
+    )
+    prepared = await prepared_from(
+        bench.executor, remote, kora_vcs_binding, checkout, plan, sealed, ctx
+    )
+    outcome = await published(bench.executor, prepared, ctx)
+    ref = outcome.ref
+    if ref is None:
+        fail("the publication returns a ref")
+    missing = VcsRef.model_validate(
+        {
+            **ref.model_dump(mode="json", exclude_unset=True),
+            "branch": f"{remote.publish_branch}-absent",
+        }
+    )
+    head = await kora_vcs_provider.head_sha(ref, ctx)
+    missing_error = await await_protocol_error(kora_vcs_provider.head_sha(missing, ctx))
+    check_head_sha(head, ref, missing_error)
+
+
+def check_head_sha(
+    head: str, ref: VcsRef, missing_error: KoraProtocolError | None
+) -> None:
     check(head == ref.commit, "head_sha returns the published object id")
     check(
         len(head) in (40, 64) and head == head.lower(),
@@ -581,6 +798,32 @@ def test_vcs_local_credential_carries_no_secret(
         for request in requests
     ]
 
+    check_local_credential_carries_no_secret(issued, binding)
+
+
+async def check_vcs_local_credential_carries_no_secret(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_context: ProtocolContext,
+    kora_vcs_binding: VcsBinding,
+) -> None:
+    binding = kora_vcs_binding.binding
+    if binding.credential_mode != "local_credential_free":
+        return
+    requests = [
+        local_request(kora_vcs_binding, kora_vcs_remote, purpose)
+        for purpose in ("checkout", "publish")
+    ]
+    issued = [
+        await kora_vcs_provider.acquire_credential(request, kora_vcs_context)
+        for request in requests
+    ]
+    check_local_credential_carries_no_secret(issued, binding)
+
+
+def check_local_credential_carries_no_secret(
+    issued: list[IssuedCredential], binding: TrustedBinding
+) -> None:
     for credential in issued:
         check(credential.value is None, "a local credential carries no value")
         check(
@@ -617,10 +860,32 @@ def test_vcs_credential_binding_mismatch_is_refused(
         lambda: run(kora_vcs_provider.acquire_credential(stale, kora_vcs_context))
     )
 
+    check_credential_binding_mismatch_is_refused(error, kora_vcs_remote)
+
+
+async def check_vcs_credential_binding_mismatch_is_refused(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_context: ProtocolContext,
+    kora_vcs_binding: VcsBinding,
+) -> None:
+    request = local_request(kora_vcs_binding, kora_vcs_remote, "checkout")
+    stale = CredentialRequest.model_validate(
+        {**request.model_dump(), "binding_revision": request.binding_revision + 1}
+    )
+    error = await await_protocol_error(
+        kora_vcs_provider.acquire_credential(stale, kora_vcs_context)
+    )
+    check_credential_binding_mismatch_is_refused(error, kora_vcs_remote)
+
+
+def check_credential_binding_mismatch_is_refused(
+    error: KoraProtocolError | None, remote: VcsRemote
+) -> None:
     check(error is not None, "a mismatched binding is refused")
     check(error is not None and not error.retryable, "the refusal is not retryable")
     check(
-        error is not None and kora_vcs_remote.repo not in error.message,
+        error is not None and remote.repo not in error.message,
         "the refusal carries no input",
     )
 
@@ -649,6 +914,34 @@ def test_vcs_api_credential_is_refused(
         lambda: run(kora_vcs_provider.acquire_credential(request, kora_vcs_context))
     )
 
+    check_api_credential_is_refused(error)
+
+
+async def check_vcs_api_credential_is_refused(
+    kora_vcs_provider: Vcs,
+    kora_vcs_remote: VcsRemote,
+    kora_vcs_context: ProtocolContext,
+    kora_vcs_binding: VcsBinding,
+) -> None:
+    binding = kora_vcs_binding.binding
+    request = CredentialRequest(
+        binding=binding.binding,
+        binding_revision=binding.binding_revision,
+        credential_mode=binding.credential_mode,
+        repo=kora_vcs_remote.repo,
+        purpose="api",
+        attempt_id=None,
+        operation_id=None,
+        prepared_digest=None,
+        destination_digest=None,
+    )
+    error = await await_protocol_error(
+        kora_vcs_provider.acquire_credential(request, kora_vcs_context)
+    )
+    check_api_credential_is_refused(error)
+
+
+def check_api_credential_is_refused(error: KoraProtocolError | None) -> None:
     check(error is not None, "an api credential is refused in slice 1")
     check(
         error is not None and not error.retryable,
