@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import os
 import signal
 import sys
@@ -78,7 +79,82 @@ async def dispose_test_owner(
             if record.directory is not None:
                 record.directory.close()
         assert owner.inventory().retained_processes == 0
-        owner.mutations.release()
+        assert owner.mutations.dispose_settled()
+
+
+@pytest.mark.asyncio
+async def test_failure_disposal_closes_unadopted_bootstrap_descriptors(
+    tmp_path: Path,
+) -> None:
+    with ExitStack() as resources:
+        barrier = DirectoryAnchor.open_path(tmp_path)
+        resources.callback(barrier.close)
+        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
+        reading, writing = os.pipe()
+        resources.callback(os.close, reading)
+        resources.callback(os.close, writing)
+        clock = ControlledLifetimeClock()
+        actual = SystemClock()
+        owner = ParentLifetime(
+            clock=clock,
+            limits=limits(),
+            launcher=ProbeIOHelperLauncher(
+                tmp_path, writing, barrier.descriptor, phase="after"
+            ),
+        )
+        deadline = actual.monotonic_ns() + 5_000_000_000
+        try:
+            resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, actual)
+            )
+            helper = owner.mutations.helpers[0]
+            while len(helper.descriptors) != 3:
+                assert actual.monotonic_ns() < deadline
+                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_soon(wake.set_result, None)
+                await wake
+            descriptors = helper.descriptors
+            assert not helper.closed
+            assert owner.mutations.pending == 1
+            for descriptor in descriptors:
+                os.fstat(descriptor)
+
+            await dispose_test_owner(owner, clock)
+
+            assert helper.closed
+            assert helper.anchor.exited
+            assert helper.process.returncode is not None
+            assert helper.endpoint.fileno() == -1
+            assert helper.descriptors == ()
+            with pytest.raises(ChildProcessError):
+                os.waitpid(helper.process.pid, os.WNOHANG)
+            for descriptor in descriptors:
+                with pytest.raises(OSError, match=os.strerror(errno.EBADF)) as raised:
+                    os.fstat(descriptor)
+                assert raised.value.errno == errno.EBADF
+            inventory = owner.inventory()
+            assert inventory.cleanup_driver_tasks == 0
+            assert inventory.cleanup_effect_tasks == 0
+            assert inventory.helpers.live_helpers == 0
+            assert inventory.helpers.retained_helpers == 0
+            assert inventory.helpers.pending_mutations == 0
+            assert inventory.helpers.retained_origins == 0
+            assert inventory.helpers.directory_descriptors == 0
+            assert inventory.helpers.claim_descriptors == 0
+            assert owner.recovery_dependencies() == ()
+            assert owner.request_close(None).result().state is CleanupOutcome.UNKNOWN
+        finally:
+            async with asyncio.timeout(5):
+                for retained in tuple(owner.mutations.helpers):
+                    if not retained.closed:
+                        retained.signal(signal.SIGKILL)
+                        assert await retained.settle(
+                            clock.monotonic_ns() + 5_000_000_000
+                        )
+                await asyncio.gather(
+                    *owner.recovery_dependencies(), return_exceptions=True
+                )
+                assert owner.mutations.dispose_settled()
 
 
 @pytest.mark.asyncio
