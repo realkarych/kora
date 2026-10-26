@@ -215,6 +215,29 @@ def test_conformance_unvisited_and_literal_references() -> None:
     assert inputs.configuration == {"literal": {"$ref": missing}}
 
 
+def test_conformance_annotation_target_validity_follows_upstream() -> None:
+    schema = {"type": "object", "default": {"required": "x"}, "$ref": "#/default"}
+
+    inputs = ConformanceInputs(schema, b'{"x":1}')
+
+    assert inputs.configuration == {"x": 1}
+
+
+def test_conformance_referenced_zero_divisor_is_refused() -> None:
+    schema = {
+        "type": "object",
+        "default": {"multipleOf": 0},
+        "properties": {"amount": {"$ref": "#/default"}},
+    }
+
+    with pytest.raises(ConformanceInputError) as caught:
+        ConformanceInputs(schema, b'{"amount":1}')
+
+    assert caught.value.reason is InputReason.SCHEMA_INVALID
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+
+
 @pytest.mark.parametrize(
     "target",
     [
