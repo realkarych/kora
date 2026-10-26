@@ -34,8 +34,23 @@ def descriptors() -> int:
     return len(os.listdir(path))
 
 
-async def peer(listener: socket.socket) -> tuple[socket.socket, int]:
-    endpoint, _ = await asyncio.get_running_loop().sock_accept(listener)
+async def peer(
+    listener: socket.socket,
+    operation: asyncio.Task[PluginListing],
+    connections: list[socket.socket],
+) -> tuple[socket.socket, int]:
+    accepted = asyncio.create_task(asyncio.get_running_loop().sock_accept(listener))
+    try:
+        await asyncio.wait((accepted, operation), return_when=asyncio.FIRST_COMPLETED)
+        if not accepted.done():
+            operation.result()
+            raise ValueError("discovery completed before fixture connected")
+    finally:
+        accepted.cancel()
+        await asyncio.gather(accepted, return_exceptions=True)
+        if not accepted.cancelled() and accepted.exception() is None:
+            connections.append(accepted.result()[0])
+    endpoint, _ = accepted.result()
     raw = b""
     while not raw.endswith(b"\n"):
         received = await asyncio.get_running_loop().sock_recv(endpoint, 1024 - len(raw))
@@ -53,6 +68,32 @@ async def discover_under_handled_error(
         raise ValueError("unrelated handled exception")
     except ValueError:
         return await invocation.discover()
+
+
+async def advance_while_running(
+    clock: ProbeClock,
+    operation: asyncio.Task[PluginListing],
+    instant: int,
+    *,
+    current: int | None = None,
+    cancel_again: bool = False,
+) -> bool:
+    while instant not in clock.waiters.values() and not operation.done():
+        clock.changed.clear()
+        changed = asyncio.create_task(clock.changed.wait())
+        try:
+            await asyncio.wait(
+                (changed, operation), return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            changed.cancel()
+            await asyncio.gather(changed, return_exceptions=True)
+    if not operation.done():
+        if cancel_again:
+            operation.cancel()
+        await clock.advance_to_timer(instant, current=current)
+        return True
+    return False
 
 
 async def exercise(case: str) -> dict[str, object]:
@@ -75,8 +116,7 @@ async def exercise(case: str) -> dict[str, object]:
     phase = "metadata_peer"
     try:
         async with asyncio.timeout(12):
-            endpoint, pid = await peer(listener)
-            connections.append(endpoint)
+            endpoint, pid = await peer(listener, operation, connections)
             process = invocation.process
             if process is None or process.registration is None:
                 raise ValueError("missing owned process identity")
@@ -89,29 +129,36 @@ async def exercise(case: str) -> dict[str, object]:
             elif case == "descendant":
                 phase = "descendant_peer"
                 endpoint.sendall(b"d")
-                descendant, descendant_pid = await peer(listener)
-                connections.append(descendant)
+                _, descendant_pid = await peer(listener, operation, connections)
             elif case == "timeout":
                 phase = "discovery_deadline"
-                await clock.advance_to_timer(started + 30_000_000_000)
+                advanced = await advance_while_running(
+                    clock, operation, started + 30_000_000_000
+                )
+                if not advanced:
+                    raise ValueError("discovery deadline was not exercised")
                 started = clock.monotonic_ns()
             else:
                 operation.cancel()
+                if case == "cancel_before_timer":
+                    process.signal(signal.SIGKILL, started + 5_000_000_000)
+                    await asyncio.wait((operation,))
             if case not in {"crash", "retained"}:
                 phase = "cooperative_deadline"
-                if case == "repeat_cancel":
-                    while started + 5_000_000_000 not in clock.waiters.values():
-                        clock.changed.clear()
-                        if started + 5_000_000_000 not in clock.waiters.values():
-                            await clock.changed.wait()
-                    operation.cancel()
-                await clock.advance_to_timer(
+                advanced = await advance_while_running(
+                    clock,
+                    operation,
                     started + 5_000_000_000,
                     current=started + 14_000_000_000 if case == "unknown" else None,
+                    cancel_again=case == "repeat_cancel",
                 )
+                if case == "repeat_cancel" and not advanced:
+                    raise ValueError("repeated cancellation was not exercised")
                 if configuration().resistant or case == "descendant":
                     phase = "term_deadline"
-                    await clock.advance_to_timer(started + 7_000_000_000)
+                    await advance_while_running(
+                        clock, operation, started + 7_000_000_000
+                    )
             outcome = "completed"
             cleanup_reason: str | None = None
             retained_content: str | None = None
@@ -142,6 +189,7 @@ async def exercise(case: str) -> dict[str, object]:
                 "retained_content": retained_content,
                 "closed": process.closed,
                 "reaped": process.returncode is not None,
+                "returncode": process.returncode,
                 "pid_absent": NativeIdentityReader().read(pid).state
                 is IdentityState.ABSENT,
                 "descendant_absent": descendant_pid is None

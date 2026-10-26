@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import tempfile
 from pathlib import Path
@@ -17,6 +18,7 @@ from tests.support.provider_tooling import build_fixture_wheel, install_tooling
         ("cancel", False, "import", False),
         ("repeat_cancel", False, "factory", False),
         ("cancel", True, "factory", False),
+        ("cancel_before_timer", True, "factory", False),
         ("timeout", False, "factory", False),
         ("crash", False, "factory", False),
         ("descendant", False, "factory", False),
@@ -69,6 +71,8 @@ def test_listing_joins_owned_processes_on_every_exit(
             pytest.fail(completed.stderr.decode(errors="replace"), pytrace=False)
         assert payload["closed"] is True
         assert payload["reaped"] is True
+        if resistant:
+            assert payload["returncode"] == -signal.SIGKILL
         assert payload["pid_absent"] is True
         assert payload["descendant_absent"] is True
         assert payload["group_empty"] is True
@@ -92,7 +96,7 @@ def test_listing_joins_owned_processes_on_every_exit(
             assert b"cli.provider_listing_retained" in completed.stderr
         assert payload["outcome"] == (
             "cancelled"
-            if case in {"cancel", "repeat_cancel", "unknown"}
+            if case in {"cancel", "cancel_before_timer", "repeat_cancel", "unknown"}
             else "invalid_discovery"
             if case in {"timeout", "crash"}
             else "state_retained"
