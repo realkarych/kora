@@ -1,4 +1,4 @@
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import Field, StrictBool, StrictInt, StrictStr
 
@@ -53,11 +53,42 @@ class PressureReport(BoundaryModel):
     elapsed_seconds: Annotated[float, Field(ge=0, allow_inf_nan=False)] = 0
 
 
+NativeCommandLabel: TypeAlias = Literal[
+    "hdiutil create",
+    "hdiutil attach",
+    "hdiutil detach",
+    "hdiutil info",
+    "hdiutil imageinfo",
+    "python",
+    "mkfs.ext4",
+    "losetup",
+    "mount",
+    "umount",
+    "native",
+]
+
+
 class PressureFailure(RuntimeError):
     code: str
     command_stderr: bytes | None
 
-    def __init__(self, code: str, *, command_stderr: bytes | None = None) -> None:
-        super().__init__(code)
+    def __init__(
+        self,
+        code: str,
+        *,
+        command_stderr: bytes | None = None,
+        command_label: NativeCommandLabel | None = None,
+        command_status: int | None = None,
+    ) -> None:
+        message = code
+        if command_label is not None:
+            message += f": command={command_label}"
+        if command_status is not None:
+            message += f" exit={command_status}"
+        if command_stderr is not None:
+            message += f" stderr={command_stderr[:16384]!r}"
+            if len(command_stderr) > 16384 or len(message) > 16384:
+                message = message[: 16384 - len(" [truncated]")] + " [truncated]"
+        super().__init__(message)
         self.code = code
         self.command_stderr = command_stderr

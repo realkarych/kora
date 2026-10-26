@@ -1,5 +1,6 @@
 import errno
 import os
+import plistlib
 import select
 import sqlite3
 import subprocess
@@ -7,28 +8,37 @@ import sys
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from tests.measurements.storage_pressure_evidence import preserve_owner
 from tests.plugins.storage.pressure_models import PressureFailure, PressureReport
-from tests.plugins.storage.pressure_native import collect_process
+from tests.plugins.storage.pressure_native import (
+    collect_process,
+    command,
+    process_token,
+)
 
 
-def test_closed_failed_command_does_not_block_pressure_recovery(tmp_path: Path) -> None:
+@pytest.mark.parametrize("repetitions", [1, 4096])
+def test_closed_failed_command_does_not_block_pressure_recovery(
+    tmp_path: Path, repetitions: int
+) -> None:
     from tests.plugins.storage.pressure_controller import create
 
     directory = tmp_path / "failed-command"
     output = tmp_path / "evidence"
     output.mkdir()
-    diagnostic = b"fixture-command-error\xff"
+    fragment = b"fixture-command-error\xff\r\n\x1b"
+    diagnostic = fragment * repetitions
     arguments = (
         sys.executable,
         "-I",
         "-c",
-        f"import os; os.write(2, {diagnostic!r}); raise SystemExit(17)",
+        f"import os; os.write(2, {fragment!r} * {repetitions}); raise SystemExit(17)",
     )
 
     with create(directory) as controller:
-        with pytest.raises(PressureFailure, match="command_failed"):
+        with pytest.raises(PressureFailure, match="command_failed") as failure:
             controller.effect(arguments)
         pending = directory / "command-stderr.pending"
         pending.symlink_to(directory / "absent")
@@ -46,9 +56,16 @@ def test_closed_failed_command_does_not_block_pressure_recovery(tmp_path: Path) 
     assert not controller.manifest.command_inflight
     assert controller.manifest.resources_closed
     assert controller.report.failure == "command_failed"
+    rendered = str(failure.value)
+    assert "python" in rendered
+    assert "exit=17" in rendered
+    assert "\\xff\\r\\n\\x1b" in rendered
+    assert len(rendered.encode()) <= 16384
+    assert all(32 <= ord(character) <= 126 for character in rendered)
+    assert ("[truncated]" in rendered) == (repetitions == 4096)
     assert len(persistence.value.exceptions) == 2
     assert isinstance(persistence.value.exceptions[0], PressureFailure)
-    assert str(persistence.value.exceptions[0]) == "command_failed"
+    assert persistence.value.exceptions[0].code == "command_failed"
     assert isinstance(persistence.value.exceptions[1], OSError)
 
 
@@ -139,6 +156,137 @@ def run_controller(
         close_controller(process, directory)
 
 
+def test_pressure_controller_preserves_caught_native_failure(tmp_path: Path) -> None:
+    from tests.plugins.storage.pressure_controller import read_manifest
+
+    directory = tmp_path / "native-failure"
+
+    result, report = run_controller(directory, "command-failure")
+    manifest = read_manifest(directory / "pressure-manifest.json")
+    diagnostic = (directory / "command-stderr.txt").read_bytes()
+
+    assert result.returncode == 1
+    assert result.stdout == b""
+    assert result.stderr.endswith(b"\n")
+    assert len(result.stderr) <= 16385
+    assert all(32 <= byte <= 126 for byte in result.stderr[:-1])
+    assert b"python" in result.stderr
+    assert b"exit=17" in result.stderr
+    assert b"\\xff\\r\\n\\x1b" in result.stderr
+    assert b"[truncated]" in result.stderr
+    assert diagnostic == b"pressure-native\xff\r\n\x1b" * 4096
+    assert report.failure == "command_failed"
+    assert report.resources_closed
+    assert manifest.command_exit_status == 17
+    assert not manifest.command_inflight
+    assert manifest.child is not None
+    assert process_token(manifest.child.pid) is None
+
+
+class NativeImageInformation(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    format: StrictStr = Field(alias="Format")
+
+
+def test_pressure_image_creation_keeps_native_format_and_private_identity(
+    tmp_path: Path,
+) -> None:
+    from tests.plugins.storage import pressure_images
+    from tests.plugins.storage.pressure_controller import create
+
+    observed: list[tuple[str, ...]] = []
+    with create(tmp_path / "image-creation") as controller:
+        controller.manifest = controller.manifest.model_copy(
+            update={"image_requested": True}
+        )
+        controller.persist()
+
+        def effect(arguments: tuple[str, ...]) -> bytes:
+            observed.append(arguments)
+            return controller.effect(arguments)
+
+        try:
+            stamp = pressure_images.create_image(
+                controller.directory, controller.manifest.nonce, effect
+            )
+            image = controller.directory / pressure_images.image_name()
+            actual = pressure_images.inspect_image(image, None)
+            information = image.stat()
+            if sys.platform == "darwin":
+                raw: object = plistlib.loads(
+                    command(("/usr/bin/hdiutil", "imageinfo", "-plist", str(image)))
+                )
+                image_format = NativeImageInformation.model_validate(raw).format
+            else:
+                image_format = "ext4"
+            attached = pressure_images.discover(controller.directory, actual)
+        finally:
+            controller.cleanup()
+
+    assert stamp == actual
+    assert information.st_uid == os.geteuid()
+    assert information.st_mode & 0o777 == 0o600
+    assert 0 < information.st_size <= 68157440
+    assert information.st_nlink == 1
+    assert attached is None
+    assert controller.manifest.resources_closed
+    if sys.platform == "darwin":
+        assert observed[0][:7] == (
+            "/usr/bin/hdiutil",
+            "create",
+            "-size",
+            "64m",
+            "-fs",
+            "HFS+",
+            "-volname",
+        )
+        assert "-srcfolder" not in observed[0]
+        assert image_format == "UDRW"
+    else:
+        assert observed[0][0] == "/usr/sbin/mkfs.ext4"
+
+
+def test_pressure_owner_recovers_legacy_source_directory(tmp_path: Path) -> None:
+    from tests.plugins.storage.pressure_controller import read_manifest
+    from tests.plugins.storage.pressure_images import image_name
+
+    directory = tmp_path / "legacy-owner"
+    process = subprocess.Popen(
+        controller_arguments(directory, "parent-eof"),
+        cwd=Path(__file__).resolve().parents[3],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        assert process.stdout is not None
+        ready, _, _ = select.select([process.stdout], [], [], 30)
+        assert ready
+        assert process.stdout.readline(1024) == b"provider_started\n", (
+            controller_diagnostics(directory)
+        )
+        mounted = (directory / "mounted").stat()
+        legacy = directory / "volume-root"
+        legacy.mkdir(mode=0o700, exist_ok=True)
+        manifest = read_manifest(directory / "pressure-manifest.json")
+        process.kill()
+        process.wait(timeout=10)
+        recover_owner(directory)
+        report = read_report(directory)
+    finally:
+        close_controller(process, directory)
+
+    assert manifest.version == 1
+    assert mounted.st_uid == os.geteuid()
+    if sys.platform == "darwin":
+        assert mounted.st_mode & 0o777 == 0o700
+    assert report.resources_closed
+    assert not (directory / "mounted").exists()
+    assert not (directory / image_name()).exists()
+    assert not legacy.exists()
+
+
 @pytest.mark.parametrize(
     ("workload", "reason"),
     [
@@ -165,7 +313,7 @@ def test_pressure_owner_closes_after_parent_interrupt(
         readable, _, _ = select.select([process.stdout], [], [], 30)
         assert readable
         phase = process.stdout.readline(1024)
-        assert phase == b"provider_started\n"
+        assert phase == b"provider_started\n", controller_diagnostics(directory)
         if workload == "parent-eof":
             process.stdin.close()
         elif workload == "cancelled":
@@ -177,7 +325,7 @@ def test_pressure_owner_closes_after_parent_interrupt(
         close_controller(process, directory)
 
     assert status != 0, error_output
-    assert report.provider_started
+    assert report.provider_started, error_output
     assert report.failure == reason
     assert report.resources_closed
     assert not (directory / "mounted").exists()
@@ -236,7 +384,7 @@ def test_local_storage_enospc_recovers(tmp_path: Path) -> None:
     result, report = run_controller(directory, "enospc")
 
     assert result.returncode == 0, (result.stderr, report)
-    assert report.provider_started
+    assert report.provider_started, result.stderr
     assert report.payload_enospc
     assert report.metadata_enospc
     assert report.payload_errno == errno.ENOSPC
@@ -260,9 +408,9 @@ def test_storage_pressure_controller_closes_on_child_failure(tmp_path: Path) -> 
     result, report = run_controller(directory, "child-failure")
 
     assert result.returncode != 0
-    assert report.provider_started
-    assert report.failure == "child_failure"
-    assert report.resources_closed
+    assert report.provider_started, result.stderr
+    assert report.failure == "child_failure", result.stderr
+    assert report.resources_closed, result.stderr
     assert not (directory / "mounted").exists()
 
 
@@ -321,7 +469,9 @@ def test_pressure_owner_reconciles_lost_attachment_response(tmp_path: Path) -> N
         assert process.stdout is not None
         readable, _, _ = select.select([process.stdout], [], [], 30)
         assert readable
-        assert process.stdout.readline(1024) == b"attachment_created\n"
+        assert process.stdout.readline(1024) == b"attachment_created\n", (
+            controller_diagnostics(directory)
+        )
         from tests.plugins.storage.pressure_controller import read_manifest
 
         saved = read_manifest(directory / "pressure-manifest.json")

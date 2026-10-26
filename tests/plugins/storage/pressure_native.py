@@ -10,7 +10,11 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from tests.plugins.storage.pressure_models import PressureFailure, ProcessToken
+from tests.plugins.storage.pressure_models import (
+    NativeCommandLabel,
+    PressureFailure,
+    ProcessToken,
+)
 
 
 def process_token(pid: int, *, include_exited: bool = False) -> ProcessToken | None:
@@ -121,6 +125,26 @@ def collect_process(
             process.wait(timeout=5)
 
 
+def native_command_label(arguments: tuple[str, ...]) -> NativeCommandLabel:
+    if arguments and arguments[0] == sys.executable:
+        return "python"
+    labels: dict[tuple[str, ...], NativeCommandLabel] = {
+        ("/usr/bin/hdiutil", "create"): "hdiutil create",
+        ("/usr/bin/hdiutil", "attach"): "hdiutil attach",
+        ("/usr/bin/hdiutil", "detach"): "hdiutil detach",
+        ("/usr/bin/hdiutil", "info"): "hdiutil info",
+        ("/usr/bin/hdiutil", "imageinfo"): "hdiutil imageinfo",
+        ("/usr/sbin/mkfs.ext4",): "mkfs.ext4",
+        ("/usr/bin/sudo", "-n", "/usr/sbin/losetup"): "losetup",
+        ("/usr/bin/sudo", "-n", "/usr/bin/mount"): "mount",
+        ("/usr/bin/sudo", "-n", "/usr/bin/umount"): "umount",
+    }
+    for prefix, label in labels.items():
+        if arguments[: len(prefix)] == prefix:
+            return label
+    return "native"
+
+
 def command(
     arguments: tuple[str, ...],
     seconds: float = 30,
@@ -158,11 +182,21 @@ def command(
             if process.stderr is not None:
                 process.stderr.close()
     if status < 0:
-        raise PressureFailure("command_terminated")
+        raise PressureFailure(
+            "command_terminated",
+            command_stderr=error_output,
+            command_label=native_command_label(arguments),
+            command_status=status,
+        )
     if on_finished is not None:
         on_finished(status)
     if on_closed is not None:
         on_closed()
     if status != 0:
-        raise PressureFailure("command_failed", command_stderr=error_output)
+        raise PressureFailure(
+            "command_failed",
+            command_stderr=error_output,
+            command_label=native_command_label(arguments),
+            command_status=status,
+        )
     return output
