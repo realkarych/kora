@@ -23,6 +23,11 @@ PRODUCER_STEPS = {
         "full_disk_evidence",
         "full_disk_cleanup",
         "full_disk_upload",
+        "final_sync",
+    ),
+    "qualification": (
+        "dependencies",
+        "source_revision",
         "lifetime_measurement",
         "lifetime_evidence",
         "lifetime_upload",
@@ -68,11 +73,18 @@ class YamlLoader(Protocol):
     def load(self, stream: Path) -> object: ...
 
 
-def workflow_jobs() -> dict[str, object]:
+def workflow_document(filename: str = "ci.yml") -> dict[str, object]:
     document = cast(YamlLoader, YAML(typ="safe")).load(
-        Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml"
+        Path(__file__).resolve().parents[2] / ".github" / "workflows" / filename
     )
-    return table(table(document)["jobs"])
+    return table(document)
+
+
+def workflow_jobs() -> dict[str, object]:
+    return {
+        **table(workflow_document()["jobs"]),
+        **table(workflow_document("conformance-lifetime.yml")["jobs"]),
+    }
 
 
 def steps(job: dict[str, object]) -> dict[str, dict[str, object]]:
@@ -154,7 +166,12 @@ def test_producer_proof_covers_every_required_step(job_id: str) -> None:
 
 @pytest.mark.parametrize(
     "job_id",
-    ["resource-measurements", "pricing-measurements", "git-publication-measurements"],
+    [
+        "resource-measurements",
+        "pricing-measurements",
+        "git-publication-measurements",
+        "qualification",
+    ],
 )
 def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> None:
     jobs = workflow_jobs()
@@ -181,7 +198,7 @@ def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> Non
     )
 
 
-def test_lifetime_route_preserves_private_evidence_before_disposal() -> None:
+def test_full_disk_route_preserves_private_evidence_before_disposal() -> None:
     selected = steps(table(workflow_jobs()["resource-measurements"]))
     required = (
         "protocol_upload",
@@ -190,9 +207,6 @@ def test_lifetime_route_preserves_private_evidence_before_disposal() -> None:
         "full_disk_evidence",
         "full_disk_cleanup",
         "full_disk_upload",
-        "lifetime_measurement",
-        "lifetime_evidence",
-        "lifetime_upload",
         "final_sync",
     )
 
@@ -228,6 +242,56 @@ def test_lifetime_route_preserves_private_evidence_before_disposal() -> None:
         'full-disk "$KORA_LIFETIME_FULL_DISK_ROOT" '
         '"$PWD/measurements/conformance-full-disk"\n'
     ) in str(selected["full_disk_evidence"]["run"])
+    for identity in ("full_disk_evidence", "full_disk_cleanup", "full_disk_upload"):
+        assert selected[identity]["if"] == (
+            "${{ always() && !cancelled() && "
+            "steps.full_disk_prepare.outcome != 'skipped' }}"
+        )
+    environment = table(selected["full_disk_evidence"]["env"])
+    assert environment["KORA_LIFETIME_CHECKOUT_REVISION"] == (
+        "${{ steps.source_revision.outputs.checkout_revision }}"
+    )
+    assert environment["KORA_MEASUREMENT_REVISION"] == (
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    )
+    assert table(selected["full_disk_upload"]["with"]) == {
+        "name": "conformance-full-disk-evidence",
+        "path": "measurements/conformance-full-disk",
+        "if-no-files-found": "error",
+    }
+    assert selected["full_disk_upload"]["uses"] == (
+        "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    )
+
+
+def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None:
+    document = workflow_document("conformance-lifetime.yml")
+    jobs = table(document["jobs"])
+    job = table(jobs["qualification"])
+    selected = steps(job)
+
+    positions = [
+        list(selected).index(identity) for identity in PRODUCER_STEPS["qualification"]
+    ]
+
+    assert table(document["on"]) == {
+        "workflow_dispatch": None,
+        "schedule": [{"cron": "0 2 * * *"}],
+    }
+    assert document["permissions"] == {"contents": "read"}
+    assert set(jobs) == {"qualification"}
+    assert "qualification" not in table(workflow_document()["jobs"])
+    assert "qualification" not in cast(
+        list[str], table(workflow_jobs()["cel-measurements"])["needs"]
+    )
+    assert positions == sorted(positions)
+    assert "lifetime_measurement" not in steps(
+        table(workflow_jobs()["resource-measurements"])
+    )
+    assert (
+        selected["dependencies"]["run"]
+        == steps(table(workflow_jobs()["resource-measurements"]))["dependencies"]["run"]
+    )
     assert (
         'KORA_MEASUREMENT_OUTPUT="$PWD/measurements/conformance-lifetime/report.json"'
         " \\\n"
@@ -245,37 +309,25 @@ def test_lifetime_route_preserves_private_evidence_before_disposal() -> None:
             "${{ steps.lifetime_measurement.outcome }}"
         )
     }
-    for identity in ("full_disk_evidence", "full_disk_cleanup", "full_disk_upload"):
-        assert selected[identity]["if"] == (
-            "${{ always() && !cancelled() && "
-            "steps.full_disk_prepare.outcome != 'skipped' }}"
-        )
     for identity in ("lifetime_evidence", "lifetime_upload"):
         assert selected[identity]["if"] == (
             "${{ always() && !cancelled() && "
             "steps.lifetime_measurement.outcome != 'skipped' }}"
         )
-    for identity in ("full_disk_evidence", "lifetime_measurement"):
-        environment = table(selected[identity]["env"])
-        assert environment["KORA_LIFETIME_CHECKOUT_REVISION"] == (
-            "${{ steps.source_revision.outputs.checkout_revision }}"
-        )
-        assert environment["KORA_MEASUREMENT_REVISION"] == (
-            "${{ github.event.pull_request.head.sha || github.sha }}"
-        )
-    for identity, directory, artifact in (
-        ("full_disk_upload", "conformance-full-disk", "conformance-full-disk-evidence"),
-        ("lifetime_upload", "conformance-lifetime", "conformance-lifetime-measurement"),
-    ):
-        assert selected[identity]["uses"] == (
-            "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
-        )
-        assert table(selected[identity]["with"]) == {
-            "name": artifact,
-            "path": f"measurements/{directory}",
-            "if-no-files-found": "error",
-            **({"include-hidden-files": True} if identity == "lifetime_upload" else {}),
-        }
+    environment = table(selected["lifetime_measurement"]["env"])
+    assert environment["KORA_LIFETIME_CHECKOUT_REVISION"] == (
+        "${{ steps.source_revision.outputs.checkout_revision }}"
+    )
+    assert environment["KORA_MEASUREMENT_REVISION"] == "${{ github.sha }}"
+    assert selected["lifetime_upload"]["uses"] == (
+        "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    )
+    assert table(selected["lifetime_upload"]["with"]) == {
+        "name": "conformance-lifetime-measurement",
+        "path": "measurements/conformance-lifetime",
+        "if-no-files-found": "error",
+        "include-hidden-files": True,
+    }
 
 
 @pytest.mark.parametrize(

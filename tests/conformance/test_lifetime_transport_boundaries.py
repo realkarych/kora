@@ -30,6 +30,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelFailure
+from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 
 
@@ -52,66 +53,70 @@ async def test_client_rejects_close_reply_at_the_original_deadline(
     request = ReservationRequest(
         operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
     )
-    reservation = await owner.reserve(request)
-    reserving = asyncio.create_task(client.reserve(request))
+    reserving = None
     closing = None
     deadline = actual.monotonic_ns() + 5_000_000_000
     try:
-        header = HEADER.validate_json(await peer.read_frame(deadline, 256))
-        assert isinstance(header, OrdinaryHeader)
-        await peer.read_frame(deadline, header.control_bytes)
-        await peer.write_record(
-            ENVELOPE.dump_json(
-                OrdinaryReply(
-                    request_id=header.request_id,
-                    reply=SuccessReply(value=reservation),
-                )
-            ),
-            deadline,
-        )
-        assert await reserving == reservation
-        closing = asyncio.create_task(client.close(reservation.token.resource_id))
-        assert isinstance(
-            HEADER.validate_json(await peer.read_frame(deadline, 256)), CloseHeader
-        )
-        report = await owner.close(reservation.token.resource_id)
-        await peer.write_record(
-            ENVELOPE.dump_json(
-                CloseReply(resource_id=reservation.token.resource_id, report=report)
-            ),
-            deadline,
-        )
-        clock.advance(
-            sum(
-                duration_ns(seconds)
-                for seconds in (
-                    client.limits.cooperative_seconds,
-                    client.limits.term_seconds,
-                    client.limits.kill_observation_seconds,
-                    client.limits.drain_seconds,
-                )
+        async with asyncio.timeout(5):
+            reservation = await owner.reserve(request)
+            reserving = asyncio.create_task(client.reserve(request))
+            header = HEADER.validate_json(await peer.read_frame(deadline, 256))
+            assert isinstance(header, OrdinaryHeader)
+            await peer.read_frame(deadline, header.control_bytes)
+            await peer.write_record(
+                ENVELOPE.dump_json(
+                    OrdinaryReply(
+                        request_id=header.request_id,
+                        reply=SuccessReply(value=reservation),
+                    )
+                ),
+                deadline,
             )
-            + late_ns
-        )
+            assert await reserving == reservation
+            closing = asyncio.create_task(client.close(reservation.token.resource_id))
+            assert isinstance(
+                HEADER.validate_json(await peer.read_frame(deadline, 256)), CloseHeader
+            )
+            report = await owner.close(reservation.token.resource_id)
+            await peer.write_record(
+                ENVELOPE.dump_json(
+                    CloseReply(resource_id=reservation.token.resource_id, report=report)
+                ),
+                deadline,
+            )
+            clock.advance(
+                sum(
+                    duration_ns(seconds)
+                    for seconds in (
+                        client.limits.cooperative_seconds,
+                        client.limits.term_seconds,
+                        client.limits.kill_observation_seconds,
+                        client.limits.drain_seconds,
+                    )
+                )
+                + late_ns
+            )
 
-        with pytest.raises(LifetimeTransportError) as refused:
-            await asyncio.wait_for(asyncio.shield(closing), 5)
+            with pytest.raises(LifetimeTransportError) as refused:
+                await asyncio.wait_for(asyncio.shield(closing), 5)
 
-        assert refused.value.reason is ChannelFailure.DEADLINE
-        assert client.closed
-        assert not client.resources
+            assert refused.value.reason is ChannelFailure.DEADLINE
+            assert client.closed
+            assert not client.resources
     finally:
         client.disconnect()
         peer.close()
-        reserving.cancel()
+        if reserving is not None:
+            reserving.cancel()
         if closing is not None:
             closing.cancel()
             await asyncio.gather(closing, return_exceptions=True)
-        await asyncio.gather(reserving, return_exceptions=True)
+        if reserving is not None:
+            await asyncio.gather(reserving, return_exceptions=True)
         try:
             await asyncio.wait_for(asyncio.gather(client.reader, client.writer), 5)
         finally:
-            await asyncio.wait_for(owner.close(None), 5)
+            await dispose_test_owner(owner, clock)
 
 
 @pytest.mark.asyncio
