@@ -1,14 +1,17 @@
+import gc
 import json
 import os
 import re
 import subprocess
 import sys
+import weakref
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, cast
 
 import pytest
 from pydantic import ValidationError
+from pydantic.json_schema import GenerateJsonSchema
 
 from kora.ir import GraphDocument, HumanInputConfig, export_ir
 from tests.ir.schema_document_cases import boundary_cases
@@ -259,6 +262,24 @@ def test_ir_schema_generation_is_deterministic() -> None:
     assert generate_ir_schema() == json.loads(rendered)
     assert rendered.endswith("\n")
     assert not rendered.endswith("\n\n")
+
+
+@pytest.mark.parametrize("retained", [True, False])
+def test_ir_schema_generator_inventory_observes_real_retention(retained: bool) -> None:
+    from tests.measurements.ir_schema_lifetime import live_schema_generators
+
+    gc.collect()
+    baseline = live_schema_generators()
+    generator = GenerateJsonSchema()
+    reference = weakref.ref(generator)
+    if not retained:
+        del generator
+
+    gc.collect()
+    observed = live_schema_generators()
+
+    assert observed == baseline + int(retained)
+    assert (reference() is not None) is retained
 
 
 def test_ir_schema_command_has_only_schema_stdout_without_artifact_access(

@@ -7,6 +7,8 @@ import time
 import tracemalloc
 from typing import cast
 
+from pydantic.json_schema import GenerateJsonSchema
+
 from tests.measurements.harness import (
     open_descriptors,
     os_threads,
@@ -18,6 +20,10 @@ from tests.measurements.ir_schema_workload import (
     schema_fixture_manifest,
     schema_models,
 )
+
+
+def live_schema_generators() -> int:
+    return sum(isinstance(value, GenerateJsonSchema) for value in gc.get_objects())
 
 
 def main() -> None:
@@ -54,6 +60,7 @@ def main() -> None:
                 "cycles": cycles,
                 "seconds": time.perf_counter() - started,
                 "retained_bytes": current - baseline,
+                "live_generators": live_schema_generators(),
                 "peak_traced_bytes": peak,
                 "current_rss_bytes": rss_bytes(),
                 "peak_rss_bytes": peak_rss_bytes(),

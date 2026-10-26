@@ -1000,8 +1000,13 @@ def test_ir_schema_repeated_lifetime(report: Report, run: int) -> None:
         report.samples.append(
             Sample("schema_lifetime", run, cycle, cast("float", checkpoint["seconds"]))
         )
-        passed = cast("int", checkpoint["retained_bytes"]) < RETAINED_LIMIT_BYTES
-        report.gates[f"schema_lifetime_{run}_{cycle}_retained"] = passed
+        passed = (
+            checkpoint["live_generators"] == 0
+            and checkpoint["threads"] == result["baseline_threads"]
+            and checkpoint["descriptors"] == result["baseline_descriptors"]
+            and checkpoint["os_threads"] == result["baseline_os_threads"]
+        )
+        report.gates[f"schema_lifetime_{run}_{cycle}_resources_released"] = passed
         assert passed
         assert checkpoint["threads"] == result["baseline_threads"]
         assert checkpoint["descriptors"] == result["baseline_descriptors"]

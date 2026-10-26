@@ -59,9 +59,7 @@ CONFIG_MODELS = {
     "McpServer": McpServer,
     "CommandConfig": CommandConfig,
     "CommandResource": CommandResource,
-    "NetworkPolicy_agentConfig": NetworkPolicy,
-    "NetworkPolicy_commandConfig": NetworkPolicy,
-    "NetworkPolicy_mcpServer": NetworkPolicy,
+    "NetworkPolicy": NetworkPolicy,
 }
 for definition, model in CONFIG_MODELS.items():
     GENERATED[definition] = model.model_json_schema

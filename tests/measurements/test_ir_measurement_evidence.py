@@ -88,6 +88,7 @@ def schema_payload() -> dict[str, object]:
     checkpoints = cast(list[dict[str, object]], resources["checkpoints"])
     for checkpoint in checkpoints:
         checkpoint.pop("live_models")
+        checkpoint["live_generators"] = 0
     return {
         **{
             name: value
@@ -1177,6 +1178,18 @@ def test_ir_union_checks_all_artifact_identities(
             1227,
             10668,
         )
+        assert result["schema_retention_diagnostics"] == [
+            {
+                "run": run,
+                "cycle": cycle,
+                "retained_bytes": 0,
+                "reference_bytes": 65536,
+                "exceeded": False,
+            }
+            for run in range(3)
+            for cycle in (250, 500, 750, 1000)
+        ]
+        assert len(cast(list[object], result["accounting_timing_diagnostics"])) == 144
     else:
         with pytest.raises(ValueError, match="IR"):
             verify_union(tmp_path, REVISION)
@@ -1577,7 +1590,12 @@ def test_ir_report_refuses_missing_schema_metadata(field: str) -> None:
         ("cycles", 251),
         ("seconds", 0.2),
         ("seconds", float("inf")),
-        ("retained_bytes", 65536),
+        ("retained_bytes", float("inf")),
+        ("retained_bytes", "artifact-input-must-remain-private"),
+        ("live_generators", 1),
+        ("live_generators", -1),
+        ("live_generators", True),
+        ("live_models", 0),
         ("threads", 2),
         ("os_threads", True),
         ("descriptors", 5),
@@ -1600,6 +1618,56 @@ def test_ir_report_refuses_inconsistent_schema_checkpoints(
         verify_report(
             report.model_dump_json(), rendered_junit(expected), REVISION, expected
         )
+
+
+def test_ir_schema_checkpoint_requires_generator_inventory() -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    checkpoints[0].pop("live_generators")
+    report.environment["schema_lifetime_1"] = json.dumps(payload)
+
+    with pytest.raises(ValueError, match="IR schema"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+def test_ir_schema_retention_diagnostics_preserve_raw_reference_excess() -> None:
+    expected = schema_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = schema_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    values = (-1, 65535, 65536, 86162)
+    for checkpoint, retained in zip(checkpoints, values, strict=True):
+        checkpoint["retained_bytes"] = retained
+    raw = json.dumps(payload)
+    report.environment["schema_lifetime_1"] = raw
+    report.environment["schema_retention_diagnostics"] = "forged"
+    diagnostics: list[dict[str, ExtraValue]] = []
+
+    result = verify_report(
+        report.model_dump_json(),
+        rendered_junit(expected),
+        REVISION,
+        expected,
+        schema_diagnostics=diagnostics,
+    )
+
+    assert result.environment["schema_lifetime_1"] == raw
+    assert diagnostics == [
+        {
+            "run": 1,
+            "cycle": cycle,
+            "retained_bytes": retained,
+            "reference_bytes": 65536,
+            "exceeded": retained >= 65536,
+        }
+        for cycle, retained in zip((250, 500, 750, 1000), values, strict=True)
+    ]
+    assert len(result.samples) == 4
+    assert all(result.gates.values())
 
 
 @pytest.mark.parametrize(

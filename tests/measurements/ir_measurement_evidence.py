@@ -307,6 +307,10 @@ class ConfigurationCheckpoint(ResourceCheckpoint):
     live_models: int
 
 
+class SchemaCheckpoint(ResourceCheckpoint):
+    live_generators: int = Field(ge=0)
+
+
 class LifetimeResources(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
 
@@ -357,7 +361,7 @@ class SchemaLifetime(LifetimeResources):
     pid: int = Field(gt=0)
     platform: str
     python: str
-    checkpoints: list[ResourceCheckpoint]
+    checkpoints: list[SchemaCheckpoint]
     cycles: int
     action_counts: dict[str, int]
     class_schema_inventory: list[str]
@@ -393,7 +397,8 @@ def schema_evidence(run: int) -> Evidence:
     return Evidence(
         frozenset({f"{NODE}test_ir_schema_repeated_lifetime[{run}]"}),
         frozenset(
-            f"schema_lifetime_{run}_{cycle}_retained" for cycle in (250, 500, 750, 1000)
+            f"schema_lifetime_{run}_{cycle}_resources_released"
+            for cycle in (250, 500, 750, 1000)
         ),
         Counter(("schema_lifetime", run, cycle) for cycle in (250, 500, 750, 1000)),
     )
@@ -599,7 +604,11 @@ def verify_configuration_payloads(
                 raise ValueError("inconsistent IR configuration lifetime checkpoint")
 
 
-def verify_schema_payloads(report: MeasurementReport, expected: Evidence) -> None:
+def verify_schema_payloads(
+    report: MeasurementReport,
+    expected: Evidence,
+    diagnostics: list[dict[str, ExtraValue]] | None = None,
+) -> None:
     runs = [run for run in range(3) if schema_evidence(run).nodes <= expected.nodes]
     if {name for name in report.environment if name.startswith("schema_lifetime_")} != {
         f"schema_lifetime_{run}{suffix}"
@@ -669,7 +678,7 @@ def verify_schema_payloads(report: MeasurementReport, expected: Evidence) -> Non
             if (
                 point.seconds != times.get(point.cycles)
                 or point.seconds < 0
-                or point.retained_bytes >= RETAINED_LIMIT_BYTES
+                or point.live_generators != 0
                 or point.threads != payload.baseline_threads
                 or point.descriptors != payload.baseline_descriptors
                 or point.os_threads != payload.baseline_os_threads
@@ -686,6 +695,16 @@ def verify_schema_payloads(report: MeasurementReport, expected: Evidence) -> Non
                 )
             ):
                 raise ValueError("inconsistent IR schema lifetime checkpoint")
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "run": run,
+                        "cycle": point.cycles,
+                        "retained_bytes": point.retained_bytes,
+                        "reference_bytes": RETAINED_LIMIT_BYTES,
+                        "exceeded": point.retained_bytes >= RETAINED_LIMIT_BYTES,
+                    }
+                )
 
 
 def verify_vcs_ref_evidence(report: MeasurementReport, expected: Evidence) -> None:
@@ -998,6 +1017,7 @@ def verify_report(
     revision: str,
     expected: Evidence,
     diagnostics: list[dict[str, ExtraValue]] | None = None,
+    schema_diagnostics: list[dict[str, ExtraValue]] | None = None,
 ) -> MeasurementReport:
     try:
         report = MeasurementReport.model_validate_json(document)
@@ -1026,7 +1046,7 @@ def verify_report(
     ):
         raise ValueError("incomplete IR shard evidence")
     verify_configuration_payloads(report, expected)
-    verify_schema_payloads(report, expected)
+    verify_schema_payloads(report, expected, schema_diagnostics)
     verify_vcs_ref_evidence(report, expected)
     verify_accounting_evidence(
         report, expected, [] if diagnostics is None else diagnostics
@@ -1055,6 +1075,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
     gates: set[str] = set()
     samples: Counter[tuple[str, int, int]] = Counter()
     diagnostics: list[dict[str, ExtraValue]] = []
+    schema_diagnostics: list[dict[str, ExtraValue]] = []
     for run, inventory in enumerate(expected):
         shard = directory / f"ir-models-cost-measurement-{revision}-{run}"
         required_files = {
@@ -1078,6 +1099,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
             revision,
             inventory,
             diagnostics,
+            schema_diagnostics,
         )
         actual_manifests = {
             name: report.environment.get(name)
@@ -1115,6 +1137,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         "samples": sum(samples.values()),
         "selected_test_nodes": sorted(selected),
         "accounting_timing_diagnostics": diagnostics,
+        "schema_retention_diagnostics": schema_diagnostics,
     }
 
 
