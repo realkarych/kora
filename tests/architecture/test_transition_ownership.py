@@ -41,6 +41,7 @@ CONFINING_PACKAGES: tuple[str, ...] = (DB_PACKAGE, "kora.engine")
 DATABASE_DRIVERS: frozenset[str] = frozenset(
     {"sqlite3", "asyncpg", "aiosqlite", "psycopg", "psycopg2"}
 )
+PRIVATE_SQLITE_OWNER: str = "kora.plugins.storage.state"
 TABLE_HANDLES: frozenset[str] = GUARDED_TABLES | {"tables", "metadata"}
 SQL_COMMENT: re.Pattern[str] = re.compile(r"/\*.*?\*/|--[^\n]*", re.DOTALL)
 RAW_WRITE: re.Pattern[str] = re.compile(
@@ -197,14 +198,24 @@ def write_targets(node: ast.Call, bindings: dict[str, str]) -> list[ast.expr]:
 
 
 def raw_sql_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
-    if not is_sqlalchemy_call(node, bindings, frozenset({"text"})):
+    sqlalchemy_text = is_sqlalchemy_call(node, bindings, frozenset({"text"}))
+    driver_statement = isinstance(node.func, ast.Attribute) and node.func.attr in {
+        "execute",
+        "executemany",
+        "executescript",
+    }
+    if not sqlalchemy_text and not driver_statement:
         return None
-    arguments = call_arguments(node, "text")
+    arguments = call_arguments(node, "text" if sqlalchemy_text else "sql")
     if not arguments:
         return None
     statement = constant_string(arguments[0])
     if statement is None:
-        return "builds SQL text dynamically outside kora.engine"
+        return (
+            "builds SQL text dynamically outside kora.engine"
+            if sqlalchemy_text
+            else None
+        )
     normalized = SQL_COMMENT.sub(" ", statement)
     for quote in "`[]":
         normalized = normalized.replace(quote, "")
@@ -213,18 +224,25 @@ def raw_sql_reason(node: ast.Call, bindings: dict[str, str]) -> str | None:
     return None
 
 
+def guarded_driver(source: str, module: SourceModule) -> bool:
+    driver = source.split(".")[0]
+    return driver in DATABASE_DRIVERS and not (
+        module.name == PRIVATE_SQLITE_OWNER and driver == "sqlite3"
+    )
+
+
 def guarded_import_reasons(node: ast.AST, module: SourceModule) -> Iterator[str]:
     if isinstance(node, ast.Import):
         for alias in node.names:
             if is_within(alias.name, TABLES_MODULE):
                 yield "imports kora.db.tables"
-            elif alias.name.split(".")[0] in DATABASE_DRIVERS:
+            elif guarded_driver(alias.name, module):
                 yield f"imports the database driver {alias.name}"
         return
     if not isinstance(node, ast.ImportFrom):
         return
     source = import_source(module, node)
-    if source.split(".")[0] in DATABASE_DRIVERS:
+    if guarded_driver(source, module):
         yield f"imports the database driver {source}"
     elif is_within(source, TABLES_MODULE):
         yield "imports from kora.db.tables"
@@ -361,6 +379,36 @@ def test_transitions_only_through_shared_functions() -> None:
     violations = find_violations(source_root)
 
     assert violations == []
+
+
+def test_private_control_sqlite_does_not_grant_metadata_authority(
+    tmp_path: Path,
+) -> None:
+    write_module(
+        tmp_path,
+        "kora.plugins.storage.state",
+        "import sqlite3\n"
+        "from sqlite3 import Connection\n"
+        "import asyncpg\n"
+        "from kora.db.tables import run\n"
+        'connection.execute("UPDATE run SET status=1")\n'
+        'connection.executemany("DELETE FROM wait WHERE id=?", ())\n'
+        'connection.executescript("INSERT INTO attempt VALUES (1)")\n',
+    )
+    write_module(tmp_path, "kora.plugins.storage.state_helper", "import sqlite3\n")
+    write_module(tmp_path, "kora.plugins.storage.staging", "import sqlite3\n")
+
+    violations = find_violations(tmp_path)
+
+    assert violations == [
+        "kora/plugins/storage/staging.py:1: imports the database driver sqlite3",
+        "kora/plugins/storage/state.py:3: imports the database driver asyncpg",
+        "kora/plugins/storage/state.py:4: imports from kora.db.tables",
+        "kora/plugins/storage/state.py:5: writes an execution table in raw SQL",
+        "kora/plugins/storage/state.py:6: writes an execution table in raw SQL",
+        "kora/plugins/storage/state.py:7: writes an execution table in raw SQL",
+        "kora/plugins/storage/state_helper.py:1: imports the database driver sqlite3",
+    ]
 
 
 def test_checker_refuses_execution_tables_outside_db_and_engine(tmp_path: Path) -> None:

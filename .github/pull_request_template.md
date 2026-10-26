@@ -6,6 +6,12 @@ Closes #
 
 ## What changes
 
+## PR size
+
+For a business-logic change, record the complete diff’s added plus deleted hand-written production-code line count, compared merge-base/head revisions and excluded test/documentation/generated paths. Mark not applicable with a reason for other changes.
+
+- [ ] Business-logic changes contain at most 1,000 added plus deleted production-code lines; larger scopes were split into smaller, independently reviewable and mergeable PRs with linked sub-issues and explicit dependencies, preserving required tests, documentation, parity and verification.
+
 ## Merge
 
 - [ ] The PR title reads as the subject of the one squash commit this PR becomes on `master`, which carries no body, as defined in [AGENTS.md](https://github.com/realkarych/kora/blob/master/AGENTS.md#issues-and-pull-requests).
@@ -29,27 +35,23 @@ Approved plan link and base revision:
 
 Final reviewed/tested revision and working-tree state:
 
-Affected components and contracts, including semantic effects beyond file paths. Split component families by contract/resource ownership and follow transitive effects until an unchanged boundary stops propagation. Keep complete component/profile coverage and map every applicable profile to an assignment identifier:
+Follow [kora-verify](https://github.com/realkarych/kora/blob/master/.claude/skills/kora-verify/SKILL.md), the canonical router. Record the delivered outcome, work outside this change and stopping conditions. Keep one coverage table, including transitive contract/resource effects and integration ownership:
 
-| Component | Direct change or transitive causal edge, with contract/source evidence | Integration-boundary owner | Applicable profiles and checks, or reason for exclusion | Assignment identifiers by profile |
+| Affected contract/component and changed risk | Integration owner | Blocking checks | Diagnostic measurements | Independent result or qualifying reuse |
 |---|---|---|---|---|
 | | | | | |
 
-Performance/resource lifetime: workload, acquired resources and release conditions, repeated success/failure/cancellation/recovery/shutdown cycles, quiescence, peak/retained measurements and baseline/budget evidence; give a concrete applicability reason for instruction/editorial-only changes.
+For selected performance scope, state the workload, resource owners/release conditions, approved numerical method and remaining limits. Diagnostics remain visible and establish no passing guarantee. A new experiment must answer a named unresolved acceptance question.
 
-Observability impact and evidence under [the logging contract](https://github.com/realkarych/kora/blob/master/knowledge/specs/observability.md): event/level/context ownership, safe fields, stream separation and bounded failure behavior; link named tests or give a concrete applicability reason. Pending component rows must name their implementing issue and activation trigger. Logging collection, redaction, propagation, buffer or sink changes require correctness, security and performance review.
+Record applicable observability impact and named evidence under [the logging contract](https://github.com/realkarych/kora/blob/master/knowledge/specs/observability.md), or a concrete applicability reason. Pending capabilities name their implementing issue and activation trigger.
 
-One row per independent single-profile assignment. Related components may share a bounded assignment with an explicit common contract and grouping reason; different profiles use separate independent contexts. kora-verify owns the review process: map qualifying step, local or native results to these assignments rather than adding duplicate stages. Verify actual independent result provenance, scope and inputs; a coordinator-authored report or generic clean verdict is insufficient. Record reassessment of changed inputs and affected conclusions, actual returned results and justified descendant splits; requested/running assignments are not completed reviews.
-
-| Assignment / profile | Covered components, boundaries and grouping reason | Reviewer identity and justified descendant scope | Reviewed inputs/revision, reassessment and evidence | Verdict, findings and disposition or applicability reason |
-|---|---|---|---|---|
-| | | | | |
+Link each actual selected single-profile result with reviewer identity, inspected inputs/revision, bounded scope, findings and disposition. Carry matching results forward once; relevant inspected source/configuration changes reopen affected conclusions, while a new SHA alone does not. An implementation summary, request or generic clean verdict cannot prove independent review. Record justified descendant scope and retain native read-only restrictions.
 
 | Check | Command or CI run/artifact link | Tested revision and result |
 |---|---|---|
 | | | |
 
-Use passed, failed, blocked, pending implementation, unverified or not applicable, with a reason for every non-pass. For pending checks, link the implementing issue and activation trigger. A design review is not runtime evidence. Record missing required merge statuses and their owner/admin activation work; a report does not replace CI logs or prove independent dispatch.
+Use passed, failed, blocked, pending implementation, unverified or not applicable, with a reason for every non-pass. Planning review does not prove runtime behavior. Final-head required CI remains mandatory; local checks may target changed inputs instead of duplicating the full suite. Record whole-workflow duration against the ten-minute feedback target separately from hard job/test/cleanup deadlines and required results. Historical failures keep their verdicts.
 
 Native GitHub Codex Review uses the same coverage and assignment rules through `AGENTS.md`, retaining trusted-base and native read-only restrictions. Link actual scoped results when available; an aggregate clean verdict is not evidence for missing assignments or executable checks. Reuse does not waive a required native invocation or activate automatic review. For review-workflow changes, record repository-wide all-contributor/new-head automatic-review settings and required merge-status activation, or the precise configuration gap. Native subagent capability is assumed; no new capability experiment or internal-trace prerequisite is required.
 

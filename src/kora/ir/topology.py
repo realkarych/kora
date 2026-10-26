@@ -136,7 +136,13 @@ class NodeEnvelope(IrRecord):
     limits: NodeLimits | MISSING = MISSING
     attempt_invariant: StrictBool | MISSING = MISSING
     independent_of: NodeNames | MISSING = MISSING
-    protected_paths: Strings | MISSING = MISSING
+    protected_paths: Strings | MISSING = Field(
+        default=MISSING,
+        description=(
+            "node-level addition to runtime.protected_paths (DD-34), "
+            "path globs in the syntax of ir.md section 4.1"
+        ),
+    )
     preset: StrictStr | MISSING = MISSING
 
 

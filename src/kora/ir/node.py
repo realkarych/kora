@@ -1,8 +1,9 @@
 from enum import StrEnum
 from typing import ClassVar, LiteralString, cast
 
-from pydantic import StrictStr, field_validator
-from pydantic_core import PydanticCustomError
+from pydantic import GetJsonSchemaHandler, StrictStr, field_validator
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema, PydanticCustomError
 
 from kora.ir.record import IrRecord
 
@@ -41,6 +42,20 @@ class ToolPolicy(IrRecord):
 
     allow: tuple[StrictStr, ...] = ()
     deny: tuple[StrictStr, ...] = ()
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        schema = super().__get_pydantic_json_schema__(core_schema, handler)
+        schema["description"] = (
+            "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns "
+            "in kora's tool-pattern grammar (protocols.md section 12), evaluated "
+            "per layer together with the namespace policy: a deny in either "
+            "layer wins, every layer with a non-empty allow list must match, "
+            "and order inside an array has no effect"
+        )
+        return schema
 
     @field_validator("allow", "deny", mode="before")
     @classmethod

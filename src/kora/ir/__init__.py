@@ -1,80 +1,84 @@
-from kora.ir.config import (
-    AgentConfig,
-    BranchCase,
-    BranchConfig,
-    CommandConfig,
-    CommandResource,
-    EventSelector,
-    FanOutConfig,
-    HumanInputBinds,
-    HumanInputConfig,
-    McpServer,
-    NetworkPolicy,
-    NodeLimits,
-    Retry,
-    SensorPoll,
-    SubagentConfig,
-    SubgraphNodeConfig,
-    TimerConfig,
-    WaitEventConfig,
-    Workspace,
-)
-from kora.ir.contracts import (
-    BuiltinTypeContract,
-    CustomTypeContract,
-    TypeBehavior,
-    TypeContract,
-)
-from kora.ir.data import IrJsonObjectField, IrJsonValueField
-from kora.ir.declarations import (
-    InputRef,
-    IrSourceLocation,
-    OutputDecl,
-    OutputTarget,
-    ParameterTarget,
-    SubgraphOutput,
-    TargetConfig,
-)
+from typing import TYPE_CHECKING
+
 from kora.ir.diagnostics import (
     ConfigWarning,
     ContractViolation,
     Diagnostic,
     SourceLocation,
 )
-from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
-from kora.ir.export import export_ir, render_ir_json
-from kora.ir.node import ErrorClass, ToolPolicy
-from kora.ir.runtime import (
-    Concurrency,
-    ProviderRetry,
-    Retention,
-    RuntimeSection,
-    SecretsSection,
-)
-from kora.ir.topology import (
-    AgentNode,
-    BranchNode,
-    CommandNode,
-    FanOutNode,
-    Graph,
-    GraphBody,
-    HumanInputNode,
-    Node,
-    Subgraph,
-    SubgraphNode,
-    TimerNode,
-    WaitEventNode,
-)
-from kora.ir.trigger import (
-    CronTrigger,
-    GraphTrigger,
-    ManualTrigger,
-    SensorTrigger,
-    Trigger,
-    WebhookAuth,
-    WebhookTrigger,
-)
-from kora.ir.vcs_ref import PrincipalRef, VcsRef
+
+if TYPE_CHECKING:
+    from kora.ir.config import (
+        AgentConfig,
+        BranchCase,
+        BranchConfig,
+        CommandConfig,
+        CommandResource,
+        EventSelector,
+        FanOutConfig,
+        HumanInputBinds,
+        HumanInputConfig,
+        McpServer,
+        NetworkPolicy,
+        NodeLimits,
+        Retry,
+        SensorPoll,
+        SubagentConfig,
+        SubgraphNodeConfig,
+        TimerConfig,
+        WaitEventConfig,
+        Workspace,
+    )
+    from kora.ir.contracts import (
+        BuiltinTypeContract,
+        CustomTypeContract,
+        TypeBehavior,
+        TypeContract,
+    )
+    from kora.ir.data import IrJsonObjectField, IrJsonValueField
+    from kora.ir.declarations import (
+        InputRef,
+        IrSourceLocation,
+        OutputDecl,
+        OutputTarget,
+        ParameterTarget,
+        SubgraphOutput,
+        TargetConfig,
+    )
+    from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
+    from kora.ir.export import export_ir, render_ir_json
+    from kora.ir.node import ErrorClass, ToolPolicy
+    from kora.ir.runtime import (
+        Concurrency,
+        ProviderRetry,
+        Retention,
+        RuntimeSection,
+        SecretsSection,
+    )
+    from kora.ir.topology import (
+        AgentNode,
+        BranchNode,
+        CommandNode,
+        FanOutNode,
+        Graph,
+        GraphBody,
+        HumanInputNode,
+        Node,
+        Subgraph,
+        SubgraphNode,
+        TimerNode,
+        WaitEventNode,
+    )
+    from kora.ir.trigger import (
+        CronTrigger,
+        GraphTrigger,
+        ManualTrigger,
+        SensorTrigger,
+        Trigger,
+        WebhookAuth,
+        WebhookTrigger,
+    )
+    from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
     "PrincipalRef",
@@ -147,3 +151,115 @@ __all__ = [
     "ToolPolicy",
     "Workspace",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in {
+        "CommandResource",
+        "NetworkPolicy",
+        "McpServer",
+        "BranchConfig",
+        "FanOutConfig",
+        "Workspace",
+        "CommandConfig",
+        "EventSelector",
+        "SubagentConfig",
+        "AgentConfig",
+        "NodeLimits",
+        "SensorPoll",
+        "HumanInputBinds",
+        "SubgraphNodeConfig",
+        "WaitEventConfig",
+        "Retry",
+        "BranchCase",
+        "TimerConfig",
+        "HumanInputConfig",
+    }:
+        from kora.ir import config
+
+        return getattr(config, name)
+    if name in {
+        "CustomTypeContract",
+        "TypeContract",
+        "BuiltinTypeContract",
+        "TypeBehavior",
+    }:
+        from kora.ir import contracts
+
+        return getattr(contracts, name)
+    if name in {"IrJsonObjectField", "IrJsonValueField"}:
+        from kora.ir import data
+
+        return getattr(data, name)
+    if name in {
+        "OutputDecl",
+        "SubgraphOutput",
+        "IrSourceLocation",
+        "OutputTarget",
+        "TargetConfig",
+        "InputRef",
+        "ParameterTarget",
+    }:
+        from kora.ir import declarations
+
+        return getattr(declarations, name)
+    if name in {"inspect_ir_root", "GraphDocument", "Provenance"}:
+        from kora.ir import document
+
+        return getattr(document, name)
+    if name in {"render_ir_json", "export_ir"}:
+        from kora.ir import export
+
+        return getattr(export, name)
+    if name in {"ToolPolicy", "ErrorClass"}:
+        from kora.ir import node
+
+        return getattr(node, name)
+    if name in {
+        "Concurrency",
+        "RuntimeSection",
+        "SecretsSection",
+        "ProviderRetry",
+        "Retention",
+    }:
+        from kora.ir import runtime
+
+        return getattr(runtime, name)
+    if name in {
+        "CommandNode",
+        "SubgraphNode",
+        "BranchNode",
+        "GraphBody",
+        "HumanInputNode",
+        "Subgraph",
+        "WaitEventNode",
+        "Node",
+        "TimerNode",
+        "FanOutNode",
+        "AgentNode",
+        "Graph",
+    }:
+        from kora.ir import topology
+
+        return getattr(topology, name)
+    if name in {
+        "Trigger",
+        "GraphTrigger",
+        "WebhookAuth",
+        "WebhookTrigger",
+        "ManualTrigger",
+        "CronTrigger",
+        "SensorTrigger",
+    }:
+        from kora.ir import trigger
+
+        return getattr(trigger, name)
+    if name in {"VcsRef", "PrincipalRef"}:
+        from kora.ir import vcs_ref
+
+        return getattr(vcs_ref, name)
+    raise AttributeError(name)
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

@@ -11,6 +11,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import Column, Connection, func, select
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
+from kora.db.connection import MIGRATION_LEASE
 from kora.db.tables import metadata
 from kora.db.types import POSTGRESQL
 
@@ -69,6 +70,10 @@ def upgrade_to_head(connection: Connection) -> MigrationReport:
     head = head_revision(config)
     from_revision = current_revision(connection)
     steps = pending_steps(config, from_revision, head)
+    if connection.info.get(MIGRATION_LEASE):
+        connection.commit()
+    elif connection.dialect.name == POSTGRESQL and steps:
+        raise RuntimeError("PostgreSQL upgrades require a dedicated migration lease")
     command.upgrade(config, HEAD)
     return MigrationReport(
         dialect=connection.dialect.name,

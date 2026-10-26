@@ -1,0 +1,224 @@
+name: Storage release qualification
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  storage-lifetime-linux:
+    name: Storage lifetime Linux (${{ matrix.repeat }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        repeat: [0, 1, 2]
+    env:
+      KORA_TEST_DATABASES: sqlite
+      KORA_STORAGE_LOAD_CONTEXT: github_hosted_runner
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_STORAGE_EVIDENCE: measurements
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: storage-linux-${{ matrix.repeat }}
+      - name: Install the locked editable provider
+        run: |
+          uv sync --locked --no-build --group build --all-extras --no-install-project
+          KORA_STORAGE_BUILD="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project --format requirements.txt --output-file "$KORA_STORAGE_BUILD/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps --build-constraints "$KORA_STORAGE_BUILD/constraints.txt" --require-build-hashes --editable .
+          test "$(git rev-parse HEAD)" = "$KORA_MEASUREMENT_REVISION"
+      - name: Measure complete storage lifetimes
+        run: |
+          uv run --no-sync pytest -q -m measurement 'tests/measurements/test_artifact_storage_lifetime.py::test_artifact_storage_lifetime[${{ matrix.repeat }}]' --junitxml=measurements/linux-${{ matrix.repeat }}/measurement.xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: storage-${{ env.KORA_MEASUREMENT_REVISION }}-linux-${{ matrix.repeat }}
+          path: measurements/linux-${{ matrix.repeat }}/
+          if-no-files-found: error
+
+  storage-lifetime-macos:
+    name: Storage lifetime macOS (${{ matrix.repeat }})
+    runs-on: macos-15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        repeat: [0, 1, 2]
+    env:
+      KORA_TEST_DATABASES: sqlite
+      KORA_STORAGE_LOAD_CONTEXT: github_hosted_runner
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_STORAGE_EVIDENCE: measurements
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: storage-macos-${{ matrix.repeat }}
+      - name: Install the locked editable provider
+        run: |
+          uv sync --locked --no-build --group build --all-extras --no-install-project
+          KORA_STORAGE_BUILD="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project --format requirements.txt --output-file "$KORA_STORAGE_BUILD/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps --build-constraints "$KORA_STORAGE_BUILD/constraints.txt" --require-build-hashes --editable .
+          test "$(git rev-parse HEAD)" = "$KORA_MEASUREMENT_REVISION"
+      - name: Measure complete storage lifetimes
+        run: |
+          uv run --no-sync pytest -q -m measurement 'tests/measurements/test_artifact_storage_lifetime.py::test_artifact_storage_lifetime[${{ matrix.repeat }}]' --junitxml=measurements/darwin-${{ matrix.repeat }}/measurement.xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: storage-${{ env.KORA_MEASUREMENT_REVISION }}-darwin-${{ matrix.repeat }}
+          path: measurements/darwin-${{ matrix.repeat }}/
+          if-no-files-found: error
+
+  storage-qualification:
+    name: Storage qualification (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+          - os: macos-15
+            platform: darwin
+    env:
+      KORA_TEST_DATABASES: sqlite
+      KORA_STORAGE_LOAD_CONTEXT: github_hosted_runner
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+      KORA_STORAGE_BOUNDARY_OUTPUT: measurements/${{ matrix.platform }}-qualification/boundaries.json
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: storage-qualification-${{ matrix.platform }}
+      - name: Install the locked editable provider
+        run: |
+          uv sync --locked --no-build --group build --all-extras --no-install-project
+          KORA_STORAGE_BUILD="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project --format requirements.txt --output-file "$KORA_STORAGE_BUILD/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps --build-constraints "$KORA_STORAGE_BUILD/constraints.txt" --require-build-hashes --editable .
+          test "$(git rev-parse HEAD)" = "$KORA_MEASUREMENT_REVISION"
+      - name: Allocate private qualification fixtures
+        id: fixtures
+        run: |
+          KORA_STORAGE_FIXTURES="$(mktemp -d /tmp/kora-storage-qualification.XXXXXXXX)"
+          printf 'path=%s\n' "$KORA_STORAGE_FIXTURES" >> "$GITHUB_OUTPUT"
+      - name: Qualify actual boundaries, pressure, crashes and diagnostic failure
+        env:
+          KORA_STORAGE_FIXTURES: ${{ steps.fixtures.outputs.path }}
+        run: |
+          test -n "$KORA_STORAGE_FIXTURES"
+          uv run --no-sync pytest -q tests/plugins/storage/test_lifetime_boundaries.py tests/plugins/storage/test_sink_progress.py tests/plugins/storage/test_pressure_controller.py tests/plugins/storage/test_crash_recovery.py --basetemp="$KORA_STORAGE_FIXTURES/fixtures" --junitxml=measurements/${{ matrix.platform }}-qualification/qualification.xml
+      - name: Recover fixture ownership and preserve reports
+        if: ${{ always() }}
+        env:
+          KORA_STORAGE_FIXTURES: ${{ steps.fixtures.outputs.path }}
+        run: |
+          test -n "$KORA_STORAGE_FIXTURES"
+          uv run --no-sync python -m tests.measurements.storage_pressure_evidence "$KORA_STORAGE_FIXTURES/fixtures" measurements/${{ matrix.platform }}-qualification/pressure
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: storage-${{ env.KORA_MEASUREMENT_REVISION }}-${{ matrix.platform }}-qualification
+          path: measurements/${{ matrix.platform }}-qualification/
+          if-no-files-found: error
+
+  storage-evidence:
+    name: Required storage evidence
+    needs: [storage-lifetime-linux, storage-lifetime-macos, storage-qualification]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: src
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          cache-suffix: storage-evidence
+      - run: uv sync --locked --no-build --group build --all-extras --no-install-project
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: download
+        if: ${{ always() && !cancelled() }}
+        with:
+          pattern: storage-${{ env.KORA_MEASUREMENT_REVISION }}-*
+          path: measurements/storage
+          merge-multiple: false
+      - name: Verify exact producers, tests, workloads and source provenance
+        id: union
+        if: ${{ always() && steps.download.outcome == 'success' && !cancelled() }}
+        run: |
+          uv run --no-sync python -m tests.measurements.storage_measurement_evidence measurements/storage "$KORA_MEASUREMENT_REVISION" > measurements/storage-union.json
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: upload
+        if: ${{ always() }}
+        with:
+          name: storage-union-${{ env.KORA_MEASUREMENT_REVISION }}
+          path: measurements/storage-union.json
+          if-no-files-found: error
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require both platforms and complete evidence
+        if: ${{ always() }}
+        env:
+          LINUX_RESULT: ${{ needs.storage-lifetime-linux.result }}
+          MACOS_RESULT: ${{ needs.storage-lifetime-macos.result }}
+          QUALIFICATION_RESULT: ${{ needs.storage-qualification.result }}
+          DOWNLOAD_RESULT: ${{ steps.download.outcome }}
+          UNION_RESULT: ${{ steps.union.outcome }}
+          UPLOAD_RESULT: ${{ steps.upload.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$LINUX_RESULT" = success
+          test "$MACOS_RESULT" = success
+          test "$QUALIFICATION_RESULT" = success
+          test "$DOWNLOAD_RESULT" = success
+          test "$UNION_RESULT" = success
+          test "$UPLOAD_RESULT" = success
+          test "$WORKFLOW_CANCELLED" = false

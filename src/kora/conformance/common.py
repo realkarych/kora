@@ -61,8 +61,12 @@ def context_for(capture: Capture) -> ProtocolContext:
 
 
 def raised_protocol_error(outcome: Awaitable[object]) -> KoraProtocolError | None:
+    return asyncio.run(await_protocol_error(outcome))
+
+
+async def await_protocol_error(outcome: Awaitable[object]) -> KoraProtocolError | None:
     try:
-        asyncio.run(awaited(outcome))
+        await outcome
     except KoraProtocolError as error:
         return error
     return None
@@ -85,22 +89,72 @@ def flag_values(value: object) -> tuple[object, ...]:
     return tuple(getattr(value, item.name) for item in fields(value))
 
 
-@pytest.mark.kora_conformance
-def test_capabilities_are_frozen_and_consistent(
-    kora_provider: ProviderProtocol,
-) -> None:
-    first = kora_provider.capabilities()
-    second = kora_provider.capabilities()
+def check_capabilities_are_frozen_and_consistent(provider: ProviderProtocol) -> None:
+    first = provider.capabilities()
+    second = provider.capabilities()
 
     check(is_frozen_dataclass(first), "capabilities() returns a frozen dataclass")
     check(flag_values(first) == flag_values(second), "capabilities() is consistent")
 
 
-@pytest.mark.kora_conformance
-def test_config_schema_is_an_object_schema(kora_provider: ProviderProtocol) -> None:
-    schema = kora_provider.config_schema
+def check_config_schema_is_an_object_schema(provider: ProviderProtocol) -> None:
+    schema = provider.config_schema
 
     check(schema.get("type") == "object", "config_schema has type object")
+
+
+async def check_failure_is_a_bounded_protocol_error(
+    exercise: Exercise, context: ProtocolContext, marker: str
+) -> None:
+    error = await await_protocol_error(exercise(context, marker))
+
+    check_protocol_error(error, marker)
+
+
+def check_protocol_error(error: KoraProtocolError | None, marker: str) -> None:
+    if error is None:
+        fail("the exercise's failing input raises KoraProtocolError")
+    check(ERROR_CODE.fullmatch(error.code) is not None, "the code is bounded")
+    check(marker not in error.message, "the message carries no input")
+    check(marker not in json.dumps(error.details), "the details carry no input")
+
+
+async def check_provider_logs_through_its_context(
+    exercise: Exercise, capture: Capture, context: ProtocolContext, marker: str
+) -> None:
+    handlers = list(logging.getLogger().handlers)
+
+    await await_protocol_error(exercise(context, marker))
+    check_captured_provider_logs(capture, handlers, marker)
+
+
+def check_captured_provider_logs(
+    capture: Capture, handlers: list[logging.Handler], marker: str
+) -> None:
+    after = list(logging.getLogger().handlers)
+    records = capture.finish()
+
+    check(after == handlers, "the provider leaves root handlers alone")
+    check(
+        any(record.get("component") == CONFORMANCE_COMPONENT for record in records),
+        "the provider logs through the context's logger",
+    )
+    check(
+        all(marker not in json.dumps(record) for record in records),
+        "no record carries the exercise's content",
+    )
+
+
+@pytest.mark.kora_conformance
+def test_capabilities_are_frozen_and_consistent(
+    kora_provider: ProviderProtocol,
+) -> None:
+    check_capabilities_are_frozen_and_consistent(kora_provider)
+
+
+@pytest.mark.kora_conformance
+def test_config_schema_is_an_object_schema(kora_provider: ProviderProtocol) -> None:
+    check_config_schema_is_an_object_schema(kora_provider)
 
 
 @pytest.mark.kora_conformance
@@ -111,11 +165,7 @@ def test_failure_is_a_bounded_protocol_error(
 
     error = raised_protocol_error(kora_exercise(context, MARKER))
 
-    if error is None:
-        fail("the exercise's failing input raises KoraProtocolError")
-    check(ERROR_CODE.fullmatch(error.code) is not None, "the code is bounded")
-    check(MARKER not in error.message, "the message carries no input")
-    check(MARKER not in json.dumps(error.details), "the details carry no input")
+    check_protocol_error(error, MARKER)
 
 
 @pytest.mark.kora_conformance
@@ -126,15 +176,5 @@ def test_provider_logs_through_its_context(
     handlers = list(logging.getLogger().handlers)
 
     raised_protocol_error(kora_exercise(context, MARKER))
-    after = list(logging.getLogger().handlers)
-    records = kora_capture.finish()
 
-    check(after == handlers, "the provider leaves root handlers alone")
-    check(
-        any(record.get("component") == CONFORMANCE_COMPONENT for record in records),
-        "the provider logs through the context's logger",
-    )
-    check(
-        all(MARKER not in json.dumps(record) for record in records),
-        "no record carries the exercise's content",
-    )
+    check_captured_provider_logs(kora_capture, handlers, MARKER)

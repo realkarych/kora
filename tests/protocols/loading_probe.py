@@ -127,6 +127,51 @@ def run_legs(log_path: str) -> dict[str, object]:
     return result
 
 
+def testing_modules() -> list[str]:
+    return sorted(
+        name
+        for name in sys.modules
+        if name.startswith(("kora.testing", "kora.conformance"))
+        or (name.startswith("kora.plugins.") and ".fake" in f"{name}.")
+    )
+
+
+def run_serving(log_path: str) -> dict[str, object]:
+    from kora.protocols.loading import LOADING_COMPONENT, load_provider
+
+    settings = read_logging_settings(os.environ, CATALOG.components())
+    descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    diagnostics = configure_process(
+        LOADING_COMPONENT,
+        settings,
+        "serving-probe",
+        lambda: datetime.now(UTC),
+        descriptor,
+    )
+    harness = ProtocolName.HARNESS
+    legs = (
+        (harness, "fake"),
+        (harness, "genuine"),
+        (ProtocolName.RUNTIME, "fake"),
+    )
+    result: dict[str, object] = {"before": testing_modules()}
+    result["imported"] = {
+        f"{protocol.value}.{name}": code_of(
+            lambda protocol=protocol, name=name: load_provider(
+                protocol, name, diagnostics
+            )
+        )
+        for protocol, name in legs
+    }
+    result["after_imported"] = testing_modules()
+    result["implemented"] = code_of(
+        lambda: load_provider(harness, "implemented", diagnostics)
+    )
+    result["drained"] = diagnostics.shutdown(5.0)
+    os.close(descriptor)
+    return result
+
+
 def run_settings_first() -> dict[str, object]:
     try:
         read_logging_settings(os.environ, CATALOG.components())
@@ -147,7 +192,12 @@ def run_settings_first() -> dict[str, object]:
 def main(arguments: list[str]) -> None:
     mode, first, second, log_path = arguments
     sys.path[:0] = [first, second]
-    result = run_legs(log_path) if mode == "legs" else run_settings_first()
+    if mode == "legs":
+        result = run_legs(log_path)
+    elif mode == "serving":
+        result = run_serving(log_path)
+    else:
+        result = run_settings_first()
     sys.stdout.write(json.dumps(result))
 
 

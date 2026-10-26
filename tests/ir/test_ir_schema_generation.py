@@ -169,6 +169,32 @@ def test_ir_schema_annotations_preserve_approval_defaults(mode: str) -> None:
     assert "schema_" not in cast("dict[str, object]", schema["properties"])
     assert schema["additionalProperties"] is True
     assert definitions["Provenance"]["additionalProperties"] is True
+    assert definitions["ToolPolicy"]["description"] == (
+        "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns "
+        "in kora's tool-pattern grammar (protocols.md section 12), evaluated "
+        "per layer together with the namespace policy: a deny in either "
+        "layer wins, every layer with a non-empty allow list must match, "
+        "and order inside an array has no effect"
+    )
+    for name in (
+        "AgentNode",
+        "CommandNode",
+        "HumanInputNode",
+        "WaitEventNode",
+        "TimerNode",
+        "BranchNode",
+        "FanOutNode",
+        "SubgraphNode",
+        "RuntimeSection",
+    ):
+        fields = cast("dict[str, dict[str, object]]", definitions[name]["properties"])
+        assert fields["protected_paths"]["description"] == (
+            "path globs (ir.md section 4.1 syntax) of gate files agent nodes "
+            "may not edit and command gates verify against the base commit (DD-34)"
+            if name == "RuntimeSection"
+            else "node-level addition to runtime.protected_paths (DD-34), "
+            "path globs in the syntax of ir.md section 4.1"
+        )
     assert sum(record.get("type") == "null" for record in schema_objects(schema)) == 1
     assert definitions["AgentConfig"]["required"] == ["harness", "prompt", "workspace"]
     assert definitions["HumanInputConfig"]["required"] == [
@@ -379,7 +405,7 @@ def test_ir_schema_measurement_inventory_preserves_all_actions() -> None:
         len(expected.nodes),
         len(expected.gates),
         sum(expected.samples.values()),
-    ) == (337, 462, 7923)
+    ) == (359, 1227, 10668)
     for mode in ("validation", "serialization", "render_utf8"):
         assert manifest[mode]["definitions"] == 53
         assert manifest[mode]["references"] == 110

@@ -70,7 +70,13 @@ class RuntimeSection(IrRecord):
     budget_headroom_pct: HeadroomNumber | MISSING = MISSING
     stall_after: Duration | MISSING = MISSING
     retention: Retention | MISSING = MISSING
-    protected_paths: Strings | MISSING = MISSING
+    protected_paths: Strings | MISSING = Field(
+        default=MISSING,
+        description=(
+            "path globs (ir.md section 4.1 syntax) of gate files agent nodes "
+            "may not edit and command gates verify against the base commit (DD-34)"
+        ),
+    )
     infrastructure_retry: Retry | MISSING = MISSING
     provider_retry: ProviderRetry | MISSING = MISSING
 

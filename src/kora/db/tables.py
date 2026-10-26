@@ -1,6 +1,7 @@
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     ForeignKey,
     Index,
@@ -315,6 +316,7 @@ attempt: Table = Table(
     document("scratch"),
     Column("resolved_config_digest", digest(), nullable=True),
     Column("price_table_id", identifier(), nullable=True),
+    document("usage_coverage", nullable=True),
     Column("image_digest", name(), nullable=True),
     Column("harness_version", name(), nullable=True),
     timestamp("started_at", nullable=True),
@@ -382,6 +384,10 @@ approval_request: Table = Table(
     document("bound_digests", nullable=True),
     Column("observed_head_sha", name(), nullable=True),
     document("run_cost"),
+    Column("run_cost_version", Integer, nullable=True),
+    CheckConstraint(
+        "run_cost_version IS NULL OR run_cost_version = 1", name="run_cost_version"
+    ),
     Column("status", name(), nullable=False),
     document("response", nullable=True),
     document("approver", nullable=True),
@@ -436,7 +442,7 @@ usage_record: Table = Table(
     metadata,
     primary_identifier(),
     reference("attempt_id", "attempt.id"),
-    Column("model", name(), nullable=False),
+    Column("model", collated_text(256), nullable=False),
     Column("input_tokens", Integer, nullable=False),
     Column("cached_input_tokens", Integer, nullable=False),
     Column("cache_creation_tokens", Integer, nullable=False),
@@ -445,7 +451,38 @@ usage_record: Table = Table(
     Column("completeness", name(), nullable=False),
     Column("basis", name(), nullable=False),
     Column("billing_class", name(), nullable=False),
-    Column("usd_estimate", UsdAmount(), nullable=False),
+    Column("usd_estimate", UsdAmount(), nullable=True),
+    Column("reported_usd", UsdAmount(), nullable=True),
+    document("known_token_fields", nullable=True),
+    document("cache_creation_by_ttl", nullable=True),
+    Column("observation_id", collated_text(256), nullable=True),
+    Column("observation_sequence", BigInteger, nullable=True),
+    timestamp("observed_at", nullable=True),
+    Column("dispatcher_id", identifier(), nullable=True),
+    Column("normalization_version", Integer, nullable=True),
+    CheckConstraint(
+        "(normalization_version IS NULL AND reported_usd IS NULL AND "
+        "known_token_fields IS NULL AND cache_creation_by_ttl IS NULL AND "
+        "observation_id IS NULL AND observation_sequence IS NULL AND "
+        "observed_at IS NULL AND dispatcher_id IS NULL) OR "
+        "(normalization_version IS NOT NULL AND normalization_version = 1 AND "
+        "known_token_fields IS NOT NULL AND observation_id IS NOT NULL AND "
+        "observation_sequence IS NOT NULL AND observed_at IS NOT NULL AND "
+        "observation_sequence >= 0 AND observation_sequence <= 9007199254740991 AND "
+        "input_tokens >= 0 AND input_tokens <= 2147483647 AND "
+        "cached_input_tokens >= 0 AND cached_input_tokens <= 2147483647 AND "
+        "cache_creation_tokens >= 0 AND cache_creation_tokens <= 2147483647 AND "
+        "output_tokens >= 0 AND output_tokens <= 2147483647 AND "
+        "reasoning_tokens >= 0 AND reasoning_tokens <= 2147483647 AND "
+        "reasoning_tokens <= output_tokens AND "
+        "input_tokens = CAST(input_tokens AS BIGINT) AND "
+        "cached_input_tokens = CAST(cached_input_tokens AS BIGINT) AND "
+        "cache_creation_tokens = CAST(cache_creation_tokens AS BIGINT) AND "
+        "output_tokens = CAST(output_tokens AS BIGINT) AND "
+        "reasoning_tokens = CAST(reasoning_tokens AS BIGINT) AND "
+        "observation_sequence = CAST(observation_sequence AS BIGINT))",
+        name="normalization",
+    ),
     flag("delta_of_session_totals"),
     document("source"),
     Column("worker_id", name(), nullable=True),
@@ -459,9 +496,32 @@ price_table: Table = Table(
     metadata,
     primary_identifier(),
     reference("namespace_id", "namespace.id", nullable=True),
-    Column("model", name(), nullable=False),
+    Column("model", name(), nullable=True),
+    Column("version", Integer, nullable=True),
+    Column("normalization_version", Integer, nullable=True),
     timestamp("effective_from"),
     document("prices"),
+    CheckConstraint(
+        "(version IS NULL AND normalization_version IS NULL AND model IS NOT NULL) OR "
+        "(version IS NOT NULL AND normalization_version IS NOT NULL AND "
+        "version = 1 AND normalization_version = 1 AND model IS NULL)",
+        name="revision",
+    ),
+    Index(
+        "ix_price_table_default_effective",
+        "effective_from",
+        unique=True,
+        postgresql_where=text("version = 1 AND namespace_id IS NULL"),
+        sqlite_where=text("version = 1 AND namespace_id IS NULL"),
+    ),
+    Index(
+        "ix_price_table_namespace_effective",
+        "namespace_id",
+        "effective_from",
+        unique=True,
+        postgresql_where=text("version = 1 AND namespace_id IS NOT NULL"),
+        sqlite_where=text("version = 1 AND namespace_id IS NOT NULL"),
+    ),
     *audit_columns(),
 )
 

@@ -4,6 +4,7 @@ import pytest
 
 from kora.protocols.deadlines import (
     ClockSample,
+    ExecutionDeadline,
     LocalThresholds,
     cancellation_schedule,
     duration_ns,
@@ -14,7 +15,6 @@ from kora.protocols.deadlines import (
     tighten,
     useful_phase_bound_ns,
 )
-from kora.protocols.runtime import ExecutionDeadline
 
 SECOND: int = 10**9
 GRACE: timedelta = timedelta(seconds=30)

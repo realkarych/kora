@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -7,22 +8,31 @@ from typing import Protocol, cast
 import pytest
 from ruamel.yaml import YAML
 
-from tests.measurements.ir_measurement_evidence import expected_evidence
+from tests.measurements.ir_measurement_evidence import expected_evidence, shard_evidence
 
 ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
 SCHEMA_RUN = f"{MEASUREMENT}::test_ir_schema_repeated_lifetime"
 SUCCESS = {
+    "SCAFFOLD_RESULT": "success",
     "IR_MATRIX_RESULT": "success",
+    "RESOURCE_RESULT": "success",
+    "RESOURCE_VERIFIED": "true",
+    "PRICING_RESULT": "success",
+    "PRICING_VERIFIED": "true",
+    "CEL_RESULT": "success",
+    "CEL_VERIFIED": "true",
+    "GIT_PUBLICATION_RESULT": "success",
+    "GIT_PUBLICATION_VERIFIED": "true",
+    "DEPENDENCIES_OUTCOME": "success",
+    "SOURCE_REVISION_OUTCOME": "success",
     "IR_DOWNLOAD_OUTCOME": "success",
     "IR_INVENTORY_OUTCOME": "success",
     "IR_UNION_UPLOAD_OUTCOME": "success",
-    "CEL_LIFETIME_OUTCOME": "success",
-    "CEL_COST_OUTCOME": "success",
-    "CEL_ARTIFACTS_OUTCOME": "success",
-    "CEL_LIFETIME_UPLOAD_OUTCOME": "success",
-    "CEL_COST_UPLOAD_OUTCOME": "success",
+    "CEL_LIFETIME_DOWNLOAD_OUTCOME": "success",
+    "CEL_COST_DOWNLOAD_OUTCOME": "success",
+    "CEL_INVENTORY_OUTCOME": "success",
     "WORKFLOW_CANCELLED": "false",
 }
 
@@ -63,13 +73,38 @@ def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
         {
             "run": 0,
             "pytest-arguments": (
-                f"{MEASUREMENT} '--deselect={RUN}[1]' '--deselect={RUN}[2]'"
+                f"{MEASUREMENT} '--deselect={RUN}[1]' '--deselect={RUN}[2]' "
+                f"'--deselect={MEASUREMENT}::"
+                "test_cost_checker_refuses_unexpected_acceptance' "
+                f"'--deselect={MEASUREMENT}::"
+                "test_cost_checker_refuses_unexpected_rejection' "
+                f"'--deselect={MEASUREMENT}::test_cost_checker_releases_nested_values' "
+                f"'--deselect={MEASUREMENT}::"
+                "test_cost_process_failure_preserves_lossless_evidence' "
+                f"'--deselect={MEASUREMENT}::test_accounting_value_cost' "
+                f"'--deselect={MEASUREMENT}::test_accounting_value_lifetime'"
                 f" '--deselect={SCHEMA_RUN}[0]' '--deselect={SCHEMA_RUN}[1]'"
                 f" '--deselect={SCHEMA_RUN}[2]'"
             ),
         },
-        {"run": 1, "pytest-arguments": f"'{RUN}[1]'"},
-        {"run": 2, "pytest-arguments": f"'{RUN}[2]'"},
+        {
+            "run": 1,
+            "pytest-arguments": (
+                f"'{RUN}[1]' "
+                f"'{MEASUREMENT}::test_cost_checker_refuses_unexpected_acceptance' "
+                f"'{MEASUREMENT}::test_cost_checker_refuses_unexpected_rejection' "
+                f"'{MEASUREMENT}::test_cost_checker_releases_nested_values' "
+                f"'{MEASUREMENT}::"
+                "test_cost_process_failure_preserves_lossless_evidence' "
+                f"'{MEASUREMENT}::test_accounting_value_cost'"
+            ),
+        },
+        {
+            "run": 2,
+            "pytest-arguments": (
+                f"'{RUN}[2]' '{MEASUREMENT}::test_accounting_value_lifetime'"
+            ),
+        },
         {"run": 3, "pytest-arguments": f"'{SCHEMA_RUN}[0]'"},
         {"run": 4, "pytest-arguments": f"'{SCHEMA_RUN}[1]'"},
         {"run": 5, "pytest-arguments": f"'{SCHEMA_RUN}[2]'"},
@@ -118,19 +153,37 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
     gate = selected_steps["required_measurements"]
 
     assert job["name"] == "CEL evaluator lifetime"
-    assert job["needs"] == ["ir-measurements"]
+    assert job["needs"] == [
+        "scaffold",
+        "ir-measurements",
+        "resource-measurements",
+        "pricing-measurements",
+        "cel-producer",
+        "git-publication-measurements",
+    ]
     assert job["if"] == "${{ always() }}"
     assert gate["if"] == "${{ always() }}"
     assert table(gate["env"]) == {
+        "SCAFFOLD_RESULT": "${{ needs.scaffold.result }}",
         "IR_MATRIX_RESULT": "${{ needs.ir-measurements.result }}",
+        "RESOURCE_RESULT": "${{ needs.resource-measurements.result }}",
+        "RESOURCE_VERIFIED": "${{ needs.resource-measurements.outputs.verified }}",
+        "PRICING_RESULT": "${{ needs.pricing-measurements.result }}",
+        "PRICING_VERIFIED": "${{ needs.pricing-measurements.outputs.verified }}",
+        "CEL_RESULT": "${{ needs.cel-producer.result }}",
+        "CEL_VERIFIED": "${{ needs.cel-producer.outputs.verified }}",
+        "GIT_PUBLICATION_RESULT": "${{ needs.git-publication-measurements.result }}",
+        "GIT_PUBLICATION_VERIFIED": (
+            "${{ needs.git-publication-measurements.outputs.verified }}"
+        ),
+        "DEPENDENCIES_OUTCOME": "${{ steps.dependencies.outcome }}",
+        "SOURCE_REVISION_OUTCOME": "${{ steps.source_revision.outcome }}",
         "IR_DOWNLOAD_OUTCOME": "${{ steps.ir_download.outcome }}",
         "IR_INVENTORY_OUTCOME": "${{ steps.ir_inventory.outcome }}",
         "IR_UNION_UPLOAD_OUTCOME": "${{ steps.ir_union_upload.outcome }}",
-        "CEL_LIFETIME_OUTCOME": "${{ steps.measurement.outcome }}",
-        "CEL_COST_OUTCOME": "${{ steps.cost_regression.outcome }}",
-        "CEL_ARTIFACTS_OUTCOME": "${{ steps.cel_artifacts.outcome }}",
-        "CEL_LIFETIME_UPLOAD_OUTCOME": "${{ steps.lifetime_upload.outcome }}",
-        "CEL_COST_UPLOAD_OUTCOME": "${{ steps.cost_upload.outcome }}",
+        "CEL_LIFETIME_DOWNLOAD_OUTCOME": "${{ steps.cel_lifetime_download.outcome }}",
+        "CEL_COST_DOWNLOAD_OUTCOME": "${{ steps.cel_cost_download.outcome }}",
+        "CEL_INVENTORY_OUTCOME": "${{ steps.cel_inventory.outcome }}",
         "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
     }
     assert selected_steps["workflow_cancellation"]["if"] == "${{ cancelled() }}"
@@ -147,7 +200,7 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
         (field, outcome)
         for field in SUCCESS
         if field != "WORKFLOW_CANCELLED"
-        for outcome in ("success", "failure", "cancelled", "skipped", "")
+        for outcome in (SUCCESS[field], "failure", "cancelled", "skipped", "", "false")
     ]
     + [("WORKFLOW_CANCELLED", "true"), ("WORKFLOW_CANCELLED", "")],
 )
@@ -166,7 +219,7 @@ def test_required_measurement_shell_gate_fails_closed(field: str, outcome: str) 
     assert (result.returncode == 0) is (outcome == SUCCESS[field])
 
 
-def collected_nodes(arguments: list[str]) -> tuple[int, frozenset[str]]:
+def collected_nodes(arguments: list[str]) -> tuple[int, tuple[str, ...]]:
     result = subprocess.run(
         [
             sys.executable,
@@ -183,7 +236,7 @@ def collected_nodes(arguments: list[str]) -> tuple[int, frozenset[str]]:
         check=False,
         timeout=30,
     )
-    return result.returncode, frozenset(
+    return result.returncode, tuple(
         line
         for line in result.stdout.splitlines()
         if line.startswith(MEASUREMENT + "::")
@@ -192,29 +245,37 @@ def collected_nodes(arguments: list[str]) -> tuple[int, frozenset[str]]:
 
 def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     expected = expected_evidence()
+    shards = shard_evidence()
+    job = table(workflow_jobs()["ir-measurements"])
+    includes = cast(list[object], table(table(job["strategy"])["matrix"])["include"])
     arguments = [
-        [
-            MEASUREMENT,
-            f"--deselect={RUN}[1]",
-            f"--deselect={RUN}[2]",
-            f"--deselect={SCHEMA_RUN}[0]",
-            f"--deselect={SCHEMA_RUN}[1]",
-            f"--deselect={SCHEMA_RUN}[2]",
-        ],
-        [f"{RUN}[1]"],
-        [f"{RUN}[2]"],
-        [f"{SCHEMA_RUN}[0]"],
-        [f"{SCHEMA_RUN}[1]"],
-        [f"{SCHEMA_RUN}[2]"],
+        shlex.split(str(table(entry)["pytest-arguments"])) for entry in includes
     ]
 
     collected = [collected_nodes(selection) for selection in arguments]
     default_code, default_nodes = collected_nodes([MEASUREMENT])
 
     assert default_code == 0
-    assert default_nodes == expected.nodes
+    assert frozenset(default_nodes) == expected.nodes
+    assert len(default_nodes) == len(expected.nodes)
     assert all(code == 0 for code, _ in collected)
-    assert [len(nodes) for _, nodes in collected] == [332, 1, 1, 1, 1, 1]
+    assert [len(nodes) for _, nodes in collected] == [332, 11, 13, 1, 1, 1]
+    assert [frozenset(nodes) for _, nodes in collected] == [
+        shard.nodes for shard in shards
+    ]
+    assert collected[0][1] == tuple(
+        node for node in default_nodes if node in shards[0].nodes
+    )
+    for run in (1, 2):
+        worker = f"{RUN}[{run}]"
+        assert collected[run][1] == (
+            worker,
+            *(
+                node
+                for node in default_nodes
+                if node in shards[run].nodes and node != worker
+            ),
+        )
     assert set().union(*(nodes for _, nodes in collected)) == expected.nodes
     assert sum(len(nodes) for _, nodes in collected) == len(expected.nodes)
 
@@ -229,4 +290,4 @@ def test_ir_unknown_or_empty_selection_fails(
     code, nodes = collected_nodes(selection)
 
     assert code == expected_code
-    assert nodes == frozenset()
+    assert nodes == ()

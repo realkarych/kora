@@ -8,6 +8,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import TIMESTAMP as POSTGRESQL_TIMESTAMP
 from sqlalchemy.types import JSON, DateTime, TypeDecorator, TypeEngine
 
+from kora.ir.cost import format_money, parse_money
+
 JsonValue: TypeAlias = (
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
 )
@@ -181,15 +183,14 @@ class UsdAmount(TypeDecorator[Decimal]):
         return dialect.type_descriptor(Numeric(USD_PRECISION, USD_SCALE))
 
     def process_bind_param(
-        self, value: Decimal | None, dialect: Dialect
+        self, value: Decimal | str | None, dialect: Dialect
     ) -> Decimal | str | None:
         if value is None:
             return None
-        if not value.is_finite():
-            raise ValueRejected("amounts are finite decimals")
-        amount = value.quantize(Decimal(1).scaleb(-USD_SCALE))
+        canonical = format_money(value) if isinstance(value, Decimal) else value
+        amount = parse_money(canonical)
         if dialect.name == SQLITE:
-            return format(amount, "f")
+            return canonical
         return amount
 
     def process_result_value(

@@ -138,6 +138,11 @@ def current_rss_bytes() -> int | None:
     return resident_pages * os.sysconf("SC_PAGE_SIZE")
 
 
+def peak_rss_bytes() -> int:
+    scale = 1024 if sys.platform == "linux" else 1
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * scale
+
+
 def new_report() -> Report:
     return Report(
         utc_now().isoformat(),
@@ -171,11 +176,6 @@ def rss_bytes() -> int:
         capture_output=True,
     )
     return int(completed.stdout.strip()) * 1024
-
-
-def peak_rss_bytes() -> int:
-    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    return int(peak) if sys.platform == "darwin" else int(peak) * 1024
 
 
 def os_threads() -> int | None:

@@ -47,14 +47,27 @@ body:
     id: verification
     attributes:
       label: Verification scope
-      description: Directly and transitively affected components, causal edges and integration-boundary owners; complete component/profile coverage mapped to independent single-profile assignments and named checks from kora-verify, the single review router. Related components may share an assignment with an explicit common contract and bounded scope; different profiles remain separate contexts. Identify qualifying existing results and missing work instead of automatically adding duplicate review stages. Include applicable performance and memory/resource-lifetime workloads. Include observability impact, event/context ownership and logging evidence, or a concrete applicability reason. Collection, redaction, propagation, buffer or sink changes select correctness, security and performance reviews. Native review uses the same assignment rules; only actual scoped independent results count, and final-revision executable checks remain required. Descendants inherit scope, profile, revision and permissions, with a recorded split reason. For unimplemented checks, name the implementing issue or this issue, the activation trigger and expected evidence. Resolve this scope before posting the implementation plan; missing tools for existing checks are blockers, not pending implementation.
+      description: >-
+        Follow kora-verify, the canonical review router linked from AGENTS.md. Keep one table of
+        affected contracts/components, changed risks, integration owners, blocking checks,
+        diagnostic measurements and selected independent review or qualifying reuse.
+        Include transitive effects, actual resource release and observability impact where relevant.
+        Name the delivered outcome, work outside this change and stopping conditions.
+        Preserve approved gates unless the owner explicitly approves a named reduction.
+        Missing required evidence is unverified; absent capabilities name their implementing issue and activation trigger.
     validations:
       required: true
   - type: textarea
     id: constraints
     attributes:
       label: Constraints
-      description: Limits the solution must respect, such as budgets, compatibility or rules from AGENTS.md. For status:deferred, state the reason for postponement and the concrete condition or stage that triggers revisiting the issue.
+      description: >-
+        Limits the solution must respect, such as budgets, compatibility or rules from AGENTS.md.
+        For status:deferred, state the reason for postponement and the concrete condition or stage
+        that triggers revisiting the issue. Plans for business-logic changes must estimate added
+        plus deleted hand-written production-code lines, excluding tests, documentation and generated files.
+        Split any scope exceeding 1,000 into smaller PRs and linked sub-issues with explicit dependencies,
+        preserving each PR’s required tests, documentation, parity and verification.
     validations:
       required: false
   - type: textarea
