@@ -17,6 +17,7 @@ from kora.conformance.common import (
     context_for,
     fail,
     kora_capture,
+    raised_protocol_error,
     test_capabilities_are_frozen_and_consistent,
     test_config_schema_is_an_object_schema,
     test_failure_is_a_bounded_protocol_error,
@@ -171,6 +172,10 @@ async def check_secrets_resolution_returns_a_masked_value(
 
     value = await awaited(provider.resolve(reference, context))
 
+    check_resolved_value(value, expected, capture)
+
+
+def check_resolved_value(value: object, expected: str, capture: Capture) -> None:
     if not isinstance(value, SecretValue):
         fail("resolve returns a SecretValue")
     check(value.reveal() == expected, "resolve returns the referenced value")
@@ -183,6 +188,12 @@ async def check_secrets_missing_reference_is_a_bounded_error(
 ) -> None:
     error = await await_protocol_error(provider.resolve(reference, context))
 
+    check_missing_reference_error(error, reference)
+
+
+def check_missing_reference_error(
+    error: KoraProtocolError | None, reference: str
+) -> None:
     if error is None:
         fail("a missing reference raises KoraProtocolError")
     check_content_free(error, reference)
@@ -193,6 +204,12 @@ async def check_secrets_forbidden_reference_is_refused_like_a_missing_one(
 ) -> None:
     error = await await_protocol_error(provider.resolve(reference, context))
 
+    check_forbidden_reference_error(error, reference)
+
+
+def check_forbidden_reference_error(
+    error: KoraProtocolError | None, reference: str
+) -> None:
     if error is None:
         fail("a reference outside the namespace's prefixes raises KoraProtocolError")
     check_content_free(error, reference)
@@ -205,6 +222,10 @@ async def check_secrets_list_names_returns_names_only(
 
     names = await awaited(provider.list_names(prefix))
 
+    check_listed_names(names, prefix, expected)
+
+
+def check_listed_names(names: object, prefix: str, expected: str) -> None:
     if not isinstance(names, list):
         fail("list_names returns a list")
     listed = cast("list[object]", names)
@@ -225,6 +246,11 @@ async def check_secrets_value_is_masked_in_a_captured_stream(
 ) -> None:
     reference, expected = resolvable
     await provider.resolve(reference, context)
+
+    check_captured_stream(capture, expected)
+
+
+def check_captured_stream(capture: Capture, expected: str) -> None:
     escaped = (json.dumps(expected), json.dumps(expected, ensure_ascii=False))
     stream = f"before {expected} middle {escaped[0]} and {escaped[1]} after"
 
@@ -241,14 +267,13 @@ def test_secrets_resolution_returns_a_masked_value(
     kora_secrets_resolvable: tuple[str, str],
     kora_capture: Capture,
 ) -> None:
-    asyncio.run(
-        check_secrets_resolution_returns_a_masked_value(
-            kora_secrets_provider,
-            kora_secrets_resolvable,
-            kora_capture,
-            context_for(kora_capture),
-        )
+    reference, expected = kora_secrets_resolvable
+
+    value = asyncio.run(
+        awaited(kora_secrets_provider.resolve(reference, context_for(kora_capture)))
     )
+
+    check_resolved_value(value, expected, kora_capture)
 
 
 @pytest.mark.kora_conformance
@@ -257,13 +282,13 @@ def test_secrets_missing_reference_is_a_bounded_error(
     kora_secrets_missing_reference: str,
     kora_capture: Capture,
 ) -> None:
-    asyncio.run(
-        check_secrets_missing_reference_is_a_bounded_error(
-            kora_secrets_provider,
-            kora_secrets_missing_reference,
-            context_for(kora_capture),
-        )
+    context = context_for(kora_capture)
+
+    error = raised_protocol_error(
+        kora_secrets_provider.resolve(kora_secrets_missing_reference, context)
     )
+
+    check_missing_reference_error(error, kora_secrets_missing_reference)
 
 
 @pytest.mark.kora_conformance
@@ -272,13 +297,13 @@ def test_secrets_forbidden_reference_is_refused_like_a_missing_one(
     kora_secrets_forbidden_reference: str,
     kora_capture: Capture,
 ) -> None:
-    asyncio.run(
-        check_secrets_forbidden_reference_is_refused_like_a_missing_one(
-            kora_secrets_provider,
-            kora_secrets_forbidden_reference,
-            context_for(kora_capture),
-        )
+    context = context_for(kora_capture)
+
+    error = raised_protocol_error(
+        kora_secrets_provider.resolve(kora_secrets_forbidden_reference, context)
     )
+
+    check_forbidden_reference_error(error, kora_secrets_forbidden_reference)
 
 
 @pytest.mark.kora_conformance
@@ -287,11 +312,13 @@ def test_secrets_list_names_returns_names_only(
     kora_secrets_listed_prefix: str,
     kora_secrets_resolvable: tuple[str, str],
 ) -> None:
-    asyncio.run(
-        check_secrets_list_names_returns_names_only(
-            kora_secrets_provider, kora_secrets_listed_prefix, kora_secrets_resolvable
-        )
+    expected = kora_secrets_resolvable[1]
+
+    names = asyncio.run(
+        awaited(kora_secrets_provider.list_names(kora_secrets_listed_prefix))
     )
+
+    check_listed_names(names, kora_secrets_listed_prefix, expected)
 
 
 @pytest.mark.kora_conformance
@@ -300,11 +327,8 @@ def test_secrets_value_is_masked_in_a_captured_stream(
     kora_secrets_resolvable: tuple[str, str],
     kora_capture: Capture,
 ) -> None:
-    asyncio.run(
-        check_secrets_value_is_masked_in_a_captured_stream(
-            kora_secrets_provider,
-            kora_secrets_resolvable,
-            kora_capture,
-            context_for(kora_capture),
-        )
-    )
+    reference, expected = kora_secrets_resolvable
+
+    asyncio.run(kora_secrets_provider.resolve(reference, context_for(kora_capture)))
+
+    check_captured_stream(kora_capture, expected)

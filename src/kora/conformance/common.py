@@ -108,6 +108,10 @@ async def check_failure_is_a_bounded_protocol_error(
 ) -> None:
     error = await await_protocol_error(exercise(context, marker))
 
+    check_protocol_error(error, marker)
+
+
+def check_protocol_error(error: KoraProtocolError | None, marker: str) -> None:
     if error is None:
         fail("the exercise's failing input raises KoraProtocolError")
     check(ERROR_CODE.fullmatch(error.code) is not None, "the code is bounded")
@@ -121,6 +125,12 @@ async def check_provider_logs_through_its_context(
     handlers = list(logging.getLogger().handlers)
 
     await await_protocol_error(exercise(context, marker))
+    check_captured_provider_logs(capture, handlers, marker)
+
+
+def check_captured_provider_logs(
+    capture: Capture, handlers: list[logging.Handler], marker: str
+) -> None:
     after = list(logging.getLogger().handlers)
     records = capture.finish()
 
@@ -151,19 +161,20 @@ def test_config_schema_is_an_object_schema(kora_provider: ProviderProtocol) -> N
 def test_failure_is_a_bounded_protocol_error(
     kora_exercise: Exercise, kora_capture: Capture
 ) -> None:
-    asyncio.run(
-        check_failure_is_a_bounded_protocol_error(
-            kora_exercise, context_for(kora_capture), MARKER
-        )
-    )
+    context = context_for(kora_capture)
+
+    error = raised_protocol_error(kora_exercise(context, MARKER))
+
+    check_protocol_error(error, MARKER)
 
 
 @pytest.mark.kora_conformance
 def test_provider_logs_through_its_context(
     kora_exercise: Exercise, kora_capture: Capture
 ) -> None:
-    asyncio.run(
-        check_provider_logs_through_its_context(
-            kora_exercise, kora_capture, context_for(kora_capture), MARKER
-        )
-    )
+    context = context_for(kora_capture)
+    handlers = list(logging.getLogger().handlers)
+
+    raised_protocol_error(kora_exercise(context, MARKER))
+
+    check_captured_provider_logs(kora_capture, handlers, MARKER)

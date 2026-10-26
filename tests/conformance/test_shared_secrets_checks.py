@@ -4,6 +4,8 @@ from functools import partial
 
 import pytest
 
+import kora.conformance.common as common_cases
+import kora.conformance.secrets as secrets_cases
 from kora.conformance.capture import Capture, captured
 from kora.conformance.common import (
     CONFORMANCE_COMPONENT,
@@ -32,11 +34,31 @@ from tests.conformance.providers import (
     FORBIDDEN,
     MISSING,
     REFERENCE,
+    RESOLVING,
     VALUE,
     ReferenceSecretsProvider,
 )
 
 SUPPLIED_MARKER: str = "shared-check-supplied-marker"
+
+
+class FinalizingSecretsProvider(ReferenceSecretsProvider):
+    def __init__(self) -> None:
+        self.pending: asyncio.Task[None] | None = None
+
+    async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
+        started = asyncio.Event()
+
+        async def finish_later() -> None:
+            started.set()
+            try:
+                await asyncio.Future[None]()
+            finally:
+                ctx.logger.emit(RESOLVING, detail=reference)
+
+        self.pending = asyncio.create_task(finish_later())
+        await started.wait()
+        return await super().resolve(reference, ctx)
 
 
 class LoopBoundSecretsProvider(ReferenceSecretsProvider):
@@ -253,3 +275,34 @@ def test_shared_checks_release_capture_on_every_ending(ending: str) -> None:
     assert providers[0].worker.done()
     assert providers[0].cleanup_loop is providers[0].loop
     assert_capture_released(captures[0])
+
+
+def test_sync_logging_checks_provider_task_finalization() -> None:
+    provider = FinalizingSecretsProvider()
+    failure = partial(failing_input, provider, {"missing": MISSING})
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(), "finalization", utc_now
+    ) as capture:
+        with pytest.raises(pytest.fail.Exception, match="no record carries"):
+            common_cases.test_provider_logs_through_its_context(failure, capture)
+
+    assert provider.pending is not None
+    assert provider.pending.done()
+    assert_capture_released(capture)
+
+
+def test_sync_resolution_captures_provider_task_finalization() -> None:
+    provider = FinalizingSecretsProvider()
+    with captured(
+        CONFORMANCE_COMPONENT, LoggingSettings(), "finalization", utc_now
+    ) as capture:
+        secrets_cases.test_secrets_resolution_returns_a_masked_value(
+            provider, (REFERENCE, VALUE), capture
+        )
+
+        assert any(
+            record.get("detail") == REFERENCE for record in capture.reader.records()
+        )
+    assert provider.pending is not None
+    assert provider.pending.done()
+    assert_capture_released(capture)
