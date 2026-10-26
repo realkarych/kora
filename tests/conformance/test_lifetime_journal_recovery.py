@@ -205,7 +205,7 @@ async def test_recovery_close_preserves_complete_inventory(
     from kora.protocols.lifetime import CleanupOutcome, TemporaryTreeRegistration
     from kora.runner.filesystem import DirectoryAnchor
     from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-    from tests.conformance.test_lifetime_io_helper import entered_fifo
+    from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
     from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 
     probe = subprocess.run(
@@ -255,8 +255,10 @@ async def test_recovery_close_preserves_complete_inventory(
         await owner.closure_started.wait()
 
     try:
-        writer = os.open(
-            "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
+        writer = await open_fifo_writer(
+            barrier.descriptor,
+            independent_clock.monotonic_ns() + 5_000_000_000,
+            independent_clock,
         )
         os.close(writer)
         if case == "substituted_tree":

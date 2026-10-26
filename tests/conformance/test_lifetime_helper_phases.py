@@ -21,7 +21,11 @@ from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_io_helper import entered_fifo, read_probe
+from tests.conformance.test_lifetime_io_helper import (
+    entered_fifo,
+    open_fifo_writer,
+    read_probe,
+)
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -138,8 +142,8 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                     effect == "elapsed"
                 )
                 if effect == "unrelated":
-                    writer = os.open(
-                        "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
+                    writer = await open_fifo_writer(
+                        barrier.descriptor, deadline, actual_clock
                     )
                     os.close(writer)
                     await asyncio.wait_for(asyncio.shield(acquiring), 5)
@@ -240,9 +244,7 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
             assert full_report.state is CleanupOutcome.UNKNOWN
             assert not helper.anchor.exited
             assert not effect.task.done()
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
+            writer = await open_fifo_writer(barrier.descriptor, deadline, actual)
             os.close(writer)
             await asyncio.wait_for(asyncio.shield(publisher), 5)
             with pytest.raises(LifetimeError):
