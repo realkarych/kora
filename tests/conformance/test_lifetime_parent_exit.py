@@ -19,7 +19,7 @@ from kora.protocols.lifetime import (
     ProcessRegistration,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel
+from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
@@ -33,9 +33,12 @@ from tests.conformance.test_parent_lifetime import limits
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sink_mode", ["drained", "blocked", "broken"])
+@pytest.mark.parametrize(
+    ("sink_mode", "setup_failure"),
+    [("drained", False), ("blocked", False), ("broken", False), ("drained", True)],
+)
 async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_recovery(
-    tmp_path: Path, sink_mode: str
+    tmp_path: Path, sink_mode: str, setup_failure: bool
 ) -> None:
     probe = subprocess.run(
         [
@@ -96,11 +99,16 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     assert await channel.read_frame(deadline) == reference.invocation_id.encode("ascii")
     identity = ProcessIdentity.model_validate_json(await channel.read_frame(deadline))
     helper_anchor = ExitAnchor(identity.pid, direct_child=False)
-    await entered_fifo(identity.pid, reading, deadline, clock)
     recovery_clock = ControlledLifetimeClock()
     recovered: ParentLifetime | None = None
+    caught: ChannelError | None = None
+    phase = "fifo_barrier"
 
     try:
+        if setup_failure:
+            deadline = clock.monotonic_ns()
+        await entered_fifo(identity.pid, reading, deadline, clock)
+        phase = "parent_close"
         await channel.write_frame(b"close", deadline)
         report = ClosureReport.model_validate_json(
             await channel.read_record(deadline, 1048576)
@@ -142,6 +150,18 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
             assert unknown[0]["invocation_id"] == reference.invocation_id
             assert str(tmp_path).encode() not in encoded
             assert b"signal.pause" not in encoded
+    except ChannelError as failure:
+        failure.add_note(
+            f"phase={phase}, remaining_ns={deadline - clock.monotonic_ns()}, "
+            f"parent_status={parent.poll()}, helper_identity={identity}"
+        )
+        if not (
+            setup_failure
+            and phase == "fifo_barrier"
+            and failure.reason is ChannelFailure.DEADLINE
+        ):
+            raise
+        caught = failure
     finally:
         deadline = clock.monotonic_ns() + 5_000_000_000
         if parent.returncode is None:
@@ -169,3 +189,8 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
         os.close(reading)
         os.close(writing)
         barrier.close()
+
+    assert (caught is not None) is setup_failure
+    assert parent.returncode is not None
+    assert helper_anchor.exited
+    assert channel.closed
