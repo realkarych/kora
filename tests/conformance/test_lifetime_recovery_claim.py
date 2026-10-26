@@ -25,7 +25,7 @@ from tests.conformance.test_lifetime_cleanup_controls import (
     close_recovered_test_owner,
     dispose_test_owner,
 )
-from tests.conformance.test_lifetime_io_helper import entered_fifo
+from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -120,9 +120,7 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
             refused = await competing.close(None)
             assert refused.state is CleanupOutcome.UNKNOWN
             assert path.read_bytes() == retained
-        writer = os.open(
-            "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-        )
+        writer = await open_fifo_writer(barrier.descriptor, deadline, clock)
         os.close(writer)
         await helper_anchor.wait(deadline, clock)
         published = JournalSnapshot.model_validate_json(path.read_bytes())
