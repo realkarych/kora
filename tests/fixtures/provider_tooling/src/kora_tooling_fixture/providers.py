@@ -25,6 +25,8 @@ def constructor() -> object:
 
 
 def metadata(name: str, schema: JsonObject | None = None) -> ProviderMetadata:
+    if not sys.flags.isolated:
+        raise RuntimeError("listing did not enable Python isolation")
     if any(
         name == prefix or name.startswith(prefix + ".")
         for name in sys.modules
@@ -53,6 +55,7 @@ def good() -> ProviderMetadata:
 
 def broken() -> ProviderMetadata:
     typer.echo(RAW_MARKER, err=True)
+    saturated()
     raise RuntimeError(RAW_MARKER)
 
 

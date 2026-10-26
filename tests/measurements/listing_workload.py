@@ -80,6 +80,8 @@ class Workload:
         self.count = count
         self.active: Cycle | None = None
         self.clock: ProbeClock | None = None
+        self.operation: asyncio.Task[PluginListing] | None = None
+        self.endpoint: socket.socket | None = None
         self.references: list[weakref.ReferenceType[object]] = []
 
     async def acquire(self, index: int, case: str) -> None:
@@ -94,8 +96,10 @@ class Workload:
         self.observer.sample()
         started = time.perf_counter()
         operation = asyncio.create_task(invocation.discover())
+        self.operation = operation
         async with asyncio.timeout(30):
             endpoint, _ = await asyncio.get_running_loop().sock_accept(self.listener)
+            self.endpoint = endpoint
             barrier = await read_counter(endpoint)
         owner = invocation.process
         if barrier is None or owner is None or owner.registration is None:
@@ -219,6 +223,8 @@ class Workload:
         self.persist_active()
         self.active = None
         self.clock = None
+        self.operation = None
+        self.endpoint = None
         return result
 
     async def settled(self) -> ListingPoint:
@@ -229,14 +235,25 @@ class Workload:
         return point
 
     async def abort(self) -> None:
-        if self.clock is not None:
-            self.clock.use_system_time()
-            invocation = self.observer.invocation
-            owner = None if invocation is None else invocation.process
-            if owner is not None and not owner.closed:
-                owner.signal(signal.SIGKILL, self.clock.monotonic_ns() + 5_000_000_000)
-        if self.active is not None:
-            self.active.endpoint.close()
+        if self.endpoint is not None:
+            self.endpoint.close()
+        clock = self.clock
+        if clock is None:
+            return
+        clock.use_system_time()
+        invocation = self.observer.invocation
+        owner = None if invocation is None else invocation.process
+        if owner is not None and not owner.closed:
+            owner.signal(signal.SIGKILL, clock.monotonic_ns() + 5_000_000_000)
+        if self.operation is not None:
+            if not self.operation.done():
+                self.operation.cancel()
+            await asyncio.gather(self.operation, return_exceptions=True)
+        if owner is not None and not owner.closed:
+            deadline = clock.monotonic_ns() + 5_000_000_000
+            await owner.settle(deadline)
+            await owner.drain(deadline)
+            owner.release(deadline)
 
 
 def assert_same_resources(actual: ListingPoint, expected: ListingPoint) -> None:
@@ -312,8 +329,10 @@ def main() -> None:
         )
     finally:
         try:
-            runner.run(workload.abort())
-            runner.close()
+            try:
+                runner.run(workload.abort())
+            finally:
+                runner.close()
         finally:
             try:
                 workload.collect_retained()

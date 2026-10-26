@@ -56,7 +56,9 @@ def test_provider_listing_reports_failures(
         tmp_path,
         {
             "policy.external": "kora_tooling_fixture.noisy_import:provider_metadata",
+            "policy.allow_deny": "kora.testing:must_not_import",
             "secrets.broken": "kora_tooling_fixture.providers:broken",
+            "secrets.import_broken": "kora_tooling_fixture.failing_import:constructor",
             "runtime.fake": "kora.testing:must_not_import",
             "unprefixed": "kora_tooling_fixture.providers:constructor",
         },
@@ -73,6 +75,7 @@ def test_provider_listing_reports_failures(
     }
 
     result = installed.run(*arguments, environment=environment)
+    human = installed.run("plugins", "list", environment=environment)
     payload = cast(dict[str, object], json.loads(result.stdout))
     probe = subprocess.run(
         [
@@ -89,29 +92,33 @@ def test_provider_listing_reports_failures(
     )
 
     assert result.code == 1, result.stderr
+    assert human.code == 1, human.stderr
+    assert b"policy.external 1.0.0" in human.stdout
+    assert b"provider_ambiguous" in human.stdout
+    assert b"private-" not in human.stdout + human.stderr
     assert probe.returncode == 0, probe.stderr
     providers = cast(list[dict[str, object]], payload["providers"])
     assert [(item["protocol"], item["name"]) for item in providers] == [
-        ("policy", "allow_deny"),
         ("policy", "external"),
         ("secrets", "env"),
         ("vcs", "git"),
     ]
     failures = cast(list[dict[str, object]], payload["failures"])
-    assert len(failures) == 3
+    assert len(failures) == 5
     assert {item["code"] for item in failures} == {
         "provider_name_invalid",
         "provider_reserved",
         "provider_load_failed",
+        "provider_ambiguous",
     }
     assert b"private-" not in result.stdout + result.stderr
-    assert len(result.records()) == 7
+    assert len(result.records()) == 8
     assert (
         sum(
             record["event"] == "protocols.loading.provider_loaded"
             for record in result.records()
         )
-        == 4
+        == 3
     )
     assert all(("config_schema" in item) is schema for item in providers)
 

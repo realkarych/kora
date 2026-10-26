@@ -1,9 +1,11 @@
 import asyncio
+import json
 import os
 import signal
 import socket
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from kora.__main__ import InstalledPluginDiscovery
@@ -33,7 +35,7 @@ def listen(path: Path) -> socket.socket:
 
 
 async def measure_cold_child(
-    python: Path, control: Path, count: int, cutoff: float
+    python: Path, control: Path, count: int, cutoff: float, evidence: Path
 ) -> JsonObject:
     clock = SystemClock()
     remaining = min(30, cutoff - time.monotonic() - 5)
@@ -45,13 +47,19 @@ async def measure_cold_child(
         CLI_COMPONENT, LoggingSettings(), "listing-cold", clock.now
     )
     invocation = InstalledPluginDiscovery(diagnostics)
-    with tempfile.TemporaryDirectory(prefix="kora-list-cold-", dir="/tmp") as temporary:
-        root = Path(temporary).resolve()
+    root = Path(tempfile.mkdtemp(prefix="kora-list-cold-", dir="/tmp")).resolve()
+    with ExitStack() as resources:
+        resources.callback(diagnostics.shutdown)
         cwd = root / "cwd"
         cwd.mkdir()
         control_path = control / f"{os.getpid()}.sock"
         paths = (root / "r", root / "e", control_path)
-        listeners = tuple(listen(path) for path in paths)
+        resources.callback(control_path.unlink, missing_ok=True)
+        listeners: list[socket.socket] = []
+        for path in paths:
+            listener = listen(path)
+            resources.callback(listener.close)
+            listeners.append(listener)
         accepts = tuple(
             asyncio.create_task(loop.sock_accept(listener)) for listener in listeners
         )
@@ -59,6 +67,7 @@ async def measure_cold_child(
         launch = ProcessLaunch(
             executable=str(python),
             argv=(
+                str(python),
                 "-I",
                 "-X",
                 "tracemalloc=1",
@@ -83,8 +92,10 @@ async def measure_cold_child(
             stderr=ProcessOutput.CAPTURE,
             domain=ProcessDomain.INVOCATION,
         )
-        owner = start_gated(launch, "d" * 32, directory, deadline, clock)
-        os.close(directory)
+        try:
+            owner = start_gated(launch, "d" * 32, directory, deadline, clock)
+        finally:
+            os.close(directory)
         result_task = None
         events_task = None
         try:
@@ -129,26 +140,44 @@ async def measure_cold_child(
                     "released": True,
                 }
         finally:
-            for task in (*accepts, result_task, events_task):
-                if task is not None:
-                    task.cancel()
-            await asyncio.gather(
-                *accepts,
-                *(task for task in (result_task, events_task) if task is not None),
-                return_exceptions=True,
-            )
-            for accepted in accepts:
-                if not accepted.cancelled() and accepted.exception() is None:
-                    accepted.result()[0].close()
-            if not owner.closed:
-                cleanup_deadline = min(
-                    clock.monotonic_ns() + 5_000_000_000, int(cutoff * 1_000_000_000)
+            try:
+                for task in (*accepts, result_task, events_task):
+                    if task is not None:
+                        task.cancel()
+                await asyncio.gather(
+                    *accepts,
+                    *(task for task in (result_task, events_task) if task is not None),
+                    return_exceptions=True,
                 )
-                owner.signal(signal.SIGKILL, cleanup_deadline)
-                await owner.settle(cleanup_deadline)
-                await owner.drain(cleanup_deadline)
-                owner.release(cleanup_deadline)
-            for listener in listeners:
-                listener.close()
-            control_path.unlink()
-            diagnostics.shutdown()
+                for accepted in accepts:
+                    if not accepted.cancelled() and accepted.exception() is None:
+                        accepted.result()[0].close()
+                if not owner.closed:
+                    cleanup_deadline = min(
+                        clock.monotonic_ns() + 5_000_000_000,
+                        int(cutoff * 1_000_000_000),
+                    )
+                    owner.signal(signal.SIGKILL, cleanup_deadline)
+                    await owner.settle(cleanup_deadline)
+                    await owner.drain(cleanup_deadline)
+                    owner.release(cleanup_deadline)
+            finally:
+                registration = owner.registration
+                (evidence / "cold-owner.json").write_text(
+                    json.dumps(
+                        {
+                            "root": str(root),
+                            "registration": None
+                            if registration is None
+                            else registration.model_dump(mode="json"),
+                            "closed": owner.closed,
+                            "returncode": owner.returncode,
+                        },
+                        sort_keys=True,
+                    )
+                )
+                if owner.closed:
+                    for path in paths[:2]:
+                        path.unlink(missing_ok=True)
+                    cwd.rmdir()
+                    root.rmdir()

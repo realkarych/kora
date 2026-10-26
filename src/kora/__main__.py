@@ -219,6 +219,7 @@ class InstalledPluginDiscovery:
         launch = ProcessLaunch(
             executable=os.path.abspath(sys.executable),
             argv=(
+                os.path.abspath(sys.executable),
                 "-I",
                 "-m",
                 "kora.cli.plugin_child",

@@ -84,7 +84,6 @@ class ListingObserver:
         self.started = time.perf_counter_ns()
         self.loop: MeasuredLoop | None = None
         self.invocation: InstalledPluginDiscovery | None = None
-        self.child_pid: int | None = None
         self.timer: asyncio.TimerHandle | None = None
         self.cycle = -1
         self.workload = "startup"
@@ -102,7 +101,7 @@ class ListingObserver:
         child_threads: int | None = None
         departed = False
         process = None if self.invocation is None else self.invocation.process
-        pid = self.child_pid
+        pid: int | None = None
         if process is not None and process.registration is not None:
             pid = process.registration.process.pid
         if pid is not None:
@@ -171,7 +170,6 @@ class ListingObserver:
     async def settled(self) -> ListingPoint:
         self.stop()
         self.invocation = None
-        self.child_pid = None
         self.phase = "settled"
         gc.collect()
         loop = asyncio.get_running_loop()

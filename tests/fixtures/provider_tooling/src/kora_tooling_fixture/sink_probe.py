@@ -5,7 +5,13 @@ import sys
 
 from kora.__main__ import InstalledPluginDiscovery
 from kora.cli import CLI_COMPONENT
-from kora.observability import Level, LoggingSettings, configure_process
+from kora.observability import (
+    Level,
+    LoggingSettings,
+    ProcessDiagnostics,
+    configure_process,
+)
+from kora.protocols.loading import LOADING_COMPONENT, PROVIDER_LOADED
 from kora.protocols.time import SystemClock
 
 
@@ -33,6 +39,7 @@ async def exercise(kind: str) -> dict[str, int | bool]:
     )
     invocation = InstalledPluginDiscovery(diagnostics)
     try:
+        primed = await prime_sink(diagnostics, kind)
         result = await invocation.discover()
         before_shutdown = diagnostics.snapshot()
         drained = diagnostics.shutdown()
@@ -55,12 +62,38 @@ async def exercise(kind: str) -> dict[str, int | bool]:
                 if key[2] == "queue_records"
             ),
             "drained": drained,
+            "primed_in_flight_bytes": primed,
         }
     finally:
         diagnostics.shutdown()
         os.close(writing)
         if kind != "broken":
             os.close(reading)
+
+
+async def prime_sink(diagnostics: ProcessDiagnostics, kind: str) -> int:
+    diagnostics.logger(LOADING_COMPONENT).emit(
+        PROVIDER_LOADED,
+        protocol="policy",
+        provider="primer",
+        version="1",
+        distribution="kora-tooling-fixture",
+    )
+    loop = asyncio.get_running_loop()
+    async with asyncio.timeout(5):
+        while True:
+            state = diagnostics.snapshot()
+            ready = (
+                state.sink_failures > 0
+                if kind == "broken"
+                else state.in_flight_bytes > 0
+            )
+            if ready:
+                assert state.queue_records == 0
+                return state.in_flight_bytes
+            resumed: asyncio.Future[None] = loop.create_future()
+            loop.call_soon(resumed.set_result, None)
+            await resumed
 
 
 if __name__ == "__main__":

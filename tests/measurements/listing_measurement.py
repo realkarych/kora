@@ -115,7 +115,9 @@ def measure_listing(output: Path) -> None:
                     cycle["workload"] for cycle in cycles if isinstance(cycle, dict)
                 ] == list(SEQUENCE)
                 total += len(cycles)
-            cold = asyncio.run(measure_cold_child(python, control, count, deadline))
+            cold = asyncio.run(
+                measure_cold_child(python, control, count, deadline, dataset)
+            )
             (dataset / "cold.json").write_text(json.dumps(cold, sort_keys=True))
             control.rmdir()
             datasets.append(

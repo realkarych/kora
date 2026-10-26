@@ -40,6 +40,9 @@ def test_listing_diagnostic_loss_does_not_hold_command_exit(
     if sink == "broken":
         assert sink_failures > 0
     else:
+        primed = payload["primed_in_flight_bytes"]
+        assert isinstance(primed, int)
+        assert primed > 0
         assert sink_failures == 0
         assert payload["drained"] is False
         assert payload["queued_before_shutdown"] == 1024
