@@ -18,6 +18,7 @@ from tests.measurements.lifetime_measurement_support import (
 )
 from tests.measurements.lifetime_observation import Point
 from tests.measurements.lifetime_workload import SEQUENCE, RunResult
+from tests.measurements.listing_measurement import measure_listing
 
 pytestmark = pytest.mark.measurement
 
@@ -184,3 +185,11 @@ def test_conformance_fixture_resources_are_released(report: Report) -> None:
     report.gates["all_240_cycles"] = len(report.samples) == 240
     report.gates["within_command_deadline"] = time.monotonic() < deadline
     assert all(report.gates.values())
+
+
+def test_installed_listing_resources_are_released() -> None:
+    output = Path(os.environ["KORA_MEASUREMENT_OUTPUT"])
+
+    measure_listing(output)
+
+    assert (output.parent / "listing.json").is_file()

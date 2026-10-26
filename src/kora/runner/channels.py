@@ -3,11 +3,13 @@ import os
 import socket
 import struct
 from enum import StrEnum
+from typing import TypeVar
 
 from kora.protocols.time import Clock
 
 MAX_FRAME_BYTES: int = 65536
 MAX_RECORD_BYTES: int = 1048576
+T = TypeVar("T")
 
 
 class ChannelFailure(StrEnum):
@@ -24,9 +26,7 @@ class ChannelError(Exception):
         super().__init__(reason.value)
 
 
-async def wait_future(
-    ready: asyncio.Future[None], deadline_ns: int, clock: Clock
-) -> None:
+async def wait_future(ready: asyncio.Future[T], deadline_ns: int, clock: Clock) -> None:
     if ready.done():
         ready.result()
         return
@@ -150,6 +150,28 @@ class BoundedChannel:
                 raise ChannelError(ChannelFailure.CLOSED)
             result.extend(chunk)
         return bytes(result)
+
+    async def expect_eof(self, deadline_ns: int) -> None:
+        if self._reading:
+            raise ChannelError(ChannelFailure.BUSY)
+        self._reading = True
+        try:
+            while True:
+                if self._closed:
+                    raise ChannelError(ChannelFailure.CLOSED)
+                if self._clock.monotonic_ns() >= deadline_ns:
+                    raise ChannelError(ChannelFailure.DEADLINE)
+                try:
+                    chunk = self._endpoint.recv(1)
+                except BlockingIOError:
+                    await self._wait(deadline_ns, writing=False)
+                    continue
+                if chunk:
+                    raise ChannelError(ChannelFailure.MALFORMED)
+                return
+        finally:
+            self._reading = False
+            self.close()
 
     async def _write(self, value: bytes, deadline_ns: int) -> None:
         remaining = memoryview(value)

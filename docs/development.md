@@ -38,7 +38,7 @@ CEL binding amendment dated 2026-10-21: the `cel` extra, the `wcwidth` constrain
 
 No-suppression amendment dated 2026-10-20: `--ignore-noqa`, the Ruff families and banned-API table, the ESLint comment rule and the no-suppression architecture test added under [issue #155](https://github.com/realkarych/kora/issues/155); wording pending line-by-line owner review.
 
-The repository contains an importable typed Python package with the logging bootstrap, the metadata database package with its migrations, the `kora` entry point (`kora --version`, `kora db upgrade`), a minimal React shell and distribution builds. The execution engine, HTTP API, the other CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
+The repository contains an importable typed Python package with the logging bootstrap, the metadata database package with its migrations, the `kora` entry point (`kora --version`, `kora db upgrade`, `kora plugins list`), a minimal React shell and distribution builds. The execution engine, HTTP API, the other CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup
 
@@ -205,6 +205,10 @@ The Linux reference lane records current RSS, fresh-image high-water RSS, descri
 
 The VcsRef typed-boundary work in [issue #209](https://github.com/realkarych/kora/issues/209) extends the same IR command and artifact with raw/object/model admission, canonicalization, full-payload digest and identity-summary workloads. Three warm-ups and ten action samples cover accepted and refused wire boundaries and caller-owned decoded inputs beyond the wire cap, preserving validation phase order. Three serial traced/untraced child pairs each run 500 operations, with quiescent samples every 25 and bounded retaining-path evidence at 250 and 500; fixed fixtures and evidence storage precede the warmed baseline. Current/peak traced allocations, tracer overhead, native-inclusive Linux RSS, process high-water memory and thread/descriptor counts distinguish transient state from unexplained growth. Cold public IR imports compare base and head in fresh processes. Existing child deadline/output bounds, the strict retained-Python allowance and the whole-workflow budget remain; continuing unexplained growth blocks readiness even below the numerical allowance. No calibrated latency or native-memory bound is claimed.
 
+`kora plugins list --json` reports installed provider protocol, name, version and bounded load failures without constructing providers. A failure keeps valid entries visible and makes the command nonzero. `kora plugins list --schema` includes defensive schema views.
+
+Listing captures metadata-import/factory output separately from its public result and emits registry diagnostics once through its parent reporting owner.
+
 `kora db upgrade` applies every pending migration to the database named by `KORA_DATABASE_URL` and prints the head revision; the accepted forms are `sqlite+aiosqlite:///<path>` (relative paths resolve against the working directory, and a new file is created with mode 0600) and a complete `postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>`, whose query string, if any, carries the driver's connection options such as the TLS mode (`?ssl=require`); the driver's `PGSSL*` variables apply only when the URL sets no `ssl` option, and no other `PG*` variable or password file is consulted. A missing, malformed or incomplete URL exits 78 with one line on stderr that never repeats the value; an unreachable database is an unhandled error (code 70) with content-free records. There is no command-line option for the URL, so it never appears in a process listing.
 
 ```sh
@@ -219,7 +223,7 @@ osv-scanner --lockfile=uv.lock --lockfile=web/pnpm-lock.yaml \
 gitleaks git --redact
 ```
 
-The build writes both archives to `dist/`. No test inspects the archives or installs the wheel. The wheel build hook described below checks that every local `src` and `href` reference in the built `index.html` resolves to a file in the output directory; nothing checks that those assets reach the wheel.
+The build writes both archives to `dist/`. Local provider-tooling tests build and install kora and an external fixture distribution in an isolated environment. No test inspects archive contents. The wheel build hook described below checks that every local `src` and `href` reference in the built `index.html` resolves to a file in the output directory; nothing checks that those assets reach the wheel.
 
 Vite generates `src/kora/api/static/THIRD_PARTY_LICENSES.md` from the bundled frontend dependencies. The wheel includes this inventory and their license text alongside the generated assets. The project's Apache-2.0 metadata and license remain separate. The [dated packaging record](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#packaging-implementation-record) links the generation and upstream license references.
 

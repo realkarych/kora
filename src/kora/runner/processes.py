@@ -512,6 +512,10 @@ class GatedProcess:
         self._start(cwd_descriptor)
 
     @property
+    def registration(self) -> ProcessRegistration | None:
+        return self._registration
+
+    @property
     def returncode(self) -> int | None:
         return self._process.returncode if self._process is not None else None
 
