@@ -29,6 +29,7 @@ def test_provider_listing_exposes_installed_core_metadata(schema: bool) -> None:
     assert output["failures"] == []
     providers = cast(list[dict[str, object]], output["providers"])
     assert [(entry["protocol"], entry["name"]) for entry in providers] == [
+        ("artifact_storage", "local"),
         ("policy", "allow_deny"),
         ("secrets", "env"),
         ("vcs", "git"),
@@ -41,7 +42,7 @@ def test_provider_listing_exposes_installed_core_metadata(schema: bool) -> None:
         if schema:
             assert isinstance(entry["config_schema"], dict)
     records = result.records()
-    assert len(records) == 3
+    assert len(records) == 4
     assert all(
         record["event"] == "protocols.loading.provider_loaded" for record in records
     )
@@ -99,6 +100,7 @@ def test_provider_listing_reports_failures(
     assert probe.returncode == 0, probe.stderr
     providers = cast(list[dict[str, object]], payload["providers"])
     assert [(item["protocol"], item["name"]) for item in providers] == [
+        ("artifact_storage", "local"),
         ("policy", "external"),
         ("secrets", "env"),
         ("vcs", "git"),
@@ -112,13 +114,13 @@ def test_provider_listing_reports_failures(
         "provider_ambiguous",
     }
     assert b"private-" not in result.stdout + result.stderr
-    assert len(result.records()) == 8
+    assert len(result.records()) == 9
     assert (
         sum(
             record["event"] == "protocols.loading.provider_loaded"
             for record in result.records()
         )
-        == 3
+        == 4
     )
     assert all(("config_schema" in item) is schema for item in providers)
 
@@ -145,7 +147,7 @@ def test_installed_provider_supports_listing_without_conformance_extra(
     assert payload["failures"] == []
     providers = cast(list[dict[str, object]], payload["providers"])
     selected = next(item for item in providers if item["name"] == name)
-    assert len(result.records()) == 4
+    assert len(result.records()) == 5
     assert b"private-provider-output-248" not in result.stdout + result.stderr
     assert f"policy.{name} 1.0.0".encode() in human.stdout
     if provider == "largest_schema":

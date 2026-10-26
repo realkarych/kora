@@ -14,9 +14,9 @@ def test_listing_diagnostic_loss_does_not_hold_command_exit(
 ) -> None:
     entries = {
         f"policy.item_{index:03}": (f"kora_tooling_fixture.inventory:item_{index:03}")
-        for index in range(1097)
+        for index in range(1096)
     }
-    fixture = build_fixture_wheel(tmp_path, entries, inventory=1097)
+    fixture = build_fixture_wheel(tmp_path, entries, inventory=1096)
     installed = install_tooling(tmp_path, provider_tooling_wheelhouse, fixture)
 
     completed = subprocess.run(

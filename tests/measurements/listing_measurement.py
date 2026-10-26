@@ -60,7 +60,7 @@ def measure_listing(output: Path) -> None:
     datasets: list[JsonValue] = []
     total = 0
     try:
-        for count in (4, 256):
+        for count in (5, 256):
             dataset = folder / str(count)
             dataset.mkdir()
             control = Path(
@@ -71,14 +71,14 @@ def measure_listing(output: Path) -> None:
                 f"policy.item_{index:03}": (
                     f"kora_tooling_fixture.inventory:item_{index:03}"
                 )
-                for index in range(count - 4)
+                for index in range(count - 5)
             }
             entries["policy.zz_controlled"] = (
                 "kora_tooling_fixture.measurement:controlled"
             )
             setup_started = time.monotonic()
             wheel = build_fixture_wheel(
-                dataset, entries, {"socket": str(control)}, inventory=count - 4
+                dataset, entries, {"socket": str(control)}, inventory=count - 5
             )
             python = install_measurement_fixture(dataset, wheel)
             cohorts: list[Cohort] = []
@@ -123,8 +123,8 @@ def measure_listing(output: Path) -> None:
             datasets.append(
                 {
                     "entries": count,
-                    "fixture_entries": count - 3,
-                    "fixture_schema_bytes": (count - 3) * 8192,
+                    "fixture_entries": count - 4,
+                    "fixture_schema_bytes": (count - 4) * 8192,
                     "wheel_bytes": wheel.stat().st_size,
                     "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
                     "setup_seconds": setup_seconds,
