@@ -85,6 +85,20 @@ def test_storage_raw_union_requires_all_platform_producers_and_qualification(
     )
 
 
+@pytest.mark.parametrize("field", ["failure", "provider_started"])
+def test_storage_raw_union_refuses_missing_native_failure_closure(
+    tmp_path: Path, field: str
+) -> None:
+    repository = raw_union(tmp_path)
+    path = tmp_path / "linux-qualification" / "pressure" / "primary-9.json"
+    data = parse_json_object(json.loads(path.read_text()))
+    data[field] = None if field == "failure" else True
+    path.write_text(json.dumps(data))
+
+    with pytest.raises(EvidenceFailure, match="native command failure/closure"):
+        validate(tmp_path, REVISION, repository)
+
+
 def test_storage_raw_union_refuses_reused_native_process_evidence(
     tmp_path: Path,
 ) -> None:

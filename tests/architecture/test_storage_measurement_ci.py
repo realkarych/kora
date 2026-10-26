@@ -74,7 +74,18 @@ def test_storage_qualification_cases_remain_in_ordinary_collection(
     collection.write_bytes(result.stdout)
 
     assert result.returncode == 0, result.stderr.decode()
-    assert qualification_nodes() <= collection_nodes(collection)
+    required = qualification_nodes()
+    collected = collection_nodes(collection)
+    pressure = "tests.plugins.storage.test_pressure_controller."
+    required_pressure = frozenset(
+        node for node in required if node.startswith(pressure)
+    )
+    collected_pressure = frozenset(
+        node for node in collected if node.startswith(pressure)
+    )
+
+    assert required <= collected
+    assert required_pressure == collected_pressure
 
 
 def test_storage_ci_requires_exact_platform_producers_and_always_qualification() -> (
