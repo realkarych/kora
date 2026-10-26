@@ -49,7 +49,9 @@ cel = [
     "common-expression-language==0.10.0",
 ]
 conformance = [
+    "jsonschema==4.26.0",
     "pytest==9.1.1",
+    "referencing==0.37.0",
 ]
 
 [tool.hatch.build.targets.wheel]

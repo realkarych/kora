@@ -5,6 +5,8 @@ import pytest
 from tests.support.observability import run_python
 
 HEAVY: tuple[str, ...] = (
+    "jsonschema",
+    "referencing",
     "pydantic",
     "kora.protocols",
     "kora.observability",
@@ -66,6 +68,7 @@ def test_fixed_lifetime_helper_imports_no_cel_checker() -> None:
         "kora.conformance.secrets",
         "kora.conformance.artifact_storage",
         "kora.conformance.vcs",
+        "kora.conformance.inputs",
     ],
 )
 def test_case_modules_import_no_fakes(module: str) -> None:
