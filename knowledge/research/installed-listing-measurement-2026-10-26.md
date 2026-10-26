@@ -20,6 +20,25 @@ Separately exercise 1,100 offered registry events, blocked and broken parent dia
 
 The existing 240-cycle foundation study and collector remain unchanged. Listing writes a separate sidecar and raw artifacts within the existing qualification output directory, and is invoked by the existing qualification test module. No workflow topology, coverage, timeout or ten-minute budget changes. Record total qualification time; a capacity failure must be fixed without silently reducing either population.
 
-## Evidence status
+## Observed result
 
-Implementation and execution of this instrumented method are pending. Ordinary installed-wheel, malformed-channel and lifecycle regressions do not replace this measurement evidence.
+The combined qualification passed at `ac713f7989304e3312f51b51d664c859dcaa5fd5` on 2026-10-26: `2 passed in 392.32s`. The environment was CPython 3.11.17 on macOS 27.0.1 arm64, using the locked development environment on the permitted shared host. The command was `KORA_TEST_DATABASES=sqlite KORA_MEASUREMENT_REVISION=ac713f7989304e3312f51b51d664c859dcaa5fd5 KORA_MEASUREMENT_OUTPUT=<private-directory>/report.json uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_conformance_lifetime.py`.
+
+The unchanged foundation population completed all 240 cycles with every report gate true. Listing completed all 420 declared cycles and both cold legs in 236.06 seconds, including its setup and collection. The shared command cutoff had 207.86 seconds remaining at listing report publication. All six listing parents exited with code zero and were reaped. Every cycle asserted native identity absence, empty owned groups, direct-child reaping, private-root removal and weak-owner collection.
+
+After warmup, every settled checkpoint matched its parent's descriptor, task, timer, selector, thread, module and retained-owner baseline. Final checkpoints had two Python/native threads, one observer task, zero timers, one selector watch, 466 modules, and descriptors classified as three files, one pipe, three sockets and one other descriptor. All eight tracked listing/process/channel/anchor owner classes had zero retained instances. These counts include the measurement process's own diagnostics, event loop and output files; they are not a zero-resource claim for the entire interpreter.
+
+| Dataset | Parent traced-heap peak, bytes | Parent sampled RSS peak, bytes | Cold child traced-heap peak, bytes | Cold child native high-water, bytes |
+| --- | --- | --- | --- | --- |
+| 4 entries, three parents | 26,012,562–26,012,828 | 163,889,152–168,214,528 | 27,488,833 | 76,742,656 |
+| 256 entries, three parents | 28,270,628–28,275,752 | 161,546,240–166,117,376 | 29,978,506 | 79,593,472 |
+
+These process-wide figures are diagnostic observations with the tracing, wrapper, retained evidence-list and shared-host limitations above. They establish no numerical latency/RSS guarantee or general leak-freedom claim. The blocking release assertions are distinct from these curves. Revisit attribution if owned resources remain live, a declared capacity is exceeded, or a repeated workload demonstrates unbounded component retention.
+
+The listing source-manifest SHA-256 is `42e4c883ee62ebf15b2e16c9e47791b2c01b7e6808bd3d12b5add9dadb7179b6`. The retained raw bundle contains `report.json`, `listing.json`, source hashes, all parent points and allocation snapshots, cycle records, cold observations and owner receipts under `listing-artifacts/`. [PR #277](https://github.com/realkarych/kora/pull/277) records the execution and independent assessments. The raw local bundle is not a published GitHub Actions artifact; supported-platform ordinary regressions and final-head CI remain separate evidence.
+
+## Ordinary regressions and historical observations
+
+The installed-wheel, channel and lifecycle target set passed 61 tests in 33.58 seconds after the launch correction. A fixture assertion reproduced the missing Python isolation twice before that correction: the executable was absent from `argv[0]`, so `-I` was consumed as the program name. Both launch tuples now preserve the option, and ordinary metadata plus the cold wrapper check `sys.flags.isolated`. Ambiguous real registrations, raising import/factory output, exact schema capacity, forged/truncated channels and retained UNKNOWN state have named ordinary cases. Blocked-sink setup observes one priming event in flight before offering 1,100 registry events, making the full 1,024-record queue and loss assertion independent of thread scheduling. Broken-sink setup likewise observes the sink failure before discovery.
+
+Earlier method runs remain historical: the first failed an incorrect group-observation assertion, the next completed the small population but failed result parsing, and a later 233.97-second listing run completed before the collection and isolation corrections. A combined run at `a8ad387` was intentionally interrupted after 82.53 seconds when the isolation defect was identified. None of these is relabeled as qualification of the corrected source.
