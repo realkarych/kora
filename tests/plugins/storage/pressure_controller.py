@@ -568,6 +568,7 @@ def create(directory: Path) -> PressureController:
 
 
 def run(directory: Path, workload: str) -> int:
+    diagnostic: str | None = None
     with create(directory) as controller:
         controller.parent_descriptor = sys.stdin.fileno()
         succeeded = False
@@ -581,14 +582,16 @@ def run(directory: Path, workload: str) -> int:
                 controller.report = controller.report.model_copy(
                     update={"failure": error.code}
                 )
-                sys.stderr.write(str(error) + "\n")
-                sys.stderr.flush()
+                diagnostic = str(error)
         finally:
             try:
                 controller.cleanup()
             finally:
                 controller.finish_report()
-        return 0 if succeeded else 1
+    if diagnostic is not None:
+        sys.stderr.write(diagnostic + "\n")
+        sys.stderr.flush()
+    return 0 if succeeded else 1
 
 
 def recover(path: Path, *, hold: bool = False) -> int:

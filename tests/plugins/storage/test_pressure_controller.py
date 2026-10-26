@@ -5,6 +5,7 @@ import select
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -179,6 +180,64 @@ def test_pressure_controller_preserves_caught_native_failure(tmp_path: Path) -> 
     assert report.resources_closed
     assert manifest.command_exit_status == 17
     assert not manifest.command_inflight
+    assert manifest.child is not None
+    assert process_token(manifest.child.pid) is None
+
+
+def test_pressure_controller_closes_before_stopped_diagnostic_reader(
+    tmp_path: Path,
+) -> None:
+    from tests.plugins.storage.pressure_controller import acquire_lease, read_manifest
+
+    directory = tmp_path / "blocked-diagnostic"
+    reader, writer = os.pipe()
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        os.set_blocking(writer, False)
+        filled = 0
+        while filled < 1048576:
+            try:
+                filled += os.write(writer, b"x" * 4096)
+            except BlockingIOError:
+                break
+        assert filled < 1048576
+        os.set_blocking(writer, True)
+
+        process = subprocess.Popen(
+            controller_arguments(directory, "command-failure"),
+            cwd=Path(__file__).resolve().parents[3],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=writer,
+        )
+        deadline = time.monotonic() + 30
+        while not (directory / "report.json").exists():
+            assert time.monotonic() < deadline
+        report = read_report(directory)
+        manifest = read_manifest(directory / "pressure-manifest.json")
+        while True:
+            try:
+                lease = acquire_lease(directory, manifest.lease_stamp)
+            except PressureFailure as error:
+                if error.code != "controller_busy":
+                    raise
+                assert time.monotonic() < deadline
+            else:
+                lease.close()
+                break
+        retained_process = process.poll()
+    finally:
+        try:
+            if process is not None:
+                close_controller(process, directory)
+        finally:
+            os.close(writer)
+            os.close(reader)
+
+    assert retained_process is None
+    assert report.failure == "command_failed"
+    assert report.resources_closed
+    assert manifest.resources_closed
     assert manifest.child is not None
     assert process_token(manifest.child.pid) is None
 
