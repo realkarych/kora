@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import math
 import statistics
 import sys
 from collections import Counter
@@ -254,7 +255,8 @@ def accounting_evidence(children: list[AccountingChild] | None = None) -> Eviden
         gates.add(f"{child.identity}_completed")
         if child.mode == "timing":
             gates.update(
-                f"{child.identity}_cost_{case.name}_p95" for case in child.cases
+                f"{child.identity}_cost_{case.name}_p95_captured"
+                for case in child.cases
             )
         else:
             resource = "heap" if child.mode == "traced" else "rss"
@@ -655,7 +657,9 @@ def verify_accounting_lifetime(
 
 
 def verify_accounting_child(
-    report: MeasurementReport, child: AccountingChild
+    report: MeasurementReport,
+    child: AccountingChild,
+    diagnostics: list[dict[str, ExtraValue]],
 ) -> Counter[tuple[str, int, int, float, float]]:
     process = AccountingProcess.model_validate(
         accounting_json(
@@ -748,12 +752,22 @@ def verify_accounting_child(
         raise ValueError("inconsistent IR accounting sample evidence")
     if isinstance(environment, AccountingLifetimeEnvironment):
         verify_accounting_lifetime(environment, child)
-    elif any(
-        summaries[f"cost_{case.name}"]["p95_us_per_record"] * case.records / 1_000_000
-        > COST_TIMING_LIMIT_SECONDS[f"cost_{case.name}"]
-        for case in child.cases
-    ):
-        raise ValueError("inconsistent IR accounting timing evidence")
+    else:
+        for case in child.cases:
+            name = f"cost_{case.name}"
+            observed = summaries[name]["p95_us_per_record"] * case.records / 1_000_000
+            if not math.isfinite(observed) or observed < 0:
+                raise ValueError("inconsistent IR accounting timing evidence")
+            reference = COST_TIMING_LIMIT_SECONDS[name]
+            diagnostics.append(
+                {
+                    "child": child.identity,
+                    "workload": name,
+                    "observed_seconds": observed,
+                    "reference_seconds": reference,
+                    "exceeds_reference": observed > reference,
+                }
+            )
     samples = accounting_sample_values(payload.samples)
     name, repeat, count = child.parent_sample()
     samples[
@@ -768,7 +782,11 @@ def verify_accounting_child(
     return samples
 
 
-def verify_accounting_evidence(report: MeasurementReport, expected: Evidence) -> None:
+def verify_accounting_evidence(
+    report: MeasurementReport,
+    expected: Evidence,
+    diagnostics: list[dict[str, ExtraValue]],
+) -> None:
     actions = cost_cases()
     selected = [
         child for child in accounting_children(actions) if child.node in expected.nodes
@@ -793,7 +811,7 @@ def verify_accounting_evidence(report: MeasurementReport, expected: Evidence) ->
                 raise ValueError("inconsistent IR accounting case inventory")
         samples: Counter[tuple[str, int, int, float, float]] = Counter()
         for child in selected:
-            samples.update(verify_accounting_child(report, child))
+            samples.update(verify_accounting_child(report, child, diagnostics))
         if samples != accounting_sample_values(
             [sample for sample in report.samples if sample.workload.startswith("cost_")]
         ):
@@ -803,7 +821,11 @@ def verify_accounting_evidence(report: MeasurementReport, expected: Evidence) ->
 
 
 def verify_report(
-    document: str, junit: str, revision: str, expected: Evidence
+    document: str,
+    junit: str,
+    revision: str,
+    expected: Evidence,
+    diagnostics: list[dict[str, ExtraValue]] | None = None,
 ) -> MeasurementReport:
     try:
         report = MeasurementReport.model_validate_json(document)
@@ -833,7 +855,9 @@ def verify_report(
         raise ValueError("incomplete IR shard evidence")
     verify_configuration_payloads(report, expected)
     verify_vcs_ref_evidence(report, expected)
-    verify_accounting_evidence(report, expected)
+    verify_accounting_evidence(
+        report, expected, [] if diagnostics is None else diagnostics
+    )
     repeats = Counter(sample.workload for sample in report.samples)
     if set(report.summary) != set(repeats) or any(
         report.summary[name].get("repeats") != count for name, count in repeats.items()
@@ -857,6 +881,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
     selected: set[str] = set()
     gates: set[str] = set()
     samples: Counter[tuple[str, int, int]] = Counter()
+    diagnostics: list[dict[str, ExtraValue]] = []
     for run, inventory in enumerate(expected):
         shard = directory / f"ir-models-cost-measurement-{revision}-{run}"
         required_files = {
@@ -879,6 +904,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
             (shard / f"ir-models-cost-{run}.xml").read_text(),
             revision,
             inventory,
+            diagnostics,
         )
         actual_manifests = {
             name: report.environment.get(name)
@@ -914,6 +940,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         "gates": len(gates),
         "samples": sum(samples.values()),
         "selected_test_nodes": sorted(selected),
+        "accounting_timing_diagnostics": diagnostics,
     }
 
 

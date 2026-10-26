@@ -205,7 +205,7 @@ async def test_recovery_close_preserves_complete_inventory(
     from kora.protocols.lifetime import CleanupOutcome, TemporaryTreeRegistration
     from kora.runner.filesystem import DirectoryAnchor
     from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-    from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
+    from tests.conformance.test_lifetime_io_helper import entered_fifo
     from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 
     probe = subprocess.run(
@@ -242,76 +242,77 @@ async def test_recovery_close_preserves_complete_inventory(
         loop.call_soon(wake.set_result, None)
         await wake
     helper = owner.mutations.helpers[-1]
-    await entered_fifo(helper.process.pid, reading, owner.deadline(), clock)
-    if case == "substituted_tree":
-        tree = journal.entries[0].registration
-        assert isinstance(tree, TemporaryTreeRegistration)
-        tree_path = path.parent / tree.name
-        tree_path.rename(path.parent / "retained-original")
-        tree_path.mkdir(mode=0o700)
-        closing = None
-    else:
-        closing = asyncio.create_task(owner.close(None))
-        await owner.closure_started.wait()
-
-    try:
-        writer = await open_fifo_writer(
-            barrier.descriptor,
-            independent_clock.monotonic_ns() + 5_000_000_000,
-            independent_clock,
-        )
-        os.close(writer)
+    with await entered_fifo(
+        barrier.descriptor,
+        reading,
+        independent_clock.monotonic_ns() + 5_000_000_000,
+        independent_clock,
+    ) as writer:
         if case == "substituted_tree":
-            with pytest.raises(LifetimeError):
-                await owner.ready()
-            retained = path.read_bytes()
+            tree = journal.entries[0].registration
+            assert isinstance(tree, TemporaryTreeRegistration)
+            tree_path = path.parent / tree.name
+            tree_path.rename(path.parent / "retained-original")
+            tree_path.mkdir(mode=0o700)
+            closing = None
+        else:
             closing = asyncio.create_task(owner.close(None))
             await owner.closure_started.wait()
-            clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
-            reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
-            while not independent.observe(reap_deadline).settled:
-                assert independent_clock.monotonic_ns() < reap_deadline
-                wake = loop.create_future()
-                loop.call_soon(wake.set_result, None)
-                await wake
-            clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
-            report = await asyncio.wait_for(closing, 5)
-            assert report.state is CleanupOutcome.UNKNOWN
-            assert path.read_bytes() == retained
-            assert tuple(owner.records) == tuple(
-                entry.resource_id for entry in journal.entries
+
+        try:
+            writer.close()
+            if case == "substituted_tree":
+                with pytest.raises(LifetimeError):
+                    await owner.ready()
+                retained = path.read_bytes()
+                closing = asyncio.create_task(owner.close(None))
+                await owner.closure_started.wait()
+                clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
+                reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
+                while not independent.observe(reap_deadline).settled:
+                    assert independent_clock.monotonic_ns() < reap_deadline
+                    wake = loop.create_future()
+                    loop.call_soon(wake.set_result, None)
+                    await wake
+                clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
+                report = await asyncio.wait_for(closing, 5)
+                assert report.state is CleanupOutcome.UNKNOWN
+                assert path.read_bytes() == retained
+                assert tuple(owner.records) == tuple(
+                    entry.resource_id for entry in journal.entries
+                )
+            else:
+                assert closing is not None
+                await owner.ready()
+                clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
+                reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
+                while not independent.observe(reap_deadline).settled:
+                    assert independent_clock.monotonic_ns() < reap_deadline
+                    wake = loop.create_future()
+                    loop.call_soon(wake.set_result, None)
+                    await wake
+                clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
+                report = await asyncio.wait_for(closing, 5)
+                assert report.state is CleanupOutcome.CLOSED
+                assert independent.observe(
+                    independent_clock.monotonic_ns() + 5_000_000_000
+                ).settled
+                assert not path.parent.exists()
+        finally:
+            writer.close()
+            deadline = independent_clock.monotonic_ns() + 5_000_000_000
+            assert independent.signal(signal.SIGKILL, deadline) in (
+                SignalResult.SENT,
+                SignalResult.SETTLED,
             )
-        else:
-            assert closing is not None
-            await owner.ready()
-            clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
-            reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
-            while not independent.observe(reap_deadline).settled:
-                assert independent_clock.monotonic_ns() < reap_deadline
-                wake = loop.create_future()
-                loop.call_soon(wake.set_result, None)
-                await wake
-            clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
-            report = await asyncio.wait_for(closing, 5)
-            assert report.state is CleanupOutcome.CLOSED
-            assert independent.observe(
-                independent_clock.monotonic_ns() + 5_000_000_000
-            ).settled
-            assert not path.parent.exists()
-    finally:
-        deadline = independent_clock.monotonic_ns() + 5_000_000_000
-        assert independent.signal(signal.SIGKILL, deadline) in (
-            SignalResult.SENT,
-            SignalResult.SETTLED,
-        )
-        await independent.settle(deadline)
-        independent.release(deadline)
-        if not helper.closed:
-            helper.signal(signal.SIGKILL)
-            await helper.settle(deadline)
-        os.close(reading)
-        os.close(writing)
-        barrier.close()
+            await independent.settle(deadline)
+            independent.release(deadline)
+            if not helper.closed:
+                helper.signal(signal.SIGKILL)
+                await helper.settle(deadline)
+            os.close(reading)
+            os.close(writing)
+            barrier.close()
 
 
 class ExpiringIdentityReader:

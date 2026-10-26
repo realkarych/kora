@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 from contextlib import ExitStack
+from io import FileIO
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from kora.protocols.lifetime import CleanupOutcome, CleanupReference, LifetimeRe
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
+from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_lifetime_recovery_ownership import (
     recovery_progress,
@@ -29,7 +30,8 @@ async def retain(
     launcher: ProbeIOHelperLauncher,
     clock: ControlledLifetimeClock,
     reading: int,
-) -> RecoveryAttempt:
+    directory: int,
+) -> tuple[RecoveryAttempt, FileIO]:
     previous = subprocess.run(
         [
             sys.executable,
@@ -61,27 +63,31 @@ async def retain(
     owner = attempt.owner
     assert owner is not None
     helper = owner.mutations.helpers[-1]
-    await entered_fifo(helper.process.pid, reading, deadline, SystemClock())
-    while not helper.descriptors:
-        await recovery_progress(caller, deadline)
-    clock.advance(int(owner.limits.acquisition_seconds * 1_000_000_000) + 1)
-    await asyncio.wait_for(owner.closure_started.wait(), 5)
-    clock.advance(
-        int(
-            (
-                owner.limits.cooperative_seconds
-                + owner.limits.term_seconds
-                + owner.limits.kill_observation_seconds
-                + owner.limits.drain_seconds
-            )
-            * 1_000_000_000
+    with ExitStack() as pending:
+        writer = pending.enter_context(
+            await entered_fifo(directory, reading, deadline, SystemClock())
         )
-        + 1
-    )
-    report = await asyncio.wait_for(caller, 5)
-    assert report.state is CleanupOutcome.UNKNOWN
-    assert registry.inventory().completed_tasks == 1
-    return attempt
+        while not helper.descriptors:
+            await recovery_progress(caller, deadline)
+        clock.advance(int(owner.limits.acquisition_seconds * 1_000_000_000) + 1)
+        await asyncio.wait_for(owner.closure_started.wait(), 5)
+        clock.advance(
+            int(
+                (
+                    owner.limits.cooperative_seconds
+                    + owner.limits.term_seconds
+                    + owner.limits.kill_observation_seconds
+                    + owner.limits.drain_seconds
+                )
+                * 1_000_000_000
+            )
+            + 1
+        )
+        report = await asyncio.wait_for(caller, 5)
+        assert report.state is CleanupOutcome.UNKNOWN
+        assert registry.inventory().completed_tasks == 1
+        pending.pop_all()
+        return attempt, writer
 
 
 async def refuse(
@@ -118,9 +124,10 @@ def main(home: Path) -> None:
         registry = RecoveryAttempts()
         loop = asyncio.new_event_loop()
         try:
-            attempt = loop.run_until_complete(
-                retain(home, registry, launcher, clock, reading)
+            attempt, writer = loop.run_until_complete(
+                retain(home, registry, launcher, clock, reading, barrier.descriptor)
             )
+            resources.enter_context(writer)
             loop.close()
             gc.collect()
             owner = attempt.owner
@@ -131,14 +138,7 @@ def main(home: Path) -> None:
             before = os.fstat(claim)
 
             asyncio.run(refuse(home, registry, attempt, launcher, clock))
-            writer = asyncio.run(
-                open_fifo_writer(
-                    barrier.descriptor,
-                    SystemClock().monotonic_ns() + 5_000_000_000,
-                    SystemClock(),
-                )
-            )
-            os.close(writer)
+            writer.close()
             assert helper.process.wait(timeout=5) == 0
             asyncio.run(refuse(home, registry, attempt, launcher, clock))
 

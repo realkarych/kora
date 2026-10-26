@@ -23,7 +23,6 @@ from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_io_helper import (
     entered_fifo,
-    open_fifo_writer,
     read_probe,
 )
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
@@ -109,7 +108,9 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                 asyncio.get_running_loop().call_soon(wake.set_result, None)
                 await wake
             helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, actual_clock)
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, actual_clock)
+            )
             assert owner.inventory().helpers.retained_origins == 1
             assert len(owner.mutations.helpers) <= slots + 1
             origin = owner.mutations.origins[helper]
@@ -142,10 +143,7 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                     effect == "elapsed"
                 )
                 if effect == "unrelated":
-                    writer = await open_fifo_writer(
-                        barrier.descriptor, deadline, actual_clock
-                    )
-                    os.close(writer)
+                    writer.close()
                     await asyncio.wait_for(asyncio.shield(acquiring), 5)
             else:
                 clock.advance(100_000_000)
@@ -221,7 +219,9 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
                 asyncio.get_running_loop().call_soon(wake.set_result, None)
                 await wake
             helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, actual)
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, actual)
+            )
             full = owner.request_close(None)
             clock.advance(10_000_000)
             scoped = owner.request_close(tree.token.resource_id)
@@ -244,8 +244,7 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
             assert full_report.state is CleanupOutcome.UNKNOWN
             assert not helper.anchor.exited
             assert not effect.task.done()
-            writer = await open_fifo_writer(barrier.descriptor, deadline, actual)
-            os.close(writer)
+            writer.close()
             await asyncio.wait_for(asyncio.shield(publisher), 5)
             with pytest.raises(LifetimeError):
                 await asyncio.wait_for(asyncio.shield(effect.task), 5)

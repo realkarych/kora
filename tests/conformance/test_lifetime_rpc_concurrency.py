@@ -32,7 +32,7 @@ from tests.conformance.lifetime_helpers import (
     ProbeIOHelperLauncher,
     lifetime_failure_state,
 )
-from tests.conformance.test_lifetime_io_helper import open_fifo_writer, read_probe
+from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -77,7 +77,6 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
         running: asyncio.Task[ClosureReport] | None = None
         replay_inputs: list[weakref.ReferenceType[ProcessLaunch]] = []
         direct_acquisitions: list[asyncio.Task[Acquisition]] = []
-        probe_replies: dict[bytes, int] = {b"e": 0, b"n": 0}
         probe_ready_remaining_ns: int | None = None
         try:
             tree = await owner.reserve(
@@ -140,15 +139,13 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 actual_clock = SystemClock()
                 deadline = actual_clock.monotonic_ns() + 5_000_000_000
 
-                assert await read_probe(reading, deadline, actual_clock) == b"r"
-                probe_ready_remaining_ns = deadline - actual_clock.monotonic_ns()
+                writer = resources.enter_context(
+                    await entered_fifo(
+                        barrier.descriptor, reading, deadline, actual_clock
+                    )
+                )
                 helper = owner.mutations.helpers[-1]
-                while True:
-                    os.kill(helper.process.pid, signal.SIGUSR1)
-                    response = await read_probe(reading, deadline, actual_clock)
-                    probe_replies[response] += 1
-                    if response == b"e":
-                        break
+                probe_ready_remaining_ns = deadline - actual_clock.monotonic_ns()
                 if not tree_workload:
                     assert any(
                         isinstance(operation.request, ProcessLaunch)
@@ -263,10 +260,7 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 assert not helper.anchor.exited
                 assert not owner.records[tree.token.resource_id].fenced
                 assert not owner.records[child.token.resource_id].fenced
-                writer = await open_fifo_writer(
-                    barrier.descriptor, deadline, actual_clock
-                )
-                os.close(writer)
+                writer.close()
                 async with asyncio.timeout(10):
                     for direct in direct_acquisitions:
                         if not direct.cancelled():
@@ -306,7 +300,7 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 gc.collect()
                 assert all(reference() is None for reference in replay_inputs)
         except ChannelError as failure:
-            failure.add_note(f"probe_starts={launcher.starts}, replies={probe_replies}")
+            failure.add_note(f"probe_starts={launcher.starts}")
             failure.add_note(f"probe_ready_remaining_ns={probe_ready_remaining_ns}")
             failure.add_note(lifetime_failure_state(owner))
             raise
