@@ -1,3 +1,4 @@
+import asyncio
 import os
 import signal
 import subprocess
@@ -23,6 +24,8 @@ from kora.runner.identity import (
     NativeIdentityReader,
 )
 from kora.runner.processes import RecoveredProcess, SignalResult
+from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
+from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
 
@@ -68,39 +71,44 @@ async def test_recovery_discards_only_verified_abandoned_journal_staging(
         )
         path.chmod(0o644 if staging == "mode" else 0o600)
     staged_identity = path.lstat()
+    clock = ControlledLifetimeClock()
     owner = ParentLifetime(
         limits=limits(),
         recovery=reference,
+        clock=clock,
         launcher=InstalledIOHelperLauncher(
             home=tmp_path, state_home=tmp_path / "state"
         ),
     )
 
     try:
-        if eligible:
-            await owner.ready()
-            recovered = JournalSnapshot.model_validate_json(journal_path.read_bytes())
-
-            assert recovered.generation == journal.generation + 1
-            assert recovered.invocation_id == journal.invocation_id
-            assert recovered.entries == journal.entries
-            assert not path.exists()
-            assert (await owner.close(None)).state is CleanupOutcome.CLOSED
-            assert not journal_path.parent.exists()
-        else:
-            with pytest.raises(LifetimeError):
+        async with asyncio.timeout(5):
+            if eligible:
                 await owner.ready()
+                recovered = JournalSnapshot.model_validate_json(
+                    journal_path.read_bytes()
+                )
 
-            assert journal_path.read_bytes() == saved
-            retained = path.lstat()
-            assert (retained.st_dev, retained.st_ino, retained.st_mode) == (
-                staged_identity.st_dev,
-                staged_identity.st_ino,
-                staged_identity.st_mode,
-            )
-        assert target.read_bytes() == b"preserved"
+                assert recovered.generation == journal.generation + 1
+                assert recovered.invocation_id == journal.invocation_id
+                assert recovered.entries == journal.entries
+                assert not path.exists()
+                assert (await owner.close(None)).state is CleanupOutcome.CLOSED
+                assert not journal_path.parent.exists()
+            else:
+                with pytest.raises(LifetimeError):
+                    await owner.ready()
+
+                assert journal_path.read_bytes() == saved
+                retained = path.lstat()
+                assert (retained.st_dev, retained.st_ino, retained.st_mode) == (
+                    staged_identity.st_dev,
+                    staged_identity.st_ino,
+                    staged_identity.st_mode,
+                )
+            assert target.read_bytes() == b"preserved"
     finally:
-        await owner.close(None)
+        await dispose_test_owner(owner, clock)
 
 
 @pytest.mark.asyncio
