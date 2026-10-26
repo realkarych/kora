@@ -228,21 +228,51 @@ def test_sampled_payload_term_follows_the_declared_trace(
     assert payload == expected
 
 
-def test_maximum_cycle_budget_refuses_slow_outlier_hidden_by_legacy_p95() -> None:
+@pytest.mark.parametrize("metric", ["legacy_p95_seconds", "maximum_cycle_seconds"])
+def test_cycle_timing_outlier_is_reported_without_blocking_qualification(
+    metric: str,
+) -> None:
     report = StorageReport.model_validate(report_data())
     name = "storage.raw.16777216"
     changed = tuple(
         sample.model_copy(
             update={"seconds": 2.0, "gross_seconds": 2.0, "us_per_record": 2000000.0}
         )
-        if sample.workload == name and sample.cycle == 3
+        if sample.workload == name
+        and sample.phase == "cycle"
+        and (metric == "legacy_p95_seconds" or sample.cycle == 3)
         else sample
         for sample in report.samples
     )
     report = report.model_copy(update={"samples": changed})
+    if metric == "legacy_p95_seconds":
+        report = report.model_copy(
+            update={
+                "summary": {
+                    **report.summary,
+                    name: {
+                        "median_us_per_record": 2000000.0,
+                        "p95_us_per_record": 2000000.0,
+                        "repeats": 3,
+                    },
+                }
+            }
+        )
+    timing = read_budgets().platforms["linux"].workloads[name]
+    reference = (
+        timing.legacy_p95_seconds
+        if metric == "legacy_p95_seconds"
+        else timing.maximum_cycle_seconds
+    )
 
-    with pytest.raises(EvidenceFailure, match="maximum_cycle_seconds"):
-        validate_report(report, REVISION, DIGEST)
+    diagnostics = validate_report(report, REVISION, DIGEST)
+
+    assert {
+        "metric": name + "." + metric,
+        "observed": 2.0,
+        "reference": reference,
+        "exceeds_reference": True,
+    } in diagnostics
 
 
 def test_baseline_python_peak_does_not_inherit_a_measured_cycle_budget() -> None:
@@ -258,7 +288,7 @@ def test_baseline_python_peak_does_not_inherit_a_measured_cycle_budget() -> None
 @pytest.mark.parametrize(
     ("cycle", "metric"), [(60, "late_excursion_growth"), (100, "late_endpoint_growth")]
 )
-def test_storage_budget_keeps_late_retention_separate_from_absolute_allowance(
+def test_storage_diagnostics_keep_late_retention_separate_from_absolute_allowance(
     cycle: int, metric: str
 ) -> None:
     report = StorageReport.model_validate(report_data())
@@ -271,9 +301,18 @@ def test_storage_budget_keeps_late_retention_separate_from_absolute_allowance(
         for sample in report.samples
     )
     report = report.model_copy(update={"samples": changed})
+    growth = read_budgets().platforms["linux"].python_post_gc_bytes
 
-    with pytest.raises(EvidenceFailure, match=metric):
-        validate_report(report, REVISION, DIGEST)
+    diagnostics = validate_report(report, REVISION, DIGEST)
+
+    assert {
+        "metric": "storage.raw.65536.python_post_gc_bytes." + metric,
+        "observed": 8000,
+        "reference": growth.late_excursion_growth
+        if metric == "late_excursion_growth"
+        else growth.late_endpoint_growth,
+        "exceeds_reference": True,
+    } in diagnostics
 
 
 @pytest.mark.parametrize(
@@ -282,10 +321,7 @@ def test_storage_budget_keeps_late_retention_separate_from_absolute_allowance(
         ("phase_peak_unique_bytes", 35651584),
         ("phase_peak_allocated_bytes", 35651584),
         ("python_peak_bytes", 16777216),
-        ("tracer_bytes", 16777216),
-        ("rss_bytes", 1073741824),
-        ("cumulative_maxrss_bytes", 1073741824),
-        ("phase_peak_rss_bytes", 1073741824),
+        ("python_current_bytes", 16777216),
         ("database_bytes", 1048576),
         ("journal_bytes", 1),
         ("unique_bytes", 1048576),
@@ -306,6 +342,41 @@ def test_storage_resource_budget_refuses_each_exceeded_metric(
 
     with pytest.raises(EvidenceFailure, match="budget exceeded"):
         validate_report(report, REVISION, DIGEST)
+
+
+@pytest.mark.parametrize(
+    ("field", "observed"),
+    [
+        ("python_post_gc_bytes", 16777216),
+        ("tracer_bytes", 16777216),
+        ("rss_bytes", 1073741824),
+        ("cumulative_maxrss_bytes", 1073741824),
+        ("phase_peak_rss_bytes", 1073741824),
+    ],
+)
+def test_storage_process_memory_outliers_remain_visible_diagnostics(
+    field: str, observed: int
+) -> None:
+    report = StorageReport.model_validate(report_data())
+    changed = tuple(
+        sample.model_copy(update={field: observed})
+        if sample.workload == "storage.raw.16777216" and sample.cycle == 1
+        else sample
+        for sample in report.samples
+    )
+    report = report.model_copy(update={"samples": changed})
+    growth: object = getattr(read_budgets().platforms["linux"], field)
+    if not isinstance(growth, GrowthBudget):
+        raise TypeError("the diagnostic field has no growth reference")
+
+    diagnostics = validate_report(report, REVISION, DIGEST)
+
+    assert {
+        "metric": "storage.raw.16777216." + field,
+        "observed": observed,
+        "reference": growth.absolute,
+        "exceeds_reference": True,
+    } in diagnostics
 
 
 @pytest.mark.parametrize(

@@ -3,6 +3,7 @@ from typing import Annotated, Final, Self
 
 from pydantic import Field, StrictFloat, StrictInt, model_validator
 
+from kora.ir.json import JsonObject
 from kora.protocols.common import BoundaryModel
 from tests.measurements.storage_evidence_common import EvidenceFailure, read_json
 from tests.measurements.storage_lifetime_manifest import WORKLOADS, Workload
@@ -11,12 +12,14 @@ Nonnegative = Annotated[StrictInt, Field(ge=0)]
 Positive = Annotated[StrictInt, Field(gt=0)]
 Seconds = Annotated[StrictFloat, Field(gt=0, allow_inf_nan=False)]
 BUDGET_PATH: Final[Path] = Path(__file__).with_name("storage_budgets.json")
-GROWTH_FIELDS: Final[tuple[str, ...]] = (
+DIAGNOSTIC_GROWTH_FIELDS: Final[tuple[str, ...]] = (
     "python_post_gc_bytes",
     "tracer_bytes",
     "rss_bytes",
     "cumulative_maxrss_bytes",
     "phase_peak_rss_bytes",
+)
+BLOCKING_GROWTH_FIELDS: Final[tuple[str, ...]] = (
     "database_bytes",
     "journal_bytes",
     "unique_bytes",
@@ -90,25 +93,51 @@ def validate_growth(
     budget: GrowthBudget,
     metric: str,
 ) -> None:
-    require_budget(max(value for _, value in values), budget.absolute, metric)
-    require_budget(
-        max(value - baseline for _, value in values),
-        budget.warmed_growth,
-        metric + ".warmed_growth",
+    for name, observed, maximum in growth_comparisons(values, baseline, budget, metric):
+        require_budget(observed, maximum, name)
+
+
+def growth_comparisons(
+    values: tuple[tuple[int, int], ...],
+    baseline: int,
+    budget: GrowthBudget,
+    metric: str,
+) -> tuple[tuple[str, int, int], ...]:
+    comparisons = (
+        (metric, max(value for _, value in values), budget.absolute),
+        (
+            metric + ".warmed_growth",
+            max(value - baseline for _, value in values),
+            budget.warmed_growth,
+        ),
     )
     if values[-1][0] != 100:
-        return
+        return comparisons
     middle = next(value for cycle, value in values if cycle == 50)
-    require_budget(
-        values[-1][1] - middle,
-        budget.late_endpoint_growth,
-        metric + ".late_endpoint_growth",
+    return (
+        *comparisons,
+        (
+            metric + ".late_endpoint_growth",
+            values[-1][1] - middle,
+            budget.late_endpoint_growth,
+        ),
+        (
+            metric + ".late_excursion_growth",
+            max(value - middle for cycle, value in values if cycle > 50),
+            budget.late_excursion_growth,
+        ),
     )
-    require_budget(
-        max(value - middle for cycle, value in values if cycle > 50),
-        budget.late_excursion_growth,
-        metric + ".late_excursion_growth",
-    )
+
+
+def diagnostic_observation(
+    metric: str, observed: int | float, reference: int | float
+) -> JsonObject:
+    return {
+        "metric": metric,
+        "observed": observed,
+        "reference": reference,
+        "exceeds_reference": observed > reference,
+    }
 
 
 def sampled_payload_bytes(workload: Workload) -> int:

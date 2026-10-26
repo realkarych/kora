@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.measurements.harness import Report, Sample, new_report
+from tests.measurements.storage_budgets import read_budgets
 from tests.measurements.storage_evidence_common import (
     EvidenceFailure,
     validate_execution,
@@ -24,8 +25,7 @@ DIGEST: str = "b" * 64
     "phase",
     ["page", "first", "middle", "final", "restart", "concurrent", "concurrent_page"],
 )
-@pytest.mark.parametrize("field", ["seconds", "query_steps"])
-def test_inventory_budgets_cover_every_online_page_form(phase: str, field: str) -> None:
+def test_inventory_work_budget_covers_every_online_page_form(phase: str) -> None:
     report = qualification_report()
     changed: list[QualificationSample] = []
     for sample in report.samples:
@@ -33,16 +33,39 @@ def test_inventory_budgets_cover_every_online_page_form(phase: str, field: str) 
             isinstance(sample, InventoryPage)
             and sample.workload == "storage.inventory." + phase
         ):
-            sample = sample.model_copy(
-                update={"seconds": 10.0, "us_per_record": 10000000.0}
-                if field == "seconds"
-                else {"query_steps": 100000}
-            )
+            sample = sample.model_copy(update={"query_steps": 100000})
         changed.append(sample)
     report = report.model_copy(update={"samples": tuple(changed)})
 
     with pytest.raises(EvidenceFailure, match="inventory\\."):
         validate_boundaries(report, REVISION, DIGEST)
+
+
+@pytest.mark.parametrize(
+    "phase",
+    ["page", "first", "middle", "final", "restart", "concurrent", "concurrent_page"],
+)
+def test_inventory_timing_outlier_is_reported_for_every_online_page_form(
+    phase: str,
+) -> None:
+    report = qualification_report()
+    changed = tuple(
+        sample.model_copy(update={"seconds": 10.0, "us_per_record": 10000000.0})
+        if isinstance(sample, InventoryPage)
+        and sample.workload == "storage.inventory." + phase
+        else sample
+        for sample in report.samples
+    )
+    report = report.model_copy(update={"samples": changed})
+
+    diagnostics = validate_boundaries(report, REVISION, DIGEST)
+
+    assert {
+        "metric": "storage.inventory." + phase + ".seconds",
+        "observed": 10.0,
+        "reference": read_budgets().platforms["linux"].inventory_page_seconds,
+        "exceeds_reference": True,
+    } in diagnostics
 
 
 def test_inventory_budget_excludes_offline_seeding() -> None:

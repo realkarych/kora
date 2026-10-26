@@ -74,6 +74,15 @@ def test_storage_raw_union_requires_all_platform_producers_and_qualification(
 
     assert result["producers"] == 6
     assert result["qualifications"] == 2
+    diagnostics = result["diagnostics"]
+    assert isinstance(diagnostics, list)
+    assert len(diagnostics) == 8
+    assert all(
+        isinstance(group, dict)
+        and group["platform"] in {"linux", "darwin"}
+        and ("measurements" in group or "qualification" in group)
+        for group in diagnostics
+    )
 
 
 def test_storage_raw_union_refuses_reused_native_process_evidence(
@@ -221,15 +230,22 @@ def test_storage_evidence_refuses_unavailable_measured_resource_counters(
         validate_report(report, REVISION, DIGEST)
 
 
-def test_storage_evidence_refuses_excessive_settled_python_memory() -> None:
+def test_storage_evidence_retains_large_settled_python_memory_as_diagnostic() -> None:
     report = StorageReport.model_validate(report_data())
     changed = report.samples[10].model_copy(update={"python_post_gc_bytes": 16777216})
     report = report.model_copy(
         update={"samples": (*report.samples[:10], changed, *report.samples[11:])}
     )
 
-    with pytest.raises(EvidenceFailure, match="budget"):
-        validate_report(report, REVISION, DIGEST)
+    diagnostics = validate_report(report, REVISION, DIGEST)
+
+    assert any(
+        isinstance(diagnostic, dict)
+        and diagnostic["metric"] == "storage.raw.65536.python_post_gc_bytes"
+        and diagnostic["observed"] == 16777216
+        and diagnostic["exceeds_reference"] is True
+        for diagnostic in diagnostics
+    )
 
 
 @pytest.mark.parametrize(

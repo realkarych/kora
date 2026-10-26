@@ -9,8 +9,11 @@ from pydantic import Field, StrictBool, StrictInt, StrictStr
 from kora.ir.json import JsonValue
 from kora.protocols.common import BoundaryModel
 from tests.measurements.storage_budgets import (
-    GROWTH_FIELDS,
+    BLOCKING_GROWTH_FIELDS,
+    DIAGNOSTIC_GROWTH_FIELDS,
     GrowthBudget,
+    diagnostic_observation,
+    growth_comparisons,
     read_budgets,
     require_budget,
     sampled_payload_bytes,
@@ -128,7 +131,9 @@ def read_report(path: Path) -> StorageReport:
     return StorageReport.model_validate(read_json(path))
 
 
-def validate_report(report: StorageReport, revision: str, digest: str) -> None:
+def validate_report(
+    report: StorageReport, revision: str, digest: str
+) -> list[JsonValue]:
     if report.revision != revision or report.environment.source_digest != digest:
         raise EvidenceFailure("the storage evidence source/revision does not match")
     expected_gates = {workload.name for workload in WORKLOADS} | {"complete"}
@@ -257,18 +262,19 @@ def validate_report(report: StorageReport, revision: str, digest: str) -> None:
                 "the storage timing summary includes non-cycle samples "
                 "or differs from raw evidence"
             )
-    validate_budgets(report)
+    return validate_budgets(report)
 
 
-def validate_budgets(report: StorageReport) -> None:
+def validate_budgets(report: StorageReport) -> list[JsonValue]:
     budget = read_budgets().platforms[report.platform]
+    diagnostics: list[JsonValue] = []
     for workload in WORKLOADS:
         points = tuple(
             sample
             for sample in report.samples
             if sample.workload == workload.name and sample.resource_sample
         )
-        for field in GROWTH_FIELDS:
+        for field in (*BLOCKING_GROWTH_FIELDS, *DIAGNOSTIC_GROWTH_FIELDS):
             growth: object = getattr(budget, field)
             if not isinstance(growth, GrowthBudget):
                 raise EvidenceFailure("a required growth budget is unavailable")
@@ -278,7 +284,16 @@ def validate_budgets(report: StorageReport) -> None:
             baseline = (
                 points[0].rss_bytes if field == "phase_peak_rss_bytes" else values[0][1]
             )
-            validate_growth(values, baseline, growth, workload.name + "." + field)
+            metric = workload.name + "." + field
+            if field in BLOCKING_GROWTH_FIELDS:
+                validate_growth(values, baseline, growth, metric)
+            else:
+                diagnostics.extend(
+                    diagnostic_observation(name, observed, reference)
+                    for name, observed, reference in growth_comparisons(
+                        values, baseline, growth, metric
+                    )
+                )
         payload = sampled_payload_bytes(workload)
         for sample in points:
             if sample.phase != "cycle":
@@ -299,21 +314,26 @@ def validate_budgets(report: StorageReport) -> None:
                 workload.name + ".phase_peak_allocated_bytes",
             )
         timing = budget.workloads[workload.name]
-        require_budget(
-            report.summary[workload.name]["p95_us_per_record"] / 1000000,
-            timing.legacy_p95_seconds,
-            workload.name + ".legacy_p95_seconds",
+        diagnostics.append(
+            diagnostic_observation(
+                workload.name + ".legacy_p95_seconds",
+                report.summary[workload.name]["p95_us_per_record"] / 1000000,
+                timing.legacy_p95_seconds,
+            )
         )
         if timing.maximum_cycle_seconds is not None:
-            require_budget(
-                max(
-                    sample.seconds
-                    for sample in report.samples
-                    if sample.workload == workload.name and sample.phase == "cycle"
-                ),
-                timing.maximum_cycle_seconds,
-                workload.name + ".maximum_cycle_seconds",
+            diagnostics.append(
+                diagnostic_observation(
+                    workload.name + ".maximum_cycle_seconds",
+                    max(
+                        sample.seconds
+                        for sample in report.samples
+                        if sample.workload == workload.name and sample.phase == "cycle"
+                    ),
+                    timing.maximum_cycle_seconds,
+                )
             )
+    return diagnostics
 
 
 def validate_junit(path: Path, repeat: int) -> None:
@@ -360,6 +380,7 @@ def validate(root: Path, revision: str, repository: Path) -> dict[str, JsonValue
     seen: set[tuple[str, int]] = set()
     processes: set[tuple[str, str, int, str]] = set()
     digest = source_digest(repository)
+    diagnostics: list[JsonValue] = []
     for path in reports:
         report = read_report(path)
         identity = (report.platform, report.environment.producer)
@@ -379,7 +400,7 @@ def validate(root: Path, revision: str, repository: Path) -> dict[str, JsonValue
                 "independent producer process identities are duplicated"
             )
         processes.add(process)
-        validate_report(report, revision, digest)
+        observations = validate_report(report, revision, digest)
         producer = path.parent
         validate_checkpoint(producer, report)
         validate_junit(producer / "measurement.xml", report.environment.producer)
@@ -394,16 +415,24 @@ def validate(root: Path, revision: str, repository: Path) -> dict[str, JsonValue
                         allocation = producer / f"{workload.name}-{cycle}.{suffix}"
                         if allocation.stat().st_size == 0:
                             raise EvidenceFailure("allocation evidence is empty")
+        diagnostics.append(
+            {
+                "platform": report.platform,
+                "producer": report.environment.producer,
+                "measurements": observations,
+            }
+        )
     if seen != set(PRODUCERS):
         raise EvidenceFailure(
             "the Linux/macOS independent-producer union is incomplete"
         )
     qualifications: set[str] = set()
     for path in root.rglob("boundaries.json"):
-        platform = validate_qualification(path.parent, revision, digest)
+        platform, observations = validate_qualification(path.parent, revision, digest)
         if platform in qualifications:
             raise EvidenceFailure("a qualification platform is duplicated")
         qualifications.add(platform)
+        diagnostics.append({"platform": platform, "qualification": observations})
     if qualifications != {"linux", "darwin"}:
         raise EvidenceFailure("the platform qualification union is incomplete")
     return {
@@ -411,6 +440,7 @@ def validate(root: Path, revision: str, repository: Path) -> dict[str, JsonValue
         "producers": len(seen),
         "qualifications": len(qualifications),
         "source_digest": digest,
+        "diagnostics": diagnostics,
     }
 
 

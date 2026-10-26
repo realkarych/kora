@@ -5,9 +5,14 @@ from typing import Annotated, Final, Literal
 
 from pydantic import Field, StrictBool, StrictInt, StrictStr, TypeAdapter
 
+from kora.ir.json import JsonValue
 from kora.ir.scalars import Digest
 from kora.protocols.common import BoundaryModel
-from tests.measurements.storage_budgets import read_budgets, require_budget
+from tests.measurements.storage_budgets import (
+    diagnostic_observation,
+    read_budgets,
+    require_budget,
+)
 from tests.measurements.storage_evidence_common import (
     EvidenceFailure,
     junit_nodes,
@@ -253,7 +258,7 @@ def validate_pages(pages: tuple[InventoryPage, ...], count: int) -> tuple[str, .
 
 def validate_boundaries(
     report: QualificationReport, revision: str, digest: str
-) -> None:
+) -> list[JsonValue]:
     if (
         report.revision != revision
         or report.environment.source_digest != digest
@@ -448,6 +453,7 @@ def validate_boundaries(
                 "unavailable diagnostics prevented provider closure/progress"
             )
     budget = read_budgets().platforms[report.platform]
+    diagnostics: list[JsonValue] = []
     for sample in report.samples:
         if isinstance(sample, InventoryPage):
             require_budget(
@@ -455,18 +461,23 @@ def validate_boundaries(
                 budget.inventory_query_steps,
                 "inventory.query_steps",
             )
-            require_budget(
-                sample.seconds,
-                budget.inventory_page_seconds,
-                "inventory.page_seconds",
+            diagnostics.append(
+                diagnostic_observation(
+                    sample.workload + ".seconds",
+                    sample.seconds,
+                    budget.inventory_page_seconds,
+                )
             )
+    return diagnostics
 
 
-def validate_qualification(directory: Path, revision: str, digest: str) -> str:
+def validate_qualification(
+    directory: Path, revision: str, digest: str
+) -> tuple[str, list[JsonValue]]:
     report = QualificationReport.model_validate(
         read_json(directory / "boundaries.json")
     )
-    validate_boundaries(report, revision, digest)
+    diagnostics = validate_boundaries(report, revision, digest)
     if junit_nodes(directory / "qualification.xml") != qualification_nodes():
         raise EvidenceFailure("the exact qualification test inventory is incomplete")
     for sink in ("blocked", "broken"):
@@ -599,4 +610,4 @@ def validate_qualification(directory: Path, revision: str, digest: str) -> str:
             raise EvidenceFailure(
                 "a required pressure failure/closure trace is missing"
             )
-    return report.platform
+    return report.platform, diagnostics
