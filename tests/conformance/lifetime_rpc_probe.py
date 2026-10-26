@@ -303,6 +303,13 @@ async def run(address: str, mode: str, feedback_address: str) -> None:
         tree.token.resource_id,
         process.token.resource_id,
     }
+    if mode in {"eof", "terminal", "idle"}:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as feedback:
+            feedback.bind(feedback_address + "-close")
+            feedback.setblocking(False)
+            loop = asyncio.get_running_loop()
+            await loop.sock_sendto(feedback, b"c", feedback_address)
+            assert await loop.sock_recv(feedback, 1) == b"s"
     report = await client.close(tree.token.resource_id)
     assert report.cleanup_reference is None
     if mode == "terminal":

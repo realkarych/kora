@@ -96,6 +96,10 @@ async def advance_while_running(
     return False
 
 
+async def wait_for_completion(operation: asyncio.Task[PluginListing]) -> None:
+    await asyncio.wait((operation,))
+
+
 async def exercise(case: str) -> dict[str, object]:
     clock = ProbeClock()
     diagnostics = configure_process(
@@ -143,6 +147,17 @@ async def exercise(case: str) -> dict[str, object]:
                 if case == "cancel_before_timer":
                     process.signal(signal.SIGKILL, started + 5_000_000_000)
                     await asyncio.wait((operation,))
+                if case == "result_wait_timeout":
+                    try:
+                        async with asyncio.timeout(0):
+                            await wait_for_completion(operation)
+                    except TimeoutError:
+                        if operation.done() or process.closed:
+                            raise ValueError(
+                                "discovery ownership ended with its waiter"
+                            ) from None
+                    else:
+                        raise ValueError("result waiter was not interrupted")
             if case not in {"crash", "retained"}:
                 phase = "cooperative_deadline"
                 advanced = await advance_while_running(
@@ -163,8 +178,9 @@ async def exercise(case: str) -> dict[str, object]:
             cleanup_reason: str | None = None
             retained_content: str | None = None
             phase = "operation_result"
+            await wait_for_completion(operation)
             try:
-                await operation
+                operation.result()
             except asyncio.CancelledError as error:
                 outcome = "cancelled"
                 if isinstance(error.__cause__, ListingError):

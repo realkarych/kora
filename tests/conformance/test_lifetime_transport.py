@@ -151,12 +151,11 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                         asyncio.get_running_loop().sock_accept(listener), 5
                     )
                     parent = LifetimeEndpoint(owner, child.token.resource_id, endpoint)
-
-                    frontier_deadline = asyncio.get_running_loop().time() + 5
-                    async with asyncio.timeout_at(frontier_deadline):
+                    closing_peer: str | bytes | None = None
+                    if mode in {"eof", "terminal", "idle"}:
+                        running = asyncio.create_task(parent.run())
+                        loop = asyncio.get_running_loop()
                         if mode == "idle":
-                            running = asyncio.create_task(parent.run())
-                            loop = asyncio.get_running_loop()
                             marker, peer = await loop.sock_recvfrom(feedback, 1)
                             assert marker == b"r"
                             clock.advance(
@@ -165,6 +164,15 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                             await loop.sock_sendto(feedback, b"s", peer)
                             assert await loop.sock_recv(feedback, 1) == b"p"
                             assert owner.admission_open
+                        marker, closing_peer = await loop.sock_recvfrom(feedback, 1)
+                        assert marker == b"c"
+
+                    frontier_deadline = asyncio.get_running_loop().time() + 5
+                    async with asyncio.timeout_at(frontier_deadline):
+                        if closing_peer is not None:
+                            assert running is not None
+                            loop = asyncio.get_running_loop()
+                            await loop.sock_sendto(feedback, b"s", closing_peer)
                             report = await running
                         elif mode.startswith("header_"):
                             running = asyncio.create_task(parent.run())

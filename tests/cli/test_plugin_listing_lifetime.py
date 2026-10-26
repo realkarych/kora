@@ -19,6 +19,7 @@ from tests.support.provider_tooling import build_fixture_wheel, install_tooling
         ("repeat_cancel", False, "factory", False),
         ("cancel", True, "factory", False),
         ("cancel_before_timer", True, "factory", False),
+        ("result_wait_timeout", True, "factory", False),
         ("timeout", False, "factory", False),
         ("crash", False, "factory", False),
         ("descendant", False, "factory", False),
@@ -96,7 +97,14 @@ def test_listing_joins_owned_processes_on_every_exit(
             assert b"cli.provider_listing_retained" in completed.stderr
         assert payload["outcome"] == (
             "cancelled"
-            if case in {"cancel", "cancel_before_timer", "repeat_cancel", "unknown"}
+            if case
+            in {
+                "cancel",
+                "cancel_before_timer",
+                "result_wait_timeout",
+                "repeat_cancel",
+                "unknown",
+            }
             else "invalid_discovery"
             if case in {"timeout", "crash"}
             else "state_retained"
