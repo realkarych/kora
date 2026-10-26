@@ -236,246 +236,239 @@ def test_artifact_storage_staging_round_trip(
 def test_artifact_storage_promotion_is_create_only(
     kora_provider: ArtifactStorage, kora_capture: Capture
 ) -> None:
-    context = context_for(kora_capture)
+    asyncio.run(
+        check_artifact_storage_promotion_is_create_only(
+            kora_provider, context_for(kora_capture)
+        )
+    )
 
-    async def scenario() -> None:
-        first, _, _ = await seal_bytes(kora_provider, "first", b"same-bytes", context)
-        second, _, _ = await seal_bytes(kora_provider, "second", b"same-bytes", context)
-        raw, _, _ = await seal_bytes(kora_provider, "candidate", b"raw-bytes", context)
-        preparation = PreparationArguments(
-            version=1,
-            source=raw,
-            maximum_output_size=8,
-            expected_output_digest=digest(b"prepared"),
-        )
-        prepared = await kora_provider.prepare_content(
-            ContentPreparation(
-                version=1,
-                operation=operation(
-                    kora_provider.identity(), "prepare", "prepare_content", preparation
-                ),
-                arguments=preparation,
-            ),
-            BytesSource(b"prepared"),
-            context,
-        )
-        forged = (
-            SealedStage.model_validate(
-                {
-                    **first.model_dump(),
-                    "stage": StageRef.model_validate(
-                        {**first.stage.model_dump(), "stage_id": "foreign-stage"}
-                    ),
-                }
-            ),
-            SealedStage.model_validate(
-                {**first.model_dump(), "seal_identity": "foreign-seal"}
-            ),
-            PreparedContentRef.model_validate(
-                {**prepared.model_dump(), "content_identity": "foreign-candidate"}
-            ),
-            PreparedContentRef.model_validate(
-                {**prepared.model_dump(), "source": first}
-            ),
-        )
-        for index, content in enumerate(forged):
-            with pytest.raises(KoraProtocolError):
-                await publish(kora_provider, content, f"forged-{index}", kora_capture)
-            check(
-                not await kora_provider.exists(
-                    ContentAddress(
-                        version=1,
-                        storage_identity=kora_provider.identity(),
-                        payload_digest=content.payload_digest,
-                    ),
-                    context,
-                ),
-                "a first-call foreign binding cannot publish bytes",
-            )
-        wrong_destination = ContentAddress(
-            version=1,
-            storage_identity=kora_provider.identity(),
-            payload_digest=digest(b"wrong-destination"),
-        )
-        wrong_arguments = PromotionArguments(
-            version=1, content=prepared, address=wrong_destination, content_generation=1
-        )
-        with pytest.raises(KoraProtocolError):
-            await kora_provider.promote(
-                PromotionRequest(
-                    version=1,
-                    operation=operation(
-                        kora_provider.identity(),
-                        "wrong-destination",
-                        "promote",
-                        wrong_arguments,
-                    ),
-                    arguments=wrong_arguments,
-                ),
-                context,
-            )
-        check(
-            not await kora_provider.exists(wrong_destination, context),
-            "destination mismatch is refused before publication",
-        )
-        binding_spec = stage_spec(kora_provider.identity(), "binding", b"bound")
-        binding = await kora_provider.begin_stage(
-            operation(
-                kora_provider.identity(), "binding-begin", "begin_stage", binding_spec
-            ),
-            binding_spec,
-            context,
-        )
-        part_spec = single_part(b"bound")
-        part = await kora_provider.write_part(
-            operation(
-                kora_provider.identity(),
-                "binding-part",
-                "write_part",
-                StageWrite(version=1, stage=binding, spec=part_spec),
-            ),
-            binding,
-            part_spec,
-            BytesSource(b"bound"),
-            context,
-        )
-        manifest = single_manifest(binding, part_spec, part.part_identity)
-        foreign_part = single_manifest(binding, part_spec, "foreign-part")
-        foreign_stage = StageManifest.model_validate(
-            {**manifest.model_dump(), "stage": first.stage}
-        )
-        for index, invalid in enumerate((foreign_part, foreign_stage)):
-            with pytest.raises(KoraProtocolError):
-                await kora_provider.seal_stage(
-                    operation(
-                        kora_provider.identity(),
-                        f"invalid-seal-{index}",
-                        "seal_stage",
-                        invalid,
-                    ),
-                    binding,
-                    invalid,
-                    context,
-                )
-        valid = await kora_provider.seal_stage(
-            operation(kora_provider.identity(), "binding-seal", "seal_stage", manifest),
-            binding,
-            manifest,
-            context,
-        )
-        check(
-            valid.payload_digest == binding_spec.payload_digest,
-            "refused bindings preserve the valid stage",
-        )
-        prefix_spec = stage_spec(kora_provider.identity(), "incomplete", b"x")
-        prefix_stage = await kora_provider.begin_stage(
-            operation(
-                kora_provider.identity(), "incomplete-begin", "begin_stage", prefix_spec
-            ),
-            prefix_spec,
-            context,
-        )
-        source_spec = single_part(b"x")
-        capture = PrefixCapture(
-            version=1, stage=prefix_stage, source_spec=source_spec, count=0
-        )
-        prefix = await kora_provider.capture_prefix(
-            operation(
-                kora_provider.identity(), "incomplete-prefix", "capture_prefix", capture
-            ),
-            prefix_stage,
-            source_spec,
-            0,
-            BytesSource(b"x"),
-            context,
-        )
-        incomplete_manifest = StageManifest(
-            version=1,
-            stage=prefix_stage,
-            parts=(),
-            prefix=ManifestPrefix(
-                version=1,
-                source_spec=source_spec,
-                count=0,
-                digest=prefix.digest,
-                private_identity=prefix.private_identity,
-            ),
-        )
-        incomplete = await kora_provider.seal_stage(
-            operation(
-                kora_provider.identity(),
-                "incomplete-seal",
-                "seal_stage",
-                incomplete_manifest,
-            ),
-            prefix_stage,
-            incomplete_manifest,
-            context,
-        )
-        with pytest.raises(KoraProtocolError):
-            await publish(kora_provider, incomplete, "incomplete-publish", kora_capture)
-        check(
-            not await kora_provider.exists(
-                ContentAddress(
-                    version=1,
-                    storage_identity=kora_provider.identity(),
-                    payload_digest=incomplete.payload_digest,
-                ),
-                context,
-            ),
-            "an incomplete raw source cannot be published",
-        )
 
-        _, created = await publish(kora_provider, first, "first-publish", kora_capture)
-        _, existing = await publish(
-            kora_provider, second, "second-publish", kora_capture
-        )
-        _, selected = await publish(
-            kora_provider, prepared, "prepared-publish", kora_capture
-        )
-        selected_reader = await kora_provider.get(selected.content, context)
-        async with selected_reader:
-            selected_bytes = b"".join([chunk async for chunk in selected_reader])
-        arguments = PreparationArguments(
-            version=1,
-            source=first,
-            maximum_output_size=8,
-            expected_output_digest=digest(b"prepared"),
-        )
-        request = ContentPreparation(
+async def check_artifact_storage_promotion_is_create_only(
+    provider: ArtifactStorage, context: ProtocolContext
+) -> None:
+    first, _, _ = await seal_bytes(provider, "first", b"same-bytes", context)
+    second, _, _ = await seal_bytes(provider, "second", b"same-bytes", context)
+    raw, _, _ = await seal_bytes(provider, "candidate", b"raw-bytes", context)
+    preparation = PreparationArguments(
+        version=1,
+        source=raw,
+        maximum_output_size=8,
+        expected_output_digest=digest(b"prepared"),
+    )
+    prepared = await provider.prepare_content(
+        ContentPreparation(
             version=1,
             operation=operation(
-                kora_provider.identity(), "late-prepare", "prepare_content", arguments
+                provider.identity(), "prepare", "prepare_content", preparation
             ),
-            arguments=arguments,
-        )
+            arguments=preparation,
+        ),
+        BytesSource(b"prepared"),
+        context,
+    )
+    forged = (
+        SealedStage.model_validate(
+            {
+                **first.model_dump(),
+                "stage": StageRef.model_validate(
+                    {**first.stage.model_dump(), "stage_id": "foreign-stage"}
+                ),
+            }
+        ),
+        SealedStage.model_validate(
+            {**first.model_dump(), "seal_identity": "foreign-seal"}
+        ),
+        PreparedContentRef.model_validate(
+            {**prepared.model_dump(), "content_identity": "foreign-candidate"}
+        ),
+        PreparedContentRef.model_validate({**prepared.model_dump(), "source": first}),
+    )
+    for index, content in enumerate(forged):
         with pytest.raises(KoraProtocolError):
-            await kora_provider.prepare_content(
-                request, BytesSource(b"prepared"), context
-            )
-
-        check(created.created_object, "first publication reports creation")
-        check(not existing.created_object, "deduplication reports the existing object")
+            await publish_with_context(provider, content, f"forged-{index}", context)
         check(
-            existing.content == created.content,
-            "deduplication preserves the exact incarnation",
-        )
-        check(
-            selected_bytes == b"prepared", "publication selects the prepared candidate"
-        )
-        check(
-            not await kora_provider.exists(
+            not await provider.exists(
                 ContentAddress(
                     version=1,
-                    storage_identity=kora_provider.identity(),
-                    payload_digest=raw.payload_digest,
+                    storage_identity=provider.identity(),
+                    payload_digest=content.payload_digest,
                 ),
                 context,
             ),
-            "prepared publication does not publish raw bytes",
+            "a first-call foreign binding cannot publish bytes",
         )
+    wrong_destination = ContentAddress(
+        version=1,
+        storage_identity=provider.identity(),
+        payload_digest=digest(b"wrong-destination"),
+    )
+    wrong_arguments = PromotionArguments(
+        version=1, content=prepared, address=wrong_destination, content_generation=1
+    )
+    with pytest.raises(KoraProtocolError):
+        await provider.promote(
+            PromotionRequest(
+                version=1,
+                operation=operation(
+                    provider.identity(),
+                    "wrong-destination",
+                    "promote",
+                    wrong_arguments,
+                ),
+                arguments=wrong_arguments,
+            ),
+            context,
+        )
+    check(
+        not await provider.exists(wrong_destination, context),
+        "destination mismatch is refused before publication",
+    )
+    binding_spec = stage_spec(provider.identity(), "binding", b"bound")
+    binding = await provider.begin_stage(
+        operation(provider.identity(), "binding-begin", "begin_stage", binding_spec),
+        binding_spec,
+        context,
+    )
+    part_spec = single_part(b"bound")
+    part = await provider.write_part(
+        operation(
+            provider.identity(),
+            "binding-part",
+            "write_part",
+            StageWrite(version=1, stage=binding, spec=part_spec),
+        ),
+        binding,
+        part_spec,
+        BytesSource(b"bound"),
+        context,
+    )
+    manifest = single_manifest(binding, part_spec, part.part_identity)
+    foreign_part = single_manifest(binding, part_spec, "foreign-part")
+    foreign_stage = StageManifest.model_validate(
+        {**manifest.model_dump(), "stage": first.stage}
+    )
+    for index, invalid in enumerate((foreign_part, foreign_stage)):
+        with pytest.raises(KoraProtocolError):
+            await provider.seal_stage(
+                operation(
+                    provider.identity(),
+                    f"invalid-seal-{index}",
+                    "seal_stage",
+                    invalid,
+                ),
+                binding,
+                invalid,
+                context,
+            )
+    valid = await provider.seal_stage(
+        operation(provider.identity(), "binding-seal", "seal_stage", manifest),
+        binding,
+        manifest,
+        context,
+    )
+    check(
+        valid.payload_digest == binding_spec.payload_digest,
+        "refused bindings preserve the valid stage",
+    )
+    prefix_spec = stage_spec(provider.identity(), "incomplete", b"x")
+    prefix_stage = await provider.begin_stage(
+        operation(provider.identity(), "incomplete-begin", "begin_stage", prefix_spec),
+        prefix_spec,
+        context,
+    )
+    source_spec = single_part(b"x")
+    capture = PrefixCapture(
+        version=1, stage=prefix_stage, source_spec=source_spec, count=0
+    )
+    prefix = await provider.capture_prefix(
+        operation(provider.identity(), "incomplete-prefix", "capture_prefix", capture),
+        prefix_stage,
+        source_spec,
+        0,
+        BytesSource(b"x"),
+        context,
+    )
+    incomplete_manifest = StageManifest(
+        version=1,
+        stage=prefix_stage,
+        parts=(),
+        prefix=ManifestPrefix(
+            version=1,
+            source_spec=source_spec,
+            count=0,
+            digest=prefix.digest,
+            private_identity=prefix.private_identity,
+        ),
+    )
+    incomplete = await provider.seal_stage(
+        operation(
+            provider.identity(),
+            "incomplete-seal",
+            "seal_stage",
+            incomplete_manifest,
+        ),
+        prefix_stage,
+        incomplete_manifest,
+        context,
+    )
+    with pytest.raises(KoraProtocolError):
+        await publish_with_context(provider, incomplete, "incomplete-publish", context)
+    check(
+        not await provider.exists(
+            ContentAddress(
+                version=1,
+                storage_identity=provider.identity(),
+                payload_digest=incomplete.payload_digest,
+            ),
+            context,
+        ),
+        "an incomplete raw source cannot be published",
+    )
 
-    asyncio.run(scenario())
+    _, created = await publish_with_context(provider, first, "first-publish", context)
+    _, existing = await publish_with_context(
+        provider, second, "second-publish", context
+    )
+    _, selected = await publish_with_context(
+        provider, prepared, "prepared-publish", context
+    )
+    selected_reader = await provider.get(selected.content, context)
+    async with selected_reader:
+        selected_bytes = b"".join([chunk async for chunk in selected_reader])
+    arguments = PreparationArguments(
+        version=1,
+        source=first,
+        maximum_output_size=8,
+        expected_output_digest=digest(b"prepared"),
+    )
+    request = ContentPreparation(
+        version=1,
+        operation=operation(
+            provider.identity(), "late-prepare", "prepare_content", arguments
+        ),
+        arguments=arguments,
+    )
+    with pytest.raises(KoraProtocolError):
+        await provider.prepare_content(request, BytesSource(b"prepared"), context)
+
+    check(created.created_object, "first publication reports creation")
+    check(not existing.created_object, "deduplication reports the existing object")
+    check(
+        existing.content == created.content,
+        "deduplication preserves the exact incarnation",
+    )
+    check(selected_bytes == b"prepared", "publication selects the prepared candidate")
+    check(
+        not await provider.exists(
+            ContentAddress(
+                version=1,
+                storage_identity=provider.identity(),
+                payload_digest=raw.payload_digest,
+            ),
+            context,
+        ),
+        "prepared publication does not publish raw bytes",
+    )
 
 
 @pytest.mark.kora_conformance

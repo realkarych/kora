@@ -24,6 +24,8 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage import ArtifactStorage, StorageByteStream
 from kora.protocols.storage_models import (
     ContentRef,
+    PromotionRequest,
+    PromotionResult,
     StageRef,
     StageRetirement,
     StorageLimits,
@@ -39,6 +41,7 @@ from tests.plugins.storage.inspection import InspectedStorage
 Result = TypeVar("Result")
 StorageCheck = Callable[[ArtifactStorage, ProtocolContext], Awaitable[None]]
 CASES: tuple[StorageCheck, ...] = (
+    checks.check_artifact_storage_promotion_is_create_only,
     checks.check_artifact_storage_staging_lifetime,
     checks.check_artifact_storage_deletion_lifetime,
     checks.check_artifact_storage_inventory_is_bounded,
@@ -102,6 +105,14 @@ class WrongRangeStorage(LoopBoundStorage):
         return await super().get_range(content, offset + 1, length, ctx)
 
 
+class WrongPromotionStorage(LoopBoundStorage):
+    async def promote(
+        self, request: PromotionRequest, ctx: ProtocolContext
+    ) -> PromotionResult:
+        result = await super().promote(request, ctx)
+        return result.model_copy(update={"created_object": False})
+
+
 class WrongInventoryStorage(LoopBoundStorage):
     async def scan(
         self,
@@ -159,6 +170,7 @@ async def exercise_case(
     assert all(received is context for received in provider.contexts)
     assert "begin_stage" in provider.operations
     if case in (
+        checks.check_artifact_storage_promotion_is_create_only,
         checks.check_artifact_storage_deletion_lifetime,
         checks.check_artifact_storage_range_reads_are_exact,
         checks.check_artifact_storage_range_lifetime,
@@ -188,6 +200,11 @@ def test_shared_storage_check_uses_caller_loop_and_exact_provider(
 @pytest.mark.parametrize(
     ("provider_type", "case", "message"),
     [
+        (
+            WrongPromotionStorage,
+            checks.check_artifact_storage_promotion_is_create_only,
+            "first publication reports creation",
+        ),
         (
             WrongRangeStorage,
             checks.check_artifact_storage_range_reads_are_exact,
