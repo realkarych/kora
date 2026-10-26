@@ -1,6 +1,6 @@
 # Local artifact storage numerical budget derivation
 
-Status: proposed verification policy for [#255](https://github.com/realkarych/kora/issues/255), pending explicit owner review and final-revision CI. The [fixed configuration](../../tests/measurements/storage_budgets.json) is not approved by this record.
+Status: historical numerical derivation for [#255](https://github.com/realkarych/kora/issues/255), with explicit owner-approved completion dispositions below. Final source-matched CI and settings evidence belongs to PR #258. This record does not itself approve the [fixed configuration](../../tests/measurements/storage_budgets.json).
 
 ## Evidence and limitations
 
@@ -162,7 +162,7 @@ Observation CSV SHA-256: `5887e3dd6cbe91684724f38815980e29fd074bec13ec8bfc4fdf0c
 
 ## Verification status
 
-Typed configuration, arithmetic and refusal tests are implemented. Independent assessments and exact numerical owner approval remain pending. Final evidence must match the committed source/configuration digest and revision. This record does not approve a status-protection or automatic-review setting.
+Typed configuration, arithmetic and refusal tests are implemented. The appended dispositions and linked PR preserve owner approval and independent review status. Final evidence must match the committed source/configuration digest and revision. This record does not approve a status-protection or automatic-review setting.
 
 ## Required-status activation proposal
 
@@ -189,6 +189,16 @@ The existing master protection was read on 2026-10-26. The proposed change prese
 
 ## Owner-approved completion disposition
 
-The owner approved the named [#255 completion amendment](https://github.com/realkarych/kora/issues/255#issuecomment-6405709610) on 2026-10-26. The table and retained observations above are historical derivation inputs, not a requirement to promote every numerical reference to a product guarantee. The configuration remains unchanged. Process-wide Python/tracer/RSS growth and cycle/inventory elapsed timings are diagnostics with raw values, references and exceedance flags. Captured Python peak/current, every physical storage bound, actual indexed query work, exact closure, finite quotas, source/counter inventories and all deadlines remain blocking. No old failed campaign is relabeled passed, and no general leak-freedom/native-RSS/throughput claim is added. [The current implementation record](local-artifact-storage-2026-10-23.md#approved-completion-scope-and-verification-interpretation) identifies retained guarantees and the finite follow-up.
+The owner approved the named [#255 completion amendment](https://github.com/realkarych/kora/issues/255#issuecomment-6405709610) on 2026-10-26. The table and retained observations above are historical derivation inputs, not a requirement to promote every numerical reference to a product guarantee. That diagnostic disposition leaves the configuration unchanged; the physical allowance below is a separate named replacement. Process-wide Python/tracer/RSS growth and cycle/inventory elapsed timings are diagnostics with raw values, references and exceedance flags. Captured Python peak/current, every physical storage bound, actual indexed query work, exact closure, finite quotas, source/counter inventories and all deadlines remain blocking. No old failed campaign is relabeled passed, and no general leak-freedom/native-RSS/throughput claim is added. [The current implementation record](local-artifact-storage-2026-10-23.md#approved-completion-scope-and-verification-interpretation) identifies retained guarantees and the finite follow-up.
 
 The same approved plan authorizes the single required-status addition described above. Application remains separate from this historical proposal and must re-read/preserve current protection immediately before adding Required storage evidence for Actions app15368. Final settings and source-matched CI evidence are recorded in PR #258.
+
+## Owner-approved Linux allocated-block late excursion
+
+On 2026-10-26 the owner explicitly approved [the named replacement](https://github.com/realkarych/kora/issues/255#issuecomment-6411643550), recorded in [the approval receipt](https://github.com/realkarych/kora/issues/255#issuecomment-6412288197): only `platforms.linux.allocated_bytes.late_excursion_growth` changes from 0 to 8192 bytes. This permits sampled transient excursions above cycle 50 across all eight Linux 100-cycle workloads, removing their sampled zero late-excursion guarantee. It reuses the existing 8192-byte warmed allowance as a finite prospective tolerance, without a confidence-interval or harmlessness claim.
+
+The 81920-byte absolute allocated-space cap, 8192-byte warmed cap and zero late endpoint-growth limit remain independent hard checks. All other physical quantities, macOS limits, actual owned-resource closure, quotas, integrity, crash/recovery checks, workload/cycle/source inventories and hard execution/cleanup deadlines remain unchanged and blocking. Three-cycle workloads have no late window and are unaffected.
+
+The adverse report is Linux repeat 2 at revision `20bff208d6e63cc02cc4e4c095d7e5399d5fde02`, [artifact 12636447773](https://github.com/realkarych/kora/actions/runs/40291377477/artifacts/12636447773), ZIP SHA-256 `45ff21d62c733cda99979b2b849fa41b52d92d1b6239c4933d2c736aab405e1c`. Its alias workload records allocated bytes of 61440 at baseline and cycles 10/20, 65536 at 30, 61440 at 40/50/60, 65536 at 70, and 61440 at 80/90/100. Database bytes stay 57344, unique logical bytes 57850, and journal/unlinked bytes zero. This is the only exceeded physical-growth comparison across the six retained producer reports. The aggregate observations do not attribute the change to a particular file or filesystem behavior, explain its cause, establish unsampled behavior or prove leak freedom. The original storage run remains failed under its original zero bound.
+
+`test_linux_allocated_growth_accepts_the_approved_late_excursion` exercises the inclusive 8192-byte limit. `test_linux_allocated_growth_refuses_an_excess_or_positive_endpoint` isolates refusal at 8193 bytes from the warmed and absolute ceilings and separately rejects a positive endpoint. All earlier refusal tests remain required. The configuration participates in the source digest; final-revision evidence must cover the approved configuration rather than relabeling historical output.

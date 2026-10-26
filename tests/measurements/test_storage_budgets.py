@@ -141,6 +141,32 @@ def test_growth_budget_accepts_each_inclusive_boundary() -> None:
     assert values[-1] == (100, 98)
 
 
+def test_linux_allocated_growth_accepts_the_approved_late_excursion() -> None:
+    budget = read_budgets().platforms["linux"].allocated_bytes
+    values = ((0, 65536), (50, 61440), (60, 69632), (100, 61440))
+
+    validate_growth(values, 65536, budget, "allocated_bytes")
+
+    assert budget.absolute == 81920
+    assert budget.warmed_growth == 8192
+    assert budget.late_endpoint_growth == 0
+    assert budget.late_excursion_growth == 8192
+
+
+@pytest.mark.parametrize(
+    ("peak", "endpoint", "metric"),
+    [(69633, 61440, "late_excursion_growth"), (65536, 61441, "late_endpoint_growth")],
+)
+def test_linux_allocated_growth_refuses_an_excess_or_positive_endpoint(
+    peak: int, endpoint: int, metric: str
+) -> None:
+    budget = read_budgets().platforms["linux"].allocated_bytes
+    values = ((0, 65536), (50, 61440), (60, peak), (100, endpoint))
+
+    with pytest.raises(EvidenceFailure, match=metric):
+        validate_growth(values, 65536, budget, "allocated_bytes")
+
+
 @pytest.mark.parametrize(
     ("budget", "values", "metric"),
     [

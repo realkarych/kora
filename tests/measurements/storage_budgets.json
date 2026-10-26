@@ -123,7 +123,7 @@
       "allocated_bytes": {
         "absolute": 81920,
         "late_endpoint_growth": 0,
-        "late_excursion_growth": 0,
+        "late_excursion_growth": 8192,
         "warmed_growth": 8192
       },
       "cumulative_maxrss_bytes": {
