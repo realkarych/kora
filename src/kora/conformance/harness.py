@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -84,6 +85,20 @@ class HarnessCase(StrEnum):
     NO_USAGE = "no_usage"
     STRUCTURED_OUTPUT = "structured_output"
     RESULT_TEXT = "result_text"
+
+
+@dataclass(frozen=True)
+class HarnessConformanceInputs:
+    failure: Callable[
+        [HarnessAdapter, JsonObject, ProtocolContext, str], Awaitable[object]
+    ]
+    prepare_case: Callable[
+        [HarnessAdapter, JsonObject, HarnessCase, ProtocolContext], Awaitable[None]
+    ]
+    denied_tool: str
+    configuration_effect: Callable[
+        [HarnessAdapter, JsonObject, ProtocolContext], Awaitable[None]
+    ]
 
 
 class HarnessExercise(Protocol):
@@ -175,13 +190,19 @@ class HostedRun:
 
 class HarnessHost:
     async def hosted(
-        self, adapter: HarnessAdapter, denied_tool: str, max_events: int | None
+        self,
+        adapter: HarnessAdapter,
+        denied_tool: str,
+        max_events: int | None,
+        configuration: JsonObject | None = None,
     ) -> HostedRun:
         trace = Trace()
         sink = ConformanceSink(max_events, trace)
         policy = ConformancePolicy(denied_tool, trace)
         spec = adapter.build_session_spec(
-            {}, WorkspaceTarget(root=CONFORMANCE_WORKSPACE, host_path=None), None
+            {} if configuration is None else configuration,
+            WorkspaceTarget(root=CONFORMANCE_WORKSPACE, host_path=None),
+            None,
         )
         result = await adapter.run(spec, policy, sink, NoLaunches())
         return HostedRun(result, tuple(sink.events), tuple(trace.entries))
@@ -190,6 +211,20 @@ class HarnessHost:
         self, adapter: HarnessAdapter, denied_tool: str, max_events: int | None
     ) -> HostedRun:
         return asyncio.run(self.hosted(adapter, denied_tool, max_events))
+
+
+async def run_harness_case(
+    host: HarnessHost,
+    provider: HarnessAdapter,
+    configuration: JsonObject,
+    context: ProtocolContext,
+    inputs: HarnessConformanceInputs,
+    case: HarnessCase,
+    max_events: int | None = None,
+) -> HostedRun:
+    retained = deepcopy(configuration)
+    await inputs.prepare_case(provider, deepcopy(retained), case, context)
+    return await host.hosted(provider, inputs.denied_tool, max_events, retained)
 
 
 @pytest.fixture
@@ -228,6 +263,10 @@ def test_harness_events_are_normalised(
         kora_harness_host, kora_harness_exercise, kora_capture, HarnessCase.TOOL_CALLS
     )
 
+    check_harness_events_are_normalised(run)
+
+
+def check_harness_events_are_normalised(run: HostedRun) -> None:
     check(bool(run.events), "the session emits normalised events")
     check(
         all(event.kind in EVENT_KINDS for event in run.events),
@@ -250,6 +289,10 @@ def test_harness_policy_precedes_every_tool_call(
         kora_harness_host, kora_harness_exercise, kora_capture, HarnessCase.TOOL_CALLS
     )
 
+    check_harness_policy_precedes_every_tool_call(run)
+
+
+def check_harness_policy_precedes_every_tool_call(run: HostedRun) -> None:
     decided = [identifier for kind, identifier in run.trace if kind == "decide"]
     check(len(decided) >= 2, "the session asks the policy for its tool calls")
     for position, (kind, identifier) in enumerate(run.trace):
@@ -289,6 +332,10 @@ def test_harness_max_events_denies_at_exact_count(
         MAX_EVENTS,
     )
 
+    check_harness_max_events_denies_at_exact_count(run)
+
+
+def check_harness_max_events_denies_at_exact_count(run: HostedRun) -> None:
     limited = [event for event in run.events if event.kind in LIMITED_KINDS]
     check(len(limited) == MAX_EVENTS, "exactly max_events limited events are emitted")
     decisions_after = [
@@ -326,6 +373,10 @@ def test_harness_usage_completeness(
         kora_harness_host, kora_harness_exercise, kora_capture, HarnessCase.NO_USAGE
     )
 
+    check_harness_usage_completeness(reported, silent)
+
+
+def check_harness_usage_completeness(reported: HostedRun, silent: HostedRun) -> None:
     check(bool(reported.result.usage), "reported usage yields model rows")
     check(
         reported.result.usage_coverage.completeness == "complete",
@@ -354,6 +405,12 @@ def test_harness_structured_output_and_fallbacks(
         kora_harness_host, kora_harness_exercise, kora_capture, HarnessCase.RESULT_TEXT
     )
 
+    check_harness_structured_output_and_fallbacks(structured, text)
+
+
+def check_harness_structured_output_and_fallbacks(
+    structured: HostedRun, text: HostedRun
+) -> None:
     check(
         structured.result.output is not None
         and structured.result.output.source == "structured_output",

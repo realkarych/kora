@@ -1,7 +1,7 @@
 import asyncio
 import dataclasses
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Final, cast
 
@@ -21,6 +21,7 @@ from kora.conformance.common import (
 )
 from kora.ir import ContractViolation, ToolPolicy
 from kora.ir.json import JsonObject, JsonValue
+from kora.protocols.common import ProtocolContext
 from kora.protocols.policy import (
     RULE_ID,
     Policy,
@@ -87,6 +88,15 @@ class PolicyCalls:
     other: str
     edits: tuple[EditCall, ...]
     malformed: JsonObject
+
+
+@dataclass(frozen=True)
+class PolicyConformanceInputs:
+    failure: Callable[[Policy, JsonObject, ProtocolContext, str], Awaitable[object]]
+    calls: PolicyCalls
+    configuration_effect: Callable[
+        [Policy, JsonObject, ProtocolContext], Awaitable[None]
+    ]
 
 
 @pytest.fixture
@@ -177,6 +187,15 @@ def decided(
         ]
 
 
+async def decided_async(
+    provider: Policy, context: ProtocolContext, calls: Iterable[Decision]
+) -> list[PolicyDecision]:
+    return [
+        checked(await provider.decide(request, layers, protected, context), layers)
+        for request, layers, protected in calls
+    ]
+
+
 def edit_requests(
     calls: PolicyCalls, path: str
 ) -> Iterator[tuple[EditCall, ToolCallRequest]]:
@@ -200,9 +219,17 @@ def texts(value: JsonValue) -> Iterator[str]:
 def test_policy_validate_refuses_a_malformed_policy(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls
 ) -> None:
-    document = kora_policy_calls.malformed
+    check_policy_validate_refuses_a_malformed_policy(
+        kora_policy_provider, kora_policy_calls
+    )
 
-    found = violations(kora_policy_provider.validate(document))
+
+def check_policy_validate_refuses_a_malformed_policy(
+    provider: Policy, calls: PolicyCalls
+) -> None:
+    document = calls.malformed
+
+    found = violations(provider.validate(document))
 
     check(bool(found), "validate refuses the malformed policy")
     for violation in found:
@@ -273,14 +300,33 @@ def test_policy_deny_in_either_layer_denies(
     kora_capture: Capture,
     layer: str,
 ) -> None:
-    calls = kora_policy_calls
-    cited = [
+    cited = deny_cases(kora_policy_calls, layer)
+
+    decisions = decided(kora_policy_provider, kora_capture, [call for call, _ in cited])
+
+    check_deny_cases(decisions, cited, layer)
+
+
+async def check_policy_deny_in_either_layer_denies(
+    provider: Policy, calls: PolicyCalls, context: ProtocolContext, layer: str
+) -> None:
+    cited = deny_cases(calls, layer)
+
+    decisions = await decided_async(provider, context, [call for call, _ in cited])
+
+    check_deny_cases(decisions, cited, layer)
+
+
+def deny_cases(calls: PolicyCalls, layer: str) -> list[tuple[Decision, int]]:
+    return [
         *placed_denies(calls, layer),
         *contested_denies(calls, layer),
     ]
 
-    decisions = decided(kora_policy_provider, kora_capture, [call for call, _ in cited])
 
+def check_deny_cases(
+    decisions: list[PolicyDecision], cited: list[tuple[Decision, int]], layer: str
+) -> None:
     check(all(not decision.allow for decision in decisions), "a matching deny denies")
     check(
         all(
@@ -299,9 +345,26 @@ def test_policy_allow_list_restricts_in_either_layer(
     kora_capture: Capture,
     layer: str,
 ) -> None:
-    calls = kora_policy_calls
+    grid = allow_list_cases(kora_policy_calls, layer)
+
+    decisions = decided(kora_policy_provider, kora_capture, grid)
+
+    check_allow_list_cases(decisions)
+
+
+async def check_policy_allow_list_restricts_in_either_layer(
+    provider: Policy, calls: PolicyCalls, context: ProtocolContext, layer: str
+) -> None:
+    grid = allow_list_cases(calls, layer)
+
+    decisions = await decided_async(provider, context, grid)
+
+    check_allow_list_cases(decisions)
+
+
+def allow_list_cases(calls: PolicyCalls, layer: str) -> Sequence[Decision]:
     targets = list(rule_targets(calls))
-    grid = [
+    grid: Sequence[Decision] = [
         (
             target.request,
             layered(layer, policy(allow=(calls.other,)), policy(allow=other)),
@@ -319,8 +382,10 @@ def test_policy_allow_list_restricts_in_either_layer(
         for target in targets
     ]
 
-    decisions = decided(kora_policy_provider, kora_capture, grid)
+    return grid
 
+
+def check_allow_list_cases(decisions: list[PolicyDecision]) -> None:
     check(
         all(not decision.allow for decision in decisions),
         "an allow list that does not match denies",
@@ -331,8 +396,25 @@ def test_policy_allow_list_restricts_in_either_layer(
 def test_policy_allows_what_no_rule_refuses(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls, kora_capture: Capture
 ) -> None:
-    calls = kora_policy_calls
-    grid = [
+    grid = allowed_cases(kora_policy_calls)
+
+    decisions = decided(kora_policy_provider, kora_capture, grid)
+
+    check_allowed_cases(decisions)
+
+
+async def check_policy_allows_what_no_rule_refuses(
+    provider: Policy, calls: PolicyCalls, context: ProtocolContext
+) -> None:
+    grid = allowed_cases(calls)
+
+    decisions = await decided_async(provider, context, grid)
+
+    check_allowed_cases(decisions)
+
+
+def allowed_cases(calls: PolicyCalls) -> Sequence[Decision]:
+    grid: Sequence[Decision] = [
         (target.request, chosen, protected)
         for target in rule_targets(calls)
         for chosen in (
@@ -364,8 +446,10 @@ def test_policy_allows_what_no_rule_refuses(
         for request in variants(edit.build(path))
     ]
 
-    decisions = decided(kora_policy_provider, kora_capture, grid)
+    return grid
 
+
+def check_allowed_cases(decisions: list[PolicyDecision]) -> None:
     check(
         all(decision.allow for decision in decisions),
         "a call no rule refuses is allowed",
@@ -399,14 +483,31 @@ def protected_requests(edit: EditCall, path: str) -> Iterator[ToolCallRequest]:
 def test_policy_protected_path_is_denied(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls, kora_capture: Capture
 ) -> None:
-    calls = kora_policy_calls
+    grid = protected_cases(kora_policy_calls)
+
+    decisions = decided(kora_policy_provider, kora_capture, grid)
+
+    check_protected_cases(decisions)
+
+
+async def check_policy_protected_path_is_denied(
+    provider: Policy, calls: PolicyCalls, context: ProtocolContext
+) -> None:
+    grid = protected_cases(calls)
+
+    decisions = await decided_async(provider, context, grid)
+
+    check_protected_cases(decisions)
+
+
+def protected_cases(calls: PolicyCalls) -> Sequence[Decision]:
     built = [(edit, edit.build(UNPROTECTED_PATH)) for edit in calls.edits]
     harnesses = {request.harness for _, request in built}
     covered = {
         harness: {request.tool for _, request in built if request.harness == harness}
         for harness in harnesses
     }
-    grid = [
+    grid: Sequence[Decision] = [
         (request, PolicyLayers(namespace=namespace, node=node), protected)
         for edit in calls.edits
         for protected, path in PROTECTED_SETS
@@ -443,7 +544,10 @@ def test_policy_protected_path_is_denied(
         all(EDIT_TOOLS[harness] <= covered[harness] for harness in harnesses),
         "every file-edit tool of each named harness is covered",
     )
-    decisions = decided(kora_policy_provider, kora_capture, grid)
+    return grid
+
+
+def check_protected_cases(decisions: list[PolicyDecision]) -> None:
     check(
         all(not decision.allow for decision in decisions), "a protected path is denied"
     )
@@ -483,15 +587,33 @@ def expected_decisions(calls: PolicyCalls) -> list[tuple[Decision, bool]]:
 def test_policy_decisions_are_deterministic(
     kora_policy_provider: Policy, kora_policy_calls: PolicyCalls, kora_capture: Capture
 ) -> None:
-    expected = [
-        entry for _ in range(3) for entry in expected_decisions(kora_policy_calls)
-    ]
-    base = len(expected) // 3
+    expected = deterministic_cases(kora_policy_calls)
 
     decisions = decided(
         kora_policy_provider, kora_capture, [call for call, _ in expected]
     )
 
+    check_deterministic_cases(decisions, expected)
+
+
+async def check_policy_decisions_are_deterministic(
+    provider: Policy, calls: PolicyCalls, context: ProtocolContext
+) -> None:
+    expected = deterministic_cases(calls)
+
+    decisions = await decided_async(provider, context, [call for call, _ in expected])
+
+    check_deterministic_cases(decisions, expected)
+
+
+def deterministic_cases(calls: PolicyCalls) -> list[tuple[Decision, bool]]:
+    return [entry for _ in range(3) for entry in expected_decisions(calls)]
+
+
+def check_deterministic_cases(
+    decisions: list[PolicyDecision], expected: list[tuple[Decision, bool]]
+) -> None:
+    base = len(expected) // 3
     check(
         [decision.allow for decision in decisions] == [allow for _, allow in expected],
         "interleaved requests keep their own decisions",
