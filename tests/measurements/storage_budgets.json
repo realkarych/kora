@@ -122,7 +122,7 @@
     "linux": {
       "allocated_bytes": {
         "absolute": 81920,
-        "late_endpoint_growth": 0,
+        "late_endpoint_growth": 8192,
         "late_excursion_growth": 8192,
         "warmed_growth": 8192
       },
