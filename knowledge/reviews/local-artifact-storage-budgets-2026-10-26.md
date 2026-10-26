@@ -186,3 +186,9 @@ The existing master protection was read on 2026-10-26. The proposed change prese
 | CEL evaluator lifetime |
 | Console browser checks |
 | Required storage evidence |
+
+## Owner-approved completion disposition
+
+The owner approved the named [#255 completion amendment](https://github.com/realkarych/kora/issues/255#issuecomment-6405709610) on 2026-10-26. The table and retained observations above are historical derivation inputs, not a requirement to promote every numerical reference to a product guarantee. The configuration remains unchanged. Process-wide Python/tracer/RSS growth and cycle/inventory elapsed timings are diagnostics with raw values, references and exceedance flags. Captured Python peak/current, every physical storage bound, actual indexed query work, exact closure, finite quotas, source/counter inventories and all deadlines remain blocking. No old failed campaign is relabeled passed, and no general leak-freedom/native-RSS/throughput claim is added. [The current implementation record](local-artifact-storage-2026-10-23.md#approved-completion-scope-and-verification-interpretation) identifies retained guarantees and the finite follow-up.
+
+The same approved plan authorizes the single required-status addition described above. Application remains separate from this historical proposal and must re-read/preserve current protection immediately before adding Required storage evidence for Actions app15368. Final settings and source-matched CI evidence are recorded in PR #258.

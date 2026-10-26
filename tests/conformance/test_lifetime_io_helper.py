@@ -23,7 +23,7 @@ from kora.conformance.io_helper import (
 from kora.conformance.journal import JournalSnapshot
 from kora.protocols.lifetime import LifetimeReason, OriginalOutcome
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import DescriptorReadiness, wait_future
+from kora.runner.channels import ChannelError, DescriptorReadiness, wait_future
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
@@ -53,13 +53,23 @@ async def read_probe(descriptor: int, deadline: int, clock: Clock) -> bytes:
 
 
 async def entered_fifo(pid: int, observation: int, deadline: int, clock: Clock) -> None:
-    assert await read_probe(observation, deadline, clock) == b"r"
-    while True:
-        os.kill(pid, signal.SIGUSR1)
-        response = await read_probe(observation, deadline, clock)
-        assert response in (b"e", b"n")
-        if response == b"e":
-            return
+    replies = 0
+    response = b""
+    try:
+        assert await read_probe(observation, deadline, clock) == b"r"
+        while True:
+            os.kill(pid, signal.SIGUSR1)
+            response = await read_probe(observation, deadline, clock)
+            replies += 1
+            assert response in (b"e", b"n")
+            if response == b"e":
+                return
+    except ChannelError as failure:
+        failure.add_note(
+            f"fifo_pid={pid}, probe_replies={replies}, last_reply={response!r}, "
+            f"remaining_ns={deadline - clock.monotonic_ns()}"
+        )
+        raise
 
 
 @pytest.mark.asyncio
