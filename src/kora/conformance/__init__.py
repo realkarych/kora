@@ -2,6 +2,18 @@ from importlib.util import find_spec
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from kora.conformance.bridge import (
+        ConformanceAdapter as ConformanceAdapter,
+    )
+    from kora.conformance.bridge import (
+        ConstructorArguments as ConstructorArguments,
+    )
+    from kora.conformance.bridge import (
+        PreparedConformance as PreparedConformance,
+    )
+    from kora.conformance.bridge import (
+        ProtocolExerciseBundle as ProtocolExerciseBundle,
+    )
     from kora.conformance.lifetime import (
         LifetimeError as LifetimeError,
     )
@@ -157,6 +169,15 @@ if find_spec("pytest") is None:
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "ConformanceAdapter",
+        "ConstructorArguments",
+        "PreparedConformance",
+        "ProtocolExerciseBundle",
+    }:
+        from kora.conformance import bridge
+
+        return getattr(bridge, name)
     if name in LIFETIME_VALUES:
         from kora.protocols import lifetime
 
