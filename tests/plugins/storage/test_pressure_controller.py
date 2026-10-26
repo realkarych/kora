@@ -226,6 +226,13 @@ def test_pressure_controller_closes_before_stopped_diagnostic_reader(
                 lease.close()
                 break
         retained_process = process.poll()
+
+        assert retained_process is None
+        assert report.failure == "command_failed"
+        assert report.resources_closed
+        assert manifest.resources_closed
+        assert manifest.child is not None
+        assert process_token(manifest.child.pid) is None
     finally:
         try:
             if process is not None:
@@ -233,13 +240,6 @@ def test_pressure_controller_closes_before_stopped_diagnostic_reader(
         finally:
             os.close(writer)
             os.close(reader)
-
-    assert retained_process is None
-    assert report.failure == "command_failed"
-    assert report.resources_closed
-    assert manifest.resources_closed
-    assert manifest.child is not None
-    assert process_token(manifest.child.pid) is None
 
 
 class NativeImageInformation(BaseModel):
