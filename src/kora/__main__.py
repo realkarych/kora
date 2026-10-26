@@ -1,14 +1,23 @@
 import asyncio
+import json
 import os
+import signal
+import socket
+import stat
 import sys
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from datetime import UTC, datetime
+from pathlib import Path
 from types import TracebackType
+from typing import TYPE_CHECKING
 
 import typer
 import typer.main
+from pydantic import TypeAdapter, ValidationError
 
 from kora.cli import (
     CLI_COMPONENT,
@@ -18,15 +27,41 @@ from kora.cli import (
     THREAD_FAILED,
     build_app,
 )
+from kora.cli.plugins import (
+    LISTING_FINISHED,
+    LISTING_RETAINED,
+    DiscoveryComplete,
+    FailureView,
+    ListingError,
+    LoadedRecord,
+    PluginListing,
+    ProviderHeader,
+    ProviderView,
+    UnavailableRecord,
+    build_plugins_app,
+)
 from kora.db import DB_COMPONENT
 from kora.observability import (
     CATALOG,
     ComponentLogger,
     LoggingConfigurationError,
+    ProcessDiagnostics,
     configure_process,
     read_logging_settings,
 )
 from kora.observability.policy import escape_controls, truncate
+from kora.protocols.loading import (
+    LOADING_COMPONENT,
+    PROVIDER_LOADED,
+    PROVIDER_UNAVAILABLE,
+)
+from kora.protocols.metadata import parse_config_schema
+from kora.protocols.time import Clock, SystemClock
+
+if TYPE_CHECKING:
+    from kora.runner.channels import BoundedChannel
+    from kora.runner.filesystem import DirectoryAnchor
+    from kora.runner.processes import GatedProcess
 
 EXIT_SUCCESS: int = 0
 EXIT_FAILURE: int = 1
@@ -107,9 +142,399 @@ def build_database_app(environment: Mapping[str, str]) -> typer.Typer:
     return database_app
 
 
-def compose_application(environment: Mapping[str, str]) -> typer.Typer:
+class InstalledPluginDiscovery:
+    def __init__(
+        self, diagnostics: ProcessDiagnostics, clock: Clock | None = None
+    ) -> None:
+        self._log = diagnostics.logger(LOADING_COMPONENT)
+        self._lifecycle = diagnostics.logger(CLI_COMPONENT)
+        self._clock = clock if clock is not None else SystemClock()
+        self._process: GatedProcess | None = None
+
+    @property
+    def process(self) -> "GatedProcess | None":
+        return self._process
+
+    async def discover(self) -> PluginListing:
+        from kora.runner.filesystem import (
+            DirectoryAnchor,
+            FilesystemError,
+            create_directory,
+        )
+
+        if self._process is not None:
+            raise ListingError("previous_discovery_unsettled")
+        root_path = Path(tempfile.mkdtemp(prefix="kora-list-", dir="/tmp")).resolve()
+        try:
+            with ExitStack() as resources:
+                root = DirectoryAnchor.open_path(root_path)
+                resources.callback(root.close)
+                cwd = create_directory(root, "cwd")
+                resources.callback(cwd.close)
+                listeners: list[socket.socket] = []
+                identities: list[os.stat_result] = []
+                for name in ("r", "e"):
+                    endpoint = self._listener(root_path / name)
+                    resources.callback(endpoint.close)
+                    listeners.append(endpoint)
+                    identities.append(
+                        os.stat(name, dir_fd=root.descriptor, follow_symlinks=False)
+                    )
+                return await self._invoke(root_path, root, cwd, listeners, identities)
+        except (OSError, FilesystemError) as error:
+            raise ListingError(f"state_retained:{root_path}") from error
+
+    async def _invoke(
+        self,
+        root_path: Path,
+        root: "DirectoryAnchor",
+        cwd: "DirectoryAnchor",
+        listeners: list[socket.socket],
+        identities: list[os.stat_result],
+    ) -> PluginListing:
+        from kora.protocols.lifetime import (
+            EnvironmentVariable,
+            ProcessDomain,
+            ProcessLaunch,
+            ProcessOutput,
+        )
+        from kora.runner.channels import BoundedChannel, ChannelError, wait_future
+        from kora.runner.processes import ProcessError, start_gated
+
+        loop = asyncio.get_running_loop()
+        accepts = tuple(
+            asyncio.create_task(loop.sock_accept(listener)) for listener in listeners
+        )
+        channels: list[BoundedChannel] = []
+        readers: list[asyncio.Task[object]] = []
+        combined: asyncio.Future[tuple[PluginListing, int]] | None = None
+        deadline = self._clock.monotonic_ns() + 30_000_000_000
+        environment = {
+            "HOME": str(root_path / "cwd"),
+            "TMPDIR": str(root_path / "cwd"),
+            "PATH": os.defpath,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
+        launch = ProcessLaunch(
+            executable=os.path.abspath(sys.executable),
+            argv=(
+                os.path.abspath(sys.executable),
+                "-I",
+                "-m",
+                "kora.cli.plugin_child",
+                str(root_path / "r"),
+                str(root_path / "e"),
+            ),
+            environment=tuple(
+                EnvironmentVariable(name=name, value=value)
+                for name, value in environment.items()
+            ),
+            working_directory_resource_id=uuid.uuid4().hex,
+            stdin=None,
+            stdout=ProcessOutput.CAPTURE,
+            stderr=ProcessOutput.CAPTURE,
+            domain=ProcessDomain.INVOCATION,
+        )
+        owner = start_gated(
+            launch, uuid.uuid4().hex, cwd.descriptor, deadline, self._clock
+        )
+        self._process = owner
+        completed = False
+        try:
+            await owner.prepare()
+            await owner.acknowledge()
+            endpoints: list[socket.socket] = []
+            for accepted in accepts:
+                await wait_future(accepted, deadline, self._clock)
+                endpoint, _ = accepted.result()
+                endpoints.append(endpoint)
+            channels.append(BoundedChannel(endpoints[0], self._clock))
+            result_task = asyncio.create_task(self.read_result(channels[0], deadline))
+            event_task = asyncio.create_task(self.read_events(endpoints[1], deadline))
+            readers.extend((result_task, event_task))
+            combined = asyncio.gather(result_task, event_task)
+            await wait_future(combined, deadline, self._clock)
+            listing = result_task.result()
+            if event_task.result() != len(listing.providers) + len(listing.failures):
+                raise ListingError("diagnostic_count")
+            completed = True
+        except (
+            ChannelError,
+            ProcessError,
+            ValidationError,
+            OSError,
+            ValueError,
+        ) as error:
+            raise ListingError("invalid_discovery") from error
+        finally:
+            original = None if completed else sys.exception()
+            close_started = self._clock.monotonic_ns()
+            cleanup = asyncio.create_task(
+                self._finish(
+                    owner,
+                    accepts,
+                    readers,
+                    combined,
+                    channels,
+                    listeners,
+                    root_path,
+                    root,
+                    cwd,
+                    identities,
+                    close_started,
+                )
+            )
+            cancelled = False
+            try:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                cleanup.result()
+            except ListingError as cleanup_error:
+                self._lifecycle.emit(
+                    LISTING_RETAINED,
+                    reason=cleanup_error.reason.partition(":")[0],
+                    reference=root_path.name,
+                )
+                if original is not None:
+                    raise original from cleanup_error
+                if cancelled:
+                    raise asyncio.CancelledError from cleanup_error
+                raise
+            finally:
+                self._lifecycle.emit(
+                    LISTING_FINISHED,
+                    state="closed" if owner.closed else "unknown",
+                    discarded_bytes=owner.capture_bytes,
+                )
+                if owner.closed:
+                    self._process = None
+            if cancelled:
+                raise asyncio.CancelledError
+        if owner.returncode != 0:
+            raise ListingError("child_exit")
+        return listing
+
+    async def _finish(
+        self,
+        owner: "GatedProcess",
+        accepts: tuple[asyncio.Task[tuple[socket.socket, object]], ...],
+        readers: list[asyncio.Task[object]],
+        combined: asyncio.Future[tuple[PluginListing, int]] | None,
+        channels: list["BoundedChannel"],
+        listeners: list[socket.socket],
+        root_path: Path,
+        root: "DirectoryAnchor",
+        cwd: "DirectoryAnchor",
+        identities: list[os.stat_result],
+        close_started: int,
+    ) -> None:
+        from kora.runner.channels import ChannelError
+        from kora.runner.filesystem import FilesystemError
+        from kora.runner.processes import ProcessError
+
+        for accepted in accepts:
+            accepted.cancel()
+        for reader in readers:
+            reader.cancel()
+        if combined is not None:
+            combined.cancel()
+            await asyncio.gather(combined, return_exceptions=True)
+        await asyncio.gather(*accepts, *readers, return_exceptions=True)
+        for channel in channels:
+            channel.close()
+        for accepted in accepts:
+            if not accepted.cancelled() and accepted.exception() is None:
+                accepted.result()[0].close()
+        for listener in listeners:
+            listener.close()
+        try:
+            await self._close(owner, close_started)
+        except (ChannelError, ProcessError, OSError) as error:
+            evidence = json.dumps(
+                {
+                    "process": None
+                    if owner.registration is None
+                    else owner.registration.model_dump(mode="json"),
+                    "state": "closure_unknown",
+                }
+            ).encode()
+            try:
+                descriptor = os.open(
+                    "closure.json",
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=root.descriptor,
+                )
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(evidence)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.fsync(root.descriptor)
+            except OSError as storage_error:
+                raise ListingError(
+                    f"closure_unknown_evidence_failed:{root_path}"
+                ) from storage_error
+            raise ListingError(f"closure_unknown:{root_path}") from error
+        try:
+            self._remove_root(root_path, root, cwd, identities)
+        except (OSError, FilesystemError) as error:
+            raise ListingError(f"state_retained:{root_path}") from error
+
+    @staticmethod
+    def _listener(path: Path) -> socket.socket:
+        endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            endpoint.bind(str(path))
+            os.chmod(path, 0o600)
+            endpoint.listen(1)
+            endpoint.setblocking(False)
+            return endpoint
+        except OSError:
+            endpoint.close()
+            raise
+
+    @staticmethod
+    def _remove_root(
+        path: Path,
+        root: "DirectoryAnchor",
+        cwd: "DirectoryAnchor",
+        identities: list[os.stat_result],
+    ) -> None:
+        root.verify()
+        cwd.verify()
+        for name, expected in zip(("r", "e"), identities, strict=True):
+            metadata = os.stat(name, dir_fd=root.descriptor, follow_symlinks=False)
+            if (
+                not stat.S_ISSOCK(metadata.st_mode)
+                or metadata.st_uid != os.getuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or (metadata.st_dev, metadata.st_ino)
+                != (expected.st_dev, expected.st_ino)
+            ):
+                raise OSError("socket_identity")
+        actual_cwd = os.stat("cwd", dir_fd=root.descriptor, follow_symlinks=False)
+        if (actual_cwd.st_dev, actual_cwd.st_ino) != (
+            cwd.identity.device,
+            cwd.identity.inode,
+        ):
+            raise OSError("directory_identity")
+        actual_root = path.lstat()
+        if (actual_root.st_dev, actual_root.st_ino) != (
+            root.identity.device,
+            root.identity.inode,
+        ):
+            raise OSError("root_identity")
+        for name in ("r", "e"):
+            os.unlink(name, dir_fd=root.descriptor)
+        os.rmdir("cwd", dir_fd=root.descriptor)
+        path.rmdir()
+
+    async def read_result(
+        self, channel: "BoundedChannel", deadline: int
+    ) -> PluginListing:
+        providers: list[ProviderView] = []
+        failures: list[FailureView] = []
+        adapter = TypeAdapter(ProviderHeader | FailureView | DiscoveryComplete)
+        while True:
+            record = adapter.validate_json(await channel.read_record(deadline, 4096))
+            if isinstance(record, ProviderHeader):
+                schema = parse_config_schema(
+                    TypeAdapter(object).validate_json(
+                        await channel.read_record(deadline, 1048576)
+                    )
+                )
+                providers.append(
+                    ProviderView.model_validate(
+                        {**record.model_dump(exclude={"kind"}), "config_schema": schema}
+                    )
+                )
+            elif isinstance(record, FailureView):
+                failures.append(record)
+            else:
+                if (
+                    record.providers != len(providers)
+                    or record.failures != len(failures)
+                    or not record.diagnostics_ok
+                ):
+                    raise ListingError("incomplete_discovery")
+                await channel.expect_eof(deadline)
+                return PluginListing(tuple(providers), tuple(failures))
+
+    async def read_events(self, endpoint: socket.socket, deadline: int) -> int:
+        from kora.runner.channels import wait_future
+
+        count = 0
+        pending = b""
+        adapter = TypeAdapter(LoadedRecord | UnavailableRecord)
+        while True:
+            received = asyncio.create_task(
+                asyncio.get_running_loop().sock_recv(endpoint, 16384)
+            )
+            try:
+                await wait_future(received, deadline, self._clock)
+                chunk = received.result()
+            finally:
+                received.cancel()
+                await asyncio.gather(received, return_exceptions=True)
+            if not chunk:
+                if pending:
+                    raise ListingError("truncated_diagnostic")
+                return count
+            pending += chunk
+            while b"\n" in pending:
+                line, _, remainder = pending.partition(b"\n")
+                if len(line) > 16384:
+                    raise ListingError("diagnostic_capacity")
+                record = adapter.validate_json(line)
+                spec = (
+                    PROVIDER_LOADED
+                    if isinstance(record, LoadedRecord)
+                    else PROVIDER_UNAVAILABLE
+                )
+                fields = record.model_dump(
+                    mode="json", include=set(spec.fields), exclude_none=True
+                )
+                self._log.emit(spec, **fields)
+                count += 1
+                pending = remainder
+            if len(pending) > 16384:
+                raise ListingError("diagnostic_capacity")
+
+    async def _close(self, owner: "GatedProcess", started: int) -> None:
+        from kora.runner.channels import ChannelError
+        from kora.runner.processes import ProcessError
+
+        owner.close_gate()
+        for instant, requested in (
+            (started + 5_000_000_000, None),
+            (started + 7_000_000_000, signal.SIGTERM),
+            (started + 12_000_000_000, signal.SIGKILL),
+        ):
+            if requested is not None:
+                owner.signal(requested, instant)
+            try:
+                await owner.settle(instant)
+            except (ChannelError, ProcessError):
+                if requested is signal.SIGKILL:
+                    raise
+            else:
+                break
+        await owner.drain(started + 14_000_000_000)
+        owner.release(started + 14_000_000_000)
+
+
+def compose_application(
+    environment: Mapping[str, str], diagnostics: ProcessDiagnostics
+) -> typer.Typer:
     app = build_app()
     app.add_typer(build_database_app(environment), name=DATABASE_GROUP)
+    app.add_typer(
+        build_plugins_app(InstalledPluginDiscovery(diagnostics)), name="plugins"
+    )
     return app
 
 
@@ -209,7 +634,8 @@ def main(
         with ThreadFailureHook(log):
             try:
                 exit_code = run_application(
-                    application or compose_application(environment), arguments
+                    application or compose_application(environment, diagnostics),
+                    arguments,
                 )
             except KeyboardInterrupt:
                 exit_code = EXIT_INTERRUPT

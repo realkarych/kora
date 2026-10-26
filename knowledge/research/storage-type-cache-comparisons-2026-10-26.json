@@ -1,0 +1,2597 @@
+[
+  {
+    "before": "baseline",
+    "after": "cycle-50",
+    "total_bytes": 54570,
+    "total_count": 788,
+    "rows": [
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/runners.py:118",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84"
+        ],
+        "size": 3660,
+        "count": 64,
+        "size_diff": 3660,
+        "count_diff": 64
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2834,
+        "count": 45,
+        "size_diff": 2834,
+        "count_diff": 45
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:583",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2778,
+        "count": 44,
+        "size_diff": 2778,
+        "count_diff": 44
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2666,
+        "count": 43,
+        "size_diff": 2666,
+        "count_diff": 43
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:721",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:545",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2563,
+        "count": 40,
+        "size_diff": 2563,
+        "count_diff": 40
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2536,
+        "count": 40,
+        "size_diff": 2536,
+        "count_diff": 40
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:583",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2516,
+        "count": 41,
+        "size_diff": 2516,
+        "count_diff": 41
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:678",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:545",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2451,
+        "count": 39,
+        "size_diff": 2451,
+        "count_diff": 39
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2232,
+        "count": 36,
+        "size_diff": 2232,
+        "count_diff": 36
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:180",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:830",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:176",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:201",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/weakref.py:428"
+        ],
+        "size": 2200,
+        "count": 1,
+        "size_diff": 2200,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:830",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:176",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:194",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:912",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/_weakrefset.py:88"
+        ],
+        "size": 2048,
+        "count": 1,
+        "size_diff": 2048,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2015,
+        "count": 32,
+        "size_diff": 2015,
+        "count_diff": 32
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:82",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1514,
+        "count": 24,
+        "size_diff": 1514,
+        "count_diff": 24
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:418",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1493,
+        "count": 24,
+        "size_diff": 1493,
+        "count_diff": 24
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:126",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:200",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1339,
+        "count": 22,
+        "size_diff": 1339,
+        "count_diff": 22
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1323,
+        "count": 21,
+        "size_diff": 1323,
+        "count_diff": 21
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/access.py:25",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1056,
+        "count": 17,
+        "size_diff": 1056,
+        "count_diff": 17
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:760",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:827",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:680",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:437",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/_weakrefset.py:88"
+        ],
+        "size": 1024,
+        "count": 1,
+        "size_diff": 1024,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 994,
+        "count": 16,
+        "size_diff": 994,
+        "count_diff": 16
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:158",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:94",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 840,
+        "count": 13,
+        "size_diff": 840,
+        "count_diff": 13
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 580,
+        "count": 9,
+        "size_diff": 580,
+        "count_diff": 9
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:712",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 568,
+        "count": 9,
+        "size_diff": 568,
+        "count_diff": 9
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:77",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 565,
+        "count": 9,
+        "size_diff": 565,
+        "count_diff": 9
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:364",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 516,
+        "count": 8,
+        "size_diff": 516,
+        "count_diff": 8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:691",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 510,
+        "count": 8,
+        "size_diff": 510,
+        "count_diff": 8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:107",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:321",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 508,
+        "count": 8,
+        "size_diff": 508,
+        "count_diff": 8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 502,
+        "count": 8,
+        "size_diff": 502,
+        "count_diff": 8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:247",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 490,
+        "count": 8,
+        "size_diff": 490,
+        "count_diff": 8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 480,
+        "count": 8,
+        "size_diff": 480,
+        "count_diff": 8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:213",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 442,
+        "count": 7,
+        "size_diff": 442,
+        "count_diff": 7
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:153",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 385,
+        "count": 6,
+        "size_diff": 385,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:81",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 384,
+        "count": 6,
+        "size_diff": 384,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:44",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 381,
+        "count": 6,
+        "size_diff": 381,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:247",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 381,
+        "count": 6,
+        "size_diff": 381,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:611",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 370,
+        "count": 6,
+        "size_diff": 370,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:109",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 367,
+        "count": 6,
+        "size_diff": 367,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:213",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 367,
+        "count": 6,
+        "size_diff": 367,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:89",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:399",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:75",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:55",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:83"
+        ],
+        "size": 360,
+        "count": 6,
+        "size_diff": 360,
+        "count_diff": 6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 321,
+        "count": 5,
+        "size_diff": 321,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:27",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 318,
+        "count": 5,
+        "size_diff": 318,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:27",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 310,
+        "count": 5,
+        "size_diff": 310,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1002",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1036"
+        ],
+        "size": 288,
+        "count": 1,
+        "size_diff": 288,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:89",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:399",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:75",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:55",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:86"
+        ],
+        "size": 272,
+        "count": 5,
+        "size_diff": 272,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:89",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:399",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:75",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:55",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:77"
+        ],
+        "size": 272,
+        "count": 5,
+        "size_diff": 272,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:37",
+          "/Users/karych/.codex/worktrees/4bfe/kora/tests/measurements/storage_lifetime_workload.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:126",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:161",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:23"
+        ],
+        "size": 272,
+        "count": 5,
+        "size_diff": 272,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 261,
+        "count": 4,
+        "size_diff": 261,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:118",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 258,
+        "count": 4,
+        "size_diff": 258,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:235",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1119",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1141",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1076",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:840"
+        ],
+        "size": 256,
+        "count": 1,
+        "size_diff": 256,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:65",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:460",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 253,
+        "count": 4,
+        "size_diff": 253,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:81",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 252,
+        "count": 4,
+        "size_diff": 252,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:151",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:460",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 198,
+        "count": 3,
+        "size_diff": 198,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 198,
+        "count": 3,
+        "size_diff": 198,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:193",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 192,
+        "count": 3,
+        "size_diff": 192,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:151",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:462",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 189,
+        "count": 3,
+        "size_diff": 189,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:89",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:399",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:75",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:55",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:80"
+        ],
+        "size": 184,
+        "count": 4,
+        "size_diff": 184,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1045",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:982",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/observability/sink.py:222",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/observability/sink.py:152",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:320"
+        ],
+        "size": 176,
+        "count": 2,
+        "size_diff": 176,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/tests/measurements/storage_lifetime_workload.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:126",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:161",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:21",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/ctypes/__init__.py:63"
+        ],
+        "size": 160,
+        "count": 1,
+        "size_diff": 160,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:180",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:830",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:176",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:199",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:962"
+        ],
+        "size": 160,
+        "count": 1,
+        "size_diff": 160,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/tests/measurements/storage_lifetime_workload.py:488",
+          "/Users/karych/.codex/worktrees/4bfe/kora/tests/measurements/storage_lifetime_resources.py:169",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:782",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:889",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:428"
+        ],
+        "size": 144,
+        "count": 1,
+        "size_diff": 144,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:77",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 132,
+        "count": 2,
+        "size_diff": 132,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:432",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 126,
+        "count": 2,
+        "size_diff": 126,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:25"
+        ],
+        "size": 120,
+        "count": 3,
+        "size_diff": 120,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:117",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 118,
+        "count": 2,
+        "size_diff": 118,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 118,
+        "count": 2,
+        "size_diff": 118,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:117",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 115,
+        "count": 2,
+        "size_diff": 115,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:35",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:26",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/tracemalloc.py:431",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/copyreg.py:130"
+        ],
+        "size": 112,
+        "count": 2,
+        "size_diff": 112,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:905",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:766",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:782"
+        ],
+        "size": 96,
+        "count": 1,
+        "size_diff": 96,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:35",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:27",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1078",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1044"
+        ],
+        "size": 67,
+        "count": 1,
+        "size_diff": 67,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 66,
+        "count": 1,
+        "size_diff": 66,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1002",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1045",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:982",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/observability/sink.py:222",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/observability/sink.py:150"
+        ],
+        "size": 64,
+        "count": 1,
+        "size_diff": 64,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 63,
+        "count": 1,
+        "size_diff": 63,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39"
+        ],
+        "size": 57,
+        "count": 1,
+        "size_diff": 57,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:26",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/tracemalloc.py:558"
+        ],
+        "size": 56,
+        "count": 1,
+        "size_diff": 56,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:35",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:26",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/tracemalloc.py:558"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -56,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:35",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:25"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -56,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/runners.py:190",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/runners.py:118",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1920"
+        ],
+        "size": 48,
+        "count": 1,
+        "size_diff": 48,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:905"
+        ],
+        "size": 48,
+        "count": 1,
+        "size_diff": 48,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:36"
+        ],
+        "size": 48,
+        "count": 1,
+        "size_diff": 48,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1045",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:982",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/observability/sink.py:222",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/observability/sink.py:152",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:323"
+        ],
+        "size": 32,
+        "count": 1,
+        "size_diff": 32,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/runners.py:190",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/runners.py:118",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1904"
+        ],
+        "size": 24,
+        "count": 1,
+        "size_diff": 24,
+        "count_diff": 1
+      }
+    ]
+  },
+  {
+    "before": "cycle-50",
+    "after": "cycle-100",
+    "total_bytes": 3133,
+    "total_count": 63,
+    "rows": [
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/runners.py:118",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84"
+        ],
+        "size": 6905,
+        "count": 123,
+        "size_diff": 3245,
+        "count_diff": 59
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/readers.py:150",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/readers.py:146",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:384",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:437",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/_weakrefset.py:88"
+        ],
+        "size": 1024,
+        "count": 1,
+        "size_diff": 1024,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:760",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:827",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/tasks.py:680",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:437",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/_weakrefset.py:88"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -1024,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1074,
+        "count": 17,
+        "size_diff": -941,
+        "count_diff": -15
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 3169,
+        "count": 51,
+        "size_diff": 633,
+        "count_diff": 11
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2743,
+        "count": 44,
+        "size_diff": 511,
+        "count_diff": 8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:118",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 689,
+        "count": 11,
+        "size_diff": 431,
+        "count_diff": 7
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:583",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2127,
+        "count": 35,
+        "size_diff": -389,
+        "count_diff": -6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:364",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 132,
+        "count": 2,
+        "size_diff": -384,
+        "count_diff": -6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1002,
+        "count": 16,
+        "size_diff": -321,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:107",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:321",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 823,
+        "count": 13,
+        "size_diff": 315,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:678",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:545",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2746,
+        "count": 44,
+        "size_diff": 295,
+        "count_diff": 5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/concurrent/futures/thread.py:235",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1119",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1141",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:1076",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/threading.py:840"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -256,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:158",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:94",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 585,
+        "count": 9,
+        "size_diff": -255,
+        "count_diff": -4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2412,
+        "count": 39,
+        "size_diff": -254,
+        "count_diff": -4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:247",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 633,
+        "count": 10,
+        "size_diff": 252,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:712",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 316,
+        "count": 5,
+        "size_diff": -252,
+        "count_diff": -4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:721",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:545",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2811,
+        "count": 44,
+        "size_diff": 248,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:126",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:200",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1094,
+        "count": 18,
+        "size_diff": -245,
+        "count_diff": -4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 3047,
+        "count": 49,
+        "size_diff": 213,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 788,
+        "count": 13,
+        "size_diff": 208,
+        "count_diff": 4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:117",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 307,
+        "count": 5,
+        "size_diff": 192,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 258,
+        "count": 4,
+        "size_diff": 192,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:247",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 299,
+        "count": 5,
+        "size_diff": -191,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:213",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 631,
+        "count": 10,
+        "size_diff": 189,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 450,
+        "count": 7,
+        "size_diff": 189,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:27",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 504,
+        "count": 8,
+        "size_diff": 186,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:153",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 568,
+        "count": 9,
+        "size_diff": 183,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 812,
+        "count": 13,
+        "size_diff": -182,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 321,
+        "count": 5,
+        "size_diff": -181,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:418",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1657,
+        "count": 27,
+        "size_diff": 164,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:691",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 373,
+        "count": 6,
+        "size_diff": -137,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:81",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 255,
+        "count": 4,
+        "size_diff": -129,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:151",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:460",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 322,
+        "count": 5,
+        "size_diff": 124,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 198,
+        "count": 3,
+        "size_diff": -123,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:65",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:460",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 132,
+        "count": 2,
+        "size_diff": -121,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:44",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 261,
+        "count": 4,
+        "size_diff": -120,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 364,
+        "count": 6,
+        "size_diff": -116,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 302,
+        "count": 5,
+        "size_diff": 104,
+        "count_diff": 2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:82",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1426,
+        "count": 23,
+        "size_diff": -88,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:611",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 456,
+        "count": 7,
+        "size_diff": 86,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:77",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 642,
+        "count": 10,
+        "size_diff": 77,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:81",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 184,
+        "count": 3,
+        "size_diff": -68,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:27",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1078",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1044"
+        ],
+        "size": 67,
+        "count": 1,
+        "size_diff": 67,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:193",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 126,
+        "count": 2,
+        "size_diff": -66,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -63,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:89",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:399",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:75",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:55",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:86"
+        ],
+        "size": 216,
+        "count": 4,
+        "size_diff": -56,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:37",
+          "/Users/karych/.codex/worktrees/4bfe/kora/tests/measurements/storage_lifetime_workload.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:126",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:161",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/native.py:23"
+        ],
+        "size": 216,
+        "count": 4,
+        "size_diff": -56,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:117",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 63,
+        "count": 1,
+        "size_diff": -55,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:432",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 179,
+        "count": 3,
+        "size_diff": 53,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:77",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 184,
+        "count": 3,
+        "size_diff": 52,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:109",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 324,
+        "count": 5,
+        "size_diff": -43,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/access.py:25",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 1032,
+        "count": 17,
+        "size_diff": -24,
+        "count_diff": 0
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:583",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 2797,
+        "count": 44,
+        "size_diff": 19,
+        "count_diff": 0
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:27",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 327,
+        "count": 5,
+        "size_diff": 17,
+        "count_diff": 0
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:151",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:462",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 195,
+        "count": 3,
+        "size_diff": 6,
+        "count_diff": 0
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:213",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 362,
+        "count": 6,
+        "size_diff": -5,
+        "count_diff": 0
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 120,
+        "count": 2,
+        "size_diff": 2,
+        "count_diff": 0
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39"
+        ],
+        "size": 58,
+        "count": 1,
+        "size_diff": 1,
+        "count_diff": 0
+      }
+    ]
+  },
+  {
+    "before": "cycle-100",
+    "after": "after-type-cache-clear",
+    "total_bytes": -49407,
+    "total_count": -805,
+    "rows": [
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/runners.py:118",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84"
+        ],
+        "size": 360,
+        "count": 4,
+        "size_diff": -6545,
+        "count_diff": -119
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -3169,
+        "count_diff": -51
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -3047,
+        "count_diff": -49
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:721",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:545",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -2811,
+        "count_diff": -44
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:583",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -2797,
+        "count_diff": -44
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:678",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:545",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -2746,
+        "count_diff": -44
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -2743,
+        "count_diff": -44
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -2412,
+        "count_diff": -39
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:583",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -2127,
+        "count_diff": -35
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:418",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -1657,
+        "count_diff": -27
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:82",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -1426,
+        "count_diff": -23
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:126",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:200",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -1094,
+        "count_diff": -18
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -1074,
+        "count_diff": -17
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/access.py:25",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -1032,
+        "count_diff": -17
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -1002,
+        "count_diff": -16
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:107",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/files.py:321",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -823,
+        "count_diff": -13
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:284",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -812,
+        "count_diff": -13
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:423",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -788,
+        "count_diff": -13
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:118",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -689,
+        "count_diff": -11
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:77",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -642,
+        "count_diff": -10
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:247",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -633,
+        "count_diff": -10
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:213",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -631,
+        "count_diff": -10
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:158",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:94",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -585,
+        "count_diff": -9
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:153",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -568,
+        "count_diff": -9
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:27",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -504,
+        "count_diff": -8
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:611",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -456,
+        "count_diff": -7
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -450,
+        "count_diff": -7
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:691",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -373,
+        "count_diff": -6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:483",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -364,
+        "count_diff": -6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:213",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -362,
+        "count_diff": -6
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:27",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -327,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:109",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -324,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:151",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:460",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -322,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -321,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/local.py:712",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -316,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:117",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:434",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -307,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -302,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/deletion.py:247",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -299,
+        "count_diff": -5
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:44",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -261,
+        "count_diff": -4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -258,
+        "count_diff": -4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:81",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:316",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -255,
+        "count_diff": -4
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:62",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -198,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:151",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:462",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -195,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:81",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:305",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -184,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:77",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -184,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:432",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:455",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -179,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:364",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:248",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -132,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/preparation.py:65",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:460",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -132,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:193",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:495",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -126,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:41",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:25"
+        ],
+        "size": 120,
+        "count": 3,
+        "size_diff": 120,
+        "count_diff": 3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:25"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -120,
+        "count_diff": -3
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/publication.py:83",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:442",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -120,
+        "count_diff": -2
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:27",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1078",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1044"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -67,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:35",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:27",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1078",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/pathlib.py:1044"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -67,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/staging.py:117",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/plugins/storage/state.py:424",
+          "/Users/karych/.codex/worktrees/4bfe/kora/src/kora/protocols/storage_models.py:91",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/__init__.py:359",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/json/decoder.py:329"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -63,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -58,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:41",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:26",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/tracemalloc.py:558"
+        ],
+        "size": 56,
+        "count": 1,
+        "size_diff": 56,
+        "count_diff": 1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:39",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:26",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/tracemalloc.py:558"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -56,
+        "count_diff": -1
+      },
+      {
+        "traceback": [
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:641",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:608",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/base_events.py:1936",
+          "/Users/karych/.local/share/uv/python/cpython-3.11.17-macos-aarch64-none/lib/python3.11/asyncio/events.py:84",
+          "/Users/karych/.codex/review-snapshots/kora-storage-diagnostics/type_cache_release.py:36"
+        ],
+        "size": 0,
+        "count": 0,
+        "size_diff": -48,
+        "count_diff": -1
+      }
+    ]
+  }
+]

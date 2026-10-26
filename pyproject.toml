@@ -31,7 +31,10 @@ classifiers = [
 kora = "kora.__main__:main"
 
 [project.entry-points."kora.provider"]
+"artifact_storage.local" = "kora.plugins.storage.local:provider_metadata"
+"policy.allow_deny" = "kora.plugins.policy.allow_deny:provider_metadata"
 "secrets.env" = "kora.plugins.secrets.env:provider_metadata"
+"vcs.git" = "kora.plugins.vcs.git:provider_metadata"
 
 [project.urls]
 Homepage = "https://github.com/realkarych/kora"
@@ -46,7 +49,9 @@ cel = [
     "common-expression-language==0.10.0",
 ]
 conformance = [
+    "jsonschema==4.26.0",
     "pytest==9.1.1",
+    "referencing==0.37.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -124,11 +129,16 @@ select = [
 
 [tool.ruff.lint.per-file-ignores]
 "hatch_build.py" = ["S603"]
+"src/kora/executor/launcher.py" = ["S603"]
+"src/kora/plugins/vcs/git/decoder.py" = ["S603"]
+"src/kora/plugins/vcs/git/export.py" = ["S603"]
+"src/kora/plugins/vcs/git/tree_build.py" = ["S603"]
 "tests/**" = ["S101", "S603"]
 "src/kora/__main__.py" = ["BLE001"]
 "src/kora/observability/bootstrap.py" = ["BLE001"]
 "src/kora/cel_eval/thread.py" = ["BLE001"]
 "src/kora/observability/sink.py" = ["BLE001"]
+"src/kora/runner/gate.py" = ["S606"]
 "tests/support/warning_filters.py" = ["TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]

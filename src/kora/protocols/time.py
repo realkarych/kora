@@ -5,6 +5,8 @@ from typing import Protocol
 
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND, ClockSample
 
+MAX_SLEEP_NS: int = (2**31 - 1) * NANOSECONDS_PER_SECOND
+
 
 class Clock(Protocol):
     def now(self) -> datetime: ...
@@ -27,6 +29,5 @@ class SystemClock(Clock):
         return ClockSample(wall=self.now(), monotonic_ns=self.monotonic_ns())
 
     async def sleep_until(self, deadline_ns: int) -> None:
-        remaining = deadline_ns - self.monotonic_ns()
-        if remaining > 0:
-            await asyncio.sleep(remaining / NANOSECONDS_PER_SECOND)
+        while (remaining := deadline_ns - self.monotonic_ns()) > 0:
+            await asyncio.sleep(min(remaining, MAX_SLEEP_NS) / NANOSECONDS_PER_SECOND)

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
-from sqlalchemy import URL, Connection, event, make_url
+from sqlalchemy import URL, Connection, event, make_url, text
 from sqlalchemy.engine.interfaces import DBAPIConnection, ExceptionContext
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import (
@@ -47,6 +47,8 @@ READER_PRAGMAS: tuple[str, ...] = (
     "PRAGMA query_only=ON",
 )
 BEGIN_IMMEDIATE: str = "BEGIN IMMEDIATE"
+MIGRATION_LOCK_ID: int = 213_0002
+MIGRATION_LEASE: str = "kora_migration_lease"
 
 Result = TypeVar("Result")
 
@@ -180,14 +182,23 @@ def sqlite_engine(settings: DatabaseSettings, writer: bool) -> AsyncEngine:
     return engine
 
 
+def keep_migration_connection_on_cancellation(context: ExceptionContext) -> None:
+    if context.connection is not None and context.connection.info.get(MIGRATION_LEASE):
+        keep_connection_on_cancellation(context)
+
+
 def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
-    return create_async_engine(
+    engine = create_async_engine(
         settings.url,
         pool_size=settings.pool_size,
         max_overflow=settings.max_overflow,
         pool_timeout=settings.pool_timeout_seconds,
         pool_pre_ping=False,
     )
+    event.listen(
+        engine.sync_engine, "handle_error", keep_migration_connection_on_cancellation
+    )
+    return engine
 
 
 async def wait_through_cancellations(task: asyncio.Future[Result]) -> int:
@@ -291,14 +302,66 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[AsyncConnection, None]:
+        async with self._lease(transactional=True) as connection:
+            yield connection
+
+    @asynccontextmanager
+    async def migration_connection(self) -> AsyncGenerator[AsyncConnection, None]:
+        if self.dialect is Dialect.SQLITE:
+            async with self.transaction() as connection:
+                yield connection
+            return
+        async with self._lease(transactional=False) as connection:
+            previous_timeout = str(await connection.scalar(text("SHOW lock_timeout")))
+            connection.info[MIGRATION_LEASE] = True
+            event.listen(connection.sync_connection, "commit", self._migration_commit)
+            try:
+                await complete(self._lock_migration(connection))
+                yield connection
+            finally:
+                event.remove(
+                    connection.sync_connection, "commit", self._migration_commit
+                )
+                await complete(self._release_migration(connection, previous_timeout))
+
+    def _migration_commit(self, connection: Connection) -> None:
+        self._refuse_when_closed()
+
+    async def _lock_migration(self, connection: AsyncConnection) -> None:
+        await connection.execute(text("SELECT set_config('lock_timeout', '5s', false)"))
+        await connection.execute(
+            text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_LOCK_ID}
+        )
+        await connection.commit()
+
+    async def _release_migration(
+        self, connection: AsyncConnection, previous_timeout: str
+    ) -> None:
+        await connection.rollback()
+        if connection.invalidated:
+            return
+        await connection.execute(
+            text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_LOCK_ID}
+        )
+        await connection.execute(
+            text("SELECT set_config('lock_timeout', :value, false)"),
+            {"value": previous_timeout},
+        )
+        await connection.commit()
+        connection.info.pop(MIGRATION_LEASE, None)
+
+    @asynccontextmanager
+    async def _lease(
+        self, transactional: bool
+    ) -> AsyncGenerator[AsyncConnection, None]:
         self._enter_unit()
         try:
             if self.dialect is Dialect.SQLITE:
                 async with self._writer_lock:
-                    async with self._unit(self._writer) as connection:
+                    async with self._unit(self._writer, transactional) as connection:
                         yield connection
             else:
-                async with self._unit(self._writer) as connection:
+                async with self._unit(self._writer, transactional) as connection:
                     yield connection
         finally:
             await self._leave_unit_and_release()
@@ -327,16 +390,20 @@ class Database:
             await self._leave_unit_and_release()
 
     @asynccontextmanager
-    async def _unit(self, engine: AsyncEngine) -> AsyncGenerator[AsyncConnection, None]:
+    async def _unit(
+        self, engine: AsyncEngine, transactional: bool = True
+    ) -> AsyncGenerator[AsyncConnection, None]:
         self._refuse_when_closed()
         connection = await finish_releasing(engine.connect(), close_connection)
         try:
             self._refuse_when_closed()
-            await complete(connection.begin())
+            if transactional:
+                await complete(connection.begin())
             try:
                 yield connection
                 self._refuse_when_closed()
-                await complete(connection.commit())
+                if transactional:
+                    await complete(connection.commit())
             except BaseException as error:
                 await complete(connection.rollback())
                 self._record_rollback(error)

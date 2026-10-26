@@ -289,11 +289,16 @@ RUFF_TABLE: dict[str, object] = {
         ],
         "per-file-ignores": {
             "hatch_build.py": ["S603"],
+            "src/kora/executor/launcher.py": ["S603"],
+            "src/kora/plugins/vcs/git/decoder.py": ["S603"],
+            "src/kora/plugins/vcs/git/export.py": ["S603"],
+            "src/kora/plugins/vcs/git/tree_build.py": ["S603"],
             "tests/**": ["S101", "S603"],
             "src/kora/__main__.py": ["BLE001"],
             "src/kora/observability/bootstrap.py": ["BLE001"],
             "src/kora/cel_eval/thread.py": ["BLE001"],
             "src/kora/observability/sink.py": ["BLE001"],
+            "src/kora/runner/gate.py": ["S606"],
             "tests/support/warning_filters.py": ["TID251"],
         },
         "flake8-tidy-imports": {"banned-api": BANNED_API},
@@ -1535,3 +1540,286 @@ def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
         "web/tsconfig.node.json:1: compilerOptions.strict is not true",
         "web/tsconfig.node.json:1: differs from the recorded document",
     ]
+
+
+def test_process_replacement_is_confined_to_the_fixed_gate() -> None:
+    root = REPOSITORY_ROOT
+
+    violations = replacement_violations(root)
+
+    assert violations == []
+
+
+def test_replacement_guard_accepts_only_the_designated_direct_call(
+    tmp_path: Path,
+) -> None:
+    write(
+        tmp_path,
+        "src/kora/runner/gate.py",
+        "import os\ndef execute_workload(config: object) -> None:\n"
+        "    os.execve(config.executable, config.argv, config.environment)\n",
+    )
+
+    violations = replacement_violations(tmp_path)
+
+    assert violations == []
+
+
+def test_replacement_guard_refuses_missing_and_changed_call_sites(
+    tmp_path: Path,
+) -> None:
+    cases = {
+        "missing": None,
+        "zero": "import os\ndef execute_workload() -> None:\n    pass\n",
+        "twice": "import os\ndef execute_workload() -> None:\n"
+        "    os.execve('x', (), {})\n    os.execve('x', (), {})\n",
+        "wrong_function": "import os\ndef other() -> None:\n"
+        "    os.execve('x', (), {})\n",
+        "wrong_api": "import os\ndef execute_workload() -> None:\n"
+        "    os.execv('x', ())\n",
+        "module_alias": "import os as native\ndef execute_workload() -> None:\n"
+        "    native.execve('x', (), {})\n",
+        "import_alias": "from os import execve as replace\n"
+        "def execute_workload() -> None:\n    replace('x', (), {})\n",
+        "value_alias": "import os\nreplace = os.execve\n"
+        "def execute_workload() -> None:\n    replace('x', (), {})\n",
+        "default": "import os\ndef execute_workload(replace=os.execve) -> None:\n"
+        "    replace('x', (), {})\n",
+        "decorator": "import os\n@os.execve\ndef execute_workload() -> None:\n"
+        "    pass\n",
+        "dynamic": "import os\ndef execute_workload() -> None:\n"
+        "    getattr(os, 'execve')('x', (), {})\n",
+        "dictionary": "import os\ndef execute_workload() -> None:\n"
+        "    os.__dict__['execve']('x', (), {})\n",
+        "rebound": "import os\nos = replacement\n"
+        "def execute_workload() -> None:\n    os.execve('x', (), {})\n",
+        "argument_shadow": "import os\ndef execute_workload(os: object) -> None:\n"
+        "    os.execve('x', (), {})\n",
+        "other_exec": "import os\ndef execute_workload() -> None:\n"
+        "    os.execve('x', (), {})\ndef other() -> None:\n    os.execl('x', 'x')\n",
+    }
+    roots = {name: tmp_path / name for name in cases}
+    for name, source in cases.items():
+        roots[name].mkdir()
+        if source is not None:
+            write(roots[name], "src/kora/runner/gate.py", source)
+
+    results = {name: replacement_violations(root) for name, root in roots.items()}
+
+    assert all(results.values()), results
+
+
+def test_replacement_guard_refuses_the_same_call_in_another_file(
+    tmp_path: Path,
+) -> None:
+    source = "import os\ndef execute_workload() -> None:\n    os.execve('x', (), {})\n"
+    write(tmp_path, "src/kora/runner/other.py", source)
+
+    violations = replacement_violations(tmp_path)
+
+    assert len(violations) >= 2
+
+
+def test_gate_rule_cannot_expand_the_pinned_ruff_configuration(tmp_path: Path) -> None:
+    original = (REPOSITORY_ROOT / PYPROJECT).read_text(encoding="utf-8")
+    allowance = '"src/kora/runner/gate.py" = ["S606"]'
+    variations = {
+        "path": original.replace(allowance, '"src/kora/runner/*.py" = ["S606"]'),
+        "extra_rule": original.replace(allowance, allowance[:-1] + ', "S603"]'),
+        "global": original.replace(
+            "[tool.ruff.lint]\n", '[tool.ruff.lint]\nignore = ["S606"]\n'
+        ),
+        "extend": original
+        + '\n[tool.ruff.lint.extend-per-file-ignores]\n"*.py" = ["S606"]\n',
+    }
+    for name, source in variations.items():
+        copy_configuration(tmp_path / name)
+        write(tmp_path / name, PYPROJECT, source)
+
+    results = {name: configuration_violations(tmp_path / name) for name in variations}
+
+    assert all(
+        "pyproject.toml:1: [tool.ruff] differs from the recorded table" in findings
+        for findings in results.values()
+    ), results
+
+
+REPLACEMENT_GATE: str = "src/kora/runner/gate.py"
+REPLACEMENT_APIS: frozenset[str] = frozenset(
+    {
+        "execl",
+        "execle",
+        "execlp",
+        "execlpe",
+        "execv",
+        "execve",
+        "execvp",
+        "execvpe",
+        "_execvpe",
+    }
+)
+
+
+def replacement_reference(
+    node: ast.AST,
+    getters: set[str],
+) -> TypeGuard[ast.Attribute | ast.ImportFrom | ast.Call | ast.Subscript]:
+    if isinstance(node, ast.Attribute):
+        return node.attr in REPLACEMENT_APIS
+    if isinstance(node, ast.ImportFrom):
+        return node.module == "os" and any(
+            alias.name in REPLACEMENT_APIS or alias.name == "*" for alias in node.names
+        )
+    if isinstance(node, ast.Call):
+        name = call_name(node)
+        if name in getters:
+            return (
+                string_value(positional_or_keyword(node, 1, "name")) in REPLACEMENT_APIS
+            )
+        if name in {"get", "__getitem__", "__getattribute__", "attrgetter"}:
+            return first_string_argument(node) in REPLACEMENT_APIS
+    if isinstance(node, ast.Subscript):
+        return string_value(node.slice) in REPLACEMENT_APIS
+    return False
+
+
+def binds_os(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "os" and isinstance(node.ctx, ast.Store)
+    if isinstance(node, ast.arg):
+        return node.arg == "os"
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+        return node.name == "os"
+    if isinstance(node, ast.Import):
+        return any(alias.asname == "os" for alias in node.names)
+    if isinstance(node, ast.ImportFrom):
+        return any((alias.asname or alias.name) == "os" for alias in node.names)
+    return False
+
+
+def getter_names(nodes: tuple[ast.AST, ...]) -> set[str]:
+    names = {GETATTR}
+    for node in nodes:
+        if isinstance(node, ast.ImportFrom) and node.module == "builtins":
+            names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == GETATTR
+            )
+    changed = True
+    while changed:
+        previous = len(names)
+        for node in nodes:
+            if not isinstance(node, ast.Assign | ast.AnnAssign):
+                continue
+            value = node.value
+            if (
+                isinstance(value, ast.Name)
+                and value.id in names
+                or isinstance(value, ast.Attribute)
+                and value.attr == GETATTR
+            ):
+                names.update(bound_names(node))
+        changed = len(names) != previous
+    return names
+
+
+def allowed_replacement_reference(
+    source: SourceFile,
+    node: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+    unaliased_import: bool,
+    rebound: bool,
+) -> bool:
+    if (
+        source.relative != REPLACEMENT_GATE
+        or not unaliased_import
+        or rebound
+        or not isinstance(node, ast.Attribute)
+        or node.attr != "execve"
+        or not isinstance(node.value, ast.Name)
+        or node.value.id != "os"
+    ):
+        return False
+    parent = parents.get(node)
+    if not isinstance(parent, ast.Call) or parent.func is not node:
+        return False
+    current: ast.AST | None = parent
+    while current is not None and not isinstance(
+        current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda
+    ):
+        current = parents.get(current)
+    return (
+        isinstance(current, ast.FunctionDef)
+        and current.name == "execute_workload"
+        and isinstance(parents.get(current), ast.Module)
+        and not current.decorator_list
+    )
+
+
+def replacement_violations(root: Path) -> list[str]:
+    violations: set[Violation] = set()
+    allowed_count = 0
+    if not (root / REPLACEMENT_GATE).is_file():
+        violations.add(Violation(REPLACEMENT_GATE, 1, "fixed launch gate is missing"))
+    for source in source_files(root):
+        if source.language is not Language.PYTHON:
+            continue
+        tree = ast.parse(source.path.read_text(encoding="utf-8"))
+        nodes = tuple(ast.walk(tree))
+        parents = {
+            child: parent for parent in nodes for child in ast.iter_child_nodes(parent)
+        }
+        unaliased = any(
+            isinstance(node, ast.Import)
+            and any(alias.name == "os" and alias.asname is None for alias in node.names)
+            for node in tree.body
+        )
+        rebound = any(binds_os(node) for node in nodes)
+        getters = getter_names(nodes)
+        for node in nodes:
+            if not replacement_reference(node, getters):
+                continue
+            if allowed_replacement_reference(source, node, parents, unaliased, rebound):
+                allowed_count += 1
+            else:
+                violations.add(
+                    Violation(
+                        source.relative, node.lineno, "unapproved process replacement"
+                    )
+                )
+    if allowed_count != 1:
+        violations.add(
+            Violation(REPLACEMENT_GATE, 1, "fixed os.execve call count is not one")
+        )
+    return describe(violations)
+
+
+def test_replacement_guard_rejects_aliases_beside_the_approved_call(
+    tmp_path: Path,
+) -> None:
+    approved = (
+        "import os\ndef execute_workload() -> None:\n    os.execve('x', (), {})\n"
+    )
+    aliases = {
+        "module_value": "native = os\nnative.execve('x', (), {})\n",
+        "from_import": "from os import execvp as replace\nreplace('x', ())\n",
+        "assignment": "replace = os.execve\nreplace('x', (), {})\n",
+        "default": "def other(replace=os.execve) -> None:\n    replace('x', (), {})\n",
+        "decorator": "@os.execve\ndef other() -> None:\n    pass\n",
+        "getter_alias": "getter = getattr\ngetter(os, 'execve')('x', (), {})\n",
+        "getter_import": "from builtins import getattr as getter\n"
+        "getter(os, 'execve')('x', (), {})\n",
+        "module_dictionary": "os.__dict__.get('execve')('x', (), {})\n",
+        "attribute_getter": "import operator\n"
+        "operator.attrgetter('execve')(os)('x', (), {})\n",
+    }
+    for name, extra in aliases.items():
+        write(tmp_path / name, REPLACEMENT_GATE, approved + extra)
+
+    results = {name: replacement_violations(tmp_path / name) for name in aliases}
+
+    assert all(
+        any("unapproved process replacement" in finding for finding in findings)
+        for findings in results.values()
+    ), results

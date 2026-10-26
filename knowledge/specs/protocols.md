@@ -71,6 +71,16 @@ A `KoraProtocolError` has a bounded identifier as `code`, content-free text as `
 
 **Pending.** `test_runner_process_import_footprint` lands with the runner work item: start the real runner entry point under `python -I`, load its configured providers with `load_provider`, and assert that `sys.modules` holds no module of the ADR-0026 server set and none of its checked server libraries.
 
+### Installed provider listing (issue #248)
+
+`kora plugins list` performs one installed discovery without provider construction or conformance fixture loading. Human output and the closed `--json` result preserve valid providers alongside every bounded loader failure; any failure makes the exit status nonzero. `--schema` includes defensive schema views. Ordering is deterministic by protocol/name, with failures additionally ordered by code and entry-name length.
+
+The composition root owns an isolated `python -I` discovery child, empty private working directory, explicit minimal environment, process group, exit anchor and private result/event channels. Metadata output on stdout/stderr is continuously discarded. A bounded relay inside the child discards unrelated diagnostics, including ordinary library warnings. Registry records from that same discovery cross a separately validated field allowlist and are emitted once by the parent. Schemas occupy separate records of at most one MiB, using at most 64-KiB chunks; total inventory remains proportional to installed metadata. Completion counts and exact EOF reject missing or trailing data.
+
+One thirty-second discovery deadline is followed by one fourteen-second process/channel close budget: five seconds cooperative completion, two seconds TERM, five seconds KILL/observation and two seconds drain. Repeated cancellation joins the same shielded close operation. Successful results require observed whole-group closure, capture EOF and direct-child reaping. A discovery failure or cancellation remains the primary outcome when cleanup also fails. Uncertain closure retains bounded private process identity/evidence; unexpected files and changed socket identities are preserved for operator handling. Synchronous private-directory/evidence operations do not establish a hard total exit guarantee during arbitrary filesystem stalls.
+
+Ordinary installed-wheel, malformed-channel and process-lifecycle evidence is in `tests/cli/`. The [measurement record](../research/installed-listing-measurement-2026-10-26.md) defines the additional local-tooling qualification workload and its evidence status. Configured conformance and explicit cleanup commands remain #215.
+
 ### Control-plane observation lifecycle (ADR-0021)
 
 Control-plane providers are installed trusted cooperative code. Import, initialization, capabilities/configuration hooks and synchronous decoding must be bounded; I/O uses nonblocking clients and propagates cancellation. No provider hook, secret resolution or external storage/network call occurs in a database transaction or under run/scope locks. Capabilities/contracts needed there are previously validated immutable local data. This contract covers conforming slow-service failures; it supplies no hard isolation from blocking or cancellation-resistant Python, including standalone. Conformance checks representative behavior, not arbitrary code safety.
@@ -182,20 +192,22 @@ class DispatcherQuiescence:
 
 @dataclass(frozen=True)
 class TerminationReceipt:
+    kind: Literal["termination"]
     attempt_id: str
     execution_domain_id: str
     retirement_id: str
     stopped_at: datetime
     evidence_ref: str                 # names the registry record, not a journal index
-    scope: str                        # what was observed; the local scopes are below
+    scope: EvidenceScope              # what was observed; the local scopes are below
 
 @dataclass(frozen=True)
 class NormalCompletionQuiescence:
+    kind: Literal["normal_completion"]
     attempt_id: str
     execution_domain_id: str
     record_ref: str
     observed_at: datetime
-    scope: str                        # what the record attests; the local scopes are below
+    scope: EvidenceScope              # what the record attests; the local scopes are below
 
 @dataclass(frozen=True)
 class DispatcherClosure:
@@ -218,7 +230,7 @@ class AttemptError:
 @dataclass(frozen=True)
 class TerminalReport:
     outcome: Literal["succeeded", "failed", "cancelled", "lost"]
-    error_class: str | None           # set for failed; a worker-reportable class
+    error_class: ErrorClass | None    # set for failed; a worker-reportable class
     error: AttemptError | None        # set for failed
     lost_reason: Literal["execution_gone", "checkpoint_missing", "result_unrecoverable"] | None
     evidence: ClosureEvidence
@@ -267,15 +279,7 @@ class RawEvent:
     kind: str                         # a NormalisedEvent kind, `output`, `command_exited` or a supervisor kind
     data: JsonObject
 
-@dataclass(frozen=True)
-class UsageCoverage:
-    version: Literal[1]
-    observation_id: str | None
-    observation_sequence: int | None
-    completeness: Literal["complete", "partial", "unavailable"]
-    observed_at: datetime | None
-    attribution_gap: bool
-    observation_gap: bool
+from kora.ir.cost import UsageCoverage
 
 @dataclass(frozen=True)
 class Liveness:
@@ -329,6 +333,9 @@ class Runtime(Protocol):
     async def status(self, handle: Handle) -> RuntimeStatus: ...
     def events(self, handle: Handle, from_offset: int) -> AsyncIterator[RawEvent]: ...
     async def heartbeat(self, handle: Handle) -> Liveness: ...
+    def transfer_out(self, handle: Handle, name: str) -> AsyncIterator[bytes]: ...   # a manifest name; frames of at most 64 KiB
+    def read_log(self, handle: Handle, which: Literal["stdout", "stderr"], from_offset: int) -> AsyncIterator[bytes]: ...
+    def read_transcript(self, handle: Handle) -> AsyncIterator[bytes]: ...
     async def finalize(self, handle: Handle, authorization: PublicationAuthorization) -> VcsRef: ...
     async def cancel(self, handle: Handle, grace: timedelta) -> None: ...
     async def grant_history_status(self, attempt_id: str, current_grant: GrantBinding, snapshot: GrantHistorySnapshot) -> GrantHistoryProgress: ...
@@ -354,6 +361,19 @@ class Runtime(Protocol):
 - **`ArtifactRef`** references one artifact version. List inputs and command-input descriptors belong to issue #106, which builds on this element reference and changes the type of `Workload.artifact_inputs` to hold list inputs.
 - **Terminal report and closure evidence (issue #139).** `TerminalReport`, `ClosureEvidence` and their parts live in `kora.protocols` with the terminal-report types (work item 6), and the worker sends them in the attempt's one write-once report and in heartbeat `evidence` ([api-and-agent-surface.md](api-and-agent-surface.md#worker-route-bodies-issue-139)). `NormalCompletionQuiescence` is the runner's record of normal completion ("Local runtime" below); its `scope` names what it attests, and the local runtime does not claim processes it cannot observe. `dispatcher_id` is an opaque, non-secret identifier: authorization comes from the token and grant check, never from it, so it may appear in logs, events and read projections, and it is never the runtime control authenticator. Relayed runtime and dispatcher evidence (registry acknowledgements, `TerminationReceipt` and `NormalCompletionQuiescence`) is trusted only as far as the current lease holder (TM-09), and local runtimes give cooperative guarantees only. The worker reads the normal-completion record with `Runtime.quiescence(handle)` and transfers every retained grant through the resumable-history contract before `Runtime.recovery`; `ProcessIdentity` and `GrantBinding` retain their identity rules.
 - **`PublicationOutcome`.** `not_applicable` comes only from a sealed request whose `publish` is `None`; `unknown` covers a pending or unknown operation; missing state is `unknown`, never `not_dispatched` or `not_applicable`.
+
+**Execution protocol models (issue #262).** The declarations above are implemented in `kora.protocols`; [the module and contract map](../architecture/detailed.md#module-and-contract-map) places each type. These rules complete them:
+
+- **Model kinds.** Every type of this section that crosses the control channel, a worker route, the journal or a checkpoint is a closed model on `BoundaryModel`, and so is every type nested in one; `RuntimeCapabilities` and `ExecutionDeadline` stay frozen dataclasses. `ExecutionDeadline.scope_id` is a bounded identifier of 1 to 256 printable ASCII characters.
+- **Runtime records.** Only `TerminationReceipt` and `NormalCompletionQuiescence` carry a `kind` literal, `termination` and `normal_completion`, because they share no field that tells them apart; `ClosureEvidence.runtime` is discriminated on it. `scope` is the closed `EvidenceScope` enum: `subreaper+leader_group+env_sweep`, `leader_group+env_sweep`, `env_sweep`, `no_runner_started` and `fake_runtime`.
+- **Timestamps.** Every timestamp of these models accepts an aware `datetime` or ISO 8601 text, normalises it to UTC and is written with six fractional digits and `Z`; naive, numeric and overflowing input is refused.
+- **Digests.** The #226 digests are 64 lower-case hexadecimal characters. Content digests, the ones IR already writes with a `sha256:` prefix (`execution_request_digest`, `TransferItem.sha256`, `ArtifactRef.payload_digest`, `ResourceRef.sha256`), keep that prefix.
+- **Field bounds.** `TransferItem.name` is one path component: not `.` or `..`, no `/` or control character, at most 255 UTF-8 bytes; `TransferItem.size` is at most 1 GiB. `ResourceRef.name` has the IR resource-name form, at most 4,096 bytes and 255 per component; `ResourceRef.size` is at most 256 KiB and a workload has at most 64 resources. The `Workload` maps have `EnvName` keys and at most 256 entries; the values of `secret_refs` and of `harness_credentials` are `secret://` references of at most 1,024 characters, never values; an `ArtifactRef.type_name` is at most 256 characters. `Workload.artifact_inputs` is marked pending #106. `RawEvent.kind` is a bounded identifier, because the supervisor families are open; the journal writer owns the set. `RawEvent.data` is parsed with a 64 KiB budget. `AttemptError.message` is printable text of at most 4,096 bytes, and the whole `AttemptError` is at most 16 KiB. `RuntimeStatus.exit_code` is between −255 and 255 and set only for `exited`. `Liveness` satisfies the cost contract's price consistency.
+- **Reports.** `TerminalReport` sets `error_class` and `error` exactly for `failed` and `lost_reason` exactly for `lost`; its evidence always carries a publication outcome and a runtime record, which is a `TerminationReceipt` for `cancelled` and `lost`. `ClosureEvidence` holds at most 128 dispatcher closures, unique by dispatcher and lease generation, within the 256 KiB `{dispatchers: [...]}` sub-envelope, and all its records agree on attempt and domain. A closure carries a process exactly for `runtime_observed_process_exit`. `PublicationOutcome` carries `ref` exactly for `completed`, `code` exactly for `failed`, an `operation_id` for both and none for `not_applicable`.
+- **Authorization.** `PublicationAuthorization` carries the binding tuple of section 4. Its `credential` is present exactly in `credential_required` mode, and its principal is `local_service` exactly in `local_credential_free` mode. The transfer field also accepts, when a model is validated in process, an already admitted `SecretValue` that belongs to the validation context's unreleased scope, given either as the `SecretScope` or as the caller's `SecretAdmission`. A worker thus builds the authorization from `IssuedCredential.value`, and a provider that holds only `ProtocolContext.secret_admission` builds a credential-bearing `IssuedCredential`, with every rule applied; JSON input stays text only. A static check refuses `model_construct` of any model that holds a transfer field, and `model_copy` with `update` anywhere in `src/`, because both skip validation.
+- **Maximal sizes.** At their field maxima the canonical sizes are about 11.9 MB for a `Workload`, 1.6 MB for an `AdoptedSession`, 2.1 MB for a `RecoveryEvidence` and 1.3 MB for a `TerminalReport` with a 1 MiB `VcsRef`, 58 near-cap closures and a 16 KiB error. The `Workload` figure counts three 1 MiB JSON objects, two plans at their 512 KiB budget written with escaped text, 256 environment entries of 4 KiB, the reference maps, 64 resources and a maximal `SessionSpec`. The report fits the 4 MB worker body; the `Workload` does not. No whole-model cap is added: how `submit` and `adopt` cross the 1 MiB control frame is an open question of #195 and #196, which own the control channel; the recovery observation already travels in sections (#226).
+- **History envelopes.** `GrantHistoryPage` and `RecoveryPage` check their 256 KiB envelope when they are built, by summing the canonical bytes of their records, encoded once for the chain, and the fixed fields. A `RecoveryPage` counts its observation with `Handle.data` and the `VcsRef` content as separately framed sections, so a final page whose observation holds a 1 MiB `Handle.data` and a 1 MiB `VcsRef` is legal; the observation metadata is at most 64 KiB, counted here without the length and digest references of those sections, which belong to the section framing of #195 and #196. `read_grant_history_page` and `read_recovery_read` refuse more than 256 KiB of raw bytes before decoding. A legal `GrantBinding` is at most 3,825 canonical bytes and a `DispatcherClosure` 4,470, so an envelope holds 67 near-cap grants, 58 near-cap relayed closures or 57 near-cap closures on a non-final recovery page.
+- **Read operations.** `transfer_out` reads a manifest name under the `TransferItem` name rule, `read_log` reads `stdout` or `stderr` from an offset and `read_transcript` the transcript; each streams frames of at most 64 KiB and fails with `integrity_error` on a digest mismatch. `events(from_offset)` already reads the journal.
 
 **Inherited lifecycle deadline (ADR-0022).** `ExecutionDeadline.grace` is 30 seconds; the nullable binding is fixed by the first executing claim and sealed in the saved request. The authenticated control context registers it in the original runtime checkpoint before `workspace_target` or pre-submit preparation; submission verifies the same binding. Every runtime/common executor applies it in its actual placement, including `worker_host` preparation and publication. Clip each plan/network/input/credential/inspection operation to its own finite bound and remaining deadline. A runtime unable to supply local cancellation in a declared placement is not conforming; no new provider protocol or Runtime method is added.
 
@@ -422,7 +442,11 @@ Canonical vector: scope `{attempt_id:"att_demo",execution_domain_id:"domain_demo
 {"dispatcher_id":"disp_1","execution_domain_id":"domain_demo","incarnation_id":"inc_1","lease_epoch":1,"process":null,"worker_id":"worker_1"}
 ```
 
-The hashes are contract vectors; executable codec conformance remains pending #156.
+The hashes are contract vectors, executable since issue #262 in `test_hash_chains_match_the_contract_vectors`. The closure chain uses the same scope with the label `kora.dispatcher-closure.v1`, which produces H0 `490541730c04db070c2ce661387ef85d4454119fbf9a3d7c01b419f0c45ac850`; one closure step is `H1 = SHA256(raw32(H0) || C(DispatcherClosure))`. The 274 canonical UTF-8 bytes below produce H1 `a5900150d51ec7df06bdbf00a526eeb8cf640409fc8ea1e494bdef49d7bbc59a`, and their `EvidenceDisposition.item_digest` is `fd2a1d33bcc51acb1a0761c1e012fc49f35e4f17b8f3afd14b5cf9177f5e3991`:
+
+```json
+{"process":null,"provenance":"registry_acknowledgement","quiescence":{"attempt_id":"att_demo","closed_at":"2026-10-23T00:00:00.000000Z","dispatcher_id":"disp_1","evidence_ref":"ack_1","execution_domain_id":"domain_demo","lease_generation":1,"worker_incarnation_id":"inc_1"}}
+```
 
 `GrantHistoryPosition` is `{after_epoch, received_count, prefix_digest}`; the empty position is `{null,0,H0}`. It is a structural position, not an opaque bearer capability, secret or authority. The source checks its claimed count/digest against the saved prefix at after_epoch and rejects a mismatching or out-of-snapshot position. A position can select any valid prefix for an authorized read; receiver progress only advances through verified contiguous records.
 
@@ -521,7 +545,7 @@ Positive trace: 1,000 grants require at least eight 128-row pages. API serves a 
 
 Negative traces cover forged/cross-attempt/domain positions; wrong worker/incarnation; revoked token/stale epoch; altered count/digest/order; skipped/duplicate/conflicting input; source/runtime response loss on either side of durable commit; begin, scan-completion and final-page-ACK response loss; worker death between API commit and runtime ACK; whole-request refusal followed by reduced success and exact accepted/refused item mapping; refused first/middle/last items followed by valid pages and a later inspection pass; wrong generation/item digest or ambiguous refusal; empty closure output with a complete frozen observation, including no live runner and after release; observation-section response loss and exact replay; a previously live worker exiting before the next pass; new grant immediately before final authority comparison; closure append during reading; timeout during local registry write; missing index reconstruction; registry loss; stop/cancel while transfer is incomplete or a publication echo is in flight; and terminal own-grant evidence without replaying all old closures. Every refusal preserves retained history and barriers.
 
-Future named cases include `test_grant_history_transfer_resumes_after_deadline`, `test_grant_history_snapshot_rejects_invalid_continuation`, `test_grant_history_partial_transfer_cannot_authorize_effects`, `test_grant_history_append_preserves_prefix`, `test_grant_history_evidence_replay_is_monotonic`, `test_grant_history_registry_commit_is_reconstructible` and `test_grant_history_transfer_releases_resources`. DTO/codec checks belong to #156; engine/metadata and API integration to work items 9/10/11; local registry/protocol recovery to #195/#196/#197; worker bridge to work item 17. #199 owns runner harness hosting, not the worker. Implementing issues for the unassigned work-item-9/10/11/17 portions must exist before implementation/activation is claimed; their status is pending and establishes no consumer coverage. Every DB integration runs SQLite and PostgreSQL; process/registry coverage runs Linux and macOS. Runtime models, API, worker and runtime behavior remain pending implementation.
+Future named cases include `test_grant_history_transfer_resumes_after_deadline`, `test_grant_history_snapshot_rejects_invalid_continuation`, `test_grant_history_partial_transfer_cannot_authorize_effects`, `test_grant_history_append_preserves_prefix`, `test_grant_history_evidence_replay_is_monotonic`, `test_grant_history_registry_commit_is_reconstructible` and `test_grant_history_transfer_releases_resources`. DTO/codec checks belong to #156 and are implemented under #262; engine/metadata and API integration to work items 9/10/11; local registry/protocol recovery to #195/#196/#197; worker bridge to work item 17. #199 owns runner harness hosting, not the worker. Implementing issues for the unassigned work-item-9/10/11/17 portions must exist before implementation/activation is claimed; their status is pending and establishes no consumer coverage. Every DB integration runs SQLite and PostgreSQL; process/registry coverage runs Linux and macOS. Runtime models, API, worker and runtime behavior remain pending implementation.
 
 Measurements must cover 1, 128, 129 and 1,000 grants, including mostly closed histories, near-byte-cap rows and histories larger than one operation deadline; query counts/indexed work, lock hold, scheduler fairness, page/serialization peak bytes, durable growth separately from transient growth, and repeated success/refusal/replay/cancellation/deadline/restart/shutdown cycles. Preregister samples and justified gates in the implementing issue, preserving existing lifecycle gates and the ten-minute CI budget. No measurement is established by this contract.
 
@@ -681,8 +705,7 @@ class HarnessAdapter(Protocol):
         # AgentSession fields, StructuredOutput payload, usage records with completeness, stop reason, error class
     def installed_version(self) -> str: ...     # reported by the SDK at connect and in its init message, checked against the trusted values of the installation; recorded on AgentSession, never compared with a node (DD-14)
 
-@dataclass(frozen=True)
-class SessionFile:
+class SessionFile(BoundaryModel):
     name: str                       # no `/`, `..` or control characters; a skill's directory name
     digest: str                     # file digest, or a skill directory's resolved content digest
     placement: Literal["mcp_config", "skill"]
@@ -710,8 +733,7 @@ class LaunchContext(Protocol):
     placements: Mapping[Placement, Path]        # supervisor-resolved per-attempt directories
     async def allocate(self, inputs: LaunchInputs) -> Launch: ...   # one launch; raises KoraProtocolError with `launch_rejected`
 
-@dataclass(frozen=True)
-class SessionSpec:
+class SessionSpec(BoundaryModel):
     harness: str
     adapter_version: str
     options: JsonObject             # a closed per-adapter model, validated by the adapter
@@ -721,12 +743,14 @@ class SessionSpec:
     price_table_id: str
     price_table: JsonObject
 
-@dataclass(frozen=True)
-class NormalisedEvent:
+NormalisedEvent = SessionStartedEvent | TurnEvent | ToolCallEvent | ToolResultEvent | PermissionDeniedEvent | UsageEvent | ProviderLimitedEvent | ProviderRetryingEvent | ResultEvent | ErrorEvent
+                                    # tagged on `kind`; every parse goes through EVENT_ADAPTER (below)
+
+class TurnEvent(BoundaryModel):     # one envelope model per kind; the other nine have the same form
     i: int
     at: datetime
-    kind: Literal["session_started", "turn", "tool_call", "tool_result", "permission_denied", "usage", "provider_limited", "provider_retrying", "result", "error"]
-    data: JsonObject
+    kind: Literal["turn"]
+    data: TurnData                  # the closed data model of the kind's row in the session-event table
 
 RunnerCause = Literal["completed", "max_events", "budget", "stall", "deadline", "cancel", "provider_limit", "policy_bypass", "version_mismatch", "plugin_mismatch", "integrity_mismatch", "config_check_failed", "policy_error", "policy_timeout", "journal_unavailable", "cli_exit_without_result", "oversized_message", "launch_rejected", "launch_failed", "launcher_died"]
 
@@ -751,55 +775,87 @@ class RunnerOutcome:
     exit_code: int | None
     signal: int | None
 
-@dataclass(frozen=True)
-class OutputCandidate:
+class OutputCandidate(BoundaryModel):
     source: Literal["structured_output", "result_text"]
-    value: JsonValue
+    value: JsonValue                # at most 1 MiB of canonical JSON
 
-@dataclass(frozen=True)
-class UsageRow:
-    model: str
-    input_tokens: int
-    cached_input_tokens: int
-    cache_creation_tokens: int
-    output_tokens: int
-    reasoning_tokens: int
-    known_token_fields: frozenset[str]
-    cache_creation_by_ttl: Mapping[Literal["5m", "1h"], int] | None
-    reported_usd: str | None
-    observation_id: str
-    observation_sequence: int
-    observed_at: datetime
-    completeness: Literal["complete", "partial", "unavailable"]
-    basis: Literal["harness_list", "harness_managed", "price_table", "gateway"]   # the usage_record basis of data-model section 2
-    billing_class: Literal["api_key", "subscription", "gateway", "managed"]
-    delta_of_session_totals: bool
-    source: JsonObject              # the raw harness entry, at most 8 KiB
+from kora.ir.cost import UsageRow
 
-@dataclass(frozen=True)
-class SessionResult:
+class ErrorSummary(BoundaryModel):  # content-free
+    source: str
+    error_count: int
+    contract_digest: str
+    code: str
+
+class DenialSample(BoundaryModel):
+    items: tuple[PermissionDeniedData, ...]     # at most 1,000, each the `permission_denied` data model
+    total: int                                  # at least len(items)
+
+class UnconfirmedCall(BoundaryModel):
+    tool: str
+    tool_use_id: str
+
+class UnconfirmedSample(BoundaryModel):
+    items: tuple[UnconfirmedCall, ...]          # at most 1,000
+    total: int                                  # at least len(items)
+
+class SessionResult(BoundaryModel):
+    harness: str
     session_id: str | None
     installed_version: str | None
     billing_class: str | None
     stop_reason: str
     terminal_reason: str | None
     api_error_status: int | None
-    error_class: str | None
-    error_summary: JsonObject | None    # {source, error_count, contract_digest, code}, content-free
+    error_class: ErrorClass | None
+    error_summary: ErrorSummary | None
     output: OutputCandidate | None
     output_diagnostic: str | None        # content-free code
-    usage: tuple[UsageRow, ...]
+    usage: tuple[UsageRow, ...]          # at most 64 rows
     usage_coverage: UsageCoverage
     turns: int
-    denials: JsonObject                  # capped sample with a count
+    denials: DenialSample                # capped sample with a count
     denials_complete: bool
-    unconfirmed_calls: JsonObject        # capped sample with a count
+    unconfirmed_calls: UnconfirmedSample # capped sample with a count
     policy_bypass: bool
 ```
 
-`UsageRow`, `UsageCoverage` and live monetary fields follow [data-model section 7](data-model.md#7-usage-records-and-completeness-fr-91). `known_token_fields` is a closed set of the five token column names; omitted dimensions remain unknown even when their observed lower bound is zero. Observation identity/order is stable within the attempt and preserved by relay/replay, including across grants; it cannot be regenerated from a heartbeat receipt. Unknown-model observations set an attribution gap instead of creating a synthetic row. Monetary strings use the exact decimal contract; the runner derives pricing coverage, and the engine derives persisted USD. The attempt-level coverage survives an empty `usage` tuple; its independent identity/sequence, initial null state and replay/refusal rules are defined in data-model section 7.2 and also apply to `Liveness`. Polls retain the source revision instead of generating new accounting evidence. A final result alone cannot clear an observation gap. The shared closed models, including bounds and validation, belong to #213 and #156.
+`UsageRow`, `UsageCoverage` and live monetary fields follow [data-model section 7](data-model.md#7-usage-records-and-completeness-fr-91). `known_token_fields` is a closed set of the five token column names; omitted dimensions remain unknown even when their observed lower bound is zero. Observation identity/order is stable within the attempt and preserved by relay/replay, including across grants; it cannot be regenerated from a heartbeat receipt. Unknown-model observations set an attribution gap instead of creating a synthetic row. Monetary strings use the exact decimal contract; the runner derives pricing coverage, and the engine derives persisted USD. The attempt-level coverage survives an empty `usage` tuple; its independent identity/sequence, initial null state and replay/refusal rules are defined in data-model section 7.2 and also apply to `Liveness`. Polls retain the source revision instead of generating new accounting evidence. A final result alone cannot clear an observation gap. The authoritative closed `UsageRow` and `UsageCoverage` models are implemented by #213 in `kora.ir.cost`; the signatures above import those values rather than define another schema. #156 owns their use in the protocol envelopes and #199 owns runner integration. Adapter work item 15 owns native SDK normalization; engine 9 owns persisted USD and ordered acceptance, while API 11 and worker 17 own authorized relay. These consumers remain pending. `PriceRevision`, `PriceRates`, `ModelCost` and `RunCost` share that value module; normalized monetary inputs follow the exact lexical and compatibility rules in data-model sections 7.3 and 7.5. Model validation alone supplies no grant, namespace, attempt or snapshot transaction authority.
 
 `EventSummary` is the adapter's incremental state that `finalise` reads: the harness's parsed result fields (`ResultMessage` on `claude`), per-call usage accumulators by message id, the count of distinct message ids, decided `tool_use_id`s, held error results, harness-denial entries with the count of unmatched ones, whether usage arrived after the first result, and the output-channel decision. Every collection in it is capped by `max_events` or by a fixed limit below, with an overflow count. Usage is not a counted `max_events` kind: its identity/order state must remain bounded independently, using current cumulative model totals, at most 1,024 open messages and bounded source high-water state, never an ever-growing id set. Eviction cannot permit recounting; loss of exact deduplication preserves a gap. `ConfigWarning` and `ContractViolation` (section 12) are aliases of the [shared `Diagnostic`](diagnostics.md), owned by `kora.ir`, with the same source/path/offset and safe-message rules. `check_config` returns configuration-relative warning paths, with `IR008` only for unsupported non-security fields; its consumer rebases them before global ordering. The shared per-call list bounds apply before accumulation; overflow raises the fixed `diagnostics_limit` protocol error and returns no partial success list. The runner validates `SessionResult.output` against the bound `ArtifactType` before returning, so it produces `artifact_invalid` itself; the worker adds duration and provenance (issue #139), and issue #138 maps the result into `AgentSession`. The result's harness identity comes from `SessionSpec.harness` and the worker's provenance, so it is `fake` under the testing composition (issue #136).
+
+**Protocol model types (issue #236).** `kora.protocols.harness`, `kora.protocols.policy` and `kora.protocols.vcs` implement this section, section 12 and the workspace types of section 4.
+
+- **Boundary models.** A type that crosses the control channel, a worker route, the journal or a checkpoint is a model on `BoundaryModel` (section 1): `SessionSpec`, `SessionFile`, the ten event envelopes and their data models, `SessionResult` with `OutputCandidate`, `ErrorSummary` and both samples, `WorkspaceRef` and `WorkspaceTarget`. A type nested in one is one too. `HarnessCapabilities`, `LaunchInputs`, `LaunchEnd`, `Enforcement` and `RunnerOutcome` stay frozen dataclasses, and `Enforcement` refuses a `cause` unless `action` is `terminate`.
+- **Events.** `NormalisedEvent` is a tagged union of one envelope model per kind, with `i`, `at`, a literal `kind` and that kind's closed `data` model, with the `?` fields of the session-event table optional. Exactly one model validates an event, in Python and JSON mode alike. The models resolve a duplicate JSON key last-wins, so the decoder that reads events and results back (the journal consumer) refuses a document with a duplicate key. Every parse goes through the module's `EVENT_ADAPTER`, which hides the input in errors and reports an unknown or missing `kind` with a fixed error that names no tag. A consumer renders a validation error only through `safe_field_errors` (section 1), never `str(error)` or `errors()`, which can carry key names from the input. `tool_call` has no input field, so tool input cannot be represented in an event.
+- **Field types.**
+
+  | field | type |
+  |---|---|
+  | `tool`, `tool_use_id`, `agent_id`, `session_id`, `message_id`, `harness`, `adapter_version`, `price_table_id`, `resume_handle`, `storage_ref`, `installed_version`, `harness_version`, `binding` | the protocol identifier: 1 to 256 printable ASCII characters without spaces |
+  | `vendor_group` | the protocol identifier, or `None` for an event that names no group, which pauses the whole resource; required and nullable |
+  | the `usage` fields that `UsageRow` shares | the `kora.ir.cost` type of the same `UsageRow` field, with the same checks: `reasoning_tokens` within `output_tokens`, and a `cache_creation_by_ttl` split, held read-only, that names both TTLs and adds up to a known `cache_creation_tokens` and is serialised `5m` first; `known_token_fields` is serialised sorted, so identical events encode to identical bytes; `coverage` is `UsageCoverage` |
+  | `model` in `provider_limited` and `provider_retrying` | the `kora.ir.cost` identifier |
+  | `permission_denied.pattern` | a deny rule id (section 12), only with `code: denied` from `source: policy`; section 12 maps a decision onto the pattern and the code |
+  | `permission_denied.code` | a `PolicyReason` (section 12) for `source: policy`; `harness_rule`, `policy_error` or `policy_timeout` for `source: harness` |
+  | `subtype`, `terminal_reason`, `stop_reason`, `output_diagnostic`, `error.code`, `ErrorSummary.source` and `.code` | a protocol error code (`ERROR_CODE`) |
+  | `billing_class` | `BillingClass` of `kora.ir.cost` |
+  | `retry_after` | a timestamp: the matching window's reset time; required and nullable on `provider_limited`, optional on `provider_retrying` |
+  | `at`; `i` | a timestamp; a `kora.ir.cost` `Sum` |
+  | `retry_number`, `turns`, `ErrorSummary.error_count` | a `kora.ir.cost` `Token` |
+  | `api_error_status` | an integer from 100 to 599, or `None` |
+  | `mcp_sources`; `SessionSpec.files` | at most 64 identifiers; at most 64 entries |
+  | `plugins_digest`, `SessionFile.digest`, `ErrorSummary.contract_digest` | a `sha256:` digest |
+  | `SessionFile.name` | 1 to 255 UTF-8 bytes of printable characters (no control, line or paragraph separator or bidi character; an inner ASCII space is allowed, leading or trailing white space is not), with no `/`, no `..`, and not `.`; the names of one `SessionSpec` stay distinct after case folding and NFC |
+  | `WorkspaceRef.root`, `.repo`; `WorkspaceTarget.root`, `.host_path` | 1 to 4,096 printable characters; a root is not yet required to be absolute (section 4) |
+  | `WorkspaceRef.attempt_id`, `.commit`, `.base_commit`, `.branch` | the protocol identifier; `branch` is nullable |
+  | `SessionSpec.prompt` | at most 1 MiB of UTF-8 |
+  | `SessionSpec.options`, `SessionSpec.price_table` | a bounded JSON object of `kora.ir.json`, held as a plain parsed object like `OutputCandidate.value`, so a consumer copies it and never mutates it |
+  | `turn.text`, `tool_result.content`, `error.text` | at most 60 KiB of canonical JSON, escaping included, so an accepted event fits the 64 KiB record; the adapter truncates before it emits, and the runner's encoder still checks the record bound |
+
+- **`SessionResult`.** `harness` names the adapter that produced the result. `error_class` is `ErrorClass`; which classes a worker may report stays the engine's check (#139). The validator checks every field bound, and no bound covers the whole result: at its field bounds a result is about 3 MiB of JSON with identifiers at their bounds, above the 1 MiB control-channel frame, and a `SessionSpec` can reach about 3 MiB. #139's report contract decides the result's channel and whole-object bound; the workload of the VCS-bearing protocol part decides the spec's. Validating the maximal result from JSON raises process memory to a bounded plateau of about 0.5 GiB on macOS, native memory that pydantic-core takes for the dense output value; decoding the JSON first and validating the parsed object stays flat, so the journal consumer of work item 15 decodes before it validates. `test_harness_model_validation_cost` records process memory for every row: the current RSS where the platform reports it, and the process-wide peak with its growth across the row.
+- **`EventSummary`** is an empty protocol. Each adapter's `finalise` accepts any summary and narrows it to its own type, so no type parameter spreads to every holder of an adapter.
+- **`build_session_spec`** types `feedback` as `None` until `Feedback` has fields.
 
 | `RunnerOutcome.cause` | meaning | class |
 |---|---|---|
@@ -811,7 +867,7 @@ class SessionResult:
 | `version_mismatch`, `plugin_mismatch` | the installed harness version or built-in plugin list did not match the trusted values | `config_error` |
 | `integrity_mismatch` | the binary digest did not match; a skill directory digest mismatch keeps the open class question below | `integrity_error` |
 | `config_check_failed` | a check after connect failed: a `claudeai` server, or a repository MCP server named like a node server | `config_error` |
-| `policy_error`, `policy_timeout` | `decide` raised, or timed out | `config_error`, `infrastructure` |
+| `policy_error`, `policy_timeout` | `decide` raised or timed out; the runner refused the `ToolCallRequest` (section 12), including arguments over the 1 MiB or depth-16 bound; or `decide` returned anything other than an exact `PolicyDecision` | `config_error`, `infrastructure` |
 | `journal_unavailable` | the journal writer failed or stayed behind past its bound | `infrastructure` |
 | `cli_exit_without_result`, `oversized_message` | the CLI exited by itself without a result, or a message exceeded its bound | `harness_error` |
 | `launch_rejected` | a pre-launch check of the runner failed, such as an output schema over the platform's argument limit | `config_error` |
@@ -834,7 +890,7 @@ The class of a cause holds also when the stop escalated to a kill; the precedenc
 | `result` | `{subtype, is_error, terminal_reason}` | content-free |
 | `error` | `{code, text?, truncated}` | bounded content |
 
-- **Bounded content** (turn text, tool-result content, `error` diagnostic text and command `output` lines) is redacted before journal append and upload, cut with the truncation marker, and stored in `session_segment` under the `transcripts` capability and payload retention; the journal holds the same truncated content and nothing more. Audit `event` rows promoted from `permission_denied` never carry content, and `PolicyDecision.reason` is a code or a pattern id, never echoed arguments.
+- **Bounded content** (turn text, tool-result content, `error` diagnostic text and command `output` lines) is redacted before journal append and upload, cut with the truncation marker, and stored in `session_segment` under the `transcripts` capability and payload retention; the journal holds the same truncated content and nothing more. Audit `event` rows promoted from `permission_denied` never carry content, and `PolicyDecision.reason` is a rule id or a `PolicyReason` (section 12), never echoed arguments.
 - **Bounds.** These values are proposals the owner approved under issue #134; the runner work item enforces them.
   - A whole record, envelope `{i, at, kind}` included, is at most 64 KiB after canonical JSON encoding, below the 1 MiB control-channel frame payload.
   - Identifiers from the candidate (`tool_use_id`, `agent_id`, `session_id`, `message_id`, `model`, `vendor_group`) are at most 256 printable characters.
@@ -933,8 +989,7 @@ class ReviewerRequestOutcome:
     rejected: tuple[str, ...]
     reason: str | None
 
-@dataclass(frozen=True)
-class WorkspaceTarget:
+class WorkspaceTarget(BoundaryModel):
     root: str
     host_path: str | None
 
@@ -954,31 +1009,28 @@ class PublishRequest:
     branch: str
     commit_message: str
 
-@dataclass(frozen=True)
-class PlanFile:
+class PlanFile(BoundaryModel):
     area: Literal["control", "publication"]
     path: str
     content: bytes
     mode: int
 
-@dataclass(frozen=True)
-class PlanStep:
+class PlanStep(BoundaryModel):
     argv: tuple[str, ...]
     cwd: Literal["candidate", "control", "publication"]
     env: dict[str, str]
     stdin: bytes | None
     timeout: timedelta
     capture: str | None
+    failure_class: Literal["artifact_invalid", "config_error", "infrastructure"] | None = None
 
-@dataclass(frozen=True)
-class CheckoutPlan:
+class CheckoutPlan(BoundaryModel):
     required_tools: tuple[str, ...]
     credentials: dict[str, str]
     files: tuple[PlanFile, ...]
     steps: tuple[PlanStep, ...]
 
-@dataclass(frozen=True)
-class PublishPlan:
+class PublishPlan(BoundaryModel):
     required_tools: tuple[str, ...]
     files: tuple[PlanFile, ...]
     export: tuple[PlanStep, ...]
@@ -986,8 +1038,7 @@ class PublishPlan:
     inspect: tuple[PlanStep, ...]
     publish: tuple[PlanStep, ...]
 
-@dataclass(frozen=True)
-class WorkspaceRef:
+class WorkspaceRef(BoundaryModel):
     attempt_id: str
     root: str
     repo: str
@@ -995,15 +1046,13 @@ class WorkspaceRef:
     base_commit: str
     branch: str | None
 
-@dataclass(frozen=True)
-class PublicationInput:
+class PublicationInput(BoundaryModel):
     attempt_id: str
     format: str
     location: str
     digest: str
 
-@dataclass(frozen=True)
-class InspectionContent:
+class InspectionContent(BoundaryModel):
     revision: str
     path: str | None
     kind: Literal["file", "symlink", "revision_metadata"]
@@ -1011,16 +1060,14 @@ class InspectionContent:
     content_digest: str
     size_bytes: int
 
-@dataclass(frozen=True)
-class InspectionManifest:
+class InspectionManifest(BoundaryModel):
     prepared_digest: str
     revision: str
     content_index_location: str
     content_index_digest: str
     complete: bool
 
-@dataclass(frozen=True)
-class PreparedPublication:
+class PreparedPublication(BoundaryModel):
     attempt_id: str
     operation_id: str
     input_digest: str
@@ -1041,8 +1088,7 @@ class PrincipalRef:
     kind: Literal["app", "bot_user", "service_user", "user", "local_service"]
     display_name: str
 
-@dataclass(frozen=True)
-class CredentialRequest:
+class CredentialRequest(BoundaryModel):
     binding: str
     binding_revision: int
     credential_mode: CredentialMode
@@ -1053,14 +1099,12 @@ class CredentialRequest:
     prepared_digest: str | None
     destination_digest: str | None
 
-@dataclass(frozen=True)
-class CredentialRights:
+class CredentialRights(BoundaryModel):
     resource_scope: Literal["repository", "repository_set", "account", "unknown"]
     native_permissions: tuple[str, ...]
     operations: frozenset[Literal["read", "write_refs", "change_requests", "comments"]]
 
-@dataclass(frozen=True)
-class IssuedCredential:
+class IssuedCredential(BoundaryModel):
     binding: str
     binding_revision: int
     credential_mode: CredentialMode
@@ -1073,13 +1117,14 @@ class IssuedCredential:
 
 class Vcs(Protocol):
     name: str
+    config_schema: JsonObject
     def capabilities(self) -> VcsCapabilities: ...
-    async def acquire_credential(self, request: CredentialRequest) -> IssuedCredential: ...
-    async def checkout_plan(self, request: CheckoutRequest) -> CheckoutPlan: ...
-    async def publish_plan(self, request: PublishRequest) -> PublishPlan: ...
+    async def acquire_credential(self, request: CredentialRequest, ctx: ProtocolContext) -> IssuedCredential: ...
+    async def checkout_plan(self, request: CheckoutRequest, ctx: ProtocolContext) -> CheckoutPlan: ...
+    async def publish_plan(self, request: PublishRequest, ctx: ProtocolContext) -> PublishPlan: ...
     async def open_change_request(self, ref: VcsRef, title: str, body: str) -> VcsRef: ...
     async def change_request_status(self, ref: VcsRef) -> ChangeRequestStatus: ...
-    async def head_sha(self, ref: VcsRef) -> str: ...
+    async def head_sha(self, ref: VcsRef, ctx: ProtocolContext) -> str: ...
     async def post_comment(self, ref: VcsRef, body: str) -> str: ...
     async def ci_status(self, ref: VcsRef) -> CiStatus: ...
     async def request_reviewers(self, ref: VcsRef, recipients: tuple[str, ...]) -> ReviewerRequestOutcome: ...
@@ -1088,6 +1133,33 @@ class Vcs(Protocol):
 **First-slice activation.** [First-slice.md](first-slice.md) determines installed support: nonempty node hooks/skills/subagents/MCP servers and `trust_repo_config: true` are refused, not passed through or merely warned. Future harness mapping rows below activate with their implementation. Real hook interception of built-in subagent/helper/tool behavior and controlled conformance fixtures remains required for both harnesses.
 
 **Pending models (issue #134).** Three models get their fields with the first slice that needs them: `Feedback`, with the first slice that has a `fresh_with_feedback` retry or a `vcs` approval channel, whose `comments` reuse `FeedbackComment` of section 5; `ChangeRequestStatus` and `CiStatus`, with the first slice that has a code host or a `wait_event` sensor. `ChangeRequestStatus` keeps a `status` field with a `merged` value, which [ir.md](ir.md) and `examples/dependency-upgrade.ir.yaml` already read. The slice-1 git provider supports `head_sha` and declares `change_requests`, `review_comments`, `ci_status`, `head_sha_watch` and `reviewer_requests` false; capability checks refuse the unsupported operations before the call. The slice-1 `Vcs` protocol class leaves out `open_change_request`, `change_request_status`, `post_comment`, `ci_status` and `request_reviewers` until the first slice with a code host, so strict typing needs no placeholder; `HarnessAdapter.build_session_spec` receives `feedback=None` in slice 1 (section 3).
+
+**Workspace values (issue #236).** `WorkspaceRef` and `WorkspaceTarget` check only the bounds of section 3: a root need not be absolute or normalized, and `commit`, `base_commit` and `branch` are protocol identifiers that may start with `-`. Their producers are the runtime and the VCS provider, not the candidate, and a consumer must not assume more. Requiring an absolute normalized root, checking commit and ref forms, or passing `--end-of-options` to every VCS command is decided with the VCS-bearing part of work item 3.
+
+**Protocol models (issue #262).** The section 4 models are closed `BoundaryModel`s, except `VcsCapabilities`, `CheckoutRequest` and `PublishRequest`, frozen dataclasses that pass only between the worker and its provider in process; `PrincipalRef` is the `VcsRef` contract's own. `Vcs` takes the caller's `ProtocolContext` last, as section 1 requires. These rules complete the declarations:
+
+| field | rule |
+|---|---|
+| `PlanFile.path` | the `VcsRef` relative-path form, at most 4,096 bytes and 255 per component, unique per area within a plan |
+| `PlanFile.content`, `PlanStep.stdin` | at most 256 KiB and 64 KiB; written in JSON as padded URL-safe base64 (RFC 4648 section 5) |
+| one plan | file content, `stdin`, `argv` and `env` names and values together at most 512 KiB |
+| `PlanFile.mode` | 0 to 0o777 |
+| `files`, `steps` | at most 64 each; the steps of all phases of a plan count together |
+| `PlanStep.argv` | 1 to 256 arguments without NUL, each at most 4 KiB and 64 KiB together |
+| `PlanStep.env`, `CheckoutPlan.credentials` | at most 256 entries with `EnvName` keys |
+| `PlanStep.timeout` | positive and at most one hour; the step is also bounded by its deadline |
+| `PlanStep.capture` | `commit`, `branch`, `changed_paths`, `diff`, `diff_stat`, `inspection` or null |
+| `PlanStep.failure_class` | `artifact_invalid`, `config_error`, `infrastructure` or null, and null when omitted; the class the executor reports when the step exits non-zero (#159) |
+| `required_tools`, `native_permissions` | at most 64 bounded identifiers |
+| `repo`, `branch` | printable text of at most 4,096 and 1,024 bytes |
+| `diff_stat` | text without NUL of at most 4,096 bytes |
+| `PublishRequest.commit_message` | non-empty text without NUL, at most 64 KiB |
+| `CheckoutRequest.rev` | printable text of at most 1,024 bytes, or a `VcsRef` |
+
+- **Plans.** `prepare`, `inspect` and `publish` steps refuse `cwd="candidate"`, and `export` steps require it, because export runs in the candidate domain. The placeholder allow-list above is the executor's check (#159), not the model's.
+- **Inspection.** `InspectionContent.path` is null exactly for `revision_metadata`. `InspectionManifest.complete` is a strict boolean that accepts `false`; a false completeness is the scanner's `artifact_invalid` refusal, not a validation error.
+- **Prepared publication.** The fields copied into a `VcsRef` keep its forms; `commit` and `base_commit` are at most 255 characters, the changed paths are unique, at most 10,000 and 512 KiB together, and the projected `VcsRef` with a worst-case principal stays within its 1 MiB canonical limit, so a `PreparedPublication` that validates always yields a valid `VcsRef`. The digests carry the `sha256:` prefix.
+- **Credentials.** `Binding` is non-empty printable UTF-8 text of at most 256 bytes; text that is not valid UTF-8 is refused before it is measured. `BindingRevision` is an exact integer from 1 to 2^53−1. A `publish` request carries the attempt, operation and both digests; a `checkout` request carries the attempt and no digest; an `api` request carries no digest and an optional attempt, and the slice-1 provider refuses it. In `local_credential_free` mode an `IssuedCredential` has no value, rights or expiry, `not_applicable` replacement and revocation and a `local_service` principal; in `credential_required` mode it has a value, rights, other alternatives and another principal kind. A provider builds a credential-bearing `IssuedCredential` by validating it with its context's `SecretAdmission` under the transfer scope key (section 2). Whether a returned tuple matches its request is the caller's check (#159). The worker route body of `POST /attempts/{att}/credentials` reuses these types.
 
 ### Credential-free local publication
 
@@ -1172,6 +1244,31 @@ Checks read raw blobs and newly reachable commits between the trusted base and p
 **Idempotency and failure.** Store the `PreparedPublication` and native bytes before accepting late authorization. Concurrent `finalize` calls for an operation serialize; identical repetitions return one `VcsRef`, different bindings fail. After a lost response, query the trusted destination with safe provider configuration: the same revision is success, authoritative absence permits retry of the same prepared revision only before the inherited deadline, after earlier dispatchers and in-flight calls are closed and while the attempt is not retired, unexpected content is conflict, and unreachable is still unknown (`infrastructure`, retryable). Do not recreate commits, repeat collection against mutable candidate files, or claim success from a missing response. Record each reconciliation as `vcs.publish_repeated`. Lost sealed/prepared state fails `infrastructure` and leaves any existing remote branch discoverable under its deterministic name; another attempt has another branch and never adopts it. There is no database outbox: the persisted attempt and the runtime's private phase checkpoint retain the operation identity. Lease/result fencing still governs API uploads; it cannot revoke an external push already in flight. A point-in-time absence while an older call remains possible is not a settled outcome. Unknown kora publication retains the execution-recovery barrier and reservations; after retirement or deadline expiry only recorded results/read-only reconciliation can be returned, with no new push or change-request creation (ADR-0017/ADR-0022). A reconciled operation outcome after expiry is historical evidence, not current-result/success authority.
 
 Target identity validation occurs at API/scheduler source-result acceptance, after physical closure, not before every external effect. A rejected exported source result cannot become current, but already produced branches and arbitrary candidate/MCP effects are not rolled back. All target-source output reports, including the final session/result artifact, retain immutable full-payload identity for exact read-only replay; selected digest fields alone cannot establish equality. See [data-model section 12](data-model.md#12-immutable-run-target-identity-adr-0019).
+
+### Executor and slice-1 git provider (issue #159)
+
+`kora.executor` runs the plans of this section; `kora.plugins.vcs.git` (entry point `vcs.git`) is the slice-1 provider. Neither keeps state between calls: every result is a frozen model that the runner stores in its checkpoint unchanged.
+
+| entry point | result |
+|---|---|
+| `prepare_workspace(plan, request, areas, protected_paths, publishing, ctx)` | `CheckoutResult`: the `commit`, `branch` and `changed_paths` captures, the base (the `VcsRef`'s own base, otherwise the commit) and the plan digest |
+| `export(plan, workspace, areas, ctx)` | `ExportResult`: the sealed format and the candidate-side export directory `.kora/export` |
+| `seal(exported, workspace, areas, ctx)` / `verify_sealed(sealed, areas)` | `PublicationInput`; `verify_sealed` recomputes the digest of input a worker-host executor received |
+| `prepare_and_inspect(plan, sealed, workspace, request, pinned, areas, secrets, protected_paths, sink, ctx, persisted)` | `PreparedResult`: the `PreparedPublication`, the `PreparedRevision` handed to `sink` before inspection, the `ScanVerdict`, the pinned binding and the destination pin |
+| `publish(prepared, plan, authorization, grant, permit, ctx, recorded)` | `PublishOutcome`: `pushed`, `equal`, `conflict` or `unknown`, the `VcsRef` when settled and the pushing principal |
+| `reconcile(prepared, ctx)` | `RemoteState`: `absent`, `equal`, `different` or `unreachable` |
+
+**Steps.** `argv[0]` names one of the plan's `required_tools` and is replaced by the absolute path resolved at start-up; the environment is exactly the step's `env` after substitution. Placeholders are the seven names above, substituted in argv, env values and stdin; other brace text stays literal, a placeholder without a value in its phase is `config_error`, and export steps may not name `{control_root}`, `{publication_root}` or `{input_location}`. Checkout steps run in the candidate or control area, export steps in the candidate area, other steps in the control or publication area; each entry point gets a fresh control directory that it removes on every path, and `PlanFile`s are created there with descriptor-relative, no-follow, exclusive opens. Every step timeout is clipped with `useful_phase_bound_ns`; a due interruption or a zero bound starts nothing and fails `timeout`. Stdout is kept only up to its capture's bound and stderr up to 64 KiB, both drained to the end; a capture over its bound or malformed is `artifact_invalid`. A step that exits non-zero fails with its `failure_class`, or by phase when null (`infrastructure` for checkout, prepare and publish, `artifact_invalid` for export and inspect). A step is ended with SIGTERM, then SIGKILL after a 2 s grace; the helpers terminate their own Git children on SIGTERM, and those children inherit the step's stderr so a survivor keeps it open; the launcher does not reap a child until it has decided its outcome, observes exit through a pidfd on Linux and a kqueue `NOTE_EXIT` filter on macOS, so a signal never reaches a reused pid, and reads `wait4` resource usage. When a pipe stays open 5 s after the child exits, a descendant still holds it: the step is `unknown` (`step_outcome_unknown`, `infrastructure`) and its area is left for the runner to release. Children stay in the caller's process group.
+
+**Sealed format `kora.git.v1`.** The candidate-side export writes `head.json` (`{"head", "bundle"}`), `head.bundle` when HEAD differs from the checkout commit, and `manifest.jsonl` (`{"path", "gitlink"}` per tracked or untracked non-ignored path). Sealing walks every path component with `openat(O_NOFOLLOW|O_DIRECTORY)` from the candidate root, copies regular files and symlink targets as data, refuses special files, files on another device, absolute, traversing or control-character paths, `.git`/`.kora` components and their case, HFS-ignorable, trailing-dot or space, stream and 8.3 equivalents, duplicates and case-folded collisions (`artifact_invalid`), and writes `head.json`, `head.bundle`, `tree.jsonl` (path, mode, size, SHA-256, chunk, offset, gitlink object) and `tree.<k>.bin` chunks of at most 1 GiB into a fresh publication directory. The digest is SHA-256 over the file digests in that order. Bounds: bundle 512 MiB, manifest 64 MiB and 50,000 records, 2 GiB of tree bytes, 256 MiB per file.
+
+**Prepare and inspect.** Prepare runs in a fresh `prepared-*` directory of the publication area. After the `commit` capture, the executor reads the prepared commit's raw bytes through the provider's `InspectionSource`, computes `prepared_digest` over the commit, its bytes, the base, the input digest and the plan digest, hands the `PreparedRevision` to `sink.keep`, and writes the digest to the file `prepared_digest` in that directory, which the decoder copies into its `InspectionManifest`. A persisted revision is reused without running prepare again; a changed plan or input digest is `workload_conflict` (`config_error`). The scanner reads the content index and every record through the `InspectionSource`, requires the index locations to equal the source's newly reachable commits and blobs, checks each size and digest, and scans contents, the paths of the index and of `changed_paths`, and revision metadata for the resolved secret values (substring searches) and fixed key patterns (one bounded regular expression) over 1 MiB chunks with an overlap, searching chunks of 64 KiB or more off the event loop; more than 256 values are refused before scanning (`config_error`). Bounds: 100,000 records, 2 GiB scanned, 256 MiB per record, 10 minutes clipped by the deadline. Protected paths compile once before any effect (`GlobInvalid` is `config_error`) and are checked over the deduplicated `changed_paths` in a worker thread with a 2^34 budget, a 2^24 cap per path and cancellation between 2^28 slices; exhaustion fails closed as `protected_path_modified`, and a due interruption sets the same cancellation flag and fails `timeout`. Sealing is likewise bounded by the deadline and stops at its next block when it passes. A `prepared-*` directory whose preparation fails or is cancelled is removed, unless a step was left `unknown`. A prepared revision equal to the base with no changed path is `artifact_invalid`.
+
+**Publication.** `publish` refuses with `publication_authorization_mismatch` (`config_error`), before any step, unless the authorization's attempt, execution domain, operation, both digests, binding tuple and principal identity equal the pinned `PreparedResult`, its dispatcher and domain equal the grant's, its mode is `local_credential_free` with no value, and the deadline is not due. Without a `PublishPermit` for the operation it returns the recorded outcome or `unknown` and pushes nothing. The destination's pin and digest are rechecked before and after the push step; a change after the push makes the outcome `unknown`. A push that exits non-zero is settled by a head read: the prepared object is `equal`, another value `conflict`, anything else `unknown`; a killed, signalled or timed-out push is `unknown`. `reconcile` checks only the destination pin and digest and reads the head; it applies no deadline, binding or dispatcher check and is never clipped. `destination_digest` covers the provider name, the normalised remote path, the repository, the branch, the base and the transport settings `{"transport": "file", "push": "create_only"}`, not the binding revision.
+
+**The git provider.** Configuration maps each logical repository to a remote path, one binding (identifier, revision, `local_credential_free` only), and a `local_service` principal whose `stable_id` differs from the binding, the path, the OS user and the commit identity; it also names the commit identity and the tool search path. `destination` compares the remote's current identity with the pin taken at start-up and refuses a substituted repository. Start-up resolves `git` (and `prlimit` on Linux) from that path, refuses Git older than 2.43.0, which first has `attr.tree` ([research](../research/git-version-2026-10-25.md)), checks every remote is an existing bare repository and pins its `(st_dev, st_ino)`. `acquire_credential` refuses `api` and any mismatch of repository, binding, revision or mode as non-retryable `KoraProtocolError`s and otherwise builds the no-secret result from configuration. Requests carry full hexadecimal object ids or full refs, branches pass the `check-ref-format` rules without a leading `-`, a publication branch starts with `kora/` and the commit message is `kora: <node_path> #<n>`; argv puts `--end-of-options` before request operands. Git configuration reaches every Git process, including the helpers' children, through `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>` and `GIT_CONFIG_VALUE_<n>`, with `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, a private `HOME` and `PATH` limited to Git's directory; trusted phases also set an empty private hooks path, no fsmonitor, file-only protocols, no credential helper, no automatic or detached maintenance, the push step carries only the client options, because a local `receive-pack` inherits the push's environment and must run the destination's own hooks and configuration; publisher phases add `attr.tree` set to the empty tree, `core.attributesFile=/dev/null`, `core.protectHFS`, `core.protectNTFS`, object checks on transfer, two pack threads and bounded pack windows. On Linux publisher helpers and Git children run under `prlimit --as=2147483648 --fsize=1073741824`. Three standard-library helpers run as plan steps with the interpreter in isolated mode: `export.py` in the candidate domain, `tree_build.py` (bundle checks against the checkout commit, strict import, descent check, and the final tree through `hash-object --no-filters --stdin-paths` and `update-index --index-info` on a separate index, with one extra commit when the tree differs) and `decoder.py` (the content index from `rev-list --objects` and one `diff-tree --stdin -m --root -r --raw --no-renames` process over every new commit and each of its parents, LFS refusal, `changed_paths`). Prepare fetches the checkout commit with its full history, so a push succeeds even when that commit is no longer reachable from a destination ref. A `VcsRef` checkout verifies both its commit and its base on the remote (`config_error` when either is absent). `head_sha` runs `ls-remote --exit-code` with a 30 s bound and 64 KiB of output: a missing ref is the non-retryable `vcs_ref_missing` of class `artifact_invalid`, an unreachable or missing repository is retryable, a substituted repository is `vcs_destination_changed`.
+
+The legs these entry points leave to the runner, the worker, Docker and a code host are listed with their triggers in the [implementation plan](../../docs/implementation-plan.md#7-named-contracts-by-work-item).
 
 ## 5. Approval channel (FR-7.1, FR-7.2a)
 
@@ -1293,6 +1390,7 @@ Identifiers use the existing protocol Identifier domain (1–256 printable non-s
 | promote(request) -> PromotionResult | Create-only publication of the exact selected immutable publishable reference (PreparedContentRef, or unchanged complete SealedStage), never replace; atomic effect-to-creator binding survives lost response/process crash; exact replay yields original created attribution; a new content generation requires a new promotion operation and current stage ownership |
 | observe(operation) -> MutationObservation | Read-only reconciliation from durable evidence; an absent record/object or transport error is not confirmed no-effect/closure |
 | retire_stage(operation, stage) -> StageRetirement | Permanently closes mutation admission for that stage, settles or authoritatively fences all issued stage effects, deletes staging-only data, then returns completed; repeated cleanup never deletes shared content |
+| get_range(content, offset, length) -> closeable async byte stream | Exact bounded range over the same immutable content reference; actual seek, core clipping and empty-EOF handling, typed failure and reader closure follow [bounded range reads](#bounded-storage-range-reads-issue-227) |
 | get(content) -> closeable async byte stream; exists(address) -> content reference or None | Bounded content access; absence is observational and grants no owner/result/closure authority |
 | delete_content(request) -> DeleteResult | Retention only after durable owner fence; idempotent same-operation outcome, unknown remains unknown; core retains fence until every issued call/attempt cannot execute later |
 | release_stage(request) -> pending or released | Acknowledge persisted outcomes and closed issuance after retirement; provider independently verifies stage effects and readers closed before compacting receipts/tombstone. Replays after release cannot recreate stage data |
@@ -1322,6 +1420,44 @@ After release, the core's saved outcome is the replay authority. A provider whos
 Built-in, both in MVP (FR-4.4, ADR-0005): `local` for standalone and development (directory tree `artifacts/sha256/ab/cd/<hex>`, `StorageRef = local://sha256/<hex>`, DD-36) and `s3` for docker-compose and organisation deployments, against any S3-compatible service through the `obstore` library (ADR-0013; objects under `<prefix>/sha256/ab/cd/<hex>` in one configured bucket, `StorageRef = s3://sha256/<hex>` resolved against the configured bucket and prefix so that references survive a bucket move; GCS and Azure are reachable through the same library without a new implementation). `s3` is the accepted organisation-deployment store; capacity and retention need sizing against measured traffic. The [load assumptions](../analysis/control-plane-load-estimate.md) do not establish that the volume cannot fit local disk. Workers never reach the store: they upload through the API, and the API always proxies downloads; presigned URLs were dropped from v1 (DD-37).
 
 Local storage and its conformance/lifecycle evidence activate in the separately approved local-provider part of work item 8 after #229 and #224. Real API/metadata/retention evidence remains with work items 11/12/17 and [#216](https://github.com/realkarych/kora/issues/216); no provider-only result satisfies it. S3-specific conformance and actual closure guarantees activate with that backend. The implementation must prove conditional create, durable creator attribution and authoritative effect closure for its concrete service; an unsupported or uncertain capability fails closed. The accepted backend choice does not assert that every compatible service supplies these guarantees.
+
+### 7.4. Local provider implementation contract (issue #255)
+
+The [owner-approved local implementation plan](https://github.com/realkarych/kora/issues/255#issuecomment-6371758782) selects cooperative complete-issuer closure with a durable physical-root epoch. Each receiver captures its epoch immutably before issuing work. Exact settled receipts are resolved before checking the epoch; byte-bearing replay independently verifies the supplied bytes under finite verifier admission. Compacted receipts refuse before consuming input. New effects and readers require the current nonterminal epoch. Retirement closes admission before seeking exclusive actual effect/reader ownership. Release requires the exact core outcome revision, mutation-set digest and closed-issuance evidence, actual ownership closure and completed retirement; epoch advancement and receipt compaction commit together. Old receivers cannot recreate absent owners or cleanup guards. At the maximum count, admission closes permanently without wraparound; tracked cleanup remains possible. Absence never reconstructs a historical mutation outcome.
+
+Core reconstruction is explicit composition work after checking durable issuance and lifecycle state. It closes the old receiver's actual jobs, streams and executors before replacement and allows at most three reconstructions within a finite request deadline. Useful dispatch requires open issuance. Unresolved cleanup may reconstruct the original retirement intent; after retirement is saved and release authorized, no new state-creating retirement is issued. Fully released owners permit observation, retained result replay and exact release acknowledgment only. These core obligations remain pending their real consumers, including #216; provider fixtures model them without claiming metadata durability.
+
+The local provider permits one promotion operation and content generation per stage. A different generation requires a fresh stage with independently validated bytes, owner admission and private capacity. A uniquely owned prepared or assembled inode remains as the creator witness through durable outcome persistence. Recovery reconciles the persisted promotion intent against that witness before retirement can remove it. Unknown attribution remains charged. Content deletion refuses unresolved promotions; retained receipts preserve original creation attribution even after deletion.
+
+The private root has a stable canonical control path, a durable random physical-store identity and a manifest binding device, inode, effective owner, format and immutable limits. Aliases and restarts share that identity. Copying the manifest, overlapping domains, changed anchors, uncertain restore/clone lineage or unreachable canonical control paths refuse; offline relocation and migration are not implemented. Initial supported filesystems are ext4 on Linux and APFS/HFS+ on macOS. Payload effects and cleanup use descriptor-relative no-follow operations. Provider-private SQLite uses its canonical path; live root/control replacement is unsupported cooperative operator behavior, and detected substitution refuses. This qualification does not promise race-safe refusal during SQLite internals.
+
+Canonical ancestors must be owned by the effective user or root and not group/other writable, except a root-owned sticky directory protecting the next user/root-owned entry. Native ACL inspection accepts absent or deny-only ACLs and refuses allow or uninspectable ACLs. The root is 0700, private files 0600, and configured paths are bounded to 4096 encoded bytes and 128 components. Permanent ownership lock files are never replaced. Separate noninheritable file descriptions own nonblocking flock leases; lifetime ownership lasts through actual closure. The order is work admission, stage/deletion ownership, optional address stripe, then the short root transaction. No transaction or root gate spans payload I/O, callbacks, readers or waiting for work.
+
+SQLite is private provider bookkeeping, separate from the metadata database. All connections, including reads, serialize under the nonblocking root gate and close before file effects. Configuration is DELETE journal, FULL synchronization, MEMORY temporary store, zero mmap, a 256 KiB page cache, zero busy timeout and FULL auto-vacuum from creation. Busy/locked state returns bounded pending without internal retry. Durable intent precedes file effects; flushed effects precede durable outcomes. Recovery establishes namespace durability even when an earlier link/directory is already present or an earlier removal is already absent; observation alone does not flush that effect. Recovery processes one occupied slot per call. Actual database/journal allocation and settled growth are measured separately from logical payload credits.
+
+The finite data-job allowance includes individual reader pulls as well as mutations and replay verification. A returned reader retains its stream ticket and shared target ownership between pulls, without retaining a data-work ticket while its consumer is idle. Each pull obtains ordinary data-work admission before creating its owned task. Shutdown closes those streams and joins their actual read jobs together; failure of one read does not abandon other cleanup. Cancellation never drops a native future or releases its target ownership before actual completion, including repeated cancellation.
+
+| Setting | Default and supported range |
+|---|---|
+| Private payload bytes | 2 GiB; 1 MiB–16 GiB |
+| Stage slots | 8; 1–32 |
+| Deletion slots | 8; 1–32 |
+| Root data-work slots | 4; 1–8 |
+| Root reader slots | 8; 1–16 |
+| Root control-work slots | 2, fixed |
+| Per-receiver queued/running data or verifier jobs | 8, fixed |
+| Per-receiver open stream handles | 8, fixed |
+| Per-receiver queued/running control jobs | 2, fixed |
+| Executor threads | 4 payload and 2 control per receiver |
+| Address ownership stripes | 64 permanent locks |
+| Stream chunk | At most 64 KiB |
+| Inventory query/page | At most 128 rows; complete serialized DTO at most 16 KiB |
+
+One data mutation owns a stage at a time. Nonwaiting local admission precedes task/job/descriptor allocation. Cancellation retains admission and ownership until actual executor finalization. Streams retain explicit reader and stage/address leases through actual close. `aclose` seals admission, closes owned streams and joins strongly owned jobs before releasing lifetime ownership; repeated calls share one completion operation. An arbitrary blocked filesystem syscall may leave close unresolved, never falsely completed. Private capacity reserves the actual simultaneous peak: raw bytes N plus max(N, prepared cap C), with bounded file/block/control overhead measured separately. An inode with several private/content links is counted once but remains owned until its final link/reader closes.
+
+Storage DTO version is a required strict integer 1. Collections are immutable tuples, all nested records are closed, and each complete DTO fits 16 KiB/depth 16. A compact manifest stores per-part declarations and immutable part identities under one StageRef, rather than repeating StageRefs. Operation request digests use UTF-8 canonical JSON with sorted keys, compact separators and unescaped Unicode: `{version: 1, kind, storage_identity, operation_id, arguments}`. All optional fields appear explicitly as null, and every nested version and target/manifest/preparation field is included. The operation's `request_digest` is excluded. A receiver validates this binding before effects. Fixed vectors and changed-field tests establish the recipe. Digests retain the `sha256:` prefix.
+
+Inventory is a keyset query over immutable byte-ordered keys. Only the ordered prefix fitting the full page envelope is emitted; the continuation key is the last emitted key, never a discarded fetched row. Saved cursor identity/kind must match the receiver and requested scan. Inventory grants no ownership or closure authority. Diagnostics contain only safe operation, outcome, reason, counts and duration, never payload digests, private references/paths or arbitrary backend exceptions. Local implementation and executable evidence are tracked in [the implementation review record](../reviews/local-artifact-storage-2026-10-23.md).
 
 ## 8. Artifact type (FR-4.1–4.3)
 
@@ -1412,7 +1548,7 @@ The policy protocol is the **decision point for tool calls**. The session runner
 | call kind | pattern examples | `claude` | `codex` |
 |---|---|---|---|
 | shell command | `Bash`, `Bash(etl *)` | intercepted (`Bash`) | intercepted (`Bash`) |
-| file edit | `Edit`, `Write` | intercepted (`Edit`, `Write`, `NotebookEdit`) | intercepted (`apply_patch`; the hook matcher accepts `Edit` and `Write` as aliases) |
+| file edit | `Edit`, `Write` | intercepted (`Edit`, `Write`, `MultiEdit` and `NotebookEdit`, the tool names pending confirmation under work item 15) | intercepted (`apply_patch`; the hook matcher accepts `Edit` and `Write` as aliases) |
 | MCP tool call | `mcp__<server>__<tool>` | intercepted | intercepted |
 | tool call inside a subagent | any pattern | intercepted; the hook input carries `agent_id` | intercepted; subagent hooks carry the parent session id |
 | web and other hosted tools | `WebSearch`, `WebFetch` | intercepted (built-in tools) | **not interceptable**: Codex web search is a hosted tool outside its hooks; the adapter sets `web_search = disabled` in the attempt configuration and the runtime network policy is the layer that holds |
@@ -1429,9 +1565,9 @@ class ToolCallRequest:
     tool: str                       # harness tool name, e.g. "Bash", "Edit", "mcp__yt__query"
     tool_use_id: str
     agent_id: str | None
-    arguments: JsonObject
+    arguments: JsonObject           # repr=False; runner-local, never journalled
     workspace: WorkspaceRef
-    node_path: str
+    node_path: str                  # at most 1,024 printable ASCII characters, no space
 
 @dataclass(frozen=True)
 class ToolPolicy:
@@ -1444,27 +1580,115 @@ class PolicyLayers:
     namespace: ToolPolicy
     node: ToolPolicy
 
+PolicyReason = Literal["allowed", "denied", "protected_path", "not_allowed", "request_invalid", "argument_invalid"]
+
 @dataclass(frozen=True)
 class PolicyDecision:
-    allow: bool
-    reason: str                     # a code or a pattern id, never echoed arguments
+    allow: bool                     # exactly a bool
+    reason: str                     # a rule id or a PolicyReason, never echoed arguments
+
+@dataclass(frozen=True)
+class PolicyCapabilities:
+    pass
 
 class Policy(Protocol):
     name: str
     config_schema: JsonObject       # schema of the `tool_policy` object nodes carry
+    def capabilities(self) -> PolicyCapabilities: ...
     def validate(self, policy: JsonObject) -> list[ContractViolation]: ...   # kora validate, IR013
     async def decide(self, request: ToolCallRequest, layers: PolicyLayers, protected_paths: tuple[str, ...], ctx: ProtocolContext) -> PolicyDecision: ...
 ```
 
-One policy applies to every call (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md), amended 2026-10-21): the node's `tool_policy` and the namespace's `tool_policy` (set by the platform team, DD-32 `platform` flag) are evaluated **per layer**, and `decide` receives both layers, not a merged value. A call is allowed only when no `deny` pattern of either layer matches it and every layer with a non-empty `allow` has a matching pattern, so a namespace deny always wins and a node never widens a namespace allow list. An empty `allow` adds no restriction; a layer with only denies relies on its deny patterns. Order inside an array has no effect. `allow_deny` ignores `tool_use_id` and `agent_id`, so decisions stay deterministic for identical requests; `agent_id` is read only by the adapter's output-channel exception (section 3). The one exception is the harness's own output channel: on `claude` the adapter allows the synthetic `StructuredOutput` tool without consulting the policy, only under the closed exceptions of section 3 (exact name, `output_format` passed, main session, and never after `max_events`), without evaluating either layer. An exception or timeout in `decide` denies the call and fails the attempt with cause `policy_error` or `policy_timeout` (section 3). `IR013`, checked by kora's own validator for every policy implementation and wherever a `tool_policy` is validated, the namespace's included, rejects a pattern whose tool name is exactly `StructuredOutput`; a wildcard pattern stays valid and never applies to the output channel (ADR-0009, amended 2026-10-19). The MVP implementation `allow_deny` matches the allow and deny patterns of each layer in the harness's tool-pattern syntax. A shell call with chaining metacharacters, `-c`, `--exec` or other indirection matches every `Bash(...)` deny of either layer, so a deny cannot be bypassed through a wrapper, and an allow pattern never matches such a call, so it is denied whenever a layer with a non-empty `allow` applies (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)). "Other indirection" (`env`, `xargs`, `find -exec`, a shell script) stays open-ended: argv matching is the hook layer, not proof that an effect is absent (three layers above). It denies `Edit` and `Write` on `protected_paths` whether or not an allow matches (DD-34). Cedar and OPA arrive as plugins through the same interface, reading their own `x-` fields per layer, without an IR change. The policy runs inside the runner, so the decision is local to the session and never requires the agent to reach kora.
+One policy applies to every call (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md), amended 2026-10-21): the node's `tool_policy` and the namespace's `tool_policy` (set by the platform team, DD-32 `platform` flag) are evaluated **per layer**, and `decide` receives both layers, not a merged value. A call is allowed only when no `deny` pattern of either layer matches it and every layer with a non-empty `allow` has a matching pattern, so a namespace deny always wins and a node never widens a namespace allow list. An empty `allow` adds no restriction; a layer with only denies relies on its deny patterns. Order inside an array has no effect. `allow_deny` ignores `tool_use_id` and `agent_id`, so decisions stay deterministic for identical requests; `agent_id` is read only by the adapter's output-channel exception (section 3). The one exception is the harness's own output channel: on `claude` the adapter allows the synthetic `StructuredOutput` tool without consulting the policy, only under the closed exceptions of section 3 (exact name, `output_format` passed, main session, and never after `max_events`), without evaluating either layer. An exception or timeout in `decide` denies the call and fails the attempt with cause `policy_error` or `policy_timeout` (section 3). `IR013`, checked by kora's own validator for every policy implementation and wherever a `tool_policy` is validated, the namespace's included, rejects a pattern whose tool name is exactly `StructuredOutput`; a wildcard pattern stays valid and never applies to the output channel (ADR-0009, amended 2026-10-19). The MVP implementation `allow_deny` matches the allow and deny patterns of each layer in kora's own grammar, under the rules of "The `allow_deny` policy (issue #233)" below. A shell call with a form on that subsection's closed indirection list matches every governing `Bash` deny of either layer, and no allow pattern ever matches it, so it is denied whenever a layer with a non-empty `allow` applies (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md), amended 2026-10-23). Argv matching is the hook layer, not proof that an effect is absent (three layers above). It denies every file-edit tool on `protected_paths` whether or not an allow matches (DD-34). Cedar and OPA arrive as plugins through the same interface, reading their own `x-` fields per layer, without an IR change. The policy runs inside the runner, so the decision is local to the session and never requires the agent to reach kora.
+
+**Decision reasons (issue #236).** A `PolicyDecision.reason` is either a rule id or a `PolicyReason`, so no argument text can reach a decision:
+
+- **A rule id** has the form `<layer>.<allow|deny>.<index>`: `<layer>` is `namespace` or `node`, and `<index>` is the pattern's zero-based position in that layer's array, written as `0` or a decimal without a leading zero below 10,000, as in `namespace.deny.3`. Pattern text never appears. A provider that cannot cite a rule by position, including one whose array is longer, uses `denied` for a deny and `allowed` for an allow.
+- **A `PolicyReason`** is one of a closed set: `allowed`, `denied`, `protected_path`, `not_allowed`, `request_invalid` and `argument_invalid`. A provider with other refusals maps them onto it.
+- **The reason agrees with the decision.** `allow` is true exactly when the reason is `allowed` or an allow rule id.
+- **A decision becomes a `permission_denied` event** (section 3) like this: a deny rule id gives `pattern: <rule id>` and `code: denied`; any other refusal gives `pattern: None` and the reason as the `code`; `allowed` never reaches an event. A harness denial carries no `pattern`.
+
+`ToolCallRequest` and `PolicyDecision` check their fields when constructed, with fixed messages: exact `str` identifier fields, an exact `str` `node_path`, a parsed bounded `arguments` object, an exact `bool` for `allow` and the reason form above. A request the check refuses is a denied call, never an allowed one: the runner denies it with `request_invalid` and fails the attempt with cause `policy_error`; it emits the `permission_denied` event only when the call's `tool` and `tool_use_id` are valid event fields, and otherwise counts the denial without one, because the refusal names only the first field it refused. A `decide` that raises, times out or returns anything other than an exact `PolicyDecision` fails the attempt with cause `policy_error` or `policy_timeout` and emits `permission_denied` with `source: harness`, `pattern: null` and that cause as its code. These two codes are records the runner writes on the supervisor side (section 2); section 3 files them under `source: harness` because `PolicyReason` has no failure codes. `arguments` is a plain parsed `dict`, so the runner builds a fresh `ToolCallRequest` for each `decide` and never reads it back afterwards. `Policy.capabilities` returns an empty `PolicyCapabilities`, as section 1 requires of every protocol.
+
+### The `allow_deny` policy (issue #233)
+
+**Patterns.** A pattern is `Name` or `Name(argument)` with a non-empty argument, at most 4,096 characters; an `allow` or `deny` array holds at most 128 patterns and 64 KiB, and one layer holds at most 8,192 wildcard pieces (each pattern counts its `*` plus one) and 16,384 characters outside ASCII, refused as `IR013`; the protected globs of a call hold at most 8,192 pieces (each glob counts its `*` and `/` plus one), 64 KiB and 16,384 characters outside ASCII together, refused as `protected_paths_invalid`. Case folding costs per character, so these bounds, not fuel, cap the compile cost. So a configuration compiles within the cold ceiling.
+
+- `Name` uses `[A-Za-z0-9_.*-]`, with `*` as a wildcard; `mcp__<server>` alone matches every tool of that server; this assumes server names contain no `__`, which validation of the IR is to refuse (work item 3).
+- The argument runs from the first `(` to the final `)`, which ends the pattern, and contains no `(`, `)` or control character. `*` in it matches any run of characters, `/` included; consecutive `*` collapse.
+- Every piece the matcher searches for (every piece but the last, after collapsing) is at most 96 characters, in the exact and the case-folded form, so each search stays linear; a longer one is refused.
+- A deny pattern in which a `*` touches a character of nonzero combining class in the decomposed or the case-folded form, at the end of the piece before it or the start of the piece after it, is refused: canonical reordering can move another combining mark of the call's text across the wildcard, so the deny would miss a spelling of the name it denies. Allow patterns compare exact code points and keep such wildcards.
+- A pattern governs a call when its name matches the tool name. Its argument then applies to the tool's extracted argument, or to each edited path of a file-edit tool. A wildcard-name pattern's argument may match nothing for some tools it governs: `E*(/abs/x)` governs the file-edit family but can never match an edited path.
+- **The file-edit family.** A deny whose name matches `Edit` or `Write` (such as `Edit`, `E*` or `*`), and an allow named exactly `Edit` or `Write`, govern every file-edit tool of the harness: `Edit`, `Write`, `MultiEdit` and `NotebookEdit` on `claude`, `apply_patch` on `codex`. A pattern naming one tool governs only that tool. Keeping the table complete is pending work item 15: the adapter is to compare the built-in tool list each session reports with the reviewed set for its version and fail `config_error` on a difference. `MultiEdit` is listed from the Claude Code tool names, pending that confirmation.
+- **Edit-path arguments.** In a pattern whose name, with no wildcard, is `Edit`, `Write` or a file-edit tool, the argument is a root-relative path pattern: an absolute argument, a leading `~`, and an empty, `.` or `..` segment are refused. Unlike a protected path, `Edit(tests)` does not cover `tests/a.py`.
+- **Differences from the harnesses.** `:*` anywhere in a pattern and an argument starting with `//` or `~/` are refused rather than reinterpreted; arguments are globs, not gitignore patterns; a deny on `Edit` or `Write` also governs the other file-edit tools.
+- **An argument pattern on a tool with no extraction rule** (`Read(src/*)`, `mcp__fs__read(x)`) fails closed: as a deny it matches, as an allow it never matches.
+
+**`validate`** returns each refusal as `IR013` with the pattern's JSON path, such as `["deny", 3]`, and a fixed message per kind: a malformed pattern, a pattern, array or searched piece over its bound, a document that is not a tool policy, an unsupported harness form, a refused edit-path argument, and a deny wildcard that touches a combining mark; a layer over its piece or non-ASCII bound is refused once, with no path. It stops at the diagnostics bound with `diagnostics_limit`.
+
+**Arguments.** Only the named field is read, and only when a rule needs it: for `Bash`, under the shell condition, when an allow governs `Bash`, or when a governing deny has an argument; for a file-edit tool, under the path condition. Other keys are ignored; a missing or non-string field is `argument_invalid` whenever it is read, and when no rule needs it a governing deny decides by name.
+
+| harness and tool | argument |
+| --- | --- |
+| `claude` `Bash` | `command` |
+| `claude` `Edit`, `Write`, `MultiEdit` | `file_path` |
+| `claude` `NotebookEdit` | `notebook_path` |
+| `codex` `Bash` | `command` |
+| `codex` `apply_patch` | `command`, the patch text |
+
+The `codex` shapes are read from its source ([Codex hook tool input](../research/codex-hook-tool-input-2026-10-23.md)): the hook input carries neither the command's working directory nor its shell, and `write_stdin` emits no hook, so input written to a running process is outside the policy on `codex` until work item 15 disables or bounds it. The shell rule below assumes the command runs under an sh-family shell; pinning or refusing the model-chosen `shell` and `login` on `codex` and fixing `SHELL` for `claude` are pending work item 15. `allow_deny` accepts the harnesses `claude` and `codex`; the fake harness sends the harness the IR names. Any other harness raises `policy_harness_unsupported`.
+
+**Two conditions.**
+
+- **The path condition**, for a file-edit call: protected paths are set, or a layer has a pattern governing the tool. Every path rule below applies only when it holds; otherwise the paths are left to the runtime layer.
+- **The shell condition**, for a `Bash` call: protected paths are set, or a layer has a pattern governing any file-edit tool of the harness (a deny by the deny rule, an allow by the allow rule), single-tool patterns included. Under it, a command that mentions `apply_patch` or `applypatch` anywhere (case-folded), or that cannot be scanned in full, is `argument_invalid`: Codex applies such a shell-routed patch itself after the `Bash` hook, with a working directory the hook does not carry. The detection is best-effort; shell writes stay with the gate-time `changed_paths` check of section 4.
+
+**Paths.** An empty path, a path with a control character, a leading `~`, leading or trailing white space (the JavaScript `trim` set), text UTF-8 cannot encode, or more than 4,096 characters is `argument_invalid`. On `claude` the hook receives the harness-expanded absolute path ([harness edit-path resolution, 2026-10-24](../research/harness-edit-path-resolution-2026-10-24.md)); confirming that for each tested version belongs to work item 15. A path whose kernel walk differs from the kernel walk of its lexical form, as when a `..` follows a symbolic link, is `argument_invalid` too, because a harness that collapses `..` before opening the file would write a file neither form names. A relative path is joined to `WorkspaceRef.root`, the session's working directory as the harness sees it, which must be absolute with no empty, `.` or `..` segment, and is resolved as the kernel resolves it.
+
+- An iterative resolver walks the raw path with `lstat` and `readlink` as the kernel does: from the resolved root when the path starts with a spelling of the root, otherwise from `/`. A missing component ends the walk and the rest is appended lexically, so new files can be created; a `..` after a missing component, more than 40 links, and any other error are `argument_invalid`.
+- The lexical form is taken relative to whichever of the lexical and resolved roots prefixes it (the longer), and the resolved form relative to the resolved root. Each must lie under a root, or the call is `argument_invalid`.
+- Denies and protected paths compare in canonical caseless form (NFD, case folded, then NFD again, so a glob prefix compares in decomposed form and also covers a name whose next character carries a combining mark), with the interpreter's Unicode case tables, and match if either form matches; allows compare exact code points and match only if both forms match.
+- An edit of an existing regular file with more than one hard link is `argument_invalid`.
+- `decide` assumes the candidate's path namespace and a local filesystem. Effects outside the checkout, including a write through a link swapped after the check, belong to the runtime layer, and the per-attempt harness directories to the adapter.
+
+**`apply_patch`.** A patch is at most 64 KiB and is parsed as Codex's envelope: lines split only at `\n` with one trailing `\r` removed, as Rust's `str::lines` does; marker and header lines containing a control character or a line or paragraph separator refused, and a `Move to:` line with surrounding white space refused, because Codex keeps that white space in the target; trimmed headers, the heredoc-wrapped form, `*** Begin Patch` and `*** End Patch`, `Add File:`, `Update File:`, `Delete File:` and `Move to:`. A line that trims to text starting with `***` is a marker line; unclassified marker lines, text after the end marker, `*** Environment ID:` and a patch with no path are `argument_invalid`. This also refuses an indented `***` line, a recognised header included, that Codex would read as update context, which fails closed. A deny or protected path matches if any path matches; an allow passes only when every path matches some allow of that layer.
+
+**The shell rule.** A linear scanner reads the command once, tracking quotes, and splits it into words with quote removal. Indirection is any of:
+
+- a command longer than 16,384 characters or with an unterminated quote (these cannot be scanned in full), or an empty command;
+- a control character, newline or carriage return; outside quotes any of `` ; & | ( ) < > ` $ \ { } # * ? [ ] ~ ! ^ ``; inside double quotes any of `` $ ` \ ! ``; inside single quotes a backtick; and `(` or `{` right after a `$` of the same word however each is quoted, because builtins that evaluate an argument as an array subscript or a math expression run the command substitution it holds (zsh `exit 'path[$(…)]'`), and a `$` that closes a single-quoted span still joins the `(` that follows it in double quotes;
+- in the first word: a quote, a non-ASCII character, a leading `-`, or a `NAME=value` or `NAME+=value` assignment;
+- a first word whose case-folded basename is a shell (`sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`, `tcsh`, `ash`, `mksh`, with an optional `r` prefix and version suffix, such as `rbash` or `zsh-5.9`), a builtin that evaluates an argument such as an array subscript (`let`, `declare`, `typeset`, `local`, `export`, `readonly`, `read`, `printf`, `print`, `unset`, `test`, `[`, `mapfile`, `readarray`, `wait`, `getopts`, `integer`, `float`, `vared`, `exit`, `return`, `shift`, `break`, `continue`, `logout`, `bye`, `compgen`, `complete`, `ulimit`, `jobs`), a wrapper or launcher (`env`, `xargs`, `eval`, `exec`, `source`, `.`, `command`, `builtin`, `sudo`, `doas`, `nohup`, `timeout`, `nice`, `time`, `stdbuf`, `setsid`, `busybox`, `awk` with an optional `g`, `m` or `n` prefix, `osascript`, `uv`, `uvx`, `npx`, `bunx`, `pnpm`, `poetry`, `watch`, `caffeinate`, `arch`, `script`, `flock`, `chroot`, `ionice`, `taskset`, `chrt`, `unbuffer`, `parallel`, `su`, `runuser`, `strace`, `ltrace`, `gdb`, `ssh`, `tmux`, `screen`, `nix-shell`), `apply_patch` or `applypatch`, a reserved word or modifier (`!`, `coproc`, `trap`, `noglob`, `nocorrect`, `if`, `while`, `until`, `for`, `case`, `select`, `function`, `then`, `do`, `[[`, `repeat`, `foreach`), or starts with `python`, `pypy`, `perl`, `ruby`, `node`, `bun`, `deno`, `php`, `lua`, `tclsh` or `pwsh`;
+- `find` with `-exec`, `-execdir`, `-ok` or `-okdir`; and anywhere `-c`, `-e`, `--exec`, `--eval`, `--exec=`, `--eval=`, `-E`, a short-option cluster of two or more letters ending in `c`, `e` or `E` (`bash -lc`, `perl -le`), or a word starting with `=` (zsh expands it to a command's path). So `grep -e` and `grep -ie` can never be allowed.
+
+The canonical form is the words joined by single spaces. A `Bash(argument)` deny matches when the argument matches the case-folded canonical form, with empty quoted words dropped so `rm '' -rf x` still reads `rm -rf x`, from its start, or from just after any space, `/` or `=`, so it also catches `foo rm -rf x`, `/bin/rm -rf x` and `rg --pre=rm -rf x`; a deny argument ending in a space followed by `*` also matches the command without that tail. With indirection every governing `Bash` deny matches. An allow compares exact code points from the start of the canonical form and requires no indirection, a first word without `/` and no word containing whitespace; the trailing space-and-`*` rule applies to denies only, and no allow pattern of any form matches a call with indirection.
+
+**The guarantee and its limits.** A deny cannot be bypassed through the listed forms; the list is closed (ADR-0009, amended 2026-10-23 and 2026-10-24). Global options before a subcommand, scripts, build tools, and programs outside the list that run an argument as a command can still reach a denied effect (`git -C . push` against `Bash(git push *)`, so write `Bash(git *push*)`; an operand before the options, as in `rm junk -rf x` against `Bash(rm -rf *)`, so write `Bash(rm *-rf*)`; a launcher or evaluation option the list does not name, such as `fish --command=` or `php -r` behind an unnamed launcher), and an allowed command can still run code the agent wrote: shell start-up files, a directory on `PATH` inside the workspace, `.git/config`, build files. Hook-time protected paths cover the file-edit tools only; shell writes and MCP file tools are caught by the gate-time check of section 4. These effects belong to the runtime and external-permission layers (three layers above).
+
+**Order and reasons.** `decide` first raises, in order, `policy_harness_unsupported`, `tool_policy_invalid` (a layer `validate` would refuse) and `protected_paths_invalid` (an invalid glob, or a list past 64 globs, 8,192 pieces, 64 KiB or 16,384 characters outside ASCII); each is a denied call with cause `policy_error`. It then evaluates paths, the shell refusals, protected paths, namespace then node denies by index, and namespace then node allows, stopping at the first outcome:
+
+| order | condition | reason |
+| --- | --- | --- |
+| 1 | an argument, patch or path that cannot be read, a shell refusal under the shell condition, or exhausted fuel | `argument_invalid` |
+| 2 | a protected path | `protected_path` |
+| 3 | a matching deny | its rule id, such as `namespace.deny.3` |
+| 4 | a layer with a non-empty allow and no matching pattern | `not_allowed` |
+| 5 | otherwise | `allowed` |
+
+**Fuel.** `decide` never awaits, so `policy_timeout` cannot interrupt it. Every decision instead draws on one fuel counter, `kora.ir.globs.Fuel`, charged before each core match (a fixed charge per call, per edge piece and, more, per middle piece, plus the first and last pieces' lengths, then the window between the first and last piece weighted by the longest middle piece, charged only once the first and last pieces match and middle pieces remain; a literal match pays its text's length instead), each anchor search (one window weighted by its first piece as a core needle, because a search for a short needle costs up to the needle's length per character, plus a call charge for every occurrence of the first piece that does not follow a separator), each glob match (a fixed call charge) and each glob position, each `lstat` or `readlink` and each path at intake (more for a path outside ASCII); exhaustion denies the call with `argument_invalid`, never allows it. The `test_policy_decision_cost` rows of `tests/measurements/test_protocol_models_cost.py` calibrate the budget and report, as a measurement gate rather than an assertion, whether the worst decision stays below 100 ms; an ordinary decision spends at most a third of the budget, as the realistic rows show for a 4 KiB command and a 64-file patch under 100 patterns per array and 10 protected globs; a realistic 16 KiB command is decided without exhausting the fuel. Those claims hold for that envelope of short pattern prefixes: a configuration at the pattern caps whose deny prefixes are long may exhaust the fuel on a long command and fail closed. A patch whose paths times patterns exceed the budget is refused as `argument_invalid`; that realistic configuration admits about 200 files. Each row asserts its declared outcome, so a row refused early fails. Parsing the layers and compiling the protected globs, the command scanner and the patch parser are bounded by the caps above instead. A provider keeps the parsed configurations of its four most recently used layer and protected-path sets, so a configuration in use pays for parsing only on its first decision; with more than four configurations in rotation every decision pays. The rows report that cold decision as its own measurement gate: at the caps it costs several times a warm decision, because parsing is bounded by the caps rather than by fuel. A compiled pattern keeps only the form its kind compares: an allow its exact form, a deny its case-folded form and tail-free copy. At the caps, with four distinct arrays of mixed-width pieces, one cached configuration holds about 4 MB together with the strings its key keeps, at most 5 MiB for each entry by assertion, released with the provider. A decision is deterministic for an identical request, layers and protected paths on a filesystem unchanged along every walked path.
+
+**Records.** `policy.allow_deny.allowed` (DEBUG, `reason`), `policy.allow_deny.denied` (INFO, `reason`, and `cause`: `rule` or `fuel`) and `policy.allow_deny.refused` (WARNING, `code`) carry no argument, path, pattern or tool name.
 
 ## 13. Conformance suites (NFR-10.2)
 
-Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformance` that an adopter imports into a test module. The cases take the provider under test from fixtures of the opt-in plugin `kora.conformance.plugin` (`kora_<protocol>_provider`, `kora_<protocol>_exercise`, and for secrets `kora_secrets_resolvable`, `kora_secrets_missing_reference`, `kora_secrets_forbidden_reference` and `kora_secrets_listed_prefix`), which raise until the adopter overrides them; entry-point command integration and an isolated built-and-installed third-party fixture are required by first-slice readiness under [#215](https://github.com/realkarych/kora/issues/215); the injected foundation does not claim that evidence. The plugin imports only pytest, and `kora.conformance` needs the `kora[conformance]` extra (issue #204). Every protocol module also carries the common cases of section 1: frozen and consistent capabilities, an object `config_schema`, a bounded content-free `KoraProtocolError` for the exercise's failing input, and provider logging through `ctx.logger` without root reconfiguration. Outline:
+Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformance` that an adopter imports into a test module. The cases take the provider under test from fixtures of the opt-in plugin `kora.conformance.plugin` (`kora_<protocol>_provider`, `kora_<protocol>_exercise`, for secrets `kora_secrets_resolvable`, `kora_secrets_missing_reference`, `kora_secrets_forbidden_reference` and `kora_secrets_listed_prefix`, and for the policy `kora_policy_calls`), which raise until the adopter overrides them; entry-point command integration and an isolated built-and-installed third-party fixture are required by first-slice readiness under [#215](https://github.com/realkarych/kora/issues/215); the injected foundation does not claim that evidence. The plugin imports only pytest, and `kora.conformance` needs the `kora[conformance]` extra (issue #204). Every protocol module also carries the common cases of section 1: frozen and consistent capabilities, an object `config_schema`, a bounded content-free `KoraProtocolError` for the exercise's failing input, and provider logging through `ctx.logger` without root reconfiguration. Outline:
 
 - **Runtime**: idempotent submit and workload-digest conflict; authoritative absence versus unreachable lookup; original-domain adoption and protected journal offset; declared portable recovery state; constructed candidate environment; local deadlines and cancellation; one logical handle/capacity reservation through publication; late `finalize` only after inspection, binding checks and serialization; no candidate-visible publication credential; preparation crash recovery through the supervisor checkpoint; release removes bulky candidate/control/publication roots but retains the retirement/dispatcher registry. ADR-0017 adds the execution-recovery gates below. `test_workspace_preparation_recovers_after_worker_crash` uses the configured fake runtime with no shared host filesystem, crashes at phase barriers and recovers the same trusted `WorkspaceRef`. OS isolation is verified only on actual protected runtimes (table below).
+  - **`kora.conformance.runtime`** (issue #262) holds the common cases of section 1 only, run against `kora_runtime_provider` and `kora_runtime_exercise`; the runtime cases above join it with their implementing work items.
 - **Harness adapter**: recorded SDK event streams yield the expected normalised events, usage completeness, `max_events` termination at the exact count, structured output and its fallbacks, hermetic behaviour (a repo hook that must not run), policy hook invoked before every tool call the harness does not reject itself, installed version recorded and checked against `tested_versions`. The `claude` adapter's cases are the [Claude adapter contracts](#claude-adapter-contracts-issue-125).
+  - **`kora.conformance.harness`** (issue #267) holds the common cases of section 1 and the adapter-neutral outline cases, run against `kora_harness_provider` and `kora_harness_exercise`: `test_harness_events_are_normalised`, `test_harness_policy_precedes_every_tool_call`, `test_harness_max_events_denies_at_exact_count` (with `max_events: 3`), `test_harness_usage_completeness` and `test_harness_structured_output_and_fallbacks`. The exercise names one session per `HarnessCase` and the tool its policy denies; the `kora_harness_host` fixture drives a session through a sink built on the shared `EventCount` and a recording policy client, so no count is implemented twice. The fake harness passes every case from scripted steps; recorded SDK streams, hermetic behaviour and installed-version checks stay with work item 15. A passing run is not evidence that a real harness works.
 - **VCS**: checkout captures the requested base and protected paths; all private files stay outside the candidate tree; native sealed transfer, fresh metadata, fixed inspected revision and trusted destination; no runtime name in requests; same prepared revision on repeat/concurrent finalization; change-request search before create. `test_publish_and_open_change_request_are_idempotent` repeats finalization and creation concurrently using the same operation/head/base and asserts one published revision and one change request. `test_publish_reconciles_after_response_loss` loses the push/create response through an injected provider implementing the real protocol, then compares the same remote revision and reuses the existing request; conflicting remote content fails without overwrite. `test_vcs_runtime_cross_product` runs git and a directory-backed independent non-Git VCS through preparation, execution, sealing, inspection, authorization, publication and release on local and Docker in Linux CI, and on local and the configured fake runtime in macOS CI. The fake runtime exposes no worker-host root. Adopters run the same contract on their runtime/VCS pair; unsupported executor/protection combinations fail validation, with the limitation in the report.
+  - **`kora.conformance.vcs`** holds the common cases of section 1 and the eight native cases activated with #159: requested checkout/base and failure classification, private/control-file exclusion, sealed revision stability, repeated finalization/reconciliation, full head SHA/missing-ref behavior, local credential content/principal/binding, binding mismatch and API-credential refusal. Code-host cases remain with their implementing slice. Under [#288](https://github.com/realkarych/kora/issues/288), shared asynchronous checks preserve these assertions on the caller loop; the direct pytest cases retain their fixtures, markers and per-operation owned-loop shutdown.
 - **Approval channel**: request → read-only paginated marker lookup → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent, including `resolved`; response loss, late/multiple external ids and every desired-state row above. Terminal reconciliation never creates or rewrites approval audit status.
 - **Secrets**: resolution, missing-reference error shape, a reference outside the namespace's prefixes refused with the same content-free shape, `list_names` returning names only, redaction in a captured stream through `StreamMasker`.
 - **Artifact storage**: staged streaming, immutable source/prepared reads, create-only publication and exact creation attribution, retired-stage closure, bounded private/deletion capacity, acknowledged evidence compaction, content-addressed dedupe, cross-instance reads and deletion. The [storage cases](#artifact-storage-contracts-issue-229) preserve delete/get/exists and repeated-delete behavior and assign local/S3 activation separately.
@@ -1472,10 +1696,27 @@ Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformanc
 - **Observability**: a slow exporter does not delay a run; drops are counted.
 - **Authentication**: scope enforcement per operation; revoked tokens are refused. Ordinary requests retain a per-credential cache of at most the [bounded run-read wait](api-and-agent-surface.md#bounded-run-read-wait-adr-0002) re-check interval when validation is not a bounded local read. For `requires_current_authority=True`, warm that ordinary cache, then commit revocation/expiry or remove platform/namespace/transcript rights behind an explicit barrier. No current-authority request may reuse stale rights. Expected invalidity raises `authentication_rejected`; inability to establish current authority raises `authentication_unavailable` with no anonymous result or cached fallback. Real API integration proves no new protected stream record or metric bytes are submitted. Ordinary bounded-read cache cases remain separately required.
 - **Sensor**: cooperative cancellation, declared serial dependency calls and bounded decoded results; `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.
-- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every call kind the adapter declares in `policy_coverage`, under every permission mode**, for every call the harness does not reject itself, through the adapter's `PreToolUse` hook (Claude: the SDK callback; Codex: the managed command hook; after MVP ACP `session/request_permission` for the kinds the agent declares), and the denied call never reaches the tool (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)); a pattern on a kind outside the coverage is rejected by validation (`IR019` for namespace policy, `IR028` for a node-only rule); a node allow cannot widen a non-empty namespace allow list, and a call with chaining metacharacters, `-c`, `--exec` or other indirection matches every `Bash(...)` deny and no allow pattern (`test_tool_policy_layers`); a protected path cannot be edited; a pattern whose tool name is exactly `StructuredOutput` is rejected with `IR013` for every implementation. `test_required_policy_is_enforced_or_rejected` runs the matrix of section 12 against the real harness interface with a deterministic driver (recorded streams where the interface allows no driver): for every covered kind and permission mode an allowed and a denied shell command, file edit and MCP tool call, judged by whether the side effect happened, not by the presence of a `permission_denied` event; for every uncovered kind and supported permission/sandbox mode, a namespace pattern returns `IR019`, and a node-only pattern with no covering namespace restriction returns `IR028`. Exercise each case through both validate and deploy, assert the same code and safe segmented field path, no warning-only success and no provider/secret/execution side effects. Malformed patterns retain `IR013`. On `claude` the matrix runs on the scripted-model layer of the [Claude adapter contracts](#claude-adapter-contracts-issue-125), with no derived `allowed_tools` or `disallowed_tools` list, in every mode including `dont_ask` and `plan`: a callback allow runs the call, except that `plan` still blocks a call that is not read-only; a deny blocks it; an allow-listed command still reaches the callback; a protected-path `Edit`, `-c` indirection inside an allow-listed command, a subagent's call and a hosted tool's call are denied when the policy denies them; each is judged by its side effect. A live smoke test against a model is a manual experiment outside CI, recorded with the harness version; the fake adapter proves the runner's handling of a decision, never a real hook.
+- **Policy**: `validate` rejects a malformed policy with a path; a namespace deny beats a node allow; decisions are deterministic for identical requests; **a deny reaches every call kind the adapter declares in `policy_coverage`, under every permission mode**, for every call the harness does not reject itself, through the adapter's `PreToolUse` hook (Claude: the SDK callback; Codex: the managed command hook; after MVP ACP `session/request_permission` for the kinds the agent declares), and the denied call never reaches the tool (current contract [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md)); a pattern on a kind outside the coverage is rejected by validation (`IR019` for namespace policy, `IR028` for a node-only rule); a node allow cannot widen a non-empty namespace allow list, and a call with a form on the closed indirection list of section 12 matches every governing `Bash` deny and no allow pattern (`test_tool_policy_layers`); a protected path cannot be edited; a pattern whose tool name is exactly `StructuredOutput` is rejected with `IR013` for every implementation. `test_required_policy_is_enforced_or_rejected` runs the matrix of section 12 against the real harness interface with a deterministic driver (recorded streams where the interface allows no driver): for every covered kind and permission mode an allowed and a denied shell command, file edit and MCP tool call, judged by whether the side effect happened, not by the presence of a `permission_denied` event; for every uncovered kind and supported permission/sandbox mode, a namespace pattern returns `IR019`, and a node-only pattern with no covering namespace restriction returns `IR028`. Exercise each case through both validate and deploy, assert the same code and safe segmented field path, no warning-only success and no provider/secret/execution side effects. Malformed patterns retain `IR013`. On `claude` the matrix runs on the scripted-model layer of the [Claude adapter contracts](#claude-adapter-contracts-issue-125), with no derived `allowed_tools` or `disallowed_tools` list, in every mode including `dont_ask` and `plan`: a callback allow runs the call, except that `plan` still blocks a call that is not read-only; a deny blocks it; an allow-listed command still reaches the callback; a protected-path `Edit`, `-c` indirection inside an allow-listed command, a subagent's call and a hosted tool's call are denied when the policy denies them; each is judged by its side effect. A live smoke test against a model is a manual experiment outside CI, recorded with the harness version; the fake adapter proves the runner's handling of a decision, never a real hook.
+  - **`kora.conformance.policy`** (issue #236) holds the cases that hold for any policy. Every decision they receive must be an exact `PolicyDecision` with an exact `bool` for `allow` and a `reason` that is a rule id or a `PolicyReason`, agrees with the decision (section 12) and contains no part of the conformance marker, which each request carries as the extra argument `kora_conformance_marker`. The reason form already excludes the marker; the check stays as defence in depth. Each case runs with `agent_id` unset and set, with different `tool_use_id`s and with a nested `node_path`, and runs its decisions on one event loop:
+    - `test_policy_validate_refuses_a_malformed_policy`: a `ContractViolation` with a path, carrying none of the policy's text;
+    - `test_policy_deny_in_either_layer_denies`: a matching deny in either layer, placed after one or two non-matching ones, before one or between two, denies whether each layer's allow list is empty or matches, whether the other layer denies something else, whether either layer allows a narrower pattern that matches the call and whether protected paths are set, for the shell request and for every edit request at the unprotected path `src/case.py`; a rule-id reason must cite that deny's position;
+    - `test_policy_allow_list_restricts_in_either_layer`: a non-empty allow list of one or two entries that does not match denies, whatever the other layer allows and whether protected paths are set, for the same requests;
+    - `test_policy_allows_what_no_rule_refuses`: the positive control, with no rule, matching allow lists, allow lists of the narrower pattern or the pattern naming the path, or a non-matching deny, for the same requests while protected paths are set, and each protected path's edit under allow lists naming that path with no protected paths, so a fixture whose narrower or naming patterns match nothing fails;
+    - `test_policy_protected_path_is_denied`: an edit of a path under `tests/**`, of a path matching the file glob `config/*.lock`, or of a literal entry such as `Makefile`, alone or listed after one or two decoy entries, is denied for every file-edit tool of the coverage matrix for each harness the adopter names, whatever the layers say, an allow that names the path included, and the denial cites no rule. The path is relative, nested, absolute under the workspace root, in a `./`, inner `/./`, `..`, doubled-slash, `<root>/../<root name>/` or `../<root name>/` form, or spelled with a capital first letter, since protected-path globs match case-insensitively (ir.md). The case refuses a fixture with no edit call, a harness outside the coverage matrix, a builder whose request names another tool, or a harness whose file-edit tools are not all covered under that harness;
+    - `test_policy_decisions_are_deterministic`: interleaved requests with different outcomes keep their own decisions and reasons on one instance, over three rounds that each build their requests afresh: shell requests under a deny, and for every edit tool an unprotected edit against a protected one, a guarded edit without and then with its protected paths, and an edit under a matching deny against one under none.
+
+    Every rule-id reason must index an existing pattern of the named layer and kind. The cases assume an honest provider: they cannot exclude a policy that changes its behaviour after more decisions than they make, and the conformance marker in `arguments` is visible to a provider, so a policy must ignore argument keys it does not read. `apply_patch` multi-file and `Move to` paths are proven by `allow_deny`'s own tests (#233). The cases do not require a policy to resolve symlinks; `allow_deny` proves that in its own tests.
+
+    The fixture `kora_policy_calls` supplies, in the provider's own pattern syntax, a shell request with a matching, a narrower matching and a non-matching pattern, a second shell request the matching pattern does not match, an edit request builder per file-edit tool with a pattern matching every call of that tool (`MultiEdit` included) and a function that names one path in an allow pattern, and a malformed policy document. `allow_deny` runs every case in `tests/plugins/policy/test_allow_deny_conformance.py`, with a workspace root holding `src/` and `tests/unit/`. The other policy legs have their own owners: the chaining, `-c` and indirection rule is `allow_deny`'s (#233); the `IR013` `StructuredOutput` refusal and the `IR019`/`IR028` coverage checks are the validator's, with the adapters' declared coverage; the deny across call kinds and permission modes through the hook is the adapters' and the runner's.
 - **End to end**: the canonical graph on the fake harness against the runtime and VCS under test (NFR-0.2), through the testing runner of [fakes.md section 3](fakes.md#3-the-testing-runner-and-the-scenario-composition).
 
 Which of these cases the fakes pass, which do not apply to them and which they never claim is the applicability matrix of [fakes.md section 8](fakes.md#8-conformance-applicability); their own contracts are in [fakes.md section 10](fakes.md#10-contracts-and-measurements).
+
+### Bounded storage range reads (issue #227)
+
+Add `get_range(content, offset, length)` over the exact immutable content reference of ArtifactStorage, with the same closeable async stream and failure types as `get`. The core validates nonnegative offset, length 1–65,536, clips to known remaining bytes and handles empty content/end offset without opening a provider reader. The provider seeks the requested range and returns exactly that span or a typed failure; streaming/discarding the prefix, short successful EOF and extra bytes are forbidden. `get` remains the complete-content read. Range identity creates no permission, retention owner or durable cursor. Current API authority and original-owner eligibility are rechecked before submission units; physical open readers never renew eligibility. Closure and uncertain cleanup keep the existing ownership contract.
+
+Work item 8 implements this additive method with every real storage provider's existing conformance, following #229. `test_artifact_storage_range_reads_are_exact` covers empty/end offsets, invalid bounds, exact/near-limit spans, missing bytes and actual offset-independent seek. `test_artifact_storage_range_lifetime` covers slow consumers, refusal, cancellation and shutdown, including uncertain cleanup and deletion races. Measure actual readers/tasks/descriptors/buffers and settle repeated applicable endings under [the bounded-read workloads](bounded-read-projections.md#10-activation-observability-and-verification). Retention #216 and API/metadata 5/11/12 own eligibility/shared-owner integration; provider conformance is not their substitute. No provider/fake implementation is introduced by this contract.
 
 ### Artifact-storage contracts (issue #229)
 
@@ -1487,19 +1728,33 @@ These cases exercise [section 7](#7-artifact-storage-fr-44) through real protoco
 | `test_artifact_storage_promotion_is_create_only` | existing bytes never replaced; selected prepared identity rather than raw identity is published; first-call foreign stage/part/seal/preparation/destination bindings fail before effects; configured aliases resolve the same physical address |
 | `test_artifact_storage_promotion_replay_preserves_outcome` | exact replay retains original created/existing attribution after response loss, process crash, persistence failure and later deletion; unknown remains charged; no fresh operation hides uncertainty |
 | `test_artifact_storage_staging_cleanup_is_confined` | retirement closes useful writes and new readers, settles earlier effects/read leases, deletes only private bytes and never shared content; delayed begin/write/promote cannot reopen a released stage; real path/symlink substitutions fail |
-| `test_artifact_storage_staging_lifetime` | bounded stage/private-byte/semantic-receipt admission; concurrent exact/conflicting replays, slow readers, success/error/full-disk/cancel/restart/shutdown, accepted cleanup backlog and unknown effects; actual memory/tasks/threads/descriptors/bytes/objects return to their declared settled baseline |
+| `test_artifact_storage_staging_lifetime` | bounded stage/private-byte/semantic-receipt admission; concurrent exact/conflicting replays, slow readers, success/error/full-disk/cancel/restart/shutdown, accepted cleanup backlog and unknown effects; component-owned buffers, tasks, threads, descriptors and disposable bytes/objects settle after actual effect closure, with intentional bounded caches separately owned and accounted |
 | `test_artifact_storage_deletion_lifetime` | finite deletion slots, lost responses, exact outcome persistence/acknowledgment, crash on both sides of release, repeated delete/recreate generations and delayed old delete; settled receipt/intent counts stabilize and old operations cannot delete new content |
 | `test_artifact_storage_inventory_is_bounded` | stages and content, physical-identity/kind-bound keyset cursor, restart/concurrent changes, finite page bytes and actual scan work; inventory never grants deletion/closure authority |
 
 The implementation preregisters workloads, finite settings, actual commands and justified budgets. Include largest parts/uploads and simultaneous raw/assembly/candidate copies, repeated lifecycle endings and growing inventory. Measure serially on an uncontended runner; retain all samples, Python/native peak and settled memory, tasks, threads, connections, descriptors, subprocesses, private files/bytes/receipts and intentional retained content. Unresolved safety state stays separately accounted, with no claimed bounded recovery time. No complete object is buffered merely to satisfy an interface. Use real process/crash barriers and configured protocol fakes, never patched transports or sleeps for synchronization. No numerical throughput/RSS result is supplied by the contract.
 
+Component-owned payload and work resources must be released at their declared lifecycle boundary. An unresolved live resource or demonstrated unbounded component retention fails qualification. Process-wide Python/native peak and settled memory remain recorded, with runtime caches and observation overhead distinguished from component ownership. Passing exact closure and the declared working-memory bounds establishes only those checked properties; diagnostic post-GC/RSS deltas and timing observations establish no general plateau, native-RSS, throughput or leak-freedom guarantee.
+
 The integration owners retain `test_upload_requires_grant_before_bytes`, `test_refused_upload_bytes_are_reclaimed`, `test_refused_upload_shared_address_releases_staging_reservation`, `test_upload_finalization_admission_is_bounded`, `test_execution_request_upload_stays_owned_until_sealed`, `test_retention_delete_generation_survives_restart` and `test_stale_retention_delete_cannot_remove_recreated_blob`, on both databases. Complete/raw/prepared identity mismatch, positive canonicalization and marker-inclusive truncation, lost terminal responses, expired-owner recovery, denied/stale grants, shared-address races and source/prepared lock ordering belong there. Provider conformance cannot satisfy absent API/metadata consumers. Preserve at least 1,000 cycles per applicable integration ending, real owner-query work and unrelated scheduler/database progress. Work items 11/12/17 and #216 own executable activation and component diagnostics.
+
+The storage suite exposes all nine named caller-loop checks: staging-reader lifetime, deletion lifetime, bounded inventory, exact range reads and range-reader lifetime under [#290](https://github.com/realkarych/kora/issues/290); create-only publication under [#292](https://github.com/realkarych/kora/issues/292); and staging round trip, promotion replay and confined staging cleanup under [#295](https://github.com/realkarych/kora/issues/295). Direct pytest wrappers retain the same operations, identifiers, assertions, close/reconstruction order and pre-shutdown assertion placement, including all five staging sizes (0, 1, 65536, 16777216 and 268435456 bytes). Each shared case requires the same fresh storage state as its function-scoped direct fixture and receives the exact provider and protocol context; publication uses that supplied context. The three reconstruction checks receive an explicit caller-owned construction callback, preserving the direct factory fixture without placing a factory in adapter inputs. The caller closes actual provider jobs, native work and readers before disposing of exercise state, including on refusal, cancellation and unexpected failure. This library activation does not enforce installed construction authority or compose all cases on one receiver; configured command execution remains #215.
 
 ### Local conformance command
 
 The first-slice command is `kora conformance <protocol> <name> --config <provider.json> --fixtures <installed.python.module> [--fixture-data <exercise.json>]`. `--config` may be omitted only when `{}` validates against the selected provider's `config_schema`. Before that validation, external fixture loading or provider construction, core saves a private bounded canonical snapshot of the metadata schema and uses it for validation and later comparison; a shallowly frozen metadata object is not an immutable nested schema. Public metadata/schema views receive defensive copies. Validate configuration before preparation or construction. Configuration and optional exercise data are JSON objects read with a one-MiB input limit and the existing JsonObject depth-16/one-MiB value bounds. Omitted exercise data is `{}`. Invalid input is a content-free nonzero refusal, never echoed through validation or pytest diagnostics.
 
-`--fixtures` is one required explicit installed Python module, loaded as the selected pytest plugin. It is not guessed from the provider name, loaded from the checkout, registered through another entry-point group or added to `ProviderMetadata`. It must export the ordinary pytest fixture `kora_conformance_adapter() -> ConformanceAdapter`. The fixture only returns the adapter; resource acquisition starts in preparation after lifetime authority is supplied. A missing fixture, wrong adapter interface or wrong activated-protocol exercise bundle is a content-free nonzero refusal. #215 implements the following public `kora.conformance` bridge types and command wrappers; they are not supplied by the existing opt-in foundation. The accepted [local conformance lifetime ABI](conformance-lifetime.md), specified under [#231](https://github.com/realkarych/kora/issues/231), defines typed acquisition, acknowledgement and closure, including the local-runtime pre-live launch seam. #215 implements that contract; all required lifecycle gates remain in the first slice.
+Configuration schemas use their recognized declared root JSON Schema dialect; absent root `$schema` selects Draft 2020-12. Unknown root dialects, schemas rejected by the selected validator's meta-schema check, and references unresolved when encountered during validation fail before external fixture preparation or provider construction. Reference resolution uses only the retained schema and bundled in-memory resources, never network or filesystem retrieval. Format keywords retain the selected dialect's standard annotation semantics. Validation runs within the owned command phase and its bounds; schema/configuration values and library exception messages never enter public reports.
+
+Schema well-formedness is checked by the selected upstream validator's `check_schema` on the advertised root. Configuration validation then follows that validator's reference and nested-dialect semantics; an unknown nested `$schema` may fall back to the current dialect, and kora does not independently revalidate every encountered reference target as a schema. A target inside annotation data can therefore escape meta-schema checking: for example, `{"type":"object","default":{"required":"x"},"$ref":"#/default"}` may accept `{"x":1}` even though the target's `required` value is malformed. Known evaluation failures return fixed refusals. Provider authors remain responsible for well-formed referenced schemas. This library performs no retrieval or execution. Acceptance establishes only the checks described here and may allow the authorized conformance command to proceed to preparation or construction. Installed providers remain trusted code.
+
+The bounded input-library prerequisite is implemented in `kora.conformance.inputs` under [#280](https://github.com/realkarych/kora/issues/280): private canonical snapshots, defensive views, offline validation and exact instance-schema comparison. Upstream evaluation failure is a distinct content-free refusal; it never grants construction authority. The [dependency and limitation record](../research/conformance-inputs-2026-10-26.md) describes the validated domain. Owned command execution, external preparation and command activation remain #215.
+
+The common and secrets suites expose reusable checks on the caller's event loop under [#282](https://github.com/realkarych/kora/issues/282), together with `SecretsConformanceInputs`. The existing direct-injection pytest cases share the same assertion bodies and retain their fixtures and markers. Synchronous cases finish their owned event loop, including provider task and async-generator finalization, before checking returned values, handlers and captured output; shared asynchronous checks leave the caller's loop ownership unchanged. Each capture retains its own lifetime; checks that finish it require a separate capture from subsequent cases. The configured command, selected-instance/configuration enforcement and completion accounting remain #215.
+
+The policy and harness suites expose shared checks under [#286](https://github.com/realkarych/kora/issues/286). Policy checks await decisions on the caller's loop with an explicit `ProtocolContext`, retaining all six cases, request matrices and decision checks. Harness checks inspect the existing host's `HostedRun` results, retaining the five checks, six scenarios and exact three-event limit. Direct pytest wrappers retain their fixtures, markers and owned-loop shutdown before result assertions. These library interfaces do not activate the installed command.
+
+`--fixtures` is one required explicit installed Python module, loaded as the selected pytest plugin. It is not guessed from the provider name, loaded from the checkout, registered through another entry-point group or added to `ProviderMetadata`. It must export the ordinary pytest fixture `kora_conformance_adapter() -> ConformanceAdapter`. The fixture only returns the adapter; resource acquisition starts in preparation after lifetime authority is supplied. A missing fixture, wrong adapter interface or wrong activated-protocol exercise bundle is a content-free nonzero refusal. The public adapter and prepared-instance library below are implemented under #303; installed command composition remains #215. The accepted [local conformance lifetime ABI](conformance-lifetime.md), specified under [#231](https://github.com/realkarych/kora/issues/231), defines typed acquisition, acknowledgement and closure, including the local-runtime pre-live launch seam. Its closed values, generic parent controller, private client/endpoint, fixed mutation helper, journal and explicit recovery library are implemented under [#247](https://github.com/realkarych/kora/issues/247), with [dated ownership evidence](../research/local-lifetime-recovery-observations-2026-10-23.md) and lifecycle workloads in `tests/measurements/test_conformance_lifetime.py`. Installed listing is implemented under #248; the configured conformance and cleanup commands remain #215, and runtime/testing-runner integration remains in work items 7/14. All required first-slice lifecycle gates remain binding.
 
 | interface | required signature or fields |
 |---|---|
@@ -1508,6 +1763,10 @@ The first-slice command is `kora conformance <protocol> <name> --config <provide
 | `ConstructorArguments` | a frozen record with `args: tuple[object, ...]` and a read-only snapshot `kwargs: Mapping[str, object]`; referenced resources remain preparation-owned |
 | `ProtocolExerciseBundle` | a closed union of the activated protocol suites' named typed input bundles, never an untyped fixture dictionary; a suite defines its bundle before command activation |
 | `ConformanceLifetime` | the parent-owned acquisition/cleanup authority; preparation receives it before acquisition; the operations below use the closed records, replay rules, bounds and transitions of the [normative ABI](conformance-lifetime.md#public-operations-and-closed-shapes) |
+
+The prepared-instance library in `kora.conformance.bridge` is implemented under [#303](https://github.com/realkarych/kora/issues/303). `ConformanceSelection` retains the selected callable/protocol and constructs the existing validated input snapshots before external preparation. Its prepared context supplies the exact constructed object and selected typed bundle, checks the instance schema before exercises, and owns exact-instance or None cleanup. Storage reconstruction retains each distinct auxiliary before schema checking and closes all auxiliaries before adapter cleanup. Cleanup runs on the same loop, settles through repeated owner cancellation and preserves an original failure with any cleanup failure chained. The library neither changes working directories nor disposes of case domains. The core suite executor, private complete-check ledger, storage case-directory/domain sequencing, installed bootstrap, bounded output transport and parent/CLI composition remain required under #215 before command activation.
+
+`test_bridge_preserves_selected_object_configuration_and_loop` exercises two effective configurations, a wrapper-returning factory, defensive inputs and the existing common/secrets assertions. `test_bridge_cleanup_retains_exact_primary_and_original_failure`, `test_bridge_repeated_cancellation_waits_for_real_cleanup` and `test_bridge_refuses_malformed_handoffs_without_losing_cleanup` cover failure/cleanup identity. `test_bridge_storage_reconstruction_closes_actual_receivers` and `test_bridge_storage_refusals_keep_existing_cleanup_owners` cover real storage receivers, admitted-reader cancellation, schema refusal and alias ownership. `test_bridge_loads_only_the_selected_bundle` and `test_bridge_public_types_keep_other_suites_unloaded` retain selective imports. These library tests do not substitute for installed-distribution and final parent-lifetime evidence.
 
 The lifetime operations are asynchronous. Every request uses the exact typed records in the normative ABI; the parent retains ownership independently of the caller waiter.
 
@@ -1521,15 +1780,35 @@ The lifetime operations are asynchronous. Every request uses the exact typed rec
 
 Core generates invocation/resource identities; `new_operation_id()` supplies replay identities before requests. The fixed core recovery controller exposes `resume_close(reference: CleanupReference, limits: LifetimeLimits) -> ClosureReport` through `kora conformance cleanup <invocation-id>`. Recovery cannot reacquire or import provider/fixture code. The [resource ownership](conformance-lifetime.md#resource-establishment-and-ownership-transfer), [state and deadline rules](conformance-lifetime.md#state-transitions-and-bounded-settlement), [runtime seam](conformance-lifetime.md#local-runtime-seam) and [required tests](conformance-lifetime.md#required-tests-and-evidence) are part of this command contract. In particular, a callback, pytest exit or runtime receipt alone never proves cleanup; uncertainty retains bounded private recovery information and returns nonzero.
 
-Before external fixtures load, core privately retains the selected metadata implementation callable and the validated configuration/exercise-data snapshots. Core calls `prepare` with defensive copies of those exact inputs and its lifetime authority, then calls `bind_configuration` with a fresh copy of its retained validated configuration. The binding derives configuration-dependent constructor arguments from this input; fixture data supplies exercise setup, not substitute configuration. Mutating a supplied copy cannot change core's validated snapshot, later binding input or digest. Core passes the returned arguments directly to its retained callable and retains the exact returned object. The adapter returns neither a factory nor a replacement provider. Before any configured operation or suite exercise, core obtains the exact constructed instance's advertised `config_schema`, validates its bounded JSON-object shape and compares its canonical JSON with the private canonical metadata-schema snapshot saved before fixture loading and construction. Require equality; a mismatch is a content-free failure followed by normal exact-instance cleanup, never a second validation against a different schema or a fixture-selected substitute. Metadata remains the schema used for listing and pre-construction validation. Core-owned command suite fixtures supply only this object to cases and reject external provider/factory overrides. Public metadata/config/exercise-data fixtures are input views, never authority read back by the command.
+Before external fixtures load, core privately retains the selected metadata implementation callable and the validated configuration/exercise-data snapshots. Core calls `prepare` with defensive copies of those exact inputs and its lifetime authority, then calls `bind_configuration` with a fresh copy of its retained validated configuration. The binding derives configuration-dependent constructor arguments from this input; fixture data supplies exercise setup, not substitute configuration. Mutating a supplied copy cannot change core's validated snapshot, later binding input or digest. Core passes the returned arguments directly to its retained callable and retains the exact returned object. The adapter returns neither a factory nor a replacement provider. Before any configured operation or suite exercise, core obtains the exact constructed instance's advertised `config_schema`, validates its bounded JSON-object shape and compares its canonical JSON with the private canonical metadata-schema snapshot saved before fixture loading and construction. Require equality; a mismatch is a content-free failure followed by normal exact-instance cleanup, never a second validation against a different schema or a fixture-selected substitute. Metadata remains the schema used for listing and pre-construction validation. Core-owned command suite fixtures supply only the exact object retained for the current prepared exercise and reject external provider/factory overrides. The artifact-storage case and receiver scopes below are the sole exception to constructing one provider for the complete suite. Public metadata/config/exercise-data fixtures are input views, never authority read back by the command.
 
 There is no universal provider constructor. Each activated protocol suite declares the actual configuration consumer: construction where applicable, or the configured operation (for example `Sensor.observe(config, ...)` and `Policy.validate(policy)`). Where configuration belongs to an operation, constructor arguments need not contain it; core-owned exercises pass the retained validated configuration to that operation unchanged. Every exercise driver receives the exact provider and authoritative configuration explicitly, never an alternative captured provider or stale configuration. A same-name class check, digest/equality echo or a claimed consumed flag does not prove configuration use.
 
+The frozen `RuntimeConformanceInputs` bundle, implemented under #303, contains `failure: Callable[[Runtime, JsonObject, ProtocolContext, str], Awaitable[object]]` and `configuration_effect: Callable[[Runtime, JsonObject, ProtocolContext], Awaitable[None]]`. It supplies inputs to the currently active common runtime checks; it does not activate the pending runtime-specific scenarios or managed runtime controller.
+
 The secrets bundle `SecretsConformanceInputs` contains a failure driver `Callable[[SecretsProvider, JsonObject, ProtocolContext, str], Awaitable[object]]`, a resolvable `(reference, expected_value): tuple[str, str]`, `missing_reference: str`, `forbidden_reference: str`, `listed_prefix: str`, and a configuration-effect driver `Callable[[SecretsProvider, JsonObject, ProtocolContext], Awaitable[None]]`. Core-owned wrappers supply the resolvable, missing-reference, forbidden-reference and listed-prefix inputs unchanged to their matching activated secrets cases; those cases retain their direct-injection interface, including captured-stream redaction through `StreamMasker`. For failure and logging cases, a wrapper forwards the exact provider, a fresh authoritative configuration copy, the same protocol context and the existing common suite's supplied marker. The driver exercises that marker as failing/logged input; dropping or substituting it cannot make the content-exclusion checks pass. A command-wrapper negative case with an echoing provider must expose that failure. The configuration-effect driver exercises the declared configured consumer and asserts its observable behavior against the authoritative configuration. Other activated suites define equivalent explicit typed bundles and consumers before their command support ships.
+
+The frozen `PolicyConformanceInputs` bundle contains `failure: Callable[[Policy, JsonObject, ProtocolContext, str], Awaitable[object]]`, `calls: PolicyCalls`, and `configuration_effect: Callable[[Policy, JsonObject, ProtocolContext], Awaitable[None]]`. The configured consumer remains `Policy.validate` with the retained configuration; the existing malformed-policy case keeps its separate exercise input. The installed bridge supplies the authoritative configuration and exact provider when it activates under #215.
+
+The frozen `HarnessConformanceInputs` bundle contains `failure: Callable[[HarnessAdapter, JsonObject, ProtocolContext, str], Awaitable[object]]`, `prepare_case: Callable[[HarnessAdapter, JsonObject, HarnessCase, ProtocolContext], Awaitable[None]]`, `denied_tool: str`, and `configuration_effect: Callable[[HarnessAdapter, JsonObject, ProtocolContext], Awaitable[None]]`. Preparation selects declared injected fixture inputs or owned external exercise state and returns no provider, factory, session result or replacement configuration. `run_harness_case` retains a deep JSON copy before awaiting preparation, supplies preparation a separate deep copy, and passes the retained configuration to the existing host. The host calls the exact provider's `build_session_spec` and `run`, preserving an explicitly empty configuration. Its sink, recording policy and `EventCount` remain the existing implementation. The direct-injection `HarnessExercise.adapter` interface stays available; the configured shared path never invokes that factory.
+
+The frozen `VcsConformanceInputs` bundle contains `failure: Callable[[Vcs, JsonObject, ProtocolContext, str], Awaitable[object]]`, `remote: VcsRemote`, `head_remote: VcsRemote`, `binding: VcsBinding`, `bench: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[VcsBench]]`, and `configuration_effect: Callable[[Vcs, JsonObject, ProtocolContext], Awaitable[None]]`. The bench driver receives the exact selected instance after construction and supplies owned exercise infrastructure; it returns no provider or provider factory. The native executor's destination, inspection-source and head interfaces use that same instance. The ordinary remote serves checkout, private-file, sealed-transfer, credential and repeated-finalization cases. The head case uses `head_remote`, retaining the configured repository/base/binding while selecting a distinct fresh branch whose derived missing branch is absent. Repeated finalize and reconciliation within one case retain the identical prepared operation/destination. No fixture resets a remote or overwrites an existing ref to make another case pass.
+
+VCS shared checks leave loop and temporary-root ownership with their caller. The owner retains exercise roots through Runner/default-executor shutdown before deleting them. Cancellation of an executor waiter can precede thread settlement; an empty task list or cancellation return does not prove native work has stopped. Configured-invocation cleanup during native threaded work remains an explicit #215 bridge/parent integration obligation. These library checks add no executor cancellation, publication-authority or hostile-process-isolation guarantee.
+
+The frozen `ArtifactStorageConformanceInputs` bundle contains `failure: Callable[[ArtifactStorage, JsonObject, ProtocolContext, str], Awaitable[object]]` and `configuration_effect: Callable[[ArtifactStorage, JsonObject, ProtocolContext], Awaitable[None]]`. Both drivers receive the exact selected provider, authoritative configuration and protocol context; failure/logging also receives the existing common marker. Protocol-specific operation inputs remain in the shared checks. The bundle supplies no provider, constructor factory or replacement configuration. The installed bridge supplies reconstruction callbacks from its privately retained callable and enforces the accepted case/receiver scopes below when #215 activates.
 
 Preparation registers cleanup ownership before independently live resources are acquired. After successful preparation, core calls `cleanup` once on every ending path, passing the exact constructed instance or `None` if binding/construction failed. Partial preparation failure remains owned by the lifetime registry and parent cleanup. Cleanup failure cannot erase the original failure or produce success; cancellation cannot skip required teardown. This establishes input delivery, callable/object provenance and observable conformance for installed trusted code, not honesty or sandboxing of arbitrary provider/exercise internals.
 
-`test_installed_provider_configuration_is_effective` builds an external distribution with nonempty configuration and two distinct valid settings. Both must produce their respective observable behavior through the selected constructor/operation; conflicting fixture data, stale/constant configuration binding and attempted input mutation cannot substitute another setting. Invalid configuration invokes neither preparation nor construction. `test_conformance_fixture_contract_is_complete` covers the named adapter, signatures, activated typed bundle and exact selected-instance guarantee, including wrapper-returning factories and a constructed-instance/metadata schema mismatch that invokes no configured exercise and still tears down the exact instance. The existing input-disclosure and lifecycle gates include preparation, binding, construction and cleanup failures, `None`/exact-instance cleanup delivery and cancellation. `test_installed_provider_schema_matches_metadata` accepts reordered schema object keys but refuses changed constraints/defaults/types, malformed/oversized or unreadable instance schemas and metadata-schema mutation before exercises, with exact-instance cleanup. Mutation of public schema views cannot change the private validation/comparison snapshot. Runtime evidence and these bridge types remain pending #215 after the accepted lifetime ABI in #231.
+Artifact-storage conformance preserves the direct suite's fresh-state and reconstruction boundaries. One core wrapper runs all required common/storage cases and each declared size parameter on the same invocation loop, with a distinct prepared case domain. For each domain, core prepares through the selected adapter using fresh copies of the same authoritative configuration and exercise-data snapshots, binds that configuration, constructs through the same privately retained metadata implementation callable, checks the exact instance schema and supplies only that retained object. Each successfully prepared domain receives exactly one cleanup call with its exact primary instance or None. Case preparation may establish only its explicitly lifetime-owned disposable state; it does not alter the authoritative configuration or silently reset persistent or borrowed storage. A subsequent case starts after the previous domain has actually closed. Core retains the primary object immediately on return, before schema inspection, and keeps its cleanup identity independent of auxiliary receivers. Cleanup receives None only if primary construction returned no object; partial effects remain under lifetime authority.
+
+For storage case isolation, core establishes a fresh parent-owned temporary tree as the isolated child's case working directory before preparation and binding, after the preceding case has closed. The case working directory stays fixed through preparation, binding, all receiver construction, exercises, receiver closure and adapter cleanup. Core restores the anchored original directory only after all case producers and native work settle, before disposing of the case tree. Failed restoration or unresolved work prevents the next case and follows the existing nonzero parent-cleanup path. Configuration stays unchanged. The built-in local fixture accepts relative storage roots that resolve inside this case directory and refuses absolute or escaping roots before construction; it never replaces the configured root with a fixture-selected value or adopts/resets an existing store. Other fixtures must establish a compatible disposable case domain under the same ownership and configuration rules or refuse before construction. Two distinct relative local roots must produce the corresponding actual storage locations.
+
+Named storage cross-instance/reconstruction steps may request an auxiliary receiver from core, never from an adapter factory. Core binds a fresh copy of the same authoritative configuration against the same prepared store, calls its retained implementation, retains the returned object before checking its schema, and supplies only that exact receiver. Auxiliary receivers must be distinct objects from the primary and every previous receiver; a repeated object identity is refused and retains its existing cleanup owner rather than becoming a second receiver. Replacement follows actual closure of the previous receiver's jobs, streams, executors and descriptors; the existing cross-instance read case retains concurrent receivers only for that explicit check. Core closes every auxiliary receiver on every ending before prepared-domain cleanup. Reconstruction does not authorize new useful work for a released owner. Failure or uncertainty during any closure prevents successful completion and preserves the existing recovery obligations.
+
+These accepted installed storage case and receiver scopes are recorded under [#295](https://github.com/realkarych/kora/issues/295), following [the owner-approved clarification](https://github.com/realkarych/kora/issues/215#issuecomment-6422704090). Their command enforcement, case-directory switching, retained-constructor authority and private completion accounting remain pending #215; the shared library alone does not implement them.
+
+`test_installed_provider_configuration_is_effective` builds an external distribution with nonempty configuration and two distinct valid settings. Both must produce their respective observable behavior through the selected constructor/operation; conflicting fixture data, stale/constant configuration binding and attempted input mutation cannot substitute another setting. Invalid configuration invokes neither preparation nor construction. `test_conformance_fixture_contract_is_complete` covers the named adapter, signatures, activated typed bundle and exact selected-instance guarantee, including wrapper-returning factories and a constructed-instance/metadata schema mismatch that invokes no configured exercise and still tears down the exact instance. The existing input-disclosure and lifecycle gates include preparation, binding, construction and cleanup failures, `None`/exact-instance cleanup delivery and cancellation. `test_installed_provider_schema_matches_metadata` accepts reordered schema object keys but refuses changed constraints/defaults/types, malformed/oversized or unreadable instance schemas and metadata-schema mutation before exercises, with exact-instance cleanup. Mutation of public schema views cannot change the private validation/comparison snapshot. The bridge types are implemented under #303; installed runtime evidence and complete command composition remain pending #215 after the accepted lifetime ABI in #231.
 
 Run pytest through its explicit opt-in loading in an isolated local child, disabling ambient plugin, conftest and configuration discovery and current-directory/checkout imports. Load only the selected provider, explicit fixture module and the selected protocol's activated kora conformance suite with its declared dependencies. Serving processes and provider listing never load the fixture module. This is trusted installed test code, not a sandbox. No automatic installation, core dynamic-import exception, plugin-manager access exception or unlisted pytest hook is authorized; #215 must follow ADR-0026 and the suppression/import checks or obtain a separately approved narrow amendment.
 
@@ -1691,7 +1970,7 @@ These named cases specify future behavior; this documentation change implements 
 
 ### Protocol model contracts (issue #134)
 
-These are specified contracts for later work items; the first two rows are executable for their protocol-model legs since issue #204, and their worker-route and control-channel legs wait for work items 11, 14 and 17. Every database leg runs on PostgreSQL and SQLite.
+These are specified contracts for later work items; the first two rows are executable for their protocol-model legs since issue #204, with the `IssuedCredential` and `PublicationAuthorization` legs and the check against `model_construct` of a transfer-field model since issue #262, and their worker-route and control-channel legs wait for work items 11, 14 and 17. Every database leg runs on PostgreSQL and SQLite.
 
 | contract | evidence required when implemented | work items |
 |---|---|---|
@@ -1703,7 +1982,7 @@ These are specified contracts for later work items; the first two rows are execu
 | `test_adapter_cannot_emit_supervisor_kinds` | from a harness adapter `EventSink` accepts only the ten `NormalisedEvent` kinds and raises for `phase`, every supervisor kind, the command kinds and the runner markers | 14 |
 | `test_event_content_is_bounded_and_classified` | `tool_call` never carries input; turn, tool-result, error and command-output content is redacted, bounded, marked and stored only in transcript segments; promoted audit events are content-free | 14, 15 |
 | `test_command_output_volume_is_bounded` | journal and upload sizes are equal for 10^4 and 10^6 output lines, and RSS stays flat; the full streams are in the log files | 13, 14 |
-| `test_tool_policy_layers` | a node allow cannot admit a call outside a non-empty namespace allow list; a deny in either layer wins; chaining, `-c` and indirection match every `Bash(...)` deny, and under an allow-only layer such a call is denied; the protected-path deny applies regardless of allow. Unit-level over explicit layers; the seeded namespace-policy legs are required in the first slice, with #192 and work items 3/11/14/15 owning enforcement and coverage | 14 |
+| `test_tool_policy_layers` | active under issue #233: every form of the closed indirection list matches every governing `Bash` deny and no allow, bare `Bash` and `*` included; a shell-routed or unscannable command is refused under the shell condition; the raise order and the reason precedence; one content-free record per outcome. Layer precedence, allow-list restriction and the protected-path deny are proven by the policy conformance cases against `allow_deny` (section 13); the seeded namespace-policy legs are required in the first slice, with #192 and work items 3/11/14/15 owning enforcement and coverage | 14 |
 | `test_policy_failure_denies` | an exception in `decide` denies and fails the attempt with cause `policy_error`, class `config_error`; a timeout with cause `policy_timeout`, class `infrastructure` | 14 |
 | `test_adapter_exception_order` | after `max_events`, `StructuredOutput` is denied; the output channel is recorded as decided | 15 |
 | `test_runner_outcome_covers_every_stop` | every cause maps to the one class of the cause table, an escalation keeps its cause's class, a confirmed bypass after a limit cause is `harness_error`, an overflowed held error result counts as a bypass, and `journal_unavailable` wins over a simultaneous stall | 14, 15 |

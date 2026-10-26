@@ -1,11 +1,61 @@
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
-from kora.protocols.runtime import ExecutionDeadline, is_utc, require
+ScopeKind = Literal["run", "subgraph", "attempt"]
+
+SCOPE_IDENTIFIER: re.Pattern[str] = re.compile(r"\A[\x21-\x7e]{1,256}\Z")
+SCOPE_KINDS: frozenset[str] = frozenset({"run", "subgraph", "attempt"})
+DEADLINE_GRACE: timedelta = timedelta(seconds=30)
 
 NANOSECONDS_PER_SECOND: int = 10**9
 SECONDS_PER_DAY: int = 86400
 NANOSECONDS_PER_MICROSECOND: int = 1000
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ValueError(message)
+
+
+def is_duration(value: object, minimum: timedelta, inclusive: bool) -> bool:
+    if not isinstance(value, timedelta):
+        return False
+    return value >= minimum if inclusive else value > minimum
+
+
+def is_utc(value: object) -> bool:
+    return isinstance(value, datetime) and value.utcoffset() == timedelta(0)
+
+
+def is_scope_kind(value: object) -> bool:
+    return isinstance(value, str) and value in SCOPE_KINDS
+
+
+def is_scope_identifier(value: object) -> bool:
+    return isinstance(value, str) and SCOPE_IDENTIFIER.match(value) is not None
+
+
+@dataclass(frozen=True)
+class ExecutionDeadline:
+    at: datetime
+    scope_kind: ScopeKind
+    scope_id: str
+    clock_uncertainty: timedelta
+    grace: timedelta
+
+    def __post_init__(self) -> None:
+        require(is_utc(self.at), "at is a UTC datetime")
+        require(
+            is_scope_kind(self.scope_kind), "scope_kind is run, subgraph or attempt"
+        )
+        require(is_scope_identifier(self.scope_id), "scope_id is a bounded identifier")
+        require(
+            is_duration(self.clock_uncertainty, timedelta(0), inclusive=True),
+            "clock_uncertainty is a non-negative duration",
+        )
+        require(self.grace == DEADLINE_GRACE, "grace is 30 seconds")
 
 
 def duration_ns(duration: timedelta) -> int:

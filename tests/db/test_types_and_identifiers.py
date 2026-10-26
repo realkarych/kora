@@ -291,3 +291,47 @@ async def insert_artifact_type(
             **seeder.stamps(),
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_price_snapshot_decimal_round_trip(database: Database) -> None:
+    from decimal import Context, localcontext
+
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        ns = await seeder.namespace()
+        graph_id = await seeder.graph(ns)
+        version_id = await seeder.graph_version(graph_id)
+        run_id = await seeder.run(ns, graph_id, version_id)
+        node_id = await seeder.node(run_id, "money")
+        attempt_id = await seeder.attempt(node_id)
+    exact = Decimal("99999999999999.9999999999")
+
+    with localcontext(Context(prec=3)):
+        async with database.transaction() as connection:
+            usage_id = await Seeder(connection).usage(attempt_id, "exact", exact)
+        async with database.read_transaction() as connection:
+            stored = (
+                await connection.execute(
+                    select(usage_record.c.usd_estimate).where(
+                        usage_record.c.id == usage_id
+                    )
+                )
+            ).scalar_one()
+
+    assert stored == exact
+    for invalid in (
+        Decimal("0.00000000001"),
+        Decimal("-1"),
+        Decimal("100000000000000"),
+        Decimal("NaN"),
+        0.1,
+        "1.00",
+    ):
+        with pytest.raises(StatementError):
+            async with database.transaction() as connection:
+                await connection.execute(
+                    update(usage_record)
+                    .where(usage_record.c.id == usage_id)
+                    .values(usd_estimate=invalid)
+                )

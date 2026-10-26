@@ -1,7 +1,17 @@
 import os
 import time
+from collections.abc import Iterator
 
-from kora.observability import LoggingSettings, LossReason
+import pytest
+
+from kora.conformance.capture import MAX_CAPTURE_BYTES
+from kora.observability import (
+    ComponentLogger,
+    LoggingSettings,
+    LossReason,
+    ProcessDiagnostics,
+)
+from kora.observability.sink import BATCH_BYTES
 from tests.observability.conftest import (
     NOTE,
     TEST_COMPONENT,
@@ -11,6 +21,9 @@ from tests.observability.conftest import (
     wait_until,
 )
 
+BURST_RECORDS: int = 2000
+FILL_CHUNKS: tuple[int, ...] = (65_536, 4096, 512, 1)
+CAPTURE_BYTES: int = 4 * MAX_CAPTURE_BYTES
 SMALL_QUEUE: LoggingSettings = LoggingSettings(
     queue_records=32, queue_bytes=65_536, max_record_bytes=4096
 )
@@ -34,28 +47,96 @@ diagnostics.shutdown()
 """
 
 
+@pytest.fixture
+def pipe() -> Iterator[Pipe]:
+    created = Pipe.open(max_bytes=CAPTURE_BYTES)
+    yield created
+    created.release()
+
+
+def filled(descriptor: int) -> int:
+    os.set_blocking(descriptor, False)
+    written = 0
+    for chunk in FILL_CHUNKS:
+        while True:
+            try:
+                written += os.write(descriptor, b"\n" * chunk)
+            except BlockingIOError:
+                break
+    os.set_blocking(descriptor, True)
+    return written
+
+
+def delivered_note(pipe: Pipe) -> bool:
+    return any(record.get("event") == NOTE.name for record in pipe.reader.records())
+
+
+def emitted_until_blocked(
+    diagnostics: ProcessDiagnostics, log: ComponentLogger
+) -> bool:
+    log.emit(NOTE, text="y" * 300)
+    state = diagnostics.snapshot()
+    return (
+        state.queue_records == SMALL_QUEUE.queue_records and state.in_flight_bytes > 0
+    )
+
+
+def block_the_writer(diagnostics: ProcessDiagnostics, log: ComponentLogger) -> None:
+    for _ in range(BURST_RECORDS):
+        log.emit(NOTE, text="y" * 300)
+    wait_until(lambda: emitted_until_blocked(diagnostics, log))
+
+
 def test_state_reports_loss_while_the_sink_is_blocked(
     configure: Configure, pipe: Pipe
 ) -> None:
+    prefilled = filled(pipe.write_end)
     diagnostics = configure(SMALL_QUEUE, pipe.write_end)
     log = diagnostics.logger(TEST_COMPONENT)
-
-    for _ in range(2000):
-        log.emit(NOTE, text="y" * 300)
+    block_the_writer(diagnostics, log)
+    log.emit(NOTE, text="y" * 300)
     log.emit(NOTE, text="x" * 5000)
+
     blocked = diagnostics.snapshot()
     pipe.reader.start()
-    wait_until(lambda: diagnostics.snapshot().queue_records == 0)
+    wait_until(diagnostics.writer_is_idle)
     after = diagnostics.snapshot()
+    wait_until(lambda: delivered_note(pipe))
+    discarded = pipe.reader.discarded
 
-    assert 0 < blocked.queue_records <= SMALL_QUEUE.queue_records
-    assert blocked.queue_bytes > 0
+    assert 0 < prefilled < CAPTURE_BYTES
+    assert discarded == 0
+    assert blocked.queue_records == SMALL_QUEUE.queue_records
+    assert 0 < blocked.queue_bytes <= SMALL_QUEUE.queue_bytes
+    assert blocked.in_flight_bytes > 0
     assert blocked.dropped_total() > 0
     assert blocked.rejected[(TEST_COMPONENT, "INFO", LossReason.OVER_BUDGET.value)] == 1
     assert blocked.suppressed_total() > 0
     assert not blocked.sink_failed
     assert after.queue_records == 0
+    assert after.in_flight_bytes == 0
     assert after.dropped_total() == blocked.dropped_total()
+    assert not after.sink_failed
+
+
+def test_the_in_flight_batch_is_reported_and_cleared(
+    configure: Configure, pipe: Pipe
+) -> None:
+    prefilled = filled(pipe.write_end)
+    diagnostics = configure(SMALL_QUEUE, pipe.write_end)
+    log = diagnostics.logger(TEST_COMPONENT)
+    block_the_writer(diagnostics, log)
+
+    held = diagnostics.snapshot().in_flight_bytes
+    pipe.close_read_end()
+    wait_until(lambda: not diagnostics.writer_is_alive())
+    failed = diagnostics.snapshot()
+
+    assert prefilled > 0
+    assert 0 < held <= BATCH_BYTES
+    assert failed.sink_failed
+    assert failed.in_flight_bytes == 0
+    assert failed.queue_records == 0
 
 
 def test_cli_shaped_process_emits_one_loss_summary_at_shutdown() -> None:

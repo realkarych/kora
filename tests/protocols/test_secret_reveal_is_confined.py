@@ -76,3 +76,72 @@ def test_the_check_flags_every_access_form() -> None:
     ]
 
     assert all(flagged)
+
+
+def transfer_carriers() -> frozenset[str]:
+    carriers: set[str] = set()
+    for path in SOURCE.rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ClassDef) and "SecretTransfer" in ast.unparse(node):
+                carriers.add(node.name)
+    return frozenset(carriers)
+
+
+def constructions(tree: ast.AST, carriers: frozenset[str]) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "model_construct"
+        and isinstance(node.value, ast.Name)
+        and node.value.id in carriers
+    ]
+
+
+def test_no_transfer_carrier_skips_validation() -> None:
+    carriers = transfer_carriers()
+
+    found = {
+        str(path.relative_to(ROOT)): lines
+        for path in SOURCE.rglob("*.py")
+        if (lines := constructions(ast.parse(path.read_text()), carriers))
+    }
+
+    assert {
+        "IssuedCredential",
+        "PublicationAuthorization",
+        "TransferHolder",
+    } <= carriers
+    assert found == {}
+
+
+def test_the_construction_check_flags_a_carrier() -> None:
+    source = "IssuedCredential.model_construct(value=secret)"
+
+    lines = constructions(ast.parse(source), frozenset({"IssuedCredential"}))
+
+    assert lines == [1]
+
+
+def updating_copies(tree: ast.AST) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "model_copy"
+        and any(keyword.arg == "update" for keyword in node.keywords)
+    ]
+
+
+def test_no_source_copies_a_model_with_updates() -> None:
+    found = {
+        str(path.relative_to(ROOT)): lines
+        for path in SOURCE.rglob("*.py")
+        if (lines := updating_copies(ast.parse(path.read_text())))
+    }
+
+    flagged = updating_copies(ast.parse("value.model_copy(update={'a': 1})"))
+
+    assert found == {}
+    assert flagged == [1]
