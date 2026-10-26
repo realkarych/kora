@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.measurements.storage_evidence_common import EvidenceFailure
 from tests.support.ordinary_inventory import collection, inventory
 
 
@@ -75,3 +76,20 @@ def test_ordinary_inventory_refuses_wrong_union(tmp_path: Path, case: str) -> No
 
     with pytest.raises(ValueError, match="ordinary collection"):
         inventory(tmp_path)
+
+
+@pytest.mark.parametrize("case", ["oversized", "symlink"])
+def test_ordinary_collection_requires_bounded_regular_input(
+    tmp_path: Path, case: str
+) -> None:
+    path = tmp_path / "collection"
+    if case == "oversized":
+        with path.open("wb") as stream:
+            stream.truncate(16777217)
+    else:
+        target = tmp_path / "target"
+        target.write_text("tests/example.py::test_value\n1 test collected in 0.01s\n")
+        path.symlink_to(target)
+
+    with pytest.raises(EvidenceFailure, match="bounded regular"):
+        collection(path)

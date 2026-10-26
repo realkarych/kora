@@ -369,6 +369,14 @@ The sealed execution request and trusted preparation checkpoint pin binding iden
 
 The provenance remains in retained audit metadata after runtime checkpoint release and payload/projection expiry. No secret value, token id or secret-derived hash is retained, and `local_credential_free` emits no `vcs.credential_issued`. Non-null credential issuance retains its existing audit semantics. `test_local_publication_provenance_survives_release_and_retention` proves both event and attempt/history projections, their current read permissions and these cases on both databases under #216 with #159 and work item 17; metadata existence alone does not grant dispatch rights.
 
+### Local provider acknowledgment and reconstruction (issue #255)
+
+The [local storage implementation contract](protocols.md#74-local-provider-implementation-contract-issue-255) uses provider-private root epochs and receipts, separate from this metadata database. Core persists exact operation outcomes, the acknowledged mutation-set digest and closed-issuance evidence before release. It permanently closes useful issuance and proves earlier issuers unable to dispatch again; provider epoch advancement separately fences their captured receivers before compaction. No core generation alone closes an actual provider effect.
+
+Receiver reconstruction checks durable owner/issuance and cleanup lifecycle state. New useful dispatch requires open issuance. Unresolved cleanup may reconstruct retirement for the original intent; after persisted retirement and release authorization it issues no new state-creating retirement. Fully released recovery permits observation, retained result replay and exact release acknowledgment only. Each composition owner closes actual old jobs/streams/executors before replacement, shares a receiver across physical aliases and permits at most three reconstructions within a finite request deadline. The provider does not auto-refresh old invocations. The terminal epoch prohibits untracked persistent-state creation while allowing tracked cleanup.
+
+One local stage permits one promotion operation/content generation; another generation requires a fresh stage, validated bytes and current full-address admission. Core never hides an uncertain promotion behind a fresh identity. These real metadata/fence/reconstruction obligations remain pending #216 and work items 11/12/17 on both databases. Provider conformance and private SQLite do not implement them.
+
 ## 11. Immutable contracts and execution records (ADR-0018)
 
 ### Bounded saved-field representations (issue #227)

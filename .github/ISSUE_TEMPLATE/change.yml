@@ -61,7 +61,13 @@ body:
     id: constraints
     attributes:
       label: Constraints
-      description: Limits the solution must respect, such as budgets, compatibility or rules from AGENTS.md. For status:deferred, state the reason for postponement and the concrete condition or stage that triggers revisiting the issue.
+      description: >-
+        Limits the solution must respect, such as budgets, compatibility or rules from AGENTS.md.
+        For status:deferred, state the reason for postponement and the concrete condition or stage
+        that triggers revisiting the issue. Plans for business-logic changes must estimate added
+        plus deleted hand-written production-code lines, excluding tests, documentation and generated files.
+        Split any scope exceeding 1,000 into smaller PRs and linked sub-issues with explicit dependencies,
+        preserving each PR’s required tests, documentation, parity and verification.
     validations:
       required: false
   - type: textarea

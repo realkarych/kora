@@ -4,6 +4,7 @@ import fcntl
 import os
 import signal
 from contextlib import ExitStack
+from io import FileIO
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,7 @@ from kora.conformance.io_helper import (
 from kora.conformance.journal import JournalSnapshot
 from kora.protocols.lifetime import LifetimeReason, OriginalOutcome
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import ChannelError, DescriptorReadiness, wait_future
+from kora.runner.channels import DescriptorReadiness, wait_future
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
@@ -54,24 +55,17 @@ async def read_probe(descriptor: int, deadline: int, clock: Clock) -> bytes:
         readiness.close()
 
 
-async def entered_fifo(pid: int, observation: int, deadline: int, clock: Clock) -> None:
-    replies = 0
-    response = b""
-    try:
-        assert await read_probe(observation, deadline, clock) == b"r"
-        while True:
-            os.kill(pid, signal.SIGUSR1)
-            response = await read_probe(observation, deadline, clock)
-            replies += 1
-            assert response in (b"e", b"n")
-            if response == b"e":
-                return
-    except ChannelError as failure:
-        failure.add_note(
-            f"fifo_pid={pid}, probe_replies={replies}, last_reply={response!r}, "
-            f"remaining_ns={deadline - clock.monotonic_ns()}"
+async def entered_fifo(
+    directory: int, observation: int, deadline: int, clock: Clock
+) -> FileIO:
+    assert await read_probe(observation, deadline, clock) == b"r"
+    with ExitStack() as pending:
+        writer = pending.enter_context(
+            FileIO(await open_fifo_writer(directory, deadline, clock), "wb")
         )
-        raise
+        assert await read_probe(observation, deadline, clock) == b"e"
+        pending.pop_all()
+        return writer
 
 
 async def open_fifo_writer(directory: int, deadline: int, clock: Clock) -> int:
@@ -123,10 +117,8 @@ async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
     helper = launcher.start(inherited, clock)
     await helper.channel.write_record(MUTATION.dump_json(mutation), deadline)
     if effect == "failed_reply":
-        await entered_fifo(helper.process.pid, reading, deadline, clock)
-        helper.channel.close()
-        writer = await open_fifo_writer(fifo_directory, deadline, clock)
-        os.close(writer)
+        with await entered_fifo(fifo_directory, reading, deadline, clock):
+            helper.channel.close()
     else:
         result = MutationResult.model_validate_json(
             await helper.channel.read_record(deadline, 1048576)
@@ -150,26 +142,25 @@ async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
         )
     if claim is not None:
         os.close(claim)
-    await entered_fifo(helper.process.pid, reading, deadline, clock)
-
-    assert competitor is not None
-    try:
-        with pytest.raises(BlockingIOError):
-            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        assert not helper.anchor.exited
-        writer = await open_fifo_writer(fifo_directory, deadline, clock)
-        os.close(writer)
-        assert await helper.settle(deadline)
-        fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-        assert helper.closed
-    finally:
-        if not helper.closed:
-            helper.signal(signal.SIGKILL)
+    with await entered_fifo(fifo_directory, reading, deadline, clock) as writer:
+        assert competitor is not None
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert not helper.anchor.exited
+            writer.close()
             assert await helper.settle(deadline)
-        for descriptor in (competitor, reading, writing, fifo_directory):
-            os.close(descriptor)
-        barrier.close()
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            assert helper.closed
+        finally:
+            writer.close()
+            if not helper.closed:
+                helper.signal(signal.SIGKILL)
+                assert await helper.settle(deadline)
+            for descriptor in (competitor, reading, writing, fifo_directory):
+                os.close(descriptor)
+            barrier.close()
 
 
 @pytest.mark.asyncio
@@ -263,7 +254,7 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("completion", ["writer", "kill"])
-async def test_fixed_io_helper_acknowledges_actual_fifo_call_and_retains_claim(
+async def test_fixed_io_helper_retains_claim_while_fifo_lease_blocks_progress(
     tmp_path: Path, completion: str
 ) -> None:
     clock = SystemClock()
@@ -282,40 +273,58 @@ async def test_fixed_io_helper_acknowledges_actual_fifo_call_and_retains_claim(
             CreateTreeMutation(directory=directory.identity, name="3" * 32), deadline
         )
     )
-    assert await read_probe(reading, deadline, clock) == b"r"
+    with await entered_fifo(directory.descriptor, reading, deadline, clock) as writer:
+        os.close(claim)
 
-    entered = False
-    while not entered:
-        os.kill(helper.process.pid, signal.SIGUSR1)
-        response = await read_probe(reading, deadline, clock)
-        assert response in (b"e", b"n")
-        entered = response == b"e"
-    os.close(claim)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert not operation.done()
+        if completion == "writer":
+            writer.close()
+            result = await operation
+            assert result.directory is not None
+            assert result.descriptor_count == 1
+            (transferred,) = helper.take_descriptors()
+            os.close(transferred)
+        else:
+            assert helper.signal(signal.SIGKILL)
+            from kora.runner.channels import ChannelError
 
-    with pytest.raises(BlockingIOError):
+            with pytest.raises(ChannelError):
+                await operation
+            assert await helper.settle(deadline)
+        assert helper.closed
+        writer.close()
         fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    assert not operation.done()
-    if completion == "writer":
-        writer = await open_fifo_writer(directory.descriptor, deadline, clock)
-        os.close(writer)
-        result = await operation
-        assert result.directory is not None
-        assert result.descriptor_count == 1
-        (transferred,) = helper.take_descriptors()
-        os.close(transferred)
-    else:
-        assert helper.signal(signal.SIGKILL)
-        from kora.runner.channels import ChannelError
+        os.close(competitor)
+        os.close(reading)
+        os.close(writing)
+        directory.close()
 
-        with pytest.raises(ChannelError):
-            await operation
-        assert await helper.settle(deadline)
-    assert helper.closed
-    fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    os.close(competitor)
-    os.close(reading)
-    os.close(writing)
-    directory.close()
+
+@pytest.mark.asyncio
+async def test_fifo_lease_closes_writer_when_reader_acknowledgment_fails(
+    tmp_path: Path,
+) -> None:
+    clock = SystemClock()
+    with ExitStack() as resources:
+        directory = DirectoryAnchor.open_path(tmp_path)
+        resources.callback(directory.close)
+        os.mkfifo("stall", 0o600, dir_fd=directory.descriptor)
+        reader = os.open(
+            "stall", os.O_RDONLY | os.O_NONBLOCK, dir_fd=directory.descriptor
+        )
+        resources.callback(os.close, reader)
+        reading, writing = os.pipe()
+        resources.callback(os.close, reading)
+        os.write(writing, b"r")
+        os.close(writing)
+        deadline = clock.monotonic_ns() + 5_000_000_000
+
+        with pytest.raises(AssertionError):
+            await entered_fifo(directory.descriptor, reading, deadline, clock)
+
+        assert os.read(reader, 1) == b""
 
 
 @pytest.mark.asyncio

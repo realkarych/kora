@@ -97,5 +97,15 @@ def kora_secrets_listed_prefix() -> object:
 
 
 @pytest.fixture
+def kora_artifact_storage_factory() -> object:
+    raise ConformanceFixtureMissing("kora_artifact_storage_factory")
+
+
+@pytest.fixture
+def kora_artifact_storage_exercise() -> object:
+    raise ConformanceFixtureMissing("kora_artifact_storage_exercise")
+
+
+@pytest.fixture
 def kora_policy_calls() -> object:
     raise ConformanceFixtureMissing("kora_policy_calls")

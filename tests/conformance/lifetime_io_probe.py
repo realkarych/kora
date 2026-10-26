@@ -1,5 +1,4 @@
 import asyncio
-import dis
 import os
 import signal
 import socket
@@ -9,33 +8,18 @@ from kora.conformance.io_helper import MUTATION, respond_mutation
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
 
-
-def stall_open(directory: int) -> int:
-    return os.open("stall", os.O_RDONLY, dir_fd=directory)
-
-
-CALL_OFFSETS: frozenset[int] = frozenset(
-    instruction.offset
-    for instruction in dis.get_instructions(stall_open)
-    if instruction.opname in ("CALL", "CALL_KW", "CALL_FUNCTION")
-)
 PROBE: int = int(os.environ["KORA_TEST_OBSERVATION_FD"])
-
-
-def acknowledge_call(signal_number: int, frame: FrameType | None) -> None:
-    entered = (
-        signal_number == signal.SIGUSR1
-        and frame is not None
-        and frame.f_code is stall_open.__code__
-        and frame.f_lasti in CALL_OFFSETS
-    )
-    os.write(PROBE, b"e" if entered else b"n")
 
 
 def pause(directory: int) -> None:
     os.write(PROBE, b"r")
-    descriptor = stall_open(directory)
-    os.close(descriptor)
+    descriptor = os.open("stall", os.O_RDONLY, dir_fd=directory)
+    try:
+        os.write(PROBE, b"e")
+        if os.read(descriptor, 1) != b"":
+            raise ValueError("FIFO lease received unexpected data")
+    finally:
+        os.close(descriptor)
 
 
 def acknowledge_term(signal_number: int, frame: FrameType | None) -> None:
@@ -54,7 +38,6 @@ async def run() -> None:
     fifo_directory = os.environ.get("KORA_TEST_FIFO_DIRECTORY_FD")
     phase = os.environ["KORA_TEST_PAUSE_PHASE"]
     if fifo_directory is not None:
-        signal.signal(signal.SIGUSR1, acknowledge_call)
         if os.environ["KORA_TEST_RESIST_TERM"] == "1":
             signal.signal(signal.SIGTERM, acknowledge_term)
     try:

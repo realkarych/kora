@@ -96,15 +96,36 @@ def steps(job: dict[str, object]) -> dict[str, dict[str, object]]:
 
 def test_measurements_are_independent_of_complete_platform_checks() -> None:
     jobs = workflow_jobs()
-    scaffold = table(jobs["scaffold"])
+    scaffold = table(jobs["scaffold-tests"])
     scaffold_steps = [table(value) for value in cast(list[object], scaffold["steps"])]
 
     commands = "\n".join(str(step.get("run", "")) for step in scaffold_steps)
 
     assert table(table(scaffold["strategy"])["matrix"])["include"] == [
-        {"os": "ubuntu-24.04", "python": "3.11.17", "databases": "sqlite,postgresql"},
-        {"os": "ubuntu-24.04", "python": "3.15.0", "databases": "sqlite,postgresql"},
-        {"os": "macos-15", "python": "3.11.17", "databases": "sqlite"},
+        {
+            "os": operating_system,
+            "python": python,
+            "databases": databases,
+            "lane": lane,
+            "pytest-arguments": arguments,
+        }
+        for operating_system, python, databases in (
+            ("ubuntu-24.04", "3.11.17", "sqlite,postgresql"),
+            ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
+            ("macos-15", "3.11.17", "sqlite"),
+        )
+        for lane, arguments in (
+            (
+                "general",
+                "--ignore=tests/plugins/storage "
+                "--ignore=tests/conformance/test_artifact_storage_conformance.py",
+            ),
+            (
+                "storage",
+                "tests/plugins/storage "
+                "tests/conformance/test_artifact_storage_conformance.py",
+            ),
+        )
     ]
     assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
@@ -176,7 +197,7 @@ def test_producer_proof_covers_every_required_step(job_id: str) -> None:
 def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> None:
     jobs = workflow_jobs()
     selected = steps(table(jobs[job_id]))
-    scaffold_steps = cast(list[object], table(jobs["scaffold"])["steps"])
+    scaffold_steps = cast(list[object], table(jobs["scaffold-tests"])["steps"])
     original = next(
         step["run"]
         for value in scaffold_steps

@@ -1,6 +1,5 @@
 import asyncio
 import os
-import signal
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -19,7 +18,7 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import open_fifo_writer, read_probe
+from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_parent_lifetime import limits
 
 
@@ -84,14 +83,10 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
                     owner.acquire(tree.token, operation_id, TemporaryTreeRequest())
                 )
                 deadline = actual.monotonic_ns() + 5_000_000_000
-                assert await read_probe(reading, deadline, actual) == b"r"
+                writer = resources.enter_context(
+                    await entered_fifo(barrier.descriptor, reading, deadline, actual)
+                )
                 helper = owner.mutations.helpers[-1]
-                while True:
-                    os.kill(helper.process.pid, signal.SIGUSR1)
-                    response = await read_probe(reading, deadline, actual)
-                    if response == b"e":
-                        break
-                    assert response == b"n"
 
                 if case == "timeout":
                     clock.advance(duration_ns(owner.limits.acquisition_seconds) + 1)
@@ -113,10 +108,7 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
                     else:
                         closing = asyncio.create_task(owner.close(None))
                         await owner.closure_started.wait()
-                    writer = await open_fifo_writer(
-                        barrier.descriptor, deadline, actual
-                    )
-                    os.close(writer)
+                    writer.close()
                     if case == "cancel_during":
                         acquisition = await owner.acquire(
                             tree.token, operation_id, TemporaryTreeRequest()
@@ -166,42 +158,39 @@ async def test_mutation_queue_deadline_does_not_cancel_earlier_publisher(
         owner.acquire(tree.token, new_operation_id(), TemporaryTreeRequest())
     )
     deadline = actual.monotonic_ns() + 5_000_000_000
-    assert await read_probe(reading, deadline, actual) == b"r"
-    helper = owner.mutations.helpers[-1]
-    while True:
-        os.kill(helper.process.pid, signal.SIGUSR1)
-        if await read_probe(reading, deadline, actual) == b"e":
-            break
-    directory = owner.mutations.directory
-    assert directory is not None
-    queued = CreateTreeMutation(directory=directory.identity, name="e" * 32)
-    queued_call = asyncio.create_task(
-        owner.mutations.perform(queued, directory, clock.monotonic_ns() + 100_000_000)
-    )
+    with await entered_fifo(barrier.descriptor, reading, deadline, actual) as writer:
+        helper = owner.mutations.helpers[-1]
+        directory = owner.mutations.directory
+        assert directory is not None
+        queued = CreateTreeMutation(directory=directory.identity, name="e" * 32)
+        queued_call = asyncio.create_task(
+            owner.mutations.perform(
+                queued, directory, clock.monotonic_ns() + 100_000_000
+            )
+        )
 
-    try:
-        while owner.mutations.pending != 2:
-            assert actual.monotonic_ns() < deadline
-            if queued_call.done():
-                await queued_call
-            wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-            asyncio.get_running_loop().call_soon(wake.set_result, None)
-            await wake
-        clock.advance(100_000_000)
-        with pytest.raises(HelperError):
-            await asyncio.wait_for(queued_call, 1)
-        assert not helper.anchor.exited
-        assert not operation.done()
-        assert owner.mutations.pending == 1
-        with pytest.raises(FileNotFoundError):
-            os.stat("e" * 32, dir_fd=directory.descriptor, follow_symlinks=False)
-    finally:
-        writer = await open_fifo_writer(barrier.descriptor, deadline, actual)
-        os.close(writer)
-        await asyncio.gather(queued_call, return_exceptions=True)
-        await asyncio.wait_for(operation, 5)
-        report = await asyncio.wait_for(owner.close(None), 5)
-        assert report.state is CleanupOutcome.CLOSED
-        os.close(reading)
-        os.close(writing)
-        barrier.close()
+        try:
+            while owner.mutations.pending != 2:
+                assert actual.monotonic_ns() < deadline
+                if queued_call.done():
+                    await queued_call
+                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_soon(wake.set_result, None)
+                await wake
+            clock.advance(100_000_000)
+            with pytest.raises(HelperError):
+                await asyncio.wait_for(queued_call, 1)
+            assert not helper.anchor.exited
+            assert not operation.done()
+            assert owner.mutations.pending == 1
+            with pytest.raises(FileNotFoundError):
+                os.stat("e" * 32, dir_fd=directory.descriptor, follow_symlinks=False)
+        finally:
+            writer.close()
+            await asyncio.gather(queued_call, return_exceptions=True)
+            await asyncio.wait_for(operation, 5)
+            report = await asyncio.wait_for(owner.close(None), 5)
+            assert report.state is CleanupOutcome.CLOSED
+            os.close(reading)
+            os.close(writing)
+            barrier.close()

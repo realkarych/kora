@@ -26,7 +26,7 @@ from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
+from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 
 
@@ -153,8 +153,9 @@ async def test_full_disk_refuses_without_losing_owned_effects(
                     )
                     asyncio.get_running_loop().call_soon(wake.set_result, None)
                     await wake
-                helper = owner.mutations.helpers[-1]
-                await entered_fifo(helper.process.pid, reading, deadline, actual)
+                writer = resources.enter_context(
+                    await entered_fifo(barrier.descriptor, reading, deadline, actual)
+                )
                 if frontier == "registration":
                     assert owner.mutations.directory is not None
                     saved = read_journal(owner.mutations.directory)
@@ -165,8 +166,7 @@ async def test_full_disk_refuses_without_losing_owned_effects(
                     assert isinstance(record.entry.registration, ProcessRegistration)
                     assert process.returncode is None
                 fill(filler, 134217728)
-                writer = await open_fifo_writer(barrier.descriptor, deadline, actual)
-                os.close(writer)
+                writer.close()
 
                 completion = owner.ready() if operation is None else operation
                 with pytest.raises(LifetimeError) as refused:

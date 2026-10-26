@@ -3,9 +3,11 @@ import re
 import sys
 from pathlib import Path
 
+from tests.scaffold_evidence import evidence_bytes
+
 
 def collection(path: Path) -> frozenset[str]:
-    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+    lines = [line for line in evidence_bytes(path).decode("utf-8").splitlines() if line]
     if not lines:
         raise ValueError("empty ordinary collection")
     summary = re.fullmatch(

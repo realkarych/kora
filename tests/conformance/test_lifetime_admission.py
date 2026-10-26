@@ -18,7 +18,7 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
+from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -63,8 +63,9 @@ async def test_direct_bootstrap_waiters_hold_bounded_slots_before_readiness(
                 wake: asyncio.Future[None] = loop.create_future()
                 loop.call_soon(wake.set_result, None)
                 await wake
-            helper = owner.mutations.helpers[-1]
-            await entered_fifo(helper.process.pid, reading, deadline, SystemClock())
+            writer = resources.enter_context(
+                await entered_fifo(barrier.descriptor, reading, deadline, SystemClock())
+            )
             request = ReservationRequest(
                 operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
             )
@@ -89,8 +90,7 @@ async def test_direct_bootstrap_waiters_hold_bounded_slots_before_readiness(
             assert len(owner.ordinary_slots) == capacity - 1
             replacement = asyncio.create_task(owner.reserve(request))
             callers.append(replacement)
-            writer = await open_fifo_writer(barrier.descriptor, deadline, SystemClock())
-            os.close(writer)
+            writer.close()
             reservations = await asyncio.wait_for(asyncio.gather(*callers[1:]), 5)
             report = await asyncio.wait_for(owner.close(None), 5)
 

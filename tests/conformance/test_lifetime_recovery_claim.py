@@ -25,7 +25,7 @@ from tests.conformance.test_lifetime_cleanup_controls import (
     close_recovered_test_owner,
     dispose_test_owner,
 )
-from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
+from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -90,88 +90,91 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
     )
     identity = ProcessIdentity.model_validate_json(await channel.read_frame(deadline))
     helper_anchor = ExitAnchor(identity.pid, direct_child=False)
-    await entered_fifo(identity.pid, reading, deadline, clock)
-    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
-    retained = path.read_bytes()
-    snapshot = JournalSnapshot.model_validate_json(retained)
-    assert snapshot.owner.pid == parent.pid
-    if scenario == "publisher":
-        assert identity not in snapshot.helpers
-        assert snapshot.pending_effects
-    recovery_clock = ControlledLifetimeClock()
-    recovered: ParentLifetime | None = None
+    with await entered_fifo(barrier.descriptor, reading, deadline, clock) as writer:
+        path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+        retained = path.read_bytes()
+        snapshot = JournalSnapshot.model_validate_json(retained)
+        assert snapshot.owner.pid == parent.pid
+        if scenario == "publisher":
+            assert identity not in snapshot.helpers
+            assert snapshot.pending_effects
+        recovery_clock = ControlledLifetimeClock()
+        recovered: ParentLifetime | None = None
 
-    try:
-        for stage in ("live_parent", "dead_parent"):
-            if stage == "dead_parent":
-                parent.send_signal(signal.SIGKILL)
-                await anchor.wait(deadline, clock)
-                parent.wait(timeout=0)
-                assert not helper_anchor.exited
-            competing = ParentLifetime(
+        try:
+            for stage in ("live_parent", "dead_parent"):
+                if stage == "dead_parent":
+                    parent.send_signal(signal.SIGKILL)
+                    await anchor.wait(deadline, clock)
+                    parent.wait(timeout=0)
+                    assert not helper_anchor.exited
+                competing = ParentLifetime(
+                    limits=limits(),
+                    recovery=reference,
+                    launcher=InstalledIOHelperLauncher(
+                        home=tmp_path, state_home=tmp_path / "state"
+                    ),
+                )
+                with pytest.raises(LifetimeError):
+                    await competing.ready()
+                refused = await competing.close(None)
+                assert refused.state is CleanupOutcome.UNKNOWN
+                assert path.read_bytes() == retained
+            writer.close()
+            await helper_anchor.wait(deadline, clock)
+            published = JournalSnapshot.model_validate_json(path.read_bytes())
+            recovered = ParentLifetime(
+                clock=recovery_clock,
                 limits=limits(),
                 recovery=reference,
                 launcher=InstalledIOHelperLauncher(
                     home=tmp_path, state_home=tmp_path / "state"
                 ),
             )
-            with pytest.raises(LifetimeError):
-                await competing.ready()
-            refused = await competing.close(None)
-            assert refused.state is CleanupOutcome.UNKNOWN
-            assert path.read_bytes() == retained
-        writer = await open_fifo_writer(barrier.descriptor, deadline, clock)
-        os.close(writer)
-        await helper_anchor.wait(deadline, clock)
-        published = JournalSnapshot.model_validate_json(path.read_bytes())
-        recovered = ParentLifetime(
-            clock=recovery_clock,
-            limits=limits(),
-            recovery=reference,
-            launcher=InstalledIOHelperLauncher(
-                home=tmp_path, state_home=tmp_path / "state"
-            ),
-        )
-        await recovered.ready()
-        report = await close_recovered_test_owner(
-            recovered, recovery_clock, () if independent is None else (independent,)
-        )
-
-        assert published.generation == snapshot.generation
-        assert published.owner == snapshot.owner
-        if scenario == "publisher":
-            assert published.revision > snapshot.revision
-            assert published.helpers == (identity,)
-            assert not published.pending_effects
-        else:
-            assert published == snapshot
-        assert report.state is CleanupOutcome.CLOSED
-        assert recovered.generation == (2 if scenario == "publisher" else 3)
-        assert recovered.inventory().helpers.claim_descriptors == 0
-        assert not path.parent.exists()
-    finally:
-        deadline = clock.monotonic_ns() + 5_000_000_000
-        if parent.returncode is None:
-            parent.send_signal(signal.SIGKILL)
-            await anchor.wait(deadline, clock)
-            parent.wait(timeout=0)
-        if not helper_anchor.exited:
-            observed = NativeIdentityReader().read(identity.pid)
-            if observed.process is not None and observed.process.identity == identity:
-                os.kill(identity.pid, signal.SIGKILL)
-            await helper_anchor.wait(deadline, clock)
-        if independent is not None:
-            assert independent.signal(signal.SIGKILL, deadline) in (
-                SignalResult.SENT,
-                SignalResult.SETTLED,
+            await recovered.ready()
+            report = await close_recovered_test_owner(
+                recovered, recovery_clock, () if independent is None else (independent,)
             )
-            await independent.settle(deadline)
-            independent.release(deadline)
-        if recovered is not None:
-            await dispose_test_owner(recovered, recovery_clock)
-        channel.close()
-        anchor.close()
-        helper_anchor.close()
-        os.close(reading)
-        os.close(writing)
-        barrier.close()
+
+            assert published.generation == snapshot.generation
+            assert published.owner == snapshot.owner
+            if scenario == "publisher":
+                assert published.revision > snapshot.revision
+                assert published.helpers == (identity,)
+                assert not published.pending_effects
+            else:
+                assert published == snapshot
+            assert report.state is CleanupOutcome.CLOSED
+            assert recovered.generation == (2 if scenario == "publisher" else 3)
+            assert recovered.inventory().helpers.claim_descriptors == 0
+            assert not path.parent.exists()
+        finally:
+            writer.close()
+            deadline = clock.monotonic_ns() + 5_000_000_000
+            if parent.returncode is None:
+                parent.send_signal(signal.SIGKILL)
+                await anchor.wait(deadline, clock)
+                parent.wait(timeout=0)
+            if not helper_anchor.exited:
+                observed = NativeIdentityReader().read(identity.pid)
+                if (
+                    observed.process is not None
+                    and observed.process.identity == identity
+                ):
+                    os.kill(identity.pid, signal.SIGKILL)
+                await helper_anchor.wait(deadline, clock)
+            if independent is not None:
+                assert independent.signal(signal.SIGKILL, deadline) in (
+                    SignalResult.SENT,
+                    SignalResult.SETTLED,
+                )
+                await independent.settle(deadline)
+                independent.release(deadline)
+            if recovered is not None:
+                await dispose_test_owner(recovered, recovery_clock)
+            channel.close()
+            anchor.close()
+            helper_anchor.close()
+            os.close(reading)
+            os.close(writing)
+            barrier.close()

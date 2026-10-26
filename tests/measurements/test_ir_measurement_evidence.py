@@ -11,7 +11,7 @@ from typing import cast
 import pytest
 
 from tests.measurements.cost_workload import MEASURED, cost_cases
-from tests.measurements.harness import Report, Sample
+from tests.measurements.harness import ExtraValue, Report, Sample
 from tests.measurements.ir_config_lifetime import CONFIGURATIONS
 from tests.measurements.ir_measurement_evidence import (
     ACCOUNTING_ENCODED_LIMIT,
@@ -252,6 +252,54 @@ def replace_accounting_output(
     process["stdout_base64"] = base64.b64encode(raw.encode()).decode()
     report.environment[f"{identity}_process"] = json.dumps(process)
     report.environment[identity] = raw
+
+
+def test_accounting_timing_outlier_preserves_per_child_diagnostics() -> None:
+    child = next(child for child in accounting_children() if child.mode == "timing")
+    expected = accounting_evidence([child])
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = accounting_payload(child)
+    workload = f"cost_{child.cases[0].name}"
+    for sample in payload.samples:
+        if sample.workload == workload:
+            sample.seconds = 1.0
+    raw = payload.to_json()
+    replace_accounting_output(report, child.identity, raw)
+    replacement = MeasurementReport.model_validate_json(raw)
+    report.samples = [
+        sample for sample in report.samples if sample.workload != workload
+    ] + [sample for sample in replacement.samples if sample.workload == workload]
+    diagnostics: list[dict[str, ExtraValue]] = []
+
+    verify_report(
+        report.model_dump_json(),
+        rendered_junit(expected),
+        REVISION,
+        expected,
+        diagnostics,
+    )
+
+    assert len(diagnostics) == len(child.cases)
+    observed = next(item for item in diagnostics if item["workload"] == workload)
+    assert observed["child"] == child.identity
+    assert observed["observed_seconds"] == 1.0
+    assert observed["exceeds_reference"] is True
+    assert observed["reference_seconds"] == 2.0**-16
+
+
+@pytest.mark.parametrize("seconds", [-1.0, float("inf"), float("nan")])
+def test_accounting_timing_diagnostics_refuse_invalid_samples(seconds: float) -> None:
+    child = next(child for child in accounting_children() if child.mode == "timing")
+    expected = accounting_evidence([child])
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = accounting_payload(child)
+    payload.samples[0].seconds = seconds
+    replace_accounting_output(report, child.identity, payload.to_json())
+
+    with pytest.raises(ValueError, match="IR accounting"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
 
 
 def test_ir_report_accepts_every_accounting_child(accounting_document: str) -> None:
@@ -935,7 +983,10 @@ def test_ir_report_requires_selected_accounting_child_outcome() -> None:
         ),
         frozenset(
             {"cost_timing_ordinary_0_0_completed"}
-            | {f"cost_timing_ordinary_0_0_cost_{case.name}_p95" for case in actions}
+            | {
+                f"cost_timing_ordinary_0_0_cost_{case.name}_p95_captured"
+                for case in actions
+            }
         ),
         samples,
     )

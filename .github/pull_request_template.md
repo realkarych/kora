@@ -6,6 +6,12 @@ Closes #
 
 ## What changes
 
+## PR size
+
+For a business-logic change, record the complete diff’s added plus deleted hand-written production-code line count, compared merge-base/head revisions and excluded test/documentation/generated paths. Mark not applicable with a reason for other changes.
+
+- [ ] Business-logic changes contain at most 1,000 added plus deleted production-code lines; larger scopes were split into smaller, independently reviewable and mergeable PRs with linked sub-issues and explicit dependencies, preserving required tests, documentation, parity and verification.
+
 ## Merge
 
 - [ ] The PR title reads as the subject of the one squash commit this PR becomes on `master`, which carries no body, as defined in [AGENTS.md](https://github.com/realkarych/kora/blob/master/AGENTS.md#issues-and-pull-requests).

@@ -4,6 +4,7 @@ import signal
 import socket
 import subprocess
 import sys
+from io import FileIO
 from pathlib import Path
 
 import pytest
@@ -103,11 +104,12 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     recovered: ParentLifetime | None = None
     caught: ChannelError | None = None
     phase = "fifo_barrier"
+    writer: FileIO | None = None
 
     try:
         if setup_failure:
             deadline = clock.monotonic_ns()
-        await entered_fifo(identity.pid, reading, deadline, clock)
+        writer = await entered_fifo(barrier.descriptor, reading, deadline, clock)
         phase = "parent_close"
         await channel.write_frame(b"close", deadline)
         report = ClosureReport.model_validate_json(
@@ -163,6 +165,8 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
             raise
         caught = failure
     finally:
+        if writer is not None:
+            writer.close()
         deadline = clock.monotonic_ns() + 5_000_000_000
         if parent.returncode is None:
             parent.send_signal(signal.SIGKILL)

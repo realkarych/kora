@@ -1149,30 +1149,34 @@ async def pricing_read_cycle(database: Database) -> None:
 async def pricing_quiescence(
     database: Database, balance: CheckoutBalance, tasks: int
 ) -> None:
-    await until(lambda: database.units_in_flight() == 0 and balance.outstanding == 0)
-    assert database.writer_is_free()
-    assert len(asyncio.all_tasks()) == tasks
-    async with database.read_transaction() as connection:
-        if database.dialect is Dialect.POSTGRESQL:
-            assert (
-                await connection.scalar(
-                    text(
-                        "SELECT count(*) FROM pg_cursors WHERE statement NOT LIKE "
-                        "'%pg_cursors%'"
+    async with asyncio.timeout(CLOSE_WAIT_SECONDS):
+        await until(
+            lambda: database.units_in_flight() == 0 and balance.outstanding == 0
+        )
+        assert database.writer_is_free()
+        assert len(asyncio.all_tasks()) == tasks
+        while True:
+            async with database.read_transaction() as connection:
+                if database.dialect is Dialect.SQLITE:
+                    return
+                assert (
+                    await connection.scalar(
+                        text(
+                            "SELECT count(*) FROM pg_cursors WHERE statement NOT LIKE "
+                            "'%pg_cursors%'"
+                        )
                     )
+                    == 0
                 )
-                == 0
-            )
-            assert (
-                await connection.scalar(
+                active = await connection.scalar(
                     text(
                         "SELECT count(*) FROM pg_stat_activity WHERE datname = "
                         "current_database() AND pid <> pg_backend_pid() AND state "
                         "<> 'idle'"
                     )
                 )
-                == 0
-            )
+            if active == 0:
+                return
 
 
 async def pricing_release_cycles(

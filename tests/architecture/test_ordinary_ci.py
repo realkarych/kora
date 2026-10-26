@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -32,28 +33,42 @@ EVIDENCE_FILES = (
     "first.xml",
     "second.xml",
     "other.xml",
+    "first.exit",
+    "second.exit",
+    "other.exit",
 )
 
 
 def ordinary_shell() -> str:
-    return str(steps(table(workflow_jobs()["scaffold"]))["ordinary_tests"]["run"])
+    source = str(steps(table(workflow_jobs()["scaffold-tests"]))["tests"]["run"])
+    return (
+        source.partition("KORA_ORDINARY_SCRIPT' >")[2]
+        .partition("\n")[2]
+        .partition("KORA_ORDINARY_SCRIPT\n")[0]
+    )
 
 
 def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
-    selected = steps(table(workflow_jobs()["scaffold"]))
+    selected = steps(table(workflow_jobs()["scaffold-tests"]))
     command = ordinary_shell()
 
     first = command.partition("first=(\n")[2].partition(")\n")[0].split()
 
     assert tuple(first) == FIRST_MODULES
     assert (
-        'second=(tests/conformance)\nfor path in "${first[@]}"; do\n'
+        "second=(tests/conformance "
+        "--ignore=tests/conformance/test_artifact_storage_conformance.py "
+        "tests/measurements/test_ir_measurement_evidence.py)\n"
+        'for path in "${first[@]}"; do\n'
         '  second+=("--ignore=$path")\ndone\n'
-        "other=(tests --ignore=tests/conformance)\n"
+        "other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage "
+        "--ignore=tests/measurements/test_ir_measurement_evidence.py)\n"
     ) in command
-    assert 'mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX"' in command
+    assert 'mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX"' in str(
+        selected["tests"]["run"]
+    )
     for group, arguments in (
-        ("full", "tests"),
+        ("full", '"${general[@]}"'),
         ("first", '"${first[@]}"'),
         ("second", '"${second[@]}"'),
         ("other", '"${other[@]}"'),
@@ -78,11 +93,17 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         < command.index("python -m tests.support.ordinary_inventory")
         < command.index("pids=()")
     )
-    assert '  if wait "$pid"; then\n    :\n  else\n    result=1\n  fi' in command
+    assert (
+        '  if wait "${pids[$index]}"; then\n    status=0\n  else\n'
+        '    status="$?"\n    result=1\n  fi'
+    ) in command
+    assert (
+        'printf \'%s\\n\' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"'
+    ) in command
     assert command.index('pids+=("$!")', command.index("tmp-other")) < command.index(
-        'for pid in "${pids[@]}"'
+        'for index in "${!pids[@]}"'
     )
-    assert command.index('for pid in "${pids[@]}"') < command.index("for name in ")
+    assert command.index('for index in "${!pids[@]}"') < command.index("for name in ")
     assert (
         command.index("for name in ")
         < command.index("cat ")
@@ -94,29 +115,27 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         '  test ! -L "$KORA_ORDINARY_OUTPUT/$name"\n'
         '  test -s "$KORA_ORDINARY_OUTPUT/$name"\n'
     ) in command
-    assert set(selected["ordinary_tests"]) == {"name", "id", "run"}
-    upload = selected["ordinary_upload"]
+    assert set(selected["tests"]) == {"name", "id", "run"}
+    upload = selected["evidence_upload"]
     assert upload["if"] == "${{ always() }}"
     assert upload["uses"] == (
         "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
     )
     assert table(upload["with"]) == {
-        "name": "ordinary-tests-${{ matrix.os }}-python-${{ matrix.python }}",
-        "path": "".join(
-            "${{ env.KORA_ORDINARY_OUTPUT }}/" + name + "\n" for name in EVIDENCE_FILES
+        "name": (
+            "scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}"
         ),
+        "path": "${{ env.KORA_SCAFFOLD_DIRECTORY }}",
         "if-no-files-found": "error",
     }
-    gate = selected["required_ordinary"]
-    assert gate["if"] == "${{ always() }}"
-    assert table(gate["env"]) == {
-        "ORDINARY_RESULT": "${{ steps.ordinary_tests.outcome }}",
-        "ORDINARY_UPLOAD_RESULT": "${{ steps.ordinary_upload.outcome }}",
-    }
-    assert gate["run"] == (
-        'test "$ORDINARY_RESULT" = success\ntest "$ORDINARY_UPLOAD_RESULT" = success\n'
+    source = str(selected["tests"]["run"])
+    assert 'cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"' in source
+    assert source.index("KORA_ORDINARY_SCRIPT\n") < source.index("cp ")
+    assert source.index("cp ") < source.index(
+        "python -m tests.scaffold_evidence record"
     )
-    assert list(selected) == ["ordinary_tests", "ordinary_upload", "required_ordinary"]
+    assert "ordinary_tests" not in selected
+    assert "ordinary_upload" not in selected
 
 
 @pytest.mark.parametrize("failed_child", [None, 0, 1, 2])
@@ -134,6 +153,7 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
     result = subprocess.run(
         ["/bin/bash", "-e", "-o", "pipefail", "-c", script],
         cwd=tmp_path,
+        env={**os.environ, "KORA_ORDINARY_OUTPUT": str(tmp_path)},
         capture_output=True,
         check=False,
         timeout=5,
@@ -141,6 +161,10 @@ def test_ordinary_shell_joins_all_owned_children_after_failure(
 
     assert result.returncode == (0 if failed_child is None else 1)
     assert all((tmp_path / str(index)).read_text() == "complete" for index in range(3))
+    for index, name in enumerate(("first", "second", "other")):
+        assert (tmp_path / f"{name}.exit").read_text() == (
+            "1\n" if index == failed_child else "0\n"
+        )
 
 
 def test_ordinary_background_pytest_preserves_interruptible_children(
@@ -202,21 +226,39 @@ def test_ordinary_shell_requires_all_regular_nonempty_evidence(
     assert (result.returncode == 0) is (invalid is None)
 
 
-@pytest.mark.parametrize("field", ["ORDINARY_RESULT", "ORDINARY_UPLOAD_RESULT"])
+@pytest.mark.parametrize("field", ["TESTS_OUTCOME", "UPLOAD_OUTCOME"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "cancelled", "skipped", ""])
 def test_ordinary_admission_rejects_every_incomplete_outcome(
     field: str, outcome: str
 ) -> None:
-    selected = steps(table(workflow_jobs()["scaffold"]))
+    job = table(workflow_jobs()["scaffold-tests"])
+    entries = cast(list[object], job["steps"])
+    gate = table(entries[-1])
     environment = {
         **os.environ,
-        "ORDINARY_RESULT": "success",
-        "ORDINARY_UPLOAD_RESULT": "success",
+        **dict.fromkeys(
+            (
+                "DEPENDENCIES_OUTCOME",
+                "FRONTEND_OUTCOME",
+                "STATIC_OUTCOME",
+                "TESTS_OUTCOME",
+                "UPLOAD_OUTCOME",
+                "DISTRIBUTIONS_OUTCOME",
+                "FINAL_SYNC_OUTCOME",
+            ),
+            "success",
+        ),
+        "WORKFLOW_CANCELLED": "false",
         field: outcome,
     }
 
     result = subprocess.run(
-        ["/bin/bash", "-e", "-c", str(selected["required_ordinary"]["run"])],
+        [
+            "/bin/bash",
+            "-e",
+            "-c",
+            str(gate["run"]).replace("${{ matrix.lane }}", "general"),
+        ],
         env=environment,
         capture_output=True,
         check=False,
