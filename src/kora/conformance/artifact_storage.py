@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
-from collections.abc import Callable, Generator
+from collections.abc import Awaitable, Callable, Generator
+from dataclasses import dataclass
 
 import pytest
 
@@ -26,6 +27,7 @@ from kora.conformance.storage_support import (
     single_part,
     stage_spec,
 )
+from kora.ir.json import JsonObject
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage import ArtifactStorage
@@ -51,6 +53,7 @@ from kora.protocols.storage_models import (
 StorageFactory = Callable[[], ArtifactStorage]
 
 __all__ = [
+    "ArtifactStorageConformanceInputs",
     "kora_capture",
     "kora_exercise",
     "kora_provider",
@@ -68,6 +71,16 @@ __all__ = [
     "test_artifact_storage_range_reads_are_exact",
     "test_artifact_storage_range_lifetime",
 ]
+
+
+@dataclass(frozen=True)
+class ArtifactStorageConformanceInputs:
+    failure: Callable[
+        [ArtifactStorage, JsonObject, ProtocolContext, str], Awaitable[object]
+    ]
+    configuration_effect: Callable[
+        [ArtifactStorage, JsonObject, ProtocolContext], Awaitable[None]
+    ]
 
 
 @pytest.fixture
@@ -127,109 +140,120 @@ def test_artifact_storage_staging_round_trip(
     kora_artifact_storage_factory: StorageFactory,
     size: int,
 ) -> None:
-    context = context_for(kora_capture)
-
-    async def scenario() -> None:
-        upload = await seal_repeated(kora_provider, "round-trip", size, context)
-        reader = await kora_provider.read_stage(upload.content, context)
-        actual = hashlib.sha256()
-        count = 0
-        async with reader:
-            async for chunk in reader:
-                check(0 < len(chunk) <= 65536, "read chunks obey the streaming bound")
-                count += len(chunk)
-                actual.update(chunk)
-
-        check(count == size, "immutable reread has the exact size")
-        check(
-            "sha256:" + actual.hexdigest() == repeated_digest(size),
-            "immutable reread has the exact full digest",
+    asyncio.run(
+        check_artifact_storage_staging_round_trip(
+            kora_provider,
+            context_for(kora_capture),
+            kora_artifact_storage_factory,
+            size,
         )
-        output = f"prepared-{size}".encode()
-        preparation = PreparationArguments(
+    )
+
+
+async def check_artifact_storage_staging_round_trip(
+    provider: ArtifactStorage,
+    context: ProtocolContext,
+    storage_factory: StorageFactory,
+    size: int,
+) -> None:
+    upload = await seal_repeated(provider, "round-trip", size, context)
+    reader = await provider.read_stage(upload.content, context)
+    actual = hashlib.sha256()
+    count = 0
+    async with reader:
+        async for chunk in reader:
+            check(0 < len(chunk) <= 65536, "read chunks obey the streaming bound")
+            count += len(chunk)
+            actual.update(chunk)
+
+    check(count == size, "immutable reread has the exact size")
+    check(
+        "sha256:" + actual.hexdigest() == repeated_digest(size),
+        "immutable reread has the exact full digest",
+    )
+    output = f"prepared-{size}".encode()
+    preparation = PreparationArguments(
+        version=1,
+        source=upload.content,
+        maximum_output_size=len(output),
+        expected_output_digest=digest(output),
+    )
+    prepared = await provider.prepare_content(
+        ContentPreparation(
             version=1,
-            source=upload.content,
-            maximum_output_size=len(output),
-            expected_output_digest=digest(output),
-        )
-        prepared = await kora_provider.prepare_content(
-            ContentPreparation(
-                version=1,
-                operation=operation(
-                    kora_provider.identity(), "prepare", "prepare_content", preparation
-                ),
-                arguments=preparation,
+            operation=operation(
+                provider.identity(), "prepare", "prepare_content", preparation
             ),
-            BytesSource(output),
-            context,
-        )
-        prefix_payload = b"k" * (min(size, 65536) + 1)
-        spec = stage_spec(kora_provider.identity(), "prefix", prefix_payload)
-        stage = await kora_provider.begin_stage(
-            operation(kora_provider.identity(), "prefix-begin", "begin_stage", spec),
-            spec,
-            context,
-        )
-        part = single_part(prefix_payload)
-        capture = PrefixCapture(
-            version=1, stage=stage, source_spec=part, count=len(prefix_payload) - 1
-        )
-        source = BytesSource(prefix_payload)
-        prefix = await kora_provider.capture_prefix(
-            operation(kora_provider.identity(), "capture", "capture_prefix", capture),
-            stage,
-            part,
-            capture.count,
-            source,
-            context,
-        )
-        manifest = StageManifest(
+            arguments=preparation,
+        ),
+        BytesSource(output),
+        context,
+    )
+    prefix_payload = b"k" * (min(size, 65536) + 1)
+    spec = stage_spec(provider.identity(), "prefix", prefix_payload)
+    stage = await provider.begin_stage(
+        operation(provider.identity(), "prefix-begin", "begin_stage", spec),
+        spec,
+        context,
+    )
+    part = single_part(prefix_payload)
+    capture = PrefixCapture(
+        version=1, stage=stage, source_spec=part, count=len(prefix_payload) - 1
+    )
+    source = BytesSource(prefix_payload)
+    prefix = await provider.capture_prefix(
+        operation(provider.identity(), "capture", "capture_prefix", capture),
+        stage,
+        part,
+        capture.count,
+        source,
+        context,
+    )
+    manifest = StageManifest(
+        version=1,
+        stage=stage,
+        parts=(),
+        prefix=ManifestPrefix(
             version=1,
-            stage=stage,
-            parts=(),
-            prefix=ManifestPrefix(
-                version=1,
-                source_spec=part,
-                count=prefix.count,
-                digest=prefix.digest,
-                private_identity=prefix.private_identity,
-            ),
-        )
-        incomplete = await kora_provider.seal_stage(
-            operation(kora_provider.identity(), "prefix-seal", "seal_stage", manifest),
-            stage,
-            manifest,
-            context,
-        )
-        restarted = kora_artifact_storage_factory()
-        try:
-            prepared_reader = await restarted.read_stage(prepared, context)
-            async with prepared_reader:
-                prepared_bytes = b"".join([chunk async for chunk in prepared_reader])
-            prefix_reader = await restarted.read_stage(incomplete, context)
-            async with prefix_reader:
-                prefix_bytes = b"".join([chunk async for chunk in prefix_reader])
-        finally:
-            await restarted.aclose()
+            source_spec=part,
+            count=prefix.count,
+            digest=prefix.digest,
+            private_identity=prefix.private_identity,
+        ),
+    )
+    incomplete = await provider.seal_stage(
+        operation(provider.identity(), "prefix-seal", "seal_stage", manifest),
+        stage,
+        manifest,
+        context,
+    )
+    restarted = storage_factory()
+    try:
+        prepared_reader = await restarted.read_stage(prepared, context)
+        async with prepared_reader:
+            prepared_bytes = b"".join([chunk async for chunk in prepared_reader])
+        prefix_reader = await restarted.read_stage(incomplete, context)
+        async with prefix_reader:
+            prefix_bytes = b"".join([chunk async for chunk in prefix_reader])
+    finally:
+        await restarted.aclose()
 
-        check(
-            prepared_bytes == output,
-            "a separate prepared candidate survives reconstruction",
-        )
-        check(
-            prefix_bytes == prefix_payload[:-1],
-            "prefix capture preserves the exact bounded bytes",
-        )
-        check(
-            not incomplete.source_complete,
-            "prefix sealing never claims a complete source",
-        )
-        check(
-            source.closed and source.offset == capture.count,
-            "prefix capture closes without consuming the tail",
-        )
-
-    asyncio.run(scenario())
+    check(
+        prepared_bytes == output,
+        "a separate prepared candidate survives reconstruction",
+    )
+    check(
+        prefix_bytes == prefix_payload[:-1],
+        "prefix capture preserves the exact bounded bytes",
+    )
+    check(
+        not incomplete.source_complete,
+        "prefix sealing never claims a complete source",
+    )
+    check(
+        source.closed and source.offset == capture.count,
+        "prefix capture closes without consuming the tail",
+    )
 
 
 @pytest.mark.kora_conformance
@@ -477,78 +501,79 @@ def test_artifact_storage_promotion_replay_preserves_outcome(
     kora_capture: Capture,
     kora_artifact_storage_factory: StorageFactory,
 ) -> None:
-    context = context_for(kora_capture)
+    asyncio.run(
+        check_artifact_storage_promotion_replay_preserves_outcome(
+            kora_provider, context_for(kora_capture), kora_artifact_storage_factory
+        )
+    )
 
-    async def scenario() -> None:
-        sealed, manifest, _ = await seal_bytes(
-            kora_provider, "replay", b"original", context
-        )
-        request, original = await publish(
-            kora_provider, sealed, "publish", kora_capture
-        )
-        arguments = DeleteArguments(
-            version=1, address=original.content.address, deletion_generation=1
-        )
-        deletion = DeleteRequest(
+
+async def check_artifact_storage_promotion_replay_preserves_outcome(
+    provider: ArtifactStorage,
+    context: ProtocolContext,
+    storage_factory: StorageFactory,
+) -> None:
+    sealed, manifest, _ = await seal_bytes(provider, "replay", b"original", context)
+    request, original = await publish_with_context(provider, sealed, "publish", context)
+    arguments = DeleteArguments(
+        version=1, address=original.content.address, deletion_generation=1
+    )
+    deletion = DeleteRequest(
+        version=1,
+        operation=operation(provider.identity(), "delete", "delete_content", arguments),
+        arguments=arguments,
+    )
+
+    await provider.delete_content(deletion, context)
+    await provider.release_delete(
+        DeleteReleaseRequest(
             version=1,
-            operation=operation(
-                kora_provider.identity(), "delete", "delete_content", arguments
-            ),
-            arguments=arguments,
+            operation=deletion.operation,
+            persisted_outcome_revision="saved-delete",
+            issuance_closed="closed-delete",
+        ),
+        context,
+    )
+    replayed = await provider.promote(request, context)
+    observed = await provider.observe(request.operation, context)
+    part = manifest.parts[0]
+    write = operation(
+        provider.identity(),
+        "replay-part",
+        "write_part",
+        StageWrite(version=1, stage=sealed.stage, spec=part.spec),
+    )
+    supplied = BytesSource(b"original")
+    replayed_part = await provider.write_part(
+        write, sealed.stage, part.spec, supplied, context
+    )
+    with pytest.raises(KoraProtocolError):
+        await provider.write_part(
+            write, sealed.stage, part.spec, BytesSource(b"changed!"), context
         )
+    await provider.aclose()
+    reconstructed = storage_factory()
+    try:
+        recovered = await reconstructed.promote(request, context)
+    finally:
+        await reconstructed.aclose()
 
-        await kora_provider.delete_content(deletion, context)
-        await kora_provider.release_delete(
-            DeleteReleaseRequest(
-                version=1,
-                operation=deletion.operation,
-                persisted_outcome_revision="saved-delete",
-                issuance_closed="closed-delete",
-            ),
-            context,
-        )
-        replayed = await kora_provider.promote(request, context)
-        observed = await kora_provider.observe(request.operation, context)
-        part = manifest.parts[0]
-        write = operation(
-            kora_provider.identity(),
-            "replay-part",
-            "write_part",
-            StageWrite(version=1, stage=sealed.stage, spec=part.spec),
-        )
-        supplied = BytesSource(b"original")
-        replayed_part = await kora_provider.write_part(
-            write, sealed.stage, part.spec, supplied, context
-        )
-        with pytest.raises(KoraProtocolError):
-            await kora_provider.write_part(
-                write, sealed.stage, part.spec, BytesSource(b"changed!"), context
-            )
-        await kora_provider.aclose()
-        reconstructed = kora_artifact_storage_factory()
-        try:
-            recovered = await reconstructed.promote(request, context)
-        finally:
-            await reconstructed.aclose()
-
-        check(
-            replayed == original,
-            "later deletion cannot change the saved promotion outcome",
-        )
-        check(
-            observed.result == original and observed.effects_closed,
-            "observation preserves original attribution and closure",
-        )
-        check(
-            replayed_part.part_identity == part.part_identity and supplied.closed,
-            "stale byte replay verifies and preserves the saved immutable part",
-        )
-        check(
-            recovered == original,
-            "a reconstructed receiver preserves the exact saved outcome",
-        )
-
-    asyncio.run(scenario())
+    check(
+        replayed == original,
+        "later deletion cannot change the saved promotion outcome",
+    )
+    check(
+        observed.result == original and observed.effects_closed,
+        "observation preserves original attribution and closure",
+    )
+    check(
+        replayed_part.part_identity == part.part_identity and supplied.closed,
+        "stale byte replay verifies and preserves the saved immutable part",
+    )
+    check(
+        recovered == original,
+        "a reconstructed receiver preserves the exact saved outcome",
+    )
 
 
 @pytest.mark.kora_conformance
@@ -557,47 +582,54 @@ def test_artifact_storage_staging_cleanup_is_confined(
     kora_capture: Capture,
     kora_artifact_storage_factory: StorageFactory,
 ) -> None:
-    context = context_for(kora_capture)
-
-    async def scenario() -> None:
-        upload = await seal_repeated(kora_provider, "cleanup", 65536, context)
-        promotion, result = await publish(
-            kora_provider, upload.content, "publish", kora_capture
+    asyncio.run(
+        check_artifact_storage_staging_cleanup_is_confined(
+            kora_provider, context_for(kora_capture), kora_artifact_storage_factory
         )
+    )
 
-        release = await acknowledge_stage(
-            kora_provider,
-            upload.content.stage,
-            (*upload.operations, promotion.operation),
-            context,
-        )
-        released = await kora_provider.release_stage(release, context)
-        with pytest.raises(KoraProtocolError):
-            await kora_provider.promote(promotion, context)
-        saved = await kora_provider.observe(promotion.operation, context)
-        await kora_provider.aclose()
-        reconstructed = kora_artifact_storage_factory()
-        try:
-            reader = await reconstructed.get(result.content, context)
-            actual = hashlib.sha256()
-            async with reader:
-                async for chunk in reader:
-                    actual.update(chunk)
-        finally:
-            await reconstructed.aclose()
 
-        check(released.state == "released", "acknowledgment compacts the retired stage")
-        check(
-            saved.state == "evidence_unavailable",
-            "compaction never manufactures an old result",
-        )
-        check(result.created_object, "private cleanup follows a real publication")
-        check(
-            "sha256:" + actual.hexdigest() == upload.content.payload_digest,
-            "stage cleanup preserves shared content across reconstruction",
-        )
+async def check_artifact_storage_staging_cleanup_is_confined(
+    provider: ArtifactStorage,
+    context: ProtocolContext,
+    storage_factory: StorageFactory,
+) -> None:
+    upload = await seal_repeated(provider, "cleanup", 65536, context)
+    promotion, result = await publish_with_context(
+        provider, upload.content, "publish", context
+    )
 
-    asyncio.run(scenario())
+    release = await acknowledge_stage(
+        provider,
+        upload.content.stage,
+        (*upload.operations, promotion.operation),
+        context,
+    )
+    released = await provider.release_stage(release, context)
+    with pytest.raises(KoraProtocolError):
+        await provider.promote(promotion, context)
+    saved = await provider.observe(promotion.operation, context)
+    await provider.aclose()
+    reconstructed = storage_factory()
+    try:
+        reader = await reconstructed.get(result.content, context)
+        actual = hashlib.sha256()
+        async with reader:
+            async for chunk in reader:
+                actual.update(chunk)
+    finally:
+        await reconstructed.aclose()
+
+    check(released.state == "released", "acknowledgment compacts the retired stage")
+    check(
+        saved.state == "evidence_unavailable",
+        "compaction never manufactures an old result",
+    )
+    check(result.created_object, "private cleanup follows a real publication")
+    check(
+        "sha256:" + actual.hexdigest() == upload.content.payload_digest,
+        "stage cleanup preserves shared content across reconstruction",
+    )
 
 
 @pytest.mark.kora_conformance

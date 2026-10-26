@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TypeVar
@@ -16,7 +17,8 @@ from kora.conformance.common import (
     context_for,
     utc_now,
 )
-from kora.conformance.storage_support import operation, stage_spec
+from kora.conformance.storage_support import operation, seal_bytes, stage_spec
+from kora.ir.json import JsonObject
 from kora.observability import LoggingSettings
 from kora.plugins.storage.local import LocalStorageConfiguration
 from kora.protocols.common import ProtocolContext
@@ -312,19 +314,51 @@ def test_shared_storage_check_releases_every_ending(ending: str) -> None:
     assert_capture_released(capture)
 
 
-def test_shared_storage_failure_and_logging_keep_supplied_markers() -> None:
+@pytest.mark.parametrize("store_name", ["store-a", "store-b"])
+def test_shared_storage_failure_and_logging_keep_supplied_markers(
+    store_name: str,
+) -> None:
     async def scenario(root: Path, captures: list[Capture]) -> LoopBoundStorage:
-        provider = LoopBoundStorage(configuration(root))
+        configured: JsonObject = {
+            "root": str(root / store_name),
+            "limits": {"version": 1},
+        }
+        provider = LoopBoundStorage(
+            LocalStorageConfiguration.model_validate(configured)
+        )
         markers: list[str] = []
 
-        async def failure(context: ProtocolContext, marker: str) -> object:
+        async def failure(
+            selected: ArtifactStorage,
+            supplied: JsonObject,
+            context: ProtocolContext,
+            marker: str,
+        ) -> object:
+            assert selected is provider
+            assert supplied == configured
             markers.append(marker)
-            spec = stage_spec(provider.identity(), marker, b"")
+            spec = stage_spec(selected.identity(), marker, b"")
             request = operation(
-                provider.identity(), "invalid-binding", "begin_stage", spec
+                selected.identity(), "invalid-binding", "begin_stage", spec
             )
             changed = spec.model_copy(update={"content_type": "changed"})
-            return await provider.begin_stage(request, changed, context)
+            return await selected.begin_stage(request, changed, context)
+
+        async def configuration_effect(
+            selected: ArtifactStorage,
+            supplied: JsonObject,
+            context: ProtocolContext,
+        ) -> None:
+            assert selected is provider
+            expected = LocalStorageConfiguration.model_validate(supplied)
+
+            await seal_bytes(selected, "configured", b"configured-bytes", context)
+
+            assert provider.control_state().root.path == Path(expected.root).resolve()
+            assert (Path(expected.root) / "control.sqlite").is_file()
+
+        inputs = checks.ArtifactStorageConformanceInputs(failure, configuration_effect)
+        exercise = partial(inputs.failure, provider, configured)
 
         try:
             for logging in (False, True):
@@ -337,11 +371,12 @@ def test_shared_storage_failure_and_logging_keep_supplied_markers() -> None:
                     )
                     if logging:
                         await check_provider_logs_through_its_context(
-                            failure, capture, context, MARKER
+                            exercise, capture, context, MARKER
                         )
                     else:
+                        await inputs.configuration_effect(provider, configured, context)
                         await check_failure_is_a_bounded_protocol_error(
-                            failure, context, MARKER
+                            exercise, context, MARKER
                         )
                     assert provider.contexts[-1] is context
         finally:
@@ -361,3 +396,106 @@ def test_shared_storage_failure_and_logging_keep_supplied_markers() -> None:
     provider.assert_closed()
     for capture in captures:
         assert_capture_released(capture)
+
+
+@pytest.mark.parametrize(
+    ("case", "ending"),
+    [
+        ("round-trip", "success"),
+        ("replay", "success"),
+        ("cleanup", "success"),
+        ("replay", "wrong-outcome"),
+        ("cleanup", "cancel"),
+    ],
+)
+def test_shared_storage_reconstruction_owns_exact_receivers(
+    case: str, ending: str
+) -> None:
+    async def scenario(root: Path, capture: Capture) -> list[LoopBoundStorage]:
+        configured = configuration(root)
+        receivers: list[LoopBoundStorage] = []
+        barrier = StorageBarrierActivity("storage.get.admitted", on_exit=True)
+        context = replace(context_for(capture), namespace_id="storage-reconstruction")
+        if ending == "cancel":
+            context = replace(context, activity=barrier)
+
+        def construct() -> ArtifactStorage:
+            if receivers:
+                if case == "round-trip":
+                    assert not receivers[0].control_state().root.closed
+                    assert not receivers[0].worker.done()
+                else:
+                    receivers[-1].assert_closed()
+            provider_type = (
+                WrongPromotionStorage
+                if receivers and ending == "wrong-outcome"
+                else LoopBoundStorage
+            )
+            receiver = provider_type(configured)
+            assert all(receiver is not previous for previous in receivers)
+            receivers.append(receiver)
+            return receiver
+
+        primary = construct()
+
+        async def exercise() -> None:
+            if case == "round-trip":
+                await checks.check_artifact_storage_staging_round_trip(
+                    primary, context, construct, 1
+                )
+            elif case == "replay":
+                await checks.check_artifact_storage_promotion_replay_preserves_outcome(
+                    primary, context, construct
+                )
+            else:
+                await checks.check_artifact_storage_staging_cleanup_is_confined(
+                    primary, context, construct
+                )
+
+        try:
+            if ending == "cancel":
+                task = asyncio.create_task(exercise())
+                try:
+                    await asyncio.wait_for(barrier.entered.wait(), timeout=5)
+                    task.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                finally:
+                    barrier.released.set()
+                    if not task.done():
+                        task.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await task
+            elif ending == "wrong-outcome":
+                with pytest.raises(
+                    pytest.fail.Exception,
+                    match="a reconstructed receiver preserves the exact saved outcome",
+                ):
+                    await exercise()
+            else:
+                await exercise()
+        finally:
+            for receiver in receivers:
+                await receiver.aclose()
+
+        assert len(receivers) == 2
+        assert receivers[0].identity() == receivers[1].identity()
+        for receiver in receivers:
+            assert receiver.contexts
+            assert all(received is context for received in receiver.contexts)
+            assert receiver.control_state().root.path == Path(configured.root).resolve()
+            receiver.assert_closed()
+        return receivers
+
+    with TemporaryDirectory(prefix="kora-storage-reconstruction-") as directory:
+        root = Path(directory)
+        with captured(
+            CONFORMANCE_COMPONENT, LoggingSettings(), "storage-reconstruction", utc_now
+        ) as capture:
+            with asyncio.Runner() as runner:
+                receivers = runner.run(scenario(root, capture))
+
+    assert not root.exists()
+    for receiver in receivers:
+        receiver.assert_closed()
+    assert_capture_released(capture)
