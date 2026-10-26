@@ -128,6 +128,8 @@ async def measured_page(
     measured = scan(provider.control_state(), "content", cursor, 128, measure=True)
     if measured.page != page or measured.query_steps is None:
         raise AssertionError("the instrumented actual query changed its projection")
+    if measured.query_steps <= 0 or len(page.entries) > measured.queried_rows:
+        raise AssertionError("actual inventory query work is absent")
     if measured.queried_rows > 128 or len(page.canonical_bytes()) > 16384:
         raise AssertionError("the indexed inventory exceeded a declared bound")
     require_budget(
