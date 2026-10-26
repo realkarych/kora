@@ -162,11 +162,11 @@ jobs:
             tests/conformance/test_parent_lifetime.py
             tests/conformance/test_recovered_process_lifetime.py
           )
-          second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py)
+          second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py tests/measurements/test_ir_measurement_evidence.py)
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage --ignore=tests/measurements/test_ir_measurement_evidence.py)
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" "${general[@]}" > "$KORA_ORDINARY_OUTPUT/full.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.collection"

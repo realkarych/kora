@@ -57,10 +57,12 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
     assert tuple(first) == FIRST_MODULES
     assert (
         "second=(tests/conformance "
-        "--ignore=tests/conformance/test_artifact_storage_conformance.py)\n"
+        "--ignore=tests/conformance/test_artifact_storage_conformance.py "
+        "tests/measurements/test_ir_measurement_evidence.py)\n"
         'for path in "${first[@]}"; do\n'
         '  second+=("--ignore=$path")\ndone\n'
-        "other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage)\n"
+        "other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage "
+        "--ignore=tests/measurements/test_ir_measurement_evidence.py)\n"
     ) in command
     assert 'mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX"' in str(
         selected["tests"]["run"]
