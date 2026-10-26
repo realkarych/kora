@@ -26,6 +26,7 @@ from kora.conformance.storage_support import (
     single_part,
     stage_spec,
 )
+from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage import ArtifactStorage
 from kora.protocols.storage_models import (
@@ -91,6 +92,15 @@ async def publish(
     key: str,
     capture: Capture,
 ) -> tuple[PromotionRequest, PromotionResult]:
+    return await publish_with_context(provider, sealed, key, context_for(capture))
+
+
+async def publish_with_context(
+    provider: ArtifactStorage,
+    sealed: SealedStage | PreparedContentRef,
+    key: str,
+    context: ProtocolContext,
+) -> tuple[PromotionRequest, PromotionResult]:
     arguments = PromotionArguments(
         version=1,
         content=sealed,
@@ -106,7 +116,7 @@ async def publish(
         operation=operation(provider.identity(), key, "promote", arguments),
         arguments=arguments,
     )
-    return request, await provider.promote(request, context_for(capture))
+    return request, await provider.promote(request, context)
 
 
 @pytest.mark.kora_conformance
@@ -601,176 +611,183 @@ def test_artifact_storage_staging_cleanup_is_confined(
 def test_artifact_storage_staging_lifetime(
     kora_provider: ArtifactStorage, kora_capture: Capture
 ) -> None:
-    context = context_for(kora_capture)
-
-    async def scenario() -> None:
-        upload = await seal_repeated(kora_provider, "reader", 65536, context)
-        reader = await kora_provider.read_stage(upload.content, context)
-        retire = operation(
-            kora_provider.identity(), "retire", "retire_stage", upload.content.stage
+    asyncio.run(
+        check_artifact_storage_staging_lifetime(
+            kora_provider, context_for(kora_capture)
         )
+    )
 
-        pending = await kora_provider.retire_stage(
-            retire, upload.content.stage, context
-        )
-        with pytest.raises(KoraProtocolError):
-            await kora_provider.read_stage(upload.content, context)
-        await reader.aclose()
-        completed = await kora_provider.retire_stage(
-            retire, upload.content.stage, context
-        )
 
-        check(
-            not pending.completed and pending.remaining_effects > 0,
-            "an actual reader keeps cleanup unresolved",
-        )
-        check(completed.completed, "cleanup completes after actual reader closure")
+async def check_artifact_storage_staging_lifetime(
+    provider: ArtifactStorage, context: ProtocolContext
+) -> None:
+    upload = await seal_repeated(provider, "reader", 65536, context)
+    reader = await provider.read_stage(upload.content, context)
+    retire = operation(
+        provider.identity(), "retire", "retire_stage", upload.content.stage
+    )
 
-    asyncio.run(scenario())
+    pending = await provider.retire_stage(retire, upload.content.stage, context)
+    with pytest.raises(KoraProtocolError):
+        await provider.read_stage(upload.content, context)
+    await reader.aclose()
+    completed = await provider.retire_stage(retire, upload.content.stage, context)
+
+    check(
+        not pending.completed and pending.remaining_effects > 0,
+        "an actual reader keeps cleanup unresolved",
+    )
+    check(completed.completed, "cleanup completes after actual reader closure")
 
 
 @pytest.mark.kora_conformance
 def test_artifact_storage_deletion_lifetime(
     kora_provider: ArtifactStorage, kora_capture: Capture
 ) -> None:
-    context = context_for(kora_capture)
+    asyncio.run(
+        check_artifact_storage_deletion_lifetime(
+            kora_provider, context_for(kora_capture)
+        )
+    )
 
-    async def scenario() -> None:
-        sealed, _, _ = await seal_bytes(
-            kora_provider, "deletion", b"delete-me", context
-        )
-        _, published = await publish(kora_provider, sealed, "publish", kora_capture)
-        arguments = DeleteArguments(
-            version=1, address=published.content.address, deletion_generation=1
-        )
-        request = DeleteRequest(
+
+async def check_artifact_storage_deletion_lifetime(
+    provider: ArtifactStorage, context: ProtocolContext
+) -> None:
+    sealed, _, _ = await seal_bytes(provider, "deletion", b"delete-me", context)
+    _, published = await publish_with_context(provider, sealed, "publish", context)
+    arguments = DeleteArguments(
+        version=1, address=published.content.address, deletion_generation=1
+    )
+    request = DeleteRequest(
+        version=1,
+        operation=operation(provider.identity(), "delete", "delete_content", arguments),
+        arguments=arguments,
+    )
+
+    deleted = await provider.delete_content(request, context)
+    replayed = await provider.delete_content(request, context)
+    released = await provider.release_delete(
+        DeleteReleaseRequest(
             version=1,
-            operation=operation(
-                kora_provider.identity(), "delete", "delete_content", arguments
-            ),
-            arguments=arguments,
-        )
+            operation=request.operation,
+            persisted_outcome_revision="saved-delete",
+            issuance_closed="closed-delete",
+        ),
+        context,
+    )
+    with pytest.raises(KoraProtocolError):
+        await provider.delete_content(request, context)
 
-        deleted = await kora_provider.delete_content(request, context)
-        replayed = await kora_provider.delete_content(request, context)
-        released = await kora_provider.release_delete(
-            DeleteReleaseRequest(
-                version=1,
-                operation=request.operation,
-                persisted_outcome_revision="saved-delete",
-                issuance_closed="closed-delete",
-            ),
-            context,
-        )
-        with pytest.raises(KoraProtocolError):
-            await kora_provider.delete_content(request, context)
-
-        check(
-            deleted.deleted_object and replayed == deleted,
-            "exact deletion outcome survives replay",
-        )
-        check(released.state == "released", "closed acknowledged deletion compacts")
-
-    asyncio.run(scenario())
+    check(
+        deleted.deleted_object and replayed == deleted,
+        "exact deletion outcome survives replay",
+    )
+    check(released.state == "released", "closed acknowledged deletion compacts")
 
 
 @pytest.mark.kora_conformance
 def test_artifact_storage_inventory_is_bounded(
     kora_provider: ArtifactStorage, kora_capture: Capture
 ) -> None:
-    context = context_for(kora_capture)
-
-    async def scenario() -> None:
-        for index in range(3):
-            await seal_repeated(kora_provider, f"inventory-{index}", index, context)
-
-        first = await kora_provider.scan("stages", None, 2, context)
-        second = await kora_provider.scan("stages", first.next_cursor, 2, context)
-
-        check(
-            tuple(item.key for item in first.entries) == ("inventory-0", "inventory-1"),
-            "first keyset page is ordered",
+    asyncio.run(
+        check_artifact_storage_inventory_is_bounded(
+            kora_provider, context_for(kora_capture)
         )
-        check(
-            tuple(item.key for item in second.entries) == ("inventory-2",),
-            "continuation starts after the last emitted key",
-        )
-        check(
-            len(first.canonical_bytes()) <= 16384
-            and len(second.canonical_bytes()) <= 16384,
-            "complete pages fit the metadata bound",
-        )
+    )
 
-    asyncio.run(scenario())
+
+async def check_artifact_storage_inventory_is_bounded(
+    provider: ArtifactStorage, context: ProtocolContext
+) -> None:
+    for index in range(3):
+        await seal_repeated(provider, f"inventory-{index}", index, context)
+
+    first = await provider.scan("stages", None, 2, context)
+    second = await provider.scan("stages", first.next_cursor, 2, context)
+
+    check(
+        tuple(item.key for item in first.entries) == ("inventory-0", "inventory-1"),
+        "first keyset page is ordered",
+    )
+    check(
+        tuple(item.key for item in second.entries) == ("inventory-2",),
+        "continuation starts after the last emitted key",
+    )
+    check(
+        len(first.canonical_bytes()) <= 16384
+        and len(second.canonical_bytes()) <= 16384,
+        "complete pages fit the metadata bound",
+    )
 
 
 @pytest.mark.kora_conformance
 def test_artifact_storage_range_reads_are_exact(
     kora_provider: ArtifactStorage, kora_capture: Capture
 ) -> None:
-    context = context_for(kora_capture)
+    asyncio.run(
+        check_artifact_storage_range_reads_are_exact(
+            kora_provider, context_for(kora_capture)
+        )
+    )
 
-    async def scenario() -> None:
-        payload = bytes(range(256)) * 1024
-        sealed, _, _ = await seal_bytes(kora_provider, "range", payload, context)
-        _, published = await publish(kora_provider, sealed, "publish", kora_capture)
 
-        for offset, length in ((0, 1), (65530, 65536), (len(payload) - 1, 1)):
-            reader = await kora_provider.get_range(
-                published.content, offset, length, context
-            )
-            async with reader:
-                actual = b"".join([chunk async for chunk in reader])
-            check(
-                actual == payload[offset : offset + length],
-                "range returns the exact span without a prefix",
-            )
-        for offset, length in (
-            (-1, 1),
-            (0, 0),
-            (0, 65537),
-            (len(payload), 1),
-            (True, 1),
-        ):
-            with pytest.raises(KoraProtocolError):
-                await kora_provider.get_range(
-                    published.content, offset, length, context
-                )
+async def check_artifact_storage_range_reads_are_exact(
+    provider: ArtifactStorage, context: ProtocolContext
+) -> None:
+    payload = bytes(range(256)) * 1024
+    sealed, _, _ = await seal_bytes(provider, "range", payload, context)
+    _, published = await publish_with_context(provider, sealed, "publish", context)
 
-    asyncio.run(scenario())
+    for offset, length in ((0, 1), (65530, 65536), (len(payload) - 1, 1)):
+        reader = await provider.get_range(published.content, offset, length, context)
+        async with reader:
+            actual = b"".join([chunk async for chunk in reader])
+        check(
+            actual == payload[offset : offset + length],
+            "range returns the exact span without a prefix",
+        )
+    for offset, length in (
+        (-1, 1),
+        (0, 0),
+        (0, 65537),
+        (len(payload), 1),
+        (True, 1),
+    ):
+        with pytest.raises(KoraProtocolError):
+            await provider.get_range(published.content, offset, length, context)
 
 
 @pytest.mark.kora_conformance
 def test_artifact_storage_range_lifetime(
     kora_provider: ArtifactStorage, kora_capture: Capture
 ) -> None:
-    context = context_for(kora_capture)
+    asyncio.run(
+        check_artifact_storage_range_lifetime(kora_provider, context_for(kora_capture))
+    )
 
-    async def scenario() -> None:
-        sealed, _, _ = await seal_bytes(
-            kora_provider, "range-reader", b"reader", context
-        )
-        _, published = await publish(kora_provider, sealed, "publish", kora_capture)
-        reader = await kora_provider.get_range(published.content, 1, 2, context)
-        arguments = DeleteArguments(
-            version=1, address=published.content.address, deletion_generation=1
-        )
-        request = DeleteRequest(
-            version=1,
-            operation=operation(
-                kora_provider.identity(), "delete", "delete_content", arguments
-            ),
-            arguments=arguments,
-        )
 
-        with pytest.raises(KoraProtocolError):
-            await kora_provider.delete_content(request, context)
-        await reader.aclose()
-        deleted = await kora_provider.delete_content(request, context)
+async def check_artifact_storage_range_lifetime(
+    provider: ArtifactStorage, context: ProtocolContext
+) -> None:
+    sealed, _, _ = await seal_bytes(provider, "range-reader", b"reader", context)
+    _, published = await publish_with_context(provider, sealed, "publish", context)
+    reader = await provider.get_range(published.content, 1, 2, context)
+    arguments = DeleteArguments(
+        version=1, address=published.content.address, deletion_generation=1
+    )
+    request = DeleteRequest(
+        version=1,
+        operation=operation(provider.identity(), "delete", "delete_content", arguments),
+        arguments=arguments,
+    )
 
-        check(
-            deleted.deleted_object,
-            "deletion proceeds only after the actual range reader closes",
-        )
+    with pytest.raises(KoraProtocolError):
+        await provider.delete_content(request, context)
+    await reader.aclose()
+    deleted = await provider.delete_content(request, context)
 
-    asyncio.run(scenario())
+    check(
+        deleted.deleted_object,
+        "deletion proceeds only after the actual range reader closes",
+    )
