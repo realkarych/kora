@@ -1,10 +1,14 @@
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
 from ruamel.yaml import YAML
+
+from tests.measurements.storage_qualification_evidence import qualification_nodes
+from tests.scaffold_evidence import STORAGE_ARGUMENTS, collection_nodes
 
 ROOT = Path(__file__).resolve().parents[2]
 SUCCESS: dict[str, str] = {
@@ -36,6 +40,41 @@ def storage_jobs() -> dict[str, object]:
 
 def job_steps(job: dict[str, object]) -> list[dict[str, object]]:
     return [table(entry) for entry in cast(list[object], job["steps"])]
+
+
+def test_storage_qualification_runs_nightly_and_manually() -> None:
+    path = ROOT / ".github/workflows/storage.yml"
+
+    workflow = table(cast(YamlLoader, YAML(typ="safe")).load(path))
+
+    assert workflow["name"] == "Storage release qualification"
+    assert workflow["on"] == {
+        "workflow_dispatch": None,
+        "schedule": [{"cron": "0 3 * * *"}],
+    }
+    assert workflow["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": False,
+    }
+
+
+def test_storage_qualification_cases_remain_in_ordinary_collection(
+    tmp_path: Path,
+) -> None:
+    collection = tmp_path / "storage.collection"
+    arguments = [sys.executable, "-m", "pytest", "--collect-only", "-q"]
+
+    result = subprocess.run(
+        [*arguments, *STORAGE_ARGUMENTS],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    collection.write_bytes(result.stdout)
+
+    assert result.returncode == 0, result.stderr.decode()
+    assert qualification_nodes() <= collection_nodes(collection)
 
 
 def test_storage_ci_requires_exact_platform_producers_and_always_qualification() -> (

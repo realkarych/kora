@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
 import time
 from collections.abc import Awaitable
 from contextlib import AsyncExitStack
@@ -46,6 +47,7 @@ from kora.protocols.storage_models import (
     StorageScanCursor,
 )
 from tests.measurements.harness import Report, Sample
+from tests.measurements.storage_budgets import read_budgets, require_budget
 from tests.measurements.storage_lifetime_resources import close_provider
 from tests.plugins.storage.activity import StorageBarrierActivity
 from tests.plugins.storage.inspection import InspectedStorage
@@ -128,6 +130,11 @@ async def measured_page(
         raise AssertionError("the instrumented actual query changed its projection")
     if measured.queried_rows > 128 or len(page.canonical_bytes()) > 16384:
         raise AssertionError("the indexed inventory exceeded a declared bound")
+    require_budget(
+        measured.query_steps,
+        read_budgets().platforms[sys.platform].inventory_query_steps,
+        "inventory.query_steps",
+    )
     report.samples.append(
         Sample(
             f"storage.inventory.{phase}",
@@ -148,6 +155,22 @@ async def measured_page(
         )
     )
     return page
+
+
+def check_inventory_position(
+    page: StoragePage, original_keys: list[str], cursor: StorageScanCursor | None
+) -> None:
+    keys = tuple(entry.key for entry in page.entries)
+    remaining = tuple(
+        key for key in original_keys if cursor is None or key > cursor.last_key
+    )
+    if (
+        not keys
+        or keys != remaining[: len(keys)]
+        or (page.next_cursor is None and len(keys) != len(remaining))
+        or (page.next_cursor is not None and page.next_cursor.last_key != keys[-1])
+    ):
+        raise AssertionError("an inventory probe differs from its keyset position")
 
 
 async def inventory_workload(
@@ -176,14 +199,18 @@ async def inventory_workload(
             raise AssertionError(
                 "inventory omitted or duplicated intentionally retained content"
             )
-        await measured_page(provider, None, context, report, count, "first")
+        first = await measured_page(provider, None, context, report, count, "first")
+        check_inventory_position(first, emitted, None)
         middle_cursor = StorageScanCursor(
             version=1,
             storage_identity=provider.identity(),
             kind="content",
             last_key=emitted[count // 2 - 1],
         )
-        await measured_page(provider, middle_cursor, context, report, count, "middle")
+        middle = await measured_page(
+            provider, middle_cursor, context, report, count, "middle"
+        )
+        check_inventory_position(middle, emitted, middle_cursor)
         final_cursor = StorageScanCursor(
             version=1,
             storage_identity=provider.identity(),
@@ -193,11 +220,13 @@ async def inventory_workload(
         final = await measured_page(
             provider, final_cursor, context, report, count, "final"
         )
+        check_inventory_position(final, emitted, final_cursor)
         await close_provider(provider)
         provider = InspectedStorage(configuration)
         restarted = await measured_page(
             provider, final_cursor, context, report, count, "restart"
         )
+        check_inventory_position(restarted, emitted, final_cursor)
         if restarted.entries != final.entries:
             raise AssertionError("restart changed the same keyset page")
         address = ContentAddress(
@@ -808,6 +837,8 @@ async def bounded_reconstruction(
     next_reconstructions = 1
     try:
         stage = await current.begin_stage(saved_operation, saved_spec, context)
+        if stage != saved_spec.stage:
+            raise AssertionError("the next authorized request returned another stage")
         release = await acknowledge_stage(current, stage, (saved_operation,), context)
         await current.release_stage(release, context)
         if any(current.resource_counts().values()):

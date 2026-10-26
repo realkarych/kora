@@ -7,8 +7,62 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import StorageLimits
+from kora.protocols.storage_models import (
+    StorageIdentity,
+    StorageLimits,
+    StoragePage,
+    StorageScanCursor,
+    StorageScanEntry,
+)
+from tests.plugins.storage.lifetime_boundaries import check_inventory_position
 from tests.plugins.storage.support import operation, stage_spec
+
+
+@pytest.mark.parametrize(
+    ("indices", "cursor_index", "next_index"),
+    [
+        ((1,), None, None),
+        ((0,), 1, None),
+        ((), None, None),
+        ((0,), None, None),
+        ((0, 1), None, 0),
+    ],
+)
+def test_inventory_probe_rejects_incorrect_keyset_position(
+    indices: tuple[int, ...], cursor_index: int | None, next_index: int | None
+) -> None:
+    identity = StorageIdentity(version=1, store_id="inventory-probe")
+    keys = ["sha256:" + character * 64 for character in "abc"]
+    cursor = (
+        None
+        if cursor_index is None
+        else StorageScanCursor(
+            version=1,
+            storage_identity=identity,
+            kind="content",
+            last_key=keys[cursor_index],
+        )
+    )
+    page = StoragePage(
+        version=1,
+        storage_identity=identity,
+        kind="content",
+        entries=tuple(
+            StorageScanEntry(version=1, key=keys[index], state="content", size=1)
+            for index in indices
+        ),
+        next_cursor=None
+        if next_index is None
+        else StorageScanCursor(
+            version=1,
+            storage_identity=identity,
+            kind="content",
+            last_key=keys[next_index],
+        ),
+    )
+
+    with pytest.raises(AssertionError, match="keyset position"):
+        check_inventory_position(page, keys, cursor)
 
 
 def test_local_storage_inventory_page_fits_metadata_envelope(
