@@ -106,6 +106,18 @@ def close_controller(process: subprocess.Popen[bytes], directory: Path) -> None:
         recover_owner(directory)
 
 
+def controller_diagnostics(directory: Path) -> tuple[bytes | None, ...]:
+    result: list[bytes | None] = []
+    for name in ("report.json", "command-stderr.txt"):
+        path = directory / name
+        if path.exists():
+            with path.open("rb") as source:
+                result.append(source.read(16384))
+        else:
+            result.append(None)
+    return tuple(result)
+
+
 def run_controller(
     directory: Path, workload: str
 ) -> tuple[subprocess.CompletedProcess[bytes], PressureReport]:
@@ -427,7 +439,8 @@ def test_pressure_owner_recovers_interrupted_manifest_write(tmp_path: Path) -> N
         assert process.stdout is not None
         ready, _, _ = select.select([process.stdout], [], [], 30)
         assert ready
-        assert process.stdout.readline(1024) == b"manifest_pending\n"
+        response = process.stdout.readline(1024)
+        assert response == b"manifest_pending\n", controller_diagnostics(directory)
         pending = directory / "pressure-manifest.pending"
         assert pending.exists()
         process.kill()
