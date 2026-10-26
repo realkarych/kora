@@ -141,7 +141,7 @@ def validate_configuration(
         selected.check_schema(schema)
     except (SchemaError, ValueError):
         return InputReason.SCHEMA_INVALID
-    except RecursionError:
+    except (OverflowError, RecursionError):
         return InputReason.SCHEMA_EVALUATION_UNAVAILABLE
     try:
         validator = selected(schema, registry=Registry())

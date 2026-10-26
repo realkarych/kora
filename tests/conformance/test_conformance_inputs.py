@@ -343,3 +343,28 @@ def test_conformance_schema_evaluation_unavailable() -> None:
     assert caught.value.reason is InputReason.SCHEMA_EVALUATION_UNAVAILABLE
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {
+            "type": "object",
+            "properties": {PRIVATE_MARKER: {"pattern": "a{4294967296}"}},
+        },
+        {
+            "type": "object",
+            "patternProperties": {f"{PRIVATE_MARKER}{{4294967296}}": {}},
+        },
+    ],
+)
+def test_conformance_root_schema_regex_overflow_is_refused(schema: object) -> None:
+    expected = InputReason.SCHEMA_EVALUATION_UNAVAILABLE
+
+    with pytest.raises(ConformanceInputError) as caught:
+        ConformanceInputs(schema)
+
+    assert caught.value.reason is expected
+    assert PRIVATE_MARKER not in "".join(traceback.format_exception(caught.value))
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
