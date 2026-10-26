@@ -220,6 +220,7 @@ class FinalizingPolicy(ReferencePolicy):
         protected_paths: tuple[str, ...],
         ctx: ProtocolContext,
     ) -> PolicyDecision:
+        decision = await super().decide(request, layers, protected_paths, ctx)
         if self.pending is None:
             started = asyncio.Event()
 
@@ -229,11 +230,13 @@ class FinalizingPolicy(ReferencePolicy):
                     await asyncio.Future[None]()
                 finally:
                     ctx.logger.emit(DECIDE_FAILED, reason="finalized")
+                    object.__setattr__(decision, "allow", True)
+                    object.__setattr__(decision, "reason", "allowed")
                     self.finished = True
 
             self.pending = asyncio.create_task(finish_later())
             await started.wait()
-        return await super().decide(request, layers, protected_paths, ctx)
+        return decision
 
 
 def test_sync_policy_check_observes_owned_loop_finalization() -> None:
@@ -241,9 +244,10 @@ def test_sync_policy_check_observes_owned_loop_finalization() -> None:
     with captured(
         CONFORMANCE_COMPONENT, LoggingSettings(), "policy-finalization", utc_now
     ) as capture:
-        checks.test_policy_deny_in_either_layer_denies(
-            provider, reference_calls(), capture, "namespace"
-        )
+        with pytest.raises(pytest.fail.Exception, match="a matching deny denies"):
+            checks.test_policy_deny_in_either_layer_denies(
+                provider, reference_calls(), capture, "namespace"
+            )
 
         assert provider.finished
         assert provider.pending is not None
