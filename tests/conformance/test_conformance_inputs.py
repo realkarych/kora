@@ -220,6 +220,7 @@ def test_conformance_unvisited_and_literal_references() -> None:
     [
         {"type": PRIVATE_MARKER},
         {"patternProperties": {f"(?P<{PRIVATE_MARKER}>x)": {}}},
+        {"properties": [PRIVATE_MARKER]},
         1,
     ],
 )

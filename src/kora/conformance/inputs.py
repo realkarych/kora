@@ -148,7 +148,7 @@ def validate_configuration(
         validator.validate(decode_snapshot(configuration_bytes))
     except ValidationError:
         return InputReason.CONFIGURATION_INVALID
-    except (UnknownType, TypeError, re.error):
+    except (UnknownType, TypeError, AttributeError, re.error):
         return InputReason.SCHEMA_INVALID
     except (Unresolvable, ValueError):
         return InputReason.REFERENCE_UNRESOLVED
