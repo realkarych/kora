@@ -134,6 +134,8 @@ async def exercise(case: str) -> dict[str, object]:
                 phase = "descendant_peer"
                 endpoint.sendall(b"d")
                 _, descendant_pid = await peer(listener, operation, connections)
+                phase = "leader_exit"
+                await process.wait_exit(started + 5_000_000_000)
             elif case == "timeout":
                 phase = "discovery_deadline"
                 advanced = await advance_while_running(
