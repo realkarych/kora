@@ -72,6 +72,7 @@ async def exercise(case: str) -> dict[str, object]:
         if case == "retained"
         else invocation.discover()
     )
+    phase = "metadata_peer"
     try:
         async with asyncio.timeout(12):
             endpoint, pid = await peer(listener)
@@ -86,15 +87,18 @@ async def exercise(case: str) -> dict[str, object]:
             elif case == "retained":
                 endpoint.sendall(b"r")
             elif case == "descendant":
+                phase = "descendant_peer"
                 endpoint.sendall(b"d")
                 descendant, descendant_pid = await peer(listener)
                 connections.append(descendant)
             elif case == "timeout":
+                phase = "discovery_deadline"
                 await clock.advance_to_timer(started + 30_000_000_000)
                 started = clock.monotonic_ns()
             else:
                 operation.cancel()
             if case not in {"crash", "retained"}:
+                phase = "cooperative_deadline"
                 if case == "repeat_cancel":
                     while started + 5_000_000_000 not in clock.waiters.values():
                         clock.changed.clear()
@@ -106,10 +110,12 @@ async def exercise(case: str) -> dict[str, object]:
                     current=started + 14_000_000_000 if case == "unknown" else None,
                 )
                 if configuration().resistant or case == "descendant":
+                    phase = "term_deadline"
                     await clock.advance_to_timer(started + 7_000_000_000)
             outcome = "completed"
             cleanup_reason: str | None = None
             retained_content: str | None = None
+            phase = "operation_result"
             try:
                 await operation
             except asyncio.CancelledError as error:
@@ -147,6 +153,19 @@ async def exercise(case: str) -> dict[str, object]:
                 "descriptors_after": descriptors() - len(connections),
                 "remaining_tasks": len(asyncio.all_tasks()),
             }
+    except TimeoutError as error:
+        waiting = sorted(
+            (deadline - clock.monotonic_ns(), waiter.done())
+            for waiter, deadline in clock.waiters.items()
+        )
+        owner = invocation.process
+        raise TimeoutError(
+            f"listing probe phase={phase}; waiting_ns={waiting}; "
+            f"operation_done={operation.done()}; "
+            f"operation_cancelled={operation.cancelled()}; "
+            f"owner_closed={None if owner is None else owner.closed}; "
+            f"returncode={None if owner is None else owner.returncode}"
+        ) from error
     finally:
         for endpoint in connections:
             endpoint.close()

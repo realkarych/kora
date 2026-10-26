@@ -65,7 +65,8 @@ def test_listing_joins_owned_processes_on_every_exit(
             else {}
         )
 
-        assert completed.returncode == 0, completed.stderr
+        if completed.returncode != 0:
+            pytest.fail(completed.stderr.decode(errors="replace"), pytrace=False)
         assert payload["closed"] is True
         assert payload["reaped"] is True
         assert payload["pid_absent"] is True
