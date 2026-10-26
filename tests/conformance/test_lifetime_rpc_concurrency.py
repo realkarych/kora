@@ -32,7 +32,7 @@ from tests.conformance.lifetime_helpers import (
     ProbeIOHelperLauncher,
     lifetime_failure_state,
 )
-from tests.conformance.test_lifetime_io_helper import read_probe
+from tests.conformance.test_lifetime_io_helper import open_fifo_writer, read_probe
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -263,8 +263,8 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 assert not helper.anchor.exited
                 assert not owner.records[tree.token.resource_id].fenced
                 assert not owner.records[child.token.resource_id].fenced
-                writer = os.open(
-                    "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
+                writer = await open_fifo_writer(
+                    barrier.descriptor, deadline, actual_clock
                 )
                 os.close(writer)
                 async with asyncio.timeout(10):

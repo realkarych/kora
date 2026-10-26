@@ -26,7 +26,7 @@ from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.processes import GatedProcess, RecoveredProcess
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
+from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -332,9 +332,7 @@ async def test_first_scoped_close_during_root_removal_joins_actual_helper_exit(
             assert not full.done()
             assert not helper.anchor.exited
             assert invocation_path.exists() is (phase == "before")
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
+            writer = await open_fifo_writer(barrier.descriptor, deadline, actual_clock)
             os.close(writer)
             report = await asyncio.wait_for(asyncio.shield(scoped), 5)
             full_report = await asyncio.wait_for(asyncio.shield(full), 5)

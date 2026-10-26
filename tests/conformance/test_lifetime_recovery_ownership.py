@@ -22,7 +22,7 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
+from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -209,9 +209,7 @@ async def test_cancelled_recovery_retains_exact_attempt_through_gc_and_join(
                     clock=clock,
                 )
             )
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
+            writer = await open_fifo_writer(barrier.descriptor, deadline, SystemClock())
             os.close(writer)
             report = await asyncio.wait_for(joining, 10)
 
@@ -358,9 +356,7 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             assert len(attempt.dependencies) == 1
             assert launcher.starts == 2
             assert path.read_bytes() == retained
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
+            writer = await open_fifo_writer(barrier.descriptor, deadline, SystemClock())
             os.close(writer)
             actual_clock = SystemClock()
             deadline = actual_clock.monotonic_ns() + 5_000_000_000
@@ -497,9 +493,7 @@ async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
             assert refused is LifetimeReason.IDENTITY_UNKNOWN
             assert launcher.starts == 1
             assert registry.inventory().attempts == 1
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
+            writer = await open_fifo_writer(barrier.descriptor, deadline, SystemClock())
             os.close(writer)
             report = await asyncio.to_thread(results.get, True, 5)
 

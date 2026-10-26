@@ -19,7 +19,7 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import read_probe
+from tests.conformance.test_lifetime_io_helper import open_fifo_writer, read_probe
 from tests.conformance.test_parent_lifetime import limits
 
 
@@ -113,8 +113,8 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
                     else:
                         closing = asyncio.create_task(owner.close(None))
                         await owner.closure_started.wait()
-                    writer = os.open(
-                        "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
+                    writer = await open_fifo_writer(
+                        barrier.descriptor, deadline, actual
                     )
                     os.close(writer)
                     if case == "cancel_during":
@@ -196,9 +196,7 @@ async def test_mutation_queue_deadline_does_not_cancel_earlier_publisher(
         with pytest.raises(FileNotFoundError):
             os.stat("e" * 32, dir_fd=directory.descriptor, follow_symlinks=False)
     finally:
-        writer = os.open(
-            "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-        )
+        writer = await open_fifo_writer(barrier.descriptor, deadline, actual)
         os.close(writer)
         await asyncio.gather(queued_call, return_exceptions=True)
         await asyncio.wait_for(operation, 5)

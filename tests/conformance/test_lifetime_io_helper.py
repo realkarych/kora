@@ -1,7 +1,9 @@
 import asyncio
+import errno
 import fcntl
 import os
 import signal
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -72,6 +74,20 @@ async def entered_fifo(pid: int, observation: int, deadline: int, clock: Clock) 
         raise
 
 
+async def open_fifo_writer(directory: int, deadline: int, clock: Clock) -> int:
+    loop = asyncio.get_running_loop()
+    while clock.monotonic_ns() < deadline:
+        try:
+            return os.open("stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=directory)
+        except OSError as failure:
+            if failure.errno != errno.ENXIO:
+                raise
+        ready: asyncio.Future[None] = loop.create_future()
+        loop.call_soon(ready.set_result, None)
+        await ready
+    raise TimeoutError("FIFO reader did not become ready")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "effect", ["bootstrap", "tree", "refused", "failed_reply", "lost_tree_transfer"]
@@ -109,7 +125,7 @@ async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
     if effect == "failed_reply":
         await entered_fifo(helper.process.pid, reading, deadline, clock)
         helper.channel.close()
-        writer = os.open("stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=fifo_directory)
+        writer = await open_fifo_writer(fifo_directory, deadline, clock)
         os.close(writer)
     else:
         result = MutationResult.model_validate_json(
@@ -141,7 +157,7 @@ async def test_fixed_helper_claim_survives_result_error_and_transfer_finalizers(
         with pytest.raises(BlockingIOError):
             fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         assert not helper.anchor.exited
-        writer = os.open("stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=fifo_directory)
+        writer = await open_fifo_writer(fifo_directory, deadline, clock)
         os.close(writer)
         assert await helper.settle(deadline)
         fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -280,9 +296,7 @@ async def test_fixed_io_helper_acknowledges_actual_fifo_call_and_retains_claim(
         fcntl.flock(competitor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     assert not operation.done()
     if completion == "writer":
-        writer = os.open(
-            "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=directory.descriptor
-        )
+        writer = await open_fifo_writer(directory.descriptor, deadline, clock)
         os.close(writer)
         result = await operation
         assert result.directory is not None
@@ -302,3 +316,45 @@ async def test_fixed_io_helper_acknowledges_actual_fifo_call_and_retains_claim(
     os.close(reading)
     os.close(writing)
     directory.close()
+
+
+@pytest.mark.asyncio
+async def test_fifo_writer_waits_for_a_real_reader(tmp_path: Path) -> None:
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    barrier = DirectoryAnchor.open_path(tmp_path)
+    with ExitStack() as resources:
+        resources.callback(barrier.close)
+        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
+        async with asyncio.TaskGroup() as tasks:
+            pending = tasks.create_task(
+                open_fifo_writer(barrier.descriptor, deadline, clock)
+            )
+            loop = asyncio.get_running_loop()
+            yielded: asyncio.Future[None] = loop.create_future()
+            loop.call_soon(yielded.set_result, None)
+            await yielded
+            assert not pending.done()
+
+            reading = os.open(
+                "stall", os.O_RDONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
+            )
+            resources.callback(os.close, reading)
+            writer = await pending
+            resources.callback(os.close, writer)
+
+            os.write(writer, b"ready")
+            assert os.read(reading, 5) == b"ready"
+
+
+@pytest.mark.asyncio
+async def test_fifo_writer_refuses_an_expired_deadline(tmp_path: Path) -> None:
+    clock = SystemClock()
+    barrier = DirectoryAnchor.open_path(tmp_path)
+
+    with ExitStack() as resources:
+        resources.callback(barrier.close)
+        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
+
+        with pytest.raises(TimeoutError, match="FIFO reader"):
+            await open_fifo_writer(barrier.descriptor, clock.monotonic_ns(), clock)

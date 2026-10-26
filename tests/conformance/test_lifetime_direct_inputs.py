@@ -32,7 +32,7 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
+from tests.conformance.test_lifetime_io_helper import entered_fifo, open_fifo_writer
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
 
@@ -217,9 +217,7 @@ async def test_direct_execution_inputs_keep_aggregate_ownership_before_await(
             elif not case.startswith("bootstrap"):
                 assert owner.inventory().pending_operations == 1
                 owner.request_close(token.resource_id)
-            writer = os.open(
-                "stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=barrier.descriptor
-            )
+            writer = await open_fifo_writer(barrier.descriptor, deadline, actual_clock)
             os.close(writer)
             if case != "bootstrap":
                 for caller in callers:
