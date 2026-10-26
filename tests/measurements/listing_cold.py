@@ -5,7 +5,7 @@ import signal
 import socket
 import tempfile
 import time
-from contextlib import ExitStack
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from kora.__main__ import InstalledPluginDiscovery
@@ -48,7 +48,7 @@ async def measure_cold_child(
     )
     invocation = InstalledPluginDiscovery(diagnostics)
     root = Path(tempfile.mkdtemp(prefix="kora-list-cold-", dir="/tmp")).resolve()
-    with ExitStack() as resources:
+    async with AsyncExitStack() as resources:
         resources.callback(diagnostics.shutdown)
         cwd = root / "cwd"
         cwd.mkdir()
@@ -63,7 +63,22 @@ async def measure_cold_child(
         accepts = tuple(
             asyncio.create_task(loop.sock_accept(listener)) for listener in listeners
         )
-        directory = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY)
+
+        async def close_accepts() -> None:
+            for accepted in accepts:
+                accepted.cancel()
+            await asyncio.gather(*accepts, return_exceptions=True)
+            for accepted in accepts:
+                if not accepted.cancelled() and accepted.exception() is None:
+                    accepted.result()[0].close()
+
+        resources.push_async_callback(close_accepts)
+        (evidence / "cold-owner.json").write_text(
+            json.dumps(
+                {"root": str(root), "registration": None, "closed": False},
+                sort_keys=True,
+            )
+        )
         launch = ProcessLaunch(
             executable=str(python),
             argv=(
@@ -92,6 +107,7 @@ async def measure_cold_child(
             stderr=ProcessOutput.CAPTURE,
             domain=ProcessDomain.INVOCATION,
         )
+        directory = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY)
         try:
             owner = start_gated(launch, "d" * 32, directory, deadline, clock)
         finally:
@@ -141,17 +157,12 @@ async def measure_cold_child(
                 }
         finally:
             try:
-                for task in (*accepts, result_task, events_task):
-                    if task is not None:
-                        task.cancel()
-                await asyncio.gather(
-                    *accepts,
-                    *(task for task in (result_task, events_task) if task is not None),
-                    return_exceptions=True,
-                )
-                for accepted in accepts:
-                    if not accepted.cancelled() and accepted.exception() is None:
-                        accepted.result()[0].close()
+                pending: list[asyncio.Task[object]] = [
+                    task for task in (result_task, events_task) if task is not None
+                ]
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
                 if not owner.closed:
                     cleanup_deadline = min(
                         clock.monotonic_ns() + 5_000_000_000,
