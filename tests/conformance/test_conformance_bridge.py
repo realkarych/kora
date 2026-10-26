@@ -229,9 +229,45 @@ async def owned_lifetime(root: Path) -> AsyncGenerator[ParentLifetime]:
         launcher=InstalledIOHelperLauncher(home=root, state_home=root / "state"),
     )
     try:
+        await asyncio.wait_for(owner.ready(), 5)
         yield owner
     finally:
         await dispose_test_owner(owner, clock)
+
+
+@pytest.mark.asyncio
+async def test_bridge_lifetime_is_ready_before_adapter_preparation(
+    tmp_path: Path,
+) -> None:
+    lifetime = owned_lifetime(tmp_path)
+    retained: list[ParentLifetime] = []
+
+    async def fail_after_preparation() -> None:
+        async with lifetime as owner:
+            retained.append(owner)
+            assert owner.bootstrap_succeeded
+            assert owner.mutations.root is not None
+            assert owner.mutations.directory is not None
+            assert owner.mutations.claim is not None
+            assert owner.inventory().helpers.pending_mutations == 0
+            assert owner.inventory().helpers.retained_helpers == 0
+            raise LookupError("original adapter failure")
+
+    with pytest.raises(LookupError, match="original adapter failure"):
+        await fail_after_preparation()
+
+    (owner,) = retained
+    root = owner.mutations.root
+    directory = owner.mutations.directory
+    assert root is not None
+    assert directory is not None
+    assert root.closed
+    assert directory.closed
+    assert owner.mutations.claim is None
+    assert owner.inventory().helpers.pending_mutations == 0
+    assert owner.inventory().helpers.retained_helpers == 0
+    assert owner.inventory().helpers.directory_descriptors == 0
+    assert owner.inventory().cleanup_driver_tasks == 0
 
 
 @pytest.mark.asyncio
