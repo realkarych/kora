@@ -466,3 +466,41 @@ def test_bridge_invalid_configuration_never_prepares_or_constructs() -> None:
 
     assert adapter.preparations == []
     assert adapter.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["failure", "cancel"])
+async def test_bridge_cleanup_does_not_adopt_an_outer_handled_exception(
+    tmp_path: Path, ending: str
+) -> None:
+    adapter = Adapter("value", "cleanup" if ending == "failure" else "cancel")
+    selection, _ = selected(adapter)
+
+    async with owned_lifetime(tmp_path) as lifetime:
+
+        async def exercise() -> None:
+            try:
+                raise LookupError("already handled outside this invocation")
+            except LookupError:
+                async with selection.prepare(adapter, lifetime):
+                    await adapter.created[0].round_trip()
+
+        if ending == "failure":
+            with pytest.raises(RuntimeError, match="cleanup failed"):
+                await exercise()
+        else:
+            task = asyncio.create_task(exercise())
+            try:
+                await asyncio.wait_for(adapter.cleanup_started.wait(), 5)
+                task.cancel()
+                adapter.cleanup_release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 5)
+            finally:
+                adapter.cleanup_release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+
+    assert adapter.cleaned == adapter.returned
+    assert adapter.created[0].worker.done()

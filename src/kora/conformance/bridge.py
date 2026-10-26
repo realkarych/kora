@@ -251,8 +251,10 @@ class ConformanceSelection:
         invocation = PreparedInvocation(
             self._protocol, self._implementation, self._inputs, prepared
         )
+        completed = False
         try:
             invocation.initialize()
             yield invocation
+            completed = True
         finally:
-            await invocation.finish(sys.exception())
+            await invocation.finish(None if completed else sys.exception())
