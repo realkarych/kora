@@ -1,7 +1,9 @@
 import asyncio
 import json
+from collections.abc import Generator
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
 
 import pytest
@@ -32,6 +34,14 @@ from tests.conformance.test_conformance_bridge import owned_lifetime
 from tests.conformance.test_shared_secrets_checks import assert_capture_released
 from tests.conformance.test_shared_storage_checks import LoopBoundStorage
 from tests.plugins.storage.activity import StorageBarrierActivity
+
+
+@pytest.fixture
+def storage_root() -> Generator[Path]:
+    with TemporaryDirectory(prefix="kora-bridge-storage-") as directory:
+        root = Path(directory)
+        yield root
+    assert not root.exists()
 
 
 async def failure(
@@ -112,6 +122,9 @@ class StorageAdapter:
 
     async def cleanup(self, instance: object | None) -> None:
         self.cleaned.append(instance)
+        if instance is None:
+            assert not self.receivers
+            return
         for receiver in self.receivers[1:]:
             receiver.assert_closed()
         assert instance is self.receivers[0]
@@ -134,10 +147,10 @@ def selected(adapter: StorageAdapter, root: Path) -> ConformanceSelection:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["round-trip", "replay", "cleanup", "cancel"])
 async def test_bridge_storage_reconstruction_closes_actual_receivers(
-    tmp_path: Path, phase: str
+    tmp_path: Path, storage_root: Path, phase: str
 ) -> None:
     adapter = StorageAdapter(phase)
-    root = tmp_path / "store"
+    root = storage_root / "store"
     selection = selected(adapter, root)
     barrier = StorageBarrierActivity("storage.get.admitted", on_exit=True)
     retained: list[PreparedInvocation] = []
@@ -167,14 +180,22 @@ async def test_bridge_storage_reconstruction_closes_actual_receivers(
 
             if phase == "cancel":
                 task = asyncio.create_task(exercise())
+                boundary = asyncio.create_task(barrier.entered.wait())
                 try:
-                    await asyncio.wait_for(barrier.entered.wait(), 5)
+                    finished, _ = await asyncio.wait(
+                        (task, boundary), timeout=5, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if task in finished:
+                        task.result()
+                    assert boundary in finished
                     assert adapter.receivers[1].resource_counts()["readers"] > 0
                     task.cancel()
                     with pytest.raises(asyncio.CancelledError):
                         await asyncio.wait_for(task, 5)
                 finally:
                     barrier.released.set()
+                    boundary.cancel()
+                    await asyncio.gather(boundary, return_exceptions=True)
                     if not task.done():
                         task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
@@ -198,10 +219,10 @@ async def test_bridge_storage_reconstruction_closes_actual_receivers(
     "phase", ["alias-primary", "alias-auxiliary", "schema", "close"]
 )
 async def test_bridge_storage_refusals_keep_existing_cleanup_owners(
-    tmp_path: Path, phase: str
+    tmp_path: Path, storage_root: Path, phase: str
 ) -> None:
     adapter = StorageAdapter(phase)
-    selection = selected(adapter, tmp_path / "store")
+    selection = selected(adapter, storage_root / "store")
     expected = ValueError
 
     async with owned_lifetime(tmp_path) as lifetime:
