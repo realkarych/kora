@@ -3,7 +3,13 @@ import json
 import os
 import socket
 import sys
+import threading
+from collections.abc import Generator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
+from types import FrameType
 from typing import cast
 
 import pytest
@@ -52,6 +58,33 @@ async def wait_forever() -> None:
     await asyncio.get_running_loop().create_future()
 
 
+def observe_pool_join(
+    joining: threading.Event, frame: FrameType, event: str, argument: object
+) -> None:
+    shutdown = frame.f_back
+    owner = shutdown.f_back if shutdown is not None else None
+    if (
+        event == "call"
+        and frame.f_code is threading.Thread.join.__code__
+        and shutdown is not None
+        and shutdown.f_code is ThreadPoolExecutor.shutdown.__code__
+        and owner is not None
+        and owner.f_code is StorageCaseRunner.run.__code__
+    ):
+        joining.set()
+
+
+@contextmanager
+def pool_join_observation(joining: threading.Event, mode: str) -> Generator[None]:
+    previous = sys.getprofile()
+    if mode in {"native", "late", "blocked"}:
+        sys.setprofile(partial(observe_pool_join, joining))
+    try:
+        yield
+    finally:
+        sys.setprofile(previous)
+
+
 class ObservedStorage(LocalArtifactStorage):
     def __init__(self, configuration: LocalStorageConfiguration) -> None:
         super().__init__(configuration)
@@ -85,6 +118,7 @@ class Adapter:
         self.configurations: list[JsonObject] = []
         self.native_results: list[bool] = []
         self.started: asyncio.Future[None] | None = None
+        self.joining = threading.Event()
 
     async def prepare(
         self,
@@ -97,6 +131,7 @@ class Adapter:
             self.loop = loop
         assert loop is self.loop
         self.receivers = []
+        self.joining.clear()
         self.directories.append(Path.cwd())
         self.configurations.append(config)
         self.feedback.send(b"case:" + Path.cwd().name.encode())
@@ -157,6 +192,8 @@ class Adapter:
         assert started is not None
         loop.call_soon_threadsafe(started.set_result, None)
         self.feedback.send(b"native")
+        assert self.joining.wait(5)
+        self.feedback.send(b"joining")
         assert self.feedback.recv(16) == b"release"
         self.native_results.append(Path.cwd() == expected and expected.is_dir())
         if self.mode == "late":
@@ -231,9 +268,12 @@ def run(address: str, feedback_address: str, mode: str, root: str) -> None:
 
     if mode in {"success", "native", "blocked"}:
         for _ in range(2):
-            cases.run(exercise)
+            with pool_join_observation(adapter.joining, mode):
+                cases.run(exercise)
             assert Path.cwd() == startup_path
             assert not adapter.directories[-1].exists()
+            if mode in {"native", "blocked"}:
+                assert len(adapter.native_results) == len(adapter.directories)
             assert all(adapter.native_results)
             feedback.send(b"closed")
         assert len(set(adapter.directories)) == 2
@@ -249,7 +289,8 @@ def run(address: str, feedback_address: str, mode: str, root: str) -> None:
         with pytest.raises(
             (ValueError, RuntimeError, FilesystemError, asyncio.CancelledError)
         ) as caught:
-            cases.run(exercise)
+            with pool_join_observation(adapter.joining, mode):
+                cases.run(exercise)
         error = caught.value
         if mode == "substitute":
             assert isinstance(error, StorageCaseError)
@@ -274,6 +315,8 @@ def run(address: str, feedback_address: str, mode: str, root: str) -> None:
             cases.run(exercise)
         assert repeated.value.reason is StorageCaseReason.SEQUENCE_CLOSED
         assert len(adapter.directories) == 1
+        if mode == "late":
+            assert len(adapter.native_results) == 1
         assert all(adapter.native_results)
         feedback.send(b"failed")
         runner.run(wait_forever())

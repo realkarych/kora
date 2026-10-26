@@ -130,6 +130,7 @@ async def run_probe(mode: str, root: str = "store") -> None:
                 assert invocation is not None
                 assert process is not None
                 case_ids: list[str] = []
+                cleaned_cases: list[str] = []
                 terminal = b""
 
                 async with asyncio.timeout(10):
@@ -144,10 +145,15 @@ async def run_probe(mode: str, root: str = "store") -> None:
                             assert case_ids[-1] in os.listdir(invocation.descriptor)
                             assert not process.closed
                         elif message == b"cleaned":
+                            cleaned_cases.append(case_ids[-1])
                             assert case_ids[-1] in os.listdir(invocation.descriptor)
                             assert owner.records[case_ids[-1]].entry.state is not (
                                 ResourceState.CLOSED
                             )
+                        elif message == b"joining":
+                            assert cleaned_cases[-1] == case_ids[-1]
+                            assert case_ids[-1] in os.listdir(invocation.descriptor)
+                            assert process.observe().live_members
                             if mode == "blocked":
                                 terminal = b"blocked"
                             else:
