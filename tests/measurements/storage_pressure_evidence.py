@@ -20,8 +20,13 @@ def preserve_owner(manifest: Path, output: Path, prefix: str) -> None:
         (output / f"{prefix}.child.json").write_text(
             report.model_dump_json(), encoding="utf-8"
         )
-    failure = manifest.parent / "child-stderr.txt"
-    if failure.exists():
+    for source, destination in (
+        ("child-stderr.txt", f"{prefix}.stderr.txt"),
+        ("command-stderr.txt", f"{prefix}.command.stderr.txt"),
+    ):
+        failure = manifest.parent / source
+        if not failure.exists():
+            continue
         descriptor = os.open(failure, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
             info = os.fstat(descriptor)
@@ -39,7 +44,7 @@ def preserve_owner(manifest: Path, output: Path, prefix: str) -> None:
                 raise PressureFailure("failure_output_limit")
         finally:
             os.close(descriptor)
-        (output / f"{prefix}.stderr.txt").write_bytes(encoded)
+        (output / destination).write_bytes(encoded)
 
 
 def recover_fixtures(root: Path, output: Path) -> None:

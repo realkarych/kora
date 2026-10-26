@@ -262,12 +262,24 @@ class PressureController:
             }
         )
         self.persist()
-        return command(
-            arguments,
-            on_closed=self.command_closed,
-            on_started=self.command_started,
-            on_finished=self.command_finished,
-        )
+        try:
+            return command(
+                arguments,
+                on_closed=self.command_closed,
+                on_started=self.command_started,
+                on_finished=self.command_finished,
+            )
+        except PressureFailure as error:
+            self.report = self.report.model_copy(update={"failure": error.code})
+            if error.command_stderr is not None:
+                try:
+                    save(self.directory / "command-stderr.txt", error.command_stderr)
+                except (OSError, PressureFailure) as persistence:
+                    raise BaseExceptionGroup(
+                        "native command and diagnostic persistence failed",
+                        [error, persistence],
+                    ) from None
+            raise
 
     def command_started(self, token: ProcessToken) -> None:
         self.manifest = self.manifest.model_copy(update={"command": token})

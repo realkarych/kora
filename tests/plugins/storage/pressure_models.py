@@ -54,6 +54,10 @@ class PressureReport(BoundaryModel):
 
 
 class PressureFailure(RuntimeError):
-    def __init__(self, code: str) -> None:
+    code: str
+    command_stderr: bytes | None
+
+    def __init__(self, code: str, *, command_stderr: bytes | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.command_stderr = command_stderr

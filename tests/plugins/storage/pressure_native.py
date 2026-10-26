@@ -146,7 +146,7 @@ def command(
             if token is None:
                 raise PressureFailure("command_identity_unavailable")
             on_started(token)
-        output, _, status = collect_process(process, seconds)
+        output, error_output, status = collect_process(process, seconds)
     finally:
         try:
             if process.poll() is None:
@@ -164,5 +164,5 @@ def command(
     if on_closed is not None:
         on_closed()
     if status != 0:
-        raise PressureFailure("command_failed")
+        raise PressureFailure("command_failed", command_stderr=error_output)
     return output

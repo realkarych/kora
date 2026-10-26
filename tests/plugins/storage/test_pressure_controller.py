@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.measurements.storage_pressure_evidence import preserve_owner
 from tests.plugins.storage.pressure_models import PressureFailure, PressureReport
 from tests.plugins.storage.pressure_native import collect_process
 
@@ -15,13 +16,40 @@ from tests.plugins.storage.pressure_native import collect_process
 def test_closed_failed_command_does_not_block_pressure_recovery(tmp_path: Path) -> None:
     from tests.plugins.storage.pressure_controller import create
 
-    with create(tmp_path / "failed-command") as controller:
-        with pytest.raises(PressureFailure, match="command_failed"):
-            controller.effect(("/usr/bin/false",))
-        controller.cleanup()
+    directory = tmp_path / "failed-command"
+    output = tmp_path / "evidence"
+    output.mkdir()
+    diagnostic = b"fixture-command-error\xff"
+    arguments = (
+        sys.executable,
+        "-I",
+        "-c",
+        f"import os; os.write(2, {diagnostic!r}); raise SystemExit(17)",
+    )
 
-        assert not controller.manifest.command_inflight
-        assert controller.manifest.resources_closed
+    with create(directory) as controller:
+        with pytest.raises(PressureFailure, match="command_failed"):
+            controller.effect(arguments)
+        pending = directory / "command-stderr.pending"
+        pending.symlink_to(directory / "absent")
+        try:
+            with pytest.raises(BaseExceptionGroup) as persistence:
+                controller.effect(arguments)
+        finally:
+            pending.unlink()
+        controller.cleanup()
+    preserve_owner(directory / "pressure-manifest.json", output, "failed")
+
+    assert (directory / "command-stderr.txt").read_bytes() == diagnostic
+    assert (output / "failed.command.stderr.txt").read_bytes() == diagnostic
+    assert controller.manifest.command_exit_status == 17
+    assert not controller.manifest.command_inflight
+    assert controller.manifest.resources_closed
+    assert controller.report.failure == "command_failed"
+    assert len(persistence.value.exceptions) == 2
+    assert isinstance(persistence.value.exceptions[0], PressureFailure)
+    assert str(persistence.value.exceptions[0]) == "command_failed"
+    assert isinstance(persistence.value.exceptions[1], OSError)
 
 
 def controller_arguments(directory: Path, workload: str) -> list[str]:
