@@ -16,6 +16,8 @@ Secrets and redaction amendment dated 2026-10-23: the measurement text for `Stre
 
 Diagnostic value measurement amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #219](https://github.com/realkarych/kora/issues/219) on 2026-10-23.
 
+Local-tooling lifecycle amendment dated 2026-10-23: reviewed and accepted by the project owner under the [#215 implementation plan](https://github.com/realkarych/kora/issues/215#issuecomment-6369162911) on 2026-10-23.
+
 Browser verification amendment dated 2026-10-22: the project owner approved the [benchmark removal and matching documentation](https://github.com/realkarych/kora/issues/179#issuecomment-6329273349), with delegated independent review and merge.
 
 Scope and implementation plan approved by the project owner under [issue #86](https://github.com/realkarych/kora/issues/86) on 2026-10-18; wording pending line-by-line owner review.
@@ -123,6 +125,8 @@ The default pytest run excludes the `measurement` marker. The logging overhead a
 KORA_MEASUREMENT_OUTPUT=measurements/logging-overhead.json \
   uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_logging_overhead.py
 ```
+
+Run the implemented local-tooling lifecycle workloads serially on an uncontended host. Set `KORA_MEASUREMENT_OUTPUT` to a private result path and `KORA_MEASUREMENT_REVISION` to the tested commit, then run `uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_conformance_lifetime.py`. The report records its implemented workload set, environment, revision, samples and gates. Future workloads are absent until their implementing part lands; no skipped test certifies them. Existing CI measurements remain required; whole-pipeline duration follows the ten-minute feedback target.
 
 The CEL evaluator lifetime suite runs serially in the independent `cel-producer` Linux 3.11.17 job, retaining three independent processes per main workload, all cycle samples and retaining paths in `cel-evaluator-lifetime-measurement`. It measures native success/errors, cache turnover, repeated handles, cancellation, terminal failure, idle/busy thread hops, and exit with draining, blocked and broken diagnostics at disabled/INFO/DEBUG levels. Its first baseline and gates are recorded in [the evaluator lifetime record](../knowledge/research/cel-evaluator-lifetime-2026-10-21.md). These native-memory and resource-lifetime checks remain required alongside the compact regression below. Run on an otherwise idle machine:
 

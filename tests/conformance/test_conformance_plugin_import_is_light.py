@@ -35,6 +35,30 @@ def test_conformance_plugin_import_is_light() -> None:
     assert found == []
 
 
+def test_fixed_lifetime_helper_imports_no_graph_models() -> None:
+    found = loaded(
+        "kora.conformance.io_helper",
+        ("kora.ir.config", "kora.ir.topology", "kora.ir.document", "kora.ir.export"),
+    )
+
+    assert found == []
+
+
+def test_fixed_lifetime_helper_imports_no_provider_context_or_logging() -> None:
+    found = loaded(
+        "kora.conformance.io_helper",
+        ("kora.protocols.common", "kora.observability", "structlog", "rich"),
+    )
+
+    assert found == []
+
+
+def test_fixed_lifetime_helper_imports_no_cel_checker() -> None:
+    found = loaded("kora.conformance.io_helper", ("kora.cel",))
+
+    assert found == []
+
+
 @pytest.mark.parametrize(
     "module",
     ["kora.conformance.common", "kora.conformance.secrets", "kora.conformance.vcs"],
@@ -53,3 +77,23 @@ def test_conformance_requires_extra() -> None:
     assert result.code != 0
     assert b"ConformanceExtraMissing" in result.stderr
     assert b"kora[conformance]" in result.stderr
+
+
+def test_lifetime_public_records_share_protocol_identity_without_runtime_imports() -> (
+    None
+):
+    source = (
+        "import json, sys\n"
+        "from kora.conformance import LocalRuntimeBinding, LocalRuntimeRegistration\n"
+        "from kora.protocols import lifetime\n"
+        "assert LocalRuntimeBinding is lifetime.LocalRuntimeBinding\n"
+        "assert LocalRuntimeRegistration is lifetime.LocalRuntimeRegistration\n"
+        "print(json.dumps(sorted(m for m in sys.modules if m.startswith("
+        "('kora.plugins', 'kora.testing', 'kora.conformance.lifetime', "
+        "'kora.conformance.transport')))))\n"
+    )
+
+    result = run_python(["-I", "-c", source], {})
+
+    assert result.code == 0, result.stderr
+    assert json.loads(result.stdout) == []
