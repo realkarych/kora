@@ -128,6 +128,19 @@ def test_conformance_recognized_dialects(dialect: str) -> None:
     assert inputs.fixture_data == {}
 
 
+def test_conformance_nested_dialect_follows_selected_validator() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"value": {"$schema": "urn:unsupported", "type": "integer"}},
+    }
+
+    inputs = ConformanceInputs(schema, b'{"value":1}')
+
+    assert inputs.configuration == {"value": 1}
+    with pytest.raises(ConformanceInputError, match="^configuration_invalid$"):
+        ConformanceInputs(schema, b'{"value":"wrong"}')
+
+
 def test_conformance_format_annotations_and_required_configuration() -> None:
     schema = {
         "type": "object",
@@ -200,6 +213,31 @@ def test_conformance_unvisited_and_literal_references() -> None:
     inputs = ConformanceInputs(schema, configuration)
 
     assert inputs.configuration == {"literal": {"$ref": missing}}
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {"type": PRIVATE_MARKER},
+        {"patternProperties": {f"(?P<{PRIVATE_MARKER}>x)": {}}},
+        1,
+    ],
+)
+def test_conformance_referenced_annotation_failures_are_content_free(
+    target: object,
+) -> None:
+    schema = {"type": "object", "default": target}
+    configuration = json.dumps({"secret": PRIVATE_MARKER}).encode()
+    unvisited = ConformanceInputs(schema, configuration)
+
+    with pytest.raises(ConformanceInputError) as caught:
+        ConformanceInputs({**schema, "$ref": "#/default"}, configuration)
+
+    assert unvisited.configuration == {"secret": PRIVATE_MARKER}
+    assert caught.value.reason is InputReason.SCHEMA_INVALID
+    assert PRIVATE_MARKER not in "".join(traceback.format_exception(caught.value))
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
 
 
 @pytest.mark.parametrize(

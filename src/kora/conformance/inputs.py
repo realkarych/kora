@@ -1,10 +1,11 @@
 import enum
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
 from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError, ValidationError
+from jsonschema.exceptions import SchemaError, UnknownType, ValidationError
 from jsonschema.protocols import Validator
 from jsonschema.validators import validator_for
 from referencing import Registry
@@ -147,6 +148,8 @@ def validate_configuration(
         validator.validate(decode_snapshot(configuration_bytes))
     except ValidationError:
         return InputReason.CONFIGURATION_INVALID
+    except (UnknownType, TypeError, re.error):
+        return InputReason.SCHEMA_INVALID
     except (Unresolvable, ValueError):
         return InputReason.REFERENCE_UNRESOLVED
     except (OverflowError, RecursionError):
