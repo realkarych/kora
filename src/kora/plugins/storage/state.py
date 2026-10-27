@@ -116,7 +116,7 @@ class LocalState:
     def __init__(self, root: RootAnchor) -> None:
         self.root = root
         self.connections = 0
-        self.initial_epoch = self.initialize()
+        self.initial_epoch: Final[int] = self.initialize()
 
     def validate_files(self, creating: bool) -> None:
         self.root.validate_anchor()
@@ -404,12 +404,6 @@ class LocalState:
             "UPDATE receipts SET result=? WHERE operation_id=?",
             (observation.model_dump_json(), operation.operation_id),
         )
-
-    def settle_in_transaction(
-        self, operation: StorageOperationRef, result: MutationResult
-    ) -> None:
-        with self.transaction(write=True) as connection:
-            self.settle(connection, operation, result)
 
     def abandon(
         self, connection: sqlite3.Connection, operation: StorageOperationRef

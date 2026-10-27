@@ -254,11 +254,12 @@ class StagedPayloads:
                             if not prefix
                             else "storage.capture_prefix.effect_persisted"
                         ):
-                            await self.runner(
-                                partial(
-                                    self.state.settle_in_transaction, operation, result
-                                )
-                            )
+
+                            def settle() -> None:
+                                with self.state.transaction(write=True) as connection:
+                                    self.state.settle(connection, operation, result)
+
+                            await self.runner(settle)
                         return result
                     finally:
                         writer.close()

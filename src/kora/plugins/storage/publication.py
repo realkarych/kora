@@ -87,16 +87,20 @@ class ContentPublisher:
                     total_size=content.total_size,
                 )
                 self.state.save_publication(connection, request.operation, reference)
+            identity = self.state.file_identity(connection, request.operation)
             prepared = isinstance(content, PreparedContentRef) and (
                 content.content_identity != raw_content_identity(content.source)
             )
             if prepared:
-                self.state.file_identity(connection, request.operation)
                 identity = segments[0].identity
-            else:
-                identity = self.state.ensure_file_identity(
-                    connection, request.operation
+            elif identity is None:
+                identity = PrivateFile(
+                    version=1,
+                    private_identity=self.root.new_identity(),
+                    device=self.root.manifest.device,
+                    inode=None,
                 )
+                self.state.save_file_identity(connection, request.operation, identity)
             return PublicationWork(slot, segments, reference, identity, prepared)
 
     def assemble(self, work: PublicationWork, request: PromotionRequest) -> FileSegment:

@@ -142,13 +142,14 @@ class ContentPreparer:
                         async with ctx.activity.span(
                             "storage.prepare_content.effect_persisted"
                         ):
-                            await self.runner(
-                                partial(
-                                    self.state.settle_in_transaction,
-                                    request.operation,
-                                    result,
-                                )
-                            )
+
+                            def settle() -> None:
+                                with self.state.transaction(write=True) as connection:
+                                    self.state.settle(
+                                        connection, request.operation, result
+                                    )
+
+                            await self.runner(settle)
                         if identical:
                             await self.runner(
                                 lambda: self.files.discard(slot, "prepare", identity)
