@@ -181,6 +181,7 @@ jobs:
             tests/conformance/test_local_process_lifetime.py
             tests/conformance/test_parent_lifetime.py
             tests/conformance/test_recovered_process_lifetime.py
+            tests/conformance/test_installed_conformance.py
           )
           second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py)
           for path in "${first[@]}"; do

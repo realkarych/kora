@@ -21,6 +21,7 @@ FIRST_MODULES = (
     "tests/conformance/test_local_process_lifetime.py",
     "tests/conformance/test_parent_lifetime.py",
     "tests/conformance/test_recovered_process_lifetime.py",
+    "tests/conformance/test_installed_conformance.py",
 )
 COLLECTIONS = (
     "full.collection",
