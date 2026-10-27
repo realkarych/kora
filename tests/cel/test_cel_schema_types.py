@@ -342,6 +342,17 @@ MALFORMED_CLOSURES: dict[str, JsonValue] = {
         "additionalProperties": False,
     },
     "malformed_enum_beside_const": {"const": "a", "enum": 5},
+    "resource_under_content_schema": {
+        "$defs": {"c": {"type": "integer"}},
+        "contentSchema": {
+            "$id": "urn:kora:artifact:embedded",
+            "$defs": {"c": {"type": "string"}},
+            "properties": {"x": {"$ref": "#/$defs/c"}},
+        },
+        "type": "object",
+        "properties": {"m": {"$ref": "#/contentSchema/properties/x"}},
+        "required": ["m"],
+    },
     "null_reference": {"$ref": None},
     "null_type": {"type": None},
     "null_enum": {"enum": None},
