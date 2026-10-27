@@ -347,7 +347,7 @@ def check_environment(environment: Mapping[str, Variable]) -> None:
         raise BoundError("an environment name is not a string")
 
 
-def check_type(root: object) -> None:
+def check_type(root: object, meter: Meter | None = None) -> None:
     seen: set[int] = set()
     pending: list[object] = [root]
     while pending:
@@ -355,6 +355,8 @@ def check_type(root: object) -> None:
         if id(cel_type) in seen:
             continue
         seen.add(id(cel_type))
+        if meter is not None:
+            meter.tick()
         pending.extend(type_children(cel_type))
 
 

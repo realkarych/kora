@@ -25,7 +25,8 @@ from kora.cel.types import (
 JsonObject = dict[str, JsonValue]
 Resolver = Callable[[str], JsonValue | None]
 Located = tuple[JsonValue, JsonValue]
-MemoKey = tuple[int, "SchemaView"]
+MemoKey = tuple[int, int, "SchemaView"]
+TargetKey = tuple[int, int]
 Mapping = Generator[Located, CelType, CelType]
 
 NULL_TYPE: Final[str] = "null"
@@ -67,10 +68,8 @@ def entry(schema: JsonObject, name: str, kind: type | tuple[type, ...]) -> objec
 
 
 def enumerated(schema: JsonObject) -> list[JsonValue] | None:
-    if "const" in schema:
-        return [schema["const"]]
-    values = entry(schema, "enum", list)
-    return cast("list[JsonValue] | None", values)
+    values = cast("list[JsonValue] | None", entry(schema, "enum", list))
+    return [schema["const"]] if "const" in schema else values
 
 
 def is_schema(value: JsonValue) -> bool:
@@ -102,7 +101,11 @@ def strings(values: list[JsonValue]) -> list[str]:
 def check_keywords(schema: JsonObject) -> None:
     entry(schema, "properties", dict)
     entry(schema, "additionalProperties", (dict, bool))
-    entry(schema, "patternProperties", dict)
+    patterns = cast(
+        "dict[str, JsonValue]", entry(schema, "patternProperties", dict) or {}
+    )
+    if not all(isinstance(pattern, dict | bool) for pattern in patterns.values()):
+        raise SchemaError("a schema keyword has the wrong JSON type")
     entry(schema, "items", (dict, bool))
     entry(schema, "prefixItems", list)
     entry(schema, "anyOf", list)
@@ -126,7 +129,7 @@ class SchemaTypes:
         self.active: set[MemoKey] = set()
         self.documents: dict[str, JsonValue] = {}
         self.references: dict[tuple[int, str], Located] = {}
-        self.targets: dict[int, Located | None] = {}
+        self.targets: dict[TargetKey, Located | None] = {}
         self.held: list[JsonValue] = []
         self.written: list[MemoKey] = []
 
@@ -175,6 +178,8 @@ class SchemaTypes:
         node = document
         for token in fragment[1:].split("/"):
             self.meter.tick()
+            if node is not document and isinstance(node, dict) and "$id" in node:
+                raise SchemaError("a nested schema resource is not supported")
             name = token.replace("~1", "/").replace("~0", "~")
             if isinstance(node, dict) and name in node:
                 node = node[name]
@@ -185,18 +190,18 @@ class SchemaTypes:
         return node
 
     def target(self, schema: JsonValue, root: JsonValue) -> Located | None:
-        chain: list[JsonValue] = []
+        chain: list[Located] = []
         seen: set[int] = set()
         located: Located | None = None
         while isinstance(schema, dict):
-            if id(schema) in self.targets:
-                located = self.targets[id(schema)]
+            if (id(schema), id(root)) in self.targets:
+                located = self.targets[(id(schema), id(root))]
                 break
             self.meter.tick()
             if id(schema) in seen:
                 break
             seen.add(id(schema))
-            chain.append(schema)
+            chain.append((schema, root))
             if "$id" in schema and schema is not root:
                 raise SchemaError("a nested schema resource is not supported")
             reference = entry(schema, "$ref", str)
@@ -212,20 +217,26 @@ class SchemaTypes:
             if not is_schema(schema):
                 raise SchemaError("a schema is not an object or a boolean")
             located = (schema, root)
-        for link in chain:
-            self.targets[id(link)] = located
-        self.held.extend(chain)
+        for link, link_root in chain:
+            self.targets[(id(link), id(link_root))] = located
+            self.held.append(link)
         return located
 
     def mapped(self, schema: JsonValue, root: JsonValue, view: SchemaView) -> CelType:
         self.written = []
+        finished = False
         try:
-            return self.drive(schema, root, view)
-        except SchemaError:
-            for key in self.written:
-                del self.memo[key]
-            self.active.clear()
-            raise
+            result = self.drive(schema, root, view)
+            finished = True
+        finally:
+            if not finished:
+                self.forget()
+        return result
+
+    def forget(self) -> None:
+        for key in self.written:
+            del self.memo[key]
+        self.active.clear()
 
     def remember(self, key: MemoKey, cel_type: CelType) -> None:
         if key not in self.memo:
@@ -265,7 +276,7 @@ class SchemaTypes:
         found, found_root = located
         if not isinstance(found, dict):
             return DYN
-        key = (id(found), view)
+        key = (id(found), id(found_root), view)
         known = self.memo.get(key)
         if known is not None:
             return known
