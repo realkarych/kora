@@ -1,12 +1,13 @@
 import os
 import sqlite3
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from contextlib import contextmanager
-from typing import Final, TypeAlias, cast
+from typing import Final, Literal, TypeAlias, TypeVar, cast
 
-from kora.plugins.storage.errors import refuse
+from kora.plugins.storage.errors import refuse, require_deadline
 from kora.plugins.storage.files import FileLease, RootAnchor, RootManifest
 from kora.plugins.storage.payload import PayloadFiles, PrivateFile
+from kora.protocols.common import ProtocolContext
 from kora.protocols.identity import MAX_COUNT
 from kora.protocols.storage_models import (
     MAX_PAYLOAD_BYTES,
@@ -15,6 +16,7 @@ from kora.protocols.storage_models import (
     MutationObservation,
     MutationReceipt,
     MutationResult,
+    NoEffectFailure,
     PrefixCapture,
     StageRef,
     StageSpec,
@@ -25,6 +27,7 @@ from kora.protocols.storage_models import (
 )
 
 StorageConnection: TypeAlias = sqlite3.Connection
+Settled = TypeVar("Settled", bound=MutationResult)
 
 SCHEMA: Final[tuple[str, ...]] = (
     "CREATE TABLE root (singleton INTEGER PRIMARY KEY CHECK(singleton=1), epoch "
@@ -67,6 +70,46 @@ def text(value: object) -> str:
     if not isinstance(value, str):
         refuse("storage_integrity")
     return value
+
+
+def rows(cursor: sqlite3.Cursor) -> Iterator[tuple[object, ...]]:
+    for value in cursor.fetchall():
+        row = row_values(value)
+        if row is None:
+            refuse("storage_integrity")
+        yield row
+
+
+def free_slot(connection: sqlite3.Connection, query: str, count: int) -> int | None:
+    occupied = {integer(row[0]) for row in rows(connection.execute(query))}
+    return next((index for index in range(count) if index not in occupied), None)
+
+
+def operation_value(
+    connection: sqlite3.Connection, query: str, operation: StorageOperationRef
+) -> object:
+    row = row_values(connection.execute(query, (operation.operation_id,)).fetchone())
+    if row is None:
+        refuse("storage_integrity")
+    return row[0]
+
+
+def unsettled_observation(
+    operation: StorageOperationRef, state: Literal["pending", "evidence_unavailable"]
+) -> MutationObservation:
+    return MutationObservation(
+        version=1, operation=operation, state=state, result=None, effects_closed=False
+    )
+
+
+def settled_result(
+    saved: MutationObservation | None, kind: type[Settled]
+) -> Settled | None:
+    if saved is None or saved.state != "settled":
+        return None
+    if not isinstance(saved.result, kind):
+        refuse("storage_conflict")
+    return saved.result
 
 
 class LocalState:
@@ -217,10 +260,21 @@ class LocalState:
             refuse("storage_integrity")
         return integer(row[0])
 
-    def admit_epoch(self, connection: sqlite3.Connection, receiver_epoch: int) -> None:
+    def admit_epoch(self, connection: sqlite3.Connection) -> None:
         current = self.epoch(connection)
-        if receiver_epoch != current or current == MAX_COUNT:
+        if self.initial_epoch != current or current == MAX_COUNT:
             refuse("storage_issuer_closed")
+
+    def admit(self, connection: sqlite3.Connection, ctx: ProtocolContext) -> None:
+        require_deadline(ctx)
+        self.admit_epoch(connection)
+
+    def advance_epoch(self, connection: sqlite3.Connection) -> None:
+        current = self.epoch(connection)
+        if current < MAX_COUNT:
+            connection.execute(
+                "UPDATE root SET epoch=? WHERE singleton=1", (current + 1,)
+            )
 
     def stage(
         self, connection: sqlite3.Connection, stage: StageRef
@@ -245,19 +299,8 @@ class LocalState:
     def allocate_stage(
         self, connection: sqlite3.Connection, stage: StageRef, spec: StageSpec | None
     ) -> int:
-        occupied: set[int] = set()
-        for value in connection.execute("SELECT slot FROM stages").fetchall():
-            row = row_values(value)
-            if row is None:
-                refuse("storage_integrity")
-            occupied.add(integer(row[0]))
-        slot = next(
-            (
-                index
-                for index in range(self.root.manifest.limits.stage_slots)
-                if index not in occupied
-            ),
-            None,
+        slot = free_slot(
+            connection, "SELECT slot FROM stages", self.root.manifest.limits.stage_slots
         )
         total = row_values(
             connection.execute(
@@ -300,14 +343,16 @@ class LocalState:
         if saved != operation:
             refuse("storage_conflict")
         if row[1] is None:
-            return MutationObservation(
-                version=1,
-                operation=operation,
-                state="pending",
-                result=None,
-                effects_closed=False,
-            )
+            return unsettled_observation(operation, "pending")
         return MutationObservation.model_validate_json(text(row[1]))
+
+    def settled_receipt(
+        self,
+        connection: sqlite3.Connection,
+        operation: StorageOperationRef,
+        kind: type[Settled],
+    ) -> Settled | None:
+        return settled_result(self.receipt(connection, operation), kind)
 
     def register(
         self,
@@ -360,18 +405,44 @@ class LocalState:
             (observation.model_dump_json(), operation.operation_id),
         )
 
+    def settle_in_transaction(
+        self, operation: StorageOperationRef, result: MutationResult
+    ) -> None:
+        with self.transaction(write=True) as connection:
+            self.settle(connection, operation, result)
+
+    def abandon(
+        self, connection: sqlite3.Connection, operation: StorageOperationRef
+    ) -> None:
+        self.settle(
+            connection,
+            operation,
+            NoEffectFailure(
+                version=1, operation=operation, code="storage_issuer_closed"
+            ),
+        )
+
     def file_identity(
         self, connection: sqlite3.Connection, operation: StorageOperationRef
     ) -> PrivateFile | None:
-        row = row_values(
-            connection.execute(
-                "SELECT details FROM receipts WHERE operation_id=?",
-                (operation.operation_id,),
-            ).fetchone()
+        value = operation_value(
+            connection, "SELECT details FROM receipts WHERE operation_id=?", operation
         )
-        if row is None:
-            refuse("storage_integrity")
-        return None if row[0] is None else PrivateFile.model_validate_json(text(row[0]))
+        return None if value is None else PrivateFile.model_validate_json(text(value))
+
+    def ensure_file_identity(
+        self, connection: sqlite3.Connection, operation: StorageOperationRef
+    ) -> PrivateFile:
+        identity = self.file_identity(connection, operation)
+        if identity is None:
+            identity = PrivateFile(
+                version=1,
+                private_identity=self.root.new_identity(),
+                device=self.root.manifest.device,
+                inode=None,
+            )
+            self.save_file_identity(connection, operation, identity)
+        return identity
 
     def save_file_identity(
         self,
@@ -407,23 +478,16 @@ class LocalState:
         self, connection: sqlite3.Connection, stage: StageRef
     ) -> tuple[tuple[str, MutationObservation, PrivateFile | None], ...]:
         records: list[tuple[str, MutationObservation, PrivateFile | None]] = []
-        for value in connection.execute(
-            "SELECT semantic, operation, result, details FROM receipts WHERE "
-            "owner_kind='stage' AND owner_key=? ORDER BY semantic",
-            (stage.stage_id,),
-        ).fetchall():
-            row = row_values(value)
-            if row is None:
-                refuse("storage_integrity")
+        for row in rows(
+            connection.execute(
+                "SELECT semantic, operation, result, details FROM receipts WHERE "
+                "owner_kind='stage' AND owner_key=? ORDER BY semantic",
+                (stage.stage_id,),
+            )
+        ):
             operation = StorageOperationRef.model_validate_json(text(row[1]))
             observation = (
-                MutationObservation(
-                    version=1,
-                    operation=operation,
-                    state="pending",
-                    result=None,
-                    effects_closed=False,
-                )
+                unsettled_observation(operation, "pending")
                 if row[2] is None
                 else MutationObservation.model_validate_json(text(row[2]))
             )
@@ -442,14 +506,13 @@ class LocalState:
         self, connection: sqlite3.Connection, stage: StageRef
     ) -> int:
         retained = 0
-        for value in connection.execute(
-            "SELECT semantic, arguments FROM receipts WHERE owner_kind='stage' "
-            "AND owner_key=? AND (semantic LIKE 'part-%' OR semantic='prefix')",
-            (stage.stage_id,),
-        ).fetchall():
-            row = row_values(value)
-            if row is None:
-                refuse("storage_integrity")
+        for row in rows(
+            connection.execute(
+                "SELECT semantic, arguments FROM receipts WHERE owner_kind='stage' "
+                "AND owner_key=? AND (semantic LIKE 'part-%' OR semantic='prefix')",
+                (stage.stage_id,),
+            )
+        ):
             if text(row[0]) == "prefix":
                 retained += PrefixCapture.model_validate_json(text(row[1])).count
             else:
@@ -499,15 +562,12 @@ class LocalState:
     def publication(
         self, connection: sqlite3.Connection, operation: StorageOperationRef
     ) -> ContentRef | None:
-        row = row_values(
-            connection.execute(
-                "SELECT publication FROM receipts WHERE operation_id=?",
-                (operation.operation_id,),
-            ).fetchone()
+        value = operation_value(
+            connection,
+            "SELECT publication FROM receipts WHERE operation_id=?",
+            operation,
         )
-        if row is None:
-            refuse("storage_integrity")
-        return None if row[0] is None else ContentRef.model_validate_json(text(row[0]))
+        return None if value is None else ContentRef.model_validate_json(text(value))
 
     def save_publication(
         self,
