@@ -1,11 +1,11 @@
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Connection, inspect, text
 
 from kora.db.connection import Database, DatabaseSettings
+from tests.db.test_db_upgrade_process import records
 from tests.observability.conftest import ProcessResult, run_kora
 from tests.support.databases import (
     EMPTY_TEMPLATE,
@@ -57,10 +57,6 @@ async def snapshot(settings: DatabaseSettings) -> dict[str, object]:
             return await connection.run_sync(schema_snapshot)
     finally:
         await database.close()
-
-
-def records(result: ProcessResult) -> list[dict[str, object]]:
-    return [json.loads(line) for line in result.stderr_lines() if line.startswith("{")]
 
 
 def test_log_filtering_does_not_change_durable_events(
