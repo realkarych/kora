@@ -6,34 +6,19 @@ from kora.conformance.session import CURRENT_SESSION
 from kora.protocols.storage import ArtifactStorage
 
 
-@pytest.fixture
-def kora_provider() -> object:
-    return CURRENT_SESSION.get().provider()
+def session_provider(name: str) -> object:
+    def provider() -> object:
+        return CURRENT_SESSION.get().provider()
+
+    return pytest.fixture(provider, name=name)
 
 
-@pytest.fixture
-def kora_runtime_provider() -> object:
-    return CURRENT_SESSION.get().provider()
-
-
-@pytest.fixture
-def kora_secrets_provider() -> object:
-    return CURRENT_SESSION.get().provider()
-
-
-@pytest.fixture
-def kora_policy_provider() -> object:
-    return CURRENT_SESSION.get().provider()
-
-
-@pytest.fixture
-def kora_harness_provider() -> object:
-    return CURRENT_SESSION.get().provider()
-
-
-@pytest.fixture
-def kora_vcs_provider() -> object:
-    return CURRENT_SESSION.get().provider()
+kora_provider: object = session_provider("kora_provider")
+kora_runtime_provider: object = session_provider("kora_runtime_provider")
+kora_secrets_provider: object = session_provider("kora_secrets_provider")
+kora_policy_provider: object = session_provider("kora_policy_provider")
+kora_harness_provider: object = session_provider("kora_harness_provider")
+kora_vcs_provider: object = session_provider("kora_vcs_provider")
 
 
 @pytest.fixture

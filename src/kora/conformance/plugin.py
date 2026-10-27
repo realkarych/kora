@@ -6,106 +6,37 @@ class ConformanceFixtureMissing(LookupError):
         super().__init__(f"override the {name} fixture with the provider under test")
 
 
-@pytest.fixture
-def kora_runtime_provider() -> object:
-    raise ConformanceFixtureMissing("kora_runtime_provider")
+def missing_fixture(name: str) -> object:
+    def missing() -> object:
+        raise ConformanceFixtureMissing(name)
+
+    return pytest.fixture(missing, name=name)
 
 
-@pytest.fixture
-def kora_runtime_exercise() -> object:
-    raise ConformanceFixtureMissing("kora_runtime_exercise")
-
-
-@pytest.fixture
-def kora_harness_provider() -> object:
-    raise ConformanceFixtureMissing("kora_harness_provider")
-
-
-@pytest.fixture
-def kora_harness_exercise() -> object:
-    raise ConformanceFixtureMissing("kora_harness_exercise")
-
-
-@pytest.fixture
-def kora_vcs_provider() -> object:
-    raise ConformanceFixtureMissing("kora_vcs_provider")
-
-
-@pytest.fixture
-def kora_vcs_exercise() -> object:
-    raise ConformanceFixtureMissing("kora_vcs_exercise")
-
-
-@pytest.fixture
-def kora_vcs_remote() -> object:
-    raise ConformanceFixtureMissing("kora_vcs_remote")
-
-
-@pytest.fixture
-def kora_vcs_executor() -> object:
-    raise ConformanceFixtureMissing("kora_vcs_executor")
-
-
-@pytest.fixture
-def kora_vcs_context() -> object:
-    raise ConformanceFixtureMissing("kora_vcs_context")
-
-
-@pytest.fixture
-def kora_vcs_binding() -> object:
-    raise ConformanceFixtureMissing("kora_vcs_binding")
-
-
-@pytest.fixture
-def kora_policy_provider() -> object:
-    raise ConformanceFixtureMissing("kora_policy_provider")
-
-
-@pytest.fixture
-def kora_policy_exercise() -> object:
-    raise ConformanceFixtureMissing("kora_policy_exercise")
-
-
-@pytest.fixture
-def kora_secrets_provider() -> object:
-    raise ConformanceFixtureMissing("kora_secrets_provider")
-
-
-@pytest.fixture
-def kora_secrets_exercise() -> object:
-    raise ConformanceFixtureMissing("kora_secrets_exercise")
-
-
-@pytest.fixture
-def kora_secrets_resolvable() -> object:
-    raise ConformanceFixtureMissing("kora_secrets_resolvable")
-
-
-@pytest.fixture
-def kora_secrets_missing_reference() -> object:
-    raise ConformanceFixtureMissing("kora_secrets_missing_reference")
-
-
-@pytest.fixture
-def kora_secrets_forbidden_reference() -> object:
-    raise ConformanceFixtureMissing("kora_secrets_forbidden_reference")
-
-
-@pytest.fixture
-def kora_secrets_listed_prefix() -> object:
-    raise ConformanceFixtureMissing("kora_secrets_listed_prefix")
-
-
-@pytest.fixture
-def kora_artifact_storage_factory() -> object:
-    raise ConformanceFixtureMissing("kora_artifact_storage_factory")
-
-
-@pytest.fixture
-def kora_artifact_storage_exercise() -> object:
-    raise ConformanceFixtureMissing("kora_artifact_storage_exercise")
-
-
-@pytest.fixture
-def kora_policy_calls() -> object:
-    raise ConformanceFixtureMissing("kora_policy_calls")
+kora_runtime_provider: object = missing_fixture("kora_runtime_provider")
+kora_runtime_exercise: object = missing_fixture("kora_runtime_exercise")
+kora_harness_provider: object = missing_fixture("kora_harness_provider")
+kora_harness_exercise: object = missing_fixture("kora_harness_exercise")
+kora_vcs_provider: object = missing_fixture("kora_vcs_provider")
+kora_vcs_exercise: object = missing_fixture("kora_vcs_exercise")
+kora_vcs_remote: object = missing_fixture("kora_vcs_remote")
+kora_vcs_executor: object = missing_fixture("kora_vcs_executor")
+kora_vcs_context: object = missing_fixture("kora_vcs_context")
+kora_vcs_binding: object = missing_fixture("kora_vcs_binding")
+kora_policy_provider: object = missing_fixture("kora_policy_provider")
+kora_policy_exercise: object = missing_fixture("kora_policy_exercise")
+kora_secrets_provider: object = missing_fixture("kora_secrets_provider")
+kora_secrets_exercise: object = missing_fixture("kora_secrets_exercise")
+kora_secrets_resolvable: object = missing_fixture("kora_secrets_resolvable")
+kora_secrets_missing_reference: object = missing_fixture(
+    "kora_secrets_missing_reference"
+)
+kora_secrets_forbidden_reference: object = missing_fixture(
+    "kora_secrets_forbidden_reference"
+)
+kora_secrets_listed_prefix: object = missing_fixture("kora_secrets_listed_prefix")
+kora_artifact_storage_factory: object = missing_fixture("kora_artifact_storage_factory")
+kora_artifact_storage_exercise: object = missing_fixture(
+    "kora_artifact_storage_exercise"
+)
+kora_policy_calls: object = missing_fixture("kora_policy_calls")
