@@ -5,8 +5,6 @@ import sys
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
-from types import CoroutineType
-from typing import cast
 
 import pytest
 
@@ -25,37 +23,9 @@ from kora.protocols.lifetime import (
     TemporaryTreeRequest,
     new_operation_id,
 )
-from kora.runner.channels import BoundedChannel
-from tests.conformance.lifetime_helpers import lifetime_failure_state
+from tests.conformance.lifetime_helpers import lifetime_failure_state, unread_bytes
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-
-
-def partial_header_is_waiting(
-    running: asyncio.Task[ClosureReport], channel: BoundedChannel, deadline: int
-) -> bool:
-    frames = running.get_stack()
-    value: object = frames[0].f_locals.get("reader") if frames else None
-    if not isinstance(value, asyncio.Task):
-        return False
-    reader = cast(asyncio.Task[None], value)
-    current: object = reader.get_coro()
-    while isinstance(current, CoroutineType):
-        frame = current.cr_frame
-        waiting: object = current.cr_await
-        if (
-            frame is not None
-            and frame.f_code.co_name == "_read_exact"
-            and frame.f_locals.get("self") is channel
-            and frame.f_locals.get("result") == bytearray(b"\x00\x00")
-            and isinstance(waiting, CoroutineType)
-            and waiting.cr_code.co_name == "_wait"
-        ):
-            assert frame.f_locals["size"] == 4
-            assert frame.f_locals["deadline_ns"] == deadline
-            return True
-        current = current.cr_await
-    return False
 
 
 @pytest.mark.asyncio
@@ -199,27 +169,21 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 == b"p"
                             )
                             if mode == "header_partial":
-                                while not partial_header_is_waiting(
-                                    running, parent.channel, original_deadline
+                                while not running.done() and (
+                                    unread_bytes(endpoint) or not clock.waiters
                                 ):
-                                    if running.done():
-                                        await running
                                     assert loop.time() < frontier_deadline
                                     entered: asyncio.Future[None] = loop.create_future()
                                     loop.call_soon(entered.set_result, None)
                                     await entered
+                                assert not running.done(), running.result()
                                 assert not parent.pending
                                 assert not owner.ordinary_slots
                                 assert parent.control_bytes == retained
-                                clock.advance(original_interval // 2)
-                                progressed: asyncio.Future[None] = loop.create_future()
-                                loop.call_soon(progressed.set_result, None)
-                                await progressed
-                                assert partial_header_is_waiting(
-                                    running, parent.channel, original_deadline
-                                )
+                                armed = set(clock.waiters.values())
+                                assert armed == {original_deadline}
                                 clock.advance(
-                                    original_interval - original_interval // 2 + 1
+                                    original_deadline - clock.monotonic_ns() + 1
                                 )
                             report = await asyncio.wait_for(
                                 running, max(0, frontier_deadline - loop.time())

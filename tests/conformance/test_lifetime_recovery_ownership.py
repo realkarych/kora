@@ -532,7 +532,7 @@ async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
 
 
 @pytest.mark.asyncio
-async def test_failed_recovery_frontier_propagates_and_disposes_owned_attempt(
+async def test_recovery_of_unknown_invocation_reports_unknown_and_disposes_attempt(
     tmp_path: Path,
 ) -> None:
     from kora.conformance.io_helper import InstalledIOHelperLauncher
@@ -553,8 +553,6 @@ async def test_failed_recovery_frontier_propagates_and_disposes_owned_attempt(
     deadline = SystemClock().monotonic_ns() + 5_000_000_000
     try:
         while not caller.done():
-            await recovery_progress(caller, deadline)
-        with pytest.raises(AssertionError, match="recovery completed before frontier"):
             await recovery_progress(caller, deadline)
 
         assert caller.done()

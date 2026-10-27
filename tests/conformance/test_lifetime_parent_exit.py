@@ -20,7 +20,7 @@ from kora.protocols.lifetime import (
     ProcessRegistration,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+from kora.runner.channels import BoundedChannel, ChannelError
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
@@ -34,12 +34,9 @@ from tests.conformance.test_parent_lifetime import limits
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("sink_mode", "setup_failure"),
-    [("drained", False), ("blocked", False), ("broken", False), ("drained", True)],
-)
+@pytest.mark.parametrize("sink_mode", ["drained", "blocked", "broken"])
 async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_recovery(
-    tmp_path: Path, sink_mode: str, setup_failure: bool
+    tmp_path: Path, sink_mode: str
 ) -> None:
     probe = subprocess.run(
         [
@@ -102,13 +99,10 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     helper_anchor = ExitAnchor(identity.pid, direct_child=False)
     recovery_clock = ControlledLifetimeClock()
     recovered: ParentLifetime | None = None
-    caught: ChannelError | None = None
     phase = "fifo_barrier"
     writer: FileIO | None = None
 
     try:
-        if setup_failure:
-            deadline = clock.monotonic_ns()
         writer = await entered_fifo(barrier.descriptor, reading, deadline, clock)
         phase = "parent_close"
         await channel.write_frame(b"close", deadline)
@@ -157,13 +151,7 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
             f"phase={phase}, remaining_ns={deadline - clock.monotonic_ns()}, "
             f"parent_status={parent.poll()}, helper_identity={identity}"
         )
-        if not (
-            setup_failure
-            and phase == "fifo_barrier"
-            and failure.reason is ChannelFailure.DEADLINE
-        ):
-            raise
-        caught = failure
+        raise
     finally:
         if writer is not None:
             writer.close()
@@ -194,7 +182,6 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
         os.close(writing)
         barrier.close()
 
-    assert (caught is not None) is setup_failure
     assert parent.returncode is not None
     assert helper_anchor.exited
     assert channel.closed

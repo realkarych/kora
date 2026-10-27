@@ -237,29 +237,25 @@ async def test_recovery_close_preserves_complete_inventory(
         limits=limits(), recovery=reference, launcher=launcher, clock=clock
     )
     loop = asyncio.get_running_loop()
-    while not owner.mutations.helpers:
-        wake: asyncio.Future[None] = loop.create_future()
-        loop.call_soon(wake.set_result, None)
-        await wake
-    helper = owner.mutations.helpers[-1]
-    with await entered_fifo(
-        barrier.descriptor,
-        reading,
-        independent_clock.monotonic_ns() + 5_000_000_000,
-        independent_clock,
-    ) as writer:
-        if case == "substituted_tree":
-            tree = journal.entries[0].registration
-            assert isinstance(tree, TemporaryTreeRegistration)
-            tree_path = path.parent / tree.name
-            tree_path.rename(path.parent / "retained-original")
-            tree_path.mkdir(mode=0o700)
-            closing = None
-        else:
-            closing = asyncio.create_task(owner.close(None))
-            await owner.closure_started.wait()
+    try:
+        await launcher.wait_for_start(1)
+        with await entered_fifo(
+            barrier.descriptor,
+            reading,
+            independent_clock.monotonic_ns() + 5_000_000_000,
+            independent_clock,
+        ) as writer:
+            if case == "substituted_tree":
+                tree = journal.entries[0].registration
+                assert isinstance(tree, TemporaryTreeRegistration)
+                tree_path = path.parent / tree.name
+                tree_path.rename(path.parent / "retained-original")
+                tree_path.mkdir(mode=0o700)
+                closing = None
+            else:
+                closing = asyncio.create_task(owner.close(None))
+                await owner.closure_started.wait()
 
-        try:
             writer.close()
             if case == "substituted_tree":
                 with pytest.raises(LifetimeError):
@@ -271,7 +267,7 @@ async def test_recovery_close_preserves_complete_inventory(
                 reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
                 while not independent.observe(reap_deadline).settled:
                     assert independent_clock.monotonic_ns() < reap_deadline
-                    wake = loop.create_future()
+                    wake: asyncio.Future[None] = loop.create_future()
                     loop.call_soon(wake.set_result, None)
                     await wake
                 clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
@@ -298,8 +294,10 @@ async def test_recovery_close_preserves_complete_inventory(
                     independent_clock.monotonic_ns() + 5_000_000_000
                 ).settled
                 assert not path.parent.exists()
+    finally:
+        try:
+            await dispose_test_owner(owner, clock)
         finally:
-            writer.close()
             deadline = independent_clock.monotonic_ns() + 5_000_000_000
             assert independent.signal(signal.SIGKILL, deadline) in (
                 SignalResult.SENT,
@@ -307,9 +305,6 @@ async def test_recovery_close_preserves_complete_inventory(
             )
             await independent.settle(deadline)
             independent.release(deadline)
-            if not helper.closed:
-                helper.signal(signal.SIGKILL)
-                await helper.settle(deadline)
             os.close(reading)
             os.close(writing)
             barrier.close()

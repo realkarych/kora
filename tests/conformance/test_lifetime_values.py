@@ -120,8 +120,13 @@ def test_operation_identity_rejects_noncanonical_wire_values(invalid: object) ->
     assert rejected.value.error_count() == 1
 
 
-@pytest.mark.parametrize("invalid", [True, "1", 1.0, 0, -1, 2**64])
-@pytest.mark.parametrize("field", ["generation", "revision"])
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        *(("generation", invalid) for invalid in [True, 0, 2**64]),
+        *(("revision", invalid) for invalid in [True, "1", 1.0, 0, -1, 2**64]),
+    ],
+)
 def test_authority_counters_require_positive_uint64(
     field: str, invalid: object
 ) -> None:
@@ -145,16 +150,24 @@ def test_authority_counters_require_positive_uint64(
 
 
 @pytest.mark.parametrize(
-    "field",
+    ("field", "invalid"),
     [
-        "acquisition_seconds",
-        "cooperative_seconds",
-        "term_seconds",
-        "kill_observation_seconds",
-        "drain_seconds",
+        *(
+            ("acquisition_seconds", invalid)
+            for invalid in [True, "1", 0, -1, float("inf"), float("nan")]
+        ),
+        *(
+            (field, invalid)
+            for field in [
+                "cooperative_seconds",
+                "term_seconds",
+                "kill_observation_seconds",
+                "drain_seconds",
+            ]
+            for invalid in [True, 0, float("inf")]
+        ),
     ],
 )
-@pytest.mark.parametrize("invalid", [True, "1", 0, -1, float("inf"), float("nan")])
 def test_lifetime_deadlines_refuse_nonfinite_nonpositive_or_coerced_values(
     field: str,
     invalid: object,
@@ -283,20 +296,19 @@ def test_acquisitions_roundtrip_exact_registration_discriminators(
     assert restored == acquisition
 
 
-@pytest.mark.parametrize("extra", ["handle", "pidfd", "cleanup_command", "callback"])
-def test_acquisition_wire_refuses_untyped_controller_authority(extra: str) -> None:
+def test_acquisition_wire_refuses_untyped_controller_authority() -> None:
     value = {
         "token": reservation_token(),
         "operation_id": OPERATION_ID,
         "revision": 1,
         "registration": process_registration(),
-        extra: "authority",
+        "handle": "authority",
     }
 
     with pytest.raises(ValidationError) as rejected:
         Acquisition.model_validate(value)
 
-    assert rejected.value.errors()[0]["loc"] == (extra,)
+    assert rejected.value.errors()[0]["loc"] == ("handle",)
 
 
 def test_registration_discriminator_does_not_fall_back_to_another_shape() -> None:

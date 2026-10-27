@@ -1,7 +1,9 @@
 import asyncio
+import fcntl
 import socket
 import subprocess
 import sys
+import termios
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,6 +12,14 @@ from kora.protocols.time import Clock
 
 if TYPE_CHECKING:
     from kora.conformance.lifetime import ParentLifetime
+
+HELPER_START_GUARD_SECONDS: float = 5.0
+
+
+def unread_bytes(endpoint: socket.socket) -> int:
+    return int.from_bytes(
+        fcntl.ioctl(endpoint.fileno(), termios.FIONREAD, bytes(4)), sys.byteorder
+    )
 
 
 def lifetime_failure_state(owner: "ParentLifetime") -> str:
@@ -56,9 +66,38 @@ class ProbeIOHelperLauncher:
         self.pause_at = pause_at
         self.resist_term = resist_term
         self.starts = 0
+        self.start_waiters: list[asyncio.Future[None]] = []
+
+    async def wait_for_start(
+        self, count: int, watched: asyncio.Task[object] | None = None
+    ) -> None:
+        while self.starts < count:
+            started: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            waiting: set[asyncio.Future[None] | asyncio.Task[object]] = {started}
+            if watched is not None:
+                waiting.add(watched)
+            self.start_waiters.append(started)
+            try:
+                await asyncio.wait(
+                    waiting,
+                    timeout=HELPER_START_GUARD_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                self.start_waiters.remove(started)
+                started.cancel()
+            if started.cancelled() and watched is not None and watched.done():
+                raise AssertionError(
+                    f"completed before helper start {count}: {watched.result()!r}"
+                )
+            if started.cancelled():
+                raise TimeoutError(f"helper start {self.starts + 1} did not begin")
 
     def start(self, descriptors: tuple[int, ...], clock: Clock) -> IOHelper:
         self.starts += 1
+        for waiter in self.start_waiters:
+            if not waiter.done():
+                waiter.set_result(None)
         selected = (self.pause_at,) if isinstance(self.pause_at, int) else self.pause_at
         if selected is not None and self.starts not in selected:
             return InstalledIOHelperLauncher(
