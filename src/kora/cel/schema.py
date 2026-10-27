@@ -64,7 +64,7 @@ def nullable(cel_type: CelType) -> CelType:
     return Nullable(cel_type)
 
 
-def entry(schema: JsonObject, name: str, kind: type) -> object:
+def entry(schema: JsonObject, name: str, kind: type | tuple[type, ...]) -> object:
     value = schema.get(name)
     if value is not None and not isinstance(value, kind):
         raise SchemaError("a schema keyword has the wrong JSON type")
@@ -83,7 +83,8 @@ def is_schema(value: JsonValue) -> bool:
 
 
 def is_position(name: str, length: int) -> bool:
-    return name.isascii() and name.isdigit() and int(name) < length
+    digits = name.isascii() and name.isdigit() and len(name) <= len(str(length))
+    return digits and int(name) < length
 
 
 def is_null(schema: JsonObject) -> bool:
@@ -95,11 +96,21 @@ def is_null(schema: JsonObject) -> bool:
     return schema.get("enum") == [None]
 
 
-def type_names(declared: list[JsonValue]) -> list[str]:
-    names = [name for name in declared if isinstance(name, str)]
-    if len(names) != len(declared):
-        raise SchemaError("a schema type is not a string")
+def strings(values: list[JsonValue]) -> list[str]:
+    names = [name for name in values if isinstance(name, str)]
+    if len(names) != len(values):
+        raise SchemaError("a schema keyword has the wrong JSON type")
     return names
+
+
+def check_keywords(schema: JsonObject) -> None:
+    entry(schema, "properties", dict)
+    entry(schema, "additionalProperties", (dict, bool))
+    entry(schema, "patternProperties", dict)
+    entry(schema, "items", (dict, bool))
+    entry(schema, "prefixItems", list)
+    entry(schema, "anyOf", list)
+    entry(schema, "oneOf", list)
 
 
 def keyword_kind(schema: JsonObject) -> str | None:
@@ -118,7 +129,9 @@ class SchemaTypes:
         self.active: set[MemoKey] = set()
         self.documents: dict[str, JsonValue] = {}
         self.references: dict[tuple[int, str], Located] = {}
+        self.targets: dict[int, Located | None] = {}
         self.held: list[JsonValue] = []
+        self.written: list[MemoKey] = []
 
     def document(
         self, schema: JsonValue, view: SchemaView = SchemaView.PLAIN
@@ -175,25 +188,52 @@ class SchemaTypes:
         return node
 
     def target(self, schema: JsonValue, root: JsonValue) -> Located | None:
+        chain: list[JsonValue] = []
         seen: set[int] = set()
+        located: Located | None = None
         while isinstance(schema, dict):
+            if id(schema) in self.targets:
+                located = self.targets[id(schema)]
+                break
             self.meter.tick()
             if id(schema) in seen:
-                return None
+                break
             seen.add(id(schema))
+            chain.append(schema)
             reference = entry(schema, "$ref", str)
-            parts = entry(schema, "allOf", list)
+            parts = cast("list[JsonValue] | None", entry(schema, "allOf", list))
             if isinstance(reference, str):
                 schema, root = self.resolve(root, reference)
-            elif isinstance(parts, list) and len(cast("list[JsonValue]", parts)) == 1:
-                schema = cast("list[JsonValue]", parts)[0]
+            elif parts is not None and len(parts) == 1:
+                schema = parts[0]
             else:
+                located = (schema, root)
                 break
-        if not is_schema(schema):
-            raise SchemaError("a schema is not an object or a boolean")
-        return schema, root
+        else:
+            if not is_schema(schema):
+                raise SchemaError("a schema is not an object or a boolean")
+            located = (schema, root)
+        for link in chain:
+            self.targets[id(link)] = located
+        self.held.extend(chain)
+        return located
 
     def mapped(self, schema: JsonValue, root: JsonValue, view: SchemaView) -> CelType:
+        self.written = []
+        try:
+            return self.drive(schema, root, view)
+        except SchemaError:
+            for key in self.written:
+                del self.memo[key]
+            self.active.clear()
+            raise
+
+    def remember(self, key: MemoKey, cel_type: CelType) -> None:
+        if key not in self.memo:
+            self.written.append(key)
+        self.memo[key] = cel_type
+
+    def drive(self, schema: JsonValue, root: JsonValue, view: SchemaView) -> CelType:
         stack: list[tuple[MemoKey, Mapping]] = []
         result = self.start(schema, root, view, stack)
         while stack:
@@ -205,7 +245,7 @@ class SchemaTypes:
             except StopIteration as finished:
                 stack.pop()
                 self.active.discard(key)
-                self.memo[key] = finished.value
+                self.remember(key, finished.value)
                 result = finished.value
                 continue
             result = self.start(child, child_root, view, stack)
@@ -241,13 +281,14 @@ class SchemaTypes:
     def classify(
         self, schema: JsonObject, root: JsonValue, view: SchemaView, key: MemoKey
     ) -> Mapping:
+        check_keywords(schema)
         if is_null(schema):
             return NULL if view is SchemaView.STRUCTURED_OUTPUT else DYN
         declared = schema.get("type")
         values = enumerated(schema)
         kind: str | None
         if isinstance(declared, list):
-            names = type_names(cast("list[JsonValue]", declared))
+            names = strings(cast("list[JsonValue]", declared))
             others = {name for name in names if name != NULL_TYPE}
             if len(others) != 1:
                 return DYN
@@ -331,9 +372,7 @@ class SchemaTypes:
     ) -> Mapping:
         properties = cast("dict[str, JsonValue]", schema["properties"])
         required = cast("list[JsonValue]", entry(schema, "required", list) or [])
-        names = {name for name in required if isinstance(name, str)}
-        if len(names) != len(set(map(str, required))):
-            raise SchemaError("a required property name is not a string")
+        names = set(strings(required))
         additional = schema.get("additionalProperties")
         extra: CelType | None = None if additional is False else DYN
         if isinstance(additional, dict):
@@ -341,7 +380,7 @@ class SchemaTypes:
         fields: dict[str, RecordField] = {}
         record = Record(fields, extra)
         mapped = nullable(record) if wrap else record
-        self.memo[key] = mapped
+        self.remember(key, mapped)
         for name, member in properties.items():
             self.meter.tick()
             fields[name] = RecordField((yield member, root), name in names)
