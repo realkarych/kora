@@ -366,30 +366,38 @@ def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None
     }
 
 
-def test_lifetime_measurement_prepares_private_evidence_in_a_fresh_checkout(
-    tmp_path: Path,
-) -> None:
-    run = str(
-        steps(table(workflow_jobs()["qualification"]))["lifetime_measurement"]["run"]
-    )
-    preparation, command, _ = run.partition("KORA_MEASUREMENT_OUTPUT=")
-    evidence = tmp_path / "measurements" / "conformance-lifetime"
-
-    result = subprocess.run(
+def run_lifetime_preparation(
+    preparation: str, workspace: Path, checkout: str, requested: str
+) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
         ["/bin/bash", "-e", "-c", preparation],
-        cwd=tmp_path,
+        cwd=workspace,
         env={
             **os.environ,
-            "KORA_LIFETIME_CHECKOUT_REVISION": "a" * 40,
-            "KORA_MEASUREMENT_REVISION": "b" * 40,
+            "KORA_LIFETIME_CHECKOUT_REVISION": checkout,
+            "KORA_MEASUREMENT_REVISION": requested,
         },
         capture_output=True,
         check=False,
         timeout=5,
     )
 
-    assert command == "KORA_MEASUREMENT_OUTPUT="
-    assert (result.returncode, result.stderr) == (0, b"")
+
+def test_lifetime_measurement_prepares_private_evidence_in_a_fresh_checkout(
+    tmp_path: Path,
+) -> None:
+    run = str(
+        steps(table(workflow_jobs()["qualification"]))["lifetime_measurement"]["run"]
+    )
+    preparation = run[: run.index("KORA_MEASUREMENT_OUTPUT=")]
+    evidence = tmp_path / "measurements" / "conformance-lifetime"
+
+    fresh = run_lifetime_preparation(preparation, tmp_path, "a" * 40, "b" * 40)
+    repeated = run_lifetime_preparation(preparation, tmp_path, "c" * 40, "d" * 40)
+
+    assert (fresh.returncode, fresh.stderr) == (0, b"")
+    assert repeated.returncode != 0
+    assert repeated.stderr != b""
     observed = evidence.lstat()
     assert stat.S_ISDIR(observed.st_mode)
     assert stat.S_IMODE(observed.st_mode) == 0o700
