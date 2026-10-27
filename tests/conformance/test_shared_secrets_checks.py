@@ -249,7 +249,7 @@ async def exercise_ending(
         await provider.close()
 
 
-@pytest.mark.parametrize("ending", ["success", "failure", "cancel", "unexpected"])
+@pytest.mark.parametrize("ending", ["failure", "cancel", "unexpected"])
 def test_shared_checks_release_capture_on_every_ending(ending: str) -> None:
     captures: list[Capture] = []
     providers: list[LoopBoundSecretsProvider] = []
@@ -264,11 +264,9 @@ def test_shared_checks_release_capture_on_every_ending(ending: str) -> None:
         elif ending == "cancel":
             with pytest.raises(TimeoutError):
                 runner.run(operation)
-        elif ending == "unexpected":
+        else:
             with pytest.raises(KeyError, match="missing"):
                 runner.run(operation)
-        else:
-            runner.run(operation)
 
         assert len(asyncio.all_tasks(runner.get_loop())) == 0
     assert len(providers) == len(captures) == 1

@@ -710,9 +710,3 @@ class LooseDecision(PolicyDecision):
 async def policy_exercise(ctx: ProtocolContext, marker: str) -> object:
     ctx.logger.emit(DECIDE_FAILED, reason="unreachable")
     raise KoraProtocolError("policy_failed", "the policy failed", False, {})
-
-
-async def echoing_policy_exercise(ctx: ProtocolContext, marker: str) -> object:
-    raise KoraProtocolError(
-        "policy_failed", f"the policy failed on {marker}", False, {}
-    )

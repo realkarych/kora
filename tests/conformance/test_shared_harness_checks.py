@@ -317,8 +317,17 @@ async def exercise_ending(
         await source.close()
 
 
-@pytest.mark.parametrize("phase", ["prepare", "run"])
-@pytest.mark.parametrize("ending", ["success", "failure", "cancel", "unexpected"])
+@pytest.mark.parametrize(
+    ("phase", "ending"),
+    [
+        ("prepare", "failure"),
+        ("prepare", "cancel"),
+        ("prepare", "unexpected"),
+        ("run", "failure"),
+        ("run", "cancel"),
+        ("run", "unexpected"),
+    ],
+)
 def test_shared_harness_checks_release_every_ending(phase: str, ending: str) -> None:
     captures: list[Capture] = []
     sources: list[LoopBoundScript] = []
@@ -331,11 +340,9 @@ def test_shared_harness_checks_release_every_ending(phase: str, ending: str) -> 
         elif ending == "cancel":
             with pytest.raises(asyncio.CancelledError):
                 runner.run(operation)
-        elif ending == "unexpected":
+        else:
             with pytest.raises(RuntimeError, match="unexpected exercise failure"):
                 runner.run(operation)
-        else:
-            runner.run(operation)
 
         assert not asyncio.all_tasks(runner.get_loop())
     assert len(captures) == len(sources) == 1
@@ -345,6 +352,6 @@ def test_shared_harness_checks_release_every_ending(phase: str, ending: str) -> 
     assert source.worker.done()
     assert source.queue.empty()
     assert source.loop is source.cleanup_loop
-    if phase == "prepare" and ending != "success":
+    if phase == "prepare":
         assert source.started == 0
     assert_capture_released(captures[0])

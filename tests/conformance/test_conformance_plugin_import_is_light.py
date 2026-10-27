@@ -1,8 +1,11 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from tests.support.observability import run_python
+
+SOURCE: Path = Path(__file__).resolve().parents[2] / "src"
 
 HEAVY: tuple[str, ...] = (
     "jsonschema",
@@ -122,7 +125,9 @@ def test_case_modules_import_no_fakes(module: str) -> None:
 
 
 def test_conformance_requires_extra() -> None:
-    source = "import sys\nsys.path.insert(0, 'src')\nimport kora.conformance\n"
+    source = (
+        f"import sys\nsys.path.insert(0, {str(SOURCE)!r})\nimport kora.conformance\n"
+    )
 
     result = run_python(["-I", "-S", "-c", source], {})
 

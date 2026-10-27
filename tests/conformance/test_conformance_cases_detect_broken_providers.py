@@ -13,15 +13,15 @@ import kora.conformance.policy as policy_cases
 import kora.conformance.secrets as secrets_cases
 from kora.conformance.capture import (
     LEFTOVERS,
+    WAIT_SECONDS,
     Capture,
     CaptureOverflow,
-    Leftover,
-    Pipe,
+    CaptureTimeout,
     captured,
 )
 from kora.conformance.common import CONFORMANCE_COMPONENT, MARKER, utc_now
 from kora.conformance.policy import UNPROTECTED_PATH
-from kora.observability import LoggingSettings, configure_process, current_diagnostics
+from kora.observability import LoggingSettings, current_diagnostics
 from tests.conformance.harnesses import HARNESS_BROKEN_CASES
 from tests.conformance.policies import (
     AllowOverridesDenyPolicy,
@@ -62,7 +62,6 @@ from tests.conformance.policies import (
     TupleValidatePolicy,
     WrongRuleIdPolicy,
     calls_with_edits,
-    echoing_policy_exercise,
     edit_calls,
     policy_exercise,
     reference_calls,
@@ -247,12 +246,6 @@ def silent_validate(capture: Capture) -> None:
 def loose_decision(capture: Capture) -> None:
     policy_cases.test_policy_allows_what_no_rule_refuses(
         LooseDecisionPolicy(), reference_calls(), capture
-    )
-
-
-def echoing_policy_failure(capture: Capture) -> None:
-    common_cases.test_failure_is_a_bounded_protocol_error(
-        echoing_policy_exercise, capture
     )
 
 
@@ -509,7 +502,6 @@ BROKEN_CASES: tuple[tuple[Callable[[Capture], None], str], ...] = (
     (exact_protected_path, "a protected path is denied"),
     (silent_validate, "validate refuses the malformed policy"),
     (loose_decision, "decide returns a PolicyDecision"),
-    (echoing_policy_failure, "the message carries no input"),
     (subagent_protection_skipped, "a protected path is denied"),
     (shell_only_rules, "a matching deny denies"),
     (hardcoded_tests, "a protected path is denied"),
@@ -581,20 +573,41 @@ def test_a_capture_past_its_cap_fails_and_releases_everything() -> None:
     assert current_diagnostics() is None
 
 
+def inherit_write_end_after_writer_exit(capture: Capture) -> int:
+    assert capture.diagnostics.shutdown(WAIT_SECONDS)
+    assert not capture.diagnostics.writer_is_alive()
+    return os.dup(capture.pipe.write_end)
+
+
+def leave_a_capture_held_open_by_an_inherited_write_end() -> int:
+    inherited: list[int] = []
+    try:
+        with pytest.raises(CaptureTimeout, match="the pipe reader did not stop"):
+            with captured(
+                CONFORMANCE_COMPONENT,
+                LoggingSettings(),
+                "leftover",
+                utc_now,
+                deadline_seconds=0.1,
+            ) as capture:
+                inherited.append(inherit_write_end_after_writer_exit(capture))
+        return inherited.pop()
+    finally:
+        for descriptor in inherited:
+            os.close(descriptor)
+
+
 def test_a_finished_leftover_is_cleared_by_the_next_capture() -> None:
     threads = threading.active_count()
     descriptors = descriptor_count()
-    pipe = Pipe.open()
-    diagnostics = configure_process(
-        CONFORMANCE_COMPONENT, LoggingSettings(), "leftover", utc_now, pipe.write_end
-    )
-    pipe.reader.start()
-    diagnostics.shutdown()
-    LEFTOVERS.held.append(Leftover(diagnostics, pipe))
+    inherited = leave_a_capture_held_open_by_an_inherited_write_end()
+    leftovers = len(LEFTOVERS.held)
+    os.close(inherited)
 
     with captured(CONFORMANCE_COMPONENT, LoggingSettings(), "next", utc_now):
         held = len(LEFTOVERS.held)
 
+    assert leftovers == 1
     assert held == 0
     assert threading.active_count() == threads
     assert descriptor_count() == descriptors

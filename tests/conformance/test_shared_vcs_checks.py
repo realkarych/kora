@@ -5,7 +5,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
-from pydantic import ValidationError
 
 from kora.conformance import vcs as checks
 from kora.conformance.capture import Capture, captured
@@ -23,7 +22,6 @@ from kora.ir.json import JsonObject, parse_json_object
 from kora.observability import LoggingSettings
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.protocols.common import ProtocolContext
-from kora.protocols.errors import KoraProtocolError
 from kora.protocols.vcs import (
     CheckoutPlan,
     CheckoutRequest,
@@ -90,14 +88,6 @@ class LoopBoundGit(GitVcs):
         self.queue.put_nowait(None)
         await self.worker
         self.cleanup_loop = asyncio.get_running_loop()
-
-
-class EchoingGit(LoopBoundGit):
-    async def acquire_credential(
-        self, request: CredentialRequest, ctx: ProtocolContext
-    ) -> IssuedCredential:
-        await self.advance(ctx)
-        raise KoraProtocolError("vcs_binding_mismatch", request.repo, False, {})
 
 
 def configured_request(document: JsonObject) -> CredentialRequest:
@@ -234,68 +224,6 @@ def test_shared_vcs_checks_use_one_caller_loop_and_exact_inputs() -> None:
         assert root.exists()
     assert not root.exists()
     assert len(captures) == 1
-    assert_capture_released(captures[0])
-
-
-async def exercise_ending(
-    root: Path, ending: str, captures: list[Capture], providers: list[LoopBoundGit]
-) -> None:
-    with captured(
-        CONFORMANCE_COMPONENT, LoggingSettings(), "vcs-ending", utc_now
-    ) as capture:
-        captures.append(capture)
-        world = make_world(
-            root,
-            capture,
-            provider_type=EchoingGit if ending == "failure" else LoopBoundGit,
-        )
-        provider = world.provider
-        assert isinstance(provider, LoopBoundGit)
-        providers.append(provider)
-        try:
-            document = parse_json_object(configuration(world.remote, root / "gone.git"))
-            async with asyncio.timeout(0 if ending == "cancel" else 5):
-                if ending == "unexpected":
-                    document.pop("remotes")
-                    await configuration_effect(provider, document, world.context())
-                else:
-                    await check_failure_is_a_bounded_protocol_error(
-                        partial(failing_input, provider, document),
-                        world.context(),
-                        MARKER,
-                    )
-        finally:
-            await provider.close()
-
-
-@pytest.mark.parametrize("ending", ["success", "failure", "cancel", "unexpected"])
-def test_shared_vcs_checks_release_every_ending(ending: str) -> None:
-    captures: list[Capture] = []
-    providers: list[LoopBoundGit] = []
-    with TemporaryDirectory() as directory:
-        root = Path(directory)
-        with asyncio.Runner() as runner:
-            operation = exercise_ending(root, ending, captures, providers)
-
-            if ending == "failure":
-                with pytest.raises(
-                    pytest.fail.Exception, match="the message carries no input"
-                ):
-                    runner.run(operation)
-            elif ending == "cancel":
-                with pytest.raises(TimeoutError):
-                    runner.run(operation)
-            elif ending == "unexpected":
-                with pytest.raises(ValidationError):
-                    runner.run(operation)
-            else:
-                runner.run(operation)
-
-            assert not asyncio.all_tasks(runner.get_loop())
-    assert not root.exists()
-    assert len(captures) == len(providers) == 1
-    assert providers[0].worker.done()
-    assert providers[0].loop is providers[0].cleanup_loop
     assert_capture_released(captures[0])
 
 

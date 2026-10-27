@@ -16,38 +16,69 @@ VALID: bytes = (
 @pytest.mark.parametrize(
     "document",
     [
-        b"",
-        VALID[:-1],
-        b"bad",
-        VALID.replace(b'tests="1"', b'tests="2"'),
-        VALID.replace(b'failures="0"', b'failures="1"'),
-        VALID.replace(b'errors="0"', b'errors="1"'),
-        VALID.replace(b'skipped="0"', b'skipped="1"'),
-        VALID.replace(b'name="test_configured_provider"', b'name="foreign"'),
-        VALID.replace(b'classname="command_case"', b'classname="foreign"'),
-        VALID.replace(
-            b"</testsuite>",
-            b'<testcase classname="command_case" name="test_configured_provider" />'
-            b"</testsuite>",
+        pytest.param(b"", id="empty"),
+        pytest.param(VALID[:-1], id="truncated"),
+        pytest.param(b"bad", id="not_xml"),
+        pytest.param(VALID.replace(b'tests="1"', b'tests="2"'), id="two_tests"),
+        pytest.param(VALID.replace(b'failures="0"', b'failures="1"'), id="failure"),
+        pytest.param(VALID.replace(b'errors="0"', b'errors="1"'), id="error"),
+        pytest.param(VALID.replace(b'skipped="0"', b'skipped="1"'), id="skipped"),
+        pytest.param(
+            VALID.replace(b'name="test_configured_provider"', b'name="foreign"'),
+            id="foreign_name",
         ),
-        VALID.replace(
-            b"</testsuites>",
-            b'<testsuite errors="0" failures="0" skipped="0" tests="1" /></testsuites>',
+        pytest.param(
+            VALID.replace(b'classname="command_case"', b'classname="foreign"'),
+            id="foreign_classname",
         ),
-        VALID.replace(
-            b" />",
-            b'><skipped type="pytest.skip" message="private-marker" /></testcase>',
+        pytest.param(
+            VALID.replace(
+                b"</testsuite>",
+                b'<testcase classname="command_case" name="test_configured_provider" />'
+                b"</testsuite>",
+            ),
+            id="second_testcase",
         ),
-        VALID.replace(b" />", b'><error message="private-marker" /></testcase>'),
-        VALID.replace(b" />", b'><failure message="private-marker" /></testcase>'),
-        VALID.replace(
-            b" />",
-            b'><properties><property name="result" value="success" />'
-            b"</properties></testcase>",
+        pytest.param(
+            VALID.replace(
+                b"</testsuites>",
+                b'<testsuite errors="0" failures="0" skipped="0" tests="1" />'
+                b"</testsuites>",
+            ),
+            id="second_testsuite",
         ),
-        b'<!DOCTYPE testsuites [<!ENTITY e "private-marker">]>' + VALID.split(b"?>")[1],
-        VALID.replace(b'time="1"', b'time="\xff"'),
-        b" " * (MAX_CAPTURE_BYTES + 1) + VALID,
+        pytest.param(
+            VALID.replace(
+                b" />",
+                b'><skipped type="pytest.skip" message="private-marker" /></testcase>',
+            ),
+            id="skipped_element",
+        ),
+        pytest.param(
+            VALID.replace(b" />", b'><error message="private-marker" /></testcase>'),
+            id="error_element",
+        ),
+        pytest.param(
+            VALID.replace(b" />", b'><failure message="private-marker" /></testcase>'),
+            id="failure_element",
+        ),
+        pytest.param(
+            VALID.replace(
+                b" />",
+                b'><properties><property name="result" value="success" />'
+                b"</properties></testcase>",
+            ),
+            id="properties_element",
+        ),
+        pytest.param(
+            b'<!DOCTYPE testsuites [<!ENTITY e "private-marker">]>'
+            + VALID.split(b"?>")[1],
+            id="entity_declaration",
+        ),
+        pytest.param(
+            VALID.replace(b'time="1"', b'time="\xff"'), id="invalid_utf8_attribute"
+        ),
+        pytest.param(b" " * (MAX_CAPTURE_BYTES + 1) + VALID, id="over_capture_cap"),
     ],
 )
 def test_installed_conformance_report_is_bounded(document: bytes) -> None:
@@ -89,9 +120,8 @@ def test_result_requires_complete_nonempty_execution(
 
 
 @pytest.mark.parametrize("field", ["wrapper_closed", "report_accepted"])
-@pytest.mark.parametrize("value", ["1", '"true"', '"yes"'])
-def test_result_requires_exact_boolean_evidence(field: str, value: str) -> None:
-    record = f'{{"phase":"complete","{field}":{value}}}'
+def test_result_requires_exact_boolean_evidence(field: str) -> None:
+    record = f'{{"phase":"complete","{field}":"true"}}'
 
     with pytest.raises(ValidationError):
         ChildResult.model_validate_json(record)

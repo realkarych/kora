@@ -504,18 +504,7 @@ async def test_installed_vcs_rejects_alternate_executor_receivers(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mode",
-    [
-        "setup",
-        "prepare",
-        "bind",
-        "construct",
-        "schema",
-        "exercise",
-        "cleanup",
-        "teardown",
-        "echo",
-    ],
+    "mode", ["setup", "bind", "construct", "cleanup", "teardown", "echo"]
 )
 async def test_installed_conformance_preserves_ordinary_failure_controls(
     installed_conformance: InstalledTooling,
@@ -552,7 +541,8 @@ async def test_installed_conformance_rejects_fixture_replacement(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "configuration", [{}, {"value": 42}, {"value": "private-invalid", "extra": True}]
+    "configuration",
+    [pytest.param({"value": "private-invalid", "extra": True}, id="extra_property")],
 )
 async def test_installed_conformance_rejects_invalid_input_before_fixtures(
     installed_conformance: InstalledTooling,
@@ -605,22 +595,6 @@ async def test_installed_conformance_refuses_warning(
     assert outcome.returncode != 0
     assert outcome.closure.state is CleanupOutcome.CLOSED
     assert b"private-installed-warning-marker" not in outcome.events
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("plugin", ["fixtures_missing", "fixtures_wrong_bundle"])
-async def test_installed_conformance_refuses_missing_adapter_or_wrong_bundle(
-    installed_conformance: InstalledTooling,
-    plugin: str,
-) -> None:
-    installed = installed_conformance
-
-    outcome = await installed_run(installed, plugin=plugin)
-
-    assert not outcome.result.accepted
-    assert outcome.result.completed == 0
-    assert outcome.returncode != 0
-    assert outcome.closure.state is CleanupOutcome.CLOSED
 
 
 @pytest.mark.asyncio

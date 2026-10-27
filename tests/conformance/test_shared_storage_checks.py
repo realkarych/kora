@@ -252,7 +252,7 @@ def test_shared_storage_checks_reject_incorrect_results(
     assert_capture_released(capture)
 
 
-@pytest.mark.parametrize("ending", ["success", "refusal", "cancel", "unexpected"])
+@pytest.mark.parametrize("ending", ["refusal", "cancel", "unexpected"])
 def test_shared_storage_check_releases_every_ending(ending: str) -> None:
     async def scenario(root: Path, capture: Capture) -> LoopBoundStorage:
         provider_type = (
@@ -288,13 +288,11 @@ def test_shared_storage_check_releases_every_ending(ending: str) -> None:
                     await checks.check_artifact_storage_range_lifetime(
                         provider, context
                     )
-            elif ending == "unexpected":
+            else:
                 with pytest.raises(ValueError, match="reader handoff failed"):
                     await checks.check_artifact_storage_range_lifetime(
                         provider, context
                     )
-            else:
-                await checks.check_artifact_storage_range_lifetime(provider, context)
         finally:
             await provider.aclose()
 

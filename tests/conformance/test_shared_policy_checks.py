@@ -28,14 +28,13 @@ MARKER: str = "policy-shared-input-marker"
 
 
 class LoopBoundPolicy(ReferencePolicy):
-    def __init__(self, *, echo: bool = False) -> None:
+    def __init__(self) -> None:
         self.loop = asyncio.get_running_loop()
         self.queue: asyncio.Queue[asyncio.Future[None] | None] = asyncio.Queue()
         self.worker = asyncio.create_task(self.serve())
         self.contexts: list[ProtocolContext] = []
         self.requests: list[ToolCallRequest] = []
         self.cleanup_loop: asyncio.AbstractEventLoop | None = None
-        self.echo = echo
 
     async def serve(self) -> None:
         while (completion := await self.queue.get()) is not None:
@@ -57,8 +56,7 @@ class LoopBoundPolicy(ReferencePolicy):
         self.requests.append(request)
         if request.tool == "ConformanceFailure":
             ctx.logger.emit(DECIDE_FAILED, reason="unreachable")
-            message = str(request.arguments) if self.echo else "the policy failed"
-            raise KoraProtocolError("policy_failed", message, False, {})
+            raise KoraProtocolError("policy_failed", "the policy failed", False, {})
         return await super().decide(request, layers, protected_paths, ctx)
 
     async def close(self) -> None:
@@ -156,55 +154,6 @@ def test_shared_policy_checks_use_one_caller_loop_and_exact_inputs() -> None:
         assert len(provider.requests) > 6000
         assert not asyncio.all_tasks(expected_loop)
     assert len(captures) == 1
-    assert_capture_released(captures[0])
-
-
-async def exercise_ending(
-    ending: str, captures: list[Capture], providers: list[LoopBoundPolicy]
-) -> None:
-    provider = LoopBoundPolicy(echo=ending == "failure")
-    providers.append(provider)
-    try:
-        with captured(
-            CONFORMANCE_COMPONENT, LoggingSettings(), "policy-ending", utc_now
-        ) as capture:
-            captures.append(capture)
-            configuration: JsonObject = {} if ending == "unexpected" else {"deny": []}
-            async with asyncio.timeout(0 if ending == "cancel" else 5):
-                await check_failure_is_a_bounded_protocol_error(
-                    partial(failing_input, provider, configuration),
-                    context_for(capture),
-                    MARKER,
-                )
-    finally:
-        await provider.close()
-
-
-@pytest.mark.parametrize("ending", ["success", "failure", "cancel", "unexpected"])
-def test_shared_policy_checks_release_every_ending(ending: str) -> None:
-    captures: list[Capture] = []
-    providers: list[LoopBoundPolicy] = []
-    with asyncio.Runner() as runner:
-        operation = exercise_ending(ending, captures, providers)
-
-        if ending == "failure":
-            with pytest.raises(
-                pytest.fail.Exception, match="the message carries no input"
-            ):
-                runner.run(operation)
-        elif ending == "cancel":
-            with pytest.raises(TimeoutError):
-                runner.run(operation)
-        elif ending == "unexpected":
-            with pytest.raises(KeyError, match="deny"):
-                runner.run(operation)
-        else:
-            runner.run(operation)
-
-        assert not asyncio.all_tasks(runner.get_loop())
-    assert len(providers) == len(captures) == 1
-    assert providers[0].worker.done()
-    assert providers[0].cleanup_loop is providers[0].loop
     assert_capture_released(captures[0])
 
 

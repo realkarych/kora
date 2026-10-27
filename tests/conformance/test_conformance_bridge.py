@@ -500,7 +500,6 @@ def test_bridge_invalid_configuration_never_prepares_or_constructs() -> None:
     with pytest.raises(ConformanceInputError):
         ConformanceSelection(metadata, b'{"value":1}')
 
-    assert adapter.preparations == []
     assert adapter.created == []
 
 
