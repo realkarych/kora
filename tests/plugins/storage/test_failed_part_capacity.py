@@ -48,7 +48,7 @@ def test_prefix_admission_charges_the_failed_part(
                 spec,
                 context,
             )
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
+            with pytest.raises(KoraProtocolError) as failed_write:
                 await provider.write_part(
                     operation(
                         provider.identity(),
@@ -65,7 +65,7 @@ def test_prefix_admission_charges_the_failed_part(
                 version=1, stage=spec.stage, source_spec=part, count=1
             )
 
-            with pytest.raises(KoraProtocolError, match="storage_capacity"):
+            with pytest.raises(KoraProtocolError) as refused_prefix:
                 await provider.capture_prefix(
                     operation(provider.identity(), "prefix", "capture_prefix", capture),
                     spec.stage,
@@ -78,6 +78,8 @@ def test_prefix_admission_charges_the_failed_part(
         finally:
             await provider.aclose()
 
+        assert failed_write.value.code == "storage_conflict"
+        assert refused_prefix.value.code == "storage_capacity"
         assert reserved == 1048576
         provider.assert_closed()
 
@@ -111,7 +113,7 @@ def test_preparation_preserves_the_retained_failed_part_reservation(
                 spec,
                 context,
             )
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
+            with pytest.raises(KoraProtocolError) as failed_write:
                 await provider.write_part(
                     operation(
                         provider.identity(),
@@ -179,6 +181,7 @@ def test_preparation_preserves_the_retained_failed_part_reservation(
         finally:
             await provider.aclose()
 
+        assert failed_write.value.code == "storage_conflict"
         assert prepared.total_size == 1
         assert held == 524290
         assert counts["reserved_bytes"] == 1048578

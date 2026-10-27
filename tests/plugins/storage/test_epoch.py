@@ -7,7 +7,12 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import acknowledge_stage, seal_repeated
+from kora.conformance.storage_support import (
+    acknowledge_stage,
+    operation,
+    seal_repeated,
+    stage_spec,
+)
 from kora.plugins.storage.local import LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import MAX_COUNT
@@ -24,7 +29,6 @@ from kora.protocols.storage_models import (
     StorageMutationSet,
 )
 from tests.plugins.storage.inspection import InspectedStorage
-from tests.plugins.storage.support import operation, stage_spec
 
 
 def test_local_storage_epoch_exhaustion_preserves_cleanup(
@@ -57,7 +61,7 @@ def test_local_storage_epoch_exhaustion_preserves_cleanup(
             terminal.identity(), "absent-retire", "retire_stage", absent.stage
         )
         try:
-            with pytest.raises(KoraProtocolError, match="storage_issuer_closed"):
+            with pytest.raises(KoraProtocolError) as exhausted:
                 await terminal.begin_stage(
                     operation(
                         terminal.identity(), "absent-begin", "begin_stage", absent
@@ -103,6 +107,7 @@ def test_local_storage_epoch_exhaustion_preserves_cleanup(
         finally:
             await terminal.aclose()
 
+        assert exhausted.value.code == "storage_issuer_closed"
         assert closed.completed
         assert unavailable.state == "evidence_unavailable"
         assert released.state == "released"

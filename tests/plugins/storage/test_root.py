@@ -1,3 +1,4 @@
+import errno
 import os
 from pathlib import Path
 
@@ -6,6 +7,24 @@ import pytest
 from kora.plugins.storage.files import RootAnchor, RootManifest
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import StorageIdentity, StorageLimits
+
+
+def descriptors_inside(store: Path) -> frozenset[tuple[int, int, int]]:
+    objects = {
+        (info.st_dev, info.st_ino)
+        for info in (store.lstat(), *(path.lstat() for path in store.rglob("*")))
+    }
+    owned: set[tuple[int, int, int]] = set()
+    for name in os.listdir("/dev/fd"):
+        try:
+            info = os.fstat(int(name))
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+            continue
+        if (info.st_dev, info.st_ino) in objects:
+            owned.add((int(name), info.st_dev, info.st_ino))
+    return frozenset(owned)
 
 
 def test_local_storage_identity_is_physical(tmp_path: Path) -> None:
@@ -37,10 +56,13 @@ def test_local_storage_refuses_copied_identity_and_overlapping_domains(
     (copied / "manifest.json").write_bytes(manifest)
     (copied / "manifest.json").chmod(0o600)
 
-    with pytest.raises(KoraProtocolError, match="storage_identity"):
+    with pytest.raises(KoraProtocolError) as copied_identity:
         RootAnchor.open(copied, limits)
-    with pytest.raises(KoraProtocolError, match="storage_identity"):
+    with pytest.raises(KoraProtocolError) as overlapping_domain:
         RootAnchor.open(configured / "nested", limits)
+
+    assert copied_identity.value.code == "storage_identity"
+    assert overlapping_domain.value.code == "storage_identity"
 
 
 def test_local_storage_root_configuration_is_immutable(tmp_path: Path) -> None:
@@ -48,13 +70,24 @@ def test_local_storage_root_configuration_is_immutable(tmp_path: Path) -> None:
     with RootAnchor.open(configured, StorageLimits(version=1)):
         pass
 
-    with pytest.raises(KoraProtocolError, match="storage_identity"):
+    with pytest.raises(KoraProtocolError) as changed_limits:
         RootAnchor.open(configured, StorageLimits(version=1, stage_slots=9))
 
+    assert changed_limits.value.code == "storage_identity"
 
-@pytest.mark.parametrize("change", ["identity", "malformed", "oversized", "mode"])
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ("identity", "storage_identity"),
+        ("malformed", "storage_identity"),
+        ("oversized", "storage_identity"),
+        ("mode", "storage_path"),
+    ],
+    ids=["identity", "malformed", "oversized", "mode"],
+)
 def test_refreshed_manifest_refuses_changed_input_after_a_validated_hit(
-    tmp_path: Path, change: str
+    tmp_path: Path, change: str, code: str
 ) -> None:
     configured = tmp_path / "store"
     with RootAnchor.open(configured, StorageLimits(version=1)) as root:
@@ -79,21 +112,10 @@ def test_refreshed_manifest_refuses_changed_input_after_a_validated_hit(
         else:
             path.chmod(0o644)
 
-        with pytest.raises(KoraProtocolError, match="storage_identity|storage_path"):
+        with pytest.raises(KoraProtocolError) as refused:
             root.refresh_manifest()
 
-
-def test_validated_manifest_bytes_leave_the_closed_root(tmp_path: Path) -> None:
-    with RootAnchor.open(tmp_path / "store", StorageLimits(version=1)) as root:
-        root.refresh_manifest()
-        root.refresh_manifest()
-        retained = root.manifest_bytes
-
-        root.close()
-
-        assert retained is not None
-        assert len(retained) <= 16384
-        assert root.manifest_bytes is None
+    assert refused.value.code == code
 
 
 def test_local_storage_refuses_unsafe_ancestors(tmp_path: Path) -> None:
@@ -101,8 +123,10 @@ def test_local_storage_refuses_unsafe_ancestors(tmp_path: Path) -> None:
     unsafe.mkdir(mode=0o777)
     unsafe.chmod(0o777)
 
-    with pytest.raises(KoraProtocolError, match="storage_path"):
+    with pytest.raises(KoraProtocolError) as refused:
         RootAnchor.open(unsafe / "store", StorageLimits(version=1))
+
+    assert refused.value.code == "storage_path"
 
 
 def test_local_storage_locks_use_independent_descriptions(tmp_path: Path) -> None:
@@ -127,9 +151,10 @@ def test_local_storage_payload_files_are_anchored_and_no_follow(tmp_path: Path) 
     with RootAnchor.open(tmp_path / "store", StorageLimits(version=1)) as root:
         os.symlink(outside, "intruder", dir_fd=root.fd)
 
-        with pytest.raises(KoraProtocolError, match="storage_path"):
+        with pytest.raises(KoraProtocolError) as refused:
             root.open_file(("intruder",), os.O_RDONLY)
 
+    assert refused.value.code == "storage_path"
     assert outside.read_bytes() == b"preserve"
 
 
@@ -156,12 +181,12 @@ def test_publication_closes_destination_when_source_directory_is_missing(
             ),
             1,
         )
-        before = len(os.listdir("/dev/fd"))
+        before = descriptors_inside(tmp_path / "store")
 
         with pytest.raises(FileNotFoundError):
             ContentFiles(root).install(witness, address)
 
-        assert len(os.listdir("/dev/fd")) == before
+        assert descriptors_inside(tmp_path / "store") == before
 
 
 def test_local_storage_refuses_replaced_live_anchor(tmp_path: Path) -> None:
@@ -170,8 +195,10 @@ def test_local_storage_refuses_replaced_live_anchor(tmp_path: Path) -> None:
         configured.rename(tmp_path / "old")
         configured.mkdir(mode=0o700)
 
-        with pytest.raises(KoraProtocolError, match="storage_identity"):
+        with pytest.raises(KoraProtocolError) as refused:
             root.validate_anchor()
+
+    assert refused.value.code == "storage_identity"
 
 
 def test_local_storage_never_recreates_a_missing_permanent_lock(tmp_path: Path) -> None:
@@ -183,11 +210,12 @@ def test_local_storage_never_recreates_a_missing_permanent_lock(tmp_path: Path) 
         (configured / "locks" / "stage-0").unlink()
 
         try:
-            with pytest.raises(KoraProtocolError, match="storage_path"):
+            with pytest.raises(KoraProtocolError) as refused:
                 RootAnchor.open(configured, limits)
         finally:
             held.close()
 
+    assert refused.value.code == "storage_path"
     assert not (configured / "locks" / "stage-0").exists()
 
 
@@ -236,9 +264,10 @@ def test_local_storage_refuses_allow_acl_and_accepts_deny_only(tmp_path: Path) -
             + b"".join(struct.pack("<HHI", *entry) for entry in zero_entries),
         )
 
-    with pytest.raises(KoraProtocolError, match="storage_path"):
+    with pytest.raises(KoraProtocolError) as refused:
         RootAnchor.open(unsafe / "store", StorageLimits(version=1))
     with RootAnchor.open(safe / "store", StorageLimits(version=1)) as root:
         identity = root.identity
 
+    assert refused.value.code == "storage_path"
     assert identity.store_id

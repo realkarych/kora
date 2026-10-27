@@ -3,11 +3,11 @@ from pathlib import Path
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
+from kora.conformance.storage_support import operation, stage_spec
 from kora.plugins.storage.local import LocalArtifactStorage
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import ProtocolName
 from kora.protocols.storage_models import StorageLimits
-from tests.plugins.storage.support import operation, stage_spec
 
 
 def test_installed_local_storage_loads_and_uses_validated_configuration(

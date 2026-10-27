@@ -4,16 +4,16 @@ from pathlib import Path
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
-from kora.protocols.storage_models import StageWrite, StorageLimits
-from tests.plugins.storage.activity import StorageBarrierActivity
-from tests.plugins.storage.support import (
+from kora.conformance.storage_support import (
     BytesSource,
     operation,
     single_manifest,
     single_part,
     stage_spec,
 )
+from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.protocols.storage_models import StageWrite, StorageLimits
+from tests.plugins.storage.activity import StorageBarrierActivity
 
 
 def test_exact_seal_contender_returns_original_after_stage_closes(

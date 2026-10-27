@@ -6,10 +6,10 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
+from kora.conformance.storage_support import operation, stage_spec
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import StorageLimits
-from tests.plugins.storage.support import operation, stage_spec
 
 
 def test_provider_private_control_refuses_existing_metadata_directory(
@@ -30,9 +30,10 @@ def test_provider_private_control_refuses_existing_metadata_directory(
         root=str(root), limits=StorageLimits(version=1)
     )
 
-    with pytest.raises(KoraProtocolError, match="storage_identity"):
+    with pytest.raises(KoraProtocolError) as refused:
         LocalArtifactStorage(configuration)
 
+    assert refused.value.code == "storage_identity"
     assert database.read_bytes() == before
     assert not (root / "control.sqlite").exists()
 
@@ -93,11 +94,12 @@ def test_corrupt_saved_outcome_is_a_content_free_integrity_error(
         restarted = LocalArtifactStorage(configuration)
 
         try:
-            with pytest.raises(KoraProtocolError, match="storage_integrity") as caught:
+            with pytest.raises(KoraProtocolError) as caught:
                 await restarted.observe(begin, context)
         finally:
             await restarted.aclose()
 
+        assert caught.value.code == "storage_integrity"
         assert "corrupt-saved-content" not in str(caught.value)
         assert not caught.value.retryable
 

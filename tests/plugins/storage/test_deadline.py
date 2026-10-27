@@ -7,13 +7,17 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import acknowledge_stage, seal_repeated
+from kora.conformance.storage_support import (
+    acknowledge_stage,
+    operation,
+    seal_repeated,
+    stage_spec,
+)
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import StorageLimits
 from tests.plugins.storage.clock import StorageClock
-from tests.plugins.storage.support import operation, stage_spec
 
 
 def test_expired_storage_call_preserves_replay_and_cleanup(
@@ -41,9 +45,9 @@ def test_expired_storage_call_preserves_replay_and_cleanup(
         begin = operation(provider.identity(), "expired", "begin_stage", spec)
 
         try:
-            with pytest.raises(KoraProtocolError, match="storage_deadline"):
+            with pytest.raises(KoraProtocolError) as expired_begin:
                 await provider.begin_stage(begin, spec, expired)
-            with pytest.raises(KoraProtocolError, match="storage_deadline"):
+            with pytest.raises(KoraProtocolError) as expired_read:
                 await provider.read_stage(upload.content, expired)
             saved = await provider.observe(upload.operations[0], expired)
             release = await acknowledge_stage(
@@ -54,6 +58,8 @@ def test_expired_storage_call_preserves_replay_and_cleanup(
         finally:
             await provider.aclose()
 
+        assert expired_begin.value.code == "storage_deadline"
+        assert expired_read.value.code == "storage_deadline"
         assert saved.state == "settled"
         assert released.state == "released"
         assert inventory.entries == ()

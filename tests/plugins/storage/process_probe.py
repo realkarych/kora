@@ -7,6 +7,7 @@ from multiprocessing.connection import Connection
 
 from kora.conformance.capture import captured
 from kora.conformance.common import CONFORMANCE_COMPONENT, context_for, utc_now
+from kora.conformance.storage_support import digest, operation, seal_bytes
 from kora.observability import LoggingSettings
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.storage_models import (
@@ -15,7 +16,6 @@ from kora.protocols.storage_models import (
     PromotionRequest,
     StorageLimits,
 )
-from tests.plugins.storage.support import digest, operation, seal_bytes
 
 
 class ProcessBarrierActivity:

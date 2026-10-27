@@ -8,13 +8,13 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
+from kora.conformance.storage_support import seal_bytes
 from kora.plugins.storage.files import RootAnchor
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.plugins.storage.readers import ReaderManager
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import StorageLimits
 from tests.plugins.storage.activity import StorageBarrierActivity
-from tests.plugins.storage.support import seal_bytes
 
 
 def test_reader_ticket_closes_when_owner_lock_refuses(
@@ -31,7 +31,7 @@ def test_reader_ticket_closes_when_owner_lock_refuses(
             (configured / "locks" / "stage-0").unlink()
 
             try:
-                with pytest.raises(KoraProtocolError, match="storage_path"):
+                with pytest.raises(KoraProtocolError) as refused:
                     await readers.open(
                         (), "stage-0", lambda: None, 0, 0, context_for(kora_capture)
                     )
@@ -39,6 +39,7 @@ def test_reader_ticket_closes_when_owner_lock_refuses(
             finally:
                 await provider.aclose()
 
+            assert refused.value.code == "storage_path"
             assert available is not None
             available.close()
             assert readers.handles == 0
@@ -67,8 +68,9 @@ def test_stream_reads_obey_root_data_work_admission(
 
             try:
                 assert all(lease is not None for lease in held)
-                with pytest.raises(KoraProtocolError, match="storage_busy"):
+                with pytest.raises(KoraProtocolError) as refused:
                     await reader.read(1)
+                assert refused.value.code == "storage_busy"
             finally:
                 for lease in held:
                     if lease is not None:
@@ -93,7 +95,7 @@ def test_reader_validation_refusal_closes_both_acquired_leases(
             (configured / "manifest.json").write_bytes(b'{"version":1}')
 
             try:
-                with pytest.raises(KoraProtocolError, match="storage_identity"):
+                with pytest.raises(KoraProtocolError) as refused:
                     await readers.open(
                         (),
                         "stage-0",
@@ -105,6 +107,7 @@ def test_reader_validation_refusal_closes_both_acquired_leases(
                 reader = anchor.try_lock("reader-0")
                 owner = anchor.try_lock("stage-0")
                 try:
+                    assert refused.value.code == "storage_identity"
                     assert reader is not None
                     assert owner is not None
                     assert readers.handles == 0
@@ -143,9 +146,9 @@ def test_provider_shutdown_closes_all_readers_after_read_failure(
         closing = asyncio.create_task(provider.aclose())
         await asyncio.wait_for(barrier.close_started.wait(), timeout=5)
         barrier.released.set()
-        with pytest.raises(KoraProtocolError, match="storage_integrity"):
+        with pytest.raises(KoraProtocolError) as failed_read:
             await reading
-        with pytest.raises(BaseExceptionGroup):
+        with pytest.raises(BaseExceptionGroup) as closure:
             await asyncio.wait_for(closing, timeout=5)
         lifetime = os.open(configured / "locks" / "lifetime", os.O_RDWR)
         try:
@@ -153,6 +156,15 @@ def test_provider_shutdown_closes_all_readers_after_read_failure(
         finally:
             os.close(lifetime)
 
+        assert failed_read.value.code == "storage_integrity"
+        assert [type(failure) for failure in closure.value.exceptions] == [
+            KoraProtocolError
+        ]
+        assert [
+            failure.code
+            for failure in closure.value.exceptions
+            if isinstance(failure, KoraProtocolError)
+        ] == ["storage_integrity"]
         assert await retained.read(1) == b""
 
     asyncio.run(scenario())

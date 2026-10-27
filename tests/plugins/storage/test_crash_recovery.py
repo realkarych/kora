@@ -8,6 +8,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
+from kora.conformance.storage_support import operation
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.storage_models import (
     NoEffectFailure,
@@ -15,7 +16,6 @@ from kora.protocols.storage_models import (
     PromotionResult,
     StorageLimits,
 )
-from tests.plugins.storage.support import operation
 
 
 @pytest.mark.parametrize(

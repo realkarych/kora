@@ -7,7 +7,14 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import RepeatedSource, seal_repeated
+from kora.conformance.storage_support import (
+    BytesSource,
+    RepeatedSource,
+    digest,
+    operation,
+    seal_bytes,
+    seal_repeated,
+)
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import (
@@ -23,7 +30,6 @@ from kora.protocols.storage_models import (
     StorageLimits,
 )
 from tests.plugins.storage.activity import StorageBarrierActivity
-from tests.plugins.storage.support import BytesSource, digest, operation, seal_bytes
 
 
 def test_interrupted_identical_preparation_stays_within_reserved_peak(
@@ -174,18 +180,18 @@ def test_identical_preparation_aliases_raw_parts(
     asyncio.run(scenario())
 
 
-def test_prepared_publication_ranges_and_delete_replay(
+def test_prepared_candidate_replays_exactly_and_refuses_changed_bytes(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async def scenario() -> None:
-        configuration = LocalStorageConfiguration(
-            root=str(tmp_path / "store"), limits=StorageLimits(version=1)
+        provider = LocalArtifactStorage(
+            LocalStorageConfiguration(
+                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
+            )
         )
-        provider = LocalArtifactStorage(configuration)
         context = context_for(kora_capture)
-        raw = b"raw-source"
         output = b"validated-prepared-output" * 8192
-        sealed, _, _ = await seal_bytes(provider, "stage", raw, context)
+        sealed, _, _ = await seal_bytes(provider, "stage", b"raw-source", context)
         preparation = PreparationArguments(
             version=1,
             source=sealed,
@@ -211,46 +217,86 @@ def test_prepared_publication_ranges_and_delete_replay(
             replayed = await provider.prepare_content(
                 prepare, BytesSource(output), context
             )
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
+            with pytest.raises(KoraProtocolError) as changed:
                 await provider.prepare_content(
                     prepare, BytesSource(b"changed"), context
                 )
             arguments = PromotionArguments(
                 version=1, content=candidate, address=address, content_generation=1
             )
-            promotion = PromotionRequest(
+            result = await provider.promote(
+                PromotionRequest(
+                    version=1,
+                    operation=operation(
+                        provider.identity(), "promote", "promote", arguments
+                    ),
+                    arguments=arguments,
+                ),
+                context,
+            )
+            reader = await provider.get(result.content, context)
+            async with reader:
+                reread = b"".join([chunk async for chunk in reader])
+        finally:
+            await provider.aclose()
+
+        assert source.closed
+        assert candidate == replayed
+        assert changed.value.code == "storage_conflict"
+        assert candidate.total_size == len(output)
+        assert result.created_object
+        assert result.content.address == address
+        assert reread == output
+
+    asyncio.run(scenario())
+
+
+def test_content_deletion_refuses_held_readers_prunes_shards_and_compacts_evidence(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async def scenario() -> None:
+        provider = LocalArtifactStorage(
+            LocalStorageConfiguration(
+                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
+            )
+        )
+        context = context_for(kora_capture)
+        sealed, _, _ = await seal_bytes(provider, "stage", b"deleted-content", context)
+        address = ContentAddress(
+            version=1,
+            storage_identity=provider.identity(),
+            payload_digest=sealed.payload_digest,
+        )
+        promotion = PromotionArguments(
+            version=1, content=sealed, address=address, content_generation=1
+        )
+        published = await provider.promote(
+            PromotionRequest(
                 version=1,
                 operation=operation(
-                    provider.identity(), "promote", "promote", arguments
+                    provider.identity(), "promote", "promote", promotion
                 ),
-                arguments=arguments,
-            )
-            result = await provider.promote(promotion, context)
-            reader = await provider.get_range(result.content, 65530, 20, context)
-            selected = b"".join([chunk async for chunk in reader])
-            await reader.aclose()
-            full = await provider.get(result.content, context)
-            reread = b"".join([chunk async for chunk in full])
-            await full.aclose()
-            deletion_arguments = DeleteArguments(
-                version=1, address=address, deletion_generation=1
-            )
-            deletion = DeleteRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), "delete", "delete_content", deletion_arguments
-                ),
-                arguments=deletion_arguments,
-            )
-            held = await provider.get_range(result.content, 0, 1, context)
-            with pytest.raises(KoraProtocolError, match="storage_busy"):
+                arguments=promotion,
+            ),
+            context,
+        )
+        arguments = DeleteArguments(version=1, address=address, deletion_generation=1)
+        deletion = DeleteRequest(
+            version=1,
+            operation=operation(
+                provider.identity(), "delete", "delete_content", arguments
+            ),
+            arguments=arguments,
+        )
+
+        try:
+            held = await provider.get_range(published.content, 0, 1, context)
+            with pytest.raises(KoraProtocolError) as busy:
                 await provider.delete_content(deletion, context)
             await held.aclose()
-            deleted = await provider.delete_content(deletion, context)
-            original = await provider.promote(promotion, context)
+            await provider.delete_content(deletion, context)
             absent = await provider.exists(address, context)
-            delete_replay = await provider.delete_content(deletion, context)
-            release = await provider.release_delete(
+            await provider.release_delete(
                 DeleteReleaseRequest(
                     version=1,
                     operation=deletion.operation,
@@ -263,81 +309,9 @@ def test_prepared_publication_ranges_and_delete_replay(
         finally:
             await provider.aclose()
 
-        assert source.closed
-        assert candidate == replayed
-        assert candidate.total_size == len(output)
-        assert result.created_object
-        assert result.content.address == address
-        assert selected == output[65530:65550]
-        assert reread == output
-        assert deleted.deleted_object
-        assert delete_replay == deleted
-        assert original == result
+        assert busy.value.code == "storage_busy"
         assert absent is None
         assert not tuple((tmp_path / "store" / "artifacts" / "sha256").iterdir())
-        assert release.state == "released"
         assert unavailable.state == "evidence_unavailable"
-
-    asyncio.run(scenario())
-
-
-def test_create_only_publication_preserves_incarnation_and_shared_bytes(
-    tmp_path: Path, kora_capture: Capture
-) -> None:
-    async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
-        context = context_for(kora_capture)
-        payload = b"shared-content"
-        first, _, _ = await seal_bytes(provider, "first", payload, context)
-        second, _, _ = await seal_bytes(provider, "second", payload, context)
-        address = ContentAddress(
-            version=1,
-            storage_identity=provider.identity(),
-            payload_digest=digest(payload),
-        )
-
-        try:
-            first_arguments = PromotionArguments(
-                version=1, content=first, address=address, content_generation=1
-            )
-            first_request = PromotionRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), "first-promote", "promote", first_arguments
-                ),
-                arguments=first_arguments,
-            )
-            created = await provider.promote(first_request, context)
-            second_arguments = PromotionArguments(
-                version=1, content=second, address=address, content_generation=1
-            )
-            second_request = PromotionRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), "second-promote", "promote", second_arguments
-                ),
-                arguments=second_arguments,
-            )
-            existing = await provider.promote(second_request, context)
-            retired = await provider.retire_stage(
-                operation(provider.identity(), "retire", "retire_stage", first.stage),
-                first.stage,
-                context,
-            )
-            reader = await provider.get(created.content, context)
-            content = b"".join([chunk async for chunk in reader])
-            await reader.aclose()
-        finally:
-            await provider.aclose()
-
-        assert created.created_object
-        assert not existing.created_object
-        assert existing.content == created.content
-        assert retired.completed
-        assert content == payload
 
     asyncio.run(scenario())

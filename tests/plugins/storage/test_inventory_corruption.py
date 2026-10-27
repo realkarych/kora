@@ -32,9 +32,11 @@ def test_inventory_refuses_malformed_persisted_content_as_integrity_error(
 
     async def scenario() -> None:
         try:
-            with pytest.raises(KoraProtocolError, match="storage_integrity"):
+            with pytest.raises(KoraProtocolError) as refused:
                 await provider.scan("content", None, 128, context)
         finally:
             await provider.aclose()
+
+        assert refused.value.code == "storage_integrity"
 
     asyncio.run(scenario())

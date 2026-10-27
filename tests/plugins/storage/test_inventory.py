@@ -5,6 +5,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
+from kora.conformance.storage_support import operation, stage_spec
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import (
@@ -15,7 +16,6 @@ from kora.protocols.storage_models import (
     StorageScanEntry,
 )
 from tests.plugins.storage.lifetime_boundaries import check_inventory_position
-from tests.plugins.storage.support import operation, stage_spec
 
 
 @pytest.mark.parametrize(
@@ -91,13 +91,15 @@ def test_local_storage_inventory_page_fits_metadata_envelope(
             all_entries = await provider.scan("stages", None, 128, context)
             assert first.next_cursor is not None
             wrong = first.next_cursor.model_copy(update={"kind": "content"})
-            with pytest.raises(KoraProtocolError, match="storage_conflict"):
+            with pytest.raises(KoraProtocolError) as wrong_kind:
                 await provider.scan("stages", wrong, 7, context)
-            with pytest.raises(KoraProtocolError, match="storage_range"):
+            with pytest.raises(KoraProtocolError) as boolean_limit:
                 await provider.scan("stages", None, True, context)
         finally:
             await provider.aclose()
 
+        assert wrong_kind.value.code == "storage_conflict"
+        assert boolean_limit.value.code == "storage_range"
         assert tuple(entry.key for entry in first.entries) == keys[:7]
         assert tuple(entry.key for entry in second.entries) == keys[7:14]
         assert tuple(entry.key for entry in all_entries.entries) == keys

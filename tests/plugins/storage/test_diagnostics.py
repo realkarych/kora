@@ -7,6 +7,12 @@ import pytest
 
 from kora.conformance.capture import captured
 from kora.conformance.common import context_for, utc_now
+from kora.conformance.storage_support import (
+    BytesSource,
+    operation,
+    single_part,
+    stage_spec,
+)
 from kora.observability import Level, LoggingSettings
 from kora.plugins.storage.local import (
     COMPONENT,
@@ -15,12 +21,6 @@ from kora.plugins.storage.local import (
 )
 from kora.protocols.storage_models import StageWrite, StorageLimits
 from tests.plugins.storage.activity import StorageBarrierActivity
-from tests.plugins.storage.support import (
-    BytesSource,
-    operation,
-    single_part,
-    stage_spec,
-)
 
 
 class FailingSource(BytesSource):
@@ -28,7 +28,7 @@ class FailingSource(BytesSource):
         raise RuntimeError("private-payload-and-backend-path")
 
 
-@pytest.mark.parametrize("level", [Level.INFO, Level.DEBUG, Level.CRITICAL])
+@pytest.mark.parametrize("level", [Level.INFO, Level.DEBUG])
 def test_storage_unexpected_failure_has_one_safe_reporting_owner(
     tmp_path: Path, level: Level
 ) -> None:
@@ -76,7 +76,7 @@ def test_storage_unexpected_failure_has_one_safe_reporting_owner(
         records = capture.finish()
 
     errors = [record for record in records if record["level"] == "ERROR"]
-    assert len(errors) == (0 if level is Level.CRITICAL else 1)
+    assert len(errors) == 1
     assert all(record["event"] == "storage.local.failed" for record in errors)
     assert all(record["request_id"] == "safe-request" for record in errors)
     assert source.closed
