@@ -310,6 +310,25 @@ MALFORMED_CLOSURES: dict[str, JsonValue] = {
         },
         "$defs": {"x": {"type": "string"}},
     },
+    "resource_on_pointer_path": {
+        "type": "object",
+        "$defs": {
+            "c": {"type": "integer"},
+            "E": {
+                "$id": "urn:kora:artifact:embedded",
+                "$defs": {"c": {"type": "string"}},
+                "type": "object",
+                "properties": {"x": {"$ref": "#/$defs/c"}},
+            },
+        },
+        "properties": {"m": {"$ref": "#/$defs/E/properties/x"}},
+        "required": ["m"],
+    },
+    "non_schema_pattern": {
+        "patternProperties": {"^x": 5},
+        "additionalProperties": False,
+    },
+    "malformed_enum_beside_const": {"const": "a", "enum": 5},
     "null_reference": {"$ref": None},
     "null_type": {"type": None},
     "null_enum": {"enum": None},
@@ -481,3 +500,32 @@ def test_cel_schema_types_refuse_again_after_a_closure_fault() -> None:
     result = types.document(valid)
 
     assert result == Record({"a": RecordField(INT, False)})
+
+
+def test_cel_schema_types_forget_partial_types_after_a_resolver_failure() -> None:
+    documents: dict[str, JsonValue] = {}
+    faulty: JsonValue = {
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"$ref": CANDIDATE}},
+        "required": ["a", "b"],
+    }
+    types = SchemaTypes(documents.__getitem__)
+
+    with pytest.raises(KeyError):
+        types.document(faulty)
+    with pytest.raises(KeyError):
+        types.document(faulty)
+
+
+def test_cel_schema_types_resolve_each_document_against_its_own_root() -> None:
+    inner: JsonValue = {"$ref": "#/$defs/n"}
+    parent: JsonValue = {
+        "$defs": {"n": {"type": "integer"}},
+        "type": "object",
+        "properties": {"p": inner},
+    }
+    types = SchemaTypes(no_documents)
+    types.document(parent)
+
+    with pytest.raises(SchemaError):
+        types.document(inner)
