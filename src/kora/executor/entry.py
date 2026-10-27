@@ -25,6 +25,7 @@ from kora.executor.digests import (
 from kora.executor.failures import (
     ExecutorError,
     Phase,
+    deadline_due,
     invalid,
     misconfigured,
     unavailable,
@@ -336,15 +337,18 @@ class Executor:
         candidate = require_area(areas.candidate, Phase.SEAL)
         publication = require_area(areas.publication, Phase.SEAL)
         bounds = self.settings.seal
-        sealed = await guard.within(
-            SEAL_BOUND_NS,
-            Phase.SEAL,
-            lambda: off_loop(
-                lambda cancelled: seal_sync(
-                    workspace.attempt_id, candidate, publication, bounds, cancelled
-                )
-            ),
-        )
+        remaining_ns = guard.bound_ns(SEAL_BOUND_NS, Phase.SEAL)
+        try:
+            sealed = await asyncio.wait_for(
+                off_loop(
+                    lambda cancelled: seal_sync(
+                        workspace.attempt_id, candidate, publication, bounds, cancelled
+                    )
+                ),
+                remaining_ns / NANOSECONDS_PER_SECOND,
+            )
+        except TimeoutError:
+            deadline_due(Phase.SEAL)
         ctx.logger.emit(PHASE_FINISHED, phase=Phase.SEAL.value, outcome="sealed")
         return sealed
 

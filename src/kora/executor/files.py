@@ -19,13 +19,9 @@ PRIVATE_MODE: Final[int] = 0o700
 NAME_BYTES: Final[int] = 8
 
 
-def open_directory(path: Path) -> int:
-    return os.open(path, DIRECTORY_FLAGS)
-
-
 @contextmanager
 def opened(path: Path) -> Generator[int]:
-    descriptor = open_directory(path)
+    descriptor = os.open(path, DIRECTORY_FLAGS)
     try:
         yield descriptor
     finally:

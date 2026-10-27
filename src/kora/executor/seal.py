@@ -8,11 +8,11 @@ from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from pydantic import StrictBool, StrictStr, ValidationError
 
-from kora.executor.digests import Hasher, hasher_digest, input_digest, sha256_digest
+from kora.executor.digests import input_digest, sha256_digest
 from kora.executor.failures import ExecutorError, Phase, unavailable
 from kora.executor.files import (
     DIRECTORY_FLAGS,
@@ -52,6 +52,12 @@ OBJECT_ID_LENGTHS: Final[frozenset[int]] = frozenset({40, 64})
 HEX: Final[frozenset[str]] = frozenset("0123456789abcdef")
 MAX_HEAD_BYTES: Final[int] = 4096
 PATH_REFUSED: Final[str] = "sealed_path_refused"
+
+
+class Hasher(Protocol):
+    def update(self, data: bytes, /) -> None: ...
+
+    def hexdigest(self) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -239,7 +245,7 @@ def copy_stream(
 def close_chunk(writer: SealedWriter) -> None:
     if writer.chunk_descriptor >= 0 and writer.chunk_hash is not None:
         os.close(writer.chunk_descriptor)
-        writer.chunk_digests.append(hasher_digest(writer.chunk_hash))
+        writer.chunk_digests.append("sha256:" + writer.chunk_hash.hexdigest())
         writer.chunk_descriptor = -1
         writer.chunk_hash = None
 
@@ -311,7 +317,7 @@ def copy_into_chunk(
     if copied != size:
         raise refused("sealed_input_changed")
     writer.chunk_size += copied
-    return position, hasher_digest(file_hash)
+    return position, "sha256:" + file_hash.hexdigest()
 
 
 def seal_symlink(writer: SealedWriter, parent: int, name: str, path: str) -> None:
@@ -424,7 +430,7 @@ def copy_bundle(
             copy_stream(source, target, bounds.max_bundle_bytes, cancelled, [digest])
         finally:
             os.close(target)
-        return hasher_digest(digest)
+        return "sha256:" + digest.hexdigest()
 
 
 def seal_sync(
@@ -482,7 +488,7 @@ def file_digest(
             if size > limit:
                 unavailable("publication_input_unavailable", Phase.SEAL)
             digest.update(block)
-        return hasher_digest(digest)
+        return "sha256:" + digest.hexdigest()
     finally:
         os.close(descriptor)
 
