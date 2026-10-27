@@ -35,7 +35,7 @@ from kora.protocols.metadata import ProtocolName
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
 from tests.support.configured_conformance import (
     installed_conformance as installed_conformance,
 )
@@ -114,7 +114,7 @@ async def installed_run(
 ) -> Outcome:
     with TemporaryDirectory(prefix="kora-invoke-", dir="/tmp") as temporary:
         base = Path(temporary).resolve()
-        clock = ControlledLifetimeClock()
+        clock = ProbeClock()
         owner = ParentLifetime(
             clock=clock,
             launcher=InstalledIOHelperLauncher(home=base, state_home=base / "state"),
@@ -226,6 +226,10 @@ async def installed_run(
                     endpoint, _ = await loop.sock_accept(listeners[1])
                     return await drained(endpoint)
 
+                async def cleanup_time() -> None:
+                    await owner.closure_started.wait()
+                    clock.use_system_time()
+
                 async def feedback() -> tuple[int, ...]:
                     observed: list[int] = []
                     for phase in feedback_phases:
@@ -267,7 +271,8 @@ async def installed_run(
                 serving = asyncio.create_task(lifetime())
                 reading = asyncio.create_task(events())
                 observing = asyncio.create_task(feedback())
-                tasks.extend((serving, reading, observing))
+                progressing = asyncio.create_task(cleanup_time())
+                tasks.extend((serving, reading, observing, progressing))
                 endpoint, _ = await asyncio.wait_for(loop.sock_accept(listeners[0]), 30)
                 channel = BoundedChannel(endpoint, SystemClock())
                 try:
@@ -392,6 +397,47 @@ async def installed_run(
                 ]
                 if failures:
                     raise BaseExceptionGroup("installed harness tasks failed", failures)
+
+
+@pytest.mark.asyncio
+async def test_installed_conformance_stops_teardown_without_a_result(
+    installed_conformance: InstalledTooling,
+) -> None:
+    with TemporaryDirectory(prefix="kora-teardown-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        feedback = root / "feedback"
+        data = root / "data.json"
+        config = root / "config.json"
+        config.write_text(json.dumps({"value": "private-secret-value"}))
+        data.write_text(
+            json.dumps({"mode": "delayed_teardown", "feedback": str(feedback)})
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(feedback))
+            listener.listen(1)
+            listener.setblocking(False)
+            operation = asyncio.create_task(
+                installed_run(
+                    installed_conformance,
+                    plugin="fixtures_command",
+                    files=InputFiles(configuration=str(config), fixture_data=str(data)),
+                )
+            )
+            try:
+                loop = asyncio.get_running_loop()
+                endpoint, _ = await asyncio.wait_for(loop.sock_accept(listener), 30)
+                with endpoint:
+                    barrier = await asyncio.wait_for(loop.sock_recv(endpoint, 32), 30)
+                    assert barrier == b"teardown"
+
+                    with pytest.raises(ChannelError):
+                        await asyncio.wait_for(asyncio.shield(operation), 20)
+
+                    assert await asyncio.wait_for(loop.sock_recv(endpoint, 1), 5) == b""
+                    assert operation.done()
+            finally:
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
 
 
 @pytest.mark.asyncio
