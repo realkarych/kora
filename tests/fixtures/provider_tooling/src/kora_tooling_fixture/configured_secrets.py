@@ -78,8 +78,35 @@ class ConfiguredSecrets:
         assert self.worker.done()
 
 
-def construct(value: str, mode: str) -> ConfiguredSecrets:
-    return ConfiguredSecrets(value, mode)
+class WrappedSecrets:
+    name: str = "configured"
+
+    def __init__(self, provider: ConfiguredSecrets) -> None:
+        self.provider = provider
+
+    @property
+    def config_schema(self) -> JsonObject:
+        return self.provider.config_schema
+
+    @property
+    def value(self) -> str:
+        return self.provider.value
+
+    def capabilities(self) -> SecretsCapabilities:
+        return self.provider.capabilities()
+
+    async def resolve(self, reference: str, ctx: ProtocolContext) -> SecretValue:
+        return await self.provider.resolve(reference, ctx)
+
+    async def list_names(self, prefix: str) -> list[str]:
+        return await self.provider.list_names(prefix)
+
+    async def close(self) -> None:
+        await self.provider.close()
+
+
+def construct(value: str, mode: str) -> WrappedSecrets:
+    return WrappedSecrets(ConfiguredSecrets(value, mode))
 
 
 def configured() -> ProviderMetadata:

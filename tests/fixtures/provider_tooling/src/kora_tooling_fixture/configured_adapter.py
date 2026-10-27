@@ -8,7 +8,7 @@ from kora.ir.json import JsonObject
 from kora.protocols.common import ProtocolContext
 from kora.protocols.lifetime import ConformanceLifetime
 from kora.protocols.secrets import SecretsProvider
-from kora_tooling_fixture.configured_secrets import REFERENCE, ConfiguredSecrets
+from kora_tooling_fixture.configured_secrets import REFERENCE, WrappedSecrets
 
 
 async def failure(
@@ -18,7 +18,7 @@ async def failure(
     marker: str,
 ) -> object:
     assert marker == MARKER
-    assert isinstance(provider, ConfiguredSecrets)
+    assert isinstance(provider, WrappedSecrets)
     assert provider.value == configuration["value"]
     return await provider.resolve("secret://fixture/absent/" + marker, context)
 
@@ -92,7 +92,7 @@ class Adapter:
         assert not self.cleaned
         self.cleaned = True
         if instance is not None:
-            assert isinstance(instance, ConfiguredSecrets)
+            assert isinstance(instance, WrappedSecrets)
             if self.instance is not None:
                 assert instance is self.instance
             await instance.close()

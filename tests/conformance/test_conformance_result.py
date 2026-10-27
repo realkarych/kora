@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from kora.conformance.capture import MAX_CAPTURE_BYTES, Pipe
 from kora.conformance.result import ChildResult, accepted_report
@@ -85,6 +86,15 @@ def test_result_requires_complete_nonempty_execution(
     accepted = result.accepted
 
     assert not accepted
+
+
+@pytest.mark.parametrize("field", ["wrapper_closed", "report_accepted"])
+@pytest.mark.parametrize("value", ["1", '"true"', '"yes"'])
+def test_result_requires_exact_boolean_evidence(field: str, value: str) -> None:
+    record = f'{{"phase":"complete","{field}":{value}}}'
+
+    with pytest.raises(ValidationError):
+        ChildResult.model_validate_json(record)
 
 
 def test_report_pipe_drains_after_its_retention_cap() -> None:

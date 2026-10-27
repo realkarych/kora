@@ -83,6 +83,9 @@ def installed_conformance() -> Generator[InstalledTooling]:
                 "secrets.configured": (
                     "kora_tooling_fixture.configured_secrets:configured"
                 ),
+                "policy.unrelated": (
+                    "kora_tooling_fixture.noisy_import:provider_metadata"
+                ),
                 "policy.configured": (
                     "kora_tooling_fixture.configured_policy:configured"
                 ),

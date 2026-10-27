@@ -1,7 +1,7 @@
 from typing import Annotated, Literal
 from xml.parsers import expat
 
-from pydantic import Field, StrictInt
+from pydantic import Field, StrictBool, StrictInt
 
 from kora.conformance.capture import MAX_CAPTURE_BYTES
 from kora.protocols.common import BoundaryModel
@@ -21,8 +21,8 @@ class ChildResult(BoundaryModel):
     expected: Annotated[StrictInt, Field(ge=0, le=18)] = 0
     completed: Annotated[StrictInt, Field(ge=0, le=18)] = 0
     pytest_status: Annotated[StrictInt, Field(ge=0, le=5)] | None = None
-    wrapper_closed: bool = False
-    report_accepted: bool = False
+    wrapper_closed: StrictBool = False
+    report_accepted: StrictBool = False
 
     @property
     def accepted(self) -> bool:
