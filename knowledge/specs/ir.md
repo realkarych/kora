@@ -476,8 +476,9 @@ These rules give `IR011`, reported at the expression's YAML path and offset:
 
 **Settled cases** (decided on [issue #330](https://github.com/realkarych/kora/issues/330)). Where the table and rules above leave a case open:
 
-- **Mapping.** Pure null outside `kora.structured-output-view.v1`, and the boolean schema `false`, are `dyn`. `$ref` and a single-schema `allOf` take their target's type; sibling keywords do not change it. Several `patternProperties` without `additionalProperties` give `dyn` map values. Local references are JSON pointers within their document and cross-type references resolve only through the saved closure; anything else is a closure fault the validator reports as `IR022` before checking. Mapping visits every schema object at most once per view and never recurses on the interpreter stack, so recursive, repeatedly referenced and deeply nested closures map in counted linear steps.
-- **Closed objects.** An object with `additionalProperties: false` declares no further keys. On an open object an undeclared key has the `additionalProperties` type, and conversion types such keys the same way.
+- **Mapping.** Pure null outside `kora.structured-output-view.v1`, and the boolean schema `false`, are `dyn`. `$ref` and a single-schema `allOf` take their target's type; sibling keywords do not change it. Local references are JSON pointers within their document and cross-type references resolve only through the saved closure. A `$id` below a document root, a malformed keyword, an unresolvable reference and a pointer index that is not canonical are closure faults the validator reports as `IR022` before checking. Mapping resolves every reference chain and visits every schema object at most once per view, and never recurses on the interpreter stack, so recursive, repeatedly referenced and deeply nested closures map in counted linear steps; a failed mapping leaves no partial types behind.
+- **Additional and pattern properties.** An object with `additionalProperties: false` and no `patternProperties` declares no further keys. Otherwise an undeclared key has the `additionalProperties` type when there are no `patternProperties`, the single pattern's type when `additionalProperties` is `false` and exactly one pattern exists, and `dyn` in every other case; a map without `properties` takes its value type the same way. This replaces reading a map's value type from `patternProperties` alone, which keys outside the pattern would not satisfy.
+- **Conversion checks JSON kinds.** Before evaluation, conversion refuses a value whose JSON kind does not match its declared CEL type with `invalid_value` (section 7.7): numbers for `int`, `uint` and `double`, strings, booleans, `null`, arrays for lists and objects for maps and records; a nullable type also admits `null`, and `dyn` admits any kind. Keyword-inferred object and array types therefore hold for every bound value even though JSON Schema validation alone admits other kinds there.
 
 A child type must keep the CEL type of every parent property: assignability (`IR003`, section 2.1) rejects a child that narrows `number` to `integer`.
 
@@ -640,7 +641,7 @@ An `Evaluator` belongs to its creating event loop. Closing a handle rejects its 
 - Raised by kora itself:
   - `bound_exceeded`;
   - `number_out_of_range`;
-  - `invalid_value` for values outside exact JSON types or Unicode scalar strings;
+  - `invalid_value` for values outside exact JSON types or Unicode scalar strings, or whose JSON kind does not match the declared CEL type (section 7.4);
   - `wrong_result_type`: anything that is not exactly `bool`, or `string` for reasons; Python truthiness never applies;
   - `projection_unavailable`.
 - `internal_fault`, logged at ERROR, covers everything the checker should already have prevented: a `ValueError` or `RuntimeError` at execution, and the binding's parser panic.
@@ -753,10 +754,13 @@ The schema-to-CEL-type mapping of section 7.4 landed under [issue #337](https://
 | `test_cel_examples_pass_checker` | every expression in the example IRs and in dsl.md section 1 passes the checker against published built-in schemas |
 | `test_cel_schema_types_follow_the_mapping_table` | every row of the section 7.4 table and every settled mapping case gives its CEL type |
 | `test_cel_schema_types_resolve_references_only_through_the_closure` | local JSON pointers and `urn:kora:artifact:` references resolve through the saved closure to one memoized type |
-| `test_cel_schema_types_refuse_a_closure_the_validator_must_reject` | unresolved references, anchors, malformed keywords and non-schemas raise a closure fault, never a CEL type |
+| `test_cel_schema_types_refuse_a_closure_the_validator_must_reject` | unresolved references, anchors, nested `$id` resources, malformed or JSON-null keywords, non-canonical or over-long pointer indexes and non-schemas raise a closure fault, never a CEL type |
 | `test_cel_schema_types_map_the_published_vcs_ref` | the published VcsRef revision-1 schema maps to a closed record with its required fields and one shared principal type |
 | `test_cel_schema_types_map_deep_closures_without_recursion` | 5,000 nested arrays and a chain of 5,000 referenced types map without interpreter recursion in linear counted steps |
 | `test_cel_converts_additional_properties_to_their_schema_type` | undeclared keys of an open object convert to its `additionalProperties` type |
+| `test_cel_schema_types_map_shared_reference_chains_in_linear_steps` | reference chains shared by many properties, also behind nullable pairs, map in counted steps linear in the closure size |
+| `test_cel_schema_types_refuse_again_after_a_closure_fault` | a mapping that failed with a closure fault leaves no partial types: repeating it fails again and other schemas still map |
+| `test_cel_conversion_refuses_values_of_another_json_kind` | a value whose JSON kind differs from its declared CEL type, including a string under a keyword-inferred object, is `invalid_value` at binding; `null` under a nullable type and any kind under `dyn` convert |
 | `test_cel_parser_agrees_with_binding_compile` | every corpus expression, and every expression generated from a fixed seed, that kora accepts compiles in the binding |
 | `test_cel_server_validation_compiles_with_binding` | an expression the binding rejects is `IR011` at server-side validation without the binding's message, never a server error |
 | `test_kora_compile_and_validate_report_same_location` | for faults kora's own parser, checker and estimate find, `kora compile` and `/validate` report the same code, segmented document path and code-point offset under the [shared diagnostic contract](diagnostics.md), with a character outside the Basic Multilingual Plane before the fault |

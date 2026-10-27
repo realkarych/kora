@@ -105,10 +105,50 @@ MAPPING_TABLE: list[tuple[str, JsonValue, SchemaView, CelType]] = [
         MapOf(STRING, INT),
     ),
     (
-        "pattern_map",
+        "open_pattern_map",
         {"type": "object", "patternProperties": {"^a": {"type": "boolean"}}},
         SchemaView.PLAIN,
+        MapOf(STRING, DYN),
+    ),
+    (
+        "closed_pattern_map",
+        {
+            "type": "object",
+            "patternProperties": {"^a": {"type": "boolean"}},
+            "additionalProperties": False,
+        },
+        SchemaView.PLAIN,
         MapOf(STRING, BOOL),
+    ),
+    (
+        "pattern_beside_additional",
+        {
+            "type": "object",
+            "patternProperties": {"^a": {"type": "number"}},
+            "additionalProperties": {"type": "integer"},
+        },
+        SchemaView.PLAIN,
+        MapOf(STRING, DYN),
+    ),
+    (
+        "closed_pattern_record",
+        {
+            "properties": {"a": {"type": "string"}},
+            "patternProperties": {"^x": {"type": "integer"}},
+            "additionalProperties": False,
+        },
+        SchemaView.PLAIN,
+        Record({"a": RecordField(STRING, False)}, INT),
+    ),
+    (
+        "pattern_record_beside_additional",
+        {
+            "properties": {},
+            "patternProperties": {"^x": {"type": "integer"}},
+            "additionalProperties": {"type": "string"},
+        },
+        SchemaView.PLAIN,
+        Record({}, DYN),
     ),
     (
         "two_pattern_map",
@@ -250,6 +290,20 @@ MALFORMED_CLOSURES: dict[str, JsonValue] = {
         "allOf": [{}, {}],
         "properties": {"x": {"$ref": "#/allOf/" + "1" * 5000}},
     },
+    "nested_resource": {
+        "properties": {
+            "inner": {
+                "$id": "urn:other",
+                "$defs": {"x": {"type": "integer"}},
+                "$ref": "#/$defs/x",
+            }
+        },
+        "$defs": {"x": {"type": "string"}},
+    },
+    "null_reference": {"$ref": None},
+    "null_type": {"type": None},
+    "null_enum": {"enum": None},
+    "leading_zero_index": {"$ref": "#/allOf/01", "allOf": [{}, {}]},
     "non_schema": [],
 }
 

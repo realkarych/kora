@@ -13,14 +13,13 @@ from kora.cel.types import (
     NULL,
     STRING,
     CelType,
-    Dyn,
     Kind,
     ListOf,
     MapOf,
-    Nullable,
     Primitive,
     Record,
     RecordField,
+    nullable,
 )
 
 JsonObject = dict[str, JsonValue]
@@ -58,15 +57,11 @@ def json_type(value: JsonValue) -> str:
     return "array" if isinstance(value, list) else "object"
 
 
-def nullable(cel_type: CelType) -> CelType:
-    if isinstance(cel_type, Dyn | Nullable) or cel_type == NULL:
-        return cel_type
-    return Nullable(cel_type)
-
-
 def entry(schema: JsonObject, name: str, kind: type | tuple[type, ...]) -> object:
-    value = schema.get(name)
-    if value is not None and not isinstance(value, kind):
+    if name not in schema:
+        return None
+    value = schema[name]
+    if not isinstance(value, kind):
         raise SchemaError("a schema keyword has the wrong JSON type")
     return value
 
@@ -84,10 +79,11 @@ def is_schema(value: JsonValue) -> bool:
 
 def is_position(name: str, length: int) -> bool:
     digits = name.isascii() and name.isdigit() and len(name) <= len(str(length))
-    return digits and int(name) < length
+    canonical = name == "0" or not name.startswith("0")
+    return digits and canonical and int(name) < length
 
 
-def is_null(schema: JsonObject) -> bool:
+def is_null_schema(schema: JsonObject) -> bool:
     declared = schema.get("type")
     if declared == NULL_TYPE or declared == [NULL_TYPE]:
         return True
@@ -111,6 +107,7 @@ def check_keywords(schema: JsonObject) -> None:
     entry(schema, "prefixItems", list)
     entry(schema, "anyOf", list)
     entry(schema, "oneOf", list)
+    entry(schema, "type", (str, list))
 
 
 def keyword_kind(schema: JsonObject) -> str | None:
@@ -200,6 +197,8 @@ class SchemaTypes:
                 break
             seen.add(id(schema))
             chain.append(schema)
+            if "$id" in schema and schema is not root:
+                raise SchemaError("a nested schema resource is not supported")
             reference = entry(schema, "$ref", str)
             parts = cast("list[JsonValue] | None", entry(schema, "allOf", list))
             if isinstance(reference, str):
@@ -282,7 +281,7 @@ class SchemaTypes:
         self, schema: JsonObject, root: JsonValue, view: SchemaView, key: MemoKey
     ) -> Mapping:
         check_keywords(schema)
-        if is_null(schema):
+        if is_null_schema(schema):
             return NULL if view is SchemaView.STRUCTURED_OUTPUT else DYN
         declared = schema.get("type")
         values = enumerated(schema)
@@ -330,7 +329,9 @@ class SchemaTypes:
     def null_member(self, option: JsonValue, root: JsonValue) -> bool:
         located = self.target(option, root)
         return (
-            located is not None and isinstance(located[0], dict) and is_null(located[0])
+            located is not None
+            and isinstance(located[0], dict)
+            and is_null_schema(located[0])
         )
 
     def typed(
@@ -373,10 +374,10 @@ class SchemaTypes:
         properties = cast("dict[str, JsonValue]", schema["properties"])
         required = cast("list[JsonValue]", entry(schema, "required", list) or [])
         names = set(strings(required))
-        additional = schema.get("additionalProperties")
-        extra: CelType | None = None if additional is False else DYN
-        if isinstance(additional, dict):
-            extra = yield additional, root
+        extra_schema = additional_schema(schema)
+        extra: CelType | None = DYN if extra_schema is not False else None
+        if isinstance(extra_schema, dict):
+            extra = yield extra_schema, root
         fields: dict[str, RecordField] = {}
         record = Record(fields, extra)
         mapped = nullable(record) if wrap else record
@@ -387,13 +388,16 @@ class SchemaTypes:
         return mapped
 
 
+def additional_schema(schema: JsonObject) -> JsonValue:
+    additional = schema.get("additionalProperties", True)
+    patterns = cast("dict[str, JsonValue] | None", schema.get("patternProperties"))
+    if patterns is None:
+        return additional
+    if additional is False and len(patterns) == 1:
+        return next(iter(patterns.values()))
+    return True
+
+
 def map_value(schema: JsonObject) -> JsonValue | None:
-    additional = schema.get("additionalProperties")
-    if isinstance(additional, dict):
-        return cast("JsonValue", additional)
-    patterns = entry(schema, "patternProperties", dict)
-    if isinstance(patterns, dict):
-        options = cast("dict[str, JsonValue]", patterns)
-        if len(options) == 1:
-            return next(iter(options.values()))
-    return None
+    value = additional_schema(schema)
+    return value if isinstance(value, dict) else None
