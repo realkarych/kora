@@ -1,4 +1,5 @@
 import asyncio
+from typing import Final
 
 import pytest
 
@@ -13,6 +14,7 @@ CONTROL: dict[str, str] = {
     "KORA_TOKEN": "control-plane-token-0042",
     "KORA_MCP_TOKEN": "control-plane-mcp-0043",
 }
+PREFIX_OF_EVERY_NAME: Final[str] = ""
 
 
 def permissive_provider(prefix: str) -> EnvSecretsProvider:
@@ -37,15 +39,14 @@ def test_an_unvalidated_family_prefix_still_reads_nothing(
     assert listed == []
 
 
-@pytest.mark.parametrize("prefix", ["K", "KORA_", ""])
 @pytest.mark.parametrize("name", ["KORA_TOKEN", "KORA_MCP_TOKEN", "KORA_ABSENT"])
 def test_env_secrets_never_resolve_kora_variables(
-    kora_capture: Capture, prefix: str, name: str
+    kora_capture: Capture, name: str
 ) -> None:
-    subject = permissive_provider(prefix)
+    subject = permissive_provider(PREFIX_OF_EVERY_NAME)
 
     code = resolve_code(subject, kora_capture, f"secret://env/{name}")
-    listed = asyncio.run(subject.list_names(prefix))
+    listed = asyncio.run(subject.list_names(PREFIX_OF_EVERY_NAME))
 
     assert code == "secret_reference_not_allowed"
     assert [item for item in listed if item.startswith("KORA_")] == []

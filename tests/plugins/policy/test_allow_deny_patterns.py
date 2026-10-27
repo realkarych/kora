@@ -496,23 +496,15 @@ def test_conformance_protected_forms_reach_the_protected_rule(
 
 def test_filesystem_errors_leave_no_path_behind(tmp_path: Path) -> None:
     root = prepared_root(tmp_path)
-    locked = root / "locked"
-    locked.mkdir()
-    (locked / "inner").mkdir()
-    locked.chmod(0)
-    marker_path = "locked/inner/secret-marker.txt"
-    try:
-        with debug_capture() as capture:
-            found = reason(
-                capture, edit(root, "Edit", marker_path), protected=("docs",)
-            )
-            records = capture.finish()
-        with pytest.raises(ArgumentInvalid) as raised:
-            edited_path(
-                marker_path, workspace_root(str(root), Fuel(10**9)), Fuel(10**9)
-            )
-    finally:
-        locked.chmod(0o700)
+    (root / "inner").mkdir()
+    overlong = "secret-marker-" + "x" * os.pathconf(root, "PC_NAME_MAX")
+    marker_path = f"inner/{overlong}/file.txt"
+
+    with debug_capture() as capture:
+        found = reason(capture, edit(root, "Edit", marker_path), protected=("docs",))
+        records = capture.finish()
+    with pytest.raises(ArgumentInvalid) as raised:
+        edited_path(marker_path, workspace_root(str(root), Fuel(10**9)), Fuel(10**9))
 
     assert found == "argument_invalid"
     assert all("secret-marker" not in json.dumps(record) for record in records)
@@ -684,8 +676,9 @@ def test_the_installed_entry_point_loads_allow_deny(kora_capture: Capture) -> No
 
     assert isinstance(created, AllowDenyPolicy)
     assert metadata.config_schema == {"type": "object", "additionalProperties": False}
-    assert AllowDenyPolicy.config_schema["type"] == "object"
-    assert AllowDenyPolicy.config_schema != metadata.config_schema
+    tool_policy_properties = AllowDenyPolicy.config_schema["properties"]
+    assert isinstance(tool_policy_properties, dict)
+    assert set(tool_policy_properties) == {"allow", "deny"}
     with pytest.raises(ValidationError):
         metadata.implementation({"deny": ["Bash"]})
 

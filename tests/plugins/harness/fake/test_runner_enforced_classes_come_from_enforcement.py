@@ -28,6 +28,9 @@ from tests.plugins.harness.fake.fake_support import (
     tool_call,
     turn,
 )
+from tests.plugins.harness.fake.test_fake_tool_calls_go_through_policy import (
+    AllowDenyClient,
+)
 
 End = Literal["completed", "cli_exit_without_result", "oversized_message"]
 PAUSE: Final[JsonObject] = {"kind": "pause"}
@@ -180,14 +183,16 @@ def test_runner_enforced_classes_come_from_enforcement_enforcement(
 def test_runner_enforced_classes_come_from_enforcement_one_result(
     kora_capture: Capture,
 ) -> None:
+    ctx = context_for(kora_capture)
+    client = AllowDenyClient(ctx)
     adapter = harness(
-        scripted([turn("m1"), tool_call("Bash", "call-1"), result()]),
-        context_for(kora_capture),
+        scripted([turn("m1"), tool_call("Bash", "call-1"), result()]), ctx
     )
     sink = ScriptedSink(max_events=1)
 
-    outcome = asyncio.run(played(adapter, sink))
+    outcome = asyncio.run(played(adapter, sink, client))
 
+    assert client.asked == []
     assert sink.kinds() == ["turn", "result"]
     assert outcome.error_class is ErrorClass.EVENTS_EXHAUSTED
 

@@ -113,21 +113,6 @@ def test_fake_tool_calls_go_through_policy_allow_and_deny(
     assert outcome.error_class is None
 
 
-def test_fake_tool_calls_go_through_policy_after_max_events(
-    kora_capture: Capture,
-) -> None:
-    ctx = context_for(kora_capture)
-    client = AllowDenyClient(ctx)
-    sink = ScriptedSink(max_events=1)
-    adapter = adapter_for([turn("m1"), shell("call-1", "ls"), result()], ctx)
-
-    outcome = asyncio.run(played(adapter, sink, client))
-
-    assert client.asked == []
-    assert "tool_call" not in sink.kinds()
-    assert outcome.error_class is ErrorClass.EVENTS_EXHAUSTED
-
-
 def output_call(agent_id: str | None) -> JsonObject:
     return tool_call("StructuredOutput", "call-out", outcome=None, agent_id=agent_id)
 

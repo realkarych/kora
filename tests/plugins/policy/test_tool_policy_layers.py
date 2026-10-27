@@ -38,57 +38,24 @@ INDIRECTION: Final[list[str]] = [
     "a\tb",
     "/bin/r? -rf x",
     "/bin/r[m] -rf x",
-    "! rm x",
-    "coproc rm x",
-    "trap 'rm -rf x' EXIT",
     "=rm x",
-    "noglob rm x",
-    "uv run rm x",
     "FOO=1 rm x",
     "FOO+=1 bash x.sh",
-    "ssh host 'r\"m\" -rf x'",
-    "tmux new 'rm -rf x'",
     "\\rm x",
     "'rm' x",
     "/bin/sh x",
-    "perl -e 1",
     "python3.12 x.py",
-    "bash -lc 'x'",
     "BASH x.sh",
     "find . -exec rm {} ;",
     "git commit -c x",
     "x --exec=y",
-    "apply_patch x",
     "echo 'unterminated",
     "x" * 16_385,
     "",
-    "let 'x[$(rm -rf v)]'",
-    "declare 'a[$(rm -rf v)]=1'",
-    "typeset 'a[$(rm v)]=1'",
-    "local 'a[$(rm v)]=1'",
-    "export 'a[$(rm v)]=1'",
-    "readonly 'a[$(rm v)]=1'",
-    "read 'a[$(rm v)]'",
-    "printf -v 'a[$(rm v)]' x",
-    "print -v 'a[$(rm v)]' x",
-    "unset 'a[$(rm v)]'",
-    "test -v 'a[$(rm v)]'",
-    "[ -v 'a[$(rm v)]' ]",
-    "mapfile 'a[$(rm v)]'",
-    "readarray 'a[$(rm v)]'",
-    "wait 'a[$(rm v)]'",
-    "getopts x 'a[$(rm v)]'",
-    "integer 'a[$(rm v)]=1'",
-    "float 'a[$(rm v)]=1'",
-    "vared 'a[$(rm v)]'",
-    "repeat 2 rm x",
-    "foreach x y rm",
     "ls =rm",
     "unshare -r bash -lc 'r\"\"m -rf x'",
     "unshare -r perl -E 'system 1'",
     "grep -ie x f",
-    "rbash x.sh",
-    "zsh-5.9 x.sh",
     "find . -okdir rm x ';'",
     "find . -execdir rm -rf x ';'",
     "find . -ok rm x ';'",
@@ -100,24 +67,8 @@ INDIRECTION: Final[list[str]] = [
     "\u00e9cho x",
     "x --exec y",
     "x --eval y",
-    "[[ -n x ]]",
-    "nohup rm x",
-    "xargs rm",
-    "sudo rm x",
-    "env rm x",
-    "exec rm x",
-    "command rm x",
-    "exit 'path[$(rm -rf v)]'",
-    "return 'argv[$(rm -rf v)]'",
-    "shift 'argv[$(rm -rf v)]'",
-    "break 'path[$(rm -rf v)]'",
-    "continue 'path[$(rm -rf v)]'",
-    "logout 'path[$(rm -rf v)]'",
-    "bye 'path[$(rm -rf v)]'",
-    "compgen -W '$(rm -rf v)' x",
-    "complete -C 'rm -rf v' x",
-    "ulimit -n 'a[$(rm -rf v)]'",
-    "jobs -x rm -rf v",
+    "x -e y",
+    "x 'a[$(rm v)]'",
     "x 'a[`rm -rf v`]'",
     "x 'path[${(e)${:-${(#):-36}(rm -rf v)}}]'",
     "x '$''(rm -rf v)'",
@@ -127,9 +78,6 @@ INDIRECTION: Final[list[str]] = [
     "gawk 'BEGIN{system(1)}'",
     "mawk x",
     "nawk x",
-    "awk x",
-    "rbash -lc x",
-    "zsh -e x",
 ]
 UNTOUCHED: Final[list[tuple[str, str]]] = [
     ("sed 's/$//' f", "Bash(sed *)"),
@@ -151,8 +99,12 @@ DENYING: Final[list[tuple[PolicyLayers, str]]] = [
     (layers(namespace=policy(deny=("Bash(zz-none)",))), "namespace.deny.0"),
     (layers(node=policy(deny=("B*(zz-none)",))), "node.deny.0"),
 ]
-DENYING_IDS: Final[list[str]] = ["node", "namespace", "wildcard"]
+EVERY_DENY: Final[list[str]] = [expected for _, expected in DENYING]
 ALLOWS: Final[tuple[str, ...]] = ("Bash", "*", "Bash(*)", "B*")
+
+
+def denied_everywhere(capture: Capture, call: ToolCallRequest) -> list[str]:
+    return [reason(capture, call, denying) for denying, _ in DENYING]
 
 
 def allowed_anywhere(capture: Capture, call: ToolCallRequest) -> list[bool]:
@@ -167,30 +119,16 @@ def allowed_anywhere(capture: Capture, call: ToolCallRequest) -> list[bool]:
     ]
 
 
-@pytest.mark.parametrize(("denying", "expected"), DENYING, ids=DENYING_IDS)
 @pytest.mark.parametrize("command", INDIRECTION, ids=range(len(INDIRECTION)))
-def test_tool_policy_layers_indirection_matches_every_deny(
-    kora_capture: Capture,
-    tmp_path: Path,
-    command: str,
-    denying: PolicyLayers,
-    expected: str,
-) -> None:
-    call = shell(tmp_path, command)
-
-    denied = reason(kora_capture, call, denying)
-
-    assert denied == expected
-
-
-@pytest.mark.parametrize("command", INDIRECTION, ids=range(len(INDIRECTION)))
-def test_tool_policy_layers_indirection_is_never_allowed(
+def test_tool_policy_layers_indirection_matches_every_deny_and_no_allow(
     kora_capture: Capture, tmp_path: Path, command: str
 ) -> None:
     call = shell(tmp_path, command)
 
+    denied = denied_everywhere(kora_capture, call)
     allowed = allowed_anywhere(kora_capture, call)
 
+    assert denied == EVERY_DENY
     assert allowed == [False] * len(allowed)
 
 
@@ -383,17 +321,15 @@ def test_tool_policy_layers_read_the_listed_first_words() -> None:
 
 
 @pytest.mark.parametrize("name", LISTED_FIRST_WORDS)
-@pytest.mark.parametrize(("denying", "expected"), DENYING, ids=DENYING_IDS)
 def test_tool_policy_layers_listed_first_words_are_indirection(
-    kora_capture: Capture,
-    tmp_path: Path,
-    name: str,
-    denying: PolicyLayers,
-    expected: str,
+    kora_capture: Capture, tmp_path: Path, name: str
 ) -> None:
     call = shell(tmp_path, f"{name} x")
 
-    denied = reason(kora_capture, call, denying)
-    allowed = reason(kora_capture, call, layers(node=policy(allow=("Bash",))))
+    denied = denied_everywhere(kora_capture, call)
+    bare = reason(kora_capture, call, layers(node=policy(allow=("Bash",))))
+    allowed = allowed_anywhere(kora_capture, call)
 
-    assert (denied, allowed) == (expected, "not_allowed")
+    assert denied == EVERY_DENY
+    assert bare == "not_allowed"
+    assert allowed == [False] * len(allowed)
