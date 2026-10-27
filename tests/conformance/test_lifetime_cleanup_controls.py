@@ -30,6 +30,7 @@ from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.conformance.test_lifetime_io_helper import entered_fifo
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
 
 
 async def close_recovered_test_owner(
@@ -55,7 +56,7 @@ async def close_recovered_test_owner(
 
 
 async def dispose_test_owner(
-    owner: ParentLifetime, clock: ControlledLifetimeClock
+    owner: ParentLifetime, clock: ControlledLifetimeClock | ProbeClock
 ) -> None:
     closing = owner.request_close(None)
     clock.advance(40_000_000_000)

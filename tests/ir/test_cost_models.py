@@ -300,6 +300,98 @@ def test_attempt_model_union_is_cumulative_and_preserves_input() -> None:
     assert len(models) == 64
 
 
+class ModelIdentifierSubclass(str):
+    pass
+
+
+class ModelUnionSubclass(frozenset[str]):
+    pass
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        None,
+        False,
+        1,
+        "",
+        "private\nmodel",
+        "private-model-" * 24,
+        ModelIdentifierSubclass("model"),
+    ],
+)
+@pytest.mark.parametrize("role", ["prior", "incoming"])
+def test_attempt_model_union_refuses_invalid_identifiers_without_mutation(
+    invalid: object, role: str
+) -> None:
+    prior = frozenset({invalid}) if role == "prior" else frozenset({"existing"})
+    incoming = "added" if role == "prior" else invalid
+    original = tuple(prior)
+
+    with pytest.raises(ValueError, match="^invalid accounting value$") as refusal:
+        accumulate_attempt_models(cast("frozenset[str]", prior), cast("str", incoming))
+
+    assert str(refusal.value) == "invalid accounting value"
+    assert tuple(prior) == original
+
+
+@pytest.mark.parametrize(
+    "prior",
+    [None, False, [], {"existing"}, ("existing",), ModelUnionSubclass({"existing"})],
+)
+def test_attempt_model_union_requires_exact_frozenset(prior: object) -> None:
+    original = repr(prior)
+
+    with pytest.raises(ValueError, match="^invalid accounting value$") as refusal:
+        accumulate_attempt_models(cast("frozenset[str]", prior), "added")
+
+    assert str(refusal.value) == "invalid accounting value"
+    assert repr(prior) == original
+
+
+@pytest.mark.parametrize("identifier", ["model", "Ж" * 256, "😀" * 256])
+@pytest.mark.parametrize("role", ["prior", "incoming"])
+def test_attempt_model_union_accepts_printable_character_boundary(
+    identifier: str, role: str
+) -> None:
+    prior = frozenset({identifier}) if role == "prior" else frozenset({"existing"})
+    incoming = "added" if role == "prior" else identifier
+    expected = (
+        frozenset({identifier, "added"})
+        if role == "prior"
+        else frozenset({"existing", identifier})
+    )
+    original = tuple(prior)
+
+    result = accumulate_attempt_models(prior, incoming)
+
+    assert result == expected
+    assert tuple(prior) == original
+
+
+@pytest.mark.parametrize("count", [0, 63])
+def test_attempt_model_union_adds_within_capacity(count: int) -> None:
+    prior = frozenset(str(index) for index in range(count))
+    expected = frozenset((*prior, "added"))
+
+    result = accumulate_attempt_models(prior, "added")
+
+    assert result == expected
+    assert len(prior) == count
+    assert len(result) == count + 1
+
+
+@pytest.mark.parametrize("incoming", ["0", "added"])
+def test_attempt_model_union_refuses_oversized_prior(incoming: str) -> None:
+    prior = frozenset(str(index) for index in range(65))
+
+    with pytest.raises(ValueError, match="^invalid accounting value$") as refusal:
+        accumulate_attempt_models(prior, incoming)
+
+    assert str(refusal.value) == "invalid accounting value"
+    assert len(prior) == 65
+
+
 @pytest.mark.parametrize(
     "source",
     [

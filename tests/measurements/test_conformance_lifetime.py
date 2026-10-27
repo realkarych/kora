@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.measurements.command_measurement import measure_command
 from tests.measurements.harness import Report, Sample, new_report, write_report
 from tests.measurements.lifetime_cohorts import Cohort, run_cohorts
 from tests.measurements.lifetime_measurement_support import (
@@ -193,3 +194,11 @@ def test_installed_listing_resources_are_released() -> None:
     measure_listing(output)
 
     assert (output.parent / "listing.json").is_file()
+
+
+def test_installed_command_resources_are_released() -> None:
+    output = Path(os.environ["KORA_MEASUREMENT_OUTPUT"])
+
+    measure_command(output)
+
+    assert (output.parent / "command.json").is_file()

@@ -46,7 +46,7 @@ class ProbeIOHelperLauncher:
         observation_descriptor: int,
         fifo_directory: int | None = None,
         phase: str = "before",
-        pause_at: int | None = None,
+        pause_at: int | tuple[int, ...] | None = None,
         resist_term: bool = False,
     ) -> None:
         self.home = home
@@ -59,7 +59,8 @@ class ProbeIOHelperLauncher:
 
     def start(self, descriptors: tuple[int, ...], clock: Clock) -> IOHelper:
         self.starts += 1
-        if self.pause_at is not None and self.starts != self.pause_at:
+        selected = (self.pause_at,) if isinstance(self.pause_at, int) else self.pause_at
+        if selected is not None and self.starts not in selected:
             return InstalledIOHelperLauncher(
                 home=self.home, state_home=self.home / "state"
             ).start(descriptors, clock)

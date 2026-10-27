@@ -4,7 +4,6 @@ import os
 import socket
 import subprocess
 import sys
-from collections.abc import Generator
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,16 +11,18 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
+from kora.cli.conformance import CommandResult
 from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
-from kora.conformance.result import ChildInput, ChildResult
+from kora.conformance.result import ChildInput, ChildResult, InputFiles
 from kora.conformance.transport import LifetimeEndpoint
 from kora.ir.json import JsonObject
 from kora.protocols.lifetime import (
     CleanupOutcome,
     ClosureReport,
     EnvironmentVariable,
+    OriginalOutcome,
     ProcessDomain,
     ProcessLaunch,
     ProcessOutput,
@@ -32,79 +33,50 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.metadata import ProtocolName
 from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError
+from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
+from tests.support.configured_conformance import (
+    installed_conformance as installed_conformance,
+)
+from tests.support.configured_conformance import vcs_configuration
 from tests.support.provider_tooling import (
     InstalledTooling,
-    build_core_wheel,
-    build_fixture_wheel,
-    install_tooling,
-    prepare_wheelhouse,
 )
 
 
-def vcs_configuration(root: Path) -> JsonObject:
-    principal: JsonObject = {
-        "provider_instance": "fixture-git",
-        "stable_id": "fixture-publisher",
-        "display_name": "Fixture publisher",
-    }
-    return {
-        "remotes": {
-            "local": {
-                "path": str(root / "remote.git"),
-                "binding": "fixture-binding",
-                "binding_revision": 1,
-                "credential_mode": "local_credential_free",
-                "principal": principal,
-            },
-            "gone": {
-                "path": str(root / "gone.git"),
-                "binding": "gone-binding",
-                "binding_revision": 1,
-                "credential_mode": "local_credential_free",
-                "principal": principal,
-            },
-        },
-        "identity": {"name": "Fixture", "email": "fixture@example.invalid"},
-        "tool_path": list(os.environ["PATH"].split(":")),
-    }
+@pytest.mark.parametrize("mode", ["idle", "delayed_teardown", "bootstrap"])
+def test_command_waits_for_ready_execution_and_late_teardown(
+    installed_conformance: InstalledTooling, tmp_path: Path, mode: str
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
 
+    process = subprocess.run(
+        [
+            str(installed_conformance.python),
+            "-I",
+            str(Path(__file__).with_name("command_barrier_probe.py")),
+            str(home),
+            mode,
+            str(installed_conformance.outside.parent),
+        ],
+        env={"PATH": os.defpath},
+        cwd=installed_conformance.outside,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
 
-@pytest.fixture(scope="module")
-def installed_conformance() -> Generator[InstalledTooling]:
-    with TemporaryDirectory(prefix="kora-installed-", dir="/tmp") as temporary:
-        root = Path(temporary).resolve()
-        wheelhouse = root / "dependencies"
-        wheelhouse.mkdir()
-        prepare_wheelhouse(wheelhouse, conformance=True)
-        build_core_wheel(wheelhouse)
-        fixture = build_fixture_wheel(
-            root,
-            {
-                "secrets.configured": (
-                    "kora_tooling_fixture.configured_secrets:configured"
-                ),
-                "policy.unrelated": (
-                    "kora_tooling_fixture.noisy_import:provider_metadata"
-                ),
-                "policy.configured": (
-                    "kora_tooling_fixture.configured_policy:configured"
-                ),
-                "runtime.configured": (
-                    "kora_tooling_fixture.configured_runtime:configured"
-                ),
-                "harness.configured": (
-                    "kora_tooling_fixture.configured_harness:configured"
-                ),
-                "vcs.configured": "kora_tooling_fixture.configured_vcs:configured",
-                "artifact_storage.configured": (
-                    "kora_tooling_fixture.configured_storage:configured"
-                ),
-            },
-        )
-        yield install_tooling(root, wheelhouse, fixture, conformance=True)
+    assert process.returncode == 0, process.stderr
+    report = CommandResult.model_validate_json(process.stdout)
+    assert report.outcome is (
+        OriginalOutcome.COMPLETE if mode == "idle" else OriginalOutcome.FAILED
+    )
+    assert report.cleanup is not None
+    assert report.cleanup.state is CleanupOutcome.CLOSED
+    assert not list(home.rglob("journal"))
+    assert b"private-barrier-value" not in process.stdout + process.stderr
 
 
 @dataclass(frozen=True)
@@ -138,10 +110,11 @@ async def installed_run(
     feedback_phases: bytes = b"",
     stop_on_feedback: bool = False,
     entrypoint: str = "kora.conformance.child",
+    files: InputFiles | None = None,
 ) -> Outcome:
     with TemporaryDirectory(prefix="kora-invoke-", dir="/tmp") as temporary:
         base = Path(temporary).resolve()
-        clock = ControlledLifetimeClock()
+        clock = ProbeClock()
         owner = ParentLifetime(
             clock=clock,
             launcher=InstalledIOHelperLauncher(home=base, state_home=base / "state"),
@@ -253,6 +226,10 @@ async def installed_run(
                     endpoint, _ = await loop.sock_accept(listeners[1])
                     return await drained(endpoint)
 
+                async def cleanup_time() -> None:
+                    await owner.closure_started.wait()
+                    clock.use_system_time()
+
                 async def feedback() -> tuple[int, ...]:
                     observed: list[int] = []
                     for phase in feedback_phases:
@@ -294,7 +271,8 @@ async def installed_run(
                 serving = asyncio.create_task(lifetime())
                 reading = asyncio.create_task(events())
                 observing = asyncio.create_task(feedback())
-                tasks.extend((serving, reading, observing))
+                progressing = asyncio.create_task(cleanup_time())
+                tasks.extend((serving, reading, observing, progressing))
                 endpoint, _ = await asyncio.wait_for(loop.sock_accept(listeners[0]), 30)
                 channel = BoundedChannel(endpoint, SystemClock())
                 try:
@@ -318,6 +296,7 @@ async def installed_run(
                         protocol=protocol,
                         name="configured",
                         fixtures="kora_tooling_fixture." + plugin,
+                        files=files,
                     )
                     await channel.write_record(
                         request.model_dump_json().encode(), deadline
@@ -338,6 +317,21 @@ async def installed_run(
                     result = ChildResult.model_validate_json(
                         await channel.read_record(deadline, 4096)
                     )
+                    if result.phase == "ready":
+                        assert result.expected > 0
+                        readable = asyncio.create_task(channel.wait_readable())
+                        tasks.append(readable)
+                        await asyncio.wait(
+                            (readable, serving, owner.invocation_cleanup.result),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not readable.done():
+                            raise ChannelError(ChannelFailure.CLOSED)
+                        readable.result()
+                        deadline = SystemClock().monotonic_ns() + 30_000_000_000
+                        result = ChildResult.model_validate_json(
+                            await channel.read_record(deadline, 4096)
+                        )
                     if result.phase == "storage":
                         invocation = owner.mutations.directory
                         assert invocation is not None
@@ -406,39 +400,44 @@ async def installed_run(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("protocol", "plugin", "configuration", "expected"),
-    [
-        (ProtocolName.SECRETS, "fixtures_configured", {"value": "secret-value"}, 10),
-        (ProtocolName.POLICY, "fixtures_policy", {"deny": ["Bash(git *)"]}, 13),
-        (ProtocolName.RUNTIME, "fixtures_runtime", {"value": "configured-domain"}, 5),
-        (ProtocolName.HARNESS, "fixtures_harness", {"prefix": "configured-"}, 10),
-        (ProtocolName.VCS, "fixtures_vcs", None, 13),
-        (
-            ProtocolName.ARTIFACT_STORAGE,
-            "fixtures_storage",
-            {"root": "store", "limits": {"version": 1}},
-            18,
-        ),
-    ],
-)
-async def test_installed_conformance_runs_active_suites(
+async def test_installed_conformance_stops_teardown_without_a_result(
     installed_conformance: InstalledTooling,
-    protocol: ProtocolName,
-    plugin: str,
-    configuration: JsonObject | None,
-    expected: int,
 ) -> None:
-    installed = installed_conformance
+    with TemporaryDirectory(prefix="kora-teardown-", dir="/tmp") as temporary:
+        root = Path(temporary).resolve()
+        feedback = root / "feedback"
+        data = root / "data.json"
+        config = root / "config.json"
+        config.write_text(json.dumps({"value": "private-secret-value"}))
+        data.write_text(
+            json.dumps({"mode": "delayed_teardown", "feedback": str(feedback)})
+        )
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(feedback))
+            listener.listen(1)
+            listener.setblocking(False)
+            operation = asyncio.create_task(
+                installed_run(
+                    installed_conformance,
+                    plugin="fixtures_command",
+                    files=InputFiles(configuration=str(config), fixture_data=str(data)),
+                )
+            )
+            try:
+                loop = asyncio.get_running_loop()
+                endpoint, _ = await asyncio.wait_for(loop.sock_accept(listener), 30)
+                with endpoint:
+                    barrier = await asyncio.wait_for(loop.sock_recv(endpoint, 32), 30)
+                    assert barrier == b"teardown"
 
-    outcome = await installed_run(
-        installed, protocol=protocol, plugin=plugin, configuration=configuration
-    )
+                    with pytest.raises(ChannelError):
+                        await asyncio.wait_for(asyncio.shield(operation), 20)
 
-    assert outcome.result.accepted, outcome
-    assert outcome.result.completed == outcome.result.expected == expected
-    assert outcome.closure.state is CleanupOutcome.CLOSED
-    assert outcome.returncode == 0
+                    assert await asyncio.wait_for(loop.sock_recv(endpoint, 1), 5) == b""
+                    assert operation.done()
+            finally:
+                operation.cancel()
+                await asyncio.gather(operation, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -501,21 +500,6 @@ async def test_installed_vcs_rejects_alternate_executor_receivers(
     assert outcome.result.completed == 5
     assert outcome.returncode != 0
     assert outcome.closure.state is CleanupOutcome.CLOSED
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("value", ["first-effective-value", "second-effective-value"])
-async def test_installed_conformance_preserves_selected_configuration(
-    installed_conformance: InstalledTooling,
-    value: str,
-) -> None:
-    configuration: JsonObject = {"value": value}
-
-    outcome = await installed_run(installed_conformance, configuration=configuration)
-
-    assert outcome.result.accepted, outcome
-    assert outcome.closure.state is CleanupOutcome.CLOSED
-    assert value.encode() not in outcome.events
 
 
 @pytest.mark.asyncio
@@ -783,3 +767,30 @@ async def test_installed_conformance_keeps_imports_isolated(
     assert outcome.result.accepted, outcome
     assert outcome.closure.state is CleanupOutcome.CLOSED
     assert outcome.returncode == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["valid", "invalid", "large", "fifo", "missing"])
+async def test_installed_conformance_reads_only_bounded_regular_input_files(
+    installed_conformance: InstalledTooling, tmp_path: Path, content: str
+) -> None:
+    path = tmp_path / "private-input"
+    if content == "fifo":
+        os.mkfifo(path, 0o600)
+    elif content != "missing":
+        path.write_bytes(
+            b'{"value":"file-authoritative-value"}'
+            if content == "valid"
+            else b"x" * 1048577
+            if content == "large"
+            else b'{"value":'
+        )
+    files = InputFiles(configuration=str(path))
+
+    outcome = await installed_run(installed_conformance, files=files)
+
+    assert outcome.result.accepted is (content == "valid")
+    assert outcome.closure.state is CleanupOutcome.CLOSED
+    assert outcome.returncode == (0 if content == "valid" else 1)
+    assert b"file-authoritative-value" not in outcome.events
+    assert str(path) not in outcome.result.model_dump_json()

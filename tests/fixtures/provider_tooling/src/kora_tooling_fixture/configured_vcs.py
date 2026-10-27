@@ -99,6 +99,20 @@ async def effect(provider: Vcs, config: JsonObject, context: ProtocolContext) ->
     assert issued.binding_revision == remote.binding_revision
 
 
+def configured_paths(config: JsonObject) -> GitConfiguration:
+    parsed = GitConfiguration.model_validate(config)
+    return parsed.model_copy(
+        update={
+            "remotes": {
+                name: remote.model_copy(
+                    update={"path": str(Path(remote.path).absolute())}
+                )
+                for name, remote in parsed.remotes.items()
+            }
+        }
+    )
+
+
 class Adapter:
     def __init__(self, mode: str) -> None:
         self.mode = mode
@@ -118,7 +132,7 @@ class Adapter:
         fixture_data: JsonObject,
         lifetime: ConformanceLifetime,
     ) -> PreparedConformance:
-        parsed = GitConfiguration.model_validate(config)
+        parsed = configured_paths(config)
         root = Path(parsed.remotes["local"].path).parent
         assert root.parent == Path.cwd()
         assert not root.exists()
@@ -179,9 +193,7 @@ class Adapter:
         return self
 
     def bind_configuration(self, config: JsonObject) -> ConstructorArguments:
-        return ConstructorArguments(
-            (GitConfiguration.model_validate(config), self.launcher)
-        )
+        return ConstructorArguments((configured_paths(config), self.launcher))
 
     def native_work(self, loop: asyncio.AbstractEventLoop) -> None:
         started = self.native_started
@@ -221,7 +233,7 @@ class Adapter:
         executor = Executor(provider.tools, self.launcher, provider, provider, provider)
         if not self.gone_removed:
             if self.mode.startswith("decoy_"):
-                decoy = GitVcs(GitConfiguration.model_validate(config), self.launcher)
+                decoy = GitVcs(configured_paths(config), self.launcher)
                 if self.mode == "decoy_destinations":
                     executor.destinations = decoy
                 elif self.mode == "decoy_sources":

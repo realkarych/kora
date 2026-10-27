@@ -29,10 +29,12 @@ COHORTS = ("first", "second", "measurements", "integration", "other")
 GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",
     "--ignore=tests/conformance/test_artifact_storage_conformance.py",
+    "--ignore=tests/conformance/test_installed_conformance.py",
 )
 STORAGE_ARGUMENTS = (
     "tests/plugins/storage",
     "tests/conformance/test_artifact_storage_conformance.py",
+    "tests/conformance/test_installed_conformance.py",
 )
 Digest = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 Revision = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]

@@ -607,9 +607,13 @@ def accumulate_attempt_models(prior: frozenset[str], model: str) -> frozenset[st
         raise refusal()
     identifier(model)
     for previous in prior:
-        if type(previous) is not str:
+        if (
+            type(previous) is not str
+            or not previous
+            or len(previous) > MAX_IDENTIFIER_LENGTH
+            or not previous.isprintable()
+        ):
             raise refusal()
-        identifier(previous)
     if model not in prior and len(prior) == 64:
         raise refusal()
     return prior | {model}
