@@ -394,10 +394,15 @@ async def installed_run(
                 for task in tasks:
                     if not task.done():
                         task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        assert task.cancelled()
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                failures = [
+                    result
+                    for result in results
+                    if isinstance(result, BaseException)
+                    and not isinstance(result, asyncio.CancelledError)
+                ]
+                if failures:
+                    raise BaseExceptionGroup("installed harness tasks failed", failures)
 
 
 @pytest.mark.asyncio
