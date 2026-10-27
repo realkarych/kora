@@ -50,11 +50,9 @@ def conformance_arguments(
     return arguments if data is None else (*arguments, "--fixture-data", str(data))
 
 
-def closed_report(process: ProcessResult) -> CommandResult:
-    report = CommandResult.model_validate_json(process.stdout)
+def assert_closed(report: CommandResult) -> None:
     assert report.cleanup is not None
     assert report.cleanup.state is CleanupOutcome.CLOSED
-    return report
 
 
 def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
@@ -116,7 +114,8 @@ def test_conformance_fixture_contract_is_complete(
         environment={"HOME": str(home)},
     )
 
-    result = closed_report(process)
+    result = CommandResult.model_validate_json(process.stdout)
+    assert_closed(result)
     assert result.outcome is (
         OriginalOutcome.COMPLETE if mode == "normal" else OriginalOutcome.FAILED
     )
@@ -290,8 +289,9 @@ def test_targeted_conformance_loads_only_selected_provider(
         environment=environment,
     )
 
-    report = closed_report(process)
+    report = CommandResult.model_validate_json(process.stdout)
     assert process.code == (0 if selection == "configured" else 1)
+    assert_closed(report)
     records = process.records()
     completed = [
         record for record in records if record["event"] == "cli.conformance_finished"
@@ -326,9 +326,10 @@ def test_conformance_inputs_are_not_disclosed(
         environment={"HOME": str(home)},
     )
 
-    result = closed_report(process)
+    result = CommandResult.model_validate_json(process.stdout)
     assert process.code == 1
     assert result.outcome is OriginalOutcome.FAILED
+    assert_closed(result)
     assert result.completed == 0
     assert_undisclosed(
         process,
@@ -355,10 +356,11 @@ def test_installed_provider_schema_matches_metadata(
         environment={"HOME": str(home)},
     )
 
-    result = closed_report(process)
+    result = CommandResult.model_validate_json(process.stdout)
     assert process.code == 1
     assert result.outcome is OriginalOutcome.FAILED
     assert result.completed == 0
+    assert_closed(result)
     assert_undisclosed(process, b"private-schema-marker")
 
 
@@ -405,10 +407,11 @@ def test_installed_provider_supports_local_tooling(
         },
     )
 
-    outcome = closed_report(process)
+    outcome = CommandResult.model_validate_json(process.stdout)
     assert process.code == 0, (process.stdout, process.stderr)
     assert outcome.outcome is OriginalOutcome.COMPLETE
     assert outcome.completed == outcome.expected == expected
+    assert_closed(outcome)
     records = process.records()
     assert len(records) == 1
     assert records[0]["event"] == "protocols.loading.provider_loaded"
@@ -431,9 +434,10 @@ def test_installed_provider_configuration_is_effective(
         environment={"HOME": str(home)},
     )
 
-    outcome = closed_report(process)
+    outcome = CommandResult.model_validate_json(process.stdout)
     assert process.code == 0, (process.stdout, process.stderr)
     assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert_closed(outcome)
     assert_undisclosed(process, value.encode())
 
 
