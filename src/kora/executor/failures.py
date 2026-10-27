@@ -2,7 +2,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import NoReturn
 
+from kora.executor import CONTENT_REFUSED
 from kora.ir.node import ErrorClass
+from kora.observability import ComponentLogger
 
 
 class Phase(StrEnum):
@@ -61,3 +63,25 @@ def misconfigured(code: str, phase: Phase) -> NoReturn:
 
 def unavailable(code: str, phase: Phase) -> NoReturn:
     fail(ErrorClass.INFRASTRUCTURE, code, phase)
+
+
+def deadline_due(phase: Phase) -> NoReturn:
+    fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+
+
+def content_refused(
+    logger: ComponentLogger,
+    failure_class: ErrorClass,
+    code: str,
+    cause: str,
+    phase: Phase,
+) -> ExecutorError:
+    logger.emit(
+        CONTENT_REFUSED,
+        phase=phase.value,
+        failure_class=failure_class.value,
+        code=code,
+        cause=cause,
+        count=1,
+    )
+    return ExecutorError(failure_class, code, phase)

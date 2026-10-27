@@ -11,6 +11,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Final, Protocol, TypeVar
 
+from kora.executor.files import write_all
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 
 READ_SIZE: Final[int] = 65_536
@@ -500,9 +501,7 @@ class StreamingChild:
         self._reaped = False
 
     def write(self, data: bytes) -> None:
-        view = memoryview(data)
-        while view:
-            view = view[os.write(self._stdin, view) :]
+        write_all(self._stdin, data)
 
     def close_stdin(self) -> None:
         if self._stdin_open:

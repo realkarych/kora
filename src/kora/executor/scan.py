@@ -8,9 +8,15 @@ from typing import Final, Protocol
 
 from pydantic import ValidationError
 
-from kora.executor import CONTENT_REFUSED
-from kora.executor.digests import inspection_digest, sha256_digest
-from kora.executor.failures import ExecutorError, Phase, fail, invalid, misconfigured
+from kora.executor.digests import hasher_digest, inspection_digest, sha256_digest
+from kora.executor.failures import (
+    ExecutorError,
+    Phase,
+    content_refused,
+    fail,
+    invalid,
+    misconfigured,
+)
 from kora.executor.guard import PhaseGuard
 from kora.ir.node import ErrorClass
 from kora.ir.scalars import Digest
@@ -107,15 +113,9 @@ class ScanState:
 
 
 def leak(logger: ComponentLogger) -> ExecutorError:
-    logger.emit(
-        CONTENT_REFUSED,
-        phase=Phase.SCAN.value,
-        failure_class=ErrorClass.CREDENTIAL_LEAK.value,
-        code="secret_leak",
-        cause="content",
-        count=1,
+    return content_refused(
+        logger, ErrorClass.CREDENTIAL_LEAK, "secret_leak", "content", Phase.SCAN
     )
-    return ExecutorError(ErrorClass.CREDENTIAL_LEAK, "secret_leak", Phase.SCAN)
 
 
 def parsed_records(index: bytes, bounds: ScanBounds) -> list[InspectionContent]:
@@ -154,7 +154,7 @@ async def scanned_content(
         if await state.matcher.hits_off_loop(window):
             raise leak(logger)
         tail = window[-state.matcher.overlap :] if state.matcher.overlap else b""
-    return size, "sha256:" + digest.hexdigest()
+    return size, hasher_digest(digest)
 
 
 async def scan_record(

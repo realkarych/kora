@@ -1,6 +1,10 @@
-from kora.executor.failures import Phase, fail
-from kora.ir.node import ErrorClass
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
+
+from kora.executor.failures import Phase, deadline_due
 from kora.protocols.deadlines import (
+    NANOSECONDS_PER_SECOND,
     ExecutionDeadline,
     LocalThresholds,
     interruption_due,
@@ -9,6 +13,8 @@ from kora.protocols.deadlines import (
     useful_phase_bound_ns,
 )
 from kora.protocols.time import Clock
+
+ResultT = TypeVar("ResultT")
 
 
 class PhaseGuard:
@@ -32,7 +38,7 @@ class PhaseGuard:
 
     def check(self, phase: Phase) -> None:
         if self.due():
-            fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+            deadline_due(phase)
 
     def bound_ns(self, own_bound_ns: int, phase: Phase) -> int:
         self.check(phase)
@@ -40,5 +46,17 @@ class PhaseGuard:
             own_bound_ns, self.installed, self.clock.monotonic_ns()
         )
         if bound <= 0:
-            fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+            deadline_due(phase)
         return bound
+
+    async def within(
+        self,
+        own_bound_ns: int,
+        phase: Phase,
+        work: Callable[[], Awaitable[ResultT]],
+    ) -> ResultT:
+        remaining_ns = self.bound_ns(own_bound_ns, phase)
+        try:
+            return await asyncio.wait_for(work(), remaining_ns / NANOSECONDS_PER_SECOND)
+        except TimeoutError:
+            deadline_due(phase)

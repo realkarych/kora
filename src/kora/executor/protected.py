@@ -5,8 +5,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
 
-from kora.executor import CONTENT_REFUSED
-from kora.executor.failures import Phase, fail, misconfigured
+from kora.executor.failures import (
+    Phase,
+    content_refused,
+    deadline_due,
+    misconfigured,
+)
 from kora.executor.guard import PhaseGuard
 from kora.ir.globs import (
     Fuel,
@@ -123,24 +127,17 @@ async def check_protected(
     unique = tuple(dict.fromkeys(paths))
     if not globs or not unique:
         return CheckResult(Finding.CLEAR, 0)
-    remaining_ns = guard.bound_ns(CHECK_BOUND_NS, phase)
-    try:
-        result = await asyncio.wait_for(
-            checked_off_loop(globs, unique, bounds),
-            remaining_ns / NANOSECONDS_PER_SECOND,
-        )
-    except TimeoutError:
-        fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+    result = await guard.within(
+        CHECK_BOUND_NS, phase, lambda: checked_off_loop(globs, unique, bounds)
+    )
     if result.finding is Finding.CANCELLED:
-        fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+        deadline_due(phase)
     if result.finding in (Finding.RULE, Finding.FUEL):
-        logger.emit(
-            CONTENT_REFUSED,
-            phase=phase.value,
-            failure_class=ErrorClass.PROTECTED_PATH_MODIFIED.value,
-            code="protected_path_modified",
-            cause=result.finding.value,
-            count=1,
+        raise content_refused(
+            logger,
+            ErrorClass.PROTECTED_PATH_MODIFIED,
+            "protected_path_modified",
+            result.finding.value,
+            phase,
         )
-        fail(ErrorClass.PROTECTED_PATH_MODIFIED, "protected_path_modified", phase)
     return result

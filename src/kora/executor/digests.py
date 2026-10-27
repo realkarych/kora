@@ -1,7 +1,7 @@
 import base64
 import hashlib
 from collections.abc import Sequence
-from typing import Final
+from typing import Final, Protocol
 
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.vcs_ref_json import canonical_bytes
@@ -19,8 +19,18 @@ OPERATION_PREFIX: Final[str] = "op-"
 OPERATION_HEX: Final[int] = 32
 
 
+class Hasher(Protocol):
+    def update(self, data: bytes, /) -> None: ...
+
+    def hexdigest(self) -> str: ...
+
+
 def sha256_digest(data: bytes) -> str:
     return DIGEST_PREFIX + hashlib.sha256(data).hexdigest()
+
+
+def hasher_digest(hasher: Hasher) -> str:
+    return DIGEST_PREFIX + hasher.hexdigest()
 
 
 def object_digest(document: JsonObject) -> str:

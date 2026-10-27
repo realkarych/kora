@@ -25,13 +25,12 @@ from kora.executor.digests import (
 from kora.executor.failures import (
     ExecutorError,
     Phase,
-    fail,
     invalid,
     misconfigured,
     unavailable,
 )
 from kora.executor.files import (
-    open_directory,
+    opened,
     private_directory,
     remove_private_directory,
     scratch_directory,
@@ -337,18 +336,15 @@ class Executor:
         candidate = require_area(areas.candidate, Phase.SEAL)
         publication = require_area(areas.publication, Phase.SEAL)
         bounds = self.settings.seal
-        remaining_ns = guard.bound_ns(SEAL_BOUND_NS, Phase.SEAL)
-        try:
-            sealed = await asyncio.wait_for(
-                off_loop(
-                    lambda cancelled: seal_sync(
-                        workspace.attempt_id, candidate, publication, bounds, cancelled
-                    )
-                ),
-                remaining_ns / NANOSECONDS_PER_SECOND,
-            )
-        except TimeoutError:
-            fail(ErrorClass.TIMEOUT, "deadline_due", Phase.SEAL)
+        sealed = await guard.within(
+            SEAL_BOUND_NS,
+            Phase.SEAL,
+            lambda: off_loop(
+                lambda cancelled: seal_sync(
+                    workspace.attempt_id, candidate, publication, bounds, cancelled
+                )
+            ),
+        )
         ctx.logger.emit(PHASE_FINISHED, phase=Phase.SEAL.value, outcome="sealed")
         return sealed
 
@@ -763,12 +759,9 @@ class ReadsHeads(Protocol):
 
 
 def replace_digest_file(work: Path, digest: str) -> None:
-    directory = open_directory(work)
-    try:
+    with opened(work) as directory:
         try:
             os.unlink(PREPARED_DIGEST_FILE, dir_fd=directory)
         except FileNotFoundError:
             pass
         write_new_file(directory, PREPARED_DIGEST_FILE, digest.encode("ascii"), 0o600)
-    finally:
-        os.close(directory)

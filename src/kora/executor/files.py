@@ -23,6 +23,19 @@ def open_directory(path: Path) -> int:
     return os.open(path, DIRECTORY_FLAGS)
 
 
+@contextmanager
+def opened(path: Path) -> Generator[int]:
+    descriptor = open_directory(path)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def new_file(directory: int, name: str) -> int:
+    return os.open(name, NEW_FILE_FLAGS, 0o600, dir_fd=directory)
+
+
 def path_parts(relative: str) -> list[str]:
     parts = relative.split("/")
     if any(part in ("", ".", "..") for part in parts):
@@ -59,7 +72,7 @@ def write_new_file(directory: int, relative: str, content: bytes, mode: int) -> 
     parts = path_parts(relative)
     parent = descend(directory, parts[:-1], create=True)
     try:
-        descriptor = os.open(parts[-1], NEW_FILE_FLAGS, 0o600, dir_fd=parent)
+        descriptor = new_file(parent, parts[-1])
     finally:
         os.close(parent)
     try:
@@ -79,33 +92,28 @@ def write_plan_files(
         root = control if plan_file.area == "control" else publication
         if root is None:
             misconfigured("plan_file_area_refused", phase)
-        directory = open_directory(root)
-        try:
-            write_new_file(directory, plan_file.path, plan_file.content, plan_file.mode)
-        except (OSError, ValueError):
-            unavailable("plan_file_refused", phase)
-        finally:
-            os.close(directory)
+        with opened(root) as directory:
+            try:
+                write_new_file(
+                    directory, plan_file.path, plan_file.content, plan_file.mode
+                )
+            except (OSError, ValueError):
+                unavailable("plan_file_refused", phase)
 
 
 def private_directory(root: Path, prefix: str) -> Path:
-    directory = open_directory(root)
-    try:
+    with opened(root) as directory:
         name = f"{prefix}-{secrets.token_hex(NAME_BYTES)}"
         os.mkdir(name, PRIVATE_MODE, dir_fd=directory)
-    finally:
-        os.close(directory)
     return root / name
 
 
 def remove_private_directory(path: Path) -> None:
-    directory = open_directory(path.parent)
-    try:
-        shutil.rmtree(path.name, dir_fd=directory)
-    except FileNotFoundError:
-        return
-    finally:
-        os.close(directory)
+    with opened(path.parent) as directory:
+        try:
+            shutil.rmtree(path.name, dir_fd=directory)
+        except FileNotFoundError:
+            return
 
 
 @contextmanager
