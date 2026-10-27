@@ -299,3 +299,57 @@ At `3a8cf06`, JUnit attributes 75.35 s to the storage tests and 297.95 s to the 
 **Hypothesis for the implementing run.** Compared with `3a8cf06` (tests steps of 456, 524 and 498 s on macOS, Linux 3.11 and Linux 3.15), each `conformance` tests step should fall by roughly the module's share, and each storage job should stay under 7:00. A changed lane above 7:00 opens a follow-up. This is a diagnostic, not a gate. The hosted result is recorded in the PR #322 description.
 
 **Revisit** when any storage job exceeds 7:00, or exceeds 6:00 in two consecutive master runs; when the macOS pressure failures of #302 are attributed to state shared with later tests in the same process; or when a generalized lane map lowers the cost of a separate installed lane.
+
+### Remainder headroom, 2026-10-27
+
+This subsection supersedes four statements above:
+
+- The `measurements` group defined in the first shard layout (line 150) now also contains `tests/db` and the non-storage `tests/plugins`.
+- The `integration` group defined by the rebalance (line 203) now contains only `tests/cli`.
+- The installed conformance module fixture (line 278) no longer builds the core wheel. It copies the wheel that its pytest process builds once.
+- For the macOS `remainder` job, the revisit conditions at the end of this subsection replace two 6:00 clauses: the one in the rebalance's revisit list (line 218) and the macOS one in the shard samples (line 270). Both clauses stay in force for the Linux `remainder` jobs and for the other lanes. #327 tracks macOS `storage`, and #328 tracks macOS `conformance`.
+
+Checked on 2026-10-27 against `master` at `4e75a73bdc492ab471dcdc27bbcd317b8e6943b9`, under the [issue #326 plan](https://github.com/realkarych/kora/issues/326#issuecomment-6448899199).
+
+**Trigger.** The revisit condition of the rebalance record fired after two changes: #322 added `tests/cli/test_conformance.py` to `integration`, and #256 enlarged `test_ir_measurement_evidence.py` in `measurements`. In master run [40469734219](https://github.com/realkarych/kora/actions/runs/40469734219) at `abba434`, the `remainder` jobs took 279, 302 and 266 s on macOS, Linux 3.11 and Linux 3.15. In master runs [40517496683](https://github.com/realkarych/kora/actions/runs/40517496683), [40520743424](https://github.com/realkarych/kora/actions/runs/40520743424) and [40525735804](https://github.com/realkarych/kora/actions/runs/40525735804), they took 510, 427 and 477 s on macOS, 347, 364 and 455 s on Linux 3.11, and 361, 429 and 439 s on Linux 3.15. Group times in the hosted logs were not retrieved.
+
+**Local diagnostics.** Single runs on shared x86_64 Linux with 2 vCPUs, CPython 3.11.17 and SQLite only, as root. Groups were launched without `uv run`, the collection prefix or the record step.
+
+| selection | before | after |
+| --- | --- | --- |
+| `test_ir_measurement_evidence.py` alone | 271.15 s | 11.87 s |
+| longest group alone | `integration`, 373.22 s | `integration` (`tests/cli`), 269.70 s |
+| new `measurements` group alone | — | 140.39 s |
+| three groups concurrently | 485.4 s | 343.2 s |
+
+- **Profile.** A `cProfile` run attributed about 94 % of the evidence module's time to three helpers that regenerate identical expected inventories. The evidence validator made about half of those calls.
+- **Join.** On identical synthetic shards, `python -m tests.measurements.ir_measurement_evidence` produced byte-identical output before and after the change.
+- **Core wheel.** `integration` built it twice before the change and once after; two consecutive builds were byte-identical.
+- **Deadline-sensitive case.** The 18-case installed storage case of `test_installed_provider_supports_local_tooling` uses about 73 % of its 60-second command timeout alone. It reached the timeout in both concurrent runs of the old grouping. In the new grouping it ran after `measurements` had finished.
+- **Root failures.** Six failures come from running as root or are unexplained on this host, and pass in hosted runs.
+
+These observations are not hosted predictions or guarantees.
+
+**Change.**
+
+- **Validator.** The evidence validator `tests/measurements/ir_measurement_evidence.py` computes four values once per process: the cost-case identities (a payload-free `AccountingCase` projection), the schema manifest, the schema model names, and the VcsRef case names with their manifest. Its evidence tests reuse them. Every comparison keeps its operands. The workload modules that measured children import are unchanged.
+- **Shared wheel.** A session-scoped `core_wheel` fixture in `tests/conftest.py` builds the core wheel once per pytest process. The session-scoped `provider_tooling_wheelhouse` copies it once into the session wheelhouse, which the listing tests share as before. `installed_conformance` copies it into each module's own wheelhouse. Every installed module or test still creates its own environment.
+- **Grouping.** `measurements` runs `tests/measurements`, `tests/db` and the non-storage `tests/plugins`, and `integration` runs `tests/cli`.
+
+The nine jobs, the five group names, three children in `remainder`, and the collection, JUnit and provenance joins are unchanged. So are the IR union counts, the protected and artifact names, the cache suffixes, and every job, test, helper and cleanup deadline. Existing test identities are unchanged, and three tests are added.
+
+**Projection, a diagnostic.** Local factors of 0.707 to 0.723, applied to the samples above, project these `remainder` jobs:
+
+- macOS 322 to 426 s, of which master samples 322 to 388 s;
+- Linux 3.11 261 to 345 s;
+- Linux 3.15 257 to 333 s.
+
+The slowest macOS sample, at 556 s, projects to the 7:00 line. The 6:00 condition is expected to keep firing on macOS. `tests/cli`, at about 270 s alone, is now the longest group, and no grouping by whole directories goes below it. The hosted result is recorded in the description of PR #329.
+
+**Revisit** in any of these cases:
+
+- any `remainder` job exceeds 7:00;
+- macOS `remainder` exceeds 6:30 in two consecutive master runs;
+- a change moves source checks or builds into `remainder`;
+- a moved or co-scheduled test fails a deadline in a hosted run;
+- the expected IR evidence values stop being deterministic within a process.

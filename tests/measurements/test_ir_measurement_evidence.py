@@ -17,6 +17,7 @@ from tests.measurements.ir_measurement_evidence import (
     ACCOUNTING_ENCODED_LIMIT,
     ACCOUNTING_OUTPUT_LIMIT,
     ROOT,
+    AccountingCase,
     AccountingChild,
     Evidence,
     MeasurementReport,
@@ -24,7 +25,11 @@ from tests.measurements.ir_measurement_evidence import (
     accounting_children,
     accounting_evidence,
     configuration_evidence,
+    expected_cost_cases,
     expected_evidence,
+    expected_schema_manifest,
+    expected_schema_models,
+    expected_vcs_ref_inventory,
     junit_nodes,
     schema_evidence,
     shard_evidence,
@@ -102,9 +107,9 @@ def schema_payload() -> dict[str, object]:
         "python": sys.version.split()[0],
         "cycles": 1000,
         "action_counts": {"validation": 334, "serialization": 333, "render_utf8": 333},
-        "class_schema_inventory": sorted(schema_models()),
+        "class_schema_inventory": list(expected_schema_models()),
         "class_schemas_unchanged": True,
-        "schema_manifest": json.loads(schema_fixture_manifest()),
+        "schema_manifest": json.loads(expected_schema_manifest()),
         "warm_up": 3,
         "rss_source": "synthetic resource observations",
     }
@@ -178,12 +183,12 @@ def rendered_report(inventory: Evidence) -> str:
             "remaining_fixture_manifest": "remaining",
             "declaration_fixture_manifest": "declaration",
             "document_fixture_manifest": "document",
-            "schema_fixture_manifest": schema_fixture_manifest(),
+            "schema_fixture_manifest": expected_schema_manifest(),
         }
     )
     report.gates.update(dict.fromkeys(inventory.gates, True))
     cases: dict[str, list[str]] = {"ordinary": [], "large": []}
-    for case in cost_cases():
+    for case in expected_cost_cases():
         cases[case.group].append(case.name)
     report.environment["accounting_case_inventory"] = json.dumps(cases)
     for child in accounting_children():
@@ -214,7 +219,7 @@ def rendered_report(inventory: Evidence) -> str:
         name, repeat, count = child.parent_sample()
         report.samples.append(Sample(name, repeat, count, 0.1))
     if any(node.endswith("::test_vcs_ref_action_cost") for node in inventory.nodes):
-        report.environment["vcs_ref_fixture_manifest"] = json.dumps(vcs_ref_cases()[1])
+        report.environment["vcs_ref_fixture_manifest"] = expected_vcs_ref_inventory()[1]
     for run in range(3):
         if configuration_evidence(run).nodes <= inventory.nodes:
             report.environment[f"config_lifetime_{run}"] = json.dumps(
@@ -1789,3 +1794,25 @@ def test_ir_schema_payload_rejects_a_stale_outer_manifest() -> None:
         verify_report(
             report.model_dump_json(), rendered_junit(expected), REVISION, expected
         )
+
+
+def test_memoized_expected_inventories_equal_a_fresh_computation() -> None:
+    fresh_actions, fresh_manifest = vcs_ref_cases()
+    fresh = (
+        tuple(
+            AccountingCase(case.name, case.accepted, case.group, case.records)
+            for case in cost_cases()
+        ),
+        schema_fixture_manifest(),
+        tuple(sorted(schema_models())),
+        (tuple(action.name for action in fresh_actions), json.dumps(fresh_manifest)),
+    )
+
+    memoized = (
+        expected_cost_cases(),
+        expected_schema_manifest(),
+        expected_schema_models(),
+        expected_vcs_ref_inventory(),
+    )
+
+    assert memoized == fresh

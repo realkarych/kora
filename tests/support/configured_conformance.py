@@ -8,8 +8,8 @@ import pytest
 from kora.ir.json import JsonObject
 from tests.support.provider_tooling import (
     InstalledTooling,
-    build_core_wheel,
     build_fixture_wheel,
+    copy_core_wheel,
     install_tooling,
     prepare_wheelhouse,
 )
@@ -44,13 +44,13 @@ def vcs_configuration(root: Path) -> JsonObject:
 
 
 @pytest.fixture(scope="module")
-def installed_conformance() -> Generator[InstalledTooling]:
+def installed_conformance(core_wheel: Path) -> Generator[InstalledTooling]:
     with TemporaryDirectory(prefix="kora-installed-", dir="/tmp") as temporary:
         root = Path(temporary).resolve()
         wheelhouse = root / "dependencies"
         wheelhouse.mkdir()
         prepare_wheelhouse(wheelhouse, conformance=True)
-        build_core_wheel(wheelhouse)
+        copy_core_wheel(core_wheel, wheelhouse)
         fixture = build_fixture_wheel(
             root,
             {

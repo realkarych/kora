@@ -6,6 +6,7 @@ import statistics
 import sys
 from collections import Counter
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Literal, cast
 from xml.parsers.expat import ParserCreate
@@ -26,7 +27,7 @@ from tests.measurements.cost_workload import (
     LARGE_CYCLES,
     ORDINARY_CYCLES,
     SUMMARY_BYTES,
-    CostCase,
+    Group,
     cost_cases,
 )
 from tests.measurements.cost_workload import MEASURED as COST_MEASURED
@@ -148,6 +149,14 @@ class AccountingLifetimeEnvironment(AccountingEnvironment):
 
 
 @dataclass(frozen=True)
+class AccountingCase:
+    name: str
+    accepted: bool
+    group: Group
+    records: int
+
+
+@dataclass(frozen=True)
 class AccountingChild:
     identity: str
     node: str
@@ -155,7 +164,7 @@ class AccountingChild:
     mode: Literal["timing", "traced", "native"]
     group: Literal["ordinary", "large"]
     batch: int
-    cases: tuple[CostCase, ...]
+    cases: tuple[AccountingCase, ...]
 
     def samples(self) -> Counter[tuple[str, int, int]]:
         if self.mode == "timing":
@@ -182,9 +191,35 @@ class AccountingChild:
         return workload, self.run, 1
 
 
-def accounting_children(actions: list[CostCase] | None = None) -> list[AccountingChild]:
+@cache
+def expected_cost_cases() -> tuple[AccountingCase, ...]:
+    return tuple(
+        AccountingCase(case.name, case.accepted, case.group, case.records)
+        for case in cost_cases()
+    )
+
+
+@cache
+def expected_schema_manifest() -> str:
+    return schema_fixture_manifest()
+
+
+@cache
+def expected_schema_models() -> tuple[str, ...]:
+    return tuple(sorted(schema_models()))
+
+
+@cache
+def expected_vcs_ref_inventory() -> tuple[tuple[str, ...], str]:
+    actions, manifest = vcs_ref_cases()
+    return tuple(action.name for action in actions), json.dumps(manifest)
+
+
+def accounting_children(
+    actions: list[AccountingCase] | None = None,
+) -> list[AccountingChild]:
     if actions is None:
-        actions = cost_cases()
+        actions = list(expected_cost_cases())
     children: list[AccountingChild] = []
     groups: tuple[Literal["ordinary", "large"], ...] = ("ordinary", "large")
     modes: tuple[Literal["traced", "native"], ...] = ("traced", "native")
@@ -437,9 +472,9 @@ def accepted_evidence() -> Evidence:
             gates.add(f"diagnostic_{mode}_{run}_resources_released")
             samples[(f"diagnostic_{mode}_{run}_process", run, 1)] += 1
     nodes.add(f"{NODE}test_vcs_ref_action_cost")
-    for action in vcs_ref_cases()[0]:
-        gates.add(f"{action.name}_retained")
-        samples.update((action.name, repeat, 1) for repeat in range(DENSE_MEASURED))
+    for name in expected_vcs_ref_inventory()[0]:
+        gates.add(f"{name}_retained")
+        samples.update((name, repeat, 1) for repeat in range(DENSE_MEASURED))
     for run in range(3):
         nodes.add(f"{NODE}test_vcs_ref_cold_public_import[{run}]")
         gates.add(f"vcs_import_{run}_resources_released")
@@ -618,7 +653,7 @@ def verify_schema_payloads(
         raise ValueError("incomplete IR schema lifetime evidence")
     if not runs:
         return
-    manifest_text = schema_fixture_manifest()
+    manifest_text = expected_schema_manifest()
     manifest = SchemaManifest.model_validate_json(manifest_text)
     if report.environment.get("schema_fixture_manifest") != manifest_text:
         raise ValueError("inconsistent IR schema fixture manifest")
@@ -645,7 +680,7 @@ def verify_schema_payloads(
             or payload.cycles != cycles[-1]
             or payload.action_counts
             != {"validation": 334, "serialization": 333, "render_utf8": 333}
-            or payload.class_schema_inventory != sorted(schema_models())
+            or payload.class_schema_inventory != list(expected_schema_models())
             or not payload.class_schemas_unchanged
             or payload.schema_manifest != manifest
             or payload.warm_up != WARM_UP
@@ -716,7 +751,9 @@ def verify_vcs_ref_evidence(report: MeasurementReport, expected: Evidence) -> No
             recorded = VCS_REF_MANIFEST.validate_json(manifest, strict=True)
         except ValidationError:
             raise ValueError("incomplete IR VcsRef fixture manifest") from None
-        if recorded != vcs_ref_cases()[1]:
+        if recorded != VCS_REF_MANIFEST.validate_json(
+            expected_vcs_ref_inventory()[1], strict=True
+        ):
             raise ValueError("inconsistent IR VcsRef fixture manifest")
     elif "vcs_ref_fixture_manifest" in report.environment:
         raise ValueError("unselected IR VcsRef fixture manifest")
@@ -978,7 +1015,7 @@ def verify_accounting_evidence(
     expected: Evidence,
     diagnostics: list[dict[str, ExtraValue]],
 ) -> None:
-    actions = cost_cases()
+    actions = list(expected_cost_cases())
     selected = [
         child for child in accounting_children(actions) if child.node in expected.nodes
     ]

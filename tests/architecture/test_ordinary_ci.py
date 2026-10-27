@@ -103,9 +103,9 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         "--ignore=tests/conformance/test_installed_conformance.py)\n"
         'for path in "${first[@]}"; do\n'
         '  second+=("--ignore=$path")\ndone\n'
-        "measurements=(tests/measurements)\n"
-        "integration=(tests/db tests/cli tests/plugins "
+        "measurements=(tests/measurements tests/db tests/plugins "
         "--ignore=tests/plugins/storage)\n"
+        "integration=(tests/cli)\n"
         "other=(tests --ignore=tests/conformance --ignore=tests/plugins "
         "--ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)\n"
     ) in command

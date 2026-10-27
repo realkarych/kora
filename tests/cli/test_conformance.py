@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import socket
+import stat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -467,3 +468,18 @@ def test_installed_provider_configuration_is_effective(
     assert outcome.cleanup is not None
     assert outcome.cleanup.state is CleanupOutcome.CLOSED
     assert value.encode() not in process.stdout + process.stderr
+
+
+def test_installed_conformance_owns_its_environment_and_wheel_copy(
+    installed_conformance: InstalledTooling, core_wheel: Path
+) -> None:
+    root = installed_conformance.outside.parent
+    copy = root / "dependencies" / core_wheel.name
+
+    copied, shared = copy.lstat(), core_wheel.stat()
+
+    assert stat.S_ISREG(copied.st_mode)
+    assert (copied.st_dev, copied.st_ino) != (shared.st_dev, shared.st_ino)
+    assert copy.read_bytes() == core_wheel.read_bytes()
+    assert installed_conformance.python.is_relative_to(root)
+    assert not core_wheel.is_relative_to(root)

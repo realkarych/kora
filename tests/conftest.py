@@ -41,6 +41,13 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 
 @pytest.fixture(scope="session")
+def core_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    from tests.support.provider_tooling import build_core_wheel
+
+    return build_core_wheel(tmp_path_factory.mktemp("core-wheel"))
+
+
+@pytest.fixture(scope="session")
 def postgres_server() -> Iterator[PostgresServer]:
     yield from start_postgres(os.environ.get(RYUK_VARIABLE))
 

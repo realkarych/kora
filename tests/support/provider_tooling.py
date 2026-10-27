@@ -168,6 +168,12 @@ def build_core_wheel(output: Path) -> Path:
     return next(output.glob("kora-*.whl"))
 
 
+def copy_core_wheel(core_wheel: Path, wheelhouse: Path) -> Path:
+    target = wheelhouse / core_wheel.name
+    shutil.copyfile(core_wheel, target)
+    return target
+
+
 def build_fixture_wheel(
     root: Path,
     entries: Mapping[str, str],

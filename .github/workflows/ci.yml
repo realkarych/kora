@@ -183,8 +183,8 @@ jobs:
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
-          measurements=(tests/measurements)
-          integration=(tests/db tests/cli tests/plugins --ignore=tests/plugins/storage)
+          measurements=(tests/measurements tests/db tests/plugins --ignore=tests/plugins/storage)
+          integration=(tests/cli)
           other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" "${general[@]}" > "$KORA_ORDINARY_OUTPUT/full.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
