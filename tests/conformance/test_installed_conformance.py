@@ -33,7 +33,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.metadata import ProtocolName
 from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError
+from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.support.configured_conformance import (
@@ -314,6 +314,16 @@ async def installed_run(
                     )
                     if result.phase == "ready":
                         assert result.expected > 0
+                        readable = asyncio.create_task(channel.wait_readable())
+                        tasks.append(readable)
+                        await asyncio.wait(
+                            (readable, serving, owner.invocation_cleanup.result),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not readable.done():
+                            raise ChannelError(ChannelFailure.CLOSED)
+                        readable.result()
+                        deadline = SystemClock().monotonic_ns() + 30_000_000_000
                         result = ChildResult.model_validate_json(
                             await channel.read_record(deadline, 4096)
                         )

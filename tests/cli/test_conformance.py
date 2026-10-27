@@ -401,7 +401,7 @@ def test_installed_provider_supports_local_tooling(
     expected: int,
 ) -> None:
     installed = installed_conformance
-    home = tmp_path / "home"
+    home = installed.outside / protocol.value
     home.mkdir(mode=0o700)
     config = tmp_path / "config.json"
     config.write_text(
