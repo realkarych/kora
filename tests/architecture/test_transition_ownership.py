@@ -1,8 +1,16 @@
 import ast
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
+
+from tests.support.ast_modules import (
+    SourceModule,
+    Violation,
+    is_within,
+    resolve_relative,
+    source_modules,
+    write_module,
+)
 
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Path = REPOSITORY_ROOT / "src"
@@ -53,45 +61,8 @@ RAW_WRITE: re.Pattern[str] = re.compile(
 )
 
 
-@dataclass(frozen=True)
-class SourceModule:
-    path: Path
-    name: str
-
-
-@dataclass(frozen=True)
-class Violation:
-    path: Path
-    line: int
-    reason: str
-
-    def describe(self, source_root: Path) -> str:
-        return f"{self.path.relative_to(source_root)}:{self.line}: {self.reason}"
-
-
-def is_within(module: str, package: str) -> bool:
-    return module == package or module.startswith(f"{package}.")
-
-
-def source_modules(source_root: Path) -> list[SourceModule]:
-    modules: list[SourceModule] = []
-    for path in sorted((source_root / ROOT_PACKAGE).rglob("*.py")):
-        parts = list(path.relative_to(source_root).with_suffix("").parts)
-        if parts[-1] == "__init__":
-            parts.pop()
-        modules.append(SourceModule(path, ".".join(parts)))
-    return modules
-
-
 def is_owner(module: str) -> bool:
     return any(is_within(module, owner) for owner in OWNING_MODULES)
-
-
-def resolve_relative(module: SourceModule, level: int, name: str) -> str:
-    parts = module.name.split(".")
-    package_parts = parts if module.path.stem == "__init__" else parts[:-1]
-    base_parts = package_parts[: len(package_parts) - (level - 1)]
-    return ".".join([*base_parts, name] if name else base_parts)
 
 
 def import_source(module: SourceModule, node: ast.ImportFrom) -> str:
@@ -361,16 +332,10 @@ def module_violations(module: SourceModule) -> list[Violation]:
 
 def find_violations(source_root: Path) -> list[str]:
     violations: list[Violation] = []
-    for module in source_modules(source_root):
+    for module in source_modules(source_root, ROOT_PACKAGE, (".py",)):
         violations.extend(module_violations(module))
     described = {violation.describe(source_root) for violation in violations}
     return sorted(described)
-
-
-def write_module(source_root: Path, module: str, source: str) -> None:
-    path = source_root.joinpath(*module.split(".")).with_suffix(".py")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
 
 
 def test_transitions_only_through_shared_functions() -> None:

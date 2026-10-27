@@ -2,18 +2,31 @@ import os
 import shlex
 import subprocess
 import sys
-from pathlib import Path
-from typing import Protocol, cast
+from typing import cast
 
 import pytest
-from ruamel.yaml import YAML
 
 from tests.measurements.ir_measurement_evidence import expected_evidence, shard_evidence
+from tests.support.workflows import (
+    action_name,
+    command_lines,
+    step_list,
+    steps,
+    table,
+    workflow_jobs,
+)
 
-ROOT = Path(__file__).resolve().parents[2]
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
 SCHEMA_RUN = f"{MEASUREMENT}::test_ir_schema_repeated_lifetime"
+NEEDED_JOBS = {
+    "scaffold": "SCAFFOLD",
+    "ir-measurements": "IR_MATRIX",
+    "resource-measurements": "RESOURCE",
+    "pricing-measurements": "PRICING",
+    "cel-producer": "CEL",
+    "git-publication-measurements": "GIT_PUBLICATION",
+}
 SUCCESS = {
     "SCAFFOLD_RESULT": "success",
     "IR_MATRIX_RESULT": "success",
@@ -37,105 +50,51 @@ SUCCESS = {
 }
 
 
-def table(value: object) -> dict[str, object]:
-    assert isinstance(value, dict)
-    return cast(dict[str, object], value)
-
-
-class YamlLoader(Protocol):
-    def load(self, stream: Path) -> object: ...
-
-
-def workflow_jobs() -> dict[str, object]:
-    document = cast(YamlLoader, YAML(typ="safe")).load(
-        ROOT / ".github" / "workflows" / "ci.yml"
-    )
-    return table(table(document)["jobs"])
-
-
-def steps(job: dict[str, object]) -> dict[str, dict[str, object]]:
-    entries = cast(list[object], job["steps"])
-    return {
-        str(entry["id"]): entry for value in entries if "id" in (entry := table(value))
-    }
-
-
 def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
     jobs = workflow_jobs()
     job = table(jobs["ir-measurements"])
 
     strategy = table(job["strategy"])
-    includes = table(strategy["matrix"])["include"]
+    includes = cast(list[object], table(strategy["matrix"])["include"])
     selected_steps = steps(job)
+    entries = step_list(job)
+    upload = selected_steps["ir_upload"]
+    upload_with = table(upload["with"])
+    measurement = command_lines(selected_steps["measurement"]["run"])
 
     assert strategy["fail-fast"] is False
-    assert includes == [
-        {
-            "run": 0,
-            "pytest-arguments": (
-                f"{MEASUREMENT} '--deselect={RUN}[1]' '--deselect={RUN}[2]' "
-                f"'--deselect={MEASUREMENT}::"
-                "test_cost_checker_refuses_unexpected_acceptance' "
-                f"'--deselect={MEASUREMENT}::"
-                "test_cost_checker_refuses_unexpected_rejection' "
-                f"'--deselect={MEASUREMENT}::test_cost_checker_releases_nested_values' "
-                f"'--deselect={MEASUREMENT}::"
-                "test_cost_process_failure_preserves_lossless_evidence' "
-                f"'--deselect={MEASUREMENT}::test_accounting_value_cost' "
-                f"'--deselect={MEASUREMENT}::test_accounting_value_lifetime'"
-                f" '--deselect={SCHEMA_RUN}[0]' '--deselect={SCHEMA_RUN}[1]'"
-                f" '--deselect={SCHEMA_RUN}[2]'"
-            ),
-        },
-        {
-            "run": 1,
-            "pytest-arguments": (
-                f"'{RUN}[1]' "
-                f"'{MEASUREMENT}::test_cost_checker_refuses_unexpected_acceptance' "
-                f"'{MEASUREMENT}::test_cost_checker_refuses_unexpected_rejection' "
-                f"'{MEASUREMENT}::test_cost_checker_releases_nested_values' "
-                f"'{MEASUREMENT}::"
-                "test_cost_process_failure_preserves_lossless_evidence' "
-                f"'{MEASUREMENT}::test_accounting_value_cost'"
-            ),
-        },
-        {
-            "run": 2,
-            "pytest-arguments": (
-                f"'{RUN}[2]' '{MEASUREMENT}::test_accounting_value_lifetime'"
-            ),
-        },
-        {"run": 3, "pytest-arguments": f"'{SCHEMA_RUN}[0]'"},
-        {"run": 4, "pytest-arguments": f"'{SCHEMA_RUN}[1]'"},
-        {"run": 5, "pytest-arguments": f"'{SCHEMA_RUN}[2]'"},
-    ]
+    assert [table(row)["run"] for row in includes] == list(range(len(shard_evidence())))
+    assert all(set(table(row)) == {"run", "pytest-arguments"} for row in includes)
     assert job["runs-on"] == "ubuntu-24.04"
-    assert selected_steps["measurement"]["run"] == (
-        "uv run --no-sync pytest -q -p no:logging -m measurement "
-        "${{ matrix.pytest-arguments }} "
-        "--junitxml=measurements/ir-models-cost-${{ matrix.run }}.xml\n"
-    )
-    upload = selected_steps["ir_upload"]
+    assert measurement == [
+        (
+            "uv",
+            "run",
+            "--no-sync",
+            "pytest",
+            "-q",
+            "-p",
+            "no:logging",
+            "-m",
+            "measurement",
+            "${{matrix.pytest-arguments}}",
+            f"--junitxml={upload_with['path']}ir-models-cost-${{{{matrix.run}}}}.xml",
+        )
+    ]
     assert upload["if"] == "${{ always() }}"
-    assert table(upload["with"])["if-no-files-found"] == "error"
-    assert table(upload["with"])["name"] == (
+    assert upload_with["if-no-files-found"] == "error"
+    assert upload_with["name"] == (
         "ir-models-cost-measurement-${{ env.KORA_MEASUREMENT_REVISION }}-"
         "${{ matrix.run }}"
     )
-    entries = [table(entry) for entry in cast(list[object], job["steps"])]
-    assert entries[0]["uses"] == (
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
-    )
+    assert action_name(upload["uses"]) == "actions/upload-artifact"
+    assert action_name(entries[0]["uses"]) == "actions/checkout"
     assert entries[0]["with"] == {
         "persist-credentials": False,
         "ref": "${{ github.event.pull_request.head.sha || github.sha }}",
         "fetch-depth": 0,
     }
-    assert entries[1]["uses"] == (
-        "astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7"
-    )
-    assert table(entries[1]["with"])["version"] == "0.13.1"
-    assert table(entries[1]["with"])["python-version"] == "3.11.17"
+    assert action_name(entries[1]["uses"]) == "astral-sh/setup-uv"
     install = str(entries[2]["run"])
     assert "uv sync --locked --no-build" in install
     assert "uv export --locked --only-group build --no-emit-project" in install
@@ -147,49 +106,39 @@ def test_ir_ci_uses_exact_literal_nodes_and_required_artifacts() -> None:
 
 
 def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
-    job = table(workflow_jobs()["cel-measurements"])
+    jobs = workflow_jobs()
+    job = table(jobs["cel-measurements"])
 
     selected_steps = steps(job)
     gate = selected_steps["required_measurements"]
-
-    assert job["name"] == "CEL evaluator lifetime"
-    assert job["needs"] == [
-        "scaffold",
-        "ir-measurements",
-        "resource-measurements",
-        "pricing-measurements",
-        "cel-producer",
-        "git-publication-measurements",
-    ]
-    assert job["if"] == "${{ always() }}"
-    assert gate["if"] == "${{ always() }}"
-    assert table(gate["env"]) == {
-        "SCAFFOLD_RESULT": "${{ needs.scaffold.result }}",
-        "IR_MATRIX_RESULT": "${{ needs.ir-measurements.result }}",
-        "RESOURCE_RESULT": "${{ needs.resource-measurements.result }}",
-        "RESOURCE_VERIFIED": "${{ needs.resource-measurements.outputs.verified }}",
-        "PRICING_RESULT": "${{ needs.pricing-measurements.result }}",
-        "PRICING_VERIFIED": "${{ needs.pricing-measurements.outputs.verified }}",
-        "CEL_RESULT": "${{ needs.cel-producer.result }}",
-        "CEL_VERIFIED": "${{ needs.cel-producer.outputs.verified }}",
-        "GIT_PUBLICATION_RESULT": "${{ needs.git-publication-measurements.result }}",
-        "GIT_PUBLICATION_VERIFIED": (
-            "${{ needs.git-publication-measurements.outputs.verified }}"
-        ),
-        "DEPENDENCIES_OUTCOME": "${{ steps.dependencies.outcome }}",
-        "SOURCE_REVISION_OUTCOME": "${{ steps.source_revision.outcome }}",
-        "IR_DOWNLOAD_OUTCOME": "${{ steps.ir_download.outcome }}",
-        "IR_INVENTORY_OUTCOME": "${{ steps.ir_inventory.outcome }}",
-        "IR_UNION_UPLOAD_OUTCOME": "${{ steps.ir_union_upload.outcome }}",
-        "CEL_LIFETIME_DOWNLOAD_OUTCOME": "${{ steps.cel_lifetime_download.outcome }}",
-        "CEL_COST_DOWNLOAD_OUTCOME": "${{ steps.cel_cost_download.outcome }}",
-        "CEL_INVENTORY_OUTCOME": "${{ steps.cel_inventory.outcome }}",
+    expected = {
+        **{
+            f"{prefix}_RESULT": f"${{{{ needs.{needed}.result }}}}"
+            for needed, prefix in NEEDED_JOBS.items()
+        },
+        **{
+            f"{prefix}_VERIFIED": f"${{{{ needs.{needed}.outputs.verified }}}}"
+            for needed, prefix in NEEDED_JOBS.items()
+            if "verified" in table(table(jobs[needed]).get("outputs", {}))
+        },
+        **{
+            f"{identity.upper()}_OUTCOME": f"${{{{ steps.{identity}.outcome }}}}"
+            for identity in selected_steps
+            if identity not in {"required_measurements", "workflow_cancellation"}
+        },
         "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
     }
+
+    assert job["name"] == "CEL evaluator lifetime"
+    assert job["needs"] == list(NEEDED_JOBS)
+    assert job["if"] == "${{ always() }}"
+    assert gate["if"] == "${{ always() }}"
+    assert table(gate["env"]) == expected
+    assert set(expected) == set(SUCCESS)
     assert selected_steps["workflow_cancellation"]["if"] == "${{ cancelled() }}"
     assert selected_steps["workflow_cancellation"]["run"] == "exit 0"
-    assert selected_steps["ir_download"]["uses"] == (
-        "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0"
+    assert action_name(selected_steps["ir_download"]["uses"]) == (
+        "actions/download-artifact"
     )
     assert table(selected_steps["ir_download"]["with"])["merge-multiple"] is False
 

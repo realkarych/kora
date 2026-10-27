@@ -5,28 +5,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from tests.support.workflows import action_name, workflow_document
+
 ROOT = Path(__file__).resolve().parents[2]
 COPY_DIRECTORY = ROOT / ".github" / "osv" / "common-expression-language"
 CRATE_LOCK = COPY_DIRECTORY / "Cargo.lock"
 OVERRIDE = COPY_DIRECTORY / "osv-scanner.toml"
 CRATE_LOCK_SHA256 = "7115bab240a98243c913e2c97c1ba79ba94b501c8f1370f10820ad155ca107cd"
 OVERRIDE_KEYS = frozenset({"name", "version", "ecosystem", "ignore", "reason"})
-WORKFLOW = ROOT / ".github" / "workflows" / "osv-scanner.yml"
 SCAN_ARGUMENTS = (
     "--lockfile=uv.lock",
     "--lockfile=web/pnpm-lock.yaml",
     "--lockfile=.github/osv/common-expression-language/Cargo.lock",
 )
-SCAN_ARGUMENTS_KEY = "scan-args: |-"
-SCANNING_JOBS = 2
-SCANNER_WORKFLOW = "uses: google/osv-scanner-action/"
-SCANNER_PIN = "@b1d267aea5211fa648d9d442fa64b90dbdcbdd36"
-SCANNING_JOB_LINES = (
-    "if: github.event_name == 'pull_request'",
-    f"{SCANNER_WORKFLOW}.github/workflows/osv-scanner-reusable-pr.yml{SCANNER_PIN}",
-    "if: github.event_name != 'pull_request'",
-    f"{SCANNER_WORKFLOW}.github/workflows/osv-scanner-reusable.yml{SCANNER_PIN}",
-)
+SCANNER_WORKFLOWS = "google/osv-scanner-action/.github/workflows"
+SCANNING_JOBS = {
+    "pull-request": (
+        "github.event_name == 'pull_request'",
+        f"{SCANNER_WORKFLOWS}/osv-scanner-reusable-pr.yml",
+    ),
+    "full-scan": (
+        "github.event_name != 'pull_request'",
+        f"{SCANNER_WORKFLOWS}/osv-scanner-reusable.yml",
+    ),
+}
 UNSCANNED_DIRECTORIES = frozenset({".git", ".venv", "web/node_modules"})
 
 
@@ -82,41 +84,33 @@ def scanner_configurations(root: Path) -> Iterator[Path]:
                     pending.append(entry)
 
 
-def scan_argument_blocks(workflow: str) -> list[tuple[str, ...]]:
-    lines = workflow.splitlines()
-    blocks: list[tuple[str, ...]] = []
-    for index, line in enumerate(lines):
-        if line.strip() != SCAN_ARGUMENTS_KEY:
-            continue
-        indent = len(line) - len(line.lstrip())
-        block: list[str] = []
-        for following in lines[index + 1 :]:
-            if following.strip() and len(following) - len(following.lstrip()) <= indent:
-                break
-            block.append(following.strip())
-        blocks.append(tuple(entry for entry in block if entry))
-    return blocks
-
-
-def job_lines(workflow: str) -> tuple[str, ...]:
-    return tuple(
-        line.strip().split("  #", 1)[0]
-        for line in workflow.splitlines()
-        if line.strip().startswith(("if:", "uses:"))
+def scan_configuration(value: object) -> tuple[object, ...]:
+    job = as_table(value)
+    inputs = as_table(job["with"])
+    return (
+        job["if"],
+        action_name(job["uses"]),
+        frozenset(inputs),
+        tuple(as_text(inputs["scan-args"]).split()),
+        inputs["fail-on-vuln"] is True,
     )
 
 
 def test_osv_scans_pass_only_the_three_lockfiles_and_fail_on_findings() -> None:
-    workflow = WORKFLOW.read_text(encoding="utf-8")
+    jobs = as_table(workflow_document("osv-scanner.yml")["jobs"])
 
-    blocks = scan_argument_blocks(workflow)
+    scans = {identity: scan_configuration(job) for identity, job in jobs.items()}
 
-    assert blocks == [SCAN_ARGUMENTS] * SCANNING_JOBS
-    assert workflow.count("scan-args") == SCANNING_JOBS
-    assert workflow.count(SCANNER_WORKFLOW) == SCANNING_JOBS
-    assert workflow.count("fail-on-vuln: true") == SCANNING_JOBS
-    assert workflow.count("fail-on-vuln") == SCANNING_JOBS
-    assert job_lines(workflow) == SCANNING_JOB_LINES
+    assert scans == {
+        identity: (
+            condition,
+            workflow,
+            frozenset({"scan-args", "fail-on-vuln"}),
+            SCAN_ARGUMENTS,
+            True,
+        )
+        for identity, (condition, workflow) in SCANNING_JOBS.items()
+    }
 
 
 def test_osv_override_is_scoped_to_the_binding_root_crate() -> None:

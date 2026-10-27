@@ -1,14 +1,24 @@
 import os
+import shlex
 import subprocess
 import sys
+import tomllib
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import cast
 
 import pytest
 
-from tests.architecture.test_measurement_job_routing import steps, table, workflow_jobs
 from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
+from tests.support.workflows import (
+    action_name,
+    command_lines,
+    steps,
+    table,
+    workflow_jobs,
+)
 
+ROOT = Path(__file__).resolve().parents[2]
 FIRST_MODULES = (
     "tests/conformance/test_conformance_cases_detect_broken_providers.py",
     "tests/conformance/test_lifetime_helper_phases.py",
@@ -81,124 +91,262 @@ def evidence_validation() -> str:
     return marker + remainder.partition("done\n")[0] + "done\n"
 
 
-def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
-    selected = steps(table(workflow_jobs()["scaffold-tests"]))
-    command = ordinary_shell()
-    source = str(selected["tests"]["run"])
+ORDINARY_OUTPUT = "$KORA_ORDINARY_OUTPUT"
+BASE_TEMPORARY = "tmp-"
+PID_RECORD = ("pids+=", "(", "$!", ")")
+INVENTORY_COMMAND = (
+    "uv",
+    "run",
+    "--no-sync",
+    "python",
+    "-m",
+    "tests.support.ordinary_inventory",
+    ORDINARY_OUTPUT,
+    ">",
+    f"{ORDINARY_OUTPUT}/inventory.json",
+)
+COPY_GUARD = (
+    "if",
+    "test",
+    "-f",
+    f"{ORDINARY_OUTPUT}/$name",
+    "&&",
+    "test",
+    "!",
+    "-L",
+    f"{ORDINARY_OUTPUT}/$name",
+    ";",
+    "then",
+)
 
-    first = command.partition("first=(\n")[2].partition(")\n")[0].split()
 
-    assert command.startswith(
-        'read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"\n'
-        'case "$KORA_SCAFFOLD_LANE" in\n'
-        "  conformance|remainder) ;;\n"
-        "  *) exit 1 ;;\n"
-        "esac\n"
+def collection_command(group: str, arguments: str) -> tuple[str, ...]:
+    return (
+        "uv",
+        "run",
+        "--no-sync",
+        "pytest",
+        "--collect-only",
+        "-q",
+        "-o",
+        f"cache_dir={ORDINARY_OUTPUT}/cache-{group}",
+        *shlex.split(arguments),
+        ">",
+        f"{ORDINARY_OUTPUT}/{group}.collection",
     )
-    assert "${{" not in command
-    assert tuple(first) == FIRST_MODULES
-    assert (
-        "second=(tests/conformance "
-        "--ignore=tests/conformance/test_artifact_storage_conformance.py "
-        "--ignore=tests/conformance/test_installed_conformance.py)\n"
-        'for path in "${first[@]}"; do\n'
-        '  second+=("--ignore=$path")\ndone\n'
-        "measurements=(tests/measurements tests/db tests/plugins "
-        "--ignore=tests/plugins/storage)\n"
-        "integration=(tests/cli)\n"
-        "other=(tests --ignore=tests/conformance --ignore=tests/plugins "
-        "--ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)\n"
-    ) in command
-    assert 'mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX"' in source
-    collections = [
-        command.index(
-            "uv run --no-sync pytest --collect-only -q -o "
-            f'cache_dir="$KORA_ORDINARY_OUTPUT/cache-{group}" {arguments} '
-            f'> "$KORA_ORDINARY_OUTPUT/{group}.collection"\n'
+
+
+def launch_command(child: str) -> tuple[str, ...]:
+    return (
+        "uv",
+        "run",
+        "--no-sync",
+        "python",
+        "-m",
+        "tests.support.ordinary_pytest",
+        "-q",
+        "-o",
+        f"cache_dir={ORDINARY_OUTPUT}/cache-{child}",
+        f"--basetemp={ORDINARY_OUTPUT}/{BASE_TEMPORARY}{child}",
+        f"--junitxml={ORDINARY_OUTPUT}/{child}.xml",
+        f"${{{child}[@]}}",
+        ">",
+        f"{ORDINARY_OUTPUT}/{child}.log",
+        "2",
+        ">&",
+        "1",
+        "&",
+    )
+
+
+def declared_array(lines: list[tuple[str, ...]], name: str) -> list[str]:
+    values = [
+        list(line[2:-1])
+        for line in lines
+        if line[:2] == (f"{name}=", "(") and line[-1] == ")"
+    ]
+    assert len(values) == 1
+    return values[0]
+
+
+def rendered(template: str, row: dict[str, object]) -> str:
+    for key, value in row.items():
+        template = template.replace(f"${{{{ matrix.{key} }}}}", str(value))
+    return template
+
+
+def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
+    jobs = workflow_jobs()
+    lane = table(jobs["scaffold-tests"])
+    selected = steps(lane)
+    download = table(steps(table(jobs["scaffold"]))["evidence_download"]["with"])
+    upload = selected["evidence_upload"]
+    command = ordinary_shell()
+
+    lines = command_lines(command)
+    outer = command_lines(selected["tests"]["run"])
+    collections = [line for line in lines if "--collect-only" in line]
+    finished = outer.index(("KORA_ORDINARY_SCRIPT",))
+    copy = next(line for line in outer[finished:] if line[:3] == ("for", "name", "in"))
+    copying = outer.index(
+        ("cp", f"{ORDINARY_OUTPUT}/$name", "$KORA_SCAFFOLD_DIRECTORY/$name")
+    )
+    recording = next(
+        index
+        for index, line in enumerate(outer)
+        if line[:7]
+        == (
+            "uv",
+            "run",
+            "--no-sync",
+            "python",
+            "-m",
+            "tests.scaffold_evidence",
+            "record",
         )
+    )
+    rows = [
+        table(row)
+        for row in cast(
+            list[object], table(table(lane["strategy"])["matrix"])["include"]
+        )
+    ]
+    artifacts = [rendered(str(table(upload["with"])["name"]), row) for row in rows]
+
+    assert "${{" not in command
+    assert collections == [
+        collection_command(group, arguments)
         for group, arguments in GROUP_ARGUMENTS.items()
     ]
-    assert collections == sorted(collections)
     assert (
-        collections[-1]
-        < command.index("python -m tests.support.ordinary_inventory")
-        < command.index("pids=()")
+        lines.index(collections[-1])
+        < lines.index(INVENTORY_COMMAND)
+        < lines.index(("pids=", "()"))
     )
     for shard, children in SHARD_CHILDREN.items():
-        launches = "".join(
-            "    uv run --no-sync python -m tests.support.ordinary_pytest -q -o "
-            f'cache_dir="$KORA_ORDINARY_OUTPUT/cache-{child}" '
-            f'--basetemp="$KORA_ORDINARY_OUTPUT/tmp-{child}" '
-            f'--junitxml="$KORA_ORDINARY_OUTPUT/{child}.xml" '
-            f"{GROUP_ARGUMENTS[child]} "
-            f'> "$KORA_ORDINARY_OUTPUT/{child}.log" 2>&1 &\n'
-            '    pids+=("$!")\n'
-            for child in children
-        )
-        assert shard_branch(shard) == (
+        branch = command_lines(shard_branch(shard))
+        names = declared_array(branch, "names")
+        launches = [launch_command(child) for child in names]
+        assert sorted(names) == sorted(children)
+        assert [line for line in branch if "tests.support.ordinary_pytest" in line] == (
             launches
-            + "    names=("
-            + " ".join(children)
-            + ")\n    evidence=("
-            + " ".join(shard_evidence(shard))
-            + ")\n"
         )
-    assert command.count('pids+=("$!")') == 5
-    assert "    ;;\n  *) exit 1 ;;\nesac\nresult=0\n" in command
+        assert all(
+            branch[branch.index(launch) + 1] == PID_RECORD for launch in launches
+        )
+        assert branch.count(PID_RECORD) == len(children)
+        assert sorted(declared_array(branch, "evidence")) == sorted(
+            shard_evidence(shard)
+        )
     assert (
-        '  if wait "${pids[$index]}"; then\n    status=0\n  else\n'
-        '    status="$?"\n    result=1\n  fi'
-    ) in command
-    assert (
-        'printf \'%s\\n\' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"'
-    ) in command
-    assert (
-        command.index("esac\nresult=0\n")
-        < command.index('for index in "${!pids[@]}"')
-        < command.index('for name in "${evidence[@]}"')
-        < command.index('exit "$result"')
+        lines.index(("result=0",))
+        < lines.index(("for", "index", "in", "${!pids[@]}", ";", "do"))
+        < lines.index(("for", "name", "in", "${evidence[@]}", ";", "do"))
     )
+    assert lines[-1] == ("exit", "$result")
     assert (
-        'for name in "${evidence[@]}"; do\n'
-        '  test -f "$KORA_ORDINARY_OUTPUT/$name"\n'
-        '  test ! -L "$KORA_ORDINARY_OUTPUT/$name"\n'
-        '  test -s "$KORA_ORDINARY_OUTPUT/$name"\n'
-        "done\n"
-        'for name in "${evidence[@]}"; do\n'
-        '  case "$name" in\n'
-        '    inventory.json|*.log) cat "$KORA_ORDINARY_OUTPUT/$name" ;;\n'
-        "  esac\n"
-        "done\n"
-        'exit "$result"\n'
-    ) in command
-    copied = sorted(
+        "KORA_ORDINARY_OUTPUT=$(mktemp -d $RUNNER_TEMP/kora-ordinary.XXXXXX)",
+    ) in outer
+    assert (*copy[:3], *copy[-2:]) == ("for", "name", "in", ";", "do")
+    assert sorted(copy[3:-2]) == sorted(
         {name for shard in SHARD_CHILDREN for name in shard_evidence(shard)}
     )
-    copy_list = source.partition("KORA_ORDINARY_SCRIPT\n")[2]
-    copy_list = copy_list.partition("for name in ")[2].partition("; do\n")[0]
-    assert sorted(copy_list.split()) == copied
-    assert 'cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"' in source
-    assert source.index("KORA_ORDINARY_SCRIPT\n") < source.index("cp ")
-    assert source.index("cp ") < source.index(
-        "python -m tests.scaffold_evidence record"
+    assert outer[copying - 1] == COPY_GUARD
+    assert finished < copying < recording
+    assert ("if", "test", "$KORA_SCAFFOLD_LANE", "=", "conformance", ";", "then") in (
+        outer
     )
-    assert 'if test "$KORA_SCAFFOLD_LANE" = conformance; then\n' in source
-    assert 'if test "$KORA_SCAFFOLD_LANE" != storage; then\n' in source
+    assert ("if", "test", "$KORA_SCAFFOLD_LANE", "!=", "storage", ";", "then") in (
+        outer
+    )
     assert set(selected["tests"]) == {"name", "id", "run"}
-    upload = selected["evidence_upload"]
-    assert upload["if"] == "${{ always() }}"
-    assert upload["uses"] == (
-        "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
-    )
-    assert table(upload["with"]) == {
-        "name": (
-            "scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}"
-        ),
-        "path": "${{ env.KORA_SCAFFOLD_DIRECTORY }}",
-        "if-no-files-found": "error",
-    }
+    assert action_name(upload["uses"]) == "actions/upload-artifact"
+    assert table(upload["with"])["path"] == "${{ env.KORA_SCAFFOLD_DIRECTORY }}"
+    assert len(set(artifacts)) == len(rows)
+    assert all(fnmatch(artifact, str(download["pattern"])) for artifact in artifacts)
     assert "ordinary_tests" not in selected
     assert "ordinary_upload" not in selected
+
+
+def configured_testpaths() -> tuple[str, ...]:
+    document = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    options = table(table(table(document["tool"])["pytest"])["ini_options"])
+    return tuple(str(path) for path in cast(list[object], options["testpaths"]))
+
+
+def is_under(path: str, root: str) -> bool:
+    return path == root or path.startswith(f"{root}/")
+
+
+def selected_files(arguments: list[str]) -> frozenset[str]:
+    candidates = [
+        path.relative_to(ROOT).as_posix()
+        for path in (ROOT / "tests").rglob("test_*.py")
+    ]
+    ignored = [
+        argument.removeprefix("--ignore=")
+        for argument in arguments
+        if argument.startswith("--ignore=")
+    ]
+    roots = [argument for argument in arguments if not argument.startswith("-")]
+    return frozenset(
+        path
+        for path in candidates
+        if any(is_under(path, root) for root in roots or configured_testpaths())
+        and not any(is_under(path, ignore) for ignore in ignored)
+    )
+
+
+def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> None:
+    lane = table(workflow_jobs()["scaffold-tests"])
+    row = next(
+        table(value)
+        for value in cast(
+            list[object], table(table(lane["strategy"])["matrix"])["include"]
+        )
+        if table(value)["lane"] == "conformance"
+    )
+    declarations = ordinary_shell().partition("\nuv run ")[0]
+    printing = "".join(
+        f'printf "%s\\0" "${{{name}[@]}}" > "$KORA_COHORT_OUTPUT/{name}"\n'
+        for name in ("general", *COHORTS)
+    )
+
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-o", "pipefail", "-c", f"{declarations}\n{printing}"],
+        env={
+            **os.environ,
+            "KORA_SCAFFOLD_LANE": "conformance",
+            "KORA_PYTEST_ARGUMENTS": str(row["pytest-arguments"]),
+            "KORA_COHORT_OUTPUT": str(tmp_path),
+        },
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+    arrays = {
+        name: (tmp_path / name).read_text(encoding="utf-8").split("\0")[:-1]
+        for name in ("general", *COHORTS)
+    }
+    cohorts = {cohort: selected_files(arrays[cohort]) for cohort in COHORTS}
+    general = selected_files(arrays["general"])
+
+    assert result.returncode == 0, result.stderr
+    assert tuple(arrays["first"]) == FIRST_MODULES
+    assert all(
+        not argument.startswith("-") or argument.startswith("--ignore=")
+        for values in arrays.values()
+        for argument in values
+    )
+    assert all(
+        (ROOT / argument).exists()
+        for values in arrays.values()
+        for argument in values
+        if not argument.startswith("-")
+    )
+    assert all(cohorts.values())
+    assert sum(len(files) for files in cohorts.values()) == len(general)
+    assert frozenset[str]().union(*cohorts.values()) == general
 
 
 def test_shards_partition_every_inventory_group() -> None:

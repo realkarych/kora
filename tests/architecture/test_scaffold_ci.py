@@ -7,12 +7,17 @@ from typing import cast
 
 import pytest
 
-from tests.architecture.test_measurement_job_routing import table, workflow_jobs
 from tests.scaffold_evidence import (
     ENVIRONMENTS,
     GENERAL_ARGUMENTS,
     STORAGE_ARGUMENTS,
     collection_nodes,
+)
+from tests.support.workflows import (
+    action_name,
+    command_lines,
+    table,
+    workflow_jobs,
 )
 
 JOIN_FIELDS = (
@@ -21,29 +26,6 @@ JOIN_FIELDS = (
     "DOWNLOAD_OUTCOME",
     "VERIFICATION_OUTCOME",
 )
-FRONTEND_TOOLCHAIN: list[dict[str, object]] = [
-    {
-        "uses": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
-        "with": {
-            "node-version-file": "web/.node-version",
-            "package-manager-cache": False,
-        },
-    },
-    {
-        "uses": "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413",
-        "with": {
-            "package_json_file": "web/package.json",
-            "run_install": False,
-            "cache": True,
-            "cache_dependency_path": "web/pnpm-lock.yaml",
-        },
-    },
-    {
-        "name": "Install locked frontend dependencies",
-        "id": "frontend_dependencies",
-        "run": "pnpm --dir web install --frozen-lockfile",
-    },
-]
 
 
 def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
@@ -87,16 +69,31 @@ def test_every_scaffold_lane_installs_the_pinned_frontend_toolchain() -> None:
     job = table(workflow_jobs()["scaffold-tests"])
     entries = [table(value) for value in cast(list[object], job["steps"])]
 
-    toolchain = [
+    actions = [action_name(step["uses"]) for step in entries if "uses" in step]
+    node = next(
         step
         for step in entries
-        if str(step.get("uses", "")).startswith(
-            ("actions/setup-node@", "pnpm/action-setup@")
-        )
-        or step.get("id") == "frontend_dependencies"
-    ]
+        if action_name(step.get("uses", "")) == "actions/setup-node"
+    )
+    pnpm = next(
+        step
+        for step in entries
+        if action_name(step.get("uses", "")) == "pnpm/action-setup"
+    )
+    installation = next(
+        step for step in entries if step.get("id") == "frontend_dependencies"
+    )
 
-    assert toolchain == FRONTEND_TOOLCHAIN
+    assert table(node["with"])["node-version-file"] == "web/.node-version"
+    assert table(pnpm["with"])["package_json_file"] == "web/package.json"
+    assert "if" not in installation
+    assert command_lines(installation["run"]) == [
+        ("pnpm", "--dir", "web", "install", "--frozen-lockfile")
+    ]
+    assert entries.index(node) < entries.index(installation)
+    assert entries.index(pnpm) < entries.index(installation)
+    assert actions.count("actions/setup-node") == 1
+    assert actions.count("pnpm/action-setup") == 1
 
 
 def test_scaffold_workflow_arguments_partition_actual_default_collection(

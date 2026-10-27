@@ -4,6 +4,16 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from tests.support.ast_modules import (
+    SourceModule,
+    Violation,
+    dotted_name,
+    is_within,
+    resolve_relative,
+    source_modules,
+    write_module,
+)
+
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 SOURCE_ROOT: Path = REPOSITORY_ROOT / "src"
 LAYER_DOCUMENT: Path = REPOSITORY_ROOT / "knowledge" / "architecture" / "detailed.md"
@@ -13,6 +23,7 @@ DECISION_RECORD: Path = (
 )
 
 ROOT_PACKAGE: str = "kora"
+PYTHON_SOURCES: tuple[str, ...] = (".py", ".pyi")
 COMPOSITION_ROOTS: frozenset[str] = frozenset(
     {"kora.__main__", "kora.standalone", "kora.testing", "kora.conformance"}
 )
@@ -134,26 +145,6 @@ class ImportedModule:
     dynamic: bool
 
 
-@dataclass(frozen=True)
-class SourceModule:
-    path: Path
-    name: str
-
-
-@dataclass(frozen=True)
-class Violation:
-    path: Path
-    line: int
-    reason: str
-
-    def describe(self, source_root: Path) -> str:
-        return f"{self.path.relative_to(source_root)}:{self.line}: {self.reason}"
-
-
-def is_within(module: str, package: str) -> bool:
-    return module == package or module.startswith(f"{package}.")
-
-
 def layer_of(module: str) -> str | None:
     if module == ROOT_PACKAGE:
         return ROOT_PACKAGE
@@ -169,35 +160,16 @@ def is_composition_root(module: str) -> bool:
     return any(is_within(module, root) for root in COMPOSITION_ROOTS)
 
 
-def dotted_name(path: Path, source_root: Path) -> str:
-    parts = list(path.relative_to(source_root).with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts.pop()
-    return ".".join(parts)
-
-
-def source_modules(source_root: Path) -> list[SourceModule]:
-    package_root = source_root / ROOT_PACKAGE
-    paths = [*package_root.rglob("*.py"), *package_root.rglob("*.pyi")]
-    return [
-        SourceModule(path, dotted_name(path, source_root)) for path in sorted(paths)
-    ]
-
-
 def known_modules(source_root: Path) -> frozenset[str]:
     package_root = source_root / ROOT_PACKAGE
     directories = [path for path in package_root.rglob("*") if path.is_dir()]
     names = {dotted_name(path / "__init__.py", source_root) for path in directories}
     names.add(ROOT_PACKAGE)
-    names.update(module.name for module in source_modules(source_root))
+    names.update(
+        module.name
+        for module in source_modules(source_root, ROOT_PACKAGE, PYTHON_SOURCES)
+    )
     return frozenset(names)
-
-
-def resolve_relative(module: SourceModule, level: int, name: str) -> str:
-    parts = module.name.split(".")
-    package_parts = parts if module.path.stem == "__init__" else parts[:-1]
-    base_parts = package_parts[: len(package_parts) - (level - 1)]
-    return ".".join([*base_parts, name] if name else base_parts)
 
 
 def local_bindings(tree: ast.Module) -> dict[str, str]:
@@ -403,7 +375,7 @@ def composition_root_violations(
 
 
 def find_violations(source_root: Path) -> list[Violation]:
-    modules = source_modules(source_root)
+    modules = source_modules(source_root, ROOT_PACKAGE, PYTHON_SOURCES)
     known = known_modules(source_root)
     violations: list[Violation] = []
     for module in modules:
@@ -425,7 +397,7 @@ def find_violations(source_root: Path) -> list[Violation]:
 
 
 def package_import_graph(source_root: Path) -> dict[str, set[str]]:
-    modules = source_modules(source_root)
+    modules = source_modules(source_root, ROOT_PACKAGE, PYTHON_SOURCES)
     known = known_modules(source_root)
     graph: dict[str, set[str]] = {}
     for module in modules:
@@ -482,12 +454,6 @@ def decision_record_set(document: str, label: str) -> frozenset[str]:
     return backticked_names(line.split(" is ", 1)[1])
 
 
-def write_module(source_root: Path, module: str, source: str) -> None:
-    path = source_root.joinpath(*module.split(".")).with_suffix(".py")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(source, encoding="utf-8")
-
-
 def write_packages(source_root: Path, packages: list[str]) -> None:
     for package in packages:
         write_module(source_root, f"{package}.__init__", "")
@@ -500,7 +466,10 @@ def describe_all(violations: list[Violation], source_root: Path) -> list[str]:
 def test_source_tree_respects_package_layers() -> None:
     source_root = SOURCE_ROOT
 
-    module_names = [module.name for module in source_modules(source_root)]
+    module_names = [
+        module.name
+        for module in source_modules(source_root, ROOT_PACKAGE, PYTHON_SOURCES)
+    ]
     violations = find_violations(source_root)
 
     assert ROOT_PACKAGE in module_names
