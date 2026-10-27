@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -19,6 +20,29 @@ from tests.measurements.storage_qualification_evidence import (
 
 REVISION: str = "a" * 40
 DIGEST: str = "b" * 64
+FALSE_BOUNDARY_REFUSALS: Final[dict[str, str]] = {
+    "source": "qualification source/revision is not the exact clean checkout",
+    "revision": "qualification source/revision is not the exact clean checkout",
+    "dirty": "qualification source/revision is not the exact clean checkout",
+    "missing_gate": "qualification workload gates are incomplete",
+    "failed_gate": "qualification workload gates are incomplete",
+    "missing_sample": "an inventory population/phase is missing or duplicated",
+    "duplicate": "an inventory population/phase is missing or duplicated",
+    "retained": "prefix cleanup retained disposable ownership",
+    "query": "actual inventory query work is absent",
+    "population": "an undeclared inventory population was supplied",
+    "missing_pages": "a required inventory page sequence is missing",
+    "refusals": "continuing-owner churn did not complete its declared work",
+    "missing_concurrent": "the complete unique inventory keyset was not paged",
+    "duplicate_page": "inventory pages are missing, duplicated or out of order",
+    "premature_probe_exhaustion": "an inventory probe differs from its keyset position",
+}
+CHILD_EXECUTION_REFUSALS: Final[dict[str, str]] = {
+    "status": "the storage evidence child did not complete successfully",
+    "timeout": "the storage evidence child did not complete successfully",
+    "overflow": "the storage evidence child did not complete successfully",
+    "pid": "the recorded child differs from its measurement producer",
+}
 
 
 @pytest.mark.parametrize(
@@ -70,19 +94,25 @@ def test_inventory_timing_outlier_is_reported_for_every_online_page_form(
 
 def test_inventory_budget_excludes_offline_seeding() -> None:
     report = qualification_report()
-    changed = tuple(
-        sample.model_copy(
-            update={"seconds": 100.0, "us_per_record": 100000000.0 / sample.count}
-        )
-        if sample.workload == "storage.inventory.seed"
-        else sample
-        for sample in report.samples
+    slow_seeding = report.model_copy(
+        update={
+            "samples": tuple(
+                sample.model_copy(
+                    update={
+                        "seconds": 100.0,
+                        "us_per_record": 100000000.0 / sample.count,
+                    }
+                )
+                if sample.workload == "storage.inventory.seed"
+                else sample
+                for sample in report.samples
+            )
+        }
     )
-    report = report.model_copy(update={"samples": changed})
 
-    validate_boundaries(report, REVISION, DIGEST)
+    diagnostics = validate_boundaries(slow_seeding, REVISION, DIGEST)
 
-    assert report.samples[0].seconds == 100.0
+    assert diagnostics == validate_boundaries(report, REVISION, DIGEST)
 
 
 def add_inventory_page(
@@ -262,28 +292,8 @@ def test_qualification_parser_accepts_complete_boundary_evidence() -> None:
 
     validate_boundaries(report, REVISION, DIGEST)
 
-    assert report.platform == "linux"
 
-
-@pytest.mark.parametrize(
-    "defect",
-    [
-        "source",
-        "revision",
-        "dirty",
-        "missing_gate",
-        "failed_gate",
-        "missing_sample",
-        "duplicate",
-        "retained",
-        "query",
-        "population",
-        "refusals",
-        "missing_concurrent",
-        "duplicate_page",
-        "premature_probe_exhaustion",
-    ],
-)
+@pytest.mark.parametrize("defect", FALSE_BOUNDARY_REFUSALS)
 def test_qualification_parser_rejects_false_boundary_success(defect: str) -> None:
     report = qualification_report()
     if defect == "source":
@@ -346,6 +356,17 @@ def test_qualification_parser_rejects_false_boundary_success(defect: str) -> Non
                 )
             }
         )
+    elif defect == "missing_pages":
+        changed = report.model_copy(
+            update={
+                "samples": tuple(
+                    sample
+                    for sample in report.samples
+                    if sample.workload != "storage.inventory.page"
+                    or sample.repeat != 32
+                )
+            }
+        )
     elif defect == "duplicate_page":
         pages = [
             index
@@ -355,17 +376,26 @@ def test_qualification_parser_rejects_false_boundary_success(defect: str) -> Non
         items = list(report.samples)
         items[pages[1]] = items[pages[0]]
         changed = report.model_copy(update={"samples": tuple(items)})
+    elif defect == "population":
+        page = next(
+            sample
+            for sample in report.samples
+            if sample.workload == "storage.inventory.page"
+        )
+        changed = report.model_copy(
+            update={
+                "samples": (*report.samples, page.model_copy(update={"repeat": 64}))
+            }
+        )
     else:
         target = {
             "retained": "storage.prefix",
             "query": "storage.inventory.page",
-            "population": "storage.inventory.page",
             "refusals": "storage.receiver_churn",
         }[defect]
         values = {
             "retained": {"readers": 1},
             "query": {"query_steps": 0},
-            "population": {"repeat": 64},
             "refusals": {"refusals": 99},
         }[defect]
         index = next(
@@ -384,11 +414,11 @@ def test_qualification_parser_rejects_false_boundary_success(defect: str) -> Non
             }
         )
 
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(EvidenceFailure, match=FALSE_BOUNDARY_REFUSALS[defect]):
         validate_boundaries(changed, REVISION, DIGEST)
 
 
-@pytest.mark.parametrize("defect", ["status", "timeout", "overflow", "pid"])
+@pytest.mark.parametrize("defect", CHILD_EXECUTION_REFUSALS)
 def test_child_execution_parser_requires_actual_success(
     tmp_path: Path, defect: str
 ) -> None:
@@ -408,5 +438,5 @@ def test_child_execution_parser_requires_actual_success(
     path = tmp_path / "execution.json"
     path.write_text(json.dumps(data))
 
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(EvidenceFailure, match=CHILD_EXECUTION_REFUSALS[defect]):
         validate_execution(path, 1234)

@@ -1,6 +1,7 @@
 import os
 from array import array
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -16,6 +17,14 @@ from tests.measurements.storage_checkpoint import (
 )
 from tests.measurements.storage_evidence_common import EvidenceFailure
 from tests.measurements.storage_lifetime_manifest import samples
+
+CHECKPOINT_REFUSALS: Final[dict[str, str]] = {
+    "identity": "the checkpoint run identity or size is invalid",
+    "duplicate": "checkpoint rows are missing, duplicated or invalid",
+    "unexecuted": "checkpoint rows are missing, duplicated or invalid",
+    "nonfinite": "checkpoint numeric values are invalid",
+    "fractional": "a checkpoint resource counter is not integral",
+}
 
 
 def write_rows(directory: Path, count: int) -> None:
@@ -55,9 +64,7 @@ def test_checkpoint_recovers_only_complete_rows_without_passing_gates(
     assert not any(sample.extra["executed"] for sample in recovered.samples[3:])
 
 
-@pytest.mark.parametrize(
-    "defect", ["identity", "duplicate", "unexecuted", "nonfinite", "fractional"]
-)
+@pytest.mark.parametrize("defect", CHECKPOINT_REFUSALS)
 def test_checkpoint_refuses_inconsistent_numeric_records(
     tmp_path: Path, defect: str
 ) -> None:
@@ -81,5 +88,5 @@ def test_checkpoint_refuses_inconsistent_numeric_records(
         encoded[offset + ROW.size : offset + ROW.size + WIDTH * 8] = values.tobytes()
     path.write_bytes(encoded)
 
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(EvidenceFailure, match=CHECKPOINT_REFUSALS[defect]):
         partial_report(tmp_path)

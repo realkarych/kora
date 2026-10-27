@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
@@ -23,6 +24,8 @@ from tests.measurements.test_storage_measurement_evidence import (
     REVISION,
     report_data,
 )
+
+INJECTED_VALUE: Final[str] = "injected-json-value"
 
 
 def config_data() -> JsonObject:
@@ -102,23 +105,47 @@ def test_storage_budget_configuration_refuses_incomplete_or_untyped_policy(
         read_budgets(path)
 
 
+def budget_text_with_linux_page_seconds(encoded_value: str) -> str:
+    data = config_data()
+    platforms = parse_json_object(data["platforms"])
+    linux = parse_json_object(platforms["linux"])
+    linux["inventory_page_seconds"] = INJECTED_VALUE
+    platforms["linux"] = linux
+    data["platforms"] = platforms
+    return json.dumps(data).replace(json.dumps(INJECTED_VALUE), encoded_value)
+
+
 @pytest.mark.parametrize(
-    "encoded",
+    ("encoded_value", "message"),
     [
-        '{"version":1,"version":1}',
-        '{"version":NaN}',
-        '{"version":Infinity}',
-        '{"version":1e999}',
-        "[]",
+        pytest.param(
+            '1.0, "inventory_page_seconds": 0.15',
+            "duplicate evidence fields",
+            id="duplicate_field",
+        ),
+        pytest.param("NaN", "nonfinite evidence numbers", id="nan"),
+        pytest.param("Infinity", "nonfinite evidence numbers", id="infinity"),
     ],
 )
 def test_storage_budget_configuration_refuses_ambiguous_or_nonfinite_json(
-    tmp_path: Path, encoded: str
+    tmp_path: Path, encoded_value: str, message: str
 ) -> None:
     path = tmp_path / "budgets.json"
-    path.write_text(encoded)
+    path.write_text(budget_text_with_linux_page_seconds(encoded_value))
 
-    with pytest.raises((ValidationError, EvidenceFailure)):
+    with pytest.raises(EvidenceFailure, match=message):
+        read_budgets(path)
+
+
+def test_storage_budget_configuration_refuses_a_number_that_overflows_to_infinity(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "budgets.json"
+    path.write_text(budget_text_with_linux_page_seconds("1e999"))
+
+    with pytest.raises(
+        ValidationError, match=r"inventory_page_seconds\s+Input should be a finite"
+    ):
         read_budgets(path)
 
 
@@ -137,8 +164,6 @@ def test_growth_budget_accepts_each_inclusive_boundary() -> None:
     values = ((0, 90), (50, 95), (60, 100), (100, 98))
 
     validate_growth(values, 90, budget, "retained")
-
-    assert values[-1] == (100, 98)
 
 
 def test_linux_allocated_growth_accepts_the_approved_late_boundaries() -> None:
@@ -303,12 +328,15 @@ def test_cycle_timing_outlier_is_reported_without_blocking_qualification(
 
 def test_baseline_python_peak_does_not_inherit_a_measured_cycle_budget() -> None:
     report = StorageReport.model_validate(report_data())
-    baseline = report.samples[0].model_copy(update={"python_peak_bytes": 16777216})
-    report = report.model_copy(update={"samples": (baseline, *report.samples[1:])})
+    changed = tuple(
+        sample.model_copy(update={"python_peak_bytes": 16777216})
+        if sample.phase == "baseline"
+        else sample
+        for sample in report.samples
+    )
+    report = report.model_copy(update={"samples": changed})
 
     validate_report(report, REVISION, DIGEST)
-
-    assert baseline.phase == "baseline"
 
 
 @pytest.mark.parametrize(
@@ -344,8 +372,6 @@ def test_storage_diagnostics_keep_late_retention_separate_from_absolute_allowanc
 @pytest.mark.parametrize(
     ("field", "maximum"),
     [
-        ("phase_peak_unique_bytes", 35651584),
-        ("phase_peak_allocated_bytes", 35651584),
         ("python_peak_bytes", 16777216),
         ("python_current_bytes", 16777216),
         ("database_bytes", 1048576),

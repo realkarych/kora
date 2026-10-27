@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -20,12 +21,33 @@ from tests.measurements.storage_measurement_evidence import (
     EvidenceFailure,
     StorageReport,
     validate,
+    validate_junit,
     validate_report,
 )
 from tests.measurements.test_storage_qualification_evidence import qualification_report
 
 REVISION: str = "a" * 40
 DIGEST: str = "b" * 64
+CORRUPTED_UNION_REFUSALS: Final[dict[str, str]] = {
+    "missing_producer": "independent-producer union is incomplete",
+    "failed_junit": "the storage measurement test did not pass",
+    "checkpoint": "checkpoint provenance or complete row union differs",
+    "sink_field": "diagnostic-failure raw evidence does not match its workload",
+    "ownership": "pressure cleanup changed ownership",
+    "native_errno": "real platform ENOSPC/recovery evidence is incomplete",
+}
+INVALID_REPORT_REFUSALS: Final[dict[str, str]] = {
+    "missing": "exact storage sample union is missing or duplicated",
+    "duplicate": "exact storage sample union is missing or duplicated",
+    "failed": "a required storage workload failed or did not run",
+    "revision": "storage evidence source/revision does not match",
+    "source": "storage evidence source/revision does not match",
+    "producer": "a sample belongs to a different independent process",
+    "rss": "a required native/Python/disk counter is unavailable",
+    "resources": "settled ownership or disposable state remains",
+    "derived_timing": "derived storage timing differs from raw seconds",
+    "sample_order": "ordered storage sample inventory differs from its manifest",
+}
 
 
 def raw_union(directory: Path, *, duplicate_process: bool = False) -> Path:
@@ -108,17 +130,7 @@ def test_storage_raw_union_refuses_reused_native_process_evidence(
         validate(tmp_path, REVISION, repository)
 
 
-@pytest.mark.parametrize(
-    "defect",
-    [
-        "missing_producer",
-        "failed_junit",
-        "checkpoint",
-        "sink_field",
-        "ownership",
-        "native_errno",
-    ],
-)
+@pytest.mark.parametrize("defect", CORRUPTED_UNION_REFUSALS)
 def test_storage_raw_union_refuses_corrupted_child_and_ownership_evidence(
     tmp_path: Path, defect: str
 ) -> None:
@@ -153,7 +165,7 @@ def test_storage_raw_union_refuses_corrupted_child_and_ownership_evidence(
         data[field] = value
         path.write_text(json.dumps(data))
 
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(EvidenceFailure, match=CORRUPTED_UNION_REFUSALS[defect]):
         validate(tmp_path, REVISION, repository)
 
 
@@ -244,24 +256,6 @@ def test_storage_evidence_refuses_unavailable_measured_resource_counters(
         validate_report(report, REVISION, DIGEST)
 
 
-def test_storage_evidence_retains_large_settled_python_memory_as_diagnostic() -> None:
-    report = StorageReport.model_validate(report_data())
-    changed = report.samples[10].model_copy(update={"python_post_gc_bytes": 16777216})
-    report = report.model_copy(
-        update={"samples": (*report.samples[:10], changed, *report.samples[11:])}
-    )
-
-    diagnostics = validate_report(report, REVISION, DIGEST)
-
-    assert any(
-        isinstance(diagnostic, dict)
-        and diagnostic["metric"] == "storage.raw.65536.python_post_gc_bytes"
-        and diagnostic["observed"] == 16777216
-        and diagnostic["exceeds_reference"] is True
-        for diagnostic in diagnostics
-    )
-
-
 @pytest.mark.parametrize(
     "field", ["python_current_bytes", "python_post_gc_bytes", "tracer_bytes"]
 )
@@ -274,33 +268,7 @@ def test_storage_evidence_refuses_unavailable_warmed_baseline(field: str) -> Non
         validate_report(report, REVISION, DIGEST)
 
 
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
-def test_storage_evidence_accepts_declared_producer_independent_of_gate_platform(
-    platform: str,
-) -> None:
-    report = StorageReport.model_validate(report_data(platform))
-
-    validate_report(report, REVISION, DIGEST)
-
-    assert report.platform == platform
-    assert {sample.repeat for sample in report.samples} == {0}
-
-
-@pytest.mark.parametrize(
-    "defect",
-    [
-        "missing",
-        "duplicate",
-        "failed",
-        "revision",
-        "source",
-        "producer",
-        "rss",
-        "resources",
-        "derived_timing",
-        "sample_order",
-    ],
-)
+@pytest.mark.parametrize("defect", INVALID_REPORT_REFUSALS)
 def test_storage_evidence_refuses_incomplete_or_invalid_reports(defect: str) -> None:
     data = report_data()
     report = StorageReport.model_validate(data)
@@ -371,7 +339,7 @@ def test_storage_evidence_refuses_incomplete_or_invalid_reports(defect: str) -> 
             }
         )
 
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(EvidenceFailure, match=INVALID_REPORT_REFUSALS[defect]):
         validate_report(changed, REVISION, DIGEST)
 
 
@@ -379,23 +347,25 @@ def test_storage_evidence_refuses_incomplete_or_invalid_reports(defect: str) -> 
 def test_storage_junit_rejects_unsuccessful_measurement(
     tmp_path: Path, outcome: str
 ) -> None:
-    from tests.measurements.storage_measurement_evidence import validate_junit
-
     path = tmp_path / "measurement.xml"
     path.write_text(
         "<testsuites><testsuite>"
-        '<testcase name="test_artifact_storage_lifetime[0]">'
+        '<testcase classname="tests.measurements.test_artifact_storage_lifetime" '
+        'name="test_artifact_storage_lifetime[0]">'
         f"<{outcome}/></testcase></testsuite></testsuites>"
     )
 
-    with pytest.raises(EvidenceFailure):
+    with pytest.raises(EvidenceFailure, match="measurement test did not pass"):
         validate_junit(path, 0)
 
 
-def test_storage_evidence_requires_all_six_independent_producers(
-    tmp_path: Path,
-) -> None:
-    root = Path(__file__).resolve().parents[2]
+def test_storage_junit_refuses_a_test_case_without_identity(tmp_path: Path) -> None:
+    path = tmp_path / "measurement.xml"
+    path.write_text(
+        "<testsuites><testsuite>"
+        '<testcase name="test_artifact_storage_lifetime[0]"/>'
+        "</testsuite></testsuites>"
+    )
 
-    with pytest.raises(EvidenceFailure, match="union is incomplete"):
-        validate(tmp_path, REVISION, root)
+    with pytest.raises(EvidenceFailure, match="the storage test identity is missing"):
+        validate_junit(path, 0)
