@@ -1,5 +1,6 @@
 import os
 import re
+import stat
 import subprocess
 from pathlib import Path
 from typing import Protocol, cast
@@ -363,6 +364,38 @@ def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None
         "if-no-files-found": "error",
         "include-hidden-files": True,
     }
+
+
+def test_lifetime_measurement_prepares_private_evidence_in_a_fresh_checkout(
+    tmp_path: Path,
+) -> None:
+    run = str(
+        steps(table(workflow_jobs()["qualification"]))["lifetime_measurement"]["run"]
+    )
+    preparation, command, _ = run.partition("KORA_MEASUREMENT_OUTPUT=")
+    evidence = tmp_path / "measurements" / "conformance-lifetime"
+
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-c", preparation],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "KORA_LIFETIME_CHECKOUT_REVISION": "a" * 40,
+            "KORA_MEASUREMENT_REVISION": "b" * 40,
+        },
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert command == "KORA_MEASUREMENT_OUTPUT="
+    assert (result.returncode, result.stderr) == (0, b"")
+    observed = evidence.lstat()
+    assert stat.S_ISDIR(observed.st_mode)
+    assert stat.S_IMODE(observed.st_mode) == 0o700
+    assert (evidence / "source-revision.txt").read_text() == (
+        f"Actual checkout: {'a' * 40}\nRequested measurement revision: {'b' * 40}\n"
+    )
 
 
 @pytest.mark.parametrize(
