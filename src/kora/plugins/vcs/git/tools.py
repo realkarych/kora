@@ -9,6 +9,7 @@ from typing import Final
 from kora.executor.launcher import run_sync
 from kora.executor.steps import ToolMissing, resolve_tools
 from kora.plugins.vcs.git.environment import git_environment
+from kora.plugins.vcs.local import needs_prlimit
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 
 MINIMUM_GIT: Final[tuple[int, int, int]] = (2, 43, 0)
@@ -37,10 +38,6 @@ class GitTools:
 
     def names(self) -> tuple[str, ...]:
         return tuple(self.mapping())
-
-
-def needs_prlimit() -> bool:
-    return sys.platform == "linux"
 
 
 def git_version(git: str, home: Path) -> tuple[int, int, int]:

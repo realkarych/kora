@@ -40,8 +40,8 @@ COMPLETION_FIELDS = (
     "FINAL_SYNC_OUTCOME",
 )
 LANE_OUTCOMES = {
-    "conformance": {},
-    "remainder": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
+    "conformance": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
+    "remainder": {},
     "storage": {
         "FRONTEND_OUTCOME": "skipped",
         "STATIC_OUTCOME": "skipped",

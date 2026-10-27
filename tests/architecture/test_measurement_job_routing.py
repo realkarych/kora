@@ -80,15 +80,15 @@ SCAFFOLD_LANES = (
         "tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py",
     ),
 )
-CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
+REMAINDER_ONLY = "${{ matrix.lane == 'remainder' }}"
 NOT_STORAGE = "${{ matrix.lane != 'storage' }}"
 LANE_STEP_CONDITIONS = {
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": NOT_STORAGE,
     "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": NOT_STORAGE,
     "frontend_dependencies": NOT_STORAGE,
-    "static_checks": CONFORMANCE_ONLY,
+    "static_checks": REMAINDER_ONLY,
     "evidence_upload": "${{ always() }}",
-    "distributions": CONFORMANCE_ONLY,
+    "distributions": REMAINDER_ONLY,
     "workflow_cancellation": "${{ cancelled() }}",
     "Require complete lane execution": "${{ always() }}",
 }

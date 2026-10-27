@@ -333,10 +333,13 @@ async def installed_run(
                     await channel.write_record(
                         b'{"value":"conflicting-fixture-value"}', deadline
                     )
+                    result_deadline = deadline
+                    if protocol is ProtocolName.ARTIFACT_STORAGE:
+                        result_deadline += 30_000_000_000
                     if stop_on_feedback:
                         await asyncio.wait_for(observing, 20)
                     result = ChildResult.model_validate_json(
-                        await channel.read_record(deadline, 4096)
+                        await channel.read_record(result_deadline, 4096)
                     )
                     if result.phase == "storage":
                         invocation = owner.mutations.directory

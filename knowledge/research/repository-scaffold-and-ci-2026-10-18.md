@@ -268,3 +268,11 @@ The "Install pinned browser tools" step took 466 s in head attempt 4 and 594 s i
 | Linux 3.11 | `second` | 186 s | 156 s | 148 s |
 
 The lifetime conformance groups got faster on Linux, so they now see less contention. On macOS, three processes share three cores, and the `remainder` groups ran 17 to 48 % slower than in the base. That shard took 3:52 to 5:39, and so it is the one that limits the layout. Neither approved rebalance lever removes work from that runner. Revisit the grouping if any macOS shard exceeds 6:00, or when #271 compares its measurement jobs against the slowest shard.
+
+### Source-check and distribution placement, 2026-10-27
+
+The [owner-approved placement amendment](https://github.com/realkarych/kora/issues/296#issuecomment-6438330911) moves the unchanged source/frontend checks and isolated offline distribution builds from each `conformance` shard to its existing `remainder` shard. Both already install the same locked frontend/build dependencies. All nine jobs, platforms, database identities, test groups, collection/receipt checks, protected joins and hard deadlines remain unchanged. Each shard's final lane proof requires the checks assigned to it; skipped or failed required work still refuses admission.
+
+Run [40479106183](https://github.com/realkarych/kora/actions/runs/40479106183) remains failed: the macOS conformance job exceeded its ten-minute limit during runner cleanup even though every test and command step had completed successfully. The GitHub annotation records the deadline failure. Its observed step durations were 501 seconds for tests, 46 seconds for source/frontend checks and 10 seconds for offline distribution builds; the same platform's remainder tests took 294 seconds. These observations justify redistributing existing work but are not a controlled comparison, a runtime prediction or a passing guarantee. Earlier samples retain their original inputs and limitations.
+
+The new assignment requires complete final-head CI on the supported lanes. The ten-minute job deadline and every test/helper/cleanup bound remain hard checks. A further deadline, missing evidence or unresolved resource requires investigation rather than another automatic increase or an unchanged rerun. Whole-pipeline duration remains a separately reported feedback target.

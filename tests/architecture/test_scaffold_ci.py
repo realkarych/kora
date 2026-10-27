@@ -62,8 +62,8 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
     entries = [table(value) for value in cast(list[object], execution["steps"])]
     for name, condition in (
         ("Install locked frontend dependencies", "${{ matrix.lane != 'storage' }}"),
-        ("Check Python and frontend sources", "${{ matrix.lane == 'conformance' }}"),
-        ("Build isolated distributions offline", "${{ matrix.lane == 'conformance' }}"),
+        ("Check Python and frontend sources", "${{ matrix.lane == 'remainder' }}"),
+        ("Build isolated distributions offline", "${{ matrix.lane == 'remainder' }}"),
     ):
         selected = next(step for step in entries if step.get("name") == name)
         assert selected["if"] == condition

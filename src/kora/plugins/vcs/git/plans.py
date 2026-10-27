@@ -17,6 +17,7 @@ from kora.plugins.vcs.git.environment import (
     trusted_options,
 )
 from kora.plugins.vcs.git.tools import GitTools
+from kora.plugins.vcs.local import limited_argv
 from kora.protocols.vcs import (
     Capture,
     CheckoutPlan,
@@ -33,8 +34,6 @@ OBJECT_ID: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 REF_FORBIDDEN: Final[re.Pattern[str]] = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
 COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: \S+ #[1-9][0-9]*")
 PUBLISH_PREFIX: Final[str] = "kora/"
-ADDRESS_SPACE_BYTES: Final[int] = 2 * 1024**3
-FILE_SIZE_BYTES: Final[int] = 1024**3
 REPOSITORY: Final[str] = "repo"
 INDEX_FILE: Final[str] = "index.jsonl"
 PREPARED_REF: Final[str] = "refs/kora/prepared"
@@ -119,17 +118,7 @@ class Steps:
     def limited(
         self, tool: str, path: str, arguments: Sequence[str]
     ) -> tuple[str, ...]:
-        prlimit = self.settings.tools.prlimit
-        if prlimit is None:
-            return (tool, *arguments)
-        return (
-            "prlimit",
-            f"--as={ADDRESS_SPACE_BYTES}",
-            f"--fsize={FILE_SIZE_BYTES}",
-            "--",
-            path,
-            *arguments,
-        )
+        return limited_argv(self.settings.tools.prlimit, tool, path, arguments)
 
     def step(
         self,
