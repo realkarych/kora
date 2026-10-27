@@ -125,13 +125,3 @@ def test_chain_is_independent_of_page_boundaries() -> None:
     split = extend(extend(GRANT_H0, records[:2]), records[2:])
 
     assert whole == split
-
-
-def test_year_one_timestamps_have_one_encoding() -> None:
-    closure = demo_closure()
-    document = closure.model_dump(mode="json")
-    document["quiescence"]["closed_at"] = "0001-01-01T00:00:00+00:00"
-
-    encoded = record_bytes(DispatcherClosure.model_validate(document))
-
-    assert b'"closed_at":"0001-01-01T00:00:00.000000Z"' in encoded

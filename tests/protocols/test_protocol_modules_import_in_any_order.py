@@ -1,21 +1,13 @@
+import pkgutil
+
 import pytest
 
+import kora.protocols
 from tests.support.observability import run_python
 
-MODULES: tuple[str, ...] = (
-    "kora.protocols.deadlines",
-    "kora.protocols.common",
-    "kora.protocols.time",
-    "kora.protocols.identity",
-    "kora.protocols.evidence",
-    "kora.protocols.report",
-    "kora.protocols.history",
-    "kora.protocols.secret_value",
-    "kora.protocols.vcs",
-    "kora.protocols.policy",
-    "kora.protocols.harness",
-    "kora.protocols.runtime",
-    "kora.protocols.secrets",
+MODULES: list[str] = sorted(
+    f"{kora.protocols.__name__}.{module.name}"
+    for module in pkgutil.iter_modules(kora.protocols.__path__)
 )
 
 

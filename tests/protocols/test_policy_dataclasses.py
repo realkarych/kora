@@ -4,6 +4,7 @@ from typing import Final
 import pytest
 
 from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES, JsonObject
+from kora.plugins.harness.fake.adapter import denial_fields
 from kora.protocols.harness import (
     Enforcement,
     HarnessValueRefused,
@@ -146,14 +147,16 @@ def test_every_denial_maps_to_a_permission_denied_event(
     reason: str, pattern: str | None, code: str
 ) -> None:
     decision = PolicyDecision(allow=False, reason=reason)
-    document = {
-        "tool": "Bash",
-        "tool_use_id": "call-1",
-        "source": "policy",
-        "pattern": pattern,
-        "code": code,
-    }
 
-    event = PermissionDeniedData.model_validate(document)
+    mapped_pattern, mapped_code = denial_fields(decision)
+    event = PermissionDeniedData.model_validate(
+        {
+            "tool": "Bash",
+            "tool_use_id": "call-1",
+            "source": "policy",
+            "pattern": mapped_pattern,
+            "code": mapped_code,
+        }
+    )
 
-    assert (decision.reason, event.pattern, event.code) == (reason, pattern, code)
+    assert (event.pattern, event.code) == (pattern, code)

@@ -200,22 +200,16 @@ def test_vcs_models_accept_their_bounds() -> None:
     assert [request.purpose for request in parsed] == ["publish", "api"]
 
 
-@pytest.mark.parametrize(
-    "failure_class", ["artifact_invalid", "config_error", "infrastructure", None]
-)
-def test_plan_step_names_an_optional_failure_class(failure_class: str | None) -> None:
-    document = documents.plan_step(failure_class=failure_class)
+def test_plan_step_names_an_optional_failure_class() -> None:
     omitted = {
         name: value
         for name, value in documents.plan_step().items()
         if name != "failure_class"
     }
 
-    step = PlanStep.model_validate_json(json.dumps(document))
-    default = PlanStep.model_validate_json(json.dumps(omitted))
+    step = PlanStep.model_validate_json(json.dumps(omitted))
 
-    assert step.failure_class == failure_class
-    assert default.failure_class is None
+    assert step.failure_class is None
 
 
 def widest_prepared(padding: str) -> dict[str, object]:

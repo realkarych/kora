@@ -39,6 +39,7 @@ FAILED_ERROR: dict[str, object] = {
 RECEIPT_EVIDENCE: dict[str, object] = documents.closure_evidence(
     runtime=documents.termination()
 )
+LEAK_MARKER: str = "has space"
 REFUSED: list[tuple[type[BaseModel], dict[str, object]]] = [
     (TerminalReport, documents.terminal_report(outcome="failed")),
     (TerminalReport, documents.terminal_report(**FAILED_ERROR)),
@@ -115,7 +116,6 @@ REFUSED: list[tuple[type[BaseModel], dict[str, object]]] = [
     ),
     (Liveness, documents.liveness(input_tokens=-1)),
     (Liveness, documents.liveness(observed_at="2026-10-25T12:00:00")),
-    (RawEvent, {"i": 0, "at": documents.AT, "kind": "has space", "data": {}}),
     (
         RawEvent,
         {"i": 0, "at": documents.AT, "kind": "output", "data": {"t": "x" * 65_536}},
@@ -165,10 +165,22 @@ def test_runtime_models_refuse_contradictions(
 ) -> None:
     candidate = status(**document) if model is RuntimeStatus else document
 
-    with pytest.raises(ValidationError) as raised:
+    with pytest.raises(ValidationError):
         model.model_validate_json(json.dumps(candidate, allow_nan=True))
 
-    assert "has space" not in str(raised.value)
+
+def test_runtime_refusals_carry_no_input() -> None:
+    document: dict[str, object] = {
+        "i": 0,
+        "at": documents.AT,
+        "kind": LEAK_MARKER,
+        "data": {},
+    }
+
+    with pytest.raises(ValidationError) as raised:
+        RawEvent.model_validate_json(json.dumps(document))
+
+    assert LEAK_MARKER not in str(raised.value)
 
 
 def test_runtime_models_accept_every_outcome_shape() -> None:
@@ -307,6 +319,7 @@ def test_workload_accepts_a_workspace_checkout() -> None:
     ("given", "written"),
     [
         ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000000Z"),
+        ("0001-01-01T00:00:00+00:00", "0001-01-01T00:00:00.000000Z"),
         ("2026-10-25T15:00:00.5+03:00", "2026-10-25T12:00:00.500000Z"),
         ("9999-12-31T23:59:59.999999Z", "9999-12-31T23:59:59.999999Z"),
     ],

@@ -52,6 +52,8 @@ from kora.protocols.runtime import (
     Workload,
 )
 from kora.protocols.vcs import (
+    MAX_BINDING_BYTES,
+    MAX_BINDING_REVISION,
     CheckoutPlan,
     CredentialRequest,
     CredentialRights,
@@ -92,15 +94,7 @@ BINDING: dict[str, object] = {
     "execution_domain_id": "domain-1",
     "process": IDENTITY,
 }
-DOCUMENTS: dict[type[BoundaryModel], dict[str, object]] = {
-    ProcessIdentity: IDENTITY,
-    GrantBinding: BINDING,
-    WorkspaceRef: WORKSPACE_REF,
-    WorkspaceTarget: WORKSPACE_TARGET,
-    SessionFile: SESSION_FILE,
-    SessionSpec: SESSION_SPEC,
-    SessionResult: session_result(),
-}
+LEAK_MARKER: str = "has space"
 REFUSED_IDENTITIES: list[dict[str, object]] = [
     {**IDENTITY, "pid": 0},
     {**IDENTITY, "pid": "4242"},
@@ -108,17 +102,17 @@ REFUSED_IDENTITIES: list[dict[str, object]] = [
     {**IDENTITY, "start_time": -1},
     {**IDENTITY, "start_time": MAX_COUNT + 1},
     {**IDENTITY, "host_id": "h" * 257},
-    {**IDENTITY, "host_id": "has space"},
     {**IDENTITY, "leads_group": 1},
-    {**IDENTITY, "unknown": 1},
 ]
 REFUSED_BINDINGS: list[dict[str, object]] = [
     {**BINDING, "lease_epoch": -1},
     {**BINDING, "lease_epoch": MAX_COUNT + 1},
-    {**BINDING, "worker_id": "has space"},
     {**BINDING, "process": {**IDENTITY, "unknown": 1}},
-    {**BINDING, "unknown": 1},
 ]
+MARKED_IDENTIFIERS: dict[type[BoundaryModel], dict[str, object]] = {
+    ProcessIdentity: {**IDENTITY, "host_id": LEAK_MARKER},
+    GrantBinding: {**BINDING, "worker_id": LEAK_MARKER},
+}
 
 
 def test_the_boundary_base_is_closed_and_hides_input() -> None:
@@ -129,39 +123,28 @@ def test_the_boundary_base_is_closed_and_hides_input() -> None:
     assert config.get("hide_input_in_errors") is True
 
 
-@pytest.mark.parametrize("model", list(DOCUMENTS), ids=lambda model: model.__name__)
-def test_protocol_models_are_closed(model: type[BoundaryModel]) -> None:
-    document = DOCUMENTS[model]
-
-    parsed = model.model_validate(document)
-    restored = model.model_validate_json(parsed.model_dump_json())
-
-    assert restored == parsed
-    assert parsed.model_dump(mode="json") == document
-
-
-@pytest.mark.parametrize("model", list(DOCUMENTS), ids=lambda model: model.__name__)
-def test_protocol_models_refuse_unknown_fields(model: type[BoundaryModel]) -> None:
-    document = {**DOCUMENTS[model], "unknown": 1}
-
-    with pytest.raises(ValidationError):
-        model.model_validate(document)
-
-
 @pytest.mark.parametrize("document", REFUSED_IDENTITIES)
 def test_process_identity_refuses_invalid_values(document: dict[str, object]) -> None:
-    with pytest.raises(ValidationError) as raised:
+    with pytest.raises(ValidationError):
         ProcessIdentity.model_validate(document)
-
-    assert "has space" not in str(raised.value)
 
 
 @pytest.mark.parametrize("document", REFUSED_BINDINGS)
 def test_grant_binding_refuses_invalid_values(document: dict[str, object]) -> None:
-    with pytest.raises(ValidationError) as raised:
+    with pytest.raises(ValidationError):
         GrantBinding.model_validate(document)
 
-    assert "has space" not in str(raised.value)
+
+@pytest.mark.parametrize(
+    "model", list(MARKED_IDENTIFIERS), ids=lambda model: model.__name__
+)
+def test_identity_refusals_carry_no_input(model: type[BoundaryModel]) -> None:
+    document = MARKED_IDENTIFIERS[model]
+
+    with pytest.raises(ValidationError) as raised:
+        model.model_validate(document)
+
+    assert LEAK_MARKER not in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -186,10 +169,17 @@ def test_identity_equality_ignores_group_leadership() -> None:
     assert leader.identity_key() == member.identity_key()
 
 
-def json_documents() -> dict[type[BoundaryModel], dict[str, object]]:
+def closed_documents() -> dict[type[BoundaryModel], dict[str, object]]:
     closures = [documents.closure()]
     grants = [documents.grant(1), documents.grant(2)]
     return {
+        ProcessIdentity: IDENTITY,
+        GrantBinding: BINDING,
+        WorkspaceRef: WORKSPACE_REF,
+        WorkspaceTarget: WORKSPACE_TARGET,
+        SessionFile: SESSION_FILE,
+        SessionSpec: SESSION_SPEC,
+        SessionResult: session_result(),
         Handle: documents.handle(),
         DispatcherQuiescence: documents.quiescence(),
         TerminationReceipt: documents.termination(),
@@ -286,23 +276,25 @@ def json_documents() -> dict[type[BoundaryModel], dict[str, object]]:
     }
 
 
-JSON_DOCUMENTS: dict[type[BoundaryModel], dict[str, object]] = json_documents()
+DOCUMENTS: dict[type[BoundaryModel], dict[str, object]] = closed_documents()
 
 
-@pytest.mark.parametrize(
-    "model", list(JSON_DOCUMENTS), ids=lambda model: model.__name__
-)
-def test_execution_models_are_closed(model: type[BoundaryModel]) -> None:
-    document = JSON_DOCUMENTS[model]
-
-    parsed = model.model_validate_json(json.dumps(document))
-    restored = model.model_validate(parsed)
+@pytest.mark.parametrize("model", list(DOCUMENTS), ids=lambda model: model.__name__)
+def test_protocol_models_are_closed(model: type[BoundaryModel]) -> None:
+    document = DOCUMENTS[model]
     unknown = {**document, "unknown": 1}
 
-    assert restored == parsed
+    parsed = model.model_validate_json(json.dumps(document))
+    from_json = model.model_validate_json(parsed.model_dump_json())
+    from_python = model.model_validate(parsed.model_dump())
+
+    assert from_json == parsed
+    assert from_python == parsed
     assert parsed.model_dump(mode="json") == document
     with pytest.raises(ValidationError):
         model.model_validate_json(json.dumps(unknown))
+    with pytest.raises(ValidationError):
+        model.model_validate({**parsed.model_dump(), "unknown": 1})
 
 
 def test_plan_bytes_round_trip_as_base64() -> None:
@@ -334,19 +326,49 @@ REFUSED_TUPLES: list[dict[str, object]] = [
     {"binding_revision": "1"},
     {"credential_mode": "credential_optional"},
 ]
+BINDING_FIELDS: tuple[str, ...] = ("binding", "binding_revision", "credential_mode")
+ALIAS_REFUSALS: list[dict[str, object]] = [
+    {"binding": "é" * (MAX_BINDING_BYTES // 2 + 1)},
+    {"binding": "line\nbreak"},
+    {"binding_revision": True},
+    {"binding_revision": MAX_BINDING_REVISION + 1},
+    {"credential_mode": "credential_optional"},
+]
+BindingTupleCase = tuple[type[BoundaryModel], list[dict[str, object]]]
 
 
-@pytest.mark.parametrize(("model", "document"), BINDING_OWNERS)
-@pytest.mark.parametrize("change", REFUSED_TUPLES)
-def test_binding_tuple_is_required_and_bounded(
-    model: type[BoundaryModel], document: dict[str, object], change: dict[str, object]
-) -> None:
-    omitted = [
-        {key: value for key, value in document.items() if key != name}
-        for name in ("binding", "binding_revision", "credential_mode")
-    ]
+def without(document: dict[str, object], name: str) -> dict[str, object]:
+    return {key: value for key, value in document.items() if key != name}
 
-    refused = [{**document, **change}, *omitted]
+
+def binding_tuple_cases() -> dict[str, BindingTupleCase]:
+    bounded_model, bounded_document = BINDING_OWNERS[0]
+    bounded = {
+        f"bounded-{next(iter(change))}-{index}": (
+            bounded_model,
+            [{**bounded_document, **change}],
+        )
+        for index, change in enumerate(REFUSED_TUPLES)
+    }
+    wired = {
+        f"wired-{model.__name__}": (
+            model,
+            [
+                *({**document, **change} for change in ALIAS_REFUSALS),
+                *(without(document, name) for name in BINDING_FIELDS),
+            ],
+        )
+        for model, document in BINDING_OWNERS
+    }
+    return {**bounded, **wired}
+
+
+BINDING_TUPLE_CASES: dict[str, BindingTupleCase] = binding_tuple_cases()
+
+
+@pytest.mark.parametrize("case", list(BINDING_TUPLE_CASES))
+def test_binding_tuple_is_required_and_bounded(case: str) -> None:
+    model, refused = BINDING_TUPLE_CASES[case]
 
     for candidate in refused:
         with pytest.raises(ValidationError):
@@ -411,7 +433,7 @@ def test_credential_value_has_no_default() -> None:
 
 def pending_marks() -> dict[str, int]:
     marks: dict[str, int] = {}
-    for model in JSON_DOCUMENTS:
+    for model in DOCUMENTS:
         for name, field in model.model_fields.items():
             for item in field.metadata:
                 if isinstance(item, Pending):
@@ -439,14 +461,14 @@ COUNTED_MODULES: frozenset[str] = frozenset(
     "model",
     [
         model
-        for model, document in JSON_DOCUMENTS.items()
+        for model, document in DOCUMENTS.items()
         if model.__module__ in COUNTED_MODULES
         and "pushed_by" not in json.dumps(document)
     ],
     ids=lambda model: model.__name__,
 )
 def test_encoded_size_matches_canonical_bytes(model: type[BoundaryModel]) -> None:
-    parsed = model.model_validate_json(json.dumps(JSON_DOCUMENTS[model]))
+    parsed = model.model_validate_json(json.dumps(DOCUMENTS[model]))
 
     expected = len(canonical_bytes(parsed.model_dump(mode="json")))
 

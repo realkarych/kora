@@ -1,19 +1,16 @@
 import ast
+import importlib
 import json
+import pkgutil
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 
 import kora.conformance.secrets
-import kora.protocols.common
-import kora.protocols.evidence
-import kora.protocols.history
-import kora.protocols.identity
-import kora.protocols.report
-import kora.protocols.runtime
-import kora.protocols.vcs
+import kora.protocols
 from kora.conformance.secrets import check_never_rendered
 from kora.observability import LoggingSettings
 from kora.protocols.common import BoundaryModel
@@ -114,17 +111,16 @@ def test_a_transfer_that_is_not_valid_text_is_invalid(
     assert scope.registered_count() == 0
 
 
+def boundary_modules() -> list[ModuleType]:
+    protocol_modules = [
+        importlib.import_module(f"{kora.protocols.__name__}.{module.name}")
+        for module in pkgutil.iter_modules(kora.protocols.__path__)
+    ]
+    return [*protocol_modules, kora.conformance.secrets]
+
+
 def model_classes() -> list[type[BaseModel]]:
-    modules = (
-        kora.protocols.common,
-        kora.protocols.identity,
-        kora.protocols.evidence,
-        kora.protocols.report,
-        kora.protocols.history,
-        kora.protocols.vcs,
-        kora.protocols.runtime,
-        kora.conformance.secrets,
-    )
+    modules = boundary_modules()
     return [
         item
         for module in modules
@@ -140,7 +136,11 @@ def test_every_boundary_model_derives_from_the_base() -> None:
     classes = model_classes()
 
     assert classes
-    assert all(issubclass(item, BoundaryModel) for item in classes)
+    assert [
+        f"{item.__module__}.{item.__qualname__}"
+        for item in classes
+        if not issubclass(item, BoundaryModel)
+    ] == []
 
 
 def disabled_keywords(node: ast.Call) -> frozenset[str]:

@@ -1,11 +1,11 @@
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import cast
 
 import pytest
 
 from kora.protocols.deadlines import ExecutionDeadline, ScopeKind
-from kora.protocols.runtime import CAPABILITY_FLAGS, RuntimeCapabilities
+from kora.protocols.runtime import RuntimeCapabilities
 from kora.protocols.vcs import PlanExecutor
 
 CAPABILITIES: RuntimeCapabilities = RuntimeCapabilities(
@@ -29,7 +29,6 @@ DEADLINE: ExecutionDeadline = ExecutionDeadline(
 PLUS_THREE: timezone = timezone(timedelta(hours=3))
 
 CAPABILITY_CASES: list[tuple[str, object]] = [
-    *((flag, 1) for flag in CAPABILITY_FLAGS),
     ("protected_execution", None),
     ("plan_executors", frozenset()),
     ("plan_executors", frozenset({"runner", "elsewhere"})),
@@ -79,3 +78,25 @@ def test_runtime_types_reject_invalid_values(
 
     with pytest.raises(ValueError, match=rf"^{field} "):
         replace(valid, **changes)
+
+
+def bool_capabilities() -> list[str]:
+    return [field.name for field in fields(RuntimeCapabilities) if field.type is bool]
+
+
+def refuses_non_bool(name: str) -> bool:
+    changes = {name: 1}
+    try:
+        replace(CAPABILITIES, **changes)
+    except ValueError as refused:
+        return str(refused).startswith(f"{name} ")
+    return False
+
+
+def test_every_bool_capability_refuses_a_non_bool() -> None:
+    names = bool_capabilities()
+
+    accepted = [name for name in names if not refuses_non_bool(name)]
+
+    assert names
+    assert accepted == []

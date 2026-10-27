@@ -20,6 +20,7 @@ from kora.protocols.storage_models import (
     StorageScanEntry,
 )
 
+LEAK_MARKER: str = "private"
 IDENTITY: dict[str, object] = {"version": 1, "store_id": "store-1"}
 STAGE: dict[str, object] = {
     "version": 1,
@@ -80,10 +81,10 @@ def test_storage_counts_are_strict_and_finite(value: object) -> None:
 @pytest.mark.parametrize(
     "document",
     [
-        {**STAGE, "stage_id": "a" * 257},
-        {**STAGE, "stage_id": "a\n"},
-        {**STAGE, "stage_id": "has space"},
-        {**STAGE, "storage_identity": {**IDENTITY, "unknown": "private"}},
+        {**STAGE, "stage_id": LEAK_MARKER + "a" * (257 - len(LEAK_MARKER))},
+        {**STAGE, "stage_id": LEAK_MARKER + "\n"},
+        {**STAGE, "stage_id": LEAK_MARKER + " space"},
+        {**STAGE, "storage_identity": {**IDENTITY, "unknown": LEAK_MARKER}},
     ],
 )
 def test_storage_identifiers_and_nested_records_are_closed(
@@ -92,7 +93,7 @@ def test_storage_identifiers_and_nested_records_are_closed(
     with pytest.raises(ValidationError) as raised:
         StageRef.model_validate(document)
 
-    assert "private" not in str(raised.value)
+    assert LEAK_MARKER not in str(raised.value)
 
 
 def test_storage_metadata_rejects_raw_oversize_duplicate_and_deep_json() -> None:

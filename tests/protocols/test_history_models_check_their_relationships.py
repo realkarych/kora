@@ -97,14 +97,11 @@ def test_worst_case_selectors_fit_their_limits() -> None:
         "grant_snapshot": snapshot,
     }
 
-    parsed = [
-        GrantHistorySnapshot.model_validate(snapshot),
-        GrantHistoryPosition.model_validate(position),
-        ClosureSnapshot.model_validate(closure_snapshot),
-    ]
+    GrantHistorySnapshot.model_validate(snapshot)
+    GrantHistoryPosition.model_validate(position)
+    ClosureSnapshot.model_validate(closure_snapshot)
     sizes = [json_size(item) for item in (snapshot, position, closure_snapshot)]
 
-    assert len(parsed) == 3
     assert max(sizes) < POSITION_LIMIT
 
 

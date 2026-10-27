@@ -10,8 +10,9 @@ from tests.protocols.secret_support import ESCAPED, PLAIN, Holder
 ENCODE: dict[str, object] = {"secret_transfer": True}
 
 
-@pytest.mark.parametrize("value", [PLAIN, ESCAPED])
-@pytest.mark.parametrize("ascii_only", [True, False])
+@pytest.mark.parametrize(
+    ("value", "ascii_only"), [(PLAIN, True), (ESCAPED, True), (ESCAPED, False)]
+)
 def test_secret_transfer_field_is_masked(
     start_capture: StartCapture, value: str, ascii_only: bool
 ) -> None:

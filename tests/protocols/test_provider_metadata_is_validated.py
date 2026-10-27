@@ -18,6 +18,7 @@ from kora.protocols.metadata import (
 )
 from tests.protocols.conftest import StartCapture
 from tests.protocols.entry_points import (
+    DISTRIBUTION,
     entry,
     implementation,
     metadata_factory,
@@ -167,13 +168,22 @@ def test_provider_metadata_keeps_its_own_schema_copy() -> None:
 
 
 def test_unprefixed_entry_point_gets_a_hint(diagnostics: ProcessDiagnostics) -> None:
-    legacy = source(entry("alpha", returning(metadata_factory(RUNTIME, "alpha"))))
+    legacy_entry = entry("alpha", returning(metadata_factory(RUNTIME, "alpha")))
+    legacy = source(legacy_entry)
 
     with pytest.raises(KoraProtocolError) as raised:
         load_provider(RUNTIME, "alpha", diagnostics, legacy)
 
+    details = raised.value.details
+    hint = details["hint"]
+    rendered = json.dumps(details)
     assert raised.value.code == "provider_not_installed"
-    assert raised.value.details["hint"] == "entry points are named <protocol>.<name>"
+    assert set(details) == {"protocol", "name", "hint"}
+    assert isinstance(hint, str)
+    assert "<protocol>.<name>" in hint
+    assert legacy_entry.value not in rendered
+    assert "kora_loading_fixture" not in rendered
+    assert DISTRIBUTION not in rendered
 
 
 def test_implementation_from_a_reserved_module_is_refused(
