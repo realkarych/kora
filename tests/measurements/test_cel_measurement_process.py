@@ -10,27 +10,39 @@ from tests.measurements.cel_measurement_process import run_process
 
 
 @pytest.mark.parametrize(
-    ("code", "expected", "timed_out", "overflow"),
+    ("code", "expected", "overflow"),
     [
-        ("import sys; sys.stdout.write('complete')", b"complete", False, False),
-        ("import signal; signal.pause()", b"", True, False),
-        ("import os; os.write(1, b'x' * 10000)", b"x" * 256, False, True),
+        ("import sys; sys.stdout.write('complete')", b"complete", False),
+        ("import os; os.write(1, b'x' * 10000)", b"x" * 256, True),
     ],
 )
 def test_cel_measurement_children_are_bounded_and_reaped(
-    code: str, expected: bytes, timed_out: bool, overflow: bool
+    code: str, expected: bytes, overflow: bool
 ) -> None:
     descriptors_before = len(os.listdir("/dev/fd"))
 
+    result = run_process([sys.executable, "-I", "-c", code], output_limit=256)
+
+    assert result.stdout == expected
+    assert result.timed_out is False
+    assert result.overflow is overflow
+    assert len(os.listdir("/dev/fd")) == descriptors_before
+    with pytest.raises(ChildProcessError):
+        os.waitpid(result.pid, os.WNOHANG)
+
+
+def test_cel_measurement_child_past_its_deadline_is_killed_and_reaped() -> None:
+    descriptors_before = len(os.listdir("/dev/fd"))
+
     result = run_process(
-        [sys.executable, "-I", "-c", code],
+        [sys.executable, "-I", "-c", "import signal; signal.pause()"],
         deadline_seconds=0.2,
         output_limit=256,
     )
 
-    assert result.stdout == expected
-    assert result.timed_out is timed_out
-    assert result.overflow is overflow
+    assert result.stdout == b""
+    assert result.timed_out is True
+    assert result.overflow is False
     assert len(os.listdir("/dev/fd")) == descriptors_before
     with pytest.raises(ChildProcessError):
         os.waitpid(result.pid, os.WNOHANG)

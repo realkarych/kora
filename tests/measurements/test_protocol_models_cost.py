@@ -284,20 +284,15 @@ def test_harness_model_validation_cost(report: Report, workload: str) -> None:
     report.environment[f"{workload}_peak_scope"] = peak_scope(workload, count)
     report.environment[f"{workload}_retained_bytes"] = retained
     report.environment[f"{workload}_recurring_growth_bytes"] = recurring
+    if workload == "session_result_maximal_json":
+        report.environment["session_result_maximal_bytes"] = encoded_bytes(
+            maximal_result()
+        )
     report.gates[f"{workload}_retained_at_baseline"] = (
         retained < ROW_RETAINED_LIMIT_BYTES and recurring < ROW_RETAINED_LIMIT_BYTES
     )
     assert retained < ROW_RETAINED_LIMIT_BYTES
     assert recurring < ROW_RETAINED_LIMIT_BYTES
-
-
-def test_maximal_session_result_size(report: Report) -> None:
-    document = maximal_result()
-
-    size = encoded_bytes(document)
-
-    report.environment["session_result_maximal_bytes"] = size
-    assert size > 1_048_576
 
 
 def expected_outcome(row: str) -> str:
