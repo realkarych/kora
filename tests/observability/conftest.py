@@ -1,5 +1,6 @@
 import time
 from collections.abc import Callable, Iterator, Mapping
+from importlib.metadata import version
 
 import pytest
 
@@ -47,6 +48,7 @@ LEVEL_EVENTS: dict[Level, EventSpec] = {
     for level in Level
 }
 INSTANCE_ID: str = "test-instance"
+KORA_VERSION_LINE: bytes = f"kora {version('kora')}\n".encode()
 
 
 def run_kora(arguments: list[str], environment: Mapping[str, str]) -> ProcessResult:

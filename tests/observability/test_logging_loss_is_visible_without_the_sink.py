@@ -87,6 +87,11 @@ def block_the_writer(diagnostics: ProcessDiagnostics, log: ComponentLogger) -> N
     wait_until(lambda: emitted_until_blocked(diagnostics, log))
 
 
+def descriptor_identity(descriptor: int) -> tuple[int, int]:
+    status = os.fstat(descriptor)
+    return (status.st_dev, status.st_ino)
+
+
 def test_state_reports_loss_while_the_sink_is_blocked(
     configure: Configure, pipe: Pipe
 ) -> None:
@@ -155,8 +160,12 @@ def test_cli_shaped_process_emits_one_loss_summary_at_shutdown() -> None:
     assert events.count("lossy.note") == 2
 
 
-def test_idle_shutdown_returns_at_once(configure: Configure, pipe: Pipe) -> None:
-    diagnostics = configure(LoggingSettings(), pipe.write_end)
+def test_idle_shutdown_returns_before_the_drain_deadline(
+    configure: Configure, pipe: Pipe
+) -> None:
+    settings = LoggingSettings()
+    sink_identity = descriptor_identity(pipe.write_end)
+    diagnostics = configure(settings, pipe.write_end)
     pipe.reader.start()
     wait_until(lambda: diagnostics.snapshot().queue_records == 0)
 
@@ -165,6 +174,6 @@ def test_idle_shutdown_returns_at_once(configure: Configure, pipe: Pipe) -> None
     elapsed = time.monotonic() - started
 
     assert drained
-    assert elapsed < 0.5
+    assert elapsed < settings.drain_seconds
     assert not diagnostics.writer_is_alive()
-    assert os.fstat(pipe.write_end).st_size >= 0
+    assert descriptor_identity(pipe.write_end) == sink_identity

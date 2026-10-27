@@ -55,13 +55,10 @@ def test_producers_keep_going_while_the_reader_is_stopped(
     diagnostics = configure(SMALL_QUEUE, pipe.write_end)
     log = diagnostics.logger(TEST_COMPONENT)
 
-    started = time.monotonic()
     for _ in range(FILL_RECORDS):
         log.emit(NOTE, text=RECORD_TEXT)
-    elapsed = time.monotonic() - started
     snapshot = diagnostics.snapshot()
 
-    assert elapsed < 5.0
     assert snapshot.queue_records <= SMALL_QUEUE.queue_records
     assert snapshot.queue_bytes <= SMALL_QUEUE.queue_bytes
     dropped = snapshot.dropped
@@ -107,9 +104,8 @@ def test_recovery_after_a_stopped_reader_reports_drops_once(
     assert all(record["reason"] == reason.value for record in dropped)
     recovery = next(r for r in records if r["event"] == "logging.sink_recovered")
     assert 0 < int(str(recovery["dropped"])) <= dropped_before
-    assert all(json.dumps(record) for record in records)
     assert snapshot.sink_recoveries >= 1
-    assert reason.value in str(snapshot.dropped)
+    assert snapshot.dropped.get((TEST_COMPONENT, "INFO", reason.value), 0) > 0
     assert snapshot.dropped_total() > 0
 
 

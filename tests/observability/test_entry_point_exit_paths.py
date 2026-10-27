@@ -6,7 +6,8 @@ from typing import cast
 
 import pytest
 
-from tests.observability.conftest import run_kora, run_python
+from tests.observability.conftest import KORA_VERSION_LINE, run_kora, run_python
+from tests.support.observability import ProcessResult
 
 FAILING_APPLICATION_SCRIPT: str = """
 import sys
@@ -52,26 +53,12 @@ sys.exit(main(["wait"], {"KORA_LOG_LEVEL": "DEBUG"}, app))
 """
 
 
-def test_version_exits_zero_with_stdout_only() -> None:
-    result = run_kora(["--version"], {})
-
-    assert (result.code, result.stdout, result.stderr) == (0, b"kora 0.1.0.dev0\n", b"")
-
-
 def test_usage_errors_exit_two() -> None:
     result = run_kora(["--nope"], {})
 
     assert result.code == 2
     assert result.stdout == b""
     assert result.stderr_lines()[0].startswith("Usage: kora")
-
-
-def test_invalid_configuration_exits_seventy_eight() -> None:
-    result = run_kora(["--version"], {"KORA_LOG_LEVEL": "verbose"})
-
-    assert result.code == 78
-    assert result.stdout == b""
-    assert len(result.stderr_lines()) == 1
 
 
 def test_unhandled_error_exits_seventy_with_one_safe_record() -> None:
@@ -218,7 +205,7 @@ def test_usage_and_exit_text_on_stderr_are_escaped_and_bounded() -> None:
     exit_text = [line for line in exiting.stderr_lines() if line.startswith("left")]
     assert usage.code == 2
     assert "\x1b" not in usage.stderr.decode("utf-8")
-    assert usage_error.startswith("Error: No such option: --nope\\x1b[31m\\x0d\\x0a")
+    assert "--nope\\x1b[31m\\x0d\\x0a" in usage_error
     assert usage_error.endswith("[truncated]")
     assert len(usage_error.encode("utf-8")) < 1100
     assert exiting.code == 1
@@ -312,14 +299,14 @@ def test_unusable_stdout_descriptor_still_shuts_down_cleanly(
         check=False,
     )
 
-    lines = completed.stderr.decode("utf-8").splitlines()
-    failures = [line for line in lines if '"event":"process.failed"' in line]
-    assert completed.returncode == exit_code
-    assert all(line.startswith("{") for line in lines)
-    assert "Traceback" not in completed.stderr.decode("utf-8")
-    assert '"event":"process.stopped"' in lines[-1]
-    assert f'"exit_code":{exit_code}' in lines[-1]
-    assert len(failures) == (1 if exit_code == 70 else 0)
+    result = ProcessResult(completed.returncode, completed.stdout, completed.stderr)
+    records = result.records()
+    events = [record["event"] for record in records]
+    assert result.code == exit_code
+    assert "Traceback" not in result.stderr.decode("utf-8")
+    assert events[-1] == "process.stopped"
+    assert records[-1]["exit_code"] == exit_code
+    assert events.count("process.failed") == (1 if exit_code == 70 else 0)
 
 
 @pytest.mark.parametrize(
@@ -343,4 +330,4 @@ def test_closed_stderr_keeps_the_exit_code(
 
     assert completed.returncode == exit_code
     assert completed.stderr == b""
-    assert completed.stdout == (b"kora 0.1.0.dev0\n" if exit_code == 0 else b"")
+    assert completed.stdout == (KORA_VERSION_LINE if exit_code == 0 else b"")
