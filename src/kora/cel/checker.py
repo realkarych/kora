@@ -48,6 +48,8 @@ from kora.cel.types import (
     Nullable,
     Primitive,
     Record,
+    is_null,
+    nullable,
     unwrap,
 )
 
@@ -131,9 +133,7 @@ SIGNATURES: Final[dict[str, tuple[tuple[tuple[Kind, ...], Kind], ...]]] = {
     "double": tuple(((kind,), Kind.DOUBLE) for kind in CONVERTIBLE),
     "string": tuple(
         ((kind,), Kind.STRING)
-        for kind in CONVERTIBLE
-        | {Kind.BYTES, Kind.BOOL, Kind.TIMESTAMP}
-        | {Kind.DURATION}
+        for kind in CONVERTIBLE | {Kind.BYTES, Kind.TIMESTAMP, Kind.DURATION}
     ),
     "bytes": (((Kind.STRING,), Kind.BYTES), ((Kind.BYTES,), Kind.BYTES)),
     "duration": (((Kind.STRING,), Kind.DURATION), ((Kind.DURATION,), Kind.DURATION)),
@@ -151,6 +151,7 @@ SIGNATURES: Final[dict[str, tuple[tuple[tuple[Kind, ...], Kind], ...]]] = {
         for name in TIME_ACCESSORS
     },
 }
+EXACT: Final[frozenset[str]] = frozenset({"getMilliseconds"})
 LITERAL_TYPES: Final[dict[type, CelType]] = {
     IntLiteral: INT,
     UintLiteral: UINT,
@@ -162,10 +163,6 @@ LITERAL_TYPES: Final[dict[type, CelType]] = {
 }
 
 
-def is_null(cel_type: CelType) -> bool:
-    return isinstance(cel_type, Primitive) and cel_type.kind is Kind.NULL
-
-
 def kind_of(cel_type: CelType) -> Kind | None:
     inner = unwrap(cel_type)
     return inner.kind if isinstance(inner, Primitive) else None
@@ -173,12 +170,6 @@ def kind_of(cel_type: CelType) -> Kind | None:
 
 def plain(kind: Kind) -> CelType:
     return Primitive(kind)
-
-
-def nullable(cel_type: CelType) -> CelType:
-    if isinstance(cel_type, Dyn | Nullable) or is_null(cel_type):
-        return cel_type
-    return Nullable(cel_type)
 
 
 def join(left: CelType, right: CelType) -> CelType:
@@ -199,7 +190,7 @@ def shallow_join(left: CelType, right: CelType) -> CelType:
     if isinstance(left, Primitive) and isinstance(right, Primitive):
         if left.kind is not right.kind:
             return DYN
-        return left if left.allowed == right.allowed else plain(left.kind)
+        return left if left.allowed is right.allowed else plain(left.kind)
     if isinstance(left, ListOf) and isinstance(right, ListOf):
         return ListOf(scalar_join(left.element, right.element))
     if isinstance(left, MapOf) and isinstance(right, MapOf):
@@ -232,6 +223,12 @@ def equatable(left: CelType, right: CelType) -> bool:
         return True
     keyed = (MapOf, Record)
     return isinstance(inner_left, keyed) and isinstance(inner_right, keyed)
+
+
+def is_key(cel_type: CelType) -> bool:
+    if isinstance(cel_type, Dyn):
+        return True
+    return isinstance(cel_type, Primitive) and cel_type.kind in KEY_KINDS
 
 
 def literal_step(node: Node) -> Step | None:
@@ -448,8 +445,6 @@ class Checker:
         if node.operator is UnaryOperator.NOT:
             self.boolean(inner, node.offset)
             return Typed(BOOL)
-        if isinstance(inner.type, Dyn):
-            return Typed(DYN)
         kind = kind_of(inner.type)
         if kind not in (Kind.INT, Kind.DOUBLE):
             raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
@@ -505,7 +500,7 @@ class Checker:
                 for element in node.right.elements:
                     self.enum_literal(left.type, element)
         elif isinstance(container, MapOf):
-            if not equatable(left.type, container.key):
+            if not is_key(left.type) or not equatable(left.type, container.key):
                 raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
         elif isinstance(container, Record):
             if not equatable(left.type, STRING):
@@ -548,13 +543,14 @@ class Checker:
                 if literal in seen:
                     raise fail(Reason.REPEATED_MAP_KEY, entry.key.offset)
                 seen.add(literal)
-        keys = self.joined([entry.key for entry in node.entries])
-        if not isinstance(keys, Dyn) and kind_of(keys) not in KEY_KINDS:
-            raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
-        if isinstance(keys, Nullable):
-            raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
+        keys: CelType | None = None
+        for entry in node.entries:
+            key = self.visit(entry.key).type
+            if not is_key(key):
+                raise fail(Reason.NO_MATCHING_OVERLOAD, entry.key.offset)
+            keys = key if keys is None else join(keys, key)
         values = self.joined([entry.value for entry in node.entries])
-        return Typed(MapOf(keys, values))
+        return Typed(MapOf(DYN if keys is None else keys, values))
 
     def call(self, node: Call) -> Typed:
         receiver = [node.receiver] if node.receiver is not None else []
@@ -568,7 +564,8 @@ class Checker:
             return self.size(operands[0], node.offset)
         for kinds, result in SIGNATURES[name]:
             if all(
-                isinstance(unwrap(operand.type), Dyn) or kind_of(operand.type) is kind
+                kind_of(operand.type) is kind
+                or (isinstance(unwrap(operand.type), Dyn) and name not in EXACT)
                 for operand, kind in zip(operands, kinds, strict=True)
             ):
                 return Typed(plain(result))

@@ -1,6 +1,10 @@
+from types import MappingProxyType
+from typing import cast
+
 import pytest
 
 from kora.cel import (
+    BoundError,
     CheckedExpression,
     Diagnostic,
     Environment,
@@ -419,6 +423,11 @@ OVERLOADS: list[str] = [
     "{1.5: 'a'}.size() == 1",
     "{null: 1}.size() == 1",
     "{inputs.bundle.maybe: 1}.size() == 1",
+    "{1: 'a', 2.5: 'b'}.size() == 2",
+    "{1: 'a', [1]: 'b'}.size() == 2",
+    "{'a': 1, {'x': 1}: 2}.size() == 2",
+    "{} in {}",
+    "[1] in {'a': 1}",
     "inputs.bundle.count == null",
     "inputs.bundle.facts == null",
     "[1, 2].all(x, x)",
@@ -451,6 +460,11 @@ TIME: str = "timestamp('2026-10-27T00:00:00Z')"
         ("duration('1s').getMilliseconds() > 0", Reason.NO_MATCHING_OVERLOAD),
         ("{'a': 1, 'a': 2}.size() == 1", Reason.REPEATED_MAP_KEY),
         ("{1: 'a', 2: 'b', 1: 'c'}.size() == 2", Reason.REPEATED_MAP_KEY),
+        ("string(true) == 'true'", Reason.NO_MATCHING_OVERLOAD),
+        ("string(payload.flag == true) == 'true'", Reason.NO_MATCHING_OVERLOAD),
+        ("-payload.flag == true", Reason.NO_MATCHING_OVERLOAD),
+        ("-dyn(1) == -1", Reason.NO_MATCHING_OVERLOAD),
+        ("payload.elapsed.getMilliseconds() > 0", Reason.NO_MATCHING_OVERLOAD),
     ],
 )
 def test_cel_rejects_overloads_the_binding_lacks(source: str, reason: Reason) -> None:
@@ -481,7 +495,7 @@ WELL_TYPED: list[tuple[str, ResultKind]] = [
         ResultKind.BOOL,
     ),
     ("type(payload) == map && dyn(1) == 1", ResultKind.BOOL),
-    ("payload.n + 1 > 2 && -payload.m < 0 && !payload.flag", ResultKind.BOOL),
+    ("payload.n + 1 > 2 && -double(payload.m) < 0.0 && !payload.flag", ResultKind.BOOL),
     ("bytes('a') + b'b' == b'ab' && 7 % 2 == 1 && 5u % 2u == 1u", ResultKind.BOOL),
     ("response.decision", ResultKind.STRING),
     ("response.decision == 'approve' ? 'ok' : inputs.bundle.name", ResultKind.STRING),
@@ -496,3 +510,16 @@ def test_cel_accepts_well_typed_expressions(
     result = check_typed(source, environment(result_kind))
 
     assert isinstance(result, CheckedExpression), result
+
+
+def test_cel_typed_check_refuses_malformed_environments() -> None:
+    proxied = Environment(
+        cast("dict[str, Variable]", MappingProxyType({"v": Variable(DYN)})),
+        ResultKind.BOOL,
+    )
+    listed = Environment(cast("dict[str, Variable]", [Variable(DYN)]), ResultKind.BOOL)
+
+    with pytest.raises(BoundError, match="not a plain dict"):
+        check_typed("v == 1", proxied)
+    with pytest.raises(BoundError, match="not a plain dict"):
+        check_typed("v == 1", listed)
