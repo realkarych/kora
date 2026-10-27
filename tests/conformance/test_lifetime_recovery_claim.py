@@ -7,27 +7,29 @@ from pathlib import Path
 
 import pytest
 
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.journal import JournalSnapshot
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
 from kora.protocols.identity import ProcessIdentity
-from kora.protocols.lifetime import (
-    CleanupOutcome,
-    CleanupReference,
-    ProcessRegistration,
-)
+from kora.protocols.lifetime import CleanupOutcome, CleanupReference
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
-from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
-from tests.conformance.test_lifetime_cleanup_controls import (
+from kora.runner.processes import ExitAnchor, RecoveredProcess
+from tests.conformance.lifetime_support import (
+    SENT_OR_SETTLED,
+    ControlledLifetimeClock,
     close_recovered_test_owner,
     dispose_test_owner,
+    entered_fifo,
+    independent_process,
+    installed_launcher,
+    journal_file,
+    kill_independent,
+    limits,
+    retained_invocation,
+    retained_journal,
 )
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
 
 
 @pytest.mark.asyncio
@@ -39,24 +41,9 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
     invocation_id = "fresh"
     independent: RecoveredProcess | None = None
     if scenario == "claim":
-        probe = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-                str(tmp_path),
-                "live",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        invocation_id = probe.stdout.decode("ascii")
-        saved = JournalSnapshot.model_validate_json(
-            (next(tmp_path.rglob(invocation_id)) / "journal").read_bytes()
-        )
-        registration = saved.entries[-1].registration
-        assert isinstance(registration, ProcessRegistration)
-        independent = RecoveredProcess(registration, clock, NativeIdentityReader())
+        invocation_id = retained_invocation(tmp_path, "live").invocation_id
+        _, saved = retained_journal(tmp_path, invocation_id)
+        independent = independent_process(saved, clock)
     barrier = DirectoryAnchor.open_path(tmp_path)
     os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
     reading, writing = os.pipe()
@@ -91,7 +78,7 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
     identity = ProcessIdentity.model_validate_json(await channel.read_frame(deadline))
     helper_anchor = ExitAnchor(identity.pid, direct_child=False)
     with await entered_fifo(barrier.descriptor, reading, deadline, clock) as writer:
-        path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+        path = journal_file(tmp_path, reference.invocation_id)
         retained = path.read_bytes()
         snapshot = JournalSnapshot.model_validate_json(retained)
         assert snapshot.owner.pid == parent.pid
@@ -111,9 +98,7 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
                 competing = ParentLifetime(
                     limits=limits(),
                     recovery=reference,
-                    launcher=InstalledIOHelperLauncher(
-                        home=tmp_path, state_home=tmp_path / "state"
-                    ),
+                    launcher=installed_launcher(tmp_path),
                 )
                 with pytest.raises(LifetimeError):
                     await competing.ready()
@@ -127,9 +112,7 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
                 clock=recovery_clock,
                 limits=limits(),
                 recovery=reference,
-                launcher=InstalledIOHelperLauncher(
-                    home=tmp_path, state_home=tmp_path / "state"
-                ),
+                launcher=installed_launcher(tmp_path),
             )
             await recovered.ready()
             report = await close_recovered_test_owner(
@@ -164,12 +147,7 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
                     os.kill(identity.pid, signal.SIGKILL)
                 await helper_anchor.wait(deadline, clock)
             if independent is not None:
-                assert independent.signal(signal.SIGKILL, deadline) in (
-                    SignalResult.SENT,
-                    SignalResult.SETTLED,
-                )
-                await independent.settle(deadline)
-                independent.release(deadline)
+                await kill_independent(independent, deadline, SENT_OR_SETTLED)
             if recovered is not None:
                 await dispose_test_owner(recovered, recovery_clock)
             channel.close()

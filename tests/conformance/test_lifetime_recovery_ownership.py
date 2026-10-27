@@ -20,58 +20,19 @@ from kora.protocols.lifetime import (
     LifetimeReason,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
-
-
-async def recovery_progress(caller: asyncio.Task[ClosureReport], deadline: int) -> None:
-    if caller.done():
-        result = caller.result()
-        raise AssertionError(f"recovery completed before frontier: {result.state}")
-    assert SystemClock().monotonic_ns() < deadline
-    loop = asyncio.get_running_loop()
-    wake: asyncio.Future[None] = loop.create_future()
-    loop.call_soon(wake.set_result, None)
-    await wake
-
-
-async def settle_recovery_attempts(
-    attempts: RecoveryAttempts, clock: ControlledLifetimeClock
-) -> None:
-    context = attempts.context
-    if context is None:
-        return
-    for attempt in tuple(context.attempts.values()):
-        owner = attempt.owner
-        if owner is None:
-            continue
-        closing = owner.request_close(None)
-        clock.advance(
-            int(
-                (
-                    owner.limits.acquisition_seconds
-                    + owner.limits.cooperative_seconds
-                    + owner.limits.term_seconds
-                    + owner.limits.kill_observation_seconds
-                    + owner.limits.drain_seconds
-                )
-                * 1_000_000_000
-            )
-            + 1
-        )
-        for helper in tuple(owner.mutations.helpers):
-            if not helper.closed:
-                helper.signal(signal.SIGKILL)
-                await asyncio.wait_for(
-                    helper.settle(clock.monotonic_ns() + 5_000_000_000), 5
-                )
-        await asyncio.wait_for(asyncio.shield(closing), 5)
-        if attempt.task is not None:
-            await asyncio.wait_for(asyncio.shield(attempt.task), 5)
-        attempt.reconcile()
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    installed_launcher,
+    journal_file,
+    limits,
+    recovery_progress,
+    retained_invocation,
+    retained_journal,
+    settle_recovery_attempts,
+    stall_barrier,
+)
+from tests.support.event_loop import turn
 
 
 def test_closed_loop_retains_unknown_recovery_until_actual_process_exit(
@@ -96,28 +57,10 @@ def test_closed_loop_retains_unknown_recovery_until_actual_process_exit(
 async def test_cancelled_recovery_retains_exact_attempt_through_gc_and_join(
     tmp_path: Path,
 ) -> None:
-    original = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "tree",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=original.stdout.decode("ascii"))
+    reference = retained_invocation(tmp_path, "tree")
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, phase="after", pause_at=1
-        )
+        barrier = stall_barrier(resources, tmp_path)
+        launcher = barrier.launcher(phase="after", pause_at=1)
         clock = ControlledLifetimeClock()
         attempts = RecoveryAttempts()
         try:
@@ -141,7 +84,7 @@ async def test_cancelled_recovery_retains_exact_attempt_through_gc_and_join(
             assert owner is not None
             helper = owner.mutations.helpers[-1]
             writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, SystemClock())
+                await barrier.entered(deadline, SystemClock())
             )
 
             caller.cancel()
@@ -232,10 +175,8 @@ async def test_cancelled_recovery_retains_exact_attempt_through_gc_and_join(
 async def test_recovery_construction_refusal_releases_exact_admission(
     tmp_path: Path,
 ) -> None:
-    from kora.conformance.io_helper import InstalledIOHelperLauncher
-
     attempts = RecoveryAttempts()
-    launcher = InstalledIOHelperLauncher(home=tmp_path, state_home=tmp_path / "state")
+    launcher = installed_launcher(tmp_path)
     reference = CleanupReference(invocation_id="e" * 32)
     refused_limits = limits().model_copy(update={"max_control_recovery_bytes": 1})
 
@@ -257,29 +198,11 @@ async def test_recovery_construction_refusal_releases_exact_admission(
 async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
     tmp_path: Path,
 ) -> None:
-    original = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "tree",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=original.stdout.decode("ascii"))
-    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    reference = retained_invocation(tmp_path, "tree")
+    path = journal_file(tmp_path, reference.invocation_id)
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, phase="after", pause_at=2
-        )
+        barrier = stall_barrier(resources, tmp_path)
+        launcher = barrier.launcher(phase="after", pause_at=2)
         clock = ControlledLifetimeClock()
         attempts = RecoveryAttempts()
         try:
@@ -293,7 +216,6 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
                     clock=clock,
                 )
             )
-            loop = asyncio.get_running_loop()
             deadline = SystemClock().monotonic_ns() + 5_000_000_000
             while launcher.starts < 2:
                 await recovery_progress(caller, deadline)
@@ -304,7 +226,7 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             assert owner is not None
             helper = owner.mutations.helpers[-1]
             writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, SystemClock())
+                await barrier.entered(deadline, SystemClock())
             )
             retained = path.read_bytes()
             while not helper.descriptors:
@@ -365,9 +287,7 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             await helper.anchor.wait(deadline, actual_clock)
             while attempts.context is not None:
                 assert actual_clock.monotonic_ns() < deadline
-                wake = loop.create_future()
-                loop.call_soon(wake.set_result, None)
-                await wake
+                await turn()
 
             assert helper.closed
             assert helper.process.returncode == 0
@@ -428,32 +348,10 @@ def concurrent_resume(
 async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
     tmp_path: Path,
 ) -> None:
-    references: list[CleanupReference] = []
-    for _ in range(2):
-        previous = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-                str(tmp_path),
-                "tree",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        references.append(
-            CleanupReference(invocation_id=previous.stdout.decode("ascii"))
-        )
+    references = [retained_invocation(tmp_path, "tree") for _ in range(2)]
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, phase="after", pause_at=1
-        )
+        barrier = stall_barrier(resources, tmp_path)
+        launcher = barrier.launcher(phase="after", pause_at=1)
         registry = RecoveryAttempts()
         gate = threading.Barrier(3)
         results: queue.Queue[ClosureReport | LifetimeReason] = queue.Queue()
@@ -470,13 +368,10 @@ async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
             gate.wait(timeout=5)
             clock = SystemClock()
             deadline = clock.monotonic_ns() + 5_000_000_000
-            loop = asyncio.get_running_loop()
             while not launcher.starts:
                 assert clock.monotonic_ns() < deadline
                 assert any(thread.is_alive() for thread in threads)
-                wake: asyncio.Future[None] = loop.create_future()
-                loop.call_soon(wake.set_result, None)
-                await wake
+                await turn()
             context = registry.context
             assert context is not None
             attempt = next(iter(context.attempts.values()))
@@ -485,13 +380,9 @@ async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
             while not owner.mutations.helpers:
                 assert clock.monotonic_ns() < deadline
                 assert any(thread.is_alive() for thread in threads)
-                wake = loop.create_future()
-                loop.call_soon(wake.set_result, None)
-                await wake
+                await turn()
             helper = owner.mutations.helpers[-1]
-            writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, clock)
-            )
+            writer = resources.enter_context(await barrier.entered(deadline, clock))
 
             refused = await asyncio.to_thread(results.get, True, 5)
             assert refused is LifetimeReason.IDENTITY_UNKNOWN
@@ -511,11 +402,7 @@ async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
                 for reference in references
                 if reference.invocation_id != owner.invocation_id
             )
-            from kora.conformance.journal import JournalSnapshot
-
-            retained = JournalSnapshot.model_validate_json(
-                (next(tmp_path.rglob(other.invocation_id)) / "journal").read_bytes()
-            )
+            _, retained = retained_journal(tmp_path, other.invocation_id)
             assert retained.generation == 1
         finally:
             context = registry.context
@@ -535,10 +422,8 @@ async def test_simultaneous_thread_recovery_has_one_initial_effect_owner(
 async def test_recovery_of_unknown_invocation_reports_unknown_and_disposes_attempt(
     tmp_path: Path,
 ) -> None:
-    from kora.conformance.io_helper import InstalledIOHelperLauncher
-
     registry = RecoveryAttempts()
-    launcher = InstalledIOHelperLauncher(home=tmp_path, state_home=tmp_path / "state")
+    launcher = installed_launcher(tmp_path)
     clock = ControlledLifetimeClock()
     caller = asyncio.create_task(
         registry.resume(

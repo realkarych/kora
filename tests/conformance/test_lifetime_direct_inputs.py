@@ -1,8 +1,6 @@
 import asyncio
 import gc
-import os
 import signal
-import subprocess
 import sys
 import traceback
 import weakref
@@ -12,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.io_helper import HelperError
-from kora.conformance.journal import JournalEntry, JournalSnapshot
+from kora.conformance.journal import JournalEntry
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
 from kora.protocols.lifetime import (
     Acquisition,
@@ -30,11 +28,14 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
-from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    limits,
+    retained_invocation,
+    retained_journal,
+    stall_barrier,
+)
+from tests.support.event_loop import turn
 
 
 def execution_input(resource_id: str, values: int) -> ProcessLaunch:
@@ -75,20 +76,8 @@ async def test_direct_execution_inputs_keep_aggregate_ownership_before_await(
     if case == "bootstrap_missing":
         recovery = CleanupReference(invocation_id=new_operation_id())
     if case == "bootstrap_failure":
-        previous = subprocess.run(
-            [
-                sys.executable,
-                "-I",
-                str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-                str(tmp_path),
-                "tree",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        recovery = CleanupReference(invocation_id=previous.stdout.decode("ascii"))
-        journal_path = next(tmp_path.rglob(recovery.invocation_id)) / "journal"
-        journal = JournalSnapshot.model_validate_json(journal_path.read_bytes())
+        recovery = retained_invocation(tmp_path, "tree")
+        journal_path, journal = retained_journal(tmp_path, recovery.invocation_id)
         entries = (
             *journal.entries,
             *(
@@ -106,18 +95,8 @@ async def test_direct_execution_inputs_keep_aggregate_ownership_before_await(
             journal.model_copy(update={"entries": entries}).model_dump_json().encode()
         )
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            tmp_path,
-            writing,
-            barrier.descriptor,
-            pause_at=1 if case.startswith("bootstrap") else 7,
-        )
+        barrier = stall_barrier(resources, tmp_path)
+        launcher = barrier.launcher(pause_at=1 if case.startswith("bootstrap") else 7)
         clock = ControlledLifetimeClock()
         owner = ParentLifetime(
             limits=limits(), launcher=launcher, clock=clock, recovery=recovery
@@ -167,12 +146,10 @@ async def test_direct_execution_inputs_keep_aggregate_ownership_before_await(
                 if callers[0].done():
                     callers[0].result()
                     raise AssertionError("acquisition ended before helper frontier")
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
             helper = owner.mutations.helpers[-1]
             writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, actual_clock)
+                await barrier.entered(deadline, actual_clock)
             )
             if case != "near":
                 for _ in range(2):

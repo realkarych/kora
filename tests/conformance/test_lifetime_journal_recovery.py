@@ -1,32 +1,44 @@
 import asyncio
 import os
-import signal
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from kora.conformance.io_helper import InstalledIOHelperLauncher
-from kora.conformance.journal import JournalSnapshot
+from kora.conformance.journal import JournalEntry, JournalSnapshot
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
 from kora.protocols.lifetime import (
     CleanupOutcome,
-    CleanupReference,
     ProcessRegistration,
     ResourceKind,
+    ResourceState,
+    TemporaryTreeRegistration,
+    new_operation_id,
 )
 from kora.protocols.time import SystemClock
+from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import (
     GroupObservation,
     IdentityObservation,
     IdentityState,
     NativeIdentityReader,
 )
-from kora.runner.processes import RecoveredProcess, SignalResult
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from kora.runner.processes import RecoveredProcess
+from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
+from tests.conformance.lifetime_support import (
+    SENT_ONLY,
+    SENT_OR_SETTLED,
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    entered_fifo,
+    independent_process,
+    installed_launcher,
+    journal_file,
+    kill_independent,
+    limits,
+    retained_invocation,
+    retained_journal,
+)
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -37,19 +49,8 @@ from tests.conformance.test_parent_lifetime import limits
 async def test_recovery_discards_only_verified_abandoned_journal_staging(
     tmp_path: Path, staging: str
 ) -> None:
-    original = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "tree",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=original.stdout.decode("ascii"))
-    journal_path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    reference = retained_invocation(tmp_path, "tree")
+    journal_path = journal_file(tmp_path, reference.invocation_id)
     saved = journal_path.read_bytes()
     journal = JournalSnapshot.model_validate_json(saved)
     path = journal_path.with_name("next")
@@ -76,9 +77,7 @@ async def test_recovery_discards_only_verified_abandoned_journal_staging(
         limits=limits(),
         recovery=reference,
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
 
     try:
@@ -118,20 +117,8 @@ async def test_recovery_discards_only_verified_abandoned_journal_staging(
 async def test_corrupt_journal_cannot_lose_live_process_ownership(
     tmp_path: Path, corruption: str
 ) -> None:
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "pair",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
-    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
-    journal = JournalSnapshot.model_validate_json(path.read_bytes())
+    reference = retained_invocation(tmp_path, "pair")
+    path, journal = retained_journal(tmp_path, reference.invocation_id)
     clock = SystemClock()
     processes = [
         RecoveredProcess(entry.registration, clock, NativeIdentityReader())
@@ -169,9 +156,7 @@ async def test_corrupt_journal_cannot_lose_live_process_ownership(
     owner = ParentLifetime(
         limits=limits(),
         recovery=reference,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
 
     try:
@@ -186,12 +171,7 @@ async def test_corrupt_journal_cannot_lose_live_process_ownership(
         await owner.close(None)
         for process in processes:
             deadline = clock.monotonic_ns() + 5_000_000_000
-            assert process.signal(signal.SIGKILL, deadline) in (
-                SignalResult.SENT,
-                SignalResult.SETTLED,
-            )
-            await process.settle(deadline)
-            process.release(deadline)
+            await kill_independent(process, deadline, SENT_OR_SETTLED)
 
 
 @pytest.mark.asyncio
@@ -199,35 +179,10 @@ async def test_corrupt_journal_cannot_lose_live_process_ownership(
 async def test_recovery_close_preserves_complete_inventory(
     tmp_path: Path, case: str
 ) -> None:
-    import asyncio
-    import os
-
-    from kora.protocols.lifetime import CleanupOutcome, TemporaryTreeRegistration
-    from kora.runner.filesystem import DirectoryAnchor
-    from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-    from tests.conformance.test_lifetime_io_helper import entered_fifo
-    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "live",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
-    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
-    journal = JournalSnapshot.model_validate_json(path.read_bytes())
-    registration = journal.entries[-1].registration
-    assert isinstance(registration, ProcessRegistration)
+    reference = retained_invocation(tmp_path, "live")
+    path, journal = retained_journal(tmp_path, reference.invocation_id)
     independent_clock = SystemClock()
-    independent = RecoveredProcess(
-        registration, independent_clock, NativeIdentityReader()
-    )
+    independent = independent_process(journal, independent_clock)
     barrier = DirectoryAnchor.open_path(tmp_path)
     os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
     reading, writing = os.pipe()
@@ -236,7 +191,6 @@ async def test_recovery_close_preserves_complete_inventory(
     owner = ParentLifetime(
         limits=limits(), recovery=reference, launcher=launcher, clock=clock
     )
-    loop = asyncio.get_running_loop()
     try:
         await launcher.wait_for_start(1)
         with await entered_fifo(
@@ -267,9 +221,7 @@ async def test_recovery_close_preserves_complete_inventory(
                 reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
                 while not independent.observe(reap_deadline).settled:
                     assert independent_clock.monotonic_ns() < reap_deadline
-                    wake: asyncio.Future[None] = loop.create_future()
-                    loop.call_soon(wake.set_result, None)
-                    await wake
+                    await turn()
                 clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
                 report = await asyncio.wait_for(closing, 5)
                 assert report.state is CleanupOutcome.UNKNOWN
@@ -284,9 +236,7 @@ async def test_recovery_close_preserves_complete_inventory(
                 reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
                 while not independent.observe(reap_deadline).settled:
                     assert independent_clock.monotonic_ns() < reap_deadline
-                    wake = loop.create_future()
-                    loop.call_soon(wake.set_result, None)
-                    await wake
+                    await turn()
                 clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
                 report = await asyncio.wait_for(closing, 5)
                 assert report.state is CleanupOutcome.CLOSED
@@ -299,12 +249,7 @@ async def test_recovery_close_preserves_complete_inventory(
             await dispose_test_owner(owner, clock)
         finally:
             deadline = independent_clock.monotonic_ns() + 5_000_000_000
-            assert independent.signal(signal.SIGKILL, deadline) in (
-                SignalResult.SENT,
-                SignalResult.SETTLED,
-            )
-            await independent.settle(deadline)
-            independent.release(deadline)
+            await kill_independent(independent, deadline, SENT_OR_SETTLED)
             os.close(reading)
             os.close(writing)
             barrier.close()
@@ -312,10 +257,6 @@ async def test_recovery_close_preserves_complete_inventory(
 
 class ExpiringIdentityReader:
     def __init__(self) -> None:
-        from tests.conformance.test_lifetime_pending_helpers import (
-            ControlledLifetimeClock,
-        )
-
         self.clock = ControlledLifetimeClock()
         self.native = NativeIdentityReader(clock=self.clock)
         self.expiry: int | None = None
@@ -339,37 +280,17 @@ class ExpiringIdentityReader:
 async def test_close_report_never_restarts_expired_process_observation(
     tmp_path: Path,
 ) -> None:
-    from kora.protocols.lifetime import CleanupOutcome
-
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "live",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
-    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
-    journal = JournalSnapshot.model_validate_json(path.read_bytes())
-    registration = journal.entries[-1].registration
-    assert isinstance(registration, ProcessRegistration)
+    reference = retained_invocation(tmp_path, "live")
+    path, journal = retained_journal(tmp_path, reference.invocation_id)
     independent_clock = SystemClock()
-    independent = RecoveredProcess(
-        registration, independent_clock, NativeIdentityReader()
-    )
+    independent = independent_process(journal, independent_clock)
     reader = ExpiringIdentityReader()
     owner = ParentLifetime(
         limits=limits(),
         recovery=reference,
         identities=reader,
         clock=reader.clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     await owner.ready()
     reader.expiry = reader.clock.monotonic_ns() + int(
@@ -390,32 +311,15 @@ async def test_close_report_never_restarts_expired_process_observation(
         assert path.exists()
     finally:
         deadline = independent_clock.monotonic_ns() + 5_000_000_000
-        assert independent.signal(signal.SIGKILL, deadline) is SignalResult.SENT
-        await independent.settle(deadline)
-        independent.release(deadline)
+        await kill_independent(independent, deadline, SENT_ONLY)
 
 
 @pytest.mark.asyncio
 async def test_recovery_control_capacity_keeps_entire_older_inventory(
     tmp_path: Path,
 ) -> None:
-    from kora.conformance.journal import JournalEntry
-    from kora.protocols.lifetime import CleanupOutcome, ResourceState, new_operation_id
-
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(tmp_path),
-            "live",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
-    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
-    original = JournalSnapshot.model_validate_json(path.read_bytes())
+    reference = retained_invocation(tmp_path, "live")
+    path, original = retained_journal(tmp_path, reference.invocation_id)
     registration = original.entries[-1].registration
     assert isinstance(registration, ProcessRegistration)
     extended = original.model_copy(
@@ -441,9 +345,7 @@ async def test_recovery_control_capacity_keeps_entire_older_inventory(
     owner = ParentLifetime(
         limits=limits(),
         recovery=reference,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
 
     try:
@@ -468,6 +370,4 @@ async def test_recovery_control_capacity_keeps_entire_older_inventory(
         assert owner.dispose_recovery_observers()
     finally:
         deadline = clock.monotonic_ns() + 5_000_000_000
-        assert independent.signal(signal.SIGKILL, deadline) is SignalResult.SENT
-        await independent.settle(deadline)
-        independent.release(deadline)
+        await kill_independent(independent, deadline, SENT_ONLY)

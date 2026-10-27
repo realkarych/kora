@@ -18,15 +18,15 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_io_helper import (
-    entered_fifo,
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    limits,
     read_probe,
+    stall_barrier,
 )
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.support.event_loop import turn
 
 
 class QueueDeadlineLifetime(ParentLifetime):
@@ -51,17 +51,9 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
     tmp_path: Path, effect: str, slots: int
 ) -> None:
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
-        launcher = ProbeIOHelperLauncher(
-            tmp_path,
-            writing,
-            barrier.descriptor,
+        launcher = barrier.launcher(
             pause_at=7 if "remove" in effect else 8 if effect == "publish" else 5,
             resist_term=True,
         )
@@ -102,11 +94,8 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
             helper = owner.mutations.helpers[-1]
             actual_clock = SystemClock()
             writer = resources.enter_context(
-                await entered_fifo(
-                    barrier.descriptor,
-                    reading,
-                    actual_clock.monotonic_ns() + 5_000_000_000,
-                    actual_clock,
+                await barrier.entered(
+                    actual_clock.monotonic_ns() + 5_000_000_000, actual_clock
                 )
             )
             assert owner.inventory().helpers.retained_origins == 1
@@ -140,7 +129,7 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                 clock.advance(100_000_000)
                 assert (
                     await read_probe(
-                        reading,
+                        barrier.reading,
                         actual_clock.monotonic_ns() + 5_000_000_000,
                         actual_clock,
                     )
@@ -180,17 +169,10 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
     tmp_path: Path,
 ) -> None:
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
         actual = SystemClock()
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, pause_at=3
-        )
+        launcher = barrier.launcher(pause_at=3)
         owner = QueueDeadlineLifetime(clock=clock, limits=limits(), launcher=launcher)
         publisher: asyncio.Task[None] | None = None
         try:
@@ -206,13 +188,9 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
                 if publisher.done():
                     await publisher
                     raise AssertionError("publisher did not reach held helper")
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
             helper = owner.mutations.helpers[-1]
-            writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, actual)
-            )
+            writer = resources.enter_context(await barrier.entered(deadline, actual))
             full = owner.request_close(None)
             clock.advance(10_000_000)
             scoped = owner.request_close(tree.token.resource_id)
@@ -224,9 +202,7 @@ async def test_queued_cleanup_keeps_earlier_full_deadline_before_launch(
                 if effect.task.done():
                     await effect.task
                     raise AssertionError("cleanup did not reach publisher queue")
-                wake = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
             original_final = owner.invocation_cleanup.final
             assert effect.permit.final == original_final < control.final
 

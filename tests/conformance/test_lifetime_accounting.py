@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import (
     CLOSURE_CONTROL_BYTES,
     CLOSURE_REPORT_BYTES,
@@ -36,9 +35,12 @@ from kora.protocols.lifetime import (
     ResourceState,
     new_operation_id,
 )
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+    limits,
+)
 
 
 def test_control_reservations_cover_maximum_closed_wire_values() -> None:
@@ -101,9 +103,7 @@ async def test_prepaid_control_capacity_refuses_before_effect_and_keeps_close_us
     owner = ParentLifetime(
         clock=clock,
         limits=limits().model_copy(update={"max_control_recovery_bytes": 100000}),
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     admitted: list[Reservation] = []
     refusal = None

@@ -23,11 +23,12 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
-from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    stall_barrier,
+)
+from tests.support.event_loop import turn
 
 
 def bounded_mount() -> Path:
@@ -77,26 +78,16 @@ async def test_full_disk_refuses_without_losing_owned_effects(
 ) -> None:
     home = Path(tempfile.mkdtemp(dir=full_disk_mount, prefix="private-"))
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(home)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, home)
         filler = os.open(
             "filler",
             os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600,
-            dir_fd=barrier.descriptor,
+            dir_fd=barrier.directory.descriptor,
         )
         resources.callback(os.close, filler)
         clock = ControlledLifetimeClock()
-        launcher = ProbeIOHelperLauncher(
-            home,
-            writing,
-            barrier.descriptor,
-            pause_at=1 if frontier == "admission" else 8,
-        )
+        launcher = barrier.launcher(pause_at=1 if frontier == "admission" else 8)
         owner = ParentLifetime(clock=clock, launcher=launcher)
         operation = None
         process = None
@@ -148,13 +139,9 @@ async def test_full_disk_refuses_without_losing_owned_effects(
                     if operation is not None and operation.done():
                         raise AssertionError(await operation)
                     assert actual.monotonic_ns() < deadline
-                    wake: asyncio.Future[None] = (
-                        asyncio.get_running_loop().create_future()
-                    )
-                    asyncio.get_running_loop().call_soon(wake.set_result, None)
-                    await wake
+                    await turn()
                 writer = resources.enter_context(
-                    await entered_fifo(barrier.descriptor, reading, deadline, actual)
+                    await barrier.entered(deadline, actual)
                 )
                 if frontier == "registration":
                     assert owner.mutations.directory is not None
