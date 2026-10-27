@@ -18,7 +18,7 @@ from pathlib import Path
 from packaging.requirements import Requirement
 from packaging.tags import parse_tag, sys_tags
 from packaging.utils import canonicalize_name
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from kora.ir.json import JsonObject
 from tests.support.observability import ProcessResult
@@ -29,6 +29,7 @@ FIXTURE: Path = REPOSITORY / "tests" / "fixtures" / "provider_tooling"
 
 class ProjectDependencies(BaseModel):
     dependencies: list[str]
+    optional_dependencies: dict[str, list[str]] = Field(alias="optional-dependencies")
 
 
 class ProjectManifest(BaseModel):
@@ -112,7 +113,7 @@ def locked_payload_wheel(
         archive.writestr(record_path, buffer.getvalue())
 
 
-def prepare_wheelhouse(output: Path) -> None:
+def prepare_wheelhouse(output: Path, *, conformance: bool = False) -> None:
     configuration = ProjectManifest.model_validate(
         tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
     )
@@ -120,7 +121,10 @@ def prepare_wheelhouse(output: Path) -> None:
         tomllib.loads((REPOSITORY / "uv.lock").read_text())
     )
     locked = {(canonicalize_name(item.name), item.version) for item in lock.package}
-    pending = [Requirement(value) for value in configuration.project.dependencies]
+    requirements = list(configuration.project.dependencies)
+    if conformance:
+        requirements += configuration.project.optional_dependencies["conformance"]
+    pending = [Requirement(value) for value in requirements]
     seen: dict[str, frozenset[str]] = {}
     while pending:
         requested = pending.pop()
@@ -277,7 +281,7 @@ class InstalledTooling:
 
 
 def install_tooling(
-    root: Path, wheelhouse: Path, fixture_wheel: Path
+    root: Path, wheelhouse: Path, fixture_wheel: Path, *, conformance: bool = False
 ) -> InstalledTooling:
     environment = root / "installed"
     run_setup(
@@ -303,7 +307,7 @@ def install_tooling(
             str(wheelhouse),
             "--python",
             str(python),
-            "kora",
+            "kora[conformance]" if conformance else "kora",
             str(fixture_wheel),
         ]
     )
