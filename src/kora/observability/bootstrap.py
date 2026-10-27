@@ -346,9 +346,9 @@ class ProcessDiagnostics:
             recovered = self._loss_pending
             self._loss_pending = False
         if recovered:
-            self._report_recovery(emission)
+            self._report_recovery()
 
-    def _report_recovery(self, emission: Emission) -> None:
+    def _report_recovery(self) -> None:
         self.state.mark_sink_recovered()
         if self._entering():
             return
@@ -441,9 +441,6 @@ class ProcessDiagnostics:
             logging.getLogger(name).setLevel(level)
         if self._previous_root_level is not None:
             root.setLevel(self._previous_root_level)
-
-    def is_active(self) -> bool:
-        return self._active
 
     def is_shut_down(self) -> bool:
         return not self._active

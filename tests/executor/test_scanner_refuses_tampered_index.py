@@ -110,7 +110,7 @@ def scanned(
             BASE,
             source,
             secrets,
-            bounds or ScanBounds(chunk_bytes=7),
+            bounds or ScanBounds(),
             PhaseGuard(SystemClock(), None),
             capture.diagnostics.logger(CONFORMANCE_COMPONENT),
         )

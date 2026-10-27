@@ -73,7 +73,6 @@ class LocalState:
     def __init__(self, root: RootAnchor) -> None:
         self.root = root
         self.connections = 0
-        self.peak_connections = 0
         self.initial_epoch = self.initialize()
 
     def validate_files(self, creating: bool) -> None:
@@ -128,7 +127,6 @@ class LocalState:
             connection.close()
             raise
         self.connections += 1
-        self.peak_connections = max(self.peak_connections, self.connections)
         return connection
 
     @contextmanager
@@ -218,10 +216,6 @@ class LocalState:
         if row is None:
             refuse("storage_integrity")
         return integer(row[0])
-
-    def current_epoch(self) -> int:
-        with self.transaction(synchronize=False) as connection:
-            return self.epoch(connection)
 
     def admit_epoch(self, connection: sqlite3.Connection, receiver_epoch: int) -> None:
         current = self.epoch(connection)

@@ -2,12 +2,17 @@ from kora.plugins.storage.local import LocalArtifactStorage
 from kora.plugins.storage.state import LocalState, integer, row_values
 
 
+def current_epoch(state: LocalState) -> int:
+    with state.transaction(synchronize=False) as connection:
+        return state.epoch(connection)
+
+
 class InspectedStorage(LocalArtifactStorage):
     def control_state(self) -> LocalState:
         return self._state
 
     def epoch(self) -> int:
-        return self._state.current_epoch()
+        return current_epoch(self._state)
 
     def resource_counts(self) -> dict[str, int]:
         queries = {

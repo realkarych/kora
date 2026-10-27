@@ -1,7 +1,14 @@
 from typing import Final
 
-from kora.ir.cost import TOKEN_FIELDS
 from kora.ir.json import JsonValue
+
+TOKEN_FIELDS: Final[tuple[str, ...]] = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_creation_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+)
 
 AT: Final[str] = "2026-10-23T00:00:00Z"
 DIGEST: Final[str] = "sha256:" + "0" * 64

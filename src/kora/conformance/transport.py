@@ -114,7 +114,6 @@ class FailureReply(BoundaryModel):
 Reply: TypeAlias = Annotated[
     SuccessReply | FailureReply, Field(discriminator="outcome")
 ]
-REPLY: TypeAdapter[Reply] = TypeAdapter(Reply)
 
 
 class LifetimeTransportError(Exception):
@@ -200,7 +199,6 @@ class ClientRequest:
     deadline: int
     future: asyncio.Future[ReplyValue]
     control_bytes: int
-    reply_bytes: int
     reserve_bytes: int
     sent: bool = False
 
@@ -468,7 +466,6 @@ class LifetimeClient:
             deadline,
             future,
             control_bytes,
-            reply_bytes,
             reserve_bytes,
         )
         self.next_request_id += 1
@@ -619,7 +616,6 @@ class LifetimeEndpoint:
             endpoint.close()
             raise LifetimeError(LifetimeReason.CAPACITY_EXCEEDED)
         self.owner = owner
-        self.child_resource_id = child_resource_id
         self.channel = BoundedChannel(endpoint, owner.clock)
         self.resources: dict[ResourceId, EndpointResource] = {}
         self.pending: dict[int, PendingCall] = {}
@@ -821,9 +817,7 @@ class LifetimeEndpoint:
     def _close_ready(self, future: asyncio.Future[ClosureReport]) -> None:
         self.changed.set()
 
-    async def _value(
-        self, pending: PendingCall, call: Call, launch: ProcessLaunch | None
-    ) -> ReplyValue:
+    async def _value(self, call: Call, launch: ProcessLaunch | None) -> ReplyValue:
         if isinstance(call, ReserveCall):
             self._check_resource(call.request.parent_resource_id)
             reservation = await self.owner.reserve(call.request)
@@ -859,9 +853,7 @@ class LifetimeEndpoint:
             with wire_admission(
                 self.owner, pending.slot, pending.deadline, pending.input_charge
             ):
-                reply: Reply = SuccessReply(
-                    value=await self._value(pending, call, launch)
-                )
+                reply: Reply = SuccessReply(value=await self._value(call, launch))
         except LifetimeError as error:
             reply = FailureReply(reason=error.reason)
         envelope = OrdinaryReply(request_id=pending.header.request_id, reply=reply)

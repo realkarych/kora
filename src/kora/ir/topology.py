@@ -95,13 +95,12 @@ class OutputRole:
                 ]
             }
         }
-        additional = result.get("additionalProperties", {})
         if self.exclusive:
             result["additionalProperties"] = False
         else:
             result["additionalProperties"] = {
                 "allOf": [
-                    additional,
+                    declaration,
                     {"properties": {"type": {"not": {"const": self.type_name}}}},
                 ]
             }

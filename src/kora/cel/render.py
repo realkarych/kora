@@ -34,8 +34,6 @@ SHORT_ESCAPES: Final[dict[int, str]] = {
     0x09: "\\t",
 }
 
-RENDERING_EXPANSION: Final[int] = 16
-
 
 def render_string(value: str) -> str:
     parts: list[str] = ['"']

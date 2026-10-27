@@ -1,7 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from time import perf_counter
 
 from alembic import command
 from alembic.autogenerate import compare_metadata
@@ -28,7 +27,6 @@ class MigrationReport:
     from_revision: str | None
     to_revision: str
     steps: int
-    duration_ms: float
 
 
 def alembic_config(connection: Connection) -> Config:
@@ -64,7 +62,6 @@ def bound_lock_waits(connection: Connection) -> None:
 
 
 def upgrade_to_head(connection: Connection) -> MigrationReport:
-    started = perf_counter()
     bound_lock_waits(connection)
     config = alembic_config(connection)
     head = head_revision(config)
@@ -80,7 +77,6 @@ def upgrade_to_head(connection: Connection) -> MigrationReport:
         from_revision=from_revision,
         to_revision=head,
         steps=steps,
-        duration_ms=(perf_counter() - started) * 1000,
     )
 
 

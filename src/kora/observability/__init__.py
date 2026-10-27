@@ -16,7 +16,6 @@ from kora.observability.catalog import (
 from kora.observability.context import (
     ContextError,
     bound_scope,
-    copy_context,
     current_context,
 )
 from kora.observability.redaction import SecretAdmissionError, SecretRegistration
@@ -49,7 +48,6 @@ __all__ = [
     "SecretRegistration",
     "bound_scope",
     "configure_process",
-    "copy_context",
     "current_context",
     "current_diagnostics",
     "read_logging_settings",

@@ -189,7 +189,7 @@ def stopped_loop() -> None:
     with pytest.raises(EvaluatorUnavailable) as caught:
         owner.submit(identifier, ValidationWork(expression("false")), clock, 100)
     result = loop.run_until_complete(pending)
-    owner.close(identifier, handle)
+    owner.close(handle)
     loop.run_until_complete(handle.finished)
     loop.close()
 

@@ -201,16 +201,14 @@ def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
     return engine
 
 
-async def wait_through_cancellations(task: asyncio.Future[Result]) -> int:
-    cancellations = 0
+async def wait_through_cancellations(task: asyncio.Future[Result]) -> None:
     while not task.done():
         try:
             await asyncio.shield(asyncio.wait({task}))
         except asyncio.CancelledError:
-            cancellations += 1
+            continue
     if not task.cancelled():
         task.exception()
-    return cancellations
 
 
 async def finish_releasing(

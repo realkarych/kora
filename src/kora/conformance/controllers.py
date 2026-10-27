@@ -285,13 +285,6 @@ class MutationOwner:
             if helper in self.helpers
         }
 
-    async def settle(self, deadline: int) -> bool:
-        for helper in self.helpers:
-            if not helper.closed:
-                await helper.settle(deadline)
-        self.prune()
-        return not self.helpers and self.pending == 0
-
     def inventory(self) -> HelperInventory:
         return HelperInventory(
             live_helpers=sum(not helper.anchor.exited for helper in self.helpers),

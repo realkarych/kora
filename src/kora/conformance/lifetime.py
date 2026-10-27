@@ -264,7 +264,6 @@ class ParentLifetime:
         self.transport_pending = 0
         self.endpoint_count = 0
         self.closure_started = asyncio.Event()
-        self.cooperative_deadline_ns: int | None = None
         self.borrowed_scopes: dict[str, ResourceId] = {}
         self.mutations = MutationOwner(
             launcher if launcher is not None else InstalledIOHelperLauncher(),
@@ -1043,7 +1042,6 @@ class ParentLifetime:
         control.selected = self._selected(resource_id)
         if resource_id is None:
             self.admission_open = False
-            self.cooperative_deadline_ns = control.cooperative
             self.closure_started.set()
         self._fence(control.selected)
         self.closures[resource_id] = control.result

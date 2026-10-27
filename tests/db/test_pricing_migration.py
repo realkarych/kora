@@ -2,8 +2,7 @@ import asyncio
 import sqlite3
 
 import pytest
-from alembic import command
-from sqlalchemy import CheckConstraint, Connection, inspect, select, text, update
+from sqlalchemy import CheckConstraint, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import (
@@ -19,15 +18,10 @@ from kora.db.migrations import (
     upgrade_database,
     upgrade_to_head,
 )
-from kora.db.migrations.environment import alembic_config
 from kora.db.tables import metadata, price_table, usage_record
 from tests.db.closing import until
 from tests.db.seed import START, predecessor_snapshot, seed_predecessor
 from tests.db.test_migrations import differences_ignoring_expression_indexes
-
-
-def install_predecessor(connection: Connection) -> None:
-    command.upgrade(alembic_config(connection), "0001")
 
 
 @pytest.mark.asyncio

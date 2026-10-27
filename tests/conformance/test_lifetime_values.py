@@ -1,12 +1,12 @@
 import json
+from typing import Annotated
 
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.lifetime import (
     Acquisition,
-    AcquisitionRequest,
     ActivationAcknowledgement,
     BorrowedServiceRegistration,
     BorrowedServiceRequest,
@@ -40,6 +40,10 @@ RESOURCE_ID = "1123456789abcdef0123456789abcdef"
 ROOT_RESOURCE_ID = "2123456789abcdef0123456789abcdef"
 OPERATION_ID = "3123456789abcdef0123456789abcdef"
 DIGEST = "sha256:" + "a" * 64
+AcquisitionRequest = Annotated[
+    ProcessLaunch | LocalRuntimeLaunch | TemporaryTreeRequest | BorrowedServiceRequest,
+    Field(discriminator="kind"),
+]
 
 
 def process_identity() -> ProcessIdentity:

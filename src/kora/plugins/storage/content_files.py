@@ -81,11 +81,10 @@ class ContentFiles:
         directory = self.root.directory(path[:-1])
         try:
             self.root.synchronize_directory(directory)
-            if content:
-                with FileLease(
-                    self.root.open_file(path, os.O_RDONLY, multiple_links=True)
-                ) as file:
-                    os.fsync(file.fd)
+            with FileLease(
+                self.root.open_file(path, os.O_RDONLY, multiple_links=True)
+            ) as file:
+                os.fsync(file.fd)
         finally:
             os.close(directory)
 

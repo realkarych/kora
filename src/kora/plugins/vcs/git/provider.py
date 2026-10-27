@@ -162,10 +162,7 @@ CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
 
 
 class Remote:
-    def __init__(
-        self, repo: str, path: str, configuration: RemoteConfiguration
-    ) -> None:
-        self.repo = repo
+    def __init__(self, path: str, configuration: RemoteConfiguration) -> None:
         self.path = path
         self.configuration = configuration
         self.pin: RemotePin = pin_of(path)
@@ -232,7 +229,7 @@ class GitVcs(Destinations, InspectionSources, ReadsHeads):
             except ToolRefused as refused:
                 configuration_refused(refused.rule)
             self.remotes: dict[str, Remote] = {
-                repo: self.configured_remote(repo, remote, configuration, Path(home))
+                repo: self.configured_remote(remote, configuration, Path(home))
                 for repo, remote in configuration.remotes.items()
             }
         self.identity = CommitIdentity(
@@ -242,7 +239,6 @@ class GitVcs(Destinations, InspectionSources, ReadsHeads):
 
     def configured_remote(
         self,
-        repo: str,
         remote: RemoteConfiguration,
         configuration: GitConfiguration,
         home: Path,
@@ -252,7 +248,7 @@ class GitVcs(Destinations, InspectionSources, ReadsHeads):
         try:
             path = remote_path(remote.path)
             check_bare(path, self.git_tools.git, home)
-            located = Remote(repo, path, remote)
+            located = Remote(path, remote)
         except RemoteRefused as refused:
             configuration_refused(refused.rule)
         check_principal(remote, path, configuration.identity)

@@ -566,7 +566,6 @@ class Estimate:
     memory: int
     compile_steps: int
     variables: tuple[str, ...]
-    visits: int
 
 
 @dataclass(frozen=True)
@@ -633,7 +632,6 @@ class Estimator:
         self.variables: dict[str, Shape] = {}
         self.default: Variable = Variable(DYN)
         self.bounds: BoundShapes = BoundShapes(meter)
-        self.visits: int = 0
 
     def node_steps(self, *parts: Affine) -> Affine:
         return sum_affine([Affine.of(self.weights.node), *parts])
@@ -642,7 +640,6 @@ class Estimator:
         return size.times(self.weights.memory_byte)
 
     def visit(self, node: Node) -> NodeCost:
-        self.visits += 1
         self.meter.tick()
         match node:
             case StringLiteral() | BytesLiteral():
@@ -1004,5 +1001,4 @@ def estimate(
         memory,
         rendering_length * weights.rendering_character,
         variables,
-        estimator.visits,
     )

@@ -25,7 +25,7 @@ from kora.conformance.vcs import (
     sealed_input,
 )
 from kora.executor.authorization import TrustedBinding
-from kora.executor.entry import Executor, ExecutorSettings, PublishOutcome
+from kora.executor.entry import Executor, PublishOutcome
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.protocols.activity import NoActivity
@@ -92,9 +92,6 @@ class ManualClock(Clock):
 
     async def sleep_until(self, deadline_ns: int) -> None:
         self.offset_ns = max(self.offset_ns, deadline_ns - self.origin_ns)
-
-    def advance(self, seconds: float) -> None:
-        self.offset_ns += int(seconds * 10**9)
 
 
 @dataclass
@@ -313,7 +310,6 @@ def make_world(
     root: Path,
     capture: Capture,
     launcher: StepLauncher | None = None,
-    settings: ExecutorSettings | None = None,
     clock: Clock | None = None,
     provider_type: type[GitVcs] = GitVcs,
 ) -> World:
@@ -334,7 +330,6 @@ def make_world(
         provider,
         provider,
         provider,
-        settings,
     )
     return World(
         root,

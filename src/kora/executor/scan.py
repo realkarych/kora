@@ -43,7 +43,6 @@ class ScanBounds:
     max_index_bytes: int = 128 * MIB
     max_secrets: int = 256
     time_ns: int = 10 * NANOSECONDS_PER_MINUTE
-    chunk_bytes: int = MIB
 
 
 class InspectionSource(Protocol):

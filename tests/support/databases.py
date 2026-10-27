@@ -4,7 +4,7 @@ import re
 import secrets
 import shutil
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,14 +65,6 @@ def selected_databases(environ: Mapping[str, str]) -> tuple[DatabaseKind, ...]:
         if kind not in kinds:
             kinds.append(kind)
     return tuple(kinds)
-
-
-def wait_until(condition: Callable[[], bool], deadline_seconds: float) -> None:
-    deadline = time.monotonic() + deadline_seconds
-    while not condition():
-        if time.monotonic() > deadline:
-            raise TimeoutError("the condition was not met before the deadline")
-        time.sleep(READINESS_INTERVAL_SECONDS)
 
 
 def sqlite_settings(path: Path) -> DatabaseSettings:

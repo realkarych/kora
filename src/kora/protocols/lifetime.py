@@ -228,12 +228,6 @@ class BorrowedServiceRequest(BoundaryModel):
         return self
 
 
-AcquisitionRequest = Annotated[
-    ProcessLaunch | LocalRuntimeLaunch | TemporaryTreeRequest | BorrowedServiceRequest,
-    Field(discriminator="kind"),
-]
-
-
 class ProcessRegistration(BoundaryModel):
     kind: Literal["process_domain"] = "process_domain"
     process: ProcessIdentity

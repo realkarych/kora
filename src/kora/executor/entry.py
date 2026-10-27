@@ -77,7 +77,6 @@ from kora.protocols.vcs import (
 
 PREPARED_DIGEST_FILE: Final[str] = "prepared_digest"
 MAX_REVISION_BYTES: Final[int] = 1_048_576
-MAX_PUBLISH_OUTPUT: Final[int] = 65_536
 SEAL_BOUND_NS: Final[int] = 3600 * NANOSECONDS_PER_SECOND
 ResultT = TypeVar("ResultT")
 

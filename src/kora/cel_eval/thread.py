@@ -124,7 +124,6 @@ class Job:
 @dataclass(frozen=True)
 class Snapshot:
     thread_id: int | None
-    alive: bool
     failed: bool
     handles: int
     outstanding: int
@@ -259,7 +258,7 @@ class EvaluationThread:
         job.reply = None
         self.condition.notify_all()
 
-    def close(self, identifier: int, handle: Handle) -> None:
+    def close(self, handle: Handle) -> None:
         with self.condition:
             handle.closed = True
             for job_id in tuple(handle.jobs):
@@ -476,7 +475,6 @@ class EvaluationThread:
             phases = [job.phase for job in self._jobs.values()]
             return Snapshot(
                 self.worker.ident,
-                self.worker.is_alive(),
                 self._failed,
                 len(self._handles),
                 len(self._jobs),
@@ -583,7 +581,7 @@ class Evaluator:
 
     async def close(self) -> None:
         self._loop()
-        self.owner.close(self.identifier, self.handle)
+        self.owner.close(self.handle)
         timed_out = False
         try:
             await asyncio.wait_for(

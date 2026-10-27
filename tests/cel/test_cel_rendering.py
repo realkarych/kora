@@ -6,11 +6,12 @@ from kora.cel import Reason
 from kora.cel.diagnostics import DiagnosticError
 from kora.cel.limits import MAX_RENDERING_DEPTH
 from kora.cel.parser import RENDERING_LIMITS, parse
-from kora.cel.render import RENDERING_EXPANSION, canonical_rendering
+from kora.cel.render import canonical_rendering
 from tests.cel.conformance.cases import read_cases, vendored_files
 from tests.cel.conformance.selection import rejection_for
 from tests.cel.generator import generated_expressions
 
+RENDERING_EXPANSION: int = 16
 CORPUS: tuple[str, ...] = (
     "response.decision == 'approve'",
     "observation.status == 'merged'",

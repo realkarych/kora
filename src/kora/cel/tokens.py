@@ -299,13 +299,9 @@ class Lexer:
         if selector in ("u", "U") and is_bytes:
             raise fail(Reason.INVALID_ESCAPE, start)
         if selector == "u":
-            return self.code_point(
-                start, self.fixed_digits(start, 4, HEX_DIGITS, 16), is_bytes
-            )
+            return self.code_point(start, self.fixed_digits(start, 4, HEX_DIGITS, 16))
         if selector == "U":
-            return self.code_point(
-                start, self.fixed_digits(start, 8, HEX_DIGITS, 16), is_bytes
-            )
+            return self.code_point(start, self.fixed_digits(start, 8, HEX_DIGITS, 16))
         if selector in "0123":
             rest = self.fixed_digits(start, 2, OCTAL_DIGITS, 8)
             return [int(selector, 8) * 64 + rest]
@@ -321,10 +317,10 @@ class Lexer:
             self.advance()
         return int(text, base)
 
-    def code_point(self, start: int, point: int, is_bytes: bool) -> list[int]:
+    def code_point(self, start: int, point: int) -> list[int]:
         if point > MAX_CODE_POINT or 0xD800 <= point <= 0xDFFF:
             raise fail(Reason.INVALID_ESCAPE, start)
-        return self.encoded(point, is_bytes)
+        return [point]
 
 
 def lex(text: str, meter: Meter) -> list[Token]:

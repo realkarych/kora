@@ -2,12 +2,18 @@ import pytest
 
 from kora.cel import Code, Diagnostic, Reason
 from kora.cel.functions import (
+    ACCESSORS,
     MACRO_NAMES,
-    NARROWED_FUNCTIONS,
     STANDARD_FUNCTIONS,
     Form,
 )
 from tests.cel.support import accepted, checked_syntax, rejected
+
+NARROWED_FUNCTIONS: tuple[tuple[str, int, Form], ...] = (
+    ("bool", 1, Form.GLOBAL),
+    ("matches", 2, Form.GLOBAL),
+    *((name, 1, Form.RECEIVER) for name in ACCESSORS),
+)
 
 UNSUPPORTED: list[tuple[str, Reason]] = [
     ("Foo{}", Reason.MESSAGE_CONSTRUCTION),

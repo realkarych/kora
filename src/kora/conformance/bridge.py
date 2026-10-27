@@ -123,7 +123,7 @@ async def close_storage(receiver: object) -> None:
     await cast("ArtifactStorage", receiver).aclose()
 
 
-def cleanup_finished(completed: asyncio.Future[None], task: asyncio.Task[None]) -> None:
+def cleanup_finished(completed: asyncio.Future[None]) -> None:
     completed.set_result(None)
 
 
@@ -132,7 +132,7 @@ async def finish_cleanup(
 ) -> None:
     task = asyncio.create_task(close())
     completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-    task.add_done_callback(lambda settled: cleanup_finished(completed, settled))
+    task.add_done_callback(lambda _: cleanup_finished(completed))
     interrupted = False
     while not completed.done():
         try:

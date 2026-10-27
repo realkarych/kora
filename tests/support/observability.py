@@ -4,7 +4,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,3 @@ class FakeClock:
 
     def now(self) -> datetime:
         return self.moment
-
-    def advance(self, seconds: float) -> None:
-        self.moment = self.moment + timedelta(seconds=seconds)

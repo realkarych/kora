@@ -68,7 +68,7 @@ def raise_plain() -> None:
     raise ValueError("plain")
 
 
-def finished_output(diagnostics_shutdown: object, pipe: Pipe) -> str:
+def finished_output(pipe: Pipe) -> str:
     pipe.close_write_end()
     pipe.reader.wait_closed()
     return "\n".join(pipe.reader.lines())
@@ -92,7 +92,7 @@ def test_registered_values_are_masked_everywhere(
     log.emit(NOTE, text="a" * 1000 + REGISTERED_VALUE * 3 + "b" * 40)
     log.emit(LEVEL_EVENTS[Level.DEBUG], text=REGISTERED_VALUE)
     diagnostics.shutdown()
-    output = finished_output(None, pipe)
+    output = finished_output(pipe)
     registration.release()
 
     expected_lines = 5 if level is Level.INFO else 7
@@ -120,7 +120,7 @@ def test_a_value_extending_another_is_masked_whole_across_the_scan_window(
 
     log.emit(NOTE, text=text)
     diagnostics.shutdown()
-    output = finished_output(None, pipe)
+    output = finished_output(pipe)
     for registration in registrations:
         registration.release()
 
@@ -151,7 +151,7 @@ def test_unregistered_markers_in_exceptions_and_third_party_output_never_appear(
     with every_warning_raised():
         warnings.warn(UNREGISTERED_MARKER, stacklevel=1)
     diagnostics.shutdown()
-    output = finished_output(None, pipe)
+    output = finished_output(pipe)
 
     records = pipe.reader.records()
     assert UNREGISTERED_MARKER not in output
@@ -207,7 +207,7 @@ def test_records_over_the_budget_are_rejected_and_counted(
     log.emit(NOTE, items=["x"] * 65)
     log.emit(NOTE, text="kept")
     diagnostics.shutdown()
-    finished_output(None, pipe)
+    finished_output(pipe)
 
     events = [record["event"] for record in pipe.reader.records()]
     rejected = diagnostics.snapshot().rejected
@@ -228,7 +228,7 @@ def test_unknown_fields_and_wrong_types_are_rejected(
     log.emit(NOTE, ratio=float("inf"))
     log.emit(NOTE, text="kept")
     diagnostics.shutdown()
-    finished_output(None, pipe)
+    finished_output(pipe)
 
     events = [record["event"] for record in pipe.reader.records()]
     rejected = diagnostics.snapshot().rejected
@@ -254,7 +254,7 @@ def test_registration_outside_the_bounds_fails_before_any_record(
         diagnostics.register_secret("one-too-many-registered-value")
     log.emit(NOTE, text="registered-value-0100 and short")
     diagnostics.shutdown()
-    output = finished_output(None, pipe)
+    output = finished_output(pipe)
     for registration in registrations:
         registration.release()
 
@@ -286,7 +286,7 @@ def test_context_bound_outside_the_validated_scope_is_rejected(
         structlog.contextvars.reset_contextvars(**tokens)
     log.emit(NOTE, text="clean-context")
     diagnostics.shutdown()
-    output = finished_output(None, pipe)
+    output = finished_output(pipe)
     registration.release()
 
     events = [record["event"] for record in pipe.reader.records()]
@@ -316,7 +316,7 @@ def test_exception_frame_names_and_odd_types_go_through_the_policy(
     log.emit(NOTE, count=2**70)
     log.emit(NOTE, text="\udcff surrogate")
     diagnostics.shutdown()
-    output = finished_output(None, pipe)
+    output = finished_output(pipe)
     registration.release()
 
     records = [r for r in pipe.reader.records() if r["event"] == "testing.note"]
@@ -342,7 +342,7 @@ def test_unregistered_event_specifications_are_rejected(
     log.emit(rogue)
     log.emit(NOTE, text="kept")
     diagnostics.shutdown()
-    finished_output(None, pipe)
+    finished_output(pipe)
 
     events = [record["event"] for record in pipe.reader.records()]
     rejected = diagnostics.snapshot().rejected
@@ -371,7 +371,7 @@ async def test_sql_parameters_and_statements_never_appear_in_diagnostics(
     async with database.read_transaction() as connection:
         found = await token_by_digest(connection, UNREGISTERED_MARKER)
     diagnostics.shutdown()
-    output = finished_output(None, pipe)
+    output = finished_output(pipe)
 
     records = pipe.reader.records()
     assert found is None
