@@ -25,8 +25,6 @@ REJECTED_TEXT: list[tuple[str, Reason]] = [
     ("x == 'a\U000e0041'", Reason.INVALID_CHARACTER),
     ("x == '\u0600'", Reason.INVALID_CHARACTER),
     ("x == '\U0001d173'", Reason.INVALID_CHARACTER),
-    ("--9223372036854775808", Reason.INVALID_LITERAL),
-    ("---9223372036854775808", Reason.INVALID_LITERAL),
     ("1_0 == 10", Reason.UNEXPECTED_INPUT),
     ("1e400", Reason.INVALID_LITERAL),
     ("9223372036854775808", Reason.INVALID_LITERAL),

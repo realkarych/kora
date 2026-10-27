@@ -1,5 +1,6 @@
 from collections import ChainMap
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import cast
 
@@ -438,8 +439,9 @@ def test_cel_cost_estimate_refuses_inconsistent_bounds() -> None:
         element=ValueBound(bytes=100, values=10, items=50_000, string_bytes=0),
     )
     negative = ValueBound(bytes=-1, values=1, items=0, string_bytes=0)
-    not_a_number = ValueBound(bytes=1, values=1, items=0, string_bytes=0)
-    object.__setattr__(not_a_number, "bytes", float("nan"))
+    not_a_number = ValueBound(
+        bytes=cast("int", float("nan")), values=1, items=0, string_bytes=0
+    )
 
     with pytest.raises(BoundError, match="larger than its parent"):
         check("p == p", larger_child)
@@ -576,101 +578,213 @@ class DerivedBound(ValueBound):
     pass
 
 
-def test_cel_cost_estimate_refuses_malformed_bounds() -> None:
-    leaf = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
-    bad_element = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
-    object.__setattr__(bad_element, "element", 5)
-    bad_fields = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
-    object.__setattr__(bad_fields, "fields", [leaf])
-    bad_root = Variable(DYN, leaf)
-    object.__setattr__(bad_root, "bound", 5)
-    derived = DerivedBound(bytes=10, values=1, items=0, string_bytes=0)
+LEAF = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+
+
+@dataclass(frozen=True)
+class MalformedLeg:
+    name: str
+    source: str
+    environment: Mapping[str, Variable]
+    message: str
+
+
+def root_bound(bound: object) -> dict[str, Variable]:
+    return {"v": Variable(DYN, cast("ValueBound", bound))}
+
+
+def root_type(cel_type: object) -> dict[str, Variable]:
+    return {"v": Variable(cast("CelType", cel_type), LEAF)}
+
+
+def bound_with_fields(fields: object) -> ValueBound:
+    return ValueBound(
+        bytes=10,
+        values=1,
+        items=0,
+        string_bytes=0,
+        fields=cast("Mapping[str, ValueBound]", fields),
+    )
+
+
+def cyclic_pair_with_text_size() -> dict[str, Variable]:
     first_fields: dict[str, ValueBound] = {}
     second_fields: dict[str, ValueBound] = {}
-    first = ValueBound(bytes=10, values=1, items=0, string_bytes=0, fields=first_fields)
+    first = ValueBound(
+        bytes=cast("int", "10"),
+        values=1,
+        items=0,
+        string_bytes=0,
+        fields=first_fields,
+    )
     second = ValueBound(
         bytes=10, values=1, items=0, string_bytes=0, fields=second_fields
     )
     first_fields["b"] = second
     second_fields["a"] = first
-    object.__setattr__(first, "bytes", "10")
-    negative = ValueBound(bytes=-1, values=1, items=0, string_bytes=0)
+    return {"p": Variable(DYN, first), "q": Variable(DYN, second)}
 
-    bad_field = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
-    object.__setattr__(bad_field, "fields", {"a": 5})
-    bad_name = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
-    object.__setattr__(bad_name, "fields", {1: leaf})
-    derived_field = ValueBound(
-        bytes=10, values=1, items=0, string_bytes=0, fields={"a": derived}
-    )
-    custom_fields = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
-    object.__setattr__(custom_fields, "fields", ChainMap({"a": leaf}))
-    proxied = ValueBound(
-        bytes=10,
-        values=1,
-        items=0,
-        string_bytes=0,
-        fields=MappingProxyType({"a": leaf}),
-    )
-    entries = cast("dict[str, Variable]", {"v": leaf})
 
-    unreached = check(
-        "v == v", {"v": Variable(DYN, leaf), "w": Variable(DYN, negative)}
-    )
-
-    assert isinstance(unreached, CheckedExpression)
-    with pytest.raises(BoundError, match="not a plain dict"):
-        check("v.a == v.a", {"v": Variable(DYN, proxied)})
-    with pytest.raises(BoundError, match="not a plain dict"):
-        check(
-            "v == v",
-            cast("dict[str, Variable]", MappingProxyType({"v": Variable(DYN, leaf)})),
-        )
-    with pytest.raises(BoundError, match="not a string"):
-        check(
-            "v == v",
-            cast(
-                "dict[str, Variable]",
-                {"v": Variable(DYN, leaf), 1: Variable(DYN, leaf)},
-            ),
-        )
-    for cel_type in (
-        "string",
-        7,
-        Primitive(cast("Kind", "string")),
-        Nullable(cast("CelType", "string")),
-        Primitive(Kind.STRING, cast("frozenset[str]", frozenset({1}))),
-        Primitive(Kind.STRING, cast("frozenset[str]", {"a"})),
-        Record({}, cast("CelType", "string")),
-    ):
-        with pytest.raises(BoundError, match="not a CEL type"):
-            check("v + v", {"v": Variable(cast("CelType", cel_type), leaf)})
-    nested_nullable = Nullable(Nullable(STRING))
-    with pytest.raises(BoundError, match="wraps another nullable"):
-        check("v + v", {"v": Variable(nested_nullable, leaf)})
-    with pytest.raises(BoundError, match="not a plain dict"):
-        check("1 == 1", cast("dict[str, Variable]", MappingProxyType({})))
-    broken_record = Record(cast("dict[str, RecordField]", {"a": 1}))
-    with pytest.raises(BoundError, match="not a CEL type"):
-        check("v.a == 1", {"v": Variable(broken_record, leaf)})
-    for malformed in (bad_field, bad_name, derived_field):
-        with pytest.raises(BoundError, match="not a value bound"):
-            check("v == v", {"v": Variable(DYN, malformed)})
-    with pytest.raises(BoundError, match="not a plain dict"):
-        check("v == v", {"v": Variable(DYN, custom_fields)})
-    with pytest.raises(BoundError, match="not a variable"):
-        check("v == v", entries)
-    with pytest.raises(BoundError, match="not a value bound"):
-        check("v == v", {"v": Variable(DYN, bad_element)})
-    with pytest.raises(BoundError, match="not a plain dict"):
-        check("v == v", {"v": Variable(DYN, bad_fields)})
-    with pytest.raises(BoundError, match="not a value bound"):
-        check("v == v", {"v": bad_root})
-    with pytest.raises(BoundError, match="not a value bound"):
-        check("v == v", {"v": Variable(DYN, derived)})
-    for name in ("p", "q"):
-        with pytest.raises(BoundError, match="not an integer"):
-            check(
-                f"{name} == {name}",
-                {"p": Variable(DYN, first), "q": Variable(DYN, second)},
+MALFORMED_BOUNDS: list[MalformedLeg] = [
+    MalformedLeg(
+        "mapping_proxy_fields",
+        "v.a == v.a",
+        root_bound(bound_with_fields(MappingProxyType({"a": LEAF}))),
+        "not a plain dict",
+    ),
+    MalformedLeg(
+        "mapping_proxy_environment",
+        "v == v",
+        cast("dict[str, Variable]", MappingProxyType({"v": Variable(DYN, LEAF)})),
+        "not a plain dict",
+    ),
+    MalformedLeg(
+        "non_string_environment_name",
+        "v == v",
+        cast(
+            "dict[str, Variable]",
+            {"v": Variable(DYN, LEAF), 1: Variable(DYN, LEAF)},
+        ),
+        "not a string",
+    ),
+    MalformedLeg("string_type", "v + v", root_type("string"), "not a CEL type"),
+    MalformedLeg("integer_type", "v + v", root_type(7), "not a CEL type"),
+    MalformedLeg(
+        "primitive_of_string_kind",
+        "v + v",
+        root_type(Primitive(cast("Kind", "string"))),
+        "not a CEL type",
+    ),
+    MalformedLeg(
+        "nullable_of_string",
+        "v + v",
+        root_type(Nullable(cast("CelType", "string"))),
+        "not a CEL type",
+    ),
+    MalformedLeg(
+        "primitive_with_non_string_allowed_value",
+        "v + v",
+        root_type(Primitive(Kind.STRING, cast("frozenset[str]", frozenset({1})))),
+        "not a CEL type",
+    ),
+    MalformedLeg(
+        "primitive_with_allowed_values_not_a_frozenset",
+        "v + v",
+        root_type(Primitive(Kind.STRING, cast("frozenset[str]", {"a"}))),
+        "not a CEL type",
+    ),
+    MalformedLeg(
+        "record_with_extra_not_a_type",
+        "v + v",
+        root_type(Record({}, cast("CelType", "string"))),
+        "not a CEL type",
+    ),
+    MalformedLeg(
+        "nested_nullable",
+        "v + v",
+        root_type(Nullable(Nullable(STRING))),
+        "wraps another nullable",
+    ),
+    MalformedLeg(
+        "empty_mapping_proxy_environment",
+        "1 == 1",
+        cast("dict[str, Variable]", MappingProxyType({})),
+        "not a plain dict",
+    ),
+    MalformedLeg(
+        "broken_record",
+        "v.a == 1",
+        root_type(Record(cast("dict[str, RecordField]", {"a": 1}))),
+        "not a CEL type",
+    ),
+    MalformedLeg(
+        "field_value_not_a_bound",
+        "v == v",
+        root_bound(bound_with_fields({"a": 5})),
+        "not a value bound",
+    ),
+    MalformedLeg(
+        "non_string_field_name",
+        "v == v",
+        root_bound(bound_with_fields({1: LEAF})),
+        "not a value bound",
+    ),
+    MalformedLeg(
+        "subclass_under_field",
+        "v == v",
+        root_bound(
+            bound_with_fields(
+                {"a": DerivedBound(bytes=10, values=1, items=0, string_bytes=0)}
             )
+        ),
+        "not a value bound",
+    ),
+    MalformedLeg(
+        "chain_map_fields",
+        "v == v",
+        root_bound(bound_with_fields(ChainMap({"a": LEAF}))),
+        "not a plain dict",
+    ),
+    MalformedLeg(
+        "entry_not_a_variable",
+        "v == v",
+        cast("dict[str, Variable]", {"v": LEAF}),
+        "not a variable",
+    ),
+    MalformedLeg(
+        "element_not_a_bound",
+        "v == v",
+        root_bound(
+            ValueBound(
+                bytes=10,
+                values=1,
+                items=0,
+                string_bytes=0,
+                element=cast("ValueBound", 5),
+            )
+        ),
+        "not a value bound",
+    ),
+    MalformedLeg(
+        "list_fields",
+        "v == v",
+        root_bound(bound_with_fields([LEAF])),
+        "not a plain dict",
+    ),
+    MalformedLeg("root_not_a_bound", "v == v", root_bound(5), "not a value bound"),
+    MalformedLeg(
+        "subclass_at_root",
+        "v == v",
+        root_bound(DerivedBound(bytes=10, values=1, items=0, string_bytes=0)),
+        "not a value bound",
+    ),
+    MalformedLeg(
+        "non_integer_size_in_cycle_reached_from_first",
+        "p == p",
+        cyclic_pair_with_text_size(),
+        "not an integer",
+    ),
+    MalformedLeg(
+        "non_integer_size_in_cycle_reached_from_second",
+        "q == q",
+        cyclic_pair_with_text_size(),
+        "not an integer",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "leg", MALFORMED_BOUNDS, ids=[leg.name for leg in MALFORMED_BOUNDS]
+)
+def test_cel_cost_estimate_refuses_malformed_bounds(leg: MalformedLeg) -> None:
+    with pytest.raises(BoundError, match=leg.message):
+        check(leg.source, leg.environment)
+
+
+def test_cel_cost_estimate_does_not_examine_unreferenced_variables() -> None:
+    negative = ValueBound(bytes=-1, values=1, items=0, string_bytes=0)
+    environment = {"v": Variable(DYN, LEAF), "w": Variable(DYN, negative)}
+
+    result = check("v == v", environment)
+
+    assert isinstance(result, CheckedExpression)

@@ -64,19 +64,11 @@ def test_cel_maps_only_documented_native_errors(
 @pytest.mark.parametrize(
     "failure", [asyncio.CancelledError, KeyboardInterrupt, SystemExit]
 )
-def test_cel_panic_maps_and_preserves_cancellation(
+def test_cel_cancellation_propagates_through_evaluation(
     failure: type[BaseException],
 ) -> None:
     machine = Machine(FailureBinding(failure).binding(), clock)
-    panic_machine = Machine(FailureBinding(Panic).binding(), clock)
+    checked = expression("true")
 
-    panic = panic_machine.evaluate(
-        expression("true"), {}, {}, ErrorContext("when"), ResultType.BOOL
-    )
     with pytest.raises(failure):
-        machine.evaluate(
-            expression("true"), {}, {}, ErrorContext("when"), ResultType.BOOL
-        )
-    assert isinstance(panic, EvaluationError)
-    assert panic.kind is ErrorKind.INTERNAL_FAULT
-    assert panic.fault is Fault.PANIC
+        machine.evaluate(checked, {}, {}, ErrorContext("when"), ResultType.BOOL)

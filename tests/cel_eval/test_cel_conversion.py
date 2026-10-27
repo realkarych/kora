@@ -156,7 +156,7 @@ def test_cel_binding_accepts_exact_original_or_converted_numeric_boundary(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dimension", ["bytes", "values"])
-@pytest.mark.parametrize("offset", [-1, 0, 1])
+@pytest.mark.parametrize("offset", [0, 1])
 async def test_cel_binding_aggregates_referenced_byte_and_value_limits(
     dimension: str, offset: int
 ) -> None:

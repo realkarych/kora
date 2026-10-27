@@ -1,3 +1,5 @@
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -5,17 +7,80 @@ import pytest
 from kora.cel import CheckedExpression, Diagnostic, Reason, ValueBound, Variable, check
 from kora.cel.cost import PROVISIONAL_BUDGET
 from kora.cel.types import DYN, INT, STRING, ListOf
+from tests.measurements.cel_cost_smoke import TARGET_NS
+
+MEBIBYTE = 1024 * 1024
+NANOSECONDS_PER_MILLISECOND = 1_000_000
+SPECIFICATION = Path(__file__).parents[2] / "knowledge/specs/ir.md"
+COST_SECTION = "### 7.6 Data bounds, cost and evaluation"
+GROUPED = r"(\d{1,3}(?:,\d{3})*)"
+
+
+@dataclass(frozen=True)
+class Statement:
+    anchor: str
+    value: re.Pattern[str]
+    scales: tuple[int, ...]
+
+
+STEPS_BUDGET = Statement(
+    "The steps budget is ",
+    re.compile(rf"\*\*{GROUPED} logical charge units\*\*"),
+    (1,),
+)
+MEMORY_BUDGET = Statement(
+    "The memory budget remains ",
+    re.compile(rf"\*\*(\d+) MiB \({GROUPED} logical estimated bytes\)\*\*"),
+    (MEBIBYTE, 1),
+)
+REGRESSION_TARGET = Statement(
+    "regression target is ",
+    re.compile(r"\*\*(\d+) ms per evaluation interval\*\*"),
+    (NANOSECONDS_PER_MILLISECOND,),
+)
+INTERVAL_LIMIT = Statement(
+    "must be at most ",
+    re.compile(rf"{GROUPED} ns\."),
+    (1,),
+)
+
+
+def section(document: str, heading: str) -> str:
+    start = document.index(f"\n{heading}\n")
+    end = document.index("\n### ", start + len(heading))
+    return document[start:end]
+
+
+def scaled(
+    match: re.Match[str] | None, scales: tuple[int, ...]
+) -> tuple[int, ...] | None:
+    if match is None:
+        return None
+    return tuple(
+        int(digits.replace(",", "")) * scale
+        for digits, scale in zip(match.groups(), scales, strict=True)
+    )
+
+
+def stated(text: str, statement: Statement) -> list[tuple[int, ...] | None]:
+    return [
+        scaled(statement.value.match(text, anchor.end()), statement.scales)
+        for anchor in re.finditer(re.escape(statement.anchor), text)
+    ]
 
 
 def test_cel_cost_constants_match_specification() -> None:
-    specification = (Path(__file__).parents[2] / "knowledge/specs/ir.md").read_text()
+    cost_section = section(SPECIFICATION.read_text(encoding="utf-8"), COST_SECTION)
 
-    budget = PROVISIONAL_BUDGET
+    steps = stated(cost_section, STEPS_BUDGET)
+    memory = stated(cost_section, MEMORY_BUDGET)
+    target = stated(cost_section, REGRESSION_TARGET)
+    limit = stated(cost_section, INTERVAL_LIMIT)
 
-    assert budget.steps == 100_000_000_000_000
-    assert budget.memory == 16_777_216
-    assert "100,000,000,000,000" in specification
-    assert "100 ms" in specification
+    assert steps == [(PROVISIONAL_BUDGET.steps,)]
+    assert memory == [(PROVISIONAL_BUDGET.memory, PROVISIONAL_BUDGET.memory)]
+    assert target == [(TARGET_NS,)]
+    assert limit == [(TARGET_NS,)]
 
 
 def test_cel_larger_default_budget_accepts_more_estimated_work() -> None:

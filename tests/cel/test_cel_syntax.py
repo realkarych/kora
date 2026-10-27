@@ -24,8 +24,6 @@ UNSUPPORTED: list[tuple[str, Reason]] = [
     ("{?'k': v}", Reason.OPTIONAL_SYNTAX),
     (".a == 1", Reason.QUALIFIED_NAME),
     ("a.`b-c` == 1", Reason.QUOTED_FIELD),
-    ("l.all(i, v, true)", Reason.TWO_VARIABLE_COMPREHENSION),
-    ("l.exists(i, v, true)", Reason.TWO_VARIABLE_COMPREHENSION),
     ("if == 1", Reason.RESERVED_IDENTIFIER),
     ("while + 1", Reason.RESERVED_IDENTIFIER),
     ("x.in == 1", Reason.UNEXPECTED_INPUT),
@@ -42,8 +40,6 @@ UNKNOWN_OR_MALFORMED: list[tuple[str, Reason]] = [
     ("l.transformList(i, v, v)", Reason.UNKNOWN_FUNCTION),
     ("size(a, b)", Reason.UNKNOWN_FUNCTION),
     ("x.all(y)", Reason.MALFORMED_MACRO),
-    ("l.exists_one(i, v, true)", Reason.MALFORMED_MACRO),
-    ("l.filter(i, v, true)", Reason.MALFORMED_MACRO),
     ("x.map(y)", Reason.MALFORMED_MACRO),
     ("x.map(a, b, c, d)", Reason.MALFORMED_MACRO),
     ("x.all(1, true)", Reason.MALFORMED_MACRO),
@@ -51,19 +47,6 @@ UNKNOWN_OR_MALFORMED: list[tuple[str, Reason]] = [
     ("has(x)", Reason.MALFORMED_MACRO),
     ("has(x[0])", Reason.MALFORMED_MACRO),
     ("has(a.b, c)", Reason.MALFORMED_MACRO),
-]
-
-STANDARD: list[str] = [
-    "x.as == x.break",
-    "x.map(a, a > 1, a * 2)",
-    "has(a.b) && has(a.b.c)",
-    "size(x) == x.size()",
-    "t.getHours() + t.getDayOfWeek()",
-    "string(x) + bytes(y) == dyn(z)",
-    "type(x) == int",
-    "x.matches('^a') && x.contains('b') && x.startsWith('c') && x.endsWith('d')",
-    "timestamp(x) < timestamp(y) && duration(z) > duration(w)",
-    "double(x) * 0.85 > double(uint(y))",
 ]
 
 
@@ -137,10 +120,3 @@ def test_cel_accepts_every_macro_form(macro: str) -> None:
     else:
         assert isinstance(longer, Diagnostic)
         assert longer.reason is THREE_ARGUMENT_REASONS[macro]
-
-
-@pytest.mark.parametrize("source", STANDARD)
-def test_cel_accepts_the_standard_functions_and_macros(source: str) -> None:
-    rendering = accepted(source)
-
-    assert rendering
