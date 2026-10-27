@@ -779,7 +779,7 @@ The schema-driven checker of section 7.4 landed under [issue #337](https://githu
 | `test_cel_typed_check_is_linear_in_steps` | typed checking, guard facts included, takes at most a fixed number of counted steps per code point on hostile and maximal input up to the length limit |
 | `test_cel_checker_diagnostics_exclude_author_text` | no checker diagnostic carries an identifier, field name or literal from the expression |
 | `test_cel_schema_typed_fr_2_5_example_evaluates` | the FR-2.5 example checked against mapped `number` schemas converts stored integers and evaluates in the binding |
-| `test_cel_checker_overloads_evaluate_in_binding` | every function and operator overload the checker accepts, and every accepted ordering pair, evaluates in the binding with typed literals to the expected value |
+| `test_cel_checker_overloads_evaluate_in_binding` | every function and arithmetic overload the checker accepts, every accepted ordering pair and the `size()` forms evaluate in the binding with typed literals to the expected value |
 | `test_cel_parser_agrees_with_binding_compile` | every corpus expression, and every expression generated from a fixed seed, that kora accepts compiles in the binding |
 | `test_cel_server_validation_compiles_with_binding` | an expression the binding rejects is `IR011` at server-side validation without the binding's message, never a server error |
 | `test_kora_compile_and_validate_report_same_location` | for faults kora's own parser, checker and estimate find, `kora compile` and `/validate` report the same code, segmented document path and code-point offset under the [shared diagnostic contract](diagnostics.md), with a character outside the Basic Multilingual Plane before the fault |

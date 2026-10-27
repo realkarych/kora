@@ -310,7 +310,7 @@ class Checker:
         if not isinstance(variable, Variable) or not is_variable(variable):
             raise BoundError("an environment entry is not a variable")
         if name not in self.checked:
-            check_type(variable.type)
+            check_type(variable.type, self.meter)
             self.checked.add(name)
         return variable.type
 
@@ -353,7 +353,7 @@ class Checker:
                 raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
             return Typed(container.element, path)
         if isinstance(container, MapOf):
-            if not equatable(container.key, key.type):
+            if not is_key(unwrap(key.type)) or not equatable(container.key, key.type):
                 raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
             if step is not None:
                 self.require(path, node.offset)
@@ -500,7 +500,7 @@ class Checker:
                 for element in node.right.elements:
                     self.enum_literal(left.type, element)
         elif isinstance(container, MapOf):
-            if not is_key(left.type) or not equatable(left.type, container.key):
+            if not is_key(unwrap(left.type)) or not equatable(left.type, container.key):
                 raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
         elif isinstance(container, Record):
             if not equatable(left.type, STRING):
