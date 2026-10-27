@@ -355,9 +355,16 @@ def check_type(root: object, meter: Meter | None = None) -> None:
         if id(cel_type) in seen:
             continue
         seen.add(id(cel_type))
+        children = type_children(cel_type)
         if meter is not None:
-            meter.tick()
-        pending.extend(type_children(cel_type))
+            meter.tick(1 + len(children) + allowed_size(cel_type))
+        pending.extend(children)
+
+
+def allowed_size(cel_type: object) -> int:
+    if isinstance(cel_type, Primitive) and cel_type.allowed is not None:
+        return len(cel_type.allowed)
+    return 0
 
 
 def type_children(cel_type: object) -> list[object]:

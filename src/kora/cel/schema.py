@@ -46,6 +46,37 @@ class SchemaError(ValueError):
     pass
 
 
+class Position(Enum):
+    SCHEMA = "schema"
+    NAMED_SCHEMAS = "named_schemas"
+    LISTED_SCHEMAS = "listed_schemas"
+    DATA = "data"
+
+
+SCHEMA_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"items", "additionalProperties", "not", "if", "then", "else", "contains"}
+    | {"propertyNames", "unevaluatedItems", "unevaluatedProperties"}
+)
+NAMED_SCHEMA_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+LISTED_SCHEMA_KEYWORDS: Final[frozenset[str]] = frozenset(
+    {"allOf", "anyOf", "oneOf", "prefixItems"}
+)
+
+
+def next_position(position: Position, name: str) -> Position:
+    if position in (Position.NAMED_SCHEMAS, Position.LISTED_SCHEMAS):
+        return Position.SCHEMA
+    if position is Position.DATA:
+        return Position.DATA
+    if name in NAMED_SCHEMA_KEYWORDS:
+        return Position.NAMED_SCHEMAS
+    if name in LISTED_SCHEMA_KEYWORDS:
+        return Position.LISTED_SCHEMAS
+    return Position.SCHEMA if name in SCHEMA_KEYWORDS else Position.DATA
+
+
 def json_type(value: JsonValue) -> str:
     if value is None:
         return NULL_TYPE
@@ -176,10 +207,9 @@ class SchemaTypes:
         if not fragment.startswith("/"):
             raise SchemaError("a schema reference is not a JSON pointer")
         node = document
+        position = Position.SCHEMA
         for token in fragment[1:].split("/"):
             self.meter.tick()
-            if node is not document and isinstance(node, dict) and "$id" in node:
-                raise SchemaError("a nested schema resource is not supported")
             name = token.replace("~1", "/").replace("~0", "~")
             if isinstance(node, dict) and name in node:
                 node = node[name]
@@ -187,6 +217,9 @@ class SchemaTypes:
                 node = node[int(name)]
             else:
                 raise SchemaError("a schema reference does not resolve")
+            position = next_position(position, name)
+            if position is Position.SCHEMA and isinstance(node, dict) and "$id" in node:
+                raise SchemaError("a nested schema resource is not supported")
         return node
 
     def target(self, schema: JsonValue, root: JsonValue) -> Located | None:

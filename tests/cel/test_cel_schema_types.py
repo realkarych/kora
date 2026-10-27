@@ -219,6 +219,29 @@ MAPPING_TABLE: list[tuple[str, JsonValue, SchemaView, CelType]] = [
         BOOL,
     ),
     (
+        "definition_named_id",
+        {"$defs": {"$id": {"type": "string"}}, "$ref": "#/$defs/$id"},
+        SchemaView.PLAIN,
+        STRING,
+    ),
+    (
+        "pointer_through_property_named_id",
+        {
+            "$defs": {
+                "T": {
+                    "type": "object",
+                    "properties": {
+                        "$id": {"type": "integer"},
+                        "a": {"type": "boolean"},
+                    },
+                }
+            },
+            "$ref": "#/$defs/T/properties/a",
+        },
+        SchemaView.PLAIN,
+        BOOL,
+    ),
+    (
         "reference_cycle",
         {"$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}},
         SchemaView.PLAIN,
