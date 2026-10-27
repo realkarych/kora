@@ -135,3 +135,136 @@ Checked on **2026-10-18**. The [next hosted run](https://github.com/realkarych/k
 The original action's [pinned bootstrap lockfile](https://github.com/pnpm/action-setup/blob/71c92474e7e4f5bca283fb17ef80fba9cdb2b4b1/src/install-pnpm/bootstrap/pnpm-lock.json) installs pnpm 11.0.0-rc.2. Its [installer](https://github.com/pnpm/action-setup/blob/71c92474e7e4f5bca283fb17ef80fba9cdb2b4b1/src/install-pnpm/run.ts) skips self-update when the project manifest alone specifies a version. That legacy bootstrap switches to the requested pnpm through `@pnpm/exe`, adding the extra lockfile metadata during frozen installation. Running the original committed bootstrap in a disposable directory against a clean copy of `web/` reproduced exactly the hosted diff. Earlier local verification used the native pnpm 12.14.0 binary directly, so it did not exercise this setup boundary.
 
 The [v6.1.0 release](https://github.com/pnpm/action-setup/releases/tag/v6.1.0) explicitly adds pnpm v12 support. Its [pinned installer](https://github.com/pnpm/action-setup/blob/ea17c68df8912ef543352723c149a84f56e3d413/src/install-pnpm/run.ts) selects a native pnpm 12 bootstrap and updates it to the exact manifest version before project commands. Executing that release's real bundled action in a new temporary installation self-updated pnpm 12.3.4 to 12.14.0. Frozen installation into a second clean `web/` copy succeeded and left its lockfile byte-for-byte unchanged. The action pin changes to that verified commit; manifest-based exact version selection, frozen installation, store cache ownership and the dependency-file diff remain unchanged. No project dependency or lockfile change is needed.
+
+## Scaffold test shards, 2026-10-26
+
+This section records the first layout, which ran on its own revision. The merge subsection below supersedes its job names, its bash admission step and its `database` group.
+
+Checked on 2026-10-26 against `master` at `442a2b699883172e20fb5651d2d299fe59b1d343`, under the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531).
+
+At that revision the slowest Scaffold job, Linux with Python 3.11.17, took 8:50 to 9:32 against its 10-minute job timeout, because one runner ran all three ordinary-suite groups of #250. Master run [40278849670](https://github.com/realkarych/kora/actions/runs/40278849670) recorded these group times for Linux 3.11 / Linux 3.15 / macOS 3.11: `first` 205 / 145 / 135 s, `second` 186 / 133 / 108 s and `other` 439 / 295 / 338 s. Within `other`, `tests/measurements` and `tests/db` took 157 s and 98 s on Linux 3.11.
+
+The `scaffold-shard` job now runs six matrix entries, two shards for each platform and interpreter:
+
+- `conformance` runs the unchanged `first` and `second` groups, the source checks and the offline build.
+- `remainder` runs three concurrent groups: `measurements` (`tests/measurements`), `database` (`tests/db`) and `other` (all remaining tests).
+- Both shards collect the complete suite and all five groups. `tests.support.ordinary_inventory` must prove nonempty, pairwise disjoint groups whose union equals the full collection before any child starts.
+- Both shards keep the final environment and dependency-file check, so the measurement jobs' `final_sync` equality is unchanged.
+
+The required names `Scaffold (<os>, Python <ver>)` now come from the aggregate `scaffold` job. Each leg requires `needs.scaffold-shard.result == success`, which holds only when all six shards succeed. Each leg also downloads its platform's `ordinary-tests-<os>-python-<ver>-conformance` and `-remainder` artifacts into separate directories and requires the exact evidence listing of each. Every file must be regular, non-symlink and nonempty, and the two `inventory.json` files must be byte-equal.
+
+This check runs in a job that no shard controls. If the `remainder` entries were dropped from the matrix, the architecture tests that pin the matrix would never run, but every aggregate leg would still fail. Each required name therefore now means that every platform's shards succeeded and that its own two shards produced matching evidence. The gate's `needs: scaffold` is unchanged.
+
+### Merge with the storage lanes, 2026-10-26
+
+[Issue #258](https://github.com/realkarych/kora/issues/258) independently split each platform into a `general` and a `storage` lane. It replaced the single Scaffold job with `scaffold-tests` and a `scaffold` join running `tests.scaffold_evidence verify` over hashed, provenance-bound receipts. On master after #294, the serial `general` lane took 5:35 to 9:45, and the pipeline took 10:21 to 15:05.
+
+Under the [approved plan amendment](https://github.com/realkarych/kora/issues/268#issuecomment-6423535663), the merged layout works as follows:
+
+- **Lanes.** Each platform runs three lanes: `conformance`, `remainder` and the unchanged `storage`. The two general shards use the same general pytest arguments.
+- **Join.** The verifier of #258 is the single join, extended to nine lanes, and the bash admission described above is removed. For each platform it requires:
+  - each lane's receipt, with its hashes and provenance;
+  - each executed group's JUnit equal to its collection;
+  - disjoint groups whose union equals the general selection in both shards;
+  - identical `inventory.json` and group collections in both shards;
+  - general and storage partitioning the complete collection.
+- **`test_ir_measurement_evidence.py`.** #258 had moved it into `second` to balance three cohorts on one runner. It returns to the `measurements` group of `remainder`.
+- **Frontend steps.** The frontend install runs in both general shards, because `tests/browser` needs Node and the `web` dependencies. The source checks and the build run only in `conformance`.
+
+The samples in the later "Scaffold test shard samples" section were taken before this merge, on the layout with two shards per platform. They are kept as the record of that revision.
+
+#### Merged-head samples and the rebalance, 2026-10-26
+
+These samples were taken serially with `gh run rerun`, under the same sample rules. Each pipeline is timed from the attempt's `run_started_at`, and shard times are job durations.
+
+- The base is master run [40370322638](https://github.com/realkarych/kora/actions/runs/40370322638) at `05f4d7a`, attempts 2 to 4.
+- The head samples before the rebalance come from pull request run [40376563452](https://github.com/realkarych/kora/actions/runs/40376563452) at `95ed5d0`.
+- The head samples after it come from run [40387948096](https://github.com/realkarych/kora/actions/runs/40387948096) at `c7330b6`.
+
+| sample | pipeline | longest Scaffold test job | last gate input | result |
+| --- | --- | --- | --- | --- |
+| base attempt 2 | 9:01 | macOS `general`, 8:07 | Scaffold Linux 3.15 | failure |
+| base attempt 3 | at least 10:24 | macOS `general`, 8:57 | Scaffold Linux 3.11, +9:23 | cancelled |
+| base attempt 4 | 10:14 | macOS `general`, 9:23 | Scaffold Linux 3.11, +9:47 | success |
+| `95ed5d0` attempt 2 | 8:31 | macOS `remainder`, 6:28 | IR model measurements (0), +8:06 | failure |
+| `95ed5d0` attempt 3 | 7:38 | macOS `remainder`, 6:03 | logging job, +7:07 | success |
+| `95ed5d0` attempt 4 | 7:34 | Linux 3.11 `remainder`, 6:02 | IR model measurements (0), +7:04 | success |
+| `c7330b6` attempt 1 (push observation) | 6:43 | macOS `remainder`, 4:53 | Scaffold macOS, +6:20 | success |
+| `c7330b6` attempt 2 | 8:38 | macOS `remainder`, 5:16 | IR model measurements (0), +8:12 | success |
+| `c7330b6` attempt 3 | 6:26 | macOS `conformance`, 4:49 | pricing job, +6:00 | success |
+| `c7330b6` attempt 4 | 8:50 | macOS `remainder`, 6:37 | IR model measurements (0), +8:24 | success |
+
+**Failures**, kept as they occurred and not rerun:
+
+- **Base attempt 2.** On macOS `general`, `tests/conformance/test_lifetime_helper_phases.py::test_selected_helper_keeps_original_scope_and_term_kill_phases[acquire-16]` failed with a `ChannelError` deadline.
+- **Base attempt 3.** Console browser checks reached their 10-minute timeout.
+- **`95ed5d0` attempt 2.** `tests/plugins/storage/test_pressure_controller.py::test_unknown_image_identity_refuses_cleanup_before_detach` failed on the unchanged macOS `storage` lane, and the joins refused that attempt.
+
+**The rebalance.** At `95ed5d0`, every head sample missed the 6:00 per-shard target in `remainder`. There, `other` took 293 to 317 s, mostly in `tests/architecture`, `tests/plugins` and the new `tests/cli`. The one approved rebalance round replaced the `database` group with `integration`: `tests/db`, `tests/cli` and `tests/plugins` without `tests/plugins/storage`. Locally on macOS, the `remainder` shard went from 213 to 141 s, and the five groups are now 174 + 377 + 344 + 1,273 + 3,835 = 6,003.
+
+**Results at `c7330b6`:**
+
+- **Pipeline.** The median head pipeline is 8:38, against a base median of 10:14. No `Scaffold (…)` join finished last among the gate's inputs in any rerun sample. In the push observation the macOS join was last, at +6:20, and the pipeline took 6:43.
+- **Coverage.** The final head adds 182 node IDs and removes 14 on every platform, all in the changed architecture test files. It collects 6,224 cases on Linux and 6,156 on macOS.
+
+**Remaining diagnostic.** In `c7330b6` attempt 4, macOS `remainder` took 6:37 against the 6:00 per-shard target of #268.
+
+- No other run on the account overlapped it.
+- All three of its groups ran at about twice their usual time: `integration` 303 s, against 125 s locally, `measurements` 246 s and `other` 232 s. In the same attempt, macOS `conformance` took 3:25.
+- The hard 10-minute job timeout and every required result held.
+
+The project owner [accepted this miss as a recorded diagnostic](https://github.com/realkarych/kora/issues/268#issuecomment-6426246098). It is not a passing guarantee. Revisit the grouping when either of these happens:
+
+- any Scaffold test job exceeds 7:00, or exceeds 6:00 in two consecutive master runs;
+- #271 compares its measurement jobs against the slowest shard.
+
+### Scaffold test shard samples, 2026-10-26
+
+These samples were taken under the sample rules of the [issue #268 plan](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531):
+
+- Base is master run [40278849670](https://github.com/realkarych/kora/actions/runs/40278849670) at `442a2b6`, attempts 2 to 4.
+- Head is pull request run [40286071298](https://github.com/realkarych/kora/actions/runs/40286071298) at `35fc97c`, attempts 2 to 5. Attempt 1 is the push run, kept as an observation with CodeQL, Gitleaks and OSV running alongside.
+- The samples ran serially and interleaved. Each pipeline is timed from the attempt's `run_started_at` to its last job's end.
+
+| sample | pipeline | longest shard | latest aggregate leg | last gate input | result |
+| --- | --- | --- | --- | --- | --- |
+| head attempt 1 (push observation) | 7:15 | 5:39, macOS `remainder` | +6:14 | logging job, +6:52 | success |
+| base attempt 2 | 9:40 | — | — | Scaffold Linux 3.11, +9:21 | failure |
+| head attempt 2 | 8:20 | 4:20 | +4:34 | IR model measurements (0), +7:59 | success |
+| base attempt 3 | at least 10:36 | — | — | — | cancelled |
+| head attempt 3 | 7:11 | 5:22, macOS `conformance` | +5:38 | logging job, +6:53 | success |
+| base attempt 4 | 9:48 | — | — | Scaffold macOS, +9:26 | success |
+| head attempt 4 (replaced) | 10:02 | 4:35 | +5:34 | IR model measurements (0), +9:34 | success |
+| head attempt 5 | 7:14 | 4:36 | +4:46 | IR model measurements (0), +6:49 | success |
+
+**Kept head samples** (attempts 2, 3 and 5):
+
+- Median pipeline 7:14.
+- Longest shard 5:22.
+- No aggregate leg finished last among the gate's inputs.
+- The aggregate added 9 to 12 s after the last shard.
+
+**Base samples:** median 9:48.
+
+**Replacement.** Head attempt 4 overlapped an unrelated pull request run, [40291377565](https://github.com/realkarych/kora/actions/runs/40291377565), from 08:18:45 to 08:28:56 UTC. Jobs queued for up to 98 s: IR model measurements (0) 98 s, IR (2) 86 s, Mermaid 85 s, the macOS shards 47 to 51 s. Attempt 5 replaced it as the one replacement allowed for an outside cause. Keeping attempt 4 instead would give a median of 8:20, so the replacement does not decide the outcome. Base attempt 4 overlapped the same run for its last 5:28, but it queued no job for more than 5 s, so it was kept.
+
+**Base failures**, kept as they occurred and not rerun:
+
+- **Attempt 2** failed `tests/conformance/test_lifetime_rpc_concurrency.py::test_real_client_subtree_close_fences_stalled_acquire_before_reply[16-tree]` with `CancelledError` on Linux 3.15. That happened in the old layout, where three processes share one runner.
+- **Attempt 3** was cancelled when Scaffold macOS reached its 10-minute job timeout. Console browser checks also hit its timeout in "Install pinned browser tools", so 10:36 is a lower bound.
+
+The "Install pinned browser tools" step took 466 s in head attempt 4 and 594 s in base attempt 3, against about 1:30 for the whole job normally. It appeared on both sides and does not depend on the shards.
+
+**Per-group evidence.** Reruns reuse the artifact names, and the run keeps only the latest set. Per-group JUnit therefore survives for head attempt 1, retrieved before the reruns, and for attempt 5. Both have no failures or errors, and both shards of each platform have identical inventories: 5,540 cases on Linux and 5,473 on macOS. Against base `full.collection`, every platform differs by 41 added and 4 removed node IDs, all in the three changed architecture test files.
+
+**Contention diagnostic.** Per-group pytest times in head attempts 1 and 5, against base `442a2b6`:
+
+| runner | group | base | head attempt 1 | head attempt 5 |
+| --- | --- | --- | --- | --- |
+| macOS, 3 cores | `measurements` | 126 s | 175 s | 147 s |
+| macOS | `database` | 31 s | 46 s | 37 s |
+| macOS | `other` | about 176 s | 258 s | 213 s |
+| Linux 3.11 | `first` | 205 s | 173 s | 166 s |
+| Linux 3.11 | `second` | 186 s | 156 s | 148 s |
+
+The lifetime conformance groups got faster on Linux, so they now see less contention. On macOS, three processes share three cores, and the `remainder` groups ran 17 to 48 % slower than in the base. That shard took 3:52 to 5:39, and so it is the one that limits the layout. Neither approved rebalance lever removes work from that runner. Revisit the grouping if any macOS shard exceeds 6:00, or when #271 compares its measurement jobs against the slowest shard.

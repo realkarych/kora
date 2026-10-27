@@ -326,6 +326,17 @@ class PressureController:
         self.persist()
 
     def acquire(self, workload: str) -> None:
+        if workload == "command-failure":
+            self.effect(
+                (
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    "import os; "
+                    "os.write(2, b'pressure-native\\xff\\r\\n\\x1b' * 4096); "
+                    "raise SystemExit(17)",
+                )
+            )
         self.manifest = self.manifest.model_copy(update={"image_requested": True})
         self.persist()
         image = self.directory / pressure_images.image_name()
@@ -340,8 +351,9 @@ class PressureController:
             if sys.stdin.buffer.read(1) != b"c":
                 raise PressureFailure("controller_control_closed")
             raise PressureFailure("partial_acquisition_released")
-        pressure_images.create_image(self.directory, self.manifest.nonce, self.effect)
-        stamp = pressure_images.inspect_image(image, None)
+        stamp = pressure_images.create_image(
+            self.directory, self.manifest.nonce, self.effect
+        )
         self.manifest = self.manifest.model_copy(update={"image_stamp": stamp})
         self.persist()
         (self.directory / "mounted").mkdir(mode=0o700)
@@ -373,6 +385,7 @@ class PressureController:
         mounted = pressure_images.discover(self.directory, stamp)
         if mounted is None:
             raise PressureFailure("mount_missing")
+        self.validate_directory()
         filesystem = pressure_images.verify_mount(self.directory, mounted)
         self.report = self.report.model_copy(update={"filesystem": filesystem})
 
@@ -555,6 +568,7 @@ def create(directory: Path) -> PressureController:
 
 
 def run(directory: Path, workload: str) -> int:
+    diagnostic: str | None = None
     with create(directory) as controller:
         controller.parent_descriptor = sys.stdin.fileno()
         succeeded = False
@@ -568,12 +582,16 @@ def run(directory: Path, workload: str) -> int:
                 controller.report = controller.report.model_copy(
                     update={"failure": error.code}
                 )
+                diagnostic = str(error)
         finally:
             try:
                 controller.cleanup()
             finally:
                 controller.finish_report()
-        return 0 if succeeded else 1
+    if diagnostic is not None:
+        sys.stderr.write(diagnostic + "\n")
+        sys.stderr.flush()
+    return 0 if succeeded else 1
 
 
 def recover(path: Path, *, hold: bool = False) -> int:
@@ -617,6 +635,7 @@ def main() -> int:
         choices=(
             "enospc",
             "child-failure",
+            "command-failure",
             "partial-acquisition",
             "lost-attachment-response",
             "pending-manifest-write",

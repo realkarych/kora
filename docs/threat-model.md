@@ -8,6 +8,8 @@ Pricing foundation amendment dated 2026-10-24: [issue #213](https://github.com/r
 
 Bounded-read amendment dated 2026-10-23: the project owner approved the contract plan and exact wording under [issue #227](https://github.com/realkarych/kora/issues/227#issuecomment-6371188973).
 
+StructuredOutput revision-1 amendment dated 2026-10-23: the project owner approved the contract plan and exact evidence-status paragraph under issue #246. Existing actors, trust assumptions and authority are unchanged.
+
 VcsRef model amendment dated 2026-10-23: the project owner approved the #209 implementation plan and the exact typed-boundary evidence paragraph below. Existing threat actors, controls, remaining limitations and authority are unchanged.
 
 Retained dispatcher-history amendment dated 2026-10-23: the project owner approved the [contract plan and exact documentation wording](https://github.com/realkarych/kora/issues/226#issuecomment-6368198702), [approval recorded](https://github.com/realkarych/kora/issues/226#issuecomment-6368236030).
@@ -87,6 +89,8 @@ Three facts remain separate: owner review of this text, acceptance of a design d
 CEL evaluator evidence for TM-04 and TM-12 is active under [issue #166](https://github.com/realkarych/kora/issues/166): exact JSON conversion, pre-allocation bounds, detached snapshots, bounded outstanding ownership and cache, safe error records and diagnostics, narrow native failure mapping and a single pinned terminal worker guard. `test_cel_native_compilation_requires_checked_expression` rejects production raw-compilation access outside the binding loader. The evaluator lifetime artifact covers resource retention and real diagnostic sink failure. The compact regression and golden checks, schema-driven checking/projections and correction of minimum-int negation block the first product consumer. The compact regression runs within the already-required `CEL evaluator lifetime` CI status added by [PR #175](https://github.com/realkarych/kora/pull/175), alongside the existing lifetime checks; it introduces no new required status. [Evaluator lifetime evidence](../knowledge/research/cel-evaluator-lifetime-2026-10-21.md).
 
 The VcsRef typed-boundary evidence under [issue #209](https://github.com/realkarych/kora/issues/209) covers TM-04/TM-10 through strict bounded parsing and failure release, TM-06/TM-07 through content-free diagnostics and unchanged untrusted summary content, TM-08/TM-11 through full-payload identity and separate principal identity, and TM-12 through the decided model stack and immutable schema/behavior checks. Publication authority, upload admission, recovery and client rendering are not established by these model tests and remain pending their implementing components.
+
+The StructuredOutput revision-1 contract under [issue #246](https://github.com/realkarych/kora/issues/246) specifies bounded direct JSON admission, immutable complete-payload identity, safe failures and retained content under TM-04/TM-06/TM-07/TM-08/TM-10/TM-11/TM-12. Schema and fixture checks establish publication consistency only. Model/provider validation, producer parity, upload authorization, replay, retention and rendering remain pending their implementing work items and supply their own executable evidence; a matching digest or schema grants no authority.
 
 ## Assets, actors and assumptions
 

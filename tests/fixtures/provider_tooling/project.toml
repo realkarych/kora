@@ -8,5 +8,8 @@ version = "1.0.0"
 requires-python = ">=3.11"
 dependencies = ["kora==0.1.0.dev0"]
 
+[project.entry-points.pytest11]
+kora_ambient_fixture = "kora_tooling_fixture.noisy_import"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/kora_tooling_fixture"]

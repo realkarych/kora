@@ -68,6 +68,11 @@ class PipeReader:
         with self._condition:
             return self._discarded
 
+    @property
+    def data(self) -> bytes:
+        with self._condition:
+            return bytes(self._buffer)
+
     def lines(self) -> list[str]:
         with self._condition:
             return self._buffer.decode("utf-8").splitlines()

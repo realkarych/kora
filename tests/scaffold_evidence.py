@@ -20,7 +20,12 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-LANES = ("general", "storage")
+LANES = ("conformance", "remainder", "storage")
+SHARD_CHILDREN: dict[str, tuple[str, ...]] = {
+    "conformance": ("first", "second"),
+    "remainder": ("measurements", "integration", "other"),
+}
+COHORTS = ("first", "second", "measurements", "integration", "other")
 GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",
     "--ignore=tests/conformance/test_artifact_storage_conformance.py",
@@ -43,7 +48,7 @@ class LaneReceipt(BoundaryModel):
     operating_system: Literal["ubuntu-24.04", "macos-15"]
     python: Literal["3.11.17", "3.15.0"]
     databases: Literal["sqlite", "sqlite,postgresql"]
-    lane: Literal["general", "storage"]
+    lane: Literal["conformance", "remainder", "storage"]
     arguments: tuple[StrictStr, ...]
     files: dict[StrictStr, Digest]
 
@@ -94,13 +99,15 @@ def expected_files(lane: str) -> frozenset[str]:
         "tests.stderr",
         "tests.exit",
     }
-    if lane == "general":
+    if lane == "conformance":
         files.update({"complete.txt", "complete.stderr", "complete.exit"})
+    if lane in SHARD_CHILDREN:
         files.update({"full.collection", "inventory.json"})
+        files.update(f"{name}.collection" for name in COHORTS)
         files.update(
             f"{name}.{suffix}"
-            for name in ("first", "second", "other")
-            for suffix in ("collection", "log", "xml", "exit")
+            for name in SHARD_CHILDREN[lane]
+            for suffix in ("log", "xml", "exit")
         )
     else:
         files.add("junit.xml")
@@ -115,7 +122,7 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
         "receipt.json"
     }:
         raise EvidenceFailure("scaffold artifact has unexpected file coverage")
-    arguments = GENERAL_ARGUMENTS if receipt.lane == "general" else STORAGE_ARGUMENTS
+    arguments = STORAGE_ARGUMENTS if receipt.lane == "storage" else GENERAL_ARGUMENTS
     if receipt.arguments != arguments:
         raise EvidenceFailure("scaffold receipt has different pytest arguments")
     for filename, digest in receipt.files.items():
@@ -125,20 +132,25 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
         if filename.endswith(".exit") and encoded != b"0\n":
             raise EvidenceFailure("scaffold execution did not succeed")
     selected = collection_nodes(directory / "selected.txt")
-    if receipt.lane == "general":
-        validate_cohorts(directory, selected)
+    if receipt.lane in SHARD_CHILDREN:
+        validate_cohorts(directory, selected, SHARD_CHILDREN[receipt.lane])
     elif junit_nodes(directory / "junit.xml", 16777216) != selected:
         raise EvidenceFailure("scaffold JUnit differs from its collected inventory")
     return selected
 
 
-def validate_cohorts(directory: Path, selected: frozenset[str]) -> None:
+def validate_cohorts(
+    directory: Path, selected: frozenset[str], children: tuple[str, ...]
+) -> None:
     if collection_nodes(directory / "full.collection") != selected:
         raise EvidenceFailure("ordinary full collection differs from lane inventory")
     combined: set[str] = set()
-    for name in ("first", "second", "other"):
+    for name in COHORTS:
         nodes = collection_nodes(directory / f"{name}.collection")
-        if junit_nodes(directory / f"{name}.xml", 16777216) != nodes:
+        if (
+            name in children
+            and junit_nodes(directory / f"{name}.xml", 16777216) != nodes
+        ):
             raise EvidenceFailure("ordinary JUnit differs from its collected inventory")
         if nodes & combined:
             raise EvidenceFailure("ordinary cohorts overlap")
@@ -199,7 +211,7 @@ def verify_scaffold(
         for lane in LANES
     }
     if {path.name for path in root.iterdir()} != expected:
-        raise EvidenceFailure("scaffold evidence does not cover exactly six lanes")
+        raise EvidenceFailure("scaffold evidence does not cover exactly nine lanes")
     total = 0
     for operating_system, python, databases in ENVIRONMENTS:
         inventories: dict[str, frozenset[str]] = {}
@@ -234,9 +246,24 @@ def verify_scaffold(
             ):
                 raise EvidenceFailure("scaffold receipt has mismatched provenance")
             inventories[lane] = validate_lane(directory, receipt)
-            if lane == "general":
+            if lane == "conformance":
                 complete = collection_nodes(directory / "complete.txt")
-        general, storage = inventories["general"], inventories["storage"]
+        shards = [
+            root / f"scaffold-tests-{operating_system}-{python}-{lane}"
+            for lane in SHARD_CHILDREN
+        ]
+        if (
+            inventories["conformance"] != inventories["remainder"]
+            or evidence_bytes(shards[0] / "inventory.json")
+            != evidence_bytes(shards[1] / "inventory.json")
+            or any(
+                collection_nodes(shards[0] / f"{cohort}.collection")
+                != collection_nodes(shards[1] / f"{cohort}.collection")
+                for cohort in COHORTS
+            )
+        ):
+            raise EvidenceFailure("scaffold shards differ in their general inventory")
+        general, storage = inventories["conformance"], inventories["storage"]
         if general & storage or general | storage != complete:
             raise EvidenceFailure("scaffold lanes do not partition the complete suite")
         total += len(complete)

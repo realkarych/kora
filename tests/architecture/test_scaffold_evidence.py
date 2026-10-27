@@ -8,8 +8,11 @@ from kora.ir.json import parse_json_object
 from tests.measurements.storage_evidence_common import EvidenceFailure
 from tests.measurements.storage_evidence_fixture import write_junit
 from tests.scaffold_evidence import (
+    COHORTS,
     ENVIRONMENTS,
     GENERAL_ARGUMENTS,
+    LANES,
+    SHARD_CHILDREN,
     STORAGE_ARGUMENTS,
     collection_nodes,
     record_lane,
@@ -20,39 +23,47 @@ REVISION = "a" * 40
 REQUESTED = "b" * 40
 
 
+GENERAL_NODES = (
+    "tests/test_general.py::TestCase::test_value[sqlite-a::b/c]",
+    "tests/test_second.py::test_value",
+    "tests/measurements/test_value.py::test_value",
+    "tests/db/test_value.py::test_value[sqlite]",
+    "tests/test_other.py::test_value",
+)
+STORAGE_NODES = ("tests/plugins/storage/test_value.py::test_value[sqlite]",)
+
+
+def collection_text(nodes: tuple[str, ...]) -> str:
+    return "\n".join(nodes) + f"\n\n{len(nodes)} tests collected in 0.01s\n"
+
+
 def lane_files(root: Path, lane: str) -> None:
     root.mkdir(parents=True)
-    nodes = {
-        "general": (
-            "tests/test_general.py::TestCase::test_value[sqlite-a::b/c]",
-            "tests/test_second.py::test_value",
-            "tests/test_other.py::test_value",
-        ),
-        "storage": ("tests/plugins/storage/test_value.py::test_value[sqlite]",),
-    }
-    selected = nodes[lane]
-    collection = "\n".join(selected) + f"\n\n{len(selected)} tests collected in 0.01s\n"
-    (root / "selected.txt").write_text(collection)
+    selected = STORAGE_NODES if lane == "storage" else GENERAL_NODES
+    (root / "selected.txt").write_text(collection_text(selected))
     (root / "selected.stderr").write_text("")
     (root / "collection.exit").write_text("0\n")
     (root / "tests.exit").write_text("0\n")
     (root / "tests.stdout").write_text("1 passed\n")
     (root / "tests.stderr").write_text("")
-    if lane == "general":
+    if lane == "conformance":
         (root / "complete.txt").write_text(
-            "\n".join((*nodes["general"], *nodes["storage"])) + "\n"
+            "\n".join((*GENERAL_NODES, *STORAGE_NODES)) + "\n"
         )
         (root / "complete.stderr").write_text("")
         (root / "complete.exit").write_text("0\n")
-        (root / "full.collection").write_text(collection)
-        for name, node in zip(("first", "second", "other"), selected, strict=True):
-            path = root / (name + ".collection")
-            path.write_text(node + "\n\n1 test collected in 0.01s\n")
-            write_junit(root / (name + ".xml"), collection_nodes(path))
-            (root / (name + ".log")).write_text("1 passed\n")
-            (root / (name + ".exit")).write_text("0\n")
+    if lane in SHARD_CHILDREN:
+        (root / "full.collection").write_text(collection_text(selected))
+        for name, node in zip(COHORTS, selected, strict=True):
+            (root / f"{name}.collection").write_text(collection_text((node,)))
+        for name in SHARD_CHILDREN[lane]:
+            write_junit(
+                root / f"{name}.xml", collection_nodes(root / f"{name}.collection")
+            )
+            (root / f"{name}.log").write_text("1 passed\n")
+            (root / f"{name}.exit").write_text("0\n")
         (root / "inventory.json").write_text(
-            '{"full":3,"first":1,"second":1,"other":1}'
+            '{"full":5,"first":1,"second":1,"measurements":1,"integration":1,"other":1}'
         )
     else:
         write_junit(root / "junit.xml", collection_nodes(root / "selected.txt"))
@@ -60,7 +71,7 @@ def lane_files(root: Path, lane: str) -> None:
 
 def complete_evidence(root: Path) -> None:
     for operating_system, python, databases in ENVIRONMENTS:
-        for lane in ("general", "storage"):
+        for lane in LANES:
             directory = root / f"scaffold-tests-{operating_system}-{python}-{lane}"
             lane_files(directory, lane)
             record_lane(
@@ -73,8 +84,18 @@ def complete_evidence(root: Path) -> None:
                 python,
                 databases,
                 lane,
-                GENERAL_ARGUMENTS if lane == "general" else STORAGE_ARGUMENTS,
+                STORAGE_ARGUMENTS if lane == "storage" else GENERAL_ARGUMENTS,
             )
+
+
+def rehash(directory: Path, changed: list[str]) -> None:
+    receipt = directory / "receipt.json"
+    data = parse_json_object(json.loads(receipt.read_text()))
+    files = parse_json_object(data["files"])
+    for name in changed:
+        files[name] = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+    data["files"] = files
+    receipt.write_text(json.dumps(data))
 
 
 def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> None:
@@ -82,7 +103,7 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
 
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
-    assert result == {"environments": 3, "lanes": 6, "tests": 12}
+    assert result == {"environments": 3, "lanes": 9, "tests": 18}
 
 
 @pytest.mark.parametrize(
@@ -92,7 +113,7 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
     tmp_path: Path, corruption: str
 ) -> None:
     complete_evidence(tmp_path)
-    directory = tmp_path / "scaffold-tests-macos-15-3.11.17-general"
+    directory = tmp_path / "scaffold-tests-macos-15-3.11.17-conformance"
     changed: list[str] = []
     if corruption == "missing":
         (directory / "second.xml").unlink()
@@ -119,13 +140,7 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
             (directory / "first.collection").read_bytes()
         )
         changed.append("full.collection")
-    receipt = directory / "receipt.json"
-    data = parse_json_object(json.loads(receipt.read_text()))
-    files = parse_json_object(data["files"])
-    for name in changed:
-        files[name] = hashlib.sha256((directory / name).read_bytes()).hexdigest()
-    data["files"] = files
-    receipt.write_text(json.dumps(data))
+    rehash(directory, changed)
 
     with pytest.raises((EvidenceFailure, FileNotFoundError)):
         verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
@@ -151,7 +166,7 @@ def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
     complete_evidence(tmp_path)
     directory = tmp_path / "scaffold-tests-macos-15-3.11.17-storage"
     if corruption == "union":
-        directory = tmp_path / "scaffold-tests-macos-15-3.11.17-general"
+        directory = tmp_path / "scaffold-tests-macos-15-3.11.17-conformance"
     receipt = directory / "receipt.json"
     if corruption == "missing":
         receipt.unlink()
@@ -245,3 +260,62 @@ def test_collection_preserves_parameter_identity(tmp_path: Path) -> None:
     result = collection_nodes(path)
 
     assert result == {"tests.test_general.TestCase.test_value[sqlite-a::b/c]"}
+
+
+@pytest.mark.parametrize(
+    ("corruption", "match"),
+    [
+        ("missing lane", "exactly nine lanes"),
+        ("unequal inventories", "shards differ"),
+        ("different cohorts", "shards differ"),
+        ("wrong shard", "unexpected file coverage"),
+        ("remainder junit", "JUnit differs"),
+    ],
+)
+def test_scaffold_evidence_requires_both_general_shards_to_agree(
+    tmp_path: Path, corruption: str, match: str
+) -> None:
+    complete_evidence(tmp_path)
+    directory = tmp_path / "scaffold-tests-ubuntu-24.04-3.15.0-remainder"
+    changed: list[str] = []
+    if corruption == "missing lane":
+        for path in directory.iterdir():
+            path.unlink()
+        directory.rmdir()
+    elif corruption == "unequal inventories":
+        (directory / "inventory.json").write_text('{"full":5}')
+        changed.append("inventory.json")
+    elif corruption == "different cohorts":
+        (directory / "other.collection").write_text(
+            collection_text((GENERAL_NODES[3],))
+        )
+        (directory / "integration.collection").write_text(
+            collection_text((GENERAL_NODES[4],))
+        )
+        write_junit(
+            directory / "other.xml", collection_nodes(directory / "other.collection")
+        )
+        write_junit(
+            directory / "integration.xml",
+            collection_nodes(directory / "integration.collection"),
+        )
+        changed.extend(
+            (
+                "other.collection",
+                "integration.collection",
+                "other.xml",
+                "integration.xml",
+            )
+        )
+    elif corruption == "wrong shard":
+        (directory / "first.log").write_text("1 passed\n")
+    else:
+        write_junit(
+            directory / "integration.xml", frozenset({"tests.wrong.test_value"})
+        )
+        changed.append("integration.xml")
+    if directory.exists():
+        rehash(directory, changed)
+
+    with pytest.raises(EvidenceFailure, match=match):
+        verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)

@@ -51,7 +51,8 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         }
         for operating_system, python, databases in ENVIRONMENTS
         for lane, arguments in (
-            ("general", GENERAL_ARGUMENTS),
+            ("conformance", GENERAL_ARGUMENTS),
+            ("remainder", GENERAL_ARGUMENTS),
             ("storage", STORAGE_ARGUMENTS),
         )
     ]
@@ -59,13 +60,13 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         assert job["timeout-minutes"] == 10
         assert table(job["strategy"])["fail-fast"] is False
     entries = [table(value) for value in cast(list[object], execution["steps"])]
-    for name in (
-        "Install locked frontend dependencies",
-        "Check Python and frontend sources",
-        "Build isolated distributions offline",
+    for name, condition in (
+        ("Install locked frontend dependencies", "${{ matrix.lane != 'storage' }}"),
+        ("Check Python and frontend sources", "${{ matrix.lane == 'conformance' }}"),
+        ("Build isolated distributions offline", "${{ matrix.lane == 'conformance' }}"),
     ):
         selected = next(step for step in entries if step.get("name") == name)
-        assert selected["if"] == "${{ matrix.lane == 'general' }}"
+        assert selected["if"] == condition
 
 
 def test_scaffold_workflow_arguments_partition_actual_default_collection(
@@ -93,7 +94,8 @@ def test_scaffold_workflow_arguments_partition_actual_default_collection(
         path.write_bytes(result.stdout)
         collected[lane] = collection_nodes(path)
 
-    general, storage = collected["general"], collected["storage"]
+    general, storage = collected["conformance"], collected["storage"]
+    assert collected["remainder"] == general
     assert len(general & storage) == 0
     assert len((general | storage) ^ collected["complete"]) == 0
 

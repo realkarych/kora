@@ -154,6 +154,10 @@ BANNED_ATTRIBUTES: frozenset[str] = frozenset(
         "MonkeyPatch",
         "suppress",
         "_exit",
+        "adverse_outcomes",
+        "fixtures_adverse",
+        "skip_fixture",
+        "xfail_fixture",
     }
 )
 PYTEST_ENTRY_POINTS: str = "pytest11"
@@ -161,7 +165,7 @@ DYNAMIC_IMPORT_CALLS: frozenset[str] = frozenset(
     {"__import__", "import_module", "resolve_name"}
 )
 GUARDED_DYNAMIC_MODULES: frozenset[str] = frozenset(
-    {"pytest", "_pytest", "warnings", "unittest"}
+    {"pytest", "_pytest", "warnings", "unittest", "kora_tooling_fixture"}
 )
 BROAD_EXCEPTIONS: frozenset[str] = frozenset({"Exception", "BaseException"})
 COLLECTION_OVERRIDES: frozenset[str] = frozenset(
@@ -228,6 +232,21 @@ ALLOWED_HOOKS: dict[str, frozenset[str]] = {
     "tests/conftest.py": frozenset({"pytest_report_header", "pytest_generate_tests"}),
     "tests/observability/conftest.py": frozenset(),
 }
+
+ADVERSE_DIRECTORY: str = "tests/fixtures/provider_tooling/src/kora_tooling_fixture/"
+ADVERSE_HELPER: str = ADVERSE_DIRECTORY + "adverse_outcomes.py"
+ADVERSE_CONSUMER: str = ADVERSE_DIRECTORY + "fixtures_adverse.py"
+ADVERSE_NAMES: frozenset[str] = frozenset(
+    {"adverse_outcomes", "fixtures_adverse", "skip_fixture", "xfail_fixture"}
+)
+ADVERSE_SOURCE: str = (
+    "from typing import NoReturn\n"
+    "import pytest\n"
+    "def skip_fixture() -> NoReturn:\n"
+    '    pytest.skip("intentional installed fixture skip")\n'
+    "def xfail_fixture() -> NoReturn:\n"
+    '    pytest.xfail("intentional installed fixture xfail")\n'
+)
 
 BANNED_API: dict[str, dict[str, str]] = {
     "pytest.skip": {"msg": "AGENTS.md Testing: no skipped tests"},
@@ -300,6 +319,7 @@ RUFF_TABLE: dict[str, object] = {
             "src/kora/observability/sink.py": ["BLE001"],
             "src/kora/runner/gate.py": ["S606"],
             "tests/support/warning_filters.py": ["TID251"],
+            ADVERSE_HELPER: ["TID251"],
         },
         "flake8-tidy-imports": {"banned-api": BANNED_API},
     },
@@ -855,6 +875,28 @@ def hook_violations(source: SourceFile, tree: ast.Module) -> Iterator[Violation]
             yield Violation(source.relative, line, f"unlisted pytest hook {name}")
 
 
+def adverse_fixture_violations(
+    source: SourceFile, tree: ast.Module
+) -> Iterator[Violation]:
+    if source.relative == ADVERSE_HELPER:
+        if ast.dump(tree) != ast.dump(ast.parse(ADVERSE_SOURCE)):
+            yield Violation(source.relative, 1, "adverse helper structure changed")
+        return
+    if source.relative == ADVERSE_CONSUMER:
+        return
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            for qualified, _alias in imported_names(node):
+                if ADVERSE_NAMES.intersection(qualified.split(".")) or (
+                    qualified == "kora_tooling_fixture"
+                ):
+                    yield Violation(source.relative, node.lineno, "adverse import")
+        if isinstance(node, ast.Name) and node.id in ADVERSE_NAMES:
+            yield Violation(source.relative, node.lineno, "adverse reference")
+        if isinstance(node, ast.Attribute) and node.attr in ADVERSE_NAMES:
+            yield Violation(source.relative, node.lineno, "adverse reference")
+
+
 def python_violations(source: SourceFile, text: str) -> Iterator[Violation]:
     tree = ast.parse(text, filename=source.relative)
     yield from python_comment_violations(source, text)
@@ -879,6 +921,7 @@ def python_violations(source: SourceFile, text: str) -> Iterator[Violation]:
             yield from function_violations(source, node)
     yield from blind_handler_violations(source, tree)
     yield from warning_name_violations(source, tree)
+    yield from adverse_fixture_violations(source, tree)
     yield from hook_violations(source, tree)
 
 
@@ -1051,7 +1094,7 @@ def generated_file_violations(root: Path) -> Iterator[Violation]:
     for relative in GENERATED_FILES:
         if not (root / relative).is_file():
             yield Violation(relative, 1, "listed generated file is missing")
-    for relative in ALLOWED_WARNING_DIGESTS:
+    for relative in (*ALLOWED_WARNING_DIGESTS, ADVERSE_HELPER):
         if not (root / relative).is_file():
             yield Violation(relative, 1, "listed allowance file is missing")
 
@@ -1074,7 +1117,12 @@ def write(root: Path, relative: str, text: str) -> None:
 
 
 def copy_configuration(root: Path) -> None:
-    for relative in (PYPROJECT, *WEB_CONFIGURATION, *ALLOWED_WARNING_DIGESTS):
+    for relative in (
+        PYPROJECT,
+        *WEB_CONFIGURATION,
+        *ALLOWED_WARNING_DIGESTS,
+        ADVERSE_HELPER,
+    ):
         write(root, relative, (REPOSITORY_ROOT / relative).read_text(encoding="utf-8"))
     for relative in GENERATED_FILES:
         write(root, relative, "# noqa\n")
@@ -1086,6 +1134,77 @@ def test_hand_written_sources_carry_no_suppression() -> None:
     violations = source_violations(root)
 
     assert violations == []
+
+
+def test_adverse_fixture_allowance_is_confined(tmp_path: Path) -> None:
+    cases = {
+        "ordinary": (
+            "tests/test_case.py",
+            "from kora_tooling_fixture.adverse_outcomes import skip_fixture\n"
+            "skip_fixture()\n",
+        ),
+        "production": (
+            "src/kora/module.py",
+            "import kora_tooling_fixture.fixtures_adverse\n",
+        ),
+        "alias": (
+            "tests/test_case.py",
+            "from kora_tooling_fixture.adverse_outcomes import xfail_fixture as f\n"
+            "f()\n",
+        ),
+        "parent": (
+            "tests/test_case.py",
+            "import kora_tooling_fixture as f\nf.adverse_outcomes.skip_fixture()\n",
+        ),
+        "relative": (
+            ADVERSE_DIRECTORY + "other.py",
+            "from . import adverse_outcomes as f\nf.skip_fixture()\n",
+        ),
+        "dynamic": (
+            "tests/test_case.py",
+            "from importlib import import_module\n"
+            "module = import_module('kora_tooling_fixture.adverse_outcomes')\n"
+            "getattr(module, 'skip_fixture')()\n",
+        ),
+        "extra_call": (ADVERSE_HELPER, ADVERSE_SOURCE + "pytest.skip('extra')\n"),
+        "extra_import": (ADVERSE_HELPER, ADVERSE_SOURCE + "import os\n"),
+    }
+    for name, (relative, source) in cases.items():
+        write(tmp_path / name, relative, source)
+    write(tmp_path / "allowed", ADVERSE_HELPER, ADVERSE_SOURCE)
+    write(
+        tmp_path / "allowed",
+        ADVERSE_CONSUMER,
+        "from kora_tooling_fixture.adverse_outcomes import skip_fixture\n"
+        "skip_fixture()\n",
+    )
+
+    results = {name: source_violations(tmp_path / name) for name in cases}
+    allowed = source_violations(tmp_path / "allowed")
+
+    assert all(results.values()), results
+    assert any(
+        "dynamic import of kora_tooling_fixture.adverse_outcomes" in finding
+        for finding in results["dynamic"]
+    )
+    assert any(
+        "dynamic access to skip_fixture" in finding for finding in results["dynamic"]
+    )
+    assert allowed == []
+
+
+def test_adverse_fixture_ruff_allowance_cannot_expand(tmp_path: Path) -> None:
+    copy_configuration(tmp_path)
+    source = (tmp_path / PYPROJECT).read_text()
+    source = source.replace(
+        "[tool.ruff.lint.per-file-ignores]",
+        '[tool.ruff.lint.per-file-ignores]\n"tests/other.py" = ["TID251"]',
+    )
+    write(tmp_path, PYPROJECT, source)
+
+    violations = configuration_violations(tmp_path)
+
+    assert "pyproject.toml:1: [tool.ruff] differs from the recorded table" in violations
 
 
 def test_check_configuration_is_not_weakened() -> None:

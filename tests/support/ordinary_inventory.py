@@ -3,10 +3,12 @@ import re
 import sys
 from pathlib import Path
 
-from tests.scaffold_evidence import evidence_bytes
+from tests.scaffold_evidence import COHORTS, evidence_bytes
 
 
 def collection(path: Path) -> frozenset[str]:
+    if not path.is_file():
+        raise ValueError("missing ordinary collection")
     lines = [line for line in evidence_bytes(path).decode("utf-8").splitlines() if line]
     if not lines:
         raise ValueError("empty ordinary collection")
@@ -37,19 +39,13 @@ def collection(path: Path) -> frozenset[str]:
 
 def inventory(root: Path) -> dict[str, int]:
     full = collection(root / "full.collection")
-    first = collection(root / "first.collection")
-    second = collection(root / "second.collection")
-    other = collection(root / "other.collection")
-    if first & second or first & other or second & other:
+    groups = {name: collection(root / f"{name}.collection") for name in COHORTS}
+    union = frozenset[str]().union(*groups.values())
+    if sum(len(nodes) for nodes in groups.values()) != len(union):
         raise ValueError("overlapping ordinary collections")
-    if full != first | second | other:
+    if full != union:
         raise ValueError("incomplete ordinary collection union")
-    return {
-        "full": len(full),
-        "first": len(first),
-        "second": len(second),
-        "other": len(other),
-    }
+    return {"full": len(full)} | {name: len(nodes) for name, nodes in groups.items()}
 
 
 def main(arguments: list[str]) -> int:

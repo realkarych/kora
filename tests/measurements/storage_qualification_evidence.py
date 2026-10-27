@@ -192,7 +192,18 @@ def qualification_nodes() -> frozenset[str]:
                 for level in ("INFO", "DEBUG", "CRITICAL")
                 for sink in ("blocked", "broken")
             ),
-            pressure + "test_closed_failed_command_does_not_block_pressure_recovery",
+            *(
+                pressure
+                + "test_closed_failed_command_does_not_block_pressure_recovery"
+                + f"[{count}]"
+                for count in (1, 4096)
+            ),
+            pressure + "test_pressure_controller_preserves_caught_native_failure",
+            pressure
+            + "test_pressure_controller_closes_before_stopped_diagnostic_reader",
+            pressure
+            + "test_pressure_image_creation_keeps_native_format_and_private_identity",
+            pressure + "test_pressure_owner_recovers_legacy_source_directory",
             *(
                 pressure
                 + "test_pressure_owner_closes_after_parent_interrupt["
@@ -524,7 +535,7 @@ def validate_qualification(
     cleanup = PressureCleanup.model_validate(
         read_json(directory / "pressure/cleanup.json", 16384)
     )
-    if cleanup.manifests != 12 or cleanup.failures:
+    if cleanup.manifests != 17 or cleanup.failures:
         raise EvidenceFailure("pressure fixture ownership/cleanup is incomplete")
     directories: set[str] = set()
     nonces: set[str] = set()
@@ -573,11 +584,19 @@ def validate_qualification(
         for path in (directory / "pressure").glob("final-*.json")
     )
     if (
-        len(primary) != 9
-        or len(final) != 12
+        len(primary) != 12
+        or len(final) != 17
         or not all(item.resources_closed for item in (*primary, *final))
     ):
         raise EvidenceFailure("pressure closure reports are missing or unresolved")
+    if (
+        sum(
+            item.failure == "command_failed" and not item.provider_started
+            for item in primary
+        )
+        != 2
+    ):
+        raise EvidenceFailure("native command failure/closure reports are incomplete")
     enospc = tuple(item for item in primary if item.payload_enospc)
     expected_fs = "ext4" if report.platform == "linux" else "hfs"
     if (

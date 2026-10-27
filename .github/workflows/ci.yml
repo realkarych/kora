@@ -26,7 +26,12 @@ jobs:
           - os: ubuntu-24.04
             python: 3.11.17
             databases: sqlite,postgresql
-            lane: general
+            lane: conformance
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+          - os: ubuntu-24.04
+            python: 3.11.17
+            databases: sqlite,postgresql
+            lane: remainder
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
           - os: ubuntu-24.04
             python: 3.11.17
@@ -36,7 +41,12 @@ jobs:
           - os: ubuntu-24.04
             python: 3.15.0
             databases: sqlite,postgresql
-            lane: general
+            lane: conformance
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+          - os: ubuntu-24.04
+            python: 3.15.0
+            databases: sqlite,postgresql
+            lane: remainder
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
           - os: ubuntu-24.04
             python: 3.15.0
@@ -46,7 +56,12 @@ jobs:
           - os: macos-15
             python: 3.11.17
             databases: sqlite
-            lane: general
+            lane: conformance
+            pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
+          - os: macos-15
+            python: 3.11.17
+            databases: sqlite
+            lane: remainder
             pytest-arguments: --ignore=tests/plugins/storage --ignore=tests/conformance/test_artifact_storage_conformance.py
           - os: macos-15
             python: 3.11.17
@@ -65,16 +80,17 @@ jobs:
       KORA_WORKFLOW_REVISION: ${{ github.sha }}
       KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
       KORA_PYTEST_ARGUMENTS: ${{ matrix.pytest-arguments }}
+      KORA_SCAFFOLD_LANE: ${{ matrix.lane }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - if: ${{ matrix.lane == 'general' }}
+      - if: ${{ matrix.lane != 'storage' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
-      - if: ${{ matrix.lane == 'general' }}
+      - if: ${{ matrix.lane != 'storage' }}
         uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
         with:
           package_json_file: web/package.json
@@ -107,11 +123,11 @@ jobs:
           printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
       - name: Install locked frontend dependencies
         id: frontend_dependencies
-        if: ${{ matrix.lane == 'general' }}
+        if: ${{ matrix.lane != 'storage' }}
         run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         id: static_checks
-        if: ${{ matrix.lane == 'general' }}
+        if: ${{ matrix.lane == 'conformance' }}
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
@@ -127,7 +143,7 @@ jobs:
           test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
           mkdir -p "$KORA_SCAFFOLD_DIRECTORY"
           read -r -a KORA_SCAFFOLD_ARGUMENTS <<< "$KORA_PYTEST_ARGUMENTS"
-          if test '${{ matrix.lane }}' = general; then
+          if test "$KORA_SCAFFOLD_LANE" = conformance; then
             if uv run --no-sync pytest --collect-only -q > "$KORA_SCAFFOLD_DIRECTORY/complete.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/complete.stderr"; then
               printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/complete.exit"
             else
@@ -144,11 +160,15 @@ jobs:
             exit "$KORA_EXIT"
           fi
           KORA_EXIT=0
-          if test '${{ matrix.lane }}' = general; then
+          if test "$KORA_SCAFFOLD_LANE" != storage; then
             KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
             export KORA_ORDINARY_OUTPUT
             if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
           read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
+          case "$KORA_SCAFFOLD_LANE" in
+            conformance|remainder) ;;
+            *) exit 1 ;;
+          esac
           first=(
             tests/conformance/test_conformance_cases_detect_broken_providers.py
             tests/conformance/test_lifetime_helper_phases.py
@@ -162,25 +182,43 @@ jobs:
             tests/conformance/test_parent_lifetime.py
             tests/conformance/test_recovered_process_lifetime.py
           )
-          second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py tests/measurements/test_ir_measurement_evidence.py)
+          second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py)
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins/storage --ignore=tests/measurements/test_ir_measurement_evidence.py)
+          measurements=(tests/measurements)
+          integration=(tests/db tests/cli tests/plugins --ignore=tests/plugins/storage)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" "${general[@]}" > "$KORA_ORDINARY_OUTPUT/full.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.collection"
+          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.collection"
           uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.collection"
           uv run --no-sync python -m tests.support.ordinary_inventory "$KORA_ORDINARY_OUTPUT" > "$KORA_ORDINARY_OUTPUT/inventory.json"
           pids=()
-          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
-          pids+=("$!")
-          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
-          pids+=("$!")
-          uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
-          pids+=("$!")
+          case "$KORA_SCAFFOLD_LANE" in
+            conformance)
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
+              pids+=("$!")
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
+              pids+=("$!")
+              names=(first second)
+              evidence=(full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json first.log second.log first.xml second.xml first.exit second.exit)
+              ;;
+            remainder)
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
+              pids+=("$!")
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-integration" --junitxml="$KORA_ORDINARY_OUTPUT/integration.xml" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.log" 2>&1 &
+              pids+=("$!")
+              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
+              pids+=("$!")
+              names=(measurements integration other)
+              evidence=(full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json measurements.log integration.log other.log measurements.xml integration.xml other.xml measurements.exit integration.exit other.exit)
+              ;;
+            *) exit 1 ;;
+          esac
           result=0
-          names=(first second other)
           for index in "${!pids[@]}"; do
             if wait "${pids[$index]}"; then
               status=0
@@ -190,19 +228,23 @@ jobs:
             fi
             printf '%s\n' "$status" > "$KORA_ORDINARY_OUTPUT/${names[$index]}.exit"
           done
-          for name in full.collection first.collection second.collection other.collection inventory.json first.log second.log other.log first.xml second.xml other.xml first.exit second.exit other.exit; do
+          for name in "${evidence[@]}"; do
             test -f "$KORA_ORDINARY_OUTPUT/$name"
             test ! -L "$KORA_ORDINARY_OUTPUT/$name"
             test -s "$KORA_ORDINARY_OUTPUT/$name"
           done
-          cat "$KORA_ORDINARY_OUTPUT/inventory.json" "$KORA_ORDINARY_OUTPUT/first.log" "$KORA_ORDINARY_OUTPUT/second.log" "$KORA_ORDINARY_OUTPUT/other.log"
+          for name in "${evidence[@]}"; do
+            case "$name" in
+              inventory.json|*.log) cat "$KORA_ORDINARY_OUTPUT/$name" ;;
+            esac
+          done
           exit "$result"
           KORA_ORDINARY_SCRIPT
               KORA_EXIT=0
             else
               KORA_EXIT="$?"
             fi
-            for name in full.collection first.collection second.collection other.collection inventory.json first.log second.log other.log first.xml second.xml other.xml first.exit second.exit other.exit; do
+            for name in full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
               if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
                 cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
               fi
@@ -233,7 +275,7 @@ jobs:
           if-no-files-found: error
       - name: Build isolated distributions offline
         id: distributions
-        if: ${{ matrix.lane == 'general' }}
+        if: ${{ matrix.lane == 'conformance' }}
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
@@ -267,15 +309,24 @@ jobs:
           test "$UPLOAD_OUTCOME" = success
           test "$FINAL_SYNC_OUTCOME" = success
           test "$WORKFLOW_CANCELLED" = false
-          if test '${{ matrix.lane }}' = general; then
-            test "$FRONTEND_OUTCOME" = success
-            test "$STATIC_OUTCOME" = success
-            test "$DISTRIBUTIONS_OUTCOME" = success
-          else
-            test "$FRONTEND_OUTCOME" = skipped
-            test "$STATIC_OUTCOME" = skipped
-            test "$DISTRIBUTIONS_OUTCOME" = skipped
-          fi
+          case "$KORA_SCAFFOLD_LANE" in
+            conformance)
+              test "$FRONTEND_OUTCOME" = success
+              test "$STATIC_OUTCOME" = success
+              test "$DISTRIBUTIONS_OUTCOME" = success
+              ;;
+            remainder)
+              test "$FRONTEND_OUTCOME" = success
+              test "$STATIC_OUTCOME" = skipped
+              test "$DISTRIBUTIONS_OUTCOME" = skipped
+              ;;
+            storage)
+              test "$FRONTEND_OUTCOME" = skipped
+              test "$STATIC_OUTCOME" = skipped
+              test "$DISTRIBUTIONS_OUTCOME" = skipped
+              ;;
+            *) exit 1 ;;
+          esac
 
   scaffold:
     name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
@@ -317,7 +368,7 @@ jobs:
         with:
           pattern: scaffold-tests-*
           path: scaffold-evidence
-      - name: Verify six lanes and complete collection coverage
+      - name: Verify nine lanes and complete collection coverage
         id: verification
         env:
           KORA_SCAFFOLD_RUN: ${{ github.run_id }}
@@ -1137,6 +1188,8 @@ jobs:
           cache_dependency_path: web/pnpm-lock.yaml
       - name: Install pinned browser tools
         run: |
+          test -f /etc/apt/apt-mirrors.txt
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
           pnpm --dir web exec playwright install --with-deps chromium
       - name: Check and build browser sources

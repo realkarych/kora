@@ -140,6 +140,7 @@ select = [
 "src/kora/observability/sink.py" = ["BLE001"]
 "src/kora/runner/gate.py" = ["S606"]
 "tests/support/warning_filters.py" = ["TID251"]
+"tests/fixtures/provider_tooling/src/kora_tooling_fixture/adverse_outcomes.py" = ["TID251"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "pytest.skip".msg = "AGENTS.md Testing: no skipped tests"

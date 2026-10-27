@@ -57,12 +57,15 @@ def image_name() -> str:
     return "filesystem.dmg" if sys.platform == "darwin" else "filesystem.img"
 
 
-def inspect_image(path: Path, expected: ImageStamp | None) -> ImageStamp:
-    information = path.lstat()
+def image_identity(
+    information: os.stat_result,
+    expected: ImageStamp | None,
+    permissions: tuple[int, ...] = (0o600,),
+) -> ImageStamp:
     if (
         not stat.S_ISREG(information.st_mode)
         or information.st_uid != os.geteuid()
-        or stat.S_IMODE(information.st_mode) != 0o600
+        or stat.S_IMODE(information.st_mode) not in permissions
         or information.st_nlink != 1
         or not 0 <= information.st_size <= 68157440
     ):
@@ -73,11 +76,39 @@ def inspect_image(path: Path, expected: ImageStamp | None) -> ImageStamp:
     return actual
 
 
-def create_image(directory: Path, nonce: str, effect: Effect) -> None:
+def inspect_image(path: Path, expected: ImageStamp | None) -> ImageStamp:
+    return image_identity(path.lstat(), expected)
+
+
+def prepare_image(directory: Path) -> ImageStamp:
+    parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        information = os.fstat(parent)
+        if (
+            information.st_uid != os.geteuid()
+            or stat.S_IMODE(information.st_mode) != 0o700
+            or (information.st_dev, information.st_ino)
+            != (directory.stat().st_dev, directory.stat().st_ino)
+        ):
+            raise PressureFailure("directory_identity")
+        descriptor = os.open(
+            image_name(), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent
+        )
+        try:
+            stamp = image_identity(os.fstat(descriptor), None, (0o600, 0o644))
+            os.fchmod(descriptor, 0o600)
+            image_identity(os.fstat(descriptor), stamp)
+            inspect_image(directory / image_name(), stamp)
+            return stamp
+        finally:
+            os.close(descriptor)
+    finally:
+        os.close(parent)
+
+
+def create_image(directory: Path, nonce: str, effect: Effect) -> ImageStamp:
     image = directory / image_name()
     if sys.platform == "darwin":
-        source = directory / "volume-root"
-        source.mkdir(mode=0o700)
         effect(
             (
                 "/usr/bin/hdiutil",
@@ -86,20 +117,13 @@ def create_image(directory: Path, nonce: str, effect: Effect) -> None:
                 "64m",
                 "-fs",
                 "HFS+",
-                "-format",
-                "UDRW",
-                "-srcfolder",
-                str(source),
-                "-srcowners",
-                "on",
                 "-volname",
                 "kora-pressure-" + nonce[:12],
                 "-o",
                 str(image),
             )
         )
-        image.chmod(0o600)
-        return
+        return prepare_image(directory)
     descriptor = os.open(
         image, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600
     )
@@ -120,6 +144,7 @@ def create_image(directory: Path, nonce: str, effect: Effect) -> None:
             str(image),
         )
     )
+    return inspect_image(image, None)
 
 
 def linux_attachment(directory: Path, stamp: ImageStamp) -> Attachment | None:
@@ -283,12 +308,42 @@ def verify_mount(directory: Path, attachment: Attachment) -> str:
         directory / "mounted", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     )
     try:
+        information = os.fstat(descriptor)
+        if attachment.volume is None:
+            raise PressureFailure("mount_identity")
+        device = os.stat(attachment.volume)
+        if (
+            not stat.S_ISBLK(device.st_mode)
+            or information.st_dev != device.st_rdev
+            or information.st_uid != os.geteuid()
+            or not stat.S_ISDIR(information.st_mode)
+        ):
+            raise PressureFailure("mount_identity")
         name, _ = filesystem(descriptor)
+        expected = "hfs" if sys.platform == "darwin" else "ext4"
+        if name != expected:
+            raise PressureFailure("filesystem_identity")
+        if sys.platform == "darwin":
+            if stat.S_IMODE(information.st_mode) not in (0o700, 0o755):
+                raise PressureFailure("mount_permissions")
+            os.fchmod(descriptor, 0o700)
+            os.fsync(descriptor)
+            updated = os.fstat(descriptor)
+            if (
+                updated.st_uid != information.st_uid
+                or stat.S_IMODE(updated.st_mode) != 0o700
+                or (updated.st_dev, updated.st_ino)
+                != (information.st_dev, information.st_ino)
+            ):
+                raise PressureFailure("mount_identity")
+        anchored = (directory / "mounted").lstat()
+        if (anchored.st_dev, anchored.st_ino) != (
+            information.st_dev,
+            information.st_ino,
+        ):
+            raise PressureFailure("mount_identity")
     finally:
         os.close(descriptor)
-    expected = "hfs" if sys.platform == "darwin" else "ext4"
-    if name != expected:
-        raise PressureFailure("filesystem_identity")
     return expected
 
 

@@ -135,7 +135,7 @@ def write_qualification(directory: Path, report: QualificationReport) -> None:
     pressure = directory / "pressure"
     pressure.mkdir()
     (pressure / "cleanup.json").write_text(
-        json.dumps({"manifests": 12, "failures": []})
+        json.dumps({"manifests": 17, "failures": []})
     )
     failures = (
         "controller_control_closed",
@@ -143,7 +143,7 @@ def write_qualification(directory: Path, report: QualificationReport) -> None:
         "child_deadline",
         "child_failure",
     )
-    for index in range(12):
+    for index in range(17):
         manifest = PressureManifest(
             version=1,
             platform=report.platform,
@@ -179,8 +179,10 @@ def write_qualification(directory: Path, report: QualificationReport) -> None:
                 resources_closed=True,
                 failure=failures[index - 1],
             )
+        elif index in (9, 10):
+            result = PressureReport(resources_closed=True, failure="command_failed")
         else:
             result = PressureReport(resources_closed=True)
         (pressure / f"final-{index}.json").write_text(result.model_dump_json())
-        if index < 9:
+        if index < 12:
             (pressure / f"primary-{index}.json").write_text(result.model_dump_json())

@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Protocol, cast
@@ -62,6 +63,36 @@ PRODUCER_STEPS = {
         "lifetime_upload",
     ),
 }
+SCAFFOLD_PLATFORMS = (
+    ("ubuntu-24.04", "3.11.17", "sqlite,postgresql"),
+    ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
+    ("macos-15", "3.11.17", "sqlite"),
+)
+GENERAL_LANE_ARGUMENTS = (
+    "--ignore=tests/plugins/storage "
+    "--ignore=tests/conformance/test_artifact_storage_conformance.py"
+)
+SCAFFOLD_LANES = (
+    ("conformance", GENERAL_LANE_ARGUMENTS),
+    ("remainder", GENERAL_LANE_ARGUMENTS),
+    (
+        "storage",
+        "tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py",
+    ),
+)
+CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
+NOT_STORAGE = "${{ matrix.lane != 'storage' }}"
+LANE_STEP_CONDITIONS = {
+    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": NOT_STORAGE,
+    "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": NOT_STORAGE,
+    "frontend_dependencies": NOT_STORAGE,
+    "static_checks": CONFORMANCE_ONLY,
+    "evidence_upload": "${{ always() }}",
+    "distributions": CONFORMANCE_ONLY,
+    "workflow_cancellation": "${{ cancelled() }}",
+    "Require complete lane execution": "${{ always() }}",
+}
+PINNED_ACTION = re.compile(r"[a-z0-9-]+/[a-z0-9-]+@[0-9a-f]{40}")
 
 
 def table(value: object) -> dict[str, object]:
@@ -109,23 +140,8 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
             "lane": lane,
             "pytest-arguments": arguments,
         }
-        for operating_system, python, databases in (
-            ("ubuntu-24.04", "3.11.17", "sqlite,postgresql"),
-            ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
-            ("macos-15", "3.11.17", "sqlite"),
-        )
-        for lane, arguments in (
-            (
-                "general",
-                "--ignore=tests/plugins/storage "
-                "--ignore=tests/conformance/test_artifact_storage_conformance.py",
-            ),
-            (
-                "storage",
-                "tests/plugins/storage "
-                "tests/conformance/test_artifact_storage_conformance.py",
-            ),
-        )
+        for operating_system, python, databases in SCAFFOLD_PLATFORMS
+        for lane, arguments in SCAFFOLD_LANES
     ]
     assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
@@ -587,3 +603,55 @@ def test_actual_cel_inventory_rejects_incomplete_or_mixed_evidence(
     )
 
     assert (result.returncode == 0) is (mutation == "valid")
+
+
+def step_key(step: dict[str, object]) -> str:
+    return str(step.get("id", step.get("name", step.get("uses"))))
+
+
+def test_scaffold_lanes_keep_fail_closed_settings_and_pinned_steps() -> None:
+    document = workflow_document()
+    job = table(table(document["jobs"])["scaffold-tests"])
+    job_steps = [table(value) for value in cast(list[object], job["steps"])]
+
+    conditions = {step_key(step): step["if"] for step in job_steps if "if" in step}
+
+    assert job["runs-on"] == "${{ matrix.os }}"
+    assert table(job["env"])["KORA_SCAFFOLD_LANE"] == "${{ matrix.lane }}"
+    assert "if" not in job
+    assert "needs" not in job
+    assert "continue-on-error" not in job
+    assert "permissions" not in job
+    assert document["permissions"] == {"contents": "read"}
+    assert conditions == LANE_STEP_CONDITIONS
+    assert all("continue-on-error" not in step for step in job_steps)
+    assert all(
+        PINNED_ACTION.fullmatch(str(step["uses"])) is not None
+        for step in job_steps
+        if "uses" in step
+    )
+    checkout = job_steps[0]
+    assert str(checkout["uses"]).startswith("actions/checkout@")
+    assert table(checkout["with"]) == {"persist-credentials": False}
+
+
+def test_scaffold_join_keeps_the_required_names() -> None:
+    job = table(workflow_jobs()["scaffold"])
+    include = cast(
+        list[dict[str, str]], table(table(job["strategy"])["matrix"])["include"]
+    )
+
+    rendered = [
+        str(job["name"])
+        .replace("${{ matrix.os }}", entry["os"])
+        .replace("${{ matrix.python }}", entry["python"])
+        for entry in include
+    ]
+
+    assert rendered == [
+        "Scaffold (ubuntu-24.04, Python 3.11.17)",
+        "Scaffold (ubuntu-24.04, Python 3.15.0)",
+        "Scaffold (macos-15, Python 3.11.17)",
+    ]
+    assert "permissions" not in job
+    assert "continue-on-error" not in job
