@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 import pytest
 
-from kora.cel import CheckedExpression, check
+from kora.cel import CheckedExpression, JsonValue, SchemaTypes, check
 from kora.cel.types import DOUBLE, DYN, INT, CelType, ListOf, Record, RecordField
 
 
@@ -232,3 +232,31 @@ def test_cel_binding_rejects_cycles_and_oversized_integers_before_encoding() -> 
 
     assert cyclic is ErrorKind.BOUND_EXCEEDED
     assert huge is ErrorKind.NUMBER_OUT_OF_RANGE
+
+
+def no_documents(uri: str) -> JsonValue | None:
+    return None
+
+
+def test_cel_converts_additional_properties_to_their_schema_type() -> None:
+    from kora.cel_eval.convert import BoundValues, bind
+
+    schema: JsonValue = {
+        "type": "object",
+        "properties": {"n": {"type": "number"}},
+        "required": ["n"],
+        "additionalProperties": {"type": "integer"},
+    }
+    record = SchemaTypes(no_documents).document(schema)
+    checked = expression("inputs.m == inputs.m")
+    types: Mapping[str, CelType] = {"inputs": Record({"m": RecordField(record, True)})}
+
+    result = bind(checked, {"inputs": {"m": {"n": 1, "k": 2.0}}}, types)
+
+    assert isinstance(result, BoundValues)
+    converted = result.values["inputs"]
+    assert converted == {"m": {"n": 1.0, "k": 2}}
+    assert isinstance(converted, dict)
+    member = converted["m"]
+    assert isinstance(member, dict)
+    assert (type(member["n"]), type(member["k"])) == (float, int)

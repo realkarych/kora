@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
-from typing import Final
+from typing import Final, cast
 
 from kora.cel.diagnostics import Reason, fail
 from kora.cel.functions import Charge, Form, lookup
@@ -361,7 +361,7 @@ def check_type(root: object) -> None:
 def type_children(cel_type: object) -> list[object]:
     kind = type(cel_type)
     if kind is Primitive and isinstance(cel_type, Primitive):
-        if type(cel_type.kind) is not Kind:
+        if type(cel_type.kind) is not Kind or not is_allowed_set(cel_type.allowed):
             raise BoundError("a variable type is not a CEL type")
         return []
     if kind is Dyn:
@@ -390,7 +390,17 @@ def record_children(record: Record) -> list[object]:
         if type(declared.required) is not bool:
             raise BoundError("a variable type is not a CEL type")
         children.append(declared.type)
+    if record.extra is not None:
+        children.append(record.extra)
     return children
+
+
+def is_allowed_set(allowed: object) -> bool:
+    if allowed is None:
+        return True
+    return type(allowed) is frozenset and all(
+        map(is_text, cast("frozenset[object]", allowed))
+    )
 
 
 def is_record_field(value: object) -> bool:

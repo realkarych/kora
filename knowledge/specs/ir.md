@@ -474,6 +474,11 @@ These rules give `IR011`, reported at the expression's YAML path and offset:
   A pattern over the nesting limit or the provisional estimate cap of 1,048,576 is `IR027`. The tables, base, syntax floor and cap remain unchanged under the lightweight validation of section 7.6; they are not a calibrated native-memory or compiled-size envelope. The server-side compile also compiles the pattern in the binding.
 - **Result type.** The result must have the field's type from section 7.1.
 
+**Settled cases** (decided on [issue #330](https://github.com/realkarych/kora/issues/330)). Where the table and rules above leave a case open:
+
+- **Mapping.** Pure null outside `kora.structured-output-view.v1`, and the boolean schema `false`, are `dyn`. `$ref` and a single-schema `allOf` take their target's type; sibling keywords do not change it. Several `patternProperties` without `additionalProperties` give `dyn` map values. Local references are JSON pointers within their document and cross-type references resolve only through the saved closure; anything else is a closure fault the validator reports as `IR022` before checking. Mapping visits every schema object at most once per view and never recurses on the interpreter stack, so recursive, repeatedly referenced and deeply nested closures map in counted linear steps.
+- **Closed objects.** An object with `additionalProperties: false` declares no further keys. On an open object an undeclared key has the `additionalProperties` type, and conversion types such keys the same way.
+
 A child type must keep the CEL type of every parent property: assignability (`IR003`, section 2.1) rejects a child that narrows `number` to `integer`.
 
 Diagnostics use the [shared representation and collection contract](diagnostics.md): canonical segmented document paths, code-point offsets and optional source locations. Keep one diagnostic per expression; the enclosing collection owns deterministic path/offset ordering, error and warning bounds and separate omitted counts. An offset is preserved only while the final safe path still identifies the exact expression field.
@@ -712,6 +717,8 @@ The parser, checker, cost estimate and textproto reader are unit-tested, as AGEN
 
 The evaluator conversion, native error mapping, exact result types, thread priority/cancellation/close, bounded cache, safe diagnostics and resource-lifetime legs are active under [issue #166](https://github.com/realkarych/kora/issues/166). Under [issue #167](https://github.com/realkarych/kora/issues/167), `tests/cel/test_cel_cost_regression.py` adds the active provisional golden corpus and budget/specification consistency checks, and `tests/measurements/test_cel_cost_regression.py` adds the compact 100 ms measurement gate. They establish no full calibration or crash margin. The checker, projection, API, scheduler and DSL legs stay `pending implementation` with the work items that own them in the implementation plan.
 
+The schema-to-CEL-type mapping of section 7.4 landed under [issue #337](https://github.com/realkarych/kora/issues/337) in `kora.cel.schema`, with the rows added below for it; the typing rules and their rows follow under [issue #330](https://github.com/realkarych/kora/issues/330).
+
 | Test | Required result |
 |---|---|
 | `test_cel_rejects_unknown_field` | `response.decison`, a dot selection of an undeclared field on an open object and a dot selection on a schema-typed map are `IR011` at the right offset |
@@ -744,6 +751,12 @@ The evaluator conversion, native error mapping, exact result types, thread prior
 | `test_cel_recursive_closure_checked_in_bounded_time` | recursive and doubly referenced `$ref` closures are checked in a number of checker steps linear in their size, counted deterministically |
 | `test_cel_child_type_keeps_parent_cel_types` | a child type narrowing `number` to `integer` is `IR003` |
 | `test_cel_examples_pass_checker` | every expression in the example IRs and in dsl.md section 1 passes the checker against published built-in schemas |
+| `test_cel_schema_types_follow_the_mapping_table` | every row of the section 7.4 table and every settled mapping case gives its CEL type |
+| `test_cel_schema_types_resolve_references_only_through_the_closure` | local JSON pointers and `urn:kora:artifact:` references resolve through the saved closure to one memoized type |
+| `test_cel_schema_types_refuse_a_closure_the_validator_must_reject` | unresolved references, anchors, malformed keywords and non-schemas raise a closure fault, never a CEL type |
+| `test_cel_schema_types_map_the_published_vcs_ref` | the published VcsRef revision-1 schema maps to a closed record with its required fields and one shared principal type |
+| `test_cel_schema_types_map_deep_closures_without_recursion` | 5,000 nested arrays and a chain of 5,000 referenced types map without interpreter recursion in linear counted steps |
+| `test_cel_converts_additional_properties_to_their_schema_type` | undeclared keys of an open object convert to its `additionalProperties` type |
 | `test_cel_parser_agrees_with_binding_compile` | every corpus expression, and every expression generated from a fixed seed, that kora accepts compiles in the binding |
 | `test_cel_server_validation_compiles_with_binding` | an expression the binding rejects is `IR011` at server-side validation without the binding's message, never a server error |
 | `test_kora_compile_and_validate_report_same_location` | for faults kora's own parser, checker and estimate find, `kora compile` and `/validate` report the same code, segmented document path and code-point offset under the [shared diagnostic contract](diagnostics.md), with a character outside the Basic Multilingual Plane before the fault |

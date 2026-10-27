@@ -19,6 +19,7 @@ class Kind(Enum):
 @dataclass(frozen=True)
 class Primitive:
     kind: Kind
+    allowed: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ def empty_fields() -> Mapping[str, RecordField]:
 @dataclass(frozen=True)
 class Record:
     fields: Mapping[str, RecordField] = field(default_factory=empty_fields)
+    extra: "CelType | None" = field(default_factory=lambda: DYN)
 
 
 @dataclass(frozen=True)
@@ -89,7 +91,9 @@ def member_type(cel_type: CelType, name: str) -> CelType:
     inner = unwrap(cel_type)
     if isinstance(inner, Record):
         declared = inner.fields.get(name)
-        return declared.type if declared is not None else DYN
+        if declared is not None:
+            return declared.type
+        return inner.extra if inner.extra is not None else DYN
     if isinstance(inner, MapOf):
         return inner.value
     return DYN
