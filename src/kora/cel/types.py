@@ -76,6 +76,16 @@ DYN: Dyn = Dyn()
 SEQUENCE_KINDS: frozenset[Kind] = frozenset({Kind.STRING, Kind.BYTES})
 
 
+def is_null(cel_type: CelType) -> bool:
+    return isinstance(cel_type, Primitive) and cel_type.kind is Kind.NULL
+
+
+def nullable(cel_type: CelType) -> CelType:
+    if isinstance(cel_type, Dyn | Nullable) or is_null(cel_type):
+        return cel_type
+    return Nullable(cel_type)
+
+
 def unwrap(cel_type: CelType) -> CelType:
     return cel_type.inner if isinstance(cel_type, Nullable) else cel_type
 

@@ -9,8 +9,13 @@ from kora.cel.limits import MAX_INT, MIN_INT
 from kora.cel.types import (
     DYN,
     CelType,
+    Dyn,
     Kind,
+    ListOf,
+    MapOf,
+    Nullable,
     Primitive,
+    Record,
     element_type,
     member_type,
     unwrap,
@@ -19,6 +24,15 @@ from kora.cel_eval.bounds import MAX_BYTES, MAX_VALUES, measure
 from kora.cel_eval.errors import ErrorKind
 
 MAX_DOUBLE_INTEGER: int = int(sys.float_info.max)
+NUMBERS: tuple[type, ...] = (int, float)
+JSON_KINDS: dict[Kind, tuple[type, ...]] = {
+    Kind.INT: NUMBERS,
+    Kind.UINT: NUMBERS,
+    Kind.DOUBLE: NUMBERS,
+    Kind.STRING: (str,),
+    Kind.BOOL: (bool,),
+    Kind.NULL: (type(None),),
+}
 BUILTIN_TYPES: frozenset[str] = frozenset(
     {
         "int",
@@ -56,7 +70,24 @@ def number(value: int | float, cel_type: CelType) -> int | float | ErrorKind:
     return converted if math.isfinite(converted) else ErrorKind.NUMBER_OUT_OF_RANGE
 
 
+def conforms(value: object, cel_type: CelType) -> bool:
+    if value is None and isinstance(cel_type, Nullable):
+        return True
+    inner = unwrap(cel_type)
+    if isinstance(inner, Dyn):
+        return True
+    if isinstance(inner, ListOf):
+        return type(value) is list
+    if isinstance(inner, MapOf | Record):
+        return type(value) is dict
+    return isinstance(inner, Primitive) and type(value) in JSON_KINDS.get(
+        inner.kind, ()
+    )
+
+
 def convert(value: object, cel_type: CelType) -> JsonValue | ErrorKind:
+    if not conforms(value, cel_type):
+        return ErrorKind.INVALID_VALUE
     if type(value) in (int, float):
         return number(cast(int | float, value), cel_type)
     if type(value) is list:

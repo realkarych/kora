@@ -639,6 +639,9 @@ def test_cel_cost_estimate_refuses_malformed_bounds() -> None:
         7,
         Primitive(cast("Kind", "string")),
         Nullable(cast("CelType", "string")),
+        Primitive(Kind.STRING, cast("frozenset[str]", frozenset({1}))),
+        Primitive(Kind.STRING, cast("frozenset[str]", {"a"})),
+        Record({}, cast("CelType", "string")),
     ):
         with pytest.raises(BoundError, match="not a CEL type"):
             check("v + v", {"v": Variable(cast("CelType", cel_type), leaf)})

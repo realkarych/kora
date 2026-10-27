@@ -5,7 +5,19 @@ from collections.abc import Mapping
 import pytest
 
 from kora.cel import CheckedExpression, JsonValue, SchemaTypes, check
-from kora.cel.types import DOUBLE, DYN, INT, CelType, ListOf, Record, RecordField
+from kora.cel.types import (
+    BOOL,
+    DOUBLE,
+    DYN,
+    INT,
+    STRING,
+    CelType,
+    ListOf,
+    MapOf,
+    Nullable,
+    Record,
+    RecordField,
+)
 
 
 def expression(source: str) -> CheckedExpression:
@@ -260,3 +272,49 @@ def test_cel_converts_additional_properties_to_their_schema_type() -> None:
     member = converted["m"]
     assert isinstance(member, dict)
     assert (type(member["n"]), type(member["k"])) == (float, int)
+
+
+KEYWORD_OBJECT: JsonValue = {"properties": {"a": {"type": "integer"}}}
+KEYWORD_ARRAY: JsonValue = {"items": {"type": "integer"}}
+MISMATCHED_KINDS: list[tuple[object, CelType]] = [
+    ("1", INT),
+    (True, DOUBLE),
+    (1, STRING),
+    ("true", BOOL),
+    (None, STRING),
+    ({}, ListOf(INT)),
+    ([], Record({})),
+    ([], MapOf(STRING, INT)),
+    ("abc", SchemaTypes(no_documents).document(KEYWORD_OBJECT)),
+    ({"kkk": 1}, SchemaTypes(no_documents).document(KEYWORD_ARRAY)),
+    (["x"], ListOf(INT)),
+]
+MATCHING_KINDS: list[tuple[object, CelType]] = [
+    (None, Nullable(STRING)),
+    ("x", Nullable(STRING)),
+    ([1, "x", None], DYN),
+    ({"a": 1}, SchemaTypes(no_documents).document(KEYWORD_OBJECT)),
+    ([1], SchemaTypes(no_documents).document(KEYWORD_ARRAY)),
+    (False, BOOL),
+]
+
+
+@pytest.mark.parametrize(
+    ("value", "cel_type", "refused"),
+    [(value, cel_type, True) for value, cel_type in MISMATCHED_KINDS]
+    + [(value, cel_type, False) for value, cel_type in MATCHING_KINDS],
+)
+def test_cel_conversion_refuses_values_of_another_json_kind(
+    value: object, cel_type: CelType, refused: bool
+) -> None:
+    from kora.cel_eval.convert import bind
+    from kora.cel_eval.errors import ErrorKind
+
+    checked = expression("inputs.v == inputs.v")
+    types: Mapping[str, CelType] = {
+        "inputs": Record({"v": RecordField(cel_type, True)})
+    }
+
+    result = bind(checked, {"inputs": {"v": value}}, types)
+
+    assert (result is ErrorKind.INVALID_VALUE) is refused
