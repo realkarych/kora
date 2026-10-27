@@ -20,9 +20,46 @@ from tests.support.configured_conformance import (
     installed_conformance as installed_conformance,
 )
 from tests.support.configured_conformance import vcs_configuration
+from tests.support.observability import ProcessResult
 from tests.support.provider_tooling import (
     InstalledTooling,
 )
+
+
+def private_home(path: Path) -> Path:
+    path.mkdir(mode=0o700)
+    return path
+
+
+def conformance_arguments(
+    protocol: str,
+    selection: str,
+    config: Path,
+    fixtures: str,
+    data: Path | None = None,
+) -> tuple[str, ...]:
+    arguments = (
+        "conformance",
+        protocol,
+        selection,
+        "--config",
+        str(config),
+        "--fixtures",
+        "kora_tooling_fixture." + fixtures,
+    )
+    return arguments if data is None else (*arguments, "--fixture-data", str(data))
+
+
+def closed_report(process: ProcessResult) -> CommandResult:
+    report = CommandResult.model_validate_json(process.stdout)
+    assert report.cleanup is not None
+    assert report.cleanup.state is CleanupOutcome.CLOSED
+    return report
+
+
+def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
+    for marker in markers:
+        assert marker not in process.stdout + process.stderr
 
 
 @pytest.mark.parametrize("valid", [True, False])
@@ -33,17 +70,12 @@ def test_installed_public_conformance_owns_result_and_cleanup(
     configuration.write_text(
         json.dumps({"value": "private-public-command-value"}) if valid else "{"
     )
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
 
     result = installed_conformance.run(
-        "conformance",
-        "secrets",
-        "configured",
-        "--config",
-        str(configuration),
-        "--fixtures",
-        "kora_tooling_fixture.fixtures_configured",
+        *conformance_arguments(
+            "secrets", "configured", configuration, "fixtures_configured"
+        ),
         environment={
             "HOME": str(home),
             "XDG_STATE_HOME": str(home / "state"),
@@ -61,8 +93,9 @@ def test_installed_public_conformance_owns_result_and_cleanup(
     assert events.count("conformance.lifetime.closed") == 1
     if valid:
         assert report["completed"] == report["expected"] == 10
-    assert b"private-public-command-value" not in result.stdout + result.stderr
-    assert str(configuration).encode() not in result.stdout + result.stderr
+    assert_undisclosed(
+        result, b"private-public-command-value", str(configuration).encode()
+    )
     assert not list(home.rglob("journal"))
 
 
@@ -74,39 +107,30 @@ def test_conformance_fixture_contract_is_complete(
     data = tmp_path / "data.json"
     config.write_text(json.dumps({"value": "private-command-config-marker"}))
     data.write_text(json.dumps({"mode": mode, "value": "private-exercise-marker"}))
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
 
     process = installed_conformance.run(
-        "conformance",
-        "secrets",
-        "configured",
-        "--config",
-        str(config),
-        "--fixtures",
-        "kora_tooling_fixture.fixtures_command",
-        "--fixture-data",
-        str(data),
+        *conformance_arguments(
+            "secrets", "configured", config, "fixtures_command", data
+        ),
         environment={"HOME": str(home)},
     )
 
-    result = CommandResult.model_validate_json(process.stdout)
-    assert result.cleanup is not None
-    assert result.cleanup.state is CleanupOutcome.CLOSED
+    result = closed_report(process)
     assert result.outcome is (
         OriginalOutcome.COMPLETE if mode == "normal" else OriginalOutcome.FAILED
     )
     assert process.code == (0 if mode == "normal" else 1)
     if mode in {"normal", "teardown"}:
         assert result.completed == result.expected == 10
-    for marker in (
+    assert_undisclosed(
+        process,
         b"private-command-config-marker",
         b"private-exercise-marker",
         b"private-command-teardown-marker",
         str(config).encode(),
         str(data).encode(),
-    ):
-        assert marker not in process.stdout + process.stderr
+    )
     assert not list(home.rglob("journal"))
 
 
@@ -116,8 +140,7 @@ async def test_conformance_fixture_resources_are_released(
     installed_conformance: InstalledTooling, tmp_path: Path, mode: str
 ) -> None:
     installed = installed_conformance
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
     config = tmp_path / "config.json"
     data = tmp_path / "data.json"
     config.write_text(json.dumps({"value": "private-lifecycle-marker"}))
@@ -129,19 +152,11 @@ async def test_conformance_fixture_resources_are_released(
             listener.listen(1)
             listener.setblocking(False)
             process = await asyncio.create_subprocess_exec(
-                str(installed.python),
-                "-I",
-                "-m",
-                "kora",
-                "conformance",
-                "secrets",
-                "configured",
-                "--config",
-                str(config),
-                "--fixtures",
-                "kora_tooling_fixture.fixtures_command",
-                "--fixture-data",
-                str(data),
+                *installed.command(
+                    *conformance_arguments(
+                        "secrets", "configured", config, "fixtures_command", data
+                    )
+                ),
                 cwd=installed.outside,
                 env={"HOME": str(home), "PATH": os.defpath, "KORA_LOG_LEVEL": "DEBUG"},
                 stdout=asyncio.subprocess.PIPE,
@@ -207,8 +222,7 @@ async def test_conformance_fixture_resources_are_released(
 async def test_cleanup_command_preserves_unverified_socket_recovery(
     installed_conformance: InstalledTooling, tmp_path: Path, mode: str
 ) -> None:
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
     installed = installed_conformance
     process = await asyncio.create_subprocess_exec(
         str(installed.python),
@@ -260,8 +274,7 @@ def test_targeted_conformance_loads_only_selected_provider(
 ) -> None:
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"value": "private-selection-value"}))
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
     environment = {
         "HOME": str(home),
         "KORA_LOG_LEVEL": "DEBUG",
@@ -273,20 +286,12 @@ def test_targeted_conformance_loads_only_selected_provider(
     }
 
     process = installed_conformance.run(
-        "conformance",
-        "secrets",
-        selection,
-        "--config",
-        str(config),
-        "--fixtures",
-        "kora_tooling_fixture.fixtures_configured",
+        *conformance_arguments("secrets", selection, config, "fixtures_configured"),
         environment=environment,
     )
 
-    report = CommandResult.model_validate_json(process.stdout)
+    report = closed_report(process)
     assert process.code == (0 if selection == "configured" else 1)
-    assert report.cleanup is not None
-    assert report.cleanup.state is CleanupOutcome.CLOSED
     records = process.records()
     completed = [
         record for record in records if record["event"] == "cli.conformance_finished"
@@ -294,13 +299,13 @@ def test_targeted_conformance_loads_only_selected_provider(
     assert len(completed) == 1
     assert completed[0]["outcome"] == report.outcome.value
     assert completed[0]["expected"] == report.expected
-    for marker in (
+    assert_undisclosed(
+        process,
         b"private-selection-value",
         b"unrelated.private_plugin",
         b"private-ambient-option",
         b"private-environment-value",
-    ):
-        assert marker not in process.stdout + process.stderr
+    )
 
 
 @pytest.mark.parametrize(
@@ -314,35 +319,24 @@ def test_conformance_inputs_are_not_disclosed(
     data = tmp_path / "private-data-marker.json"
     config.write_text(json.dumps({"value": "private-rejected-config-marker"}))
     data.write_text(json.dumps({"value": "private-rejected-exercise-marker"}))
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
 
     process = installed_conformance.run(
-        "conformance",
-        "secrets",
-        "configured",
-        "--config",
-        str(config),
-        "--fixtures",
-        "kora_tooling_fixture." + plugin,
-        "--fixture-data",
-        str(data),
+        *conformance_arguments("secrets", "configured", config, plugin, data),
         environment={"HOME": str(home)},
     )
 
-    result = CommandResult.model_validate_json(process.stdout)
+    result = closed_report(process)
     assert process.code == 1
     assert result.outcome is OriginalOutcome.FAILED
-    assert result.cleanup is not None
-    assert result.cleanup.state is CleanupOutcome.CLOSED
     assert result.completed == 0
-    for marker in (
-        config.name,
-        data.name,
-        "private-rejected-config-marker",
-        "private-rejected-exercise-marker",
-    ):
-        assert marker.encode() not in process.stdout + process.stderr
+    assert_undisclosed(
+        process,
+        config.name.encode(),
+        data.name.encode(),
+        b"private-rejected-config-marker",
+        b"private-rejected-exercise-marker",
+    )
 
 
 def test_installed_provider_schema_matches_metadata(
@@ -352,29 +346,20 @@ def test_installed_provider_schema_matches_metadata(
     data = tmp_path / "data.json"
     config.write_text(json.dumps({"value": "private-schema-marker"}))
     data.write_text(json.dumps({"mode": "schema"}))
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
 
     process = installed_conformance.run(
-        "conformance",
-        "secrets",
-        "configured",
-        "--config",
-        str(config),
-        "--fixtures",
-        "kora_tooling_fixture.fixtures_command",
-        "--fixture-data",
-        str(data),
+        *conformance_arguments(
+            "secrets", "configured", config, "fixtures_command", data
+        ),
         environment={"HOME": str(home)},
     )
 
-    result = CommandResult.model_validate_json(process.stdout)
+    result = closed_report(process)
     assert process.code == 1
     assert result.outcome is OriginalOutcome.FAILED
     assert result.completed == 0
-    assert result.cleanup is not None
-    assert result.cleanup.state is CleanupOutcome.CLOSED
-    assert b"private-schema-marker" not in process.stdout + process.stderr
+    assert_undisclosed(process, b"private-schema-marker")
 
 
 @pytest.mark.parametrize(
@@ -402,8 +387,7 @@ def test_installed_provider_supports_local_tooling(
     expected: int,
 ) -> None:
     installed = installed_conformance
-    home = installed.outside / protocol.value
-    home.mkdir(mode=0o700)
+    home = private_home(installed.outside / protocol.value)
     config = tmp_path / "config.json"
     config.write_text(
         json.dumps(
@@ -414,25 +398,17 @@ def test_installed_provider_supports_local_tooling(
     )
 
     process = installed.run(
-        "conformance",
-        protocol.value,
-        "configured",
-        "--config",
-        str(config),
-        "--fixtures",
-        "kora_tooling_fixture." + plugin,
+        *conformance_arguments(protocol.value, "configured", config, plugin),
         environment={
             "HOME": str(home),
             "KORA_LOG_COMPONENT_LEVELS": "protocols.loading=DEBUG",
         },
     )
 
-    outcome = CommandResult.model_validate_json(process.stdout)
+    outcome = closed_report(process)
     assert process.code == 0, (process.stdout, process.stderr)
     assert outcome.outcome is OriginalOutcome.COMPLETE
     assert outcome.completed == outcome.expected == expected
-    assert outcome.cleanup is not None
-    assert outcome.cleanup.state is CleanupOutcome.CLOSED
     records = process.records()
     assert len(records) == 1
     assert records[0]["event"] == "protocols.loading.provider_loaded"
@@ -448,26 +424,17 @@ def test_installed_provider_configuration_is_effective(
 ) -> None:
     config = tmp_path / "config.json"
     config.write_text(json.dumps({"value": value}))
-    home = tmp_path / "home"
-    home.mkdir(mode=0o700)
+    home = private_home(tmp_path / "home")
 
     process = installed_conformance.run(
-        "conformance",
-        "secrets",
-        "configured",
-        "--config",
-        str(config),
-        "--fixtures",
-        "kora_tooling_fixture.fixtures_configured",
+        *conformance_arguments("secrets", "configured", config, "fixtures_configured"),
         environment={"HOME": str(home)},
     )
 
-    outcome = CommandResult.model_validate_json(process.stdout)
+    outcome = closed_report(process)
     assert process.code == 0, (process.stdout, process.stderr)
     assert outcome.outcome is OriginalOutcome.COMPLETE
-    assert outcome.cleanup is not None
-    assert outcome.cleanup.state is CleanupOutcome.CLOSED
-    assert value.encode() not in process.stdout + process.stderr
+    assert_undisclosed(process, value.encode())
 
 
 def test_installed_conformance_owns_its_environment_and_wheel_copy(
