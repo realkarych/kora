@@ -1,14 +1,13 @@
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import Field, dataclass, fields
 from datetime import datetime
-from typing import TypeAlias, TypeVar, TypeVarTuple
+from typing import TypeAlias, TypeVar
 
 from sqlalchemy import (
     Column,
     ColumnElement,
     Executable,
     Exists,
-    Select,
     Table,
     exists,
     func,
@@ -37,7 +36,6 @@ DEFAULT_PAGE_SIZE: int = 100
 MAX_PAGE_SIZE: int = 1000
 
 RowT = TypeVar("RowT")
-Columns = TypeVarTuple("Columns")
 
 
 class PageSizeError(ValueError):
@@ -197,16 +195,10 @@ EVENT_COLUMNS: RowColumns = columns_of(event, fields(EventRow))
 
 
 async def first_row(
-    connection: AsyncConnection, row: Callable[..., RowT], statement: Executable
+    connection: AsyncConnection, row_type: type[RowT], statement: Executable
 ) -> RowT | None:
     found = (await connection.execute(statement)).first()
-    return None if found is None else row(*found)
-
-
-def keyset_after(
-    statement: Select[*Columns], key: ColumnElement[str], after_id: str | None
-) -> Select[*Columns]:
-    return statement if after_id is None else statement.where(key > after_id)
+    return None if found is None else row_type(*found)
 
 
 def physical_attempt(run_id: str | ColumnElement[str]) -> Exists:
@@ -297,7 +289,8 @@ async def events_of_run(
     statement = select(*EVENT_COLUMNS).where(
         event.c.namespace_id == namespace_id, event.c.run_id == run_id
     )
-    statement = keyset_after(statement, event.c.id, after_id)
+    if after_id is not None:
+        statement = statement.where(event.c.id > after_id)
     statement = statement.order_by(event.c.id).limit(bounded_page(page_size))
     rows = (await connection.execute(statement)).all()
     return [EventRow(*row) for row in rows]
@@ -368,7 +361,8 @@ async def marked_run_page(
     statement = select(run.c.id).where(
         run.c.needs_scheduling == true(), run.c.id <= ceiling
     )
-    statement = keyset_after(statement, run.c.id, after_id)
+    if after_id is not None:
+        statement = statement.where(run.c.id > after_id)
     statement = statement.order_by(run.c.id).limit(bounded_page(page_size))
     rows = (await connection.execute(statement)).all()
     return [str(row[0]) for row in rows]

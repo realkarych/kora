@@ -23,7 +23,6 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
-from kora.db.reads import keyset_after
 from kora.db.tables import (
     approval_request,
     attempt,
@@ -184,8 +183,8 @@ async def first_mapping(
     return (await connection.execute(statement)).mappings().first()
 
 
-def attempt_run_join(attempts: FromClause) -> Join:
-    return attempts.join(
+def attempt_run_join(source: FromClause) -> Join:
+    return source.join(
         node_instance, attempt.c.node_instance_id == node_instance.c.id
     ).join(run)
 
@@ -444,7 +443,8 @@ async def read_usage_page(
         .order_by(usage_record.c.id)
         .limit(page_limit(limit))
     )
-    statement = keyset_after(statement, usage_record.c.id, after_id)
+    if after_id is not None:
+        statement = statement.where(usage_record.c.id > after_id)
     rows = (await connection.execute(statement)).mappings().all()
     return tuple(usage_value(row) for row in rows)
 
@@ -499,7 +499,8 @@ async def read_attempt_page(
         .order_by(attempt.c.id)
         .limit(page_limit(limit))
     )
-    statement = keyset_after(statement, attempt.c.id, after_id)
+    if after_id is not None:
+        statement = statement.where(attempt.c.id > after_id)
     rows = (await connection.execute(statement)).mappings().all()
     results: list[AttemptCostRead] = []
     for row in rows:
