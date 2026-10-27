@@ -9,7 +9,7 @@ from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from io import FileIO
 from pathlib import Path
-from typing import Final
+from typing import Final, TypedDict, Unpack
 
 from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import InstalledIOHelperLauncher
@@ -167,6 +167,12 @@ async def open_fifo_writer(directory: int, deadline: int, clock: Clock) -> int:
     raise TimeoutError("FIFO reader did not become ready")
 
 
+class ProbeOptions(TypedDict, total=False):
+    phase: str
+    pause_at: int | tuple[int, ...] | None
+    resist_term: bool
+
+
 @dataclass(frozen=True)
 class StallBarrier:
     home: Path
@@ -174,20 +180,9 @@ class StallBarrier:
     reading: int
     writing: int
 
-    def launcher(
-        self,
-        *,
-        phase: str = "before",
-        pause_at: int | tuple[int, ...] | None = None,
-        resist_term: bool = False,
-    ) -> ProbeIOHelperLauncher:
+    def launcher(self, **options: Unpack[ProbeOptions]) -> ProbeIOHelperLauncher:
         return ProbeIOHelperLauncher(
-            self.home,
-            self.writing,
-            self.directory.descriptor,
-            phase=phase,
-            pause_at=pause_at,
-            resist_term=resist_term,
+            self.home, self.writing, self.directory.descriptor, **options
         )
 
     async def entered(self, deadline: int, clock: Clock) -> FileIO:

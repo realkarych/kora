@@ -22,6 +22,7 @@ from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.conformance.lifetime_support import (
     ControlledLifetimeClock,
     dispose_test_owner,
+    journal_file,
     limits,
     read_probe,
     stall_barrier,
@@ -246,7 +247,7 @@ async def test_cleanup_refuses_fresh_helper_with_three_nanoseconds_remaining(
         owner = ParentLifetime(clock=clock, limits=limits(), launcher=launcher)
         try:
             await owner.ready()
-            journal = next(tmp_path.rglob(owner.invocation_id)) / "journal"
+            journal = journal_file(tmp_path, owner.invocation_id)
             before = journal.read_bytes()
 
             closing = owner.request_close(None)
