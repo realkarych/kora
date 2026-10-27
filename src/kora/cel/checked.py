@@ -2,6 +2,7 @@ import hashlib
 from collections.abc import Mapping
 from typing import Final
 
+from kora.cel.checker import Environment, check_types
 from kora.cel.cost import Estimate, Variable, estimate
 from kora.cel.diagnostics import Diagnostic, DiagnosticError
 from kora.cel.meter import Meter
@@ -59,6 +60,21 @@ def check(
         tree = parse(source, meter=used)
         rendering = canonical_rendering(tree, used)
         cost = estimate(tree, len(rendering), variables, meter=used)
+    except DiagnosticError as error:
+        return error.diagnostic
+    digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
+    return CheckedExpression(SEAL, tree, rendering, digest, cost)
+
+
+def check_typed(
+    source: str, environment: Environment, meter: Meter | None = None
+) -> CheckedExpression | Diagnostic:
+    used = meter if meter is not None else Meter()
+    try:
+        tree = parse(source, meter=used)
+        check_types(tree, environment, used)
+        rendering = canonical_rendering(tree, used)
+        cost = estimate(tree, len(rendering), environment.variables, meter=used)
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()

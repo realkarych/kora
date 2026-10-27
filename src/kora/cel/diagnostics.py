@@ -27,6 +27,16 @@ class Reason(Enum):
     INVALID_PATTERN = "invalid_pattern"
     INVALID_PATH = "invalid_path"
     RENDERING_MISMATCH = "rendering_mismatch"
+    UNKNOWN_IDENTIFIER = "unknown_identifier"
+    ROOT_NOT_SELECTED = "root_not_selected"
+    UNKNOWN_FIELD = "unknown_field"
+    SHADOWED_VARIABLE = "shadowed_variable"
+    UNKNOWN_ENUM_VALUE = "unknown_enum_value"
+    NO_MATCHING_OVERLOAD = "no_matching_overload"
+    UNGUARDED_OPTIONAL = "unguarded_optional"
+    STRING_SIZE = "string_size"
+    REPEATED_MAP_KEY = "repeated_map_key"
+    WRONG_RESULT_TYPE = "wrong_result_type"
     LENGTH = "length"
     DEPTH = "depth"
     COMPREHENSION_COUNT = "comprehension_count"
@@ -78,6 +88,16 @@ MESSAGES: dict[Reason, str] = {
     Reason.INVALID_PATTERN: "invalid regular expression",
     Reason.INVALID_PATH: "a path allows only field selection and literal indexes",
     Reason.RENDERING_MISMATCH: "canonical rendering does not parse to the same tree",
+    Reason.UNKNOWN_IDENTIFIER: "identifier is not declared in this environment",
+    Reason.ROOT_NOT_SELECTED: "this variable is read only through field selection",
+    Reason.UNKNOWN_FIELD: "field is not declared by the schema",
+    Reason.SHADOWED_VARIABLE: "comprehension variable shadows an environment variable",
+    Reason.UNKNOWN_ENUM_VALUE: "string literal is not an allowed value of the enum",
+    Reason.NO_MATCHING_OVERLOAD: "no operator or function accepts these operand types",
+    Reason.UNGUARDED_OPTIONAL: "optional field is read without a has() or in guard",
+    Reason.STRING_SIZE: "size() of a string or dyn value counts bytes, not characters",
+    Reason.REPEATED_MAP_KEY: "map literal repeats a key",
+    Reason.WRONG_RESULT_TYPE: "expression result does not have the required type",
     Reason.LENGTH: "expression is longer than 4096 code points",
     Reason.DEPTH: "expression nests deeper than 32 levels",
     Reason.COMPREHENSION_COUNT: "more than 4 comprehension macros in one expression",

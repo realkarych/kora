@@ -3,7 +3,17 @@ from pathlib import Path
 
 import pytest
 
-from kora.cel import JsonValue, SchemaError, SchemaTypes, SchemaView
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    JsonValue,
+    ResultKind,
+    SchemaError,
+    SchemaTypes,
+    SchemaView,
+    Variable,
+    check_typed,
+)
 from kora.cel.meter import Meter
 from kora.cel.types import (
     BOOL,
@@ -270,6 +280,57 @@ def test_cel_schema_types_map_the_published_vcs_ref() -> None:
     assert isinstance(principal, Record)
     assert principal is result.fields["opened_by"].type
     assert principal.fields["kind"].required is True
+
+
+def recursive_closure(width: int) -> JsonValue:
+    definitions: dict[str, JsonValue] = {
+        f"d{index}": {
+            "type": "object",
+            "properties": {
+                "left": {"$ref": f"#/$defs/d{index + 1}"},
+                "right": {"$ref": f"#/$defs/d{index + 1}"},
+                "items": {"type": "array", "items": {"$ref": f"#/$defs/d{index + 1}"}},
+                "self": {"$ref": f"#/$defs/d{index}"},
+                "value": {"type": "integer"},
+            },
+            "required": ["left", "right", "items", "self", "value"],
+        }
+        for index in range(width)
+    }
+    definitions[f"d{width}"] = {"$ref": "#/$defs/d0"}
+    return {"$defs": definitions, "$ref": "#/$defs/d0"}
+
+
+def closure_steps(width: int) -> int:
+    meter = Meter()
+    types = SchemaTypes(no_documents, meter)
+    root = types.document(recursive_closure(width))
+    reads = " && ".join(["v.left.right.self.value > 0"] * 8)
+    environment = Environment({"v": Variable(root)}, ResultKind.BOOL)
+    source = reads + " && v.items.all(i, i.left.value > 0)"
+    checked = check_typed(source, environment, meter)
+    assert isinstance(checked, CheckedExpression)
+    return meter.steps
+
+
+def test_cel_recursive_closure_checked_in_bounded_time() -> None:
+    widths = (64, 128, 256, 512)
+    meter = Meter()
+    types = SchemaTypes(no_documents, meter)
+
+    root = types.document(recursive_closure(4))
+    counts = [closure_steps(width) for width in widths]
+
+    assert isinstance(root, Record)
+    assert root.fields["self"].type is root
+    assert root.fields["left"].type is not root
+    items = root.fields["items"].type
+    assert isinstance(items, ListOf)
+    assert items.element is root.fields["right"].type
+    for width, count in zip(widths, counts, strict=True):
+        assert count <= 16 * width + 4096
+    for smaller, larger in zip(counts, counts[1:], strict=False):
+        assert larger <= 2.5 * smaller
 
 
 def nested_items(depth: int) -> JsonValue:

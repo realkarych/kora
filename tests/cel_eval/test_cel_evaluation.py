@@ -2,11 +2,20 @@ from datetime import UTC, datetime
 
 import pytest
 
-from kora.cel import CheckedExpression, check
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    JsonValue,
+    ResultKind,
+    SchemaTypes,
+    Variable,
+    check,
+    check_typed,
+)
 from kora.cel.checked import SEAL
 from kora.cel.types import BOOL, DOUBLE, DYN, INT, CelType, Record, RecordField
 from kora.cel_eval.binding import load_binding
-from tests.cel_eval.test_cel_conversion import expression
+from tests.cel_eval.test_cel_conversion import expression, no_documents
 
 AT: datetime = datetime(2026, 10, 21, tzinfo=UTC)
 
@@ -194,6 +203,62 @@ def test_cel_binding_protocol_conformance(
 
     result = machine.evaluate(
         expression(source), {}, {}, ErrorContext("when"), ResultType.BOOL
+    )
+
+    assert result is expected
+
+
+def typed_expression(source: str, environment: Environment) -> CheckedExpression:
+    checked = check_typed(source, environment)
+    assert isinstance(checked, CheckedExpression)
+    return checked
+
+
+FR_2_5: str = (
+    "inputs.review.verdict == 'approved' && "
+    "inputs.bench.cpu < inputs.baseline.cpu * 0.85"
+)
+BENCH: JsonValue = {
+    "type": "object",
+    "properties": {"cpu": {"type": "number"}},
+    "required": ["cpu"],
+}
+REVIEW: JsonValue = {
+    "type": "object",
+    "properties": {"verdict": {"enum": ["approved", "rejected"]}},
+    "required": ["verdict"],
+}
+
+
+@pytest.mark.parametrize(("cpu", "expected"), [(80, True), (85, False), (90, False)])
+def test_cel_schema_typed_fr_2_5_example_evaluates(cpu: int, expected: bool) -> None:
+    from kora.cel_eval.errors import ErrorContext
+    from kora.cel_eval.evaluate import Machine, ResultType
+
+    schemas = SchemaTypes(no_documents)
+    bench = schemas.document(BENCH)
+    inputs = Record(
+        {
+            "review": RecordField(schemas.document(REVIEW), True),
+            "bench": RecordField(bench, True),
+            "baseline": RecordField(bench, True),
+        }
+    )
+    environment = Environment(
+        {"inputs": Variable(inputs)}, ResultKind.BOOL, frozenset({"inputs"})
+    )
+    values = {
+        "inputs": {
+            "review": {"verdict": "approved"},
+            "bench": {"cpu": cpu},
+            "baseline": {"cpu": 100},
+        }
+    }
+    machine = Machine(load_binding(), clock)
+    checked = typed_expression(FR_2_5, environment)
+
+    result = machine.evaluate(
+        checked, values, {"inputs": inputs}, ErrorContext("when"), ResultType.BOOL
     )
 
     assert result is expected

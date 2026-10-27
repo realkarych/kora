@@ -2,9 +2,9 @@ from collections.abc import Callable
 
 import pytest
 
-from kora.cel import ValueBound, Variable, check
+from kora.cel import Environment, ResultKind, ValueBound, Variable, check, check_typed
 from kora.cel.meter import Meter
-from kora.cel.types import DYN
+from kora.cel.types import DYN, INT, Record, RecordField
 
 SIZES: tuple[int, ...] = (512, 1024, 2048, 4000)
 STEPS_PER_CODE_POINT: int = 8
@@ -97,3 +97,72 @@ def test_cel_estimate_is_linear_in_the_environment() -> None:
     for smaller, larger in zip(wide, wide[1:], strict=False):
         assert larger <= 2.5 * smaller
     assert deep[-1] <= 4 * deep[0]
+
+
+TYPED_STEPS_PER_CODE_POINT: int = 16
+
+TYPED_FAMILIES: dict[str, Callable[[int], str]] = {
+    **FAMILIES,
+    "guarded_reads": lambda size: (
+        "["
+        + ", ".join(["has(r.o) && r.o.n > 0"] * ((size - 20) // 23))
+        + "].size() > 0"
+    ),
+    "guard_chains": lambda size: (
+        "["
+        + ", ".join(
+            ["(has(r.o) && has(r.o.o) && has(r.o.o.o)) && r.o.o.o.n > 0"]
+            * ((size - 20) // 59)
+        )
+        + "].size() > 0"
+    ),
+    "disjunctions": lambda size: (
+        "["
+        + ", ".join(["!has(r.o) || r.o.n > 0"] * ((size - 20) // 24))
+        + "].size() > 0"
+    ),
+    "long_guard_chains": lambda size: (
+        "["
+        + ", ".join(
+            [" && ".join(["has(r.o)"] * 27) + " && r.o.n > 0"] * ((size - 20) // 340)
+        )
+        + "].size() > 0"
+    ),
+    "typed_selections": lambda size: (
+        "[" + ", ".join(["r.r.r.r.r.n"] * ((size - 20) // 13)) + "].size() > 0"
+    ),
+    "distinct_map_keys": lambda size: (
+        "{" + ", ".join(f"'{index}': 1" for index in range(size // 11)) + "}.size() > 0"
+    ),
+}
+
+
+def recursive_record() -> Record:
+    fields: dict[str, RecordField] = {}
+    record = Record(fields)
+    fields["r"] = RecordField(record, True)
+    fields["o"] = RecordField(record, False)
+    fields["n"] = RecordField(INT, True)
+    return record
+
+
+def typed_steps_for(source: str) -> int:
+    meter = Meter()
+    variables = {name: Variable(DYN) for name in ("a", "b", "c", "x")}
+    variables["r"] = Variable(recursive_record())
+    check_typed(source, Environment(variables, ResultKind.BOOL), meter)
+    return meter.steps
+
+
+@pytest.mark.parametrize("family", sorted(TYPED_FAMILIES))
+def test_cel_typed_check_is_linear_in_steps(family: str) -> None:
+    build = TYPED_FAMILIES[family]
+    sources = [build(size) for size in SIZES]
+
+    counts = [typed_steps_for(source) for source in sources]
+
+    for source, count in zip(sources, counts, strict=True):
+        assert len(source) <= 4096
+        assert count <= TYPED_STEPS_PER_CODE_POINT * len(source)
+    for smaller, larger in zip(counts, counts[1:], strict=False):
+        assert larger <= 2.5 * smaller

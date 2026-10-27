@@ -1,4 +1,5 @@
-from kora.cel.checked import CheckedExpression, check, check_path
+from kora.cel.checked import CheckedExpression, check, check_path, check_typed
+from kora.cel.checker import Environment, ResultKind
 from kora.cel.cost import (
     DATA_BOUND,
     PROVISIONAL_BUDGET,
@@ -25,6 +26,7 @@ __all__ = [
     "CheckedExpression",
     "Code",
     "Diagnostic",
+    "Environment",
     "Estimate",
     "Field",
     "JsonValue",
@@ -32,6 +34,7 @@ __all__ = [
     "Position",
     "Reason",
     "Resolver",
+    "ResultKind",
     "SchemaError",
     "SchemaTypes",
     "SchemaView",
@@ -40,5 +43,6 @@ __all__ = [
     "Weights",
     "check",
     "check_path",
+    "check_typed",
     "resolve",
 ]
