@@ -12,6 +12,14 @@ Distinct owner regressions cover bidirectional listener operation after descript
 
 Local targeted checks on CPython 3.11.17/macOS 27.0.1 arm64 passed the six public suites plus two configurations (8 cases), public negatives/missing extra (10), startup interruption (2), readiness/teardown/blocked bootstrap (3), outcome ordering (8) and retained-endpoint publication (1). These are dirty-source development observations; the implementation PR supplies revision identities, complete required final-head CI and any later corrections. Linux and macOS final-revision checks are separate from these local results.
 
+## Ordinary-test placement and CI timeout
+
+The first PR #322 run at `3c5c6de` ([CI run 40484132965](https://github.com/realkarych/kora/actions/runs/40484132965)) failed when all three conformance jobs reached their unchanged ten-minute timeout. Other test lanes passed. Cancellation prevented the temporary per-group logs from being copied into the artifact, so those artifacts do not identify an individual stalled test. These failures remain failures.
+
+A local run of the same two conformance groups on CPython 3.11.17/macOS completed with 174 cases in 82.40 seconds and 554 cases in 306.94 seconds. No hanging test reproduced. Installed conformance tests accounted for 183.582 seconds of the second group. The preceding successful native macOS run at `e1eae5a` had already recorded a large imbalance: 141.05 seconds versus 404.802 seconds. These observations support correcting cumulative work placement; they do not establish what each cancelled runner was executing at cancellation.
+
+Public command and cleanup checks now live in `tests/cli/test_conformance.py`, which the existing required CLI integration group already selects on every supported environment. Direct child and owner checks remain in `tests/conformance/`. The two modules reuse the same module-scoped wheel fixture from `tests/support/configured_conformance.py`; each module owns its separate installed environment. All 28 relocated parameter cases retain their assertions. The unchanged inventory check requires an exact, disjoint union of all ordinary tests. Workflow configuration, job count, concurrency, hard deadlines, qualification scheduling and acceptance gates are unchanged. Final-head CI determines whether this placement resolves the job failures.
+
 ## Listener transfer observation
 
 Checked on 2026-10-27. A local real-process bidirectional probe received premature EOF after the helper sent listening descriptors and exited before the parent acknowledged receipt. Keeping the helper's copies until the fixed `listeners_received` frame produced the expected reply; cancellation closes unadopted received descriptors while leaving helper settlement with its existing owner. The ordinary regression sends a fresh challenge through every accepted connection after transfer; queued bytes alone are insufficient evidence.
