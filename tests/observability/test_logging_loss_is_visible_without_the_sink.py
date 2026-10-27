@@ -17,6 +17,7 @@ from tests.observability.conftest import (
     TEST_COMPONENT,
     Configure,
     Pipe,
+    configured_with_reader,
     run_python,
     wait_until,
 )
@@ -165,8 +166,7 @@ def test_idle_shutdown_returns_before_the_drain_deadline(
 ) -> None:
     settings = LoggingSettings()
     sink_identity = descriptor_identity(pipe.write_end)
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, settings)
     wait_until(lambda: diagnostics.snapshot().queue_records == 0)
 
     started = time.monotonic()
