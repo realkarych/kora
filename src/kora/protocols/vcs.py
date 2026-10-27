@@ -15,7 +15,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from kora.ir import PrincipalRef, VcsRef
-from kora.ir.json import JsonObject, fits_utf8, utf8_length
+from kora.ir.json import JsonObject, fits_utf8
 from kora.ir.scalars import Digest, EnvName
 from kora.ir.vcs_ref import MAX_PATH_BYTES, MAX_PATHS, ChangedPath
 from kora.ir.vcs_ref_json import MAX_JSON_BYTES, canonical_size
@@ -99,15 +99,9 @@ def relative_path(value: str) -> str:
     return value
 
 
-def no_nul(value: str) -> str:
-    if "\x00" in value or utf8_length(value) is None:
-        raise vcs_refused()
-    return value
-
-
 def nul_free_text(limit: int) -> AfterValidator:
     def check(value: str) -> str:
-        if not fits_utf8(no_nul(value), limit):
+        if "\x00" in value or not fits_utf8(value, limit):
             raise vcs_refused()
         return value
 
@@ -178,12 +172,6 @@ class VcsCapabilities:
         )
 
 
-def require_attempt_target(root: str, attempt_id: str, branch: str) -> None:
-    require(is_text(root, MAX_PATH_TEXT_BYTES), "root is bounded text")
-    require(is_identifier(attempt_id), "attempt_id is a bounded identifier")
-    require(is_text(branch, MAX_BRANCH_BYTES), "branch is bounded text")
-
-
 @dataclass(frozen=True)
 class CheckoutRequest:
     repo: str
@@ -198,7 +186,9 @@ class CheckoutRequest:
             isinstance(self.rev, VcsRef) or is_text(self.rev, MAX_REVISION_BYTES),
             "rev is bounded text or a VcsRef",
         )
-        require_attempt_target(self.root, self.attempt_id, self.branch)
+        require(is_text(self.root, MAX_PATH_TEXT_BYTES), "root is bounded text")
+        require(is_identifier(self.attempt_id), "attempt_id is a bounded identifier")
+        require(is_text(self.branch, MAX_BRANCH_BYTES), "branch is bounded text")
 
 
 @dataclass(frozen=True)
@@ -211,7 +201,9 @@ class PublishRequest:
 
     def __post_init__(self) -> None:
         require(is_text(self.repo, MAX_REPO_BYTES), "repo is bounded text")
-        require_attempt_target(self.root, self.attempt_id, self.branch)
+        require(is_text(self.root, MAX_PATH_TEXT_BYTES), "root is bounded text")
+        require(is_identifier(self.attempt_id), "attempt_id is a bounded identifier")
+        require(is_text(self.branch, MAX_BRANCH_BYTES), "branch is bounded text")
         require(is_message(self.commit_message), "commit_message is bounded text")
 
 

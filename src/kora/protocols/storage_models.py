@@ -15,12 +15,8 @@ from pydantic_core import PydanticCustomError
 
 from kora.ir.json import MAX_INTEGER_BITS, JsonObject, JsonShapeError, parse_json_object
 from kora.ir.scalars import Digest
-from kora.ir.vcs_ref_json import (
-    canonical_bytes,
-    lexical_depth_valid,
-    refuse_constant,
-    unique_object,
-)
+from kora.ir.vcs_ref_json import canonical_bytes as canonical_json
+from kora.ir.vcs_ref_json import lexical_depth_valid, refuse_constant, unique_object
 from kora.protocols.common import BoundaryModel
 from kora.protocols.identity import Count, Identifier
 
@@ -101,7 +97,7 @@ class StorageModel(BoundaryModel):
             )
             if not isinstance(value, dict):
                 raise ValueError("storage metadata must be a JSON object")
-            canonical = canonical_bytes(cast("JsonObject", value))
+            canonical = canonical_json(cast("JsonObject", value))
             if len(canonical) > MAX_STORAGE_METADATA:
                 raise ValueError("storage metadata exceeds its JSON boundary")
         except (ValueError, RecursionError):
@@ -116,7 +112,7 @@ class StorageModel(BoundaryModel):
         )
 
     def canonical_bytes(self) -> bytes:
-        return canonical_bytes(self.model_dump(mode="json"))
+        return canonical_json(self.model_dump(mode="json"))
 
     def metadata_digest(self) -> str:
         return "sha256:" + hashlib.sha256(self.canonical_bytes()).hexdigest()
@@ -301,7 +297,7 @@ def request_digest(
         "kind": kind,
         "arguments": arguments.model_dump(mode="json"),
     }
-    return "sha256:" + hashlib.sha256(canonical_bytes(preimage)).hexdigest()
+    return "sha256:" + hashlib.sha256(canonical_json(preimage)).hexdigest()
 
 
 class StageWrite(StorageModel):

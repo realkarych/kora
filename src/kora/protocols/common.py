@@ -7,9 +7,10 @@ from pydantic_core import PydanticCustomError
 
 from kora.ir.json import JsonObject, JsonObjectField, parsed_or_none
 from kora.observability import ComponentLogger
+from kora.observability.policy import CONTEXT_IDENTIFIER
 from kora.protocols.activity import ActivityReporter
 from kora.protocols.boundary import BoundaryModel as BoundaryModel
-from kora.protocols.deadlines import ExecutionDeadline, is_identifier
+from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.secret_value import SecretAdmission, SecretScope, SecretValue
 from kora.protocols.time import Clock
 
@@ -23,6 +24,10 @@ class ProviderProtocol(Protocol):
     config_schema: JsonObject
 
     def capabilities(self) -> object: ...
+
+
+def is_identifier(value: object) -> bool:
+    return isinstance(value, str) and CONTEXT_IDENTIFIER.match(value) is not None
 
 
 def is_optional_identifier(value: object) -> bool:
