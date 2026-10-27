@@ -5,7 +5,7 @@ from typing import Literal
 
 ScopeKind = Literal["run", "subgraph", "attempt"]
 
-SCOPE_IDENTIFIER: re.Pattern[str] = re.compile(r"\A[\x21-\x7e]{1,256}\Z")
+IDENTIFIER: re.Pattern[str] = re.compile(r"\A[\x21-\x7e]{1,256}\Z")
 SCOPE_KINDS: frozenset[str] = frozenset({"run", "subgraph", "attempt"})
 DEADLINE_GRACE: timedelta = timedelta(seconds=30)
 
@@ -33,8 +33,8 @@ def is_scope_kind(value: object) -> bool:
     return isinstance(value, str) and value in SCOPE_KINDS
 
 
-def is_scope_identifier(value: object) -> bool:
-    return isinstance(value, str) and SCOPE_IDENTIFIER.match(value) is not None
+def is_identifier(value: object) -> bool:
+    return isinstance(value, str) and IDENTIFIER.match(value) is not None
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,7 @@ class ExecutionDeadline:
         require(
             is_scope_kind(self.scope_kind), "scope_kind is run, subgraph or attempt"
         )
-        require(is_scope_identifier(self.scope_id), "scope_id is a bounded identifier")
+        require(is_identifier(self.scope_id), "scope_id is a bounded identifier")
         require(
             is_duration(self.clock_uncertainty, timedelta(0), inclusive=True),
             "clock_uncertainty is a non-negative duration",

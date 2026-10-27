@@ -2,13 +2,19 @@ import math
 from dataclasses import dataclass
 from typing import cast
 
-from kora.cel.cost import DATA_BYTES, DATA_VALUES
+from kora.cel.cost import (
+    DATA_BYTES,
+    DATA_DEPTH,
+    DATA_ITEMS,
+    DATA_STRING_BYTES,
+    DATA_VALUES,
+)
 from kora.cel_eval.errors import ErrorKind
 
 MAX_BYTES: int = DATA_BYTES
-MAX_ITEMS: int = 1_000
-MAX_STRING_BYTES: int = 16_384
-MAX_DEPTH: int = 32
+MAX_ITEMS: int = DATA_ITEMS
+MAX_STRING_BYTES: int = DATA_STRING_BYTES
+MAX_DEPTH: int = DATA_DEPTH
 MAX_VALUES: int = DATA_VALUES
 
 
