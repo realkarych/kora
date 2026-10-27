@@ -84,7 +84,6 @@ CLEANUP_DRIVER_BYTES: int = 4096
 MEMBER_CONTROL_BYTES: int = 2048
 RECOVERY_ATTEMPT_BYTES: int = 4096
 OwnedResult = TypeVar("OwnedResult")
-Outcome = TypeVar("Outcome")
 
 
 def request_size(request: BoundaryModel | None) -> tuple[bool, int]:
@@ -99,7 +98,7 @@ def request_size(request: BoundaryModel | None) -> tuple[bool, int]:
     return execution, size
 
 
-def consume_failure(future: asyncio.Future[Outcome]) -> None:
+def consume_failure(future: asyncio.Future[OwnedResult]) -> None:
     if not future.cancelled():
         future.exception()
 
@@ -1679,8 +1678,7 @@ class RecoveryAttempt:
 
     def changed(self, future: asyncio.Future[object]) -> None:
         self.dependencies.discard(future)
-        if not future.cancelled():
-            future.exception()
+        consume_failure(future)
         self.reconcile()
 
     def reconcile(self) -> None:
@@ -1700,8 +1698,7 @@ class RecoveryAttempt:
                 if not helper.closed:
                     helper.release()
         if task.done() and owner.dispose_recovery_observers():
-            if not task.cancelled():
-                task.exception()
+            consume_failure(task)
             for dependency in self.dependencies:
                 dependency.remove_done_callback(self.changed)
             self.dependencies.clear()
