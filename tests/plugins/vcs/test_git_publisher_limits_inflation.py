@@ -11,11 +11,24 @@ from kora.conformance.capture import Capture
 from kora.conformance.vcs import Kept, pinned, publish_request, run
 from kora.executor.failures import ExecutorError
 from kora.ir.node import ErrorClass
-from tests.plugins.vcs.git_support import World, git, make_world
+from kora.plugins.vcs.git.plans import DECODER_HELPER, TREE_HELPER
+from kora.protocols.vcs import PublishPlan, PublishRequest
+from tests.plugins.vcs.git_support import (
+    COMMIT_MESSAGE,
+    PUBLISH_BRANCH,
+    REPO,
+    World,
+    git,
+    make_world,
+)
 
 DECLARED_RESULT: int = 3 * 1024**3
 REF_DELTA: int = 7
 FAKE_HEAD: str = "2" * 40
+LIMITS: tuple[str, ...] = ("prlimit", "--as=2147483648", "--fsize=1073741824", "--")
+OBJECT_READERS: frozenset[str] = frozenset(
+    {TREE_HELPER, DECODER_HELPER, "fsck", "diff"}
+)
 
 
 def varint(value: int) -> bytes:
@@ -62,7 +75,37 @@ def forged_bundle(world: World, bundle: Path) -> None:
     bundle.write_bytes(header.encode("ascii") + inflating_pack(blob, size))
 
 
+def object_readers(plan: PublishPlan) -> list[tuple[str, ...]]:
+    return [
+        step.argv
+        for step in (*plan.prepare, *plan.inspect)
+        if OBJECT_READERS & set(step.argv)
+    ]
+
+
 def test_git_publisher_limits_inflation(tmp_path: Path, kora_capture: Capture) -> None:
+    world = make_world(tmp_path, kora_capture)
+    request = PublishRequest(
+        repo=REPO,
+        root=str(tmp_path / "candidate"),
+        attempt_id="attempt",
+        branch=PUBLISH_BRANCH,
+        commit_message=COMMIT_MESSAGE,
+    )
+
+    plan = run(world.provider.publish_plan(request, world.context()))
+
+    readers = object_readers(plan)
+    covered = {name for argv in readers for name in OBJECT_READERS & set(argv)}
+    assert covered == OBJECT_READERS
+    assert [argv[: len(LIMITS)] == LIMITS for argv in readers] == [
+        sys.platform == "linux"
+    ] * len(readers)
+
+
+def test_a_corrupt_inflating_delta_is_refused(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
     world = make_world(tmp_path, kora_capture)
     checkout = world.checkout()
     context = world.context()
@@ -91,8 +134,4 @@ def test_git_publisher_limits_inflation(tmp_path: Path, kora_capture: Capture) -
             )
         )
 
-    limited = [step.argv[0] for step in plan.prepare[2:5]]
     assert raised.value.failure_class is ErrorClass.ARTIFACT_INVALID
-    assert limited == (
-        ["prlimit"] * 3 if sys.platform == "linux" else ["python", "python", "git"]
-    )

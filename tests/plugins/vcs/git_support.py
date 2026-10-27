@@ -1,10 +1,13 @@
+import asyncio
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import TracebackType
 from typing import Final, cast
 
 from kora.conformance.capture import Capture
@@ -75,6 +78,71 @@ def git(
     return completed.stdout.decode("utf-8").strip()
 
 
+BARRIER_SECONDS: Final[float] = 30.0
+PROCEED: Final[bytes] = b"p"
+ENTERED: Final[bytes] = b"e"
+HELD_HOOK: Final[str] = """#!{python} -I
+import os
+release = os.open({release!r}, os.O_RDONLY | os.O_NONBLOCK)
+os.set_blocking(release, True)
+entered = os.open({entered!r}, os.O_WRONLY | os.O_NONBLOCK)
+os.write(entered, {signal!r})
+os.close(entered)
+raise SystemExit(0 if os.read(release, 1) == {proceed!r} else 1)
+"""
+
+
+class HeldHook:
+    def __init__(self, remote: Path, directory: Path) -> None:
+        directory.mkdir()
+        entered = directory / "entered"
+        release = directory / "release"
+        os.mkfifo(entered, 0o600)
+        os.mkfifo(release, 0o600)
+        self.observed = os.open(entered, os.O_RDONLY | os.O_NONBLOCK)
+        self.kept_open = os.open(entered, os.O_WRONLY | os.O_NONBLOCK)
+        listening = os.open(release, os.O_RDONLY | os.O_NONBLOCK)
+        self.releasing = os.open(release, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(listening)
+        hook = remote / "hooks" / "pre-receive"
+        hook.parent.mkdir(exist_ok=True)
+        hook.write_text(
+            HELD_HOOK.format(
+                python=sys.executable,
+                release=str(release),
+                entered=str(entered),
+                signal=ENTERED,
+                proceed=PROCEED,
+            )
+        )
+        hook.chmod(0o755)
+
+    async def entered(self) -> None:
+        loop = asyncio.get_running_loop()
+        readable = asyncio.Event()
+        loop.add_reader(self.observed, readable.set)
+        try:
+            await asyncio.wait_for(readable.wait(), BARRIER_SECONDS)
+        finally:
+            loop.remove_reader(self.observed)
+        assert os.read(self.observed, 1) == ENTERED
+
+    def proceed(self) -> None:
+        os.write(self.releasing, PROCEED)
+
+    def __enter__(self) -> "HeldHook":
+        return self
+
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        trace: TracebackType | None,
+    ) -> None:
+        for descriptor in (self.releasing, self.kept_open, self.observed):
+            os.close(descriptor)
+
+
 class ManualClock(Clock):
     def __init__(self) -> None:
         self.wall = datetime(2026, 10, 25, 12, 0, 0, tzinfo=UTC)
@@ -92,9 +160,6 @@ class ManualClock(Clock):
 
     async def sleep_until(self, deadline_ns: int) -> None:
         self.offset_ns = max(self.offset_ns, deadline_ns - self.origin_ns)
-
-    def advance(self, seconds: float) -> None:
-        self.offset_ns += int(seconds * 10**9)
 
 
 @dataclass

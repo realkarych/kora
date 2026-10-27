@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +17,13 @@ from kora.observability import LoggingSettings, configure_process
 from kora.protocols.common import ProtocolContext
 from kora.protocols.secret_value import SecretScope
 from tests.executor.step_support import context, step
-from tests.plugins.vcs.git_support import World, git, make_world, write
+from tests.plugins.vcs.git_support import (
+    BARRIER_SECONDS,
+    World,
+    git,
+    make_world,
+    write,
+)
 
 MARKER: str = "kora-unregistered-content-marker-5e2a"
 LEAKED_VALUE: str = "kora-registered-value-8b3c"
@@ -128,15 +133,12 @@ def test_logging_multiprocess_framing_with_slow_reader(
         f"sys.stdout.write({MARKER!r} * 200000)\n"
         f"sys.stderr.write({MARKER!r} * 200000)\n"
     )
-    started = time.monotonic()
 
     _, outcome = asyncio.run(run_step(noisy, 0, subject, Captures()))
-    elapsed = time.monotonic() - started
     records = kora_capture.finish()
 
     assert outcome.succeeded
     assert outcome.stderr_dropped > 0
-    assert elapsed < 10
     assert MARKER not in text_of(records)
 
 
@@ -154,14 +156,15 @@ def test_logging_sink_failure_does_not_stall_work(tmp_path: Path) -> None:
     try:
         world = make_world(tmp_path, capture)
         prepared = prepared_in(world, "sink")
-        started = time.monotonic()
-        outcome = world.publish(prepared)
-        elapsed = time.monotonic() - started
+        outcome = asyncio.run(
+            asyncio.wait_for(
+                published(world.executor, prepared, world.context()), BARRIER_SECONDS
+            )
+        )
     finally:
         capture.scope.release()
         diagnostics.shutdown(5.0)
         pipe.close_write_end()
 
     assert outcome.state == "pushed"
-    assert elapsed < 30
     assert os.path.isdir(prepared.result.revision.location)

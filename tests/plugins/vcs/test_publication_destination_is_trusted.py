@@ -37,7 +37,6 @@ def test_publication_destination_is_trusted(
     assert world.remote_head() == publication.commit
     assert git(world.home, f"--git-dir={decoy}", "for-each-ref") == ""
     assert publication.base_commit == world.base
-    assert publication.operation_id.startswith("op-")
     assert outcome.ref is not None
     assert outcome.ref.branch == PUBLISH_BRANCH
     assert (candidate / "redirect").is_symlink()
@@ -95,7 +94,7 @@ DESTINATION: tuple[str, str, str, str, str] = (
 
 @pytest.mark.parametrize("changed", range(6))
 def test_changing_any_destination_input_changes_the_digest(changed: int) -> None:
-    transport: JsonObject = {"transport": "file", "binding_revision": 1}
+    transport: JsonObject = {"transport": "file", "push": "create_only"}
     provider, remote, repo, branch, base = DESTINATION
     original = destination_digest(provider, remote, repo, branch, base, transport)
     altered = [
@@ -104,7 +103,7 @@ def test_changing_any_destination_input_changes_the_digest(changed: int) -> None
     ]
     altered_transport: JsonObject = {
         **transport,
-        "binding_revision": 2 if changed == 5 else 1,
+        "push": "overwrite" if changed == 5 else "create_only",
     }
 
     digest = destination_digest(

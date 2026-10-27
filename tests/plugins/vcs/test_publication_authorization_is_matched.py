@@ -7,17 +7,26 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.vcs import Prepared, authorization, grant, run
 from kora.executor.authorization import acquire, credential_request
-from kora.executor.entry import PublishPermit, RemoteState
+from kora.executor.entry import Executor, PublishPermit, RemoteState
 from kora.executor.failures import ExecutorError
 from kora.ir import PrincipalRef
 from kora.ir.node import ErrorClass
-from kora.plugins.vcs.git import GitVcs
+from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.identity import GrantBinding
 from kora.protocols.runtime import PublicationAuthorization
 from kora.protocols.vcs import CredentialRequest, IssuedCredential
-from tests.plugins.vcs.git_support import REPO, ManualClock, World, make_world, write
+from tests.plugins.vcs.git_support import (
+    REPO,
+    ManualClock,
+    World,
+    configuration,
+    git,
+    make_world,
+    mapping,
+    write,
+)
 from tests.plugins.vcs.launchers import RecordingLauncher
 
 Change = Callable[[PublicationAuthorization], PublicationAuthorization]
@@ -149,18 +158,24 @@ def test_without_a_permit_an_unknown_outcome_stays_unknown(
     assert launcher.pushes() == 0
 
 
+def rebound_executor(world: World, launcher: RecordingLauncher) -> Executor:
+    gone = world.root / "gone.git"
+    git(world.home, "init", "-q", "--bare", str(gone))
+    document = configuration(world.remote, gone)
+    mapping(mapping(document["remotes"])[REPO])["binding_revision"] = 2
+    provider = GitVcs(GitConfiguration.model_validate(document), launcher)
+    return Executor(provider.tools, launcher, provider, provider, provider)
+
+
 def test_reconcile_is_read_only_after_expiry_and_binding_change(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     world, prepared, launcher = prepared_world(tmp_path, kora_capture)
     absent = run(world.executor.reconcile(prepared.result, world.context(due(world))))
     world.publish(prepared)
-    configured = world.provider.remotes[REPO].configuration
-    world.provider.remotes[REPO].configuration = configured.model_copy(
-        update={"binding_revision": 2}
-    )
+    restarted = rebound_executor(world, launcher)
 
-    after_change = run(world.executor.reconcile(prepared.result, world.context()))
+    after_change = run(restarted.reconcile(prepared.result, world.context()))
 
     assert absent is RemoteState.ABSENT
     assert after_change is RemoteState.EQUAL

@@ -1,3 +1,4 @@
+import asyncio
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -16,13 +17,15 @@ from kora.protocols.deadlines import ExecutionDeadline, LocalThresholds, duratio
 from kora.protocols.time import SystemClock
 from tests.executor.step_support import context, step
 from tests.plugins.vcs.git_support import (
+    BARRIER_SECONDS,
     REPO,
+    HeldHook,
     ManualClock,
     World,
     make_world,
     write,
 )
-from tests.plugins.vcs.launchers import RecordingLauncher
+from tests.plugins.vcs.launchers import RecordingLauncher, is_push
 
 REMAINING: timedelta = timedelta(seconds=20)
 
@@ -67,27 +70,31 @@ def test_managed_phases_share_effective_deadline(
 def test_a_due_interruption_cancels_the_active_step(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    launcher = ProcessLauncher(kill_grace_ns=200_000_000, eof_bound_ns=500_000_000)
+    launcher = RecordingLauncher(
+        ProcessLauncher(kill_grace_ns=200_000_000, eof_bound_ns=500_000_000)
+    )
     world = make_world(tmp_path, kora_capture, launcher=launcher, clock=ManualClock())
-    hook = world.remote / "hooks" / "pre-receive"
-    hook.parent.mkdir(exist_ok=True)
-    hook.write_text("#!/bin/sh\nexec /bin/sleep 3\n")
-    hook.chmod(0o755)
     checkout = world.checkout()
     write(world.candidate(checkout), {"slow.txt": "slow\n"})
     prepared = world.prepare(checkout)
-    started = time.monotonic()
+    remaining = timedelta(milliseconds=500)
 
-    outcome = run(
-        published(
-            world.executor,
-            prepared,
-            world.context(deadline(world, timedelta(milliseconds=500))),
+    with HeldHook(world.remote, tmp_path / "hook"):
+        outcome = run(
+            asyncio.wait_for(
+                published(
+                    world.executor, prepared, world.context(deadline(world, remaining))
+                ),
+                BARRIER_SECONDS,
+            )
         )
-    )
+        landed = world.remote_head()
 
+    pushes = [spec.timeout_ns for spec in launcher.specs if is_push(spec)]
     assert outcome.state == "unknown"
-    assert time.monotonic() - started < 2.5
+    assert landed is None
+    assert len(pushes) == 1
+    assert pushes[0] <= duration_ns(remaining)
 
 
 def test_bounded_diagnostics_do_not_delay_escalation(

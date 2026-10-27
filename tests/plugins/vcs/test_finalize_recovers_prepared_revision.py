@@ -76,13 +76,15 @@ def test_an_unreachable_remote_stays_unknown(
 ) -> None:
     world = make_world(tmp_path, kora_capture)
     prepared = held(world)
-    world.remote.chmod(0o000)
+    head = world.remote / "HEAD"
+    hidden = world.remote / "HEAD.hidden"
+    head.rename(hidden)
 
     try:
         outcome = world.publish(prepared)
         state = run(world.executor.reconcile(prepared.result, world.context()))
     finally:
-        world.remote.chmod(0o755)
+        hidden.rename(head)
 
     assert outcome.state == "unknown"
     assert state is RemoteState.UNREACHABLE

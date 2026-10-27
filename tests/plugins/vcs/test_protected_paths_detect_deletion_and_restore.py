@@ -1,5 +1,6 @@
 import asyncio
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -15,9 +16,16 @@ from kora.executor.protected import (
     compiled_globs,
 )
 from kora.ir import VcsRef
+from kora.ir.globs import PathGlob
 from kora.ir.node import ErrorClass
 from kora.protocols.vcs import CheckoutRequest
-from tests.plugins.vcs.git_support import REPO, World, git, make_world
+from tests.plugins.vcs.git_support import (
+    BARRIER_SECONDS,
+    REPO,
+    World,
+    git,
+    make_world,
+)
 
 PROTECTED: tuple[str, ...] = ("keep", "run.sh")
 
@@ -153,19 +161,58 @@ def test_cancellation_takes_effect_within_one_slice() -> None:
     assert result.spent < bounds.slice_units + bounds.per_path
 
 
+class HeldPaths(list[str]):
+    def __init__(self, paths: list[str]) -> None:
+        super().__init__(paths)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.reader: threading.Thread | None = None
+        self.taken = 0
+
+    def __iter__(self) -> Iterator[str]:
+        self.reader = threading.current_thread()
+        self.entered.set()
+        self.release.wait(BARRIER_SECONDS)
+        for path in super().__iter__():
+            self.taken += 1
+            yield path
+
+    def reader_running(self) -> bool:
+        return self.reader is not None and self.reader.is_alive()
+
+    def reader_stopped(self, timeout: float) -> bool:
+        if self.reader is None:
+            return False
+        self.reader.join(timeout)
+        return not self.reader.is_alive()
+
+
+async def cancelled_while_held(
+    globs: tuple[PathGlob, ...], paths: HeldPaths, bounds: FuelBounds
+) -> bool:
+    task = asyncio.create_task(checked_off_loop(globs, paths, bounds))
+    assert await asyncio.to_thread(paths.entered.wait, BARRIER_SECONDS)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        return True
+    return False
+
+
 def test_cancelled_check_does_not_wait_for_its_thread() -> None:
     globs = compiled_globs(("*a*b*c*d*",), Phase.INSPECT)
-    paths = ["/".join(["a" * 90] * 40)] * 100_000
-    bounds = FuelBounds(budget=10**13, per_path=10**7, slice_units=10**6)
+    paths = HeldPaths(["short.txt"] * 1000)
+    bounds = FuelBounds(budget=10**12, per_path=10**7, slice_units=1)
 
-    async def cancel_soon() -> bool:
-        task = asyncio.create_task(checked_off_loop(globs, paths, bounds))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            return True
-        return False
+    try:
+        cancelled = asyncio.run(cancelled_while_held(globs, paths, bounds))
+        running_after_cancel = paths.reader_running()
+    finally:
+        paths.release.set()
+    stopped = paths.reader_stopped(BARRIER_SECONDS)
 
-    assert asyncio.run(cancel_soon())
+    assert cancelled
+    assert running_after_cancel
+    assert stopped
+    assert paths.taken < len(paths)
