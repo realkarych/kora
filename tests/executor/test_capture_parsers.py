@@ -8,6 +8,8 @@ from kora.ir.vcs_ref import MAX_PATH_BYTES, MAX_PATHS
 from kora.protocols.vcs import Capture
 
 DIGEST: str = "sha256:" + "a" * 64
+MALFORMED: str = "capture_malformed"
+OVERSIZED: str = "capture_oversized"
 
 
 def manifest(**changes: object) -> bytes:
@@ -48,42 +50,47 @@ def test_inspection_capture_is_a_manifest() -> None:
 
 
 @pytest.mark.parametrize(
-    ("capture", "output"),
+    ("capture", "output", "code"),
     [
-        ("commit", b""),
-        ("commit", b"a b\n"),
-        ("commit", b"one\ntwo\n"),
-        ("commit", b"x" * 256),
-        ("commit", b"\xff\xfe"),
-        ("branch", b"with space"),
-        ("changed_paths", b"a.txt\nb.txt\n"),
-        ("changed_paths", b'{"a": 1}'),
-        ("changed_paths", b'["/abs"]'),
-        ("changed_paths", b'["a/../b"]'),
-        ("changed_paths", b'["a", "a"]'),
-        ("changed_paths", b"[1]"),
-        ("changed_paths", b'["a\\u0000b"]'),
+        ("commit", b"", MALFORMED),
+        ("commit", b"a b\n", MALFORMED),
+        ("commit", b"one\ntwo\n", MALFORMED),
+        ("commit", b"x" * 256, MALFORMED),
+        ("commit", b"\xff\xfe", MALFORMED),
+        ("branch", b"with space", MALFORMED),
+        ("changed_paths", b"a.txt\nb.txt\n", MALFORMED),
+        ("changed_paths", b'{"a": 1}', MALFORMED),
+        ("changed_paths", b'["/abs"]', MALFORMED),
+        ("changed_paths", b'["a/../b"]', MALFORMED),
+        ("changed_paths", b'["a", "a"]', OVERSIZED),
+        ("changed_paths", b"[1]", MALFORMED),
+        ("changed_paths", b'["a\\u0000b"]', MALFORMED),
         (
             "changed_paths",
             json.dumps([f"{i}" for i in range(MAX_PATHS + 1)]).encode(),
+            OVERSIZED,
         ),
         (
             "changed_paths",
-            json.dumps(["x" * 255] * (MAX_PATH_BYTES // 255 + 1)).encode(),
+            json.dumps(
+                [f"{i:05d}" + "x" * 250 for i in range(MAX_PATH_BYTES // 255 + 1)]
+            ).encode(),
+            OVERSIZED,
         ),
-        ("diff_stat", b"\x00"),
-        ("diff_stat", b"x" * 4097),
-        ("inspection", b"{}"),
-        ("inspection", manifest(complete="yes")),
-        ("inspection", manifest(extra=1)),
-        ("inspection", manifest(prepared_digest="md5:1")),
+        ("diff_stat", b"\x00", MALFORMED),
+        ("diff_stat", b"x" * 4097, MALFORMED),
+        ("inspection", b"{}", MALFORMED),
+        ("inspection", manifest(complete="yes"), MALFORMED),
+        ("inspection", manifest(extra=1), MALFORMED),
+        ("inspection", manifest(prepared_digest="md5:1"), MALFORMED),
     ],
 )
-def test_capture_parsers(capture: Capture, output: bytes) -> None:
+def test_capture_parsers(capture: Capture, output: bytes, code: str) -> None:
     with pytest.raises(ExecutorError) as raised:
         parsed(Captures(), capture, output, False, Phase.INSPECT)
 
     assert raised.value.failure_class.value == "artifact_invalid"
+    assert raised.value.code == code
 
 
 def test_an_overflowing_capture_is_refused() -> None:

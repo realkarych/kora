@@ -176,18 +176,20 @@ def unbound_revision(
 
 
 @pytest.mark.parametrize(
-    "tamper",
+    ("tamper", "code"),
     [
-        truncated,
-        missing_intermediate,
-        corrupt_blob,
-        corrupt_digest,
-        false_completeness,
-        malformed_record,
-        unbound_revision,
+        (truncated, "content_index_digest_mismatch"),
+        (missing_intermediate, "content_index_incomplete"),
+        (corrupt_blob, "content_digest_mismatch"),
+        (corrupt_digest, "content_digest_mismatch"),
+        (false_completeness, "content_index_incomplete"),
+        (malformed_record, "content_index_malformed"),
+        (unbound_revision, "content_index_unbound"),
     ],
 )
-def test_scanner_refuses_tampered_index(kora_capture: Capture, tamper: Tamper) -> None:
+def test_scanner_refuses_tampered_index(
+    kora_capture: Capture, tamper: Tamper, code: str
+) -> None:
     records, contents = history()
     index, inspection, reachable = tamper(records, contents)
     source = MemorySource(index, contents, reachable)
@@ -196,6 +198,7 @@ def test_scanner_refuses_tampered_index(kora_capture: Capture, tamper: Tamper) -
         scanned(kora_capture, source, inspection)
 
     assert raised.value.failure_class is ErrorClass.ARTIFACT_INVALID
+    assert raised.value.code == code
 
 
 def test_a_secret_across_a_chunk_boundary_is_found(kora_capture: Capture) -> None:

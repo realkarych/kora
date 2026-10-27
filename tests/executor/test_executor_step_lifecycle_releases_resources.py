@@ -18,6 +18,8 @@ FAST: ProcessLauncher = ProcessLauncher(
     kill_grace_ns=200_000_000, eof_bound_ns=400_000_000
 )
 REPORT_PID: str = "import os, sys, time\nprint(os.getpid(), flush=True)\n"
+TIMED_OUT_STEP_NS: int = 300_000_000
+EXITING_STEP_NS: int = 30_000_000_000
 
 
 def descriptors() -> int:
@@ -57,24 +59,25 @@ def pid_of(output: bytes) -> int:
 
 
 @pytest.mark.parametrize(
-    ("code", "ending"),
+    ("code", "timeout_ns", "ending"),
     [
-        (REPORT_PID + "time.sleep(30)", Ending.TIMED_OUT),
-        (REPORT_PID + "sys.exit(3)", Ending.EXITED),
+        (REPORT_PID + "time.sleep(30)", TIMED_OUT_STEP_NS, Ending.TIMED_OUT),
+        (REPORT_PID + "sys.exit(3)", EXITING_STEP_NS, Ending.EXITED),
         (
             REPORT_PID
             + "import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
             + "time.sleep(30)",
+            TIMED_OUT_STEP_NS,
             Ending.TIMED_OUT,
         ),
     ],
 )
 def test_executor_step_lifecycle_releases_resources(
-    tmp_path: Path, code: str, ending: Ending
+    tmp_path: Path, code: str, timeout_ns: int, ending: Ending
 ) -> None:
     baseline = descriptors()
 
-    outcome = asyncio.run(FAST.run(spec(code, 300_000_000, tmp_path)))
+    outcome = asyncio.run(FAST.run(spec(code, timeout_ns, tmp_path)))
 
     pid = pid_of(outcome.stdout)
     assert outcome.ending is ending

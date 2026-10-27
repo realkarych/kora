@@ -14,7 +14,7 @@ from kora.db.connection import (
 )
 from kora.db.migrations import upgrade_database
 from kora.observability import Level, LoggingSettings
-from tests.db.closing import ShutdownDuringClose, narrow_database, until
+from tests.db.closing import narrow_database, until
 from tests.db.seed import Seeder, seed_predecessor
 from tests.db.test_pricing_migration import retained_index_progress, wait_for_index
 from tests.observability.conftest import Configure, Pipe
@@ -297,30 +297,6 @@ async def test_a_close_past_its_deadline_keeps_each_unit_outcome_and_records_onc
 async def write_one(database: Database) -> None:
     async with database.transaction() as connection:
         await Seeder(connection).namespace("before-close")
-
-
-@pytest.mark.parametrize(
-    "close_started", [True, False], ids=["close-waiting", "close-not-started"]
-)
-def test_a_close_cancelled_by_loop_shutdown_records_nothing(
-    configure: Configure,
-    pipe: Pipe,
-    database_settings: DatabaseSettings,
-    close_started: bool,
-) -> None:
-    settings = LoggingSettings(
-        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-    )
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
-    shutdown = ShutdownDuringClose(database_settings)
-
-    asyncio.run(shutdown.leave_a_close_pending(close_started))
-    diagnostics.shutdown()
-    finished_output(pipe)
-
-    assert db_events(pipe) == []
-    assert shutdown.lifecycle_after_shutdown() is Lifecycle.CLOSED
 
 
 @pytest.mark.asyncio

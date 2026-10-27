@@ -1,9 +1,11 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import Select, exists, select, text, true, update
+from sqlalchemy import event, text, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, Dialect
 from kora.db.reads import (
@@ -25,13 +27,7 @@ from kora.db.reads import (
     token_by_digest,
     worker_by_id,
 )
-from kora.db.tables import (
-    FINISHED_NODE_STATUSES,
-    api_token,
-    event,
-    node_instance,
-    run,
-)
+from kora.db.tables import api_token, node_instance
 from tests.db.seed import START, Seeder
 
 MARKED_RUNS: int = 1000
@@ -45,16 +41,36 @@ FINISH_INDEX: str = "ix_node_instance_run_top_level"
 SWEEP_INDEX: str = "ix_run_needs_scheduling"
 
 
-async def query_plan(database: Database, statement: Select[object]) -> str:
+async def executed_plan(
+    database: Database, read: Callable[[AsyncConnection], Awaitable[object]]
+) -> str:
     prefix = "EXPLAIN QUERY PLAN " if database.dialect is Dialect.SQLITE else "EXPLAIN "
-    compiled = statement.compile(
-        dialect=database.reader_engine.dialect, compile_kwargs={"literal_binds": True}
-    )
+    executed: list[tuple[str, tuple[object, ...]]] = []
+
+    def capture(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: tuple[object, ...],
+        *arguments: object,
+    ) -> None:
+        executed.append((statement, parameters))
+
     async with database.read_transaction() as connection:
         if database.dialect is Dialect.POSTGRESQL:
             await connection.execute(text("ANALYZE"))
-        rows = (await connection.execute(text(prefix + str(compiled)))).all()
+        event.listen(connection.sync_connection, "before_cursor_execute", capture)
+        await read(connection)
+        event.remove(connection.sync_connection, "before_cursor_execute", capture)
+        [(statement, parameters)] = executed
+        rows = (await connection.exec_driver_sql(prefix + statement, parameters)).all()
     return "\n".join(" ".join(str(value) for value in row) for row in rows)
+
+
+def ceiling_bound(database: Database, ceiling: str) -> str:
+    if database.dialect is Dialect.SQLITE:
+        return f"{SWEEP_INDEX} (id<?)"
+    return f"Index Cond: (id <= '{ceiling}'"
 
 
 async def seeded_graph(database: Database) -> tuple[str, str, str]:
@@ -89,12 +105,9 @@ async def test_marked_run_sweep_wraps_behind_the_cursor(database: Database) -> N
         visited.extend(page.run_ids)
     async with database.read_transaction() as connection:
         after_wrap = await sweep.next_page(connection)
-    plan = await query_plan(
+    plan = await executed_plan(
         database,
-        select(run.c.id)
-        .where(run.c.needs_scheduling == true(), run.c.id <= marked[-1])
-        .order_by(run.c.id)
-        .limit(PAGE_SIZE),
+        lambda connection: marked_run_page(connection, None, marked[-1], PAGE_SIZE),
     )
 
     assert late_id is not None
@@ -104,10 +117,7 @@ async def test_marked_run_sweep_wraps_behind_the_cursor(database: Database) -> N
     assert after_wrap.wrapped
     assert after_wrap.run_ids[0] == late_id
     assert SWEEP_INDEX in plan
-    assert any(
-        "id<" in line or "id <" in line or "id)::text <" in line
-        for line in plan.splitlines()
-    )
+    assert ceiling_bound(database, marked[-1]) in plan
     with pytest.raises(PageSizeError):
         MarkedRunSweep(0)
 
@@ -186,15 +196,9 @@ async def test_run_finish_check_uses_top_level_instances(database: Database) -> 
         unfinished_after_change = await has_unfinished_top_level_instance(
             connection, run_id
         )
-    plan = await query_plan(
+    plan = await executed_plan(
         database,
-        select(
-            exists().where(
-                node_instance.c.run_id == run_id,
-                node_instance.c.top_level.is_(True),
-                node_instance.c.status.not_in(FINISHED_NODE_STATUSES),
-            )
-        ),
+        lambda connection: has_unfinished_top_level_instance(connection, run_id),
     )
 
     assert finished_with_live_body
@@ -323,12 +327,9 @@ async def test_registry_reads_are_namespace_scoped(database: Database) -> None:
             await run_by_id(connection, namespace_id, "0" * 26),
             await worker_by_id(connection, "worker-2"),
         )
-    plan = await query_plan(
+    plan = await executed_plan(
         database,
-        select(event.c.id)
-        .where(event.c.namespace_id == namespace_id, event.c.run_id == run_id)
-        .order_by(event.c.id)
-        .limit(100),
+        lambda connection: events_of_run(connection, namespace_id, run_id, None, 100),
     )
 
     assert own[0] is not None

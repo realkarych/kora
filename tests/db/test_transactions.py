@@ -7,6 +7,15 @@ from sqlalchemy import Connection, event, select, text
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.util import await_
 
+from kora.conformance.capture import captured
+from kora.db import (
+    CLOSE_TIMED_OUT,
+    DB_COMPONENT,
+    MIGRATION_FAILED,
+    MIGRATION_FINISHED,
+    MIGRATION_STARTED,
+    TRANSACTION_FAILED,
+)
 from kora.db.connection import (
     SQLITE_READERS,
     Database,
@@ -16,6 +25,7 @@ from kora.db.connection import (
     Lifecycle,
 )
 from kora.db.tables import namespace
+from kora.observability import Level, LoggingSettings
 from tests.db.closing import (
     CLOSED_BEFORE_FINISHING,
     REFUSAL_DEADLINE_SECONDS,
@@ -30,8 +40,22 @@ from tests.db.closing import (
     until,
     write,
 )
-from tests.db.seed import Seeder
+from tests.db.seed import FakeClock, Seeder
 
+DB_EVENTS: frozenset[str] = frozenset(
+    spec.name
+    for spec in (
+        MIGRATION_STARTED,
+        MIGRATION_FINISHED,
+        MIGRATION_FAILED,
+        TRANSACTION_FAILED,
+        CLOSE_TIMED_OUT,
+    )
+)
+DB_DEBUG: LoggingSettings = LoggingSettings(
+    level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
+)
+INSTANCE_ID: str = "transactions-test"
 SLOW_SQLITE_STATEMENT: str = (
     "WITH RECURSIVE counter(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM counter "
     "WHERE n < 30000000) SELECT count(*) FROM counter"
@@ -490,10 +514,13 @@ def test_close_cancelled_by_loop_shutdown_still_releases_every_connection(
 ) -> None:
     shutdown = ShutdownDuringClose(database_settings)
 
-    asyncio.run(shutdown.leave_a_close_pending(close_started))
+    with captured(DB_COMPONENT, DB_DEBUG, INSTANCE_ID, FakeClock().now) as capture:
+        asyncio.run(shutdown.leave_a_close_pending(close_started))
+    records = capture.finish()
     written = asyncio.run(shutdown.names_written())
     companions = sqlite_companions(shutdown.database)
 
+    assert [record for record in records if record["event"] in DB_EVENTS] == []
     assert shutdown.lifecycle_after_shutdown() is Lifecycle.CLOSED
     assert shutdown.ledger.closed == shutdown.ledger.opened
     assert shutdown.ledger.closed_while_checked_out == 0
