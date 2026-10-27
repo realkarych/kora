@@ -1116,6 +1116,12 @@ def write(root: Path, relative: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def replaced(text: str, target: str, replacement: str) -> str:
+    result = text.replace(target, replacement)
+    assert result != text, target
+    return result
+
+
 def copy_configuration(root: Path) -> None:
     for relative in (
         PYPROJECT,
@@ -1191,20 +1197,6 @@ def test_adverse_fixture_allowance_is_confined(tmp_path: Path) -> None:
         "dynamic access to skip_fixture" in finding for finding in results["dynamic"]
     )
     assert allowed == []
-
-
-def test_adverse_fixture_ruff_allowance_cannot_expand(tmp_path: Path) -> None:
-    copy_configuration(tmp_path)
-    source = (tmp_path / PYPROJECT).read_text()
-    source = source.replace(
-        "[tool.ruff.lint.per-file-ignores]",
-        '[tool.ruff.lint.per-file-ignores]\n"tests/other.py" = ["TID251"]',
-    )
-    write(tmp_path, PYPROJECT, source)
-
-    violations = configuration_violations(tmp_path)
-
-    assert "pyproject.toml:1: [tool.ruff] differs from the recorded table" in violations
 
 
 def test_check_configuration_is_not_weakened() -> None:
@@ -1580,20 +1572,23 @@ def test_checker_allows_shebangs_and_listed_generated_files(tmp_path: Path) -> N
 def test_checker_flags_weakened_configuration(tmp_path: Path) -> None:
     copy_configuration(tmp_path)
     pyproject = (tmp_path / PYPROJECT).read_text(encoding="utf-8")
-    pyproject = pyproject.replace('    "BLE",\n', "")
-    pyproject = pyproject.replace(
+    pyproject = replaced(pyproject, '    "BLE",\n', "")
+    pyproject = replaced(
+        pyproject,
         "[tool.ruff.lint.per-file-ignores]\n",
         '[tool.ruff.lint.extend-per-file-ignores]\n"tests/**" = ["BLE001"]\n\n'
         "[tool.ruff.lint.per-file-ignores]\n",
     )
-    pyproject = pyproject.replace(
+    pyproject = replaced(
+        pyproject,
         'filterwarnings = ["error"]\n',
         'filterwarnings = ["error", "ignore::DeprecationWarning"]\n',
     )
-    pyproject = pyproject.replace(
-        '    "--strict-markers",\n', '    "-p",\n    "no:warnings",\n'
+    pyproject = replaced(
+        pyproject, '    "--strict-markers",\n', '    "-p",\n    "no:warnings",\n'
     )
-    pyproject = pyproject.replace(
+    pyproject = replaced(
+        pyproject,
         'typeCheckingMode = "strict"\nenableTypeIgnoreComments = false\n',
         'typeCheckingMode = "basic"\nenableTypeIgnoreComments = true\n',
     )
@@ -1684,6 +1679,10 @@ def test_replacement_guard_accepts_only_the_designated_direct_call(
     assert violations == []
 
 
+def unapproved_gate_reference(line: int) -> str:
+    return f"{REPLACEMENT_GATE}:{line}: unapproved process replacement"
+
+
 def test_replacement_guard_refuses_missing_and_changed_call_sites(
     tmp_path: Path,
 ) -> None:
@@ -1717,6 +1716,25 @@ def test_replacement_guard_refuses_missing_and_changed_call_sites(
         "other_exec": "import os\ndef execute_workload() -> None:\n"
         "    os.execve('x', (), {})\ndef other() -> None:\n    os.execl('x', 'x')\n",
     }
+    missing = f"{REPLACEMENT_GATE}:1: fixed launch gate is missing"
+    count = f"{REPLACEMENT_GATE}:1: fixed os.execve call count is not one"
+    expected = {
+        "missing": [missing, count],
+        "zero": [count],
+        "twice": [count],
+        "wrong_function": [count, unapproved_gate_reference(3)],
+        "wrong_api": [count, unapproved_gate_reference(3)],
+        "module_alias": [count, unapproved_gate_reference(3)],
+        "import_alias": [count, unapproved_gate_reference(1)],
+        "value_alias": [count, unapproved_gate_reference(2)],
+        "default": [count, unapproved_gate_reference(2)],
+        "decorator": [count, unapproved_gate_reference(2)],
+        "dynamic": [count, unapproved_gate_reference(3)],
+        "dictionary": [count, unapproved_gate_reference(3)],
+        "rebound": [count, unapproved_gate_reference(4)],
+        "argument_shadow": [count, unapproved_gate_reference(3)],
+        "other_exec": [unapproved_gate_reference(5)],
+    }
     roots = {name: tmp_path / name for name in cases}
     for name, source in cases.items():
         roots[name].mkdir()
@@ -1725,31 +1743,37 @@ def test_replacement_guard_refuses_missing_and_changed_call_sites(
 
     results = {name: replacement_violations(root) for name, root in roots.items()}
 
-    assert all(results.values()), results
+    assert results == expected
 
 
 def test_replacement_guard_refuses_the_same_call_in_another_file(
     tmp_path: Path,
 ) -> None:
     source = "import os\ndef execute_workload() -> None:\n    os.execve('x', (), {})\n"
+    write(tmp_path, REPLACEMENT_GATE, source)
     write(tmp_path, "src/kora/runner/other.py", source)
 
     violations = replacement_violations(tmp_path)
 
-    assert len(violations) >= 2
+    assert violations == ["src/kora/runner/other.py:3: unapproved process replacement"]
 
 
 def test_gate_rule_cannot_expand_the_pinned_ruff_configuration(tmp_path: Path) -> None:
     original = (REPOSITORY_ROOT / PYPROJECT).read_text(encoding="utf-8")
     allowance = '"src/kora/runner/gate.py" = ["S606"]'
     variations = {
-        "path": original.replace(allowance, '"src/kora/runner/*.py" = ["S606"]'),
-        "extra_rule": original.replace(allowance, allowance[:-1] + ', "S603"]'),
-        "global": original.replace(
-            "[tool.ruff.lint]\n", '[tool.ruff.lint]\nignore = ["S606"]\n'
+        "path": replaced(original, allowance, '"src/kora/runner/*.py" = ["S606"]'),
+        "extra_rule": replaced(original, allowance, allowance[:-1] + ', "S603"]'),
+        "global": replaced(
+            original, "[tool.ruff.lint]\n", '[tool.ruff.lint]\nignore = ["S606"]\n'
         ),
         "extend": original
         + '\n[tool.ruff.lint.extend-per-file-ignores]\n"*.py" = ["S606"]\n',
+        "adverse_fixture_tid251_path": replaced(
+            original,
+            "[tool.ruff.lint.per-file-ignores]\n",
+            '[tool.ruff.lint.per-file-ignores]\n"tests/other.py" = ["TID251"]\n',
+        ),
     }
     for name, source in variations.items():
         copy_configuration(tmp_path / name)

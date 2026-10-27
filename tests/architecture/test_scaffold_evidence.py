@@ -107,10 +107,18 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    "corruption", ["missing", "failed", "skipped", "mismatch", "overlap", "full"]
+    ("corruption", "match"),
+    [
+        ("missing", "artifact has unexpected file coverage"),
+        ("failed", "execution did not succeed"),
+        ("skipped", "test did not pass"),
+        ("mismatch", "ordinary JUnit differs"),
+        ("overlap", "ordinary cohorts overlap"),
+        ("full", "full collection differs"),
+    ],
 )
 def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
-    tmp_path: Path, corruption: str
+    tmp_path: Path, corruption: str, match: str
 ) -> None:
     complete_evidence(tmp_path)
     directory = tmp_path / "scaffold-tests-macos-15-3.11.17-conformance"
@@ -142,26 +150,26 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
         changed.append("full.collection")
     rehash(directory, changed)
 
-    with pytest.raises((EvidenceFailure, FileNotFoundError)):
+    with pytest.raises(EvidenceFailure, match=match):
         verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
 
 @pytest.mark.parametrize(
-    "corruption",
+    ("corruption", "failure", "match"),
     [
-        "missing",
-        "extra",
-        "stale",
-        "hash",
-        "failed",
-        "skipped",
-        "execution",
-        "union",
-        "overlap",
+        ("missing", FileNotFoundError, "receipt.json"),
+        ("extra", EvidenceFailure, "exactly nine lanes"),
+        ("stale", EvidenceFailure, "mismatched provenance"),
+        ("hash", EvidenceFailure, "hash differs from its receipt"),
+        ("failed", EvidenceFailure, "execution did not succeed"),
+        ("skipped", EvidenceFailure, "test did not pass"),
+        ("execution", EvidenceFailure, "JUnit differs"),
+        ("union", EvidenceFailure, "do not partition"),
+        ("overlap", EvidenceFailure, "do not partition"),
     ],
 )
 def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
-    tmp_path: Path, corruption: str
+    tmp_path: Path, corruption: str, failure: type[Exception], match: str
 ) -> None:
     complete_evidence(tmp_path)
     directory = tmp_path / "scaffold-tests-macos-15-3.11.17-storage"
@@ -225,14 +233,7 @@ def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
             data["files"] = files
             receipt.write_text(json.dumps(data))
 
-    if corruption in {"union", "overlap"}:
-        match = "do not partition"
-    elif corruption == "execution":
-        match = "JUnit differs"
-    else:
-        match = None
-
-    with pytest.raises((EvidenceFailure, FileNotFoundError), match=match):
+    with pytest.raises(failure, match=match):
         verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
 

@@ -324,23 +324,69 @@ def test_ordinary_shell_requires_all_regular_nonempty_evidence(
     assert (result.returncode == 0) is (invalid is None)
 
 
-@pytest.mark.parametrize("lane", [*LANE_OUTCOMES, "unknown"])
-@pytest.mark.parametrize("field", [None, *COMPLETION_FIELDS])
-@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled", "skipped", ""])
+LaneCompletionCase = tuple[str, dict[str, str], bool]
+
+
+def lane_completion_cases() -> dict[str, LaneCompletionCase]:
+    cases: dict[str, LaneCompletionCase] = {}
+    for lane in LANE_OUTCOMES:
+        complete = expected_outcomes(lane)
+        cases[f"{lane}-complete"] = (lane, complete, True)
+        cases[f"{lane}-workflow-cancelled"] = (
+            lane,
+            {**complete, "WORKFLOW_CANCELLED": "true"},
+            False,
+        )
+        for field, expected in complete.items():
+            for outcome in ("success", "failure", "cancelled", "skipped", ""):
+                if outcome != expected:
+                    cases[f"{lane}-{field}-{outcome or 'empty'}"] = (
+                        lane,
+                        {**complete, field: outcome},
+                        False,
+                    )
+    cases["unknown-conformance-profile"] = (
+        "unknown",
+        expected_outcomes("conformance"),
+        False,
+    )
+    cases["unknown-reduced-profile"] = (
+        "unknown",
+        expected_outcomes("remainder"),
+        False,
+    )
+    cases["empty-conformance-profile"] = ("", expected_outcomes("conformance"), False)
+    return cases
+
+
+LANE_COMPLETION_CASES = lane_completion_cases()
+
+
+def test_lane_completion_gate_always_runs_without_workflow_expressions() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+
+    gate = table(cast(list[object], job["steps"])[-1])
+
+    assert gate["if"] == "${{ always() }}"
+    assert "${{" not in str(gate["run"])
+
+
+@pytest.mark.parametrize(
+    ("lane", "outcomes", "passes"),
+    list(LANE_COMPLETION_CASES.values()),
+    ids=list(LANE_COMPLETION_CASES),
+)
 def test_lane_completion_rejects_every_incomplete_outcome(
-    lane: str, field: str | None, outcome: str
+    lane: str, outcomes: dict[str, str], passes: bool
 ) -> None:
     job = table(workflow_jobs()["scaffold-tests"])
     gate = table(cast(list[object], job["steps"])[-1])
-    expected = expected_outcomes(lane if lane in LANE_OUTCOMES else "conformance")
     environment = {
         **os.environ,
-        **expected,
         "WORKFLOW_CANCELLED": "false",
+        **outcomes,
         "KORA_SCAFFOLD_LANE": lane,
     }
-    if field is not None:
-        environment[field] = outcome
 
     result = subprocess.run(
         ["/bin/bash", "-e", "-c", str(gate["run"])],
@@ -350,8 +396,4 @@ def test_lane_completion_rejects_every_incomplete_outcome(
         timeout=5,
     )
 
-    assert gate["if"] == "${{ always() }}"
-    assert "${{" not in str(gate["run"])
-    assert (result.returncode == 0) is (
-        lane in LANE_OUTCOMES and (field is None or outcome == expected[field])
-    )
+    assert (result.returncode == 0) is passes

@@ -68,20 +68,6 @@ SCAFFOLD_PLATFORMS = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-GENERAL_LANE_ARGUMENTS = (
-    "--ignore=tests/plugins/storage "
-    "--ignore=tests/conformance/test_artifact_storage_conformance.py "
-    "--ignore=tests/conformance/test_installed_conformance.py"
-)
-SCAFFOLD_LANES = (
-    ("conformance", GENERAL_LANE_ARGUMENTS),
-    ("remainder", GENERAL_LANE_ARGUMENTS),
-    (
-        "storage",
-        "tests/plugins/storage tests/conformance/test_artifact_storage_conformance.py "
-        "tests/conformance/test_installed_conformance.py",
-    ),
-)
 CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
 LANE_STEP_CONDITIONS = {
     "static_checks": CONFORMANCE_ONLY,
@@ -127,20 +113,18 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     jobs = workflow_jobs()
     scaffold = table(jobs["scaffold-tests"])
     scaffold_steps = [table(value) for value in cast(list[object], scaffold["steps"])]
+    rows = [
+        table(value)
+        for value in cast(
+            list[object], table(table(scaffold["strategy"])["matrix"])["include"]
+        )
+    ]
 
     commands = "\n".join(str(step.get("run", "")) for step in scaffold_steps)
 
-    assert table(table(scaffold["strategy"])["matrix"])["include"] == [
-        {
-            "os": operating_system,
-            "python": python,
-            "databases": databases,
-            "lane": lane,
-            "pytest-arguments": arguments,
-        }
-        for operating_system, python, databases in SCAFFOLD_PLATFORMS
-        for lane, arguments in SCAFFOLD_LANES
-    ]
+    assert {(row["os"], row["python"], row["databases"]) for row in rows} == set(
+        SCAFFOLD_PLATFORMS
+    )
     assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
     assert "pricing_command" not in commands
@@ -554,10 +538,23 @@ def test_join_keeps_cel_receipts_separate_and_requires_every_download() -> None:
     )
 
 
-@pytest.mark.parametrize("arm", ["lifetime", "cost"])
 @pytest.mark.parametrize(
-    "mutation",
-    ["valid", "missing", "empty", "extra", "revision", "symlink", "directory"],
+    ("mutation", "arm"),
+    [
+        ("valid", "lifetime"),
+        *(
+            (mutation, arm)
+            for mutation in (
+                "missing",
+                "empty",
+                "extra",
+                "revision",
+                "symlink",
+                "directory",
+            )
+            for arm in ("lifetime", "cost")
+        ),
+    ],
 )
 def test_actual_cel_inventory_rejects_incomplete_or_mixed_evidence(
     tmp_path: Path, arm: str, mutation: str

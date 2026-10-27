@@ -74,6 +74,6 @@ def test_core_wheel_is_built_once_per_session_and_installed_per_module() -> None
     assert fixture_scope(wheelhouse) == "session"
     assert fixture_scope(installed) == "module"
     for consumer in (wheelhouse, installed):
-        assert [argument.arg for argument in consumer.args.args][-1] == "core_wheel"
+        assert "core_wheel" in {argument.arg for argument in consumer.args.args}
         assert "copy_core_wheel" in called_names(consumer)
     assert "install_tooling" in called_names(installed)

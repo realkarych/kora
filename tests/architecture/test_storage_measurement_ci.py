@@ -187,7 +187,7 @@ def test_storage_required_gate_keeps_failed_dependencies_and_evidence_visible() 
         (field, outcome)
         for field in SUCCESS
         if field != "WORKFLOW_CANCELLED"
-        for outcome in ("success", "failure", "cancelled", "skipped", "")
+        for outcome in ("failure", "cancelled", "skipped", "")
     ]
     + [
         ("WORKFLOW_CANCELLED", "false"),

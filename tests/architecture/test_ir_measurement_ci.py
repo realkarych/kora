@@ -196,11 +196,12 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
 
 @pytest.mark.parametrize(
     ("field", "outcome"),
-    [
+    [("WORKFLOW_CANCELLED", "false")]
+    + [
         (field, outcome)
         for field in SUCCESS
         if field != "WORKFLOW_CANCELLED"
-        for outcome in (SUCCESS[field], "failure", "cancelled", "skipped", "", "false")
+        for outcome in ("failure", "cancelled", "skipped", "", "false")
     ]
     + [("WORKFLOW_CANCELLED", "true"), ("WORKFLOW_CANCELLED", "")],
 )
@@ -259,7 +260,6 @@ def test_ir_literal_selections_preserve_the_default_node_union() -> None:
     assert frozenset(default_nodes) == expected.nodes
     assert len(default_nodes) == len(expected.nodes)
     assert all(code == 0 for code, _ in collected)
-    assert [len(nodes) for _, nodes in collected] == [332, 11, 13, 1, 1, 1]
     assert [frozenset(nodes) for _, nodes in collected] == [
         shard.nodes for shard in shards
     ]
