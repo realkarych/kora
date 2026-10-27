@@ -41,6 +41,12 @@ class ProbeClock(SystemClock):
             )
             waiter.add_done_callback(lambda _, timer=handle: timer.cancel())
 
+    def advance(self, nanoseconds: int) -> None:
+        self.instant += nanoseconds
+        for waiter, deadline in tuple(self.waiters.items()):
+            if deadline <= self.instant and not waiter.done():
+                waiter.set_result(None)
+
     @staticmethod
     def wake(waiter: asyncio.Future[None]) -> None:
         if not waiter.done():

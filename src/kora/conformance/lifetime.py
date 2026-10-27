@@ -211,6 +211,7 @@ class ParentLifetime:
         identity_source: Callable[[], str] = new_operation_id,
         launcher: IOHelperLauncher | None = None,
         recovery: CleanupReference | None = None,
+        await_command_outcome: bool = False,
     ) -> None:
         self.limits = limits if limits is not None else LifetimeLimits()
         self.clock = clock if clock is not None else SystemClock()
@@ -234,6 +235,8 @@ class ParentLifetime:
         self.generation = 1
         self.revision = 1
         self.original_outcome = OriginalOutcome.COMPLETE
+        self._await_command_outcome = await_command_outcome
+        self._command_outcome_pending = await_command_outcome
         self.admission_open = True
         self.bootstrap_succeeded = False
         self.records: dict[ResourceId, ResourceRecord] = {}
@@ -1004,6 +1007,17 @@ class ParentLifetime:
                 "cancelled", LifetimeReason.CANCELLED, len(self.records)
             )
 
+    def finalize_command_outcome(self, outcome: OriginalOutcome) -> None:
+        if self.invocation_cleanup.result.done():
+            raise RuntimeError("command_outcome_already_closed")
+        self.set_original_outcome(outcome)
+        self._command_outcome_pending = False
+        self.cleanup_changed.set()
+
+    def retain_unverified_resources(self) -> None:
+        self.invocation_cleanup.failed = True
+        self.cleanup_changed.set()
+
     def request_close(
         self, resource_id: ResourceId | None
     ) -> asyncio.Future[ClosureReport]:
@@ -1184,6 +1198,10 @@ class ParentLifetime:
         await self._persist(control.final)
         control.published = True
 
+    async def _publish_command_outcome(self, control: CleanupControl) -> None:
+        await self._persist(control.final)
+        control.published = False
+
     async def _remove_cleanup_root(self, control: CleanupControl) -> None:
         root = self.mutations.root
         directory = self.mutations.directory
@@ -1246,6 +1264,12 @@ class ParentLifetime:
     def _finish_cleanup(
         self, resource_id: ResourceId | None, control: CleanupControl, *, safe: bool
     ) -> None:
+        if resource_id is None and self._command_outcome_pending:
+            if self.clock.monotonic_ns() < control.final:
+                control.failed = control.failed or not safe
+                return
+            self.finalize_command_outcome(OriginalOutcome.FAILED)
+            safe = False
         records = [
             record for key, record in self.records.items() if key in control.selected
         ]
@@ -1321,6 +1345,23 @@ class ParentLifetime:
         if self.clock.monotonic_ns() >= control.final:
             self._finish_cleanup(resource_id, control, safe=False)
             return
+        snapshot = self.mutations.snapshot
+        directory = self.mutations.directory
+        if (
+            resource_id is None
+            and self._await_command_outcome
+            and not self._command_outcome_pending
+            and not self.mutations.failed
+            and snapshot is not None
+            and snapshot.original_outcome is not self.original_outcome
+            and directory is not None
+            and not directory.closed
+        ):
+            if self.cleanup_effect is None:
+                self._start_cleanup_effect(
+                    control, None, self._publish_command_outcome(control)
+                )
+            return
         if pending or not helpers_settled or not settled:
             return
         inventory_ready = (
@@ -1364,6 +1405,8 @@ class ParentLifetime:
                         },
                     }
                 )
+        if resource_id is None and self._command_outcome_pending:
+            return
         if not control.published:
             self._start_cleanup_effect(
                 control, resource_id, self._publish_cleanup(control)

@@ -42,11 +42,7 @@ COMPLETION_FIELDS = (
 LANE_OUTCOMES = {
     "conformance": {},
     "remainder": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
-    "storage": {
-        "FRONTEND_OUTCOME": "skipped",
-        "STATIC_OUTCOME": "skipped",
-        "DISTRIBUTIONS_OUTCOME": "skipped",
-    },
+    "storage": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
 }
 
 
@@ -103,7 +99,8 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
     assert tuple(first) == FIRST_MODULES
     assert (
         "second=(tests/conformance "
-        "--ignore=tests/conformance/test_artifact_storage_conformance.py)\n"
+        "--ignore=tests/conformance/test_artifact_storage_conformance.py "
+        "--ignore=tests/conformance/test_installed_conformance.py)\n"
         'for path in "${first[@]}"; do\n'
         '  second+=("--ignore=$path")\ndone\n'
         "measurements=(tests/measurements)\n"

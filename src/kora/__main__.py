@@ -27,6 +27,7 @@ from kora.cli import (
     THREAD_FAILED,
     build_app,
 )
+from kora.cli.conformance import CONFORMANCE_FINISHED, CommandResult
 from kora.cli.plugins import (
     LISTING_FINISHED,
     LISTING_RETAINED,
@@ -527,6 +528,75 @@ class InstalledPluginDiscovery:
         owner.release(started + 14_000_000_000)
 
 
+def conformance(
+    diagnostics: ProcessDiagnostics,
+    protocol: str,
+    name: str,
+    config: str | None,
+    fixtures: str | None,
+    fixture_data: str | None,
+) -> None:
+    from kora.protocols.lifetime import OriginalOutcome
+
+    async def invoke() -> CommandResult:
+        try:
+            from kora.conformance.command import ConformanceCommand, cleanup_command
+            from kora.conformance.result import ChildInput, InputFiles
+        except ImportError:
+            return CommandResult(outcome=OriginalOutcome.FAILED, reason="refused")
+        if protocol == "cleanup":
+            if any(value is not None for value in (config, fixtures, fixture_data)):
+                return CommandResult(outcome=OriginalOutcome.FAILED, reason="refused")
+            return await cleanup_command(name)
+        try:
+            request = ChildInput.model_validate(
+                {
+                    "protocol": protocol,
+                    "name": name,
+                    "fixtures": fixtures,
+                    "files": InputFiles(
+                        configuration=None
+                        if config is None
+                        else os.path.abspath(config),
+                        fixture_data=None
+                        if fixture_data is None
+                        else os.path.abspath(fixture_data),
+                    ),
+                }
+            )
+        except ValidationError:
+            return CommandResult(outcome=OriginalOutcome.FAILED, reason="refused")
+        return await ConformanceCommand(diagnostics).run(request)
+
+    async def interrupted() -> CommandResult:
+        loop = asyncio.get_running_loop()
+        task = asyncio.create_task(invoke())
+        previous = {
+            value: signal.getsignal(value) for value in (signal.SIGINT, signal.SIGTERM)
+        }
+        try:
+            for value in previous:
+                loop.add_signal_handler(value, task.cancel)
+            try:
+                return await task
+            except asyncio.CancelledError:
+                return CommandResult(
+                    outcome=OriginalOutcome.CANCELLED, reason="cancelled"
+                )
+        finally:
+            for value, handler in previous.items():
+                loop.remove_signal_handler(value)
+                signal.signal(value, handler)
+
+    result = asyncio.run(interrupted())
+    diagnostics.logger(CLI_COMPONENT).emit(
+        CONFORMANCE_FINISHED,
+        **result.model_dump(exclude={"cleanup"}, exclude_none=True, mode="json"),
+    )
+    typer.echo(result.model_dump_json())
+    raise typer.Exit(result.exit_code)
+
+
 def compose_application(
     environment: Mapping[str, str], diagnostics: ProcessDiagnostics
 ) -> typer.Typer:
@@ -535,6 +605,19 @@ def compose_application(
     app.add_typer(
         build_plugins_app(InstalledPluginDiscovery(diagnostics)), name="plugins"
     )
+
+    @app.command(
+        name="conformance", help="Check an installed provider or resume local cleanup."
+    )
+    def check_conformance(
+        protocol: str,
+        name: str,
+        config: str | None = typer.Option(None, "--config"),
+        fixtures: str | None = typer.Option(None, "--fixtures"),
+        fixture_data: str | None = typer.Option(None, "--fixture-data"),
+    ) -> None:
+        conformance(diagnostics, protocol, name, config, fixtures, fixture_data)
+
     return app
 
 
@@ -621,6 +704,7 @@ def main(
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     environment = os.environ if environ is None else environ
+    CATALOG.register_component("conformance.lifetime")
     try:
         settings = read_logging_settings(environment, CATALOG.components())
     except LoggingConfigurationError as error:

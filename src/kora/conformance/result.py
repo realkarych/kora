@@ -8,16 +8,22 @@ from kora.protocols.common import BoundaryModel
 from kora.protocols.metadata import ProtocolName
 
 
+class InputFiles(BoundaryModel):
+    configuration: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+    fixture_data: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+
+
 class ChildInput(BoundaryModel):
     protocol: ProtocolName
     name: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{0,62}$")]
     fixtures: Annotated[
         str, Field(max_length=255, pattern=r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$")
     ]
+    files: InputFiles | None = None
 
 
 class ChildResult(BoundaryModel):
-    phase: Literal["bootstrap", "pytest", "storage", "complete"]
+    phase: Literal["bootstrap", "ready", "pytest", "storage", "complete"]
     expected: Annotated[StrictInt, Field(ge=0, le=18)] = 0
     completed: Annotated[StrictInt, Field(ge=0, le=18)] = 0
     pytest_status: Annotated[StrictInt, Field(ge=0, le=5)] | None = None

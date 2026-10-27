@@ -96,7 +96,8 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                 closing = None
             actual_clock = SystemClock()
             deadline = actual_clock.monotonic_ns() + 5_000_000_000
-            while launcher.starts < (launcher.pause_at or 0):
+            assert isinstance(launcher.pause_at, int)
+            while launcher.starts < launcher.pause_at:
                 assert actual_clock.monotonic_ns() < deadline
                 if acquiring.done() and effect not in (
                     "remove",
