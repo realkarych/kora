@@ -17,6 +17,8 @@ from kora.conformance.lifetime import (
     Request,
     RequestInput,
     TransportBudget,
+    closure_future,
+    consume_failure,
     wire_admission,
 )
 from kora.protocols.common import BoundaryModel
@@ -42,7 +44,12 @@ from kora.protocols.lifetime import (
     TemporaryTreeRequest,
 )
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+from kora.runner.channels import (
+    BoundedChannel,
+    ChannelError,
+    ChannelFailure,
+    cancel_task,
+)
 from kora.runner.gate import ExecutionConfig
 from kora.runner.identity import IdentityState
 
@@ -163,25 +170,6 @@ def reply_reservation(verb: str, limits: LifetimeLimits) -> int:
     return 1024 + 512 * limits.max_resource_records if verb == "observe" else 8192
 
 
-def consume_reply(future: asyncio.Future[ReplyValue]) -> None:
-    if not future.cancelled():
-        future.exception()
-
-
-def consume_close(future: asyncio.Future[ClosureReport]) -> None:
-    if not future.cancelled():
-        future.exception()
-
-
-async def cancel_task(task: asyncio.Task[None]) -> None:
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        if not task.cancelled():
-            raise
-
-
 @dataclass
 class ClientControl:
     future: asyncio.Future[ClosureReport]
@@ -229,11 +217,7 @@ class LifetimeClient:
         if self.control_bytes > self.limits.max_control_recovery_bytes:
             self.channel.close()
             raise LifetimeTransportError(ChannelFailure.CAPACITY)
-        future: asyncio.Future[ClosureReport] = (
-            asyncio.get_running_loop().create_future()
-        )
-        future.add_done_callback(consume_close)
-        self.resources[None] = ClientControl(future)
+        self.resources[None] = ClientControl(closure_future())
         self.reader = asyncio.create_task(self._read())
         self.writer = asyncio.create_task(self._write())
         self.reader.add_done_callback(self._completed)
@@ -325,12 +309,7 @@ class LifetimeClient:
                     if timeout.done() and self.clock.monotonic_ns() >= deadline:
                         raise ChannelError(ChannelFailure.DEADLINE)
                 finally:
-                    changed.cancel()
-                    try:
-                        await changed
-                    except asyncio.CancelledError:
-                        if not changed.cancelled():
-                            raise
+                    await cancel_task(changed)
                     await cancel_task(timeout)
         except (ChannelError, OSError) as error:
             self._disconnect(
@@ -348,11 +327,9 @@ class LifetimeClient:
                 self.invocation_id = value.token.invocation_id
             valid = valid and value.token.invocation_id == self.invocation_id
             if valid and value.token.resource_id not in self.resources:
-                future: asyncio.Future[ClosureReport] = (
-                    asyncio.get_running_loop().create_future()
+                self.resources[value.token.resource_id] = ClientControl(
+                    closure_future()
                 )
-                future.add_done_callback(consume_close)
-                self.resources[value.token.resource_id] = ClientControl(future)
                 pending.reserve_bytes = 0
         elif isinstance(call, (AcquireCall, ProcessCall)) and isinstance(
             value, Acquisition
@@ -457,7 +434,7 @@ class LifetimeClient:
         ):
             raise LifetimeTransportError(ChannelFailure.CAPACITY)
         future: asyncio.Future[ReplyValue] = asyncio.get_running_loop().create_future()
-        future.add_done_callback(consume_reply)
+        future.add_done_callback(consume_failure)
         self.pending[self.next_request_id] = ClientRequest(
             call,
             encoded,

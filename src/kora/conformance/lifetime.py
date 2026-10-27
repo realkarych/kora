@@ -59,7 +59,7 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import ChannelError
+from kora.runner.channels import ChannelError, cancel_task
 from kora.runner.filesystem import DirectoryAnchor, DirectoryIdentity, FilesystemError
 from kora.runner.gate import ExecutionConfig
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
@@ -84,6 +84,7 @@ CLEANUP_DRIVER_BYTES: int = 4096
 MEMBER_CONTROL_BYTES: int = 2048
 RECOVERY_ATTEMPT_BYTES: int = 4096
 OwnedResult = TypeVar("OwnedResult")
+Outcome = TypeVar("Outcome")
 
 
 def request_size(request: BoundaryModel | None) -> tuple[bool, int]:
@@ -98,14 +99,14 @@ def request_size(request: BoundaryModel | None) -> tuple[bool, int]:
     return execution, size
 
 
-def consume_closure_failure(future: asyncio.Future[ClosureReport]) -> None:
+def consume_failure(future: asyncio.Future[Outcome]) -> None:
     if not future.cancelled():
         future.exception()
 
 
 def closure_future() -> asyncio.Future[ClosureReport]:
     future: asyncio.Future[ClosureReport] = asyncio.get_running_loop().create_future()
-    future.add_done_callback(consume_closure_failure)
+    future.add_done_callback(consume_failure)
     return future
 
 
@@ -196,11 +197,6 @@ class LifetimeInventory:
     helpers: HelperInventory
 
 
-def consume_task_failure(task: asyncio.Task[object]) -> None:
-    if not task.cancelled():
-        task.exception()
-
-
 class ParentLifetime:
     def __init__(
         self,
@@ -275,7 +271,7 @@ class ParentLifetime:
         self._bootstrap = asyncio.create_task(
             self._establish() if recovery is None else self._recover(recovery)
         )
-        self._bootstrap.add_done_callback(consume_task_failure)
+        self._bootstrap.add_done_callback(consume_failure)
         self._bootstrap.add_done_callback(self._bootstrap_complete)
         self._cleanup_driver = asyncio.create_task(self._drive_cleanup())
         self._cleanup_driver.add_done_callback(self._driver_complete)
@@ -406,12 +402,7 @@ class ParentLifetime:
                 if not self._bootstrap.done() or self.clock.monotonic_ns() >= deadline:
                     raise self._refuse(LifetimeReason.EFFECT_UNSETTLED)
             finally:
-                timeout.cancel()
-                try:
-                    await timeout
-                except asyncio.CancelledError:
-                    if not timeout.cancelled():
-                        raise
+                await cancel_task(timeout)
         await self.ready()
 
     def admit_ordinary(self, *, wire: bool) -> OrdinarySlot:
@@ -590,7 +581,7 @@ class ParentLifetime:
             self.control_bytes += size
         task = asyncio.create_task(self._run_operation(coroutine))
         admitted.task = task
-        task.add_done_callback(consume_task_failure)
+        task.add_done_callback(consume_failure)
         task.add_done_callback(self._operation_complete)
         self.operations[key] = RecordedOperation(request, task, resource_id)
         return task
@@ -1101,7 +1092,7 @@ class ParentLifetime:
         )
 
     def _cleanup_done(self, task: asyncio.Task[None]) -> None:
-        consume_task_failure(task)
+        consume_failure(task)
         self.cleanup_changed.set()
 
     def _start_cleanup_effect(
