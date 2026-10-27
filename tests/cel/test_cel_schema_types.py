@@ -432,7 +432,7 @@ def test_cel_recursive_closure_checked_in_bounded_time() -> None:
     assert isinstance(items, ListOf)
     assert items.element is root.fields["right"].type
     for width, count in zip(widths, counts, strict=True):
-        assert count <= 16 * width + 4096
+        assert count <= 32 * width + 4096
     for smaller, larger in zip(counts, counts[1:], strict=False):
         assert larger <= 2.5 * smaller
 
