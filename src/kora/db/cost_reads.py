@@ -7,12 +7,23 @@ from types import MappingProxyType
 from typing import cast
 
 from pydantic import ValidationError
-from sqlalchemy import LargeBinary, Text, case, func, select, text
+from sqlalchemy import (
+    Executable,
+    FromClause,
+    Join,
+    LargeBinary,
+    Text,
+    case,
+    func,
+    select,
+    text,
+)
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
 
+from kora.db.reads import keyset_after
 from kora.db.tables import (
     approval_request,
     attempt,
@@ -167,6 +178,18 @@ def valid_price(row: RowMapping, prices: JsonValue) -> PriceRevision:
         raise CostReadRefused() from error
 
 
+async def first_mapping(
+    connection: AsyncConnection, statement: Executable
+) -> RowMapping | None:
+    return (await connection.execute(statement)).mappings().first()
+
+
+def attempt_run_join(attempts: FromClause) -> Join:
+    return attempts.join(
+        node_instance, attempt.c.node_instance_id == node_instance.c.id
+    ).join(run)
+
+
 def price_projection(
     connection: AsyncConnection,
 ) -> Sequence[ColumnElement[object] | ColumnElement[str] | ColumnElement[int]]:
@@ -184,21 +207,16 @@ def price_projection(
 async def read_latest_price(
     connection: AsyncConnection, namespace_id: str | None, at: datetime
 ) -> PriceRevision | None:
-    row = (
-        (
-            await connection.execute(
-                select(*price_projection(connection))
-                .where(
-                    price_table.c.namespace_id == namespace_id,
-                    text("price_table.version = 1"),
-                    price_table.c.effective_from <= at,
-                )
-                .order_by(price_table.c.effective_from.desc())
-                .limit(1)
-            )
+    row = await first_mapping(
+        connection,
+        select(*price_projection(connection))
+        .where(
+            price_table.c.namespace_id == namespace_id,
+            text("price_table.version = 1"),
+            price_table.c.effective_from <= at,
         )
-        .mappings()
-        .first()
+        .order_by(price_table.c.effective_from.desc())
+        .limit(1),
     )
     if row is None:
         return None
@@ -211,19 +229,14 @@ async def read_price(
 ) -> PriceRead:
     if reference is None:
         return PriceRead(HistoricalState.ABSENT, None)
-    row = (
-        (
-            await connection.execute(
-                select(*price_projection(connection))
-                .where(
-                    price_table.c.id == reference,
-                    price_table.c.namespace_id == namespace_id,
-                )
-                .limit(1)
-            )
+    row = await first_mapping(
+        connection,
+        select(*price_projection(connection))
+        .where(
+            price_table.c.id == reference,
+            price_table.c.namespace_id == namespace_id,
         )
-        .mappings()
-        .first()
+        .limit(1),
     )
     if row is None:
         return PriceRead(HistoricalState.UNMATCHED, reference)
@@ -250,28 +263,19 @@ async def read_price(
 async def read_attempt_price(
     connection: AsyncConnection, namespace_id: str, attempt_id: str
 ) -> PriceRead:
-    row = (
-        (
-            await connection.execute(
-                select(
-                    *scalar_projection(connection, attempt.c.price_table_id),
-                    *scalar_projection(connection, price_table.c.namespace_id),
-                )
-                .select_from(
-                    attempt.join(
-                        node_instance, attempt.c.node_instance_id == node_instance.c.id
-                    )
-                    .join(run, node_instance.c.run_id == run.c.id)
-                    .outerjoin(
-                        price_table, attempt.c.price_table_id == price_table.c.id
-                    )
-                )
-                .where(run.c.namespace_id == namespace_id, attempt.c.id == attempt_id)
-                .limit(1)
+    row = await first_mapping(
+        connection,
+        select(
+            *scalar_projection(connection, attempt.c.price_table_id),
+            *scalar_projection(connection, price_table.c.namespace_id),
+        )
+        .select_from(
+            attempt_run_join(attempt).outerjoin(
+                price_table, attempt.c.price_table_id == price_table.c.id
             )
         )
-        .mappings()
-        .first()
+        .where(run.c.namespace_id == namespace_id, attempt.c.id == attempt_id)
+        .limit(1),
     )
     if row is None:
         return PriceRead(HistoricalState.ABSENT, None)
@@ -286,25 +290,20 @@ async def read_attempt_price(
 async def read_approval_cost(
     connection: AsyncConnection, namespace_id: str, request_id: str
 ) -> ApprovalCostRead:
-    row = (
-        (
-            await connection.execute(
-                select(
-                    approval_request.c.run_cost_version,
-                    *payload_projection(
-                        connection, approval_request.c.run_cost, RunCost.byte_limit
-                    ),
-                )
-                .select_from(approval_request.join(node_instance).join(run))
-                .where(
-                    run.c.namespace_id == namespace_id,
-                    approval_request.c.id == request_id,
-                )
-                .limit(1)
-            )
+    row = await first_mapping(
+        connection,
+        select(
+            approval_request.c.run_cost_version,
+            *payload_projection(
+                connection, approval_request.c.run_cost, RunCost.byte_limit
+            ),
         )
-        .mappings()
-        .first()
+        .select_from(approval_request.join(node_instance).join(run))
+        .where(
+            run.c.namespace_id == namespace_id,
+            approval_request.c.id == request_id,
+        )
+        .limit(1),
     )
     if row is None:
         return ApprovalCostRead(HistoricalState.ABSENT)
@@ -437,11 +436,7 @@ async def read_usage_page(
             *payload_projection(connection, usage_record.c.usd_estimate, 128),
             *payload_projection(connection, usage_record.c.reported_usd, 128),
         )
-        .select_from(
-            usage_record.join(attempt)
-            .join(node_instance, attempt.c.node_instance_id == node_instance.c.id)
-            .join(run)
-        )
+        .select_from(attempt_run_join(usage_record.join(attempt)))
         .where(
             run.c.namespace_id == namespace_id,
             run.c.id == run_id,
@@ -449,8 +444,7 @@ async def read_usage_page(
         .order_by(usage_record.c.id)
         .limit(page_limit(limit))
     )
-    if after_id is not None:
-        statement = statement.where(usage_record.c.id > after_id)
+    statement = keyset_after(statement, usage_record.c.id, after_id)
     rows = (await connection.execute(statement)).mappings().all()
     return tuple(usage_value(row) for row in rows)
 
@@ -458,30 +452,15 @@ async def read_usage_page(
 async def read_usage_source(
     connection: AsyncConnection, namespace_id: str, usage_id: str
 ) -> JsonValue:
-    row = (
-        (
-            await connection.execute(
-                select(
-                    usage_record.c.normalization_version,
-                    *payload_projection(
-                        connection, usage_record.c.source, SOURCE_BYTE_LIMIT
-                    ),
-                )
-                .select_from(
-                    usage_record.join(attempt)
-                    .join(
-                        node_instance, attempt.c.node_instance_id == node_instance.c.id
-                    )
-                    .join(run)
-                )
-                .where(
-                    run.c.namespace_id == namespace_id, usage_record.c.id == usage_id
-                )
-                .limit(1)
-            )
+    row = await first_mapping(
+        connection,
+        select(
+            usage_record.c.normalization_version,
+            *payload_projection(connection, usage_record.c.source, SOURCE_BYTE_LIMIT),
         )
-        .mappings()
-        .first()
+        .select_from(attempt_run_join(usage_record.join(attempt)))
+        .where(run.c.namespace_id == namespace_id, usage_record.c.id == usage_id)
+        .limit(1),
     )
     if row is None:
         raise CostReadRefused()
@@ -512,11 +491,7 @@ async def read_attempt_page(
                 connection, attempt.c.usage_coverage, COVERAGE_BYTE_LIMIT
             ),
         )
-        .select_from(
-            attempt.join(
-                node_instance, attempt.c.node_instance_id == node_instance.c.id
-            ).join(run)
-        )
+        .select_from(attempt_run_join(attempt))
         .where(
             run.c.namespace_id == namespace_id,
             run.c.id == run_id,
@@ -524,8 +499,7 @@ async def read_attempt_page(
         .order_by(attempt.c.id)
         .limit(page_limit(limit))
     )
-    if after_id is not None:
-        statement = statement.where(attempt.c.id > after_id)
+    statement = keyset_after(statement, attempt.c.id, after_id)
     rows = (await connection.execute(statement)).mappings().all()
     results: list[AttemptCostRead] = []
     for row in rows:
