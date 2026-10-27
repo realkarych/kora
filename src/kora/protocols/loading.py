@@ -108,9 +108,7 @@ class InstalledEntryPoints(EntryPointSource):
                     module=module,
                     distribution=name,
                     distribution_version=version,
-                    load=importlib.metadata.EntryPoint(
-                        entry_name, value, ENTRY_POINT_GROUP
-                    ).load,
+                    load=entry_point_loader(entry_name, value, module),
                 )
 
 
@@ -131,6 +129,18 @@ def provider_lines(text: str) -> Iterator[tuple[str, str]]:
 def entry_point_module(value: str) -> str | None:
     match = importlib.metadata.EntryPoint.pattern.match(value)
     return match.group("module") if match is not None else None
+
+
+def entry_point_loader(
+    name: str, value: str, module: str | None
+) -> Callable[[], object]:
+    if module is None:
+        return unparsable_entry_point
+    return importlib.metadata.EntryPoint(name, value, ENTRY_POINT_GROUP).load
+
+
+def unparsable_entry_point() -> object:
+    raise ValueError("the entry point value does not parse")
 
 
 INSTALLED: InstalledEntryPoints = InstalledEntryPoints()
