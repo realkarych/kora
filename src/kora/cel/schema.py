@@ -55,7 +55,7 @@ class Position(Enum):
 
 SCHEMA_KEYWORDS: Final[frozenset[str]] = frozenset(
     {"items", "additionalProperties", "not", "if", "then", "else", "contains"}
-    | {"propertyNames", "unevaluatedItems", "unevaluatedProperties"}
+    | {"propertyNames", "unevaluatedItems", "unevaluatedProperties", "contentSchema"}
 )
 NAMED_SCHEMA_KEYWORDS: Final[frozenset[str]] = frozenset(
     {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
