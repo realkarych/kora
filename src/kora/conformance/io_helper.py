@@ -7,6 +7,7 @@ import socket
 import stat
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
 
@@ -76,13 +77,19 @@ class RemoveTreeMutation(BoundaryModel):
     target: DirectoryIdentity
 
 
+class CreateListenersMutation(BoundaryModel):
+    action: Literal["create_listeners"] = "create_listeners"
+    directory: DirectoryIdentity
+
+
 Mutation = Annotated[
     BootstrapMutation
     | RecoverMutation
     | PublishMutation
     | CreateTreeMutation
     | OpenTreeMutation
-    | RemoveTreeMutation,
+    | RemoveTreeMutation
+    | CreateListenersMutation,
     Field(discriminator="action"),
 ]
 MUTATION: TypeAdapter[Mutation] = TypeAdapter(Mutation)
@@ -129,6 +136,8 @@ class IOHelper:
         )
         if result.descriptor_count:
             await self.receive_descriptors(result.descriptor_count, deadline_ns)
+            if isinstance(mutation, CreateListenersMutation):
+                await self.channel.write_frame(b"listeners_received", deadline_ns)
         await self.anchor.wait(deadline_ns, self.clock)
         self.release()
         if self.process.returncode != 0:
@@ -559,6 +568,21 @@ def mutate(
             directory=child.identity,
             descriptor_count=1,
         ), (child.descriptor,)
+    if isinstance(mutation, CreateListenersMutation):
+        os.fchdir(directory.descriptor)
+        with ExitStack() as resources:
+            listeners: list[socket.socket] = []
+            for name in ("r", "e", "l"):
+                listener = resources.enter_context(
+                    socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                )
+                listener.bind(name)
+                listener.listen(1)
+                listeners.append(listener)
+            return MutationResult(
+                reason=LifetimeReason.COMPLETE,
+                descriptor_count=3,
+            ), tuple(listener.detach() for listener in listeners)
     remove_directory(directory, mutation.target)
     return MutationResult(reason=LifetimeReason.COMPLETE), ()
 
@@ -587,6 +611,10 @@ async def respond_mutation(
                 [b"d"],
                 [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", returned))],
             )
+            if isinstance(mutation, CreateListenersMutation):
+                endpoint.setblocking(False)
+                if await channel.read_frame(deadline, 32) != b"listeners_received":
+                    raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
     finally:
         releasable = (
             returned[:-1]

@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 
+from kora.cli.conformance import CommandResult
 from tests.support.observability import run_python
 from tests.support.provider_tooling import (
     build_fixture_wheel,
@@ -153,6 +154,20 @@ def test_installed_provider_supports_listing_without_conformance_extra(
     if provider == "largest_schema":
         encoded = json.dumps(selected["config_schema"], separators=(",", ":")).encode()
         assert len(encoded) == 1048576
+
+    unavailable = installed.run(
+        "conformance",
+        "policy",
+        name,
+        "--fixtures",
+        "kora_tooling_fixture.fixtures_policy",
+        environment={"HOME": str(tmp_path)},
+    )
+    refusal = CommandResult.model_validate_json(unavailable.stdout)
+    assert unavailable.code == 1
+    assert refusal.reason == "refused"
+    assert refusal.cleanup is None
+    assert unavailable.stderr == b""
 
 
 @pytest.mark.parametrize(

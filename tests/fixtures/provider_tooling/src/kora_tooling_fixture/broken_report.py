@@ -35,16 +35,18 @@ def main(result_path: str, event_path: str, lifetime_path: str) -> None:
             raise
         raise AssertionError("closed report channel unexpectedly accepted a result")
 
-    session = Session(
-        request.protocol,
-        ConformanceSelection(configured(), configuration, fixture_data),
-        Executor(request.protocol),
-        lifetime_path,
-        DirectoryAnchor.open_path(Path.cwd().parent),
-        DirectoryAnchor.open_path(Path.cwd()),
-        failed_report,
-    )
-    run_pytest(request.fixtures, session)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as lifetime:
+        lifetime.connect(lifetime_path)
+        session = Session(
+            request.protocol,
+            ConformanceSelection(configured(), configuration, fixture_data),
+            Executor(request.protocol),
+            lifetime,
+            DirectoryAnchor.open_path(Path.cwd().parent),
+            DirectoryAnchor.open_path(Path.cwd()),
+            failed_report,
+        )
+        run_pytest(request.fixtures, session)
     raise AssertionError("storage failure returned to pytest")
 
 

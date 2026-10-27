@@ -1,5 +1,7 @@
 import asyncio
+import os
 import socket
+import stat
 import sys
 from pathlib import Path
 
@@ -7,7 +9,7 @@ import pytest
 
 from kora.conformance.bridge import ConformanceSelection
 from kora.conformance.capture import Pipe
-from kora.conformance.common import CONFORMANCE_COMPONENT, INSTANCE_ID, utc_now
+from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
 from kora.conformance.executor import Executor
 from kora.conformance.result import ChildInput, ChildResult, accepted_report
 from kora.conformance.session import CURRENT_SESSION, Session
@@ -18,11 +20,29 @@ from kora.runner.channels import MAX_RECORD_BYTES, BoundedChannel
 from kora.runner.filesystem import DirectoryAnchor
 
 
+def read_input(path: str | None) -> bytes:
+    if path is None:
+        return b"{}"
+    if not os.path.isabs(path):
+        raise ValueError("conformance_input_path_refused")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "rb") as source:
+        if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+            raise ValueError("conformance_input_type_refused")
+        data = source.read(MAX_RECORD_BYTES + 1)
+    if len(data) > MAX_RECORD_BYTES:
+        raise ValueError("conformance_input_capacity")
+    return data
+
+
 async def inputs(channel: BoundedChannel) -> tuple[ChildInput, bytes, bytes]:
     deadline = SystemClock().monotonic_ns() + 30_000_000_000
-    request = ChildInput.model_validate_json(await channel.read_record(deadline, 4096))
+    request = ChildInput.model_validate_json(await channel.read_record(deadline, 16384))
     configuration = await channel.read_record(deadline, MAX_RECORD_BYTES)
     fixture_data = await channel.read_record(deadline, MAX_RECORD_BYTES)
+    if request.files is not None:
+        configuration = read_input(request.files.configuration)
+        fixture_data = read_input(request.files.fixture_data)
     return request, configuration, fixture_data
 
 
@@ -84,18 +104,20 @@ def main(result_path: str, event_path: str, lifetime_path: str) -> int:
     with (
         socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as endpoint,
         socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as events,
+        socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as lifetime,
     ):
         endpoint.connect(result_path)
+        events.connect(event_path)
+        lifetime.connect(lifetime_path)
         channel = BoundedChannel(endpoint, SystemClock())
         startup = DirectoryAnchor.open_path(Path.cwd())
         root = DirectoryAnchor.open_path(Path.cwd().parent)
         try:
             request, configuration, fixture_data = asyncio.run(inputs(channel))
-            events.connect(event_path)
             diagnostics = configure_process(
                 CONFORMANCE_COMPONENT,
                 LoggingSettings(component_levels={LOADING_COMPONENT: Level.DEBUG}),
-                INSTANCE_ID,
+                root.identity.name,
                 utc_now,
                 descriptor=events.fileno(),
             )
@@ -112,10 +134,15 @@ def main(result_path: str, event_path: str, lifetime_path: str) -> int:
                 request.protocol,
                 selection,
                 executor,
-                lifetime_path,
+                lifetime,
                 root,
                 startup,
                 lambda value: report(channel, value),
+            )
+            asyncio.run(
+                report(
+                    channel, ChildResult(phase="ready", expected=len(executor.cases))
+                )
             )
             result = ChildResult(phase="pytest", expected=len(executor.cases))
             result = run_pytest(request.fixtures, session)

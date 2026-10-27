@@ -23,7 +23,7 @@ class Session:
         protocol: ProtocolName,
         selection: ConformanceSelection,
         executor: Executor,
-        lifetime_address: str,
+        lifetime_endpoint: socket.socket,
         root: DirectoryAnchor,
         startup: DirectoryAnchor,
         report: Callable[[ChildResult], Coroutine[object, object, None]],
@@ -31,7 +31,7 @@ class Session:
         self.protocol = protocol
         self.selection = selection
         self.executor = executor
-        self.lifetime_address = lifetime_address
+        self.lifetime_endpoint = lifetime_endpoint
         self.root = root
         self.startup = startup
         self.report = report
@@ -74,16 +74,7 @@ class Session:
             self.invocation = None
 
     async def connected(self) -> LifetimeClient:
-        endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        endpoint.setblocking(False)
-        try:
-            await asyncio.get_running_loop().sock_connect(
-                endpoint, self.lifetime_address
-            )
-            return LifetimeClient(endpoint)
-        except (OSError, asyncio.CancelledError):
-            endpoint.close()
-            raise
+        return LifetimeClient(self.lifetime_endpoint)
 
     async def run_shared(
         self, adapter: object, client: LifetimeClient, request: pytest.FixtureRequest

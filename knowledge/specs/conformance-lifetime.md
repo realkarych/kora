@@ -1,10 +1,10 @@
 # Local conformance lifetime ABI
 
-Accepted by the project owner on 2026-10-23 under [issue #231](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968). This specification defines the contract; implementation and executable evidence remain pending under [#215](https://github.com/realkarych/kora/issues/215) and the runtime/testing-runner work items. [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) governs this contract; [protocols section 13](protocols.md#local-conformance-command) defines the surrounding installed-provider command.
+Accepted by the project owner on 2026-10-23 under [issue #231](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968). The generic local library is implemented under #247 and installed command composition under [#215](https://github.com/realkarych/kora/issues/215), with [command evidence and qualification limits](../research/configured-command-2026-10-27.md). Real runtime/testing-runner implementation and evidence remain with their work items. [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) governs this contract; [protocols section 13](protocols.md#local-conformance-command) defines the surrounding installed-provider command.
 
 ## Impact
 
-Installed-provider conformance will have an explicit local resource owner that survives fixture and pytest failure. A command can report successful cleanup only after its acquisition operations and owned resources have actually settled; uncertain cleanup remains a failure with retained local recovery information.
+Installed-provider conformance has an explicit local resource owner that survives fixture and pytest failure. A command can report successful cleanup only after its acquisition operations and owned resources have actually settled; uncertain cleanup remains a failure with retained local recovery information.
 
 ## Scope and ownership
 

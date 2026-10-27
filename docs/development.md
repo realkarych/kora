@@ -44,7 +44,7 @@ CEL binding amendment dated 2026-10-21: the `cel` extra, the `wcwidth` constrain
 
 No-suppression amendment dated 2026-10-20: `--ignore-noqa`, the Ruff families and banned-API table, the ESLint comment rule and the no-suppression architecture test added under [issue #155](https://github.com/realkarych/kora/issues/155); wording pending line-by-line owner review.
 
-The repository contains an importable typed Python package with the logging bootstrap, the metadata database package with its migrations, the `kora` entry point (`kora --version`, `kora db upgrade`, `kora plugins list`), a minimal React shell and distribution builds. The execution engine, HTTP API, the other CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
+The repository contains an importable typed Python package with the logging bootstrap, the metadata database package with its migrations, the `kora` entry point (`kora --version`, `kora db upgrade`, `kora plugins list`, `kora conformance`, `kora conformance cleanup`), a minimal React shell and distribution builds. The execution engine, HTTP API, the other CLI commands and full web console are subsequent implementation work. Read [AGENTS.md](../AGENTS.md) before contributing and [ADR-0013](decisions/0013-implementation-stack.md) for the stack decision.
 
 ## Tool setup
 
@@ -216,6 +216,10 @@ The VcsRef typed-boundary work in [issue #209](https://github.com/realkarych/kor
 `kora plugins list --json` reports installed provider protocol, name, version and bounded load failures without constructing providers. A failure keeps valid entries visible and makes the command nonzero. `kora plugins list --schema` includes defensive schema views.
 
 Listing captures metadata-import/factory output separately from its public result and emits registry diagnostics once through its parent reporting owner.
+
+Install the `kora[conformance]` extra, then run `kora conformance <protocol> <name> --config <provider.json> --fixtures <installed.python.module> [--fixture-data <exercise.json>]`. The fixture module must be installed and explicitly selected. Omitted configuration means `{}` only when it validates; omitted exercise data means `{}`. Unsupported suites fail explicitly. The command does not install providers.
+
+The command owns local setup and cleanup independently of pytest. An uncertain cleanup returns nonzero and an invocation ID; run `kora conformance cleanup <invocation-id>` to resume fixed local cleanup. Retained recovery state is private. The accepted cooperative local lifetime contract and the runtime/testing-runner activation limits are in the [lifetime specification](../knowledge/specs/conformance-lifetime.md).
 
 `kora db upgrade` applies every pending migration to the database named by `KORA_DATABASE_URL` and prints the head revision; the accepted forms are `sqlite+aiosqlite:///<path>` (relative paths resolve against the working directory, and a new file is created with mode 0600) and a complete `postgresql+asyncpg://<user>:<password>@<host>:<port>/<database>`, whose query string, if any, carries the driver's connection options such as the TLS mode (`?ssl=require`); the driver's `PGSSL*` variables apply only when the URL sets no `ssl` option, and no other `PG*` variable or password file is consulted. A missing, malformed or incomplete URL exits 78 with one line on stderr that never repeats the value; an unreachable database is an unhandled error (code 70) with content-free records. There is no command-line option for the URL, so it never appears in a process listing.
 
