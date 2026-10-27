@@ -5,13 +5,14 @@ import socket
 import subprocess
 import sys
 from collections.abc import Generator
-from contextlib import ExitStack
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
 
+from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.conformance.result import ChildInput, ChildResult
@@ -32,6 +33,8 @@ from kora.protocols.lifetime import (
 from kora.protocols.metadata import ProtocolName
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError
+from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
+from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.support.provider_tooling import (
     InstalledTooling,
     build_core_wheel,
@@ -138,13 +141,18 @@ async def installed_run(
 ) -> Outcome:
     with TemporaryDirectory(prefix="kora-invoke-", dir="/tmp") as temporary:
         base = Path(temporary).resolve()
+        clock = ControlledLifetimeClock()
         owner = ParentLifetime(
-            launcher=InstalledIOHelperLauncher(home=base, state_home=base / "state")
+            clock=clock,
+            launcher=InstalledIOHelperLauncher(home=base, state_home=base / "state"),
         )
         tasks: list[asyncio.Task[object]] = []
         try:
-            await owner.ready()
-            with ExitStack() as resources:
+            async with AsyncExitStack() as resources:
+                preparation = await resources.enter_async_context(
+                    asyncio.timeout(owner.limits.acquisition_seconds)
+                )
+                await owner.ready()
                 listeners: list[socket.socket] = []
                 for name in ("result", "events", "lifetime", "feedback"):
                     listener = resources.enter_context(
@@ -230,6 +238,7 @@ async def installed_run(
                 await owner.acknowledge(
                     child.token, acquired.operation_id, acquired.revision
                 )
+                preparation.reschedule(None)
                 process = owner.records[child.token.resource_id].process
                 assert process is not None
                 loop = asyncio.get_running_loop()
@@ -268,6 +277,10 @@ async def installed_run(
                                     invocation.descriptor
                                 )
                                 assert process.observe().live_members
+                                owner.request_close(None)
+                                clock.advance(
+                                    duration_ns(owner.limits.cooperative_seconds) + 1
+                                )
                                 closure = await owner.close(None)
                                 assert closure.state is CleanupOutcome.CLOSED
                                 assert process.closed
@@ -355,6 +368,8 @@ async def installed_run(
                                 )
                             finally:
                                 os.close(descriptor)
+                        owner.request_close(None)
+                        clock.advance(duration_ns(owner.limits.cooperative_seconds) + 1)
                 finally:
                     channel.close()
                 event_bytes = await asyncio.wait_for(reading, 5)
@@ -373,14 +388,16 @@ async def installed_run(
                     phase_bytes,
                 )
         finally:
-            await owner.close(None)
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    assert task.cancelled()
+            try:
+                await dispose_test_owner(owner, clock)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        assert task.cancelled()
 
 
 @pytest.mark.asyncio
