@@ -14,13 +14,13 @@ Exactly four committed patterns replace the dollar end anchor with the portable 
 
 ## Error and observability boundary
 
-The existing test-support projection masks every error-location segment and uses a fixed message, preserving the error count and type. Markers in expressions, targets, unknown keys, nested extensions and retry entries do not enter this projected result. It does not provide a configuration-to-public-`Diagnostic` adapter or field provenance. Shared diagnostic values, public protocol errors and the diagnostic measurement protocol are unchanged.
+The existing test-support projection masks every error-location segment and uses a fixed message, preserving the error count and type. Markers in expressions, targets, unknown keys, nested extensions and retry entries do not enter the raw validation error's string, representation or input-free JSON forms, so they cannot enter this projected result either. It does not provide a configuration-to-public-`Diagnostic` adapter or field provenance. Shared diagnostic values, public protocol errors and the diagnostic measurement protocol are unchanged.
 
 These data records own no process, logger, timer, connection or runtime slot. Compiler and validator callers own eventual diagnostics and operational events. Their implementing issues activate those checks. This slice adds no CEL compilation, graph scheduling or frontend interaction.
 
 ## Verification and measurement method
 
-`test_ir_control_models_preserve_omission_and_wire_aliases`, `test_ir_control_models_enforce_structural_boundaries`, `test_ir_control_errors_exclude_input_content` and the existing schema/example suites cover the structural boundary. Generated fragments match the committed definitions in validation and serialization modes, including the inline branch-case definition and alias-backed field. Actual example traversal includes control configurations, graph/body/node retries and infrastructure retries.
+`test_ir_control_models_preserve_omission_and_wire_aliases`, `test_ir_control_models_enforce_structural_boundaries`, `test_ir_control_errors_exclude_input_content` and the existing schema/example suites cover the structural boundary. The committed definitions, including the inline branch-case definition and alias-backed field, are generated from the models and pinned byte for byte, and the serialization-mode document schema equals them. Actual example traversal includes control configurations, graph/body/node retries and infrastructure retries.
 
 A shared 242-case scalar corpus was checked with pinned `check-jsonschema` tooling and Node against committed and applicable generated fragments. The Python schema checker also exercised 126 containing-schema cases spanning all 18 references to the common ID definition. The PR retains the probe source, corpus and command results; these checks do not establish whole-graph semantic validity.
 

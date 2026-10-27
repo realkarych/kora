@@ -109,10 +109,8 @@ def test_protected_path_globs(pattern: str, path: str, expected: bool) -> None:
 
 @pytest.mark.parametrize("pattern", REFUSED)
 def test_protected_path_globs_refuse_other_forms(pattern: str) -> None:
-    with pytest.raises(GlobInvalid) as refused:
+    with pytest.raises(GlobInvalid):
         compile_glob(pattern)
-
-    assert str(refused.value) == "the path glob is invalid"
 
 
 @pytest.mark.parametrize(
@@ -175,7 +173,6 @@ def test_fuel_is_charged_and_runs_out_on_a_star_dense_glob() -> None:
         glob.matches(subject, fuel)
 
     assert fuel.spent > fuel.budget
-    assert str(exhausted.value) == "the decision ran out of fuel"
     assert not isinstance(exhausted.value, ValueError | OSError)
 
 

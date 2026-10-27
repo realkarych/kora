@@ -77,10 +77,12 @@ def test_ir_approval_channel_exports_refuse_mutated_shared_data() -> None:
     data["first"] = shared
     data["second"] = shared
 
-    with pytest.raises(PydanticCustomError, match="the IR data is invalid"):
+    with pytest.raises(PydanticCustomError) as export_refusal:
         export_ir(parsed)
-    with pytest.raises(PydanticCustomError, match="the IR data is invalid"):
+    with pytest.raises(PydanticCustomError) as render_refusal:
         render_ir_json(parsed)
+
+    assert export_refusal.value.type == render_refusal.value.type == "ir_data_invalid"
 
 
 @pytest.mark.parametrize("replacement", ["repeated", "array", "shared_fields"])
@@ -108,10 +110,12 @@ def test_ir_approval_channel_exports_validate_replaced_values(replacement: str) 
             "approval_channels": {"first": {"a": []}, "second": {"a": []}},
         }
     else:
-        with pytest.raises(PydanticCustomError, match="the IR data is invalid"):
+        with pytest.raises(PydanticCustomError) as export_refusal:
             export_ir(parsed)
-        with pytest.raises(PydanticCustomError, match="the IR data is invalid"):
+        with pytest.raises(PydanticCustomError) as render_refusal:
             render_ir_json(parsed)
+        assert export_refusal.value.type == "ir_data_invalid"
+        assert render_refusal.value.type == "ir_data_invalid"
 
 
 def test_ir_runtime_preserves_disabled_policy_omissions() -> None:

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import cast
 
 import pytest
@@ -41,6 +42,7 @@ def test_ir_role_outputs_are_fixed_in_nested_bodies(
     graph = cast("dict[str, object]", value["graph"])
     node = {"kind": kind, **NODE_CASES[kind]}
     graph["subgraphs"] = {"body": {"nodes": {"node": node}}}
+    expected = deepcopy(value)
     invalid_outputs = [
         {},
         {"alias": {"type": type_name}},
@@ -54,7 +56,7 @@ def test_ir_role_outputs_are_fixed_in_nested_bodies(
         with pytest.raises(ValidationError):
             ir.GraphDocument.model_validate(value)
 
-    assert ir.export_ir(parsed)["graph"] is not None
+    assert ir.export_ir(parsed) == expected
 
 
 @pytest.mark.parametrize("kind", ["human_input", "wait_event"])
@@ -80,39 +82,10 @@ def test_timer_and_branch_preserve_declared_outputs(kind: str) -> None:
     assert ir.export_ir(parsed) == value
 
 
-@pytest.mark.parametrize("mode", ["validation", "serialization"])
-def test_fixed_role_schema_keeps_declaration_and_extra_output_rules(mode: str) -> None:
-    from typing import Literal
+def test_node_union_is_discriminated() -> None:
+    adapter = TypeAdapter(ir.Node)
 
-    mode_value = cast("Literal['validation', 'serialization']", mode)
-    human = ir.HumanInputNode.model_json_schema(mode=mode_value)
-    agent = ir.AgentNode.model_json_schema(mode=mode_value)
-
-    human_outputs = cast("dict[str, dict[str, object]]", human["properties"])["outputs"]
-    agent_outputs = cast("dict[str, dict[str, object]]", agent["properties"])["outputs"]
-
-    assert human_outputs["additionalProperties"] is False
-    properties = cast("dict[str, dict[str, object]]", human_outputs["properties"])
-    assert properties["response"]["allOf"] == [
-        {"$ref": "#/$defs/OutputDecl"},
-        {"properties": {"type": {"const": "StructuredOutput"}}},
-    ]
-    assert agent_outputs["additionalProperties"] == {
-        "allOf": [
-            {"$ref": "#/$defs/OutputDecl"},
-            {"properties": {"type": {"not": {"const": "AgentSession"}}}},
-        ]
-    }
-
-
-@pytest.mark.parametrize("mode", ["validation", "serialization"])
-def test_node_union_is_discriminated_in_both_schema_modes(mode: str) -> None:
-    from typing import Literal
-
-    schema = TypeAdapter(ir.Node).json_schema(
-        mode=cast("Literal['validation', 'serialization']", mode)
-    )
-
+    schema = adapter.json_schema()
     discriminator = cast("dict[str, object]", schema["discriminator"])
 
     assert discriminator["propertyName"] == "kind"

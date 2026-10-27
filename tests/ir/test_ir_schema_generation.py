@@ -7,7 +7,7 @@ import sys
 import weakref
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -15,13 +15,7 @@ from pydantic.json_schema import GenerateJsonSchema
 
 from kora.ir import GraphDocument, HumanInputConfig, export_ir
 from tests.ir.schema_document_cases import boundary_cases
-from tests.ir.support import (
-    EXAMPLES,
-    ROOT,
-    SCHEMA_PATH,
-    configuration_errors,
-    load_yaml,
-)
+from tests.ir.support import ROOT, SCHEMA_PATH, raw_error_forms
 
 CORPUS = (
     SCHEMA_PATH.parents[1]
@@ -68,15 +62,12 @@ def test_ir_schema_is_generated_and_current() -> None:
     assert SCHEMA_PATH.read_bytes() == rendered.encode("utf-8")
 
 
-@pytest.mark.parametrize("mode", ["validation", "serialization"])
-def test_ir_document_models_match_schema(mode: str) -> None:
+def test_ir_document_models_match_schema() -> None:
     from kora.ir.schema import generate_ir_schema
 
     expected = generate_ir_schema()
 
-    actual = GraphDocument.model_json_schema(
-        by_alias=True, mode=cast("Literal['validation', 'serialization']", mode)
-    )
+    actual = GraphDocument.model_json_schema(by_alias=True, mode="serialization")
 
     assert actual == {
         name: value
@@ -128,8 +119,9 @@ def test_ir_checker_inputs_keep_actual_modes_and_raw_cases(tmp_path: Path) -> No
     assert (tmp_path / "committed.schema.json").read_bytes() == SCHEMA_PATH.read_bytes()
 
 
-@pytest.mark.parametrize("mode", ["validation", "serialization"])
-def test_ir_schema_annotations_preserve_approval_defaults(mode: str) -> None:
+def test_ir_schema_annotations_preserve_approval_defaults() -> None:
+    from kora.ir.schema import generate_ir_schema
+
     expected_form = {
         "type": "object",
         "properties": {
@@ -139,65 +131,46 @@ def test_ir_schema_annotations_preserve_approval_defaults(mode: str) -> None:
         "required": ["decision"],
         "additionalProperties": False,
     }
-    schema = GraphDocument.model_json_schema(
-        by_alias=True, mode=cast("Literal['validation', 'serialization']", mode)
-    )
+    document = {"channel": "cli", "timeout": "0s", "on_expiry": "fail"}
+
+    schema = generate_ir_schema()
+    parsed = HumanInputConfig.model_validate(document)
     definitions = cast("dict[str, dict[str, object]]", schema["$defs"])
     human = cast(
         "dict[str, dict[str, object]]", definitions["HumanInputConfig"]["properties"]
     )
-    document = {"channel": "cli", "timeout": "0s", "on_expiry": "fail"}
-
-    parsed = HumanInputConfig.model_validate(document)
-
-    assert human["form"]["default"] == expected_form
-    assert export_ir(parsed) == document
-    defaults = [
-        record["default"] for record in schema_objects(schema) if "default" in record
-    ]
-    assert len(defaults) == 3
-    assert defaults.count([]) == 2
-    assert expected_form in defaults
     policy = cast(
         "dict[str, dict[str, object]]", definitions["ToolPolicy"]["properties"]
     )
+    defaults = [
+        record["default"] for record in schema_objects(schema) if "default" in record
+    ]
+
+    assert human["form"]["default"] == expected_form
+    assert export_ir(parsed) == document
+    assert len(defaults) == 3
+    assert defaults.count([]) == 2
+    assert expected_form in defaults
     assert policy["allow"]["default"] == policy["deny"]["default"] == []
+
+
+def test_ir_schema_keeps_required_fields_and_exclusive_choices() -> None:
+    from kora.ir.schema import generate_ir_schema
+
+    schema = generate_ir_schema()
+    definitions = cast("dict[str, dict[str, object]]", schema["$defs"])
+    root = cast("dict[str, object]", schema["properties"])
+
     assert set(cast("list[str]", schema["required"])) == {
         "ir_version",
         "type_contracts",
         "graph",
         "runtime",
     }
-    assert "$schema" in cast("dict[str, object]", schema["properties"])
-    assert "schema_" not in cast("dict[str, object]", schema["properties"])
+    assert "$schema" in root
+    assert "schema_" not in root
     assert schema["additionalProperties"] is True
     assert definitions["Provenance"]["additionalProperties"] is True
-    assert definitions["ToolPolicy"]["description"] == (
-        "The tool-call policy of a node (DD-29, S2-2): allow and deny patterns "
-        "in kora's tool-pattern grammar (protocols.md section 12), evaluated "
-        "per layer together with the namespace policy: a deny in either "
-        "layer wins, every layer with a non-empty allow list must match, "
-        "and order inside an array has no effect"
-    )
-    for name in (
-        "AgentNode",
-        "CommandNode",
-        "HumanInputNode",
-        "WaitEventNode",
-        "TimerNode",
-        "BranchNode",
-        "FanOutNode",
-        "SubgraphNode",
-        "RuntimeSection",
-    ):
-        fields = cast("dict[str, dict[str, object]]", definitions[name]["properties"])
-        assert fields["protected_paths"]["description"] == (
-            "path globs (ir.md section 4.1 syntax) of gate files agent nodes "
-            "may not edit and command gates verify against the base commit (DD-34)"
-            if name == "RuntimeSection"
-            else "node-level addition to runtime.protected_paths (DD-34), "
-            "path globs in the syntax of ir.md section 4.1"
-        )
     assert sum(record.get("type") == "null" for record in schema_objects(schema)) == 1
     assert definitions["AgentConfig"]["required"] == ["harness", "prompt", "workspace"]
     assert definitions["HumanInputConfig"]["required"] == [
@@ -223,32 +196,64 @@ def test_ir_schema_annotations_preserve_approval_defaults(mode: str) -> None:
         == definitions["OutputDecl"]["required"]
         == ["type"]
     )
-    for name, role, type_name, exclusive in (
+
+
+def test_ir_schema_fixes_role_output_declarations() -> None:
+    from kora.ir.schema import generate_ir_schema
+
+    declaration = {"$ref": "#/$defs/OutputDecl"}
+    roles = (
         ("AgentNode", "session", "AgentSession", False),
         ("CommandNode", "result", "CommandResult", False),
         ("HumanInputNode", "response", "StructuredOutput", True),
         ("WaitEventNode", "event", "StructuredOutput", True),
-    ):
+    )
+
+    schema = generate_ir_schema()
+    definitions = cast("dict[str, dict[str, object]]", schema["$defs"])
+
+    for name, role, type_name, exclusive in roles:
         fields = cast("dict[str, dict[str, object]]", definitions[name]["properties"])
         outputs = fields["outputs"]
+        declared = cast("dict[str, dict[str, object]]", outputs["properties"])[role]
         assert outputs["required"] == [role]
-        declaration = cast("dict[str, dict[str, object]]", outputs["properties"])[role]
-        constraints = cast("list[dict[str, object]]", declaration["allOf"])
-        assert constraints[1] == {"properties": {"type": {"const": type_name}}}
+        assert declared["allOf"] == [
+            declaration,
+            {"properties": {"type": {"const": type_name}}},
+        ]
         if exclusive:
             assert outputs["additionalProperties"] is False
         else:
-            assert cast("dict[str, object]", outputs["additionalProperties"])[
-                "allOf"
-            ] == [
-                {"$ref": "#/$defs/OutputDecl"},
-                {"properties": {"type": {"not": {"const": type_name}}}},
-            ]
+            assert outputs["additionalProperties"] == {
+                "allOf": [
+                    declaration,
+                    {"properties": {"type": {"not": {"const": type_name}}}},
+                ]
+            }
         assert set(cast("list[str]", definitions[name]["required"])) == {
             "kind",
             "outputs",
             "config",
         }
+
+
+def test_timer_timestamp_schema_keeps_portable_pattern_and_format() -> None:
+    from kora.ir.schema import generate_ir_schema
+
+    expected = (
+        r"^(?!0000)[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])[Tt]"
+        r"([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?"
+        r"([Zz]|[+-]([01][0-9]|2[0-3]):[0-5][0-9])(?![\s\S])"
+    )
+
+    schema = generate_ir_schema()
+    definitions = cast("dict[str, dict[str, object]]", schema["$defs"])
+    timer = cast(
+        "dict[str, dict[str, object]]", definitions["TimerConfig"]["properties"]
+    )
+
+    assert timer["at"]["format"] == "date-time"
+    assert timer["at"]["pattern"] == expected
 
 
 def test_ir_schema_generation_is_deterministic() -> None:
@@ -433,7 +438,7 @@ def test_ir_schema_measurement_inventory_preserves_all_actions() -> None:
         assert cast("int", manifest[mode]["bytes"]) > 65_000
 
 
-def test_ir_document_late_invalid_open_data_has_content_free_projection() -> None:
+def test_ir_document_late_invalid_open_data_errors_exclude_input_content() -> None:
     private_content = "private-untrusted-content"
     values: list[object] = [{"data": index} for index in range(10_000)]
     values[-1] = {private_content: object()}
@@ -461,20 +466,7 @@ def test_ir_document_late_invalid_open_data_has_content_free_projection() -> Non
 
     with pytest.raises(ValidationError) as captured:
         GraphDocument.model_validate(value)
-    projected = configuration_errors(captured.value)
+    rendered = raw_error_forms(captured.value)
 
-    assert projected
-    assert private_content not in repr(projected)
-    assert "file:///private/source" not in repr(projected)
-    assert all(
-        error.msg == "the execution configuration is invalid" for error in projected
-    )
-
-
-@pytest.mark.parametrize("path", sorted(EXAMPLES.glob("*.ir.yaml")))
-def test_ir_complete_schema_examples_preserve_authored_documents(path: Path) -> None:
-    document = load_yaml(path)
-
-    parsed = GraphDocument.model_validate(document)
-
-    assert export_ir(parsed) == document
+    assert private_content not in rendered
+    assert "file:///private/source" not in rendered

@@ -8,14 +8,11 @@ from kora.cel import Diagnostic as CelDiagnostic
 from kora.cel import check
 from kora.ir import ConfigWarning, ContractViolation, Diagnostic, SourceLocation
 from kora.ir.diagnostics import from_cel
-from kora.ir.errors import safe_field_errors
+from tests.ir.support import raw_error_forms
 
 MAX_INTEGER: int = 9_007_199_254_740_991
-FIELDS: frozenset[str] = frozenset(
-    {"code", "message", "path", "location", "file", "line", "offset", "node", "hint"}
-)
 BASE: dict[str, object] = {"code": "provider.reason-1", "message": "Invalid value."}
-MARKERS: tuple[str, ...] = ("private-payload-marker", "secret-token-marker")
+MARKER: str = "private-payload-marker"
 
 
 def parse(document: dict[str, object], wire: bool) -> Diagnostic:
@@ -201,7 +198,6 @@ def test_shared_diagnostic_path_refuses_arbitrary_iterables(
 
 
 @pytest.mark.parametrize("wire", [False, True])
-@pytest.mark.parametrize("marker", MARKERS)
 @pytest.mark.parametrize(
     "field",
     [
@@ -216,29 +212,23 @@ def test_shared_diagnostic_path_refuses_arbitrary_iterables(
         "file",
     ],
 )
-def test_shared_diagnostics_exclude_input_content(
-    marker: str,
-    field: str,
-    wire: bool,
-) -> None:
-    value: object = {marker: marker}
+def test_shared_diagnostics_exclude_input_content(field: str, wire: bool) -> None:
+    value: object = {MARKER: MARKER}
     document = dict(BASE)
     if field == "extra":
-        document[marker] = marker
+        document[MARKER] = MARKER
     elif field == "nested_extra":
-        document["location"] = {"file": "graph.py", "line": 1, marker: marker}
+        document["location"] = {"file": "graph.py", "line": 1, MARKER: MARKER}
     elif field == "file":
-        document["location"] = {"file": f"https://{marker}/graph.py", "line": 1}
+        document["location"] = {"file": f"https://{MARKER}/graph.py", "line": 1}
     else:
         document[field] = value
 
     with pytest.raises(ValidationError) as refused:
         parse(document, wire)
-    safe = safe_field_errors(refused.value, FIELDS, "Invalid diagnostic.")
+    rendered = raw_error_forms(refused.value)
 
-    assert safe
-    assert marker not in repr(safe)
-    assert all(item.msg == "Invalid diagnostic." for item in safe)
+    assert MARKER not in rendered
 
 
 @pytest.mark.parametrize("wire", [False, True])

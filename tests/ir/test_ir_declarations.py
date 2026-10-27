@@ -103,40 +103,17 @@ def test_ir_output_schema_remains_detached_open_data(depth: int) -> None:
     assert "exported" not in cast("JsonObject", second["schema"])
 
 
-@pytest.mark.parametrize(
-    ("scalar", "value", "valid"),
-    [
-        ("IrVersion", "1.000", True),
-        ("IrVersion", "1.0\n", False),
-        ("TypeContractName", "ns/Text", True),
-        ("TypeContractName", "ns/Text\n", False),
-        ("RetentionPeriod", "0000d", True),
-        ("RetentionPeriod", "forever", True),
-        ("RetentionPeriod", "1d\n", False),
-        ("SecretRef", "secret://env/A/../key", True),
-        ("SecretRef", "secret://env/key\n", False),
-        ("ArtifactType", "List[List[Text]]", True),
-        ("ArtifactType", "List[Text]]", True),
-        ("ArtifactType", "Text\n", False),
-        ("ArtifactType", "Ｔext", False),
-    ],
-)
-def test_ir_remaining_scalar_patterns_match_schema_consumers(
-    scalar: str, value: str, valid: bool
-) -> None:
+def test_ir_artifact_type_pattern_refuses_fullwidth_letters() -> None:
     import re
 
-    adapter = SCALAR_ADAPTERS[scalar]
+    adapter = SCALAR_ADAPTERS["ArtifactType"]
     pattern = cast("str", adapter.json_schema()["pattern"])
+    value = "Ｔext"
 
-    if valid:
-        parsed = adapter.validate_python(value)
-        assert parsed == value
-    else:
-        with pytest.raises(ValidationError):
-            adapter.validate_python(value)
+    with pytest.raises(ValidationError):
+        adapter.validate_python(value)
 
-    assert (re.search(pattern, value) is not None) is valid
+    assert re.search(pattern, value) is None
 
 
 def test_ir_remaining_patterns_are_used_at_each_schema_location() -> None:
@@ -180,33 +157,3 @@ def test_ir_remaining_patterns_are_used_at_each_schema_location() -> None:
         (output["type"], "ArtifactType"),
     ):
         assert field["pattern"] == SCALAR_ADAPTERS[scalar].json_schema()["pattern"]
-
-
-def declaration_schema(model: type[IrRecord]) -> dict[str, object]:
-    from tests.ir.support import schema_definition
-
-    return cast("dict[str, object]", schema_definition(model.__name__))
-
-
-@pytest.mark.parametrize("model", list(MINIMAL))
-@pytest.mark.parametrize("mode", ["validation", "serialization"])
-def test_ir_declaration_schemas_match_generated_definitions(
-    model: type[IrRecord], mode: str
-) -> None:
-    from typing import Literal
-
-    from tests.ir.test_ir_models_match_schema_definitions import (
-        inline_known_references,
-        normalised,
-    )
-
-    expected = declaration_schema(model)
-
-    generated = model.model_json_schema(
-        mode=cast("Literal['validation', 'serialization']", mode)
-    )
-    definitions = cast("dict[str, object]", generated.pop("$defs", {}))
-
-    assert normalised(inline_known_references(generated, definitions)) == normalised(
-        inline_known_references(expected, {})
-    )

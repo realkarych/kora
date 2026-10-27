@@ -3,6 +3,7 @@ from typing import cast
 
 import pytest
 from pydantic import BaseModel, Field, PrivateAttr, StrictStr, ValidationError
+from pydantic_core import PydanticCustomError
 
 from kora.ir import AgentConfig, IrJsonObjectField
 from kora.ir.json import JsonObject, JsonValue
@@ -123,6 +124,8 @@ def test_embedded_schemas_remain_open_object_data() -> None:
 
 
 def test_ir_open_json_alias_amplification_is_refused() -> None:
+    from kora.ir import export_ir
+
     model = AgentConfig
     previous: dict[str, object] = {}
     for _ in range(64):
@@ -133,17 +136,16 @@ def test_ir_open_json_alias_amplification_is_refused() -> None:
     fixtures: list[dict[str, object]] = [
         previous,
         {"a": repeated_empty, "b": repeated_empty},
-        {"a": [], "b": []},
         cycle,
     ]
+    distinct: dict[str, object] = {"a": [], "b": []}
 
-    for index, fixture in enumerate(fixtures):
-        if index == 2:
-            parsed = model.model_validate(agent_document(fixture))
-            assert parsed is not None
-        else:
-            with pytest.raises(ValidationError):
-                model.model_validate(agent_document(fixture))
+    parsed = model.model_validate(agent_document(distinct))
+    for fixture in fixtures:
+        with pytest.raises(ValidationError):
+            model.model_validate(agent_document(fixture))
+
+    assert export_ir(parsed) == agent_document(distinct)
 
 
 @pytest.mark.parametrize(
@@ -213,9 +215,13 @@ def test_ir_canonical_export_refuses_mutated_non_json_data() -> None:
     data = cast("dict[str, object]", parsed.output_schema)
     data["v"] = object()
 
+    refusals: list[str] = []
     for export in (export_ir, render_ir_json):
-        with pytest.raises(ValueError, match="the IR data is invalid"):
+        with pytest.raises(PydanticCustomError) as refused:
             export(parsed)
+        refusals.append(refused.value.type)
+
+    assert refusals == ["ir_data_invalid", "ir_data_invalid"]
 
 
 class NonIrRecord(BaseModel):
@@ -228,9 +234,13 @@ def test_ir_canonical_export_refuses_non_record_roots(root: object) -> None:
 
     unsupported = cast("IrRecord", root)
 
+    refusals: list[str] = []
     for export in (export_ir, render_ir_json):
-        with pytest.raises(ValueError, match="the IR data is invalid"):
+        with pytest.raises(PydanticCustomError) as refused:
             export(unsupported)
+        refusals.append(refused.value.type)
+
+    assert refusals == ["ir_data_invalid", "ir_data_invalid"]
 
 
 @pytest.mark.parametrize("field", ["hooks", "output_schema"])
@@ -280,10 +290,14 @@ def test_any_value_data_is_detached_and_revalidated_during_export() -> None:
     data = cast("list[object]", parsed.default_value)
     data.append(data)
 
-    assert second["default_value"] == [{"v": 1}]
+    refusals: list[str] = []
     for export in (export_ir, render_ir_json):
-        with pytest.raises(ValueError, match="the IR data is invalid"):
+        with pytest.raises(PydanticCustomError) as refused:
             export(parsed)
+        refusals.append(refused.value.type)
+
+    assert second["default_value"] == [{"v": 1}]
+    assert refusals == ["ir_data_invalid", "ir_data_invalid"]
 
 
 @pytest.mark.parametrize("shape", ["maps", "arrays"])
@@ -320,10 +334,10 @@ def test_ir_open_json_fields_release_dense_and_late_invalid_data() -> None:
     for document in documents:
         with pytest.raises(ValidationError) as raised:
             AgentConfig.model_validate(document)
-        safe = str(raised.value)
+        types = [error["type"] for error in raised.value.errors(include_input=False)]
 
-        assert "the IR data is invalid" in safe
-        assert "object at" not in safe
+        assert types == ["ir_data_invalid"]
+        assert "object at" not in str(raised.value)
 
 
 class CanonicalAliasRecord(IrRecord):
@@ -362,9 +376,13 @@ def test_canonical_export_refuses_mutated_non_extension_keys() -> None:
     parsed = AgentConfig.model_validate(document)
     parsed.extensions["harness"] = "codex"
 
+    refusals: list[str] = []
     for export in (export_ir, render_ir_json):
-        with pytest.raises(ValueError, match="the IR data is invalid"):
+        with pytest.raises(PydanticCustomError) as refused:
             export(parsed)
+        refusals.append(refused.value.type)
+
+    assert refusals == ["ir_data_invalid", "ir_data_invalid"]
 
 
 CANONICAL_WRITER_CASES: list[tuple[JsonValue, str]] = [

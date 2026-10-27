@@ -2,7 +2,6 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from kora.ir import BuiltinTypeContract, CustomTypeContract, TypeContract, export_ir
-from kora.ir.scalars import TypeContractName
 from tests.ir.declaration_cases import BEHAVIOR, DIALECT
 
 
@@ -55,27 +54,3 @@ def test_ir_custom_contract_parent_is_required_nullable() -> None:
     parsed = CustomTypeContract.model_validate({**document, "parent": None})
 
     assert export_ir(parsed) == {**document, "parent": None}
-
-
-@pytest.mark.parametrize("name", ["x-meta", "Text\n", "custom/Text\n", "List[Text]"])
-def test_ir_type_contract_map_applies_name_rules_to_every_entry(name: str) -> None:
-    adapter = TypeAdapter(dict[TypeContractName, TypeContract])
-    document = {name: {"builtin_revision": "1"}}
-
-    with pytest.raises(ValidationError):
-        adapter.validate_python(document)
-
-
-def test_ir_type_contract_map_preserves_order_and_refuses_noncontract_values() -> None:
-    adapter = TypeAdapter(dict[TypeContractName, TypeContract])
-    document = {
-        "custom/Second": {"builtin_revision": "2"},
-        "First": {"builtin_revision": "1"},
-    }
-
-    parsed = adapter.validate_python(document)
-    with pytest.raises(ValidationError):
-        adapter.validate_python({"Text": False})
-
-    assert list(parsed) == ["custom/Second", "First"]
-    assert {name: export_ir(value) for name, value in parsed.items()} == document

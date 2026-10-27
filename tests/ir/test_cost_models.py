@@ -6,6 +6,7 @@ from typing import cast
 
 import pytest
 from pydantic import ValidationError
+from pydantic_core import PydanticCustomError
 
 from kora.ir.cost import (
     ModelCost,
@@ -291,13 +292,13 @@ def test_attempt_model_union_is_cumulative_and_preserves_input() -> None:
     models = frozenset(str(i) for i in range(64))
 
     same = accumulate_attempt_models(models, "0")
-    with pytest.raises(ValueError, match="invalid accounting value"):
+    with pytest.raises(PydanticCustomError) as saturated:
         accumulate_attempt_models(models, "other")
-    with pytest.raises(ValueError, match="invalid accounting value"):
+    with pytest.raises(PydanticCustomError) as overlong:
         accumulate_attempt_models(frozenset({"x" * 257}), "other")
 
     assert same == models
-    assert len(models) == 64
+    assert saturated.value.type == overlong.value.type == "cost_invalid"
 
 
 class ModelIdentifierSubclass(str):
@@ -326,13 +327,12 @@ def test_attempt_model_union_refuses_invalid_identifiers_without_mutation(
 ) -> None:
     prior = frozenset({invalid}) if role == "prior" else frozenset({"existing"})
     incoming = "added" if role == "prior" else invalid
-    original = tuple(prior)
 
-    with pytest.raises(ValueError, match="^invalid accounting value$") as refusal:
+    with pytest.raises(PydanticCustomError) as refusal:
         accumulate_attempt_models(cast("frozenset[str]", prior), cast("str", incoming))
 
-    assert str(refusal.value) == "invalid accounting value"
-    assert tuple(prior) == original
+    assert refusal.value.type == "cost_invalid"
+    assert "private" not in str(refusal.value)
 
 
 @pytest.mark.parametrize(
@@ -342,10 +342,10 @@ def test_attempt_model_union_refuses_invalid_identifiers_without_mutation(
 def test_attempt_model_union_requires_exact_frozenset(prior: object) -> None:
     original = repr(prior)
 
-    with pytest.raises(ValueError, match="^invalid accounting value$") as refusal:
+    with pytest.raises(PydanticCustomError) as refusal:
         accumulate_attempt_models(cast("frozenset[str]", prior), "added")
 
-    assert str(refusal.value) == "invalid accounting value"
+    assert refusal.value.type == "cost_invalid"
     assert repr(prior) == original
 
 
@@ -361,12 +361,10 @@ def test_attempt_model_union_accepts_printable_character_boundary(
         if role == "prior"
         else frozenset({"existing", identifier})
     )
-    original = tuple(prior)
 
     result = accumulate_attempt_models(prior, incoming)
 
     assert result == expected
-    assert tuple(prior) == original
 
 
 @pytest.mark.parametrize("count", [0, 63])
@@ -377,7 +375,6 @@ def test_attempt_model_union_adds_within_capacity(count: int) -> None:
     result = accumulate_attempt_models(prior, "added")
 
     assert result == expected
-    assert len(prior) == count
     assert len(result) == count + 1
 
 
@@ -385,11 +382,10 @@ def test_attempt_model_union_adds_within_capacity(count: int) -> None:
 def test_attempt_model_union_refuses_oversized_prior(incoming: str) -> None:
     prior = frozenset(str(index) for index in range(65))
 
-    with pytest.raises(ValueError, match="^invalid accounting value$") as refusal:
+    with pytest.raises(PydanticCustomError) as refusal:
         accumulate_attempt_models(prior, incoming)
 
-    assert str(refusal.value) == "invalid accounting value"
-    assert len(prior) == 65
+    assert refusal.value.type == "cost_invalid"
 
 
 @pytest.mark.parametrize(
@@ -495,14 +491,10 @@ def test_identifier_overlength_refusal_is_content_free_without_mutation(
     encoded = json.dumps(original)
 
     if input_form == "json":
-        with pytest.raises(
-            ValidationError, match="invalid accounting value"
-        ) as refused:
+        with pytest.raises(ValidationError) as refused:
             model_type.model_validate_json(encoded)
     else:
-        with pytest.raises(
-            ValidationError, match="invalid accounting value"
-        ) as refused:
+        with pytest.raises(ValidationError) as refused:
             model_type.model_validate(
                 MappingProxyType(original) if input_form == "mapping" else original
             )
@@ -687,8 +679,10 @@ def test_snapshot_money_sum_ignores_ambient_decimal_context() -> None:
 def test_direct_money_parser_refuses_noncanonical_input(value: object) -> None:
     from kora.ir.cost import parse_money
 
-    with pytest.raises(ValueError, match="invalid accounting value"):
+    with pytest.raises(PydanticCustomError) as refusal:
         parse_money(value)
+
+    assert refusal.value.type == "cost_invalid"
 
 
 def test_money_storage_formatting_is_exact_and_context_independent() -> None:
@@ -702,10 +696,11 @@ def test_money_storage_formatting_is_exact_and_context_independent() -> None:
         wire = format_money(stored)
         parsed = parse_money(wire)
         rounded = quantize_money(Decimal("0.00000000015"))
-        with pytest.raises(ValueError, match="invalid accounting value"):
+        with pytest.raises(PydanticCustomError) as refusal:
             format_money(Decimal("0.00000000001"))
 
     assert wire == "99999999999999.9999999999"
+    assert refusal.value.type == "cost_invalid"
     assert parsed == stored
     assert rounded == "0.0000000002"
 

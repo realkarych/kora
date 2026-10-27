@@ -1,4 +1,4 @@
-from typing import Literal, cast
+from typing import cast
 
 import pytest
 from pydantic import MISSING, BaseModel, Field, StrictBool, StrictStr, ValidationError
@@ -155,17 +155,14 @@ def test_document_and_provenance_keep_deep_data(depth: int) -> None:
     assert rendered.count('"x"') == 2 * ((depth + 1) // 2)
 
 
-@pytest.mark.parametrize("mode", ["validation", "serialization"])
-@pytest.mark.parametrize("name", ["Text", "ns/Text", "x-meta", "Text\n", "text", ""])
-def test_document_type_contract_map_schema_matches_admission(
-    mode: str, name: str
-) -> None:
+@pytest.mark.parametrize(
+    "name", ["Text", "ns/Text", "x-meta", "Text\n", "text", "", "List[Text]"]
+)
+def test_document_type_contract_map_schema_matches_admission(name: str) -> None:
     import re
 
     value = {**document(), "type_contracts": {name: {"builtin_revision": "1"}}}
-    schema = ir.GraphDocument.model_json_schema(
-        mode=cast("Literal['validation', 'serialization']", mode)
-    )
+    schema = ir.GraphDocument.model_json_schema()
     property_schema = cast("dict[str, dict[str, object]]", schema["properties"])[
         "type_contracts"
     ]

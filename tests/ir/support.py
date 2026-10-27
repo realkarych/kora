@@ -80,17 +80,20 @@ def nested(depth: int, leaf: str) -> dict[str, object]:
     return document
 
 
-def error_forms(error: ValidationError) -> str:
-    safe = safe_field_errors(error, POLICY_FIELDS, SAFE_MESSAGE)
+def raw_error_forms(error: ValidationError) -> str:
     return " ".join(
         (
             str(error),
             repr(error),
             error.json(include_input=False, include_context=False),
             json.dumps(error.errors(include_input=False, include_context=False)),
-            repr(safe),
         )
     )
+
+
+def error_forms(error: ValidationError) -> str:
+    safe = safe_field_errors(error, POLICY_FIELDS, SAFE_MESSAGE)
+    return raw_error_forms(error) + " " + repr(safe)
 
 
 def agent_document(data: object) -> dict[str, object]:

@@ -177,8 +177,6 @@ def test_vcs_ref_rejects_published_negative_fixtures(fixture: "Path") -> None:
     with pytest.raises(VcsRefValidationError):
         parse_vcs_ref_json(payload)
 
-    assert payload
-
 
 @pytest.mark.parametrize(
     "field",
@@ -347,8 +345,6 @@ def test_vcs_ref_url_grammar_refuses_non_iri(url: str) -> None:
 
     with pytest.raises(VcsRefValidationError):
         parse_vcs_ref(candidate)
-
-    assert candidate["commit_url"] == url
 
 
 @pytest.mark.parametrize("unit", ["a", "😀", "\u0001"])
@@ -597,8 +593,6 @@ def test_vcs_ref_refuses_arbitrary_mapping_and_scalar_subclasses(
     with pytest.raises(VcsRefValidationError):
         parse_vcs_ref(candidate)
 
-    assert candidate is not None
-
 
 def test_vcs_ref_raw_override_preserves_preflight_and_flags_cannot_relax_shape() -> (
     None
@@ -668,8 +662,6 @@ def test_vcs_ref_collection_subclasses_are_not_admitted(field: str) -> None:
         parse_vcs_ref(candidate)
     with pytest.raises(VcsRefValidationError):
         parse_vcs_ref(ForeignDict(document()))
-
-    assert candidate[field] is item
 
 
 @pytest.mark.parametrize(

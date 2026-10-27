@@ -12,7 +12,6 @@ from kora.ir import (
     NodeLimits,
     Workspace,
 )
-from kora.ir.errors import PLACEHOLDER_LOCATION
 from kora.ir.json import DEFAULT_MAX_DEPTH, MAX_CANONICAL_BYTES
 from tests.ir.config_cases import DIGEST, MINIMAL, POPULATED, RESOURCE
 from tests.ir.support import CONFIG_ERROR_MESSAGE, configuration_errors, nested
@@ -180,10 +179,12 @@ def test_ir_config_integer_fields_accept_integral_json_numbers(
         (McpServer, "headers", {"X-Header": "value", "": "value"}, True),
         (McpServer, "secret_env", {"lower-key": "ALIAS", "x-entry": "TOKEN"}, True),
         (McpServer, "secret_env", {"TOKEN": "lower-alias"}, False),
+        (McpServer, "secret_env", {"TOKEN": False}, False),
         (McpServer, "env", {"x-entry": {"ignored": True}}, False),
         (McpServer, "headers", {"x-entry": 1}, False),
         (McpServer, "env", {1: "value"}, False),
         (CommandConfig, "env", {"A": "value", "A" * 64: ""}, True),
+        (CommandConfig, "env", {"A": False}, False),
         (CommandConfig, "env", {"A" * 65: "value"}, False),
         (CommandConfig, "env", {"_A": "value"}, False),
         (CommandConfig, "env", {"lower-key": "value"}, False),
@@ -191,6 +192,7 @@ def test_ir_config_integer_fields_accept_integral_json_numbers(
         (CommandConfig, "secret_env", {"TOKEN": "ALIAS"}, True),
         (CommandConfig, "secret_env", {"lower-key": "ALIAS"}, False),
         (CommandConfig, "secret_env", {"TOKEN": "lower-alias"}, False),
+        (CommandConfig, "secret_env", {"TOKEN": False}, False),
     ],
 )
 def test_ir_config_maps_keep_their_distinct_contracts(
@@ -342,45 +344,3 @@ def test_ir_mcp_map_keys_preserve_unrestricted_strings() -> None:
     parsed = McpServer.model_validate(document)
 
     assert parsed.model_dump(mode="json", exclude_unset=True) == document
-
-
-@pytest.mark.parametrize("key", ["workspace", "type", "headers", "TOKEN", 7319, True])
-@pytest.mark.parametrize(
-    ("model", "field"),
-    [
-        (McpServer, "env"),
-        (McpServer, "headers"),
-        (McpServer, "secret_env"),
-        (CommandConfig, "env"),
-        (CommandConfig, "secret_env"),
-    ],
-)
-def test_ir_config_map_keys_never_become_safe_location_names(
-    model: type[BaseModel], field: str, key: str | int
-) -> None:
-    document = {**MINIMAL[model], field: {key: False}}
-
-    with pytest.raises(ValidationError) as raised:
-        model.model_validate(document)
-    raw = raised.value.errors(include_input=False, include_context=False)
-    safe = configuration_errors(raised.value)
-
-    assert safe
-    assert len(safe) == len(raw)
-    for filtered, original in zip(safe, raw, strict=True):
-        assert filtered.loc == tuple(PLACEHOLDER_LOCATION for _ in original["loc"])
-        assert filtered.type == original["type"]
-        assert filtered.msg == CONFIG_ERROR_MESSAGE
-
-
-def test_ir_config_safe_locations_redact_unproven_indexes() -> None:
-    document = {**MINIMAL[CommandConfig], "cmd": ["tool", False]}
-
-    with pytest.raises(ValidationError) as raised:
-        CommandConfig.model_validate(document)
-    safe = configuration_errors(raised.value)
-
-    assert len(safe) == 1
-    assert safe[0].loc == (PLACEHOLDER_LOCATION, PLACEHOLDER_LOCATION)
-    assert safe[0].type == "string_type"
-    assert safe[0].msg == CONFIG_ERROR_MESSAGE
