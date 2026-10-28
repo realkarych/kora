@@ -318,3 +318,67 @@ def test_cel_conversion_refuses_values_of_another_json_kind(
     result = bind(checked, {"inputs": {"v": value}}, types)
 
     assert (result is ErrorKind.INVALID_VALUE) is refused
+
+
+DECLARED_SCHEMA: JsonValue = {
+    "type": "object",
+    "properties": {
+        "tags": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {"type": "string", "maxLength": 1},
+        },
+        "name": {"type": "string", "maxLength": 2},
+    },
+    "additionalProperties": {"type": "array", "maxItems": 0},
+}
+DECLARED_VALUES: list[tuple[str, JsonValue, bool]] = [
+    ("within", {"tags": ["a", "\U0001f600"], "name": "ab", "extra": []}, True),
+    ("too_many_items", {"tags": ["a", "b", "c"]}, False),
+    ("within_utf8_bytes", {"tags": ["ab"], "name": "abcd"}, True),
+    ("nested_string_too_long", {"tags": ["a", "abcde"]}, False),
+    ("field_string_too_long", {"name": "abcdefghi"}, False),
+    ("utf8_bytes_counted", {"name": "\U0001f600\U0001f600\U0001f600"}, False),
+    ("additional_property", {"extra": [1]}, False),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("value", "admitted"),
+    [(value, admitted) for _, value, admitted in DECLARED_VALUES],
+    ids=[name for name, _, _ in DECLARED_VALUES],
+)
+async def test_cel_binding_refuses_data_over_declared_bounds(
+    value: JsonValue, admitted: bool
+) -> None:
+    from kora.cel_eval.convert import BoundValues, bind
+    from kora.cel_eval.errors import ErrorContext, ErrorKind, EvaluationError
+    from kora.cel_eval.thread import Evaluator
+    from tests.cel_eval.test_cel_evaluation import clock
+
+    variable = SchemaTypes(no_documents).variable(DECLARED_SCHEMA)
+    checked = expression("v == v")
+    evaluator = Evaluator(clock)
+
+    bound = bind(checked, {"v": value}, {"v": variable.type}, {"v": variable.bound})
+    unchecked = bind(checked, {"v": value}, {"v": variable.type})
+    try:
+        outcome = await evaluator.evaluate(
+            checked,
+            {"v": value},
+            {"v": variable.type},
+            ErrorContext("when"),
+            bounds={"v": variable.bound},
+        )
+    finally:
+        await evaluator.close()
+
+    assert isinstance(unchecked, BoundValues)
+    if admitted:
+        assert isinstance(bound, BoundValues)
+        assert outcome is True
+    else:
+        assert bound is ErrorKind.BOUND_EXCEEDED
+        assert isinstance(outcome, EvaluationError)
+        assert outcome.kind is ErrorKind.BOUND_EXCEEDED

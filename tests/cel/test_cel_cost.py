@@ -13,7 +13,9 @@ from kora.cel import (
     Code,
     Diagnostic,
     Estimate,
+    JsonValue,
     Reason,
+    SchemaTypes,
     ValueBound,
     Variable,
     Weights,
@@ -111,8 +113,23 @@ def rejected_by_budget(
     return refused.value.diagnostic
 
 
-def test_cel_cost_estimate_rejects_compounding_concatenation() -> None:
-    environment = {"l": string_list(items=1, element=16 * KIB, total=16 * KIB + 4)}
+def schema_list_of_one() -> Variable:
+    schema: JsonValue = {"type": "array", "maxItems": 1, "items": {"type": "string"}}
+    return SchemaTypes(lambda uri: None).variable(schema)
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        string_list(items=1, element=16 * KIB, total=16 * KIB + 4),
+        schema_list_of_one(),
+    ],
+    ids=["given_bounds", "max_items"],
+)
+def test_cel_cost_estimate_rejects_compounding_concatenation(
+    variable: Variable,
+) -> None:
+    environment = {"l": variable}
     eight = "+".join(["{v}"] * 8)
     compounding = ".".join(
         ["l"]

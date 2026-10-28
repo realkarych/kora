@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from kora.cel import CheckedExpression, JsonValue
+from kora.cel.cost import ValueBound
 from kora.cel.limits import MAX_INT, MIN_INT
 from kora.cel.types import (
     DYN,
@@ -20,7 +21,7 @@ from kora.cel.types import (
     member_type,
     unwrap,
 )
-from kora.cel_eval.bounds import MAX_BYTES, MAX_VALUES, measure
+from kora.cel_eval.bounds import MAX_BYTES, MAX_VALUES, DeclaredBounds, measure
 from kora.cel_eval.errors import ErrorKind
 
 MAX_DOUBLE_INTEGER: int = int(sys.float_info.max)
@@ -114,7 +115,10 @@ def bind(
     checked: CheckedExpression,
     values: Mapping[str, object],
     types: Mapping[str, CelType],
+    bounds: Mapping[str, ValueBound] | None = None,
 ) -> BoundValues | ErrorKind:
+    declared: Mapping[str, ValueBound] = {} if bounds is None else bounds
+    admission = DeclaredBounds()
     result: dict[str, JsonValue] = {}
     total_bytes = 0
     total_values = 0
@@ -132,6 +136,9 @@ def bind(
         original_bytes += before.bytes
         original_values += before.values
         if original_bytes > MAX_BYTES or original_values > MAX_VALUES:
+            return ErrorKind.BOUND_EXCEEDED
+        variable_bound = declared.get(name)
+        if variable_bound is not None and not admission.admit(value, variable_bound):
             return ErrorKind.BOUND_EXCEEDED
         converted = convert(value, types.get(name, DYN))
         if isinstance(converted, ErrorKind):

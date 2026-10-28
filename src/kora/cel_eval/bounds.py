@@ -2,7 +2,7 @@ import math
 from dataclasses import dataclass
 from typing import cast
 
-from kora.cel.cost import DATA_BYTES, DATA_VALUES
+from kora.cel.cost import DATA_BYTES, DATA_VALUES, Snapshot, ValueBound, take_snapshot
 from kora.cel_eval.errors import ErrorKind
 
 MAX_BYTES: int = DATA_BYTES
@@ -93,3 +93,44 @@ def measure(value: object) -> Size | ErrorKind:
         if size > MAX_BYTES:
             return ErrorKind.BOUND_EXCEEDED
     return Size(size, count)
+
+
+class DeclaredBounds:
+    def __init__(self) -> None:
+        self.snapshots: dict[
+            int, tuple[ValueBound, Snapshot, dict[str, ValueBound]]
+        ] = {}
+
+    def snapshot(self, bound: ValueBound) -> tuple[Snapshot, dict[str, ValueBound]]:
+        known = self.snapshots.get(id(bound))
+        if known is not None:
+            return known[1], known[2]
+        taken = take_snapshot(bound)
+        fields = dict(taken.fields)
+        self.snapshots[id(bound)] = (bound, taken, fields)
+        return taken, fields
+
+    def admit(self, value: object, bound: ValueBound) -> bool:
+        pending: list[tuple[object, ValueBound]] = [(value, bound)]
+        while pending:
+            current, current_bound = pending.pop()
+            snapshot, fields = self.snapshot(current_bound)
+            if type(current) is str:
+                if len(current.encode("utf-8")) > snapshot.string_bytes:
+                    return False
+            elif type(current) is list:
+                sequence = cast(list[object], current)
+                if len(sequence) > snapshot.items:
+                    return False
+                element = snapshot.element
+                if element is not None:
+                    pending.extend((child, element) for child in sequence)
+            elif type(current) is dict:
+                mapping = cast(dict[str, object], current)
+                if len(mapping) > snapshot.items:
+                    return False
+                for key, child in mapping.items():
+                    child_bound = fields.get(key, snapshot.element)
+                    if child_bound is not None:
+                        pending.append((child, child_bound))
+        return True

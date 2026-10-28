@@ -1,7 +1,9 @@
 import json
 from pathlib import Path
+from typing import Protocol, cast
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from kora.cel import (
     CheckedExpression,
@@ -11,9 +13,11 @@ from kora.cel import (
     SchemaError,
     SchemaTypes,
     SchemaView,
+    ValueBound,
     Variable,
     check_typed,
 )
+from kora.cel.cost import DATA_BOUND
 from kora.cel.meter import Meter
 from kora.cel.types import (
     BOOL,
@@ -31,6 +35,8 @@ from kora.cel.types import (
     Record,
     RecordField,
 )
+from kora.cel_eval.bounds import DeclaredBounds
+from tests.cel.generator import SeededSource
 
 ROOT: Path = Path(__file__).resolve().parents[2]
 VCS_REF_SCHEMA: Path = ROOT / "knowledge/specs/artifacts/VcsRef.schema.json"
@@ -563,3 +569,250 @@ def test_cel_schema_types_resolve_each_document_against_its_own_root() -> None:
 
     with pytest.raises(SchemaError):
         types.document(inner)
+
+
+def declared(
+    items: int = 1000,
+    string_bytes: int = 16384,
+    element: ValueBound | None = None,
+    fields: dict[str, ValueBound] | None = None,
+) -> ValueBound:
+    return ValueBound(4096, 256, items, string_bytes, element, fields or {})
+
+
+BOUND_TABLE: list[tuple[str, JsonValue, ValueBound]] = [
+    ("max_items", {"type": "array", "maxItems": 3}, declared(items=3)),
+    ("integral_float", {"type": "array", "maxItems": 2.0}, declared(items=2)),
+    ("max_length", {"type": "string", "maxLength": 5}, declared(string_bytes=20)),
+    ("wide_length", {"type": "string", "maxLength": 10_000}, DATA_BOUND),
+    ("wide_items", {"type": "array", "maxItems": 2000}, DATA_BOUND),
+    (
+        "element",
+        {"type": "array", "items": {"type": "string", "maxLength": 2}},
+        declared(element=declared(string_bytes=8)),
+    ),
+    (
+        "record",
+        {
+            "type": "object",
+            "properties": {
+                "a": {"type": "string", "maxLength": 1},
+                "b": {"type": "integer"},
+            },
+            "additionalProperties": {"type": "array", "maxItems": 0},
+        },
+        declared(element=declared(items=0), fields={"a": declared(string_bytes=4)}),
+    ),
+    (
+        "map",
+        {"type": "object", "additionalProperties": {"type": "string", "maxLength": 3}},
+        declared(element=declared(string_bytes=12)),
+    ),
+    (
+        "single_pattern",
+        {
+            "type": "object",
+            "patternProperties": {"^x": {"type": "array", "maxItems": 1}},
+            "additionalProperties": False,
+        },
+        declared(element=declared(items=1)),
+    ),
+    ("nullable_type", {"type": ["array", "null"], "maxItems": 4}, declared(items=4)),
+    (
+        "nullable_pair",
+        {"anyOf": [{"type": "null"}, {"type": "string", "maxLength": 1}]},
+        declared(string_bytes=4),
+    ),
+    (
+        "reference",
+        {"$defs": {"s": {"type": "string", "maxLength": 2}}, "$ref": "#/$defs/s"},
+        declared(string_bytes=8),
+    ),
+    ("single_all_of", {"allOf": [{"type": "array", "maxItems": 5}]}, declared(items=5)),
+    (
+        "prefix_items",
+        {
+            "type": "array",
+            "prefixItems": [{"type": "string", "maxLength": 1}],
+            "maxItems": 2,
+        },
+        declared(items=2),
+    ),
+    (
+        "reference_sibling",
+        {"$defs": {"a": {"type": "array"}}, "$ref": "#/$defs/a", "maxItems": 1},
+        DATA_BOUND,
+    ),
+    ("items_on_string", {"type": "string", "maxItems": 1}, DATA_BOUND),
+    ("length_on_array", {"type": "array", "maxLength": 1}, DATA_BOUND),
+    ("length_on_object", {"type": "object", "maxLength": 1}, DATA_BOUND),
+    (
+        "several_types",
+        {"type": ["string", "array"], "maxLength": 1, "maxItems": 1},
+        DATA_BOUND,
+    ),
+    (
+        "recursive",
+        {
+            "$defs": {
+                "n": {
+                    "type": "object",
+                    "properties": {
+                        "next": {"$ref": "#/$defs/n"},
+                        "tag": {"type": "string", "maxLength": 1},
+                    },
+                }
+            },
+            "$ref": "#/$defs/n",
+        },
+        declared(fields={"tag": declared(string_bytes=4)}),
+    ),
+]
+
+
+@pytest.mark.parametrize("view", list(SchemaView))
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [(schema, expected) for _, schema, expected in BOUND_TABLE],
+    ids=[name for name, _, _ in BOUND_TABLE],
+)
+def test_cel_schema_bounds_follow_max_items_and_max_length(
+    schema: JsonValue, expected: ValueBound, view: SchemaView
+) -> None:
+    types = SchemaTypes(no_documents)
+
+    variable = types.variable(schema, view)
+
+    assert variable.bound == expected
+    assert variable.type == types.document(schema, view)
+
+
+def test_cel_schema_bounds_follow_references_through_the_resolver() -> None:
+    documents: dict[str, JsonValue] = {
+        CANDIDATE: {"type": "array", "items": {"type": "string", "maxLength": 3}}
+    }
+    types = SchemaTypes(documents.get)
+
+    variable = types.reference_variable(CANDIDATE)
+
+    assert variable.bound == declared(element=declared(string_bytes=12))
+
+
+BOUNDED_SCHEMAS: list[JsonValue] = [
+    {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 2}},
+    {
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "maxItems": 2, "items": {"type": "string"}},
+            "name": {"type": ["string", "null"], "maxLength": 4},
+        },
+        "additionalProperties": {"type": "string", "maxLength": 1},
+    },
+    {
+        "type": "object",
+        "additionalProperties": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {"type": "string", "maxLength": 1},
+        },
+    },
+]
+
+
+class SchemaValidator(Protocol):
+    def is_valid(self, instance: object) -> bool: ...
+
+
+ALPHABET: str = "a\u00e9\u4e2d\U0001f600"
+
+
+def random_text(chooser: SeededSource) -> str:
+    return "".join(chooser.choice(ALPHABET) for _ in range(chooser.randrange(0, 7)))
+
+
+def random_value(chooser: SeededSource, depth: int = 0) -> JsonValue:
+    if depth >= 3:
+        return random_text(chooser)
+    kind = chooser.randrange(0, 4)
+    if kind == 0:
+        return random_text(chooser)
+    if kind == 1:
+        size = chooser.randrange(0, 5)
+        return [random_value(chooser, depth + 1) for _ in range(size)]
+    if kind == 2:
+        names = ["tags", "name", "x", "y"]
+        size = chooser.randrange(0, 4)
+        return {
+            chooser.choice(names): random_value(chooser, depth + 1) for _ in range(size)
+        }
+    return None
+
+
+@pytest.mark.parametrize("schema", BOUNDED_SCHEMAS)
+def test_cel_schema_bounds_admit_every_valid_value(schema: JsonValue) -> None:
+    chooser = SeededSource(20261028)
+    validator = cast(
+        "SchemaValidator", Draft202012Validator(cast("dict[str, object]", schema))
+    )
+    bound = SchemaTypes(no_documents).variable(schema).bound
+    candidates = [random_value(chooser) for _ in range(4000)]
+
+    valid = [value for value in candidates if validator.is_valid(value)]
+    invalid = [value for value in candidates if not validator.is_valid(value)]
+    admitted = [DeclaredBounds().admit(value, bound) for value in valid]
+    refused = [not DeclaredBounds().admit(value, bound) for value in invalid]
+
+    assert len(valid) >= 50
+    assert all(admitted)
+    assert any(refused)
+
+
+@pytest.mark.parametrize("keyword", ["maxItems", "maxLength"])
+@pytest.mark.parametrize("value", [-1, 1.5, True, None, "3", float("inf")])
+def test_cel_schema_bounds_refuse_malformed_keywords(
+    keyword: str, value: JsonValue
+) -> None:
+    schema: JsonValue = {
+        "type": "object",
+        "properties": {"a": {"type": "string", keyword: value}},
+    }
+    types = SchemaTypes(no_documents)
+
+    with pytest.raises(SchemaError):
+        types.variable(schema)
+
+
+def bounded_items(depth: int) -> JsonValue:
+    schema: JsonValue = {"type": "string", "maxLength": 1}
+    for _ in range(depth):
+        schema = {"type": "array", "maxItems": 2, "items": schema}
+    return schema
+
+
+def bound_depth(bound: ValueBound) -> int:
+    depth = 0
+    element = bound.element
+    while element is not None:
+        depth, element = depth + 1, element.element
+    return depth
+
+
+def variable_steps(schema: JsonValue) -> tuple[int, int]:
+    typed_meter, bound_meter = Meter(), Meter()
+    SchemaTypes(no_documents, typed_meter).document(schema)
+    SchemaTypes(no_documents, bound_meter).variable(schema)
+    return typed_meter.steps, bound_meter.steps
+
+
+def test_cel_schema_bounds_are_linear_in_steps() -> None:
+    deep = SchemaTypes(no_documents).variable(bounded_items(5000))
+    lengths = (250, 500, 1000, 2000)
+
+    shared = [variable_steps(shared_chain(length)) for length in lengths]
+    chains = [variable_steps(reference_chain(length)) for length in lengths]
+
+    assert bound_depth(deep.bound) == 5000
+    for typed_steps, bound_steps in [*shared, *chains]:
+        assert bound_steps == typed_steps
+    for smaller, larger in zip(shared, shared[1:], strict=False):
+        assert larger[1] <= 2.5 * smaller[1]

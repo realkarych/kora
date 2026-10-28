@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from kora.cel import CheckedExpression
+from kora.cel.cost import ValueBound
 from kora.cel.diagnostics import DiagnosticError
 from kora.cel.parser import RENDERING_LIMITS, parse
 from kora.cel.types import CelType
@@ -113,8 +114,9 @@ class Machine:
         types: Mapping[str, CelType],
         context: ErrorContext,
         result_type: ResultType,
+        bounds: Mapping[str, ValueBound] | None = None,
     ) -> Result:
-        bound = bind(checked, values, types)
+        bound = bind(checked, values, types, bounds)
         if isinstance(bound, ErrorKind):
             return context.record(bound, self.clock)
         return self.run(Prepared(checked, bound, context, result_type))
