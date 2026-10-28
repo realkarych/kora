@@ -6,6 +6,15 @@ from typing import Final
 from kora.cel.cost import BoundError, Variable, check_type, is_variable
 from kora.cel.diagnostics import Reason, fail
 from kora.cel.meter import Meter
+from kora.cel.paths import Field
+from kora.cel.projection import (
+    EVERY,
+    PathSet,
+    ProjectionPath,
+    ProjectionStep,
+    Read,
+    path_sets,
+)
 from kora.cel.rewrite import rewrite_integer_negations
 from kora.cel.tree import (
     Binary,
@@ -254,6 +263,7 @@ class Checker:
         self.scope_count: int = 0
         self.checked: set[str] = set()
         self.integer_negations: set[int] = set()
+        self.reads: dict[int, Read] = {}
 
     def key(self, parent: int | None, step: Step | None) -> int | None:
         if parent is None or step is None:
@@ -262,6 +272,18 @@ class Checker:
         return self.paths.setdefault((parent, step), len(self.paths))
 
     def visit(self, node: Node) -> Typed:
+        typed = self.reach(node)
+        self.read(typed.path, Read.WHOLE)
+        return typed
+
+    def read(self, path: int | None, read: Read) -> None:
+        if path is None:
+            return
+        self.meter.tick()
+        if read is Read.WHOLE or path not in self.reads:
+            self.reads[path] = read
+
+    def reach(self, node: Node) -> Typed:
         self.meter.tick()
         match node:
             case Identifier():
@@ -292,7 +314,7 @@ class Checker:
     def operand(self, node: Node) -> Typed:
         if isinstance(node, Identifier):
             return self.identifier(node, selected=True)
-        return self.visit(node)
+        return self.reach(node)
 
     def identifier(self, node: Identifier, selected: bool) -> Typed:
         name = node.name
@@ -341,13 +363,15 @@ class Checker:
         return Typed(declared.type, path)
 
     def index(self, node: Index) -> Typed:
-        inner = self.visit(node.operand)
+        inner = self.reach(node.operand)
         key = self.visit(node.index)
         step = literal_step(node.index)
         path = self.key(inner.path, step)
         container = unwrap(inner.type)
         key_kind = kind_of(key.type)
         dynamic_key = isinstance(key.type, Dyn)
+        if path is None or (isinstance(container, Dyn) and isinstance(step, int)):
+            self.read(inner.path, Read.WHOLE)
         if isinstance(container, Dyn):
             return Typed(DYN, path)
         if isinstance(container, ListOf):
@@ -378,7 +402,9 @@ class Checker:
 
     def has(self, node: Has) -> Typed:
         target = node.target
-        container = unwrap(self.operand(target.operand).type)
+        operand = self.operand(target.operand)
+        self.read(self.key(operand.path, target.name), Read.PRESENCE)
+        container = unwrap(operand.type)
         if isinstance(container, MapOf):
             raise fail(Reason.UNKNOWN_FIELD, target.offset)
         if isinstance(container, Record):
@@ -471,7 +497,11 @@ class Checker:
             )
             self.boolean(self.guarded(facts, node.right), node.offset)
             return Typed(BOOL)
-        right = self.visit(node.right)
+        right = self.reach(node.right)
+        if operator is BinaryOperator.IN:
+            self.membership_read(node, right)
+        else:
+            self.read(right.path, Read.WHOLE)
         if operator in (BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL):
             if not equatable(left.type, right.type):
                 raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
@@ -493,6 +523,14 @@ class Checker:
         if allowed is not None and isinstance(node, StringLiteral):
             if node.value not in allowed:
                 raise fail(Reason.UNKNOWN_ENUM_VALUE, node.offset)
+
+    def membership_read(self, node: Binary, right: Typed) -> None:
+        step = literal_step(node.left)
+        container = unwrap(right.type)
+        if isinstance(container, MapOf | Record) and isinstance(step, str):
+            self.read(self.key(right.path, step), Read.PRESENCE)
+        else:
+            self.read(right.path, Read.WHOLE)
 
     def membership(self, node: Binary, left: Typed, right: Typed) -> None:
         container = unwrap(right.type)
@@ -630,7 +668,31 @@ def ordered(left: CelType, right: CelType) -> bool:
     return kinds[0] is kinds[1] and kinds[0] in ORDERED
 
 
-def check_types(tree: Node, environment: Environment, meter: Meter) -> Node:
+@dataclass(frozen=True)
+class TypedTree:
+    tree: Node
+    paths: dict[str, PathSet]
+
+
+def read_paths(checker: Checker) -> dict[str, PathSet]:
+    parents = {key: link for link, key in checker.paths.items()}
+    reads: dict[str, dict[ProjectionPath, Read]] = {}
+    for path, read in checker.reads.items():
+        steps: list[ProjectionStep] = []
+        parent, step = parents[path]
+        while parent >= 0:
+            checker.meter.tick()
+            steps.append(Field(step) if isinstance(step, str) else EVERY)
+            parent, step = parents[parent]
+        if parent == VARIABLE_ROOT and isinstance(step, str):
+            located = tuple(reversed(steps))
+            variable = reads.setdefault(step, {})
+            if variable.get(located) is not Read.WHOLE:
+                variable[located] = read
+    return path_sets(reads)
+
+
+def check_types(tree: Node, environment: Environment, meter: Meter) -> TypedTree:
     checker = Checker(environment, meter)
     result = checker.visit(tree).type
     expected = Kind.BOOL if environment.result is ResultKind.BOOL else Kind.STRING
@@ -639,4 +701,5 @@ def check_types(tree: Node, environment: Environment, meter: Meter) -> Node:
     ):
         raise fail(Reason.WRONG_RESULT_TYPE, 0)
     negations = frozenset(checker.integer_negations)
-    return rewrite_integer_negations(tree, negations, meter)
+    rewritten = rewrite_integer_negations(tree, negations, meter)
+    return TypedTree(rewritten, read_paths(checker))
