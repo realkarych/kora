@@ -51,8 +51,12 @@ protect unexpected completed-task faults and local-handle closure after signal r
 Both failed before their corrections. Existing successful mutation, transfer, claim
 exclusion, queued-publisher and helper-conformance assertions remain.
 
-Every ownership case observes actual child exit/reaping and native process/group
-absence. Pending cases also require zero retained trees/processes, pending operations,
+The four expired-barrier and four cancellation cases observe actual child
+exit/reaping and native process/group absence. The completed-task regression
+asserts helper closure, direct-child return status, exception context and descriptor
+equality; it does not add a native group scan. The signal-refusal regression proves
+local-handle closure while deliberately retaining unsettled process state, then its
+independent emergency finalizer stops and reaps the direct child. Pending cases also require zero retained trees/processes, pending operations,
 cleanup tasks and helper directory/claim descriptors. Garbage collection and exact
 `/dev/fd` equality are checked before outer fallback can repair a leak, then again after
 removing retained test handles. The existing warnings-as-errors policy stays active.
