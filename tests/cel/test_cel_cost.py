@@ -150,6 +150,24 @@ def test_cel_cost_estimate_rejects_compounding_concatenation(
     assert isinstance(fitting, CheckedExpression)
 
 
+@pytest.mark.parametrize(("max_items", "admitted"), [(None, False), (10, True)])
+def test_cel_cost_estimate_uses_schema_max_items(
+    max_items: int | None, admitted: bool
+) -> None:
+    schema: dict[str, JsonValue] = {"type": "array", "items": {"type": "string"}}
+    if max_items is not None:
+        schema["maxItems"] = max_items
+    variable = SchemaTypes(lambda uri: None).variable(schema)
+
+    result = check("l.map(a, l.map(b, a + b)).size() > 0", {"l": variable})
+
+    if admitted:
+        assert isinstance(result, CheckedExpression)
+    else:
+        assert isinstance(result, Diagnostic)
+        assert result.reason is Reason.STEPS
+
+
 def test_cel_cost_estimate_bounds_comprehension_results() -> None:
     source = string_list(items=500, element=16 * KIB, total=64 * KIB)
     memory = only(memory_byte=1)

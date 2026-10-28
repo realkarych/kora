@@ -155,7 +155,7 @@ def test_cel_program_cache_checks_rendering_on_a_digest_collision() -> None:
     other = check("false")
     assert isinstance(other, CheckedExpression)
     collision_input = CheckedExpression(
-        SEAL, other.tree, other.rendering, original.digest, other.estimate
+        SEAL, other.tree, other.rendering, original.digest, other.estimate, {}
     )
 
     accepted = machine.evaluate(original, {}, {}, ErrorContext("when"), ResultType.BOOL)

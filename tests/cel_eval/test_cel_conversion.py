@@ -329,51 +329,67 @@ DECLARED_SCHEMA: JsonValue = {
             "items": {"type": "string", "maxLength": 1},
         },
         "name": {"type": "string", "maxLength": 2},
+        "description": {"type": "string"},
     },
     "additionalProperties": {"type": "array", "maxItems": 0},
 }
-DECLARED_VALUES: list[tuple[str, JsonValue, bool]] = [
-    ("within", {"tags": ["a", "\U0001f600"], "name": "ab", "extra": []}, True),
-    ("too_many_items", {"tags": ["a", "b", "c"]}, False),
-    ("within_utf8_bytes", {"tags": ["ab"], "name": "abcd"}, True),
-    ("nested_string_too_long", {"tags": ["a", "abcde"]}, False),
-    ("field_string_too_long", {"name": "abcdefghi"}, False),
-    ("utf8_bytes_counted", {"name": "\U0001f600\U0001f600\U0001f600"}, False),
-    ("additional_property", {"extra": [1]}, False),
+ROOT_LIST: JsonValue = {"type": "array", "maxItems": 1}
+ROOT_STRING: JsonValue = {"type": "string", "maxLength": 1}
+DECLARED_VALUES: list[tuple[str, JsonValue, JsonValue, bool]] = [
+    (
+        "within",
+        DECLARED_SCHEMA,
+        {"tags": ["a", "\U0001f600"], "name": "ab", "extra": []},
+        True,
+    ),
+    ("within_utf8_bytes", DECLARED_SCHEMA, {"tags": ["ab"], "name": "abcd"}, True),
+    ("loose_declared_property", DECLARED_SCHEMA, {"description": "a" * 100}, True),
+    ("too_many_items", DECLARED_SCHEMA, {"tags": ["a", "b", "c"]}, False),
+    ("nested_string_too_long", DECLARED_SCHEMA, {"tags": ["a", "abcde"]}, False),
+    ("field_string_too_long", DECLARED_SCHEMA, {"name": "abcdefghi"}, False),
+    (
+        "utf8_bytes_counted",
+        DECLARED_SCHEMA,
+        {"name": "\U0001f600\U0001f600\U0001f600"},
+        False,
+    ),
+    ("additional_property", DECLARED_SCHEMA, {"extra": [1]}, False),
+    ("root_list_within", ROOT_LIST, [1], True),
+    ("root_list_too_long", ROOT_LIST, [1, 2], False),
+    ("root_string_too_long", ROOT_STRING, "abcde", False),
 ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("value", "admitted"),
-    [(value, admitted) for _, value, admitted in DECLARED_VALUES],
-    ids=[name for name, _, _ in DECLARED_VALUES],
+    ("schema", "value", "admitted"),
+    [(schema, value, admitted) for _, schema, value, admitted in DECLARED_VALUES],
+    ids=[name for name, _, _, _ in DECLARED_VALUES],
 )
 async def test_cel_binding_refuses_data_over_declared_bounds(
-    value: JsonValue, admitted: bool
+    schema: JsonValue, value: JsonValue, admitted: bool
 ) -> None:
     from kora.cel_eval.convert import BoundValues, bind
     from kora.cel_eval.errors import ErrorContext, ErrorKind, EvaluationError
     from kora.cel_eval.thread import Evaluator
     from tests.cel_eval.test_cel_evaluation import clock
 
-    variable = SchemaTypes(no_documents).variable(DECLARED_SCHEMA)
-    checked = expression("v == v")
+    variable = SchemaTypes(no_documents).variable(schema)
+    bounded = check("v == v", {"v": variable})
+    unbounded = expression("v == v")
+    assert isinstance(bounded, CheckedExpression)
     evaluator = Evaluator(clock)
 
-    bound = bind(checked, {"v": value}, {"v": variable.type}, {"v": variable.bound})
-    unchecked = bind(checked, {"v": value}, {"v": variable.type})
+    bound = bind(bounded, {"v": value}, {"v": variable.type})
+    unchecked = bind(unbounded, {"v": value}, {"v": variable.type})
     try:
         outcome = await evaluator.evaluate(
-            checked,
-            {"v": value},
-            {"v": variable.type},
-            ErrorContext("when"),
-            bounds={"v": variable.bound},
+            bounded, {"v": value}, {"v": variable.type}, ErrorContext("when")
         )
     finally:
         await evaluator.close()
 
+    assert bounded.bounds == {"v": variable.bound}
     assert isinstance(unchecked, BoundValues)
     if admitted:
         assert isinstance(bound, BoundValues)
@@ -382,3 +398,18 @@ async def test_cel_binding_refuses_data_over_declared_bounds(
         assert bound is ErrorKind.BOUND_EXCEEDED
         assert isinstance(outcome, EvaluationError)
         assert outcome.kind is ErrorKind.BOUND_EXCEEDED
+
+
+def test_cel_binding_checks_json_kinds_before_declared_bounds() -> None:
+    from kora.cel_eval.convert import bind
+    from kora.cel_eval.errors import ErrorKind
+
+    variable = SchemaTypes(no_documents).variable(
+        {"items": {"type": "string"}, "maxItems": 1}
+    )
+    bounded = check("v == v", {"v": variable})
+    assert isinstance(bounded, CheckedExpression)
+
+    result = bind(bounded, {"v": {"a": "x", "b": "y"}}, {"v": variable.type})
+
+    assert result is ErrorKind.INVALID_VALUE

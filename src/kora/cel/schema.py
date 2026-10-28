@@ -167,6 +167,11 @@ def string_limit(schema: JsonObject) -> int:
     return min(DATA_STRING_BYTES, declared * UTF8_BYTES_PER_CODE_POINT)
 
 
+UNTIGHTENED: Final[ValueBound] = ValueBound(
+    DATA_BYTES, DATA_VALUES, DATA_ITEMS, DATA_STRING_BYTES
+)
+
+
 def tightened(
     items: int = DATA_ITEMS,
     string_bytes: int = DATA_STRING_BYTES,
@@ -515,6 +520,8 @@ class SchemaTypes:
             fields[name] = RecordField(member_type, name in names)
             if member_bound is not None:
                 bounds[name] = member_bound
+            elif extra_bound is not None:
+                bounds[name] = UNTIGHTENED
         return mapped, tightened(element=extra_bound, fields=bounds)
 
 

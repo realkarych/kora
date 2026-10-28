@@ -10,7 +10,6 @@ from enum import Enum
 from functools import partial
 
 from kora.cel import CheckedExpression
-from kora.cel.cost import ValueBound
 from kora.cel.types import CelType
 from kora.cel_eval import (
     CEL_COMPONENT,
@@ -77,7 +76,6 @@ class EvaluationInput:
     types: Mapping[str, CelType]
     context: ErrorContext
     result_type: ResultType = ResultType.BOOL
-    bounds: Mapping[str, ValueBound] = field(default_factory=lambda: {})
 
 
 @dataclass(frozen=True)
@@ -537,11 +535,9 @@ class Evaluator:
         types: Mapping[str, CelType],
         context: ErrorContext,
         result_type: ResultType = ResultType.BOOL,
-        bounds: Mapping[str, ValueBound] | None = None,
     ) -> Result:
-        declared: Mapping[str, ValueBound] = {} if bounds is None else bounds
         results = await self.evaluate_batch(
-            [EvaluationInput(checked, values, types, context, result_type, declared)]
+            [EvaluationInput(checked, values, types, context, result_type)]
         )
         return results[0]
 
@@ -562,7 +558,7 @@ class Evaluator:
                 or (event_id is not None and len(event_id) > MAX_EVENT_ID)
             ):
                 refuse(UnavailableReason.BUSY)
-            bound = bind(request.checked, request.values, request.types, request.bounds)
+            bound = bind(request.checked, request.values, request.types)
             charge += (
                 len(request.checked.rendering) * 4
                 + len(context.field) * 4

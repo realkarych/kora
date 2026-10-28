@@ -35,7 +35,7 @@ from kora.cel.types import (
     Record,
     RecordField,
 )
-from kora.cel_eval.bounds import DeclaredBounds
+from kora.cel_eval.bounds import admitted
 from tests.cel.generator import SeededSource
 
 ROOT: Path = Path(__file__).resolve().parents[2]
@@ -601,7 +601,43 @@ BOUND_TABLE: list[tuple[str, JsonValue, ValueBound]] = [
             },
             "additionalProperties": {"type": "array", "maxItems": 0},
         },
-        declared(element=declared(items=0), fields={"a": declared(string_bytes=4)}),
+        declared(
+            element=declared(items=0),
+            fields={"a": declared(string_bytes=4), "b": declared()},
+        ),
+    ),
+    (
+        "loose_property_beside_additional",
+        {
+            "type": "object",
+            "properties": {"description": {"type": "string"}},
+            "additionalProperties": {"type": "string", "maxLength": 1},
+        },
+        declared(element=declared(string_bytes=4), fields={"description": declared()}),
+    ),
+    (
+        "property_beside_single_pattern",
+        {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "patternProperties": {"^x": {"type": "array", "maxItems": 1}},
+            "additionalProperties": False,
+        },
+        declared(element=declared(items=1), fields={"name": declared()}),
+    ),
+    (
+        "recursive_beside_additional",
+        {
+            "$defs": {
+                "n": {
+                    "type": "object",
+                    "properties": {"next": {"$ref": "#/$defs/n"}},
+                    "additionalProperties": {"type": "array", "maxItems": 0},
+                }
+            },
+            "$ref": "#/$defs/n",
+        },
+        declared(element=declared(items=0), fields={"next": declared()}),
     ),
     (
         "map",
@@ -684,7 +720,7 @@ def test_cel_schema_bounds_follow_max_items_and_max_length(
     variable = types.variable(schema, view)
 
     assert variable.bound == expected
-    assert variable.type == types.document(schema, view)
+    assert variable.type is types.document(schema, view)
 
 
 def test_cel_schema_bounds_follow_references_through_the_resolver() -> None:
@@ -715,6 +751,17 @@ BOUNDED_SCHEMAS: list[JsonValue] = [
             "maxItems": 1,
             "items": {"type": "string", "maxLength": 1},
         },
+    },
+    {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "tags": {"type": "array"}},
+        "additionalProperties": {"type": "string", "maxLength": 1},
+    },
+    {
+        "type": "object",
+        "properties": {"name": {}},
+        "patternProperties": {"^x": {"type": "array", "maxItems": 1}},
+        "additionalProperties": False,
     },
 ]
 
@@ -759,11 +806,11 @@ def test_cel_schema_bounds_admit_every_valid_value(schema: JsonValue) -> None:
 
     valid = [value for value in candidates if validator.is_valid(value)]
     invalid = [value for value in candidates if not validator.is_valid(value)]
-    admitted = [DeclaredBounds().admit(value, bound) for value in valid]
-    refused = [not DeclaredBounds().admit(value, bound) for value in invalid]
+    accepted = [admitted(value, bound) for value in valid]
+    refused = [not admitted(value, bound) for value in invalid]
 
     assert len(valid) >= 50
-    assert all(admitted)
+    assert all(accepted)
     assert any(refused)
 
 
