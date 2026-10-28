@@ -30,7 +30,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.lifetime import ConformanceLifetime
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.storage import ArtifactStorage
-from tests.conformance.test_conformance_bridge import owned_lifetime
+from tests.conformance.lifetime_support import owned_lifetime
 from tests.conformance.test_shared_secrets_checks import assert_capture_released
 from tests.conformance.test_shared_storage_checks import LoopBoundStorage
 from tests.plugins.storage.activity import StorageBarrierActivity

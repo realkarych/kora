@@ -9,7 +9,6 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.conformance.transport import LifetimeEndpoint
 from kora.protocols.lifetime import (
@@ -25,9 +24,12 @@ from kora.protocols.lifetime import (
 )
 from kora.runner.filesystem import FilesystemError
 from tests.conformance.lifetime_helpers import lifetime_failure_state
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+    limits,
+)
 
 
 async def receive_feedback(
@@ -58,7 +60,7 @@ async def run_probe(mode: str, root: str = "store") -> None:
         owner = ParentLifetime(
             clock=clock,
             limits=limits(),
-            launcher=InstalledIOHelperLauncher(home=base, state_home=base / "state"),
+            launcher=installed_launcher(base),
         )
         running: asyncio.Task[ClosureReport] | None = None
         try:

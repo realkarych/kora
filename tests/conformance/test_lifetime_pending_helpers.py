@@ -18,33 +18,16 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_parent_lifetime import limits
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    entered_fifo,
+    limits,
+    stall_barrier,
+)
+from tests.support.event_loop import turn
 
-
-class ControlledLifetimeClock(SystemClock):
-    def __init__(self) -> None:
-        self.instant = super().monotonic_ns()
-        self.waiters: dict[asyncio.Future[None], int] = {}
-
-    def monotonic_ns(self) -> int:
-        return self.instant
-
-    async def sleep_until(self, deadline_ns: int) -> None:
-        if self.instant >= deadline_ns:
-            return
-        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self.waiters[waiter] = deadline_ns
-        try:
-            await waiter
-        finally:
-            self.waiters.pop(waiter)
-
-    def advance(self, nanoseconds: int) -> None:
-        self.instant += nanoseconds
-        for waiter, deadline in tuple(self.waiters.items()):
-            if self.instant >= deadline and not waiter.done():
-                waiter.set_result(None)
+__all__ = ["ControlledLifetimeClock"]
 
 
 @pytest.mark.asyncio
@@ -53,15 +36,8 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
     tmp_path: Path, case: str
 ) -> None:
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, pause_at=4
-        )
+        barrier = stall_barrier(resources, tmp_path)
+        launcher = barrier.launcher(pause_at=4)
         clock = ControlledLifetimeClock()
         actual = SystemClock()
         owner = ParentLifetime(
@@ -84,7 +60,7 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
                 )
                 deadline = actual.monotonic_ns() + 5_000_000_000
                 writer = resources.enter_context(
-                    await entered_fifo(barrier.descriptor, reading, deadline, actual)
+                    await barrier.entered(deadline, actual)
                 )
                 helper = owner.mutations.helpers[-1]
 
@@ -126,10 +102,6 @@ async def test_conformance_fixture_resources_are_released_with_pending_helper(
                 assert helper.closed
                 assert owner.inventory().helpers.live_helpers == 0
         finally:
-            from tests.conformance.test_lifetime_cleanup_controls import (
-                dispose_test_owner,
-            )
-
             try:
                 await dispose_test_owner(owner, clock)
             finally:
@@ -174,9 +146,7 @@ async def test_mutation_queue_deadline_does_not_cancel_earlier_publisher(
                 assert actual.monotonic_ns() < deadline
                 if queued_call.done():
                     await queued_call
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
             clock.advance(100_000_000)
             with pytest.raises(HelperError):
                 await asyncio.wait_for(queued_call, 1)

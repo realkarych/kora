@@ -1,6 +1,5 @@
 import asyncio
 import gc
-import os
 import signal
 import socket
 import sys
@@ -27,14 +26,13 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError
-from kora.runner.filesystem import DirectoryAnchor
-from tests.conformance.lifetime_helpers import (
-    ProbeIOHelperLauncher,
-    lifetime_failure_state,
+from tests.conformance.lifetime_helpers import lifetime_failure_state
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    limits,
+    stall_barrier,
 )
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -56,16 +54,9 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
 ) -> None:
     tree_workload = workload in ("tree", "mixed")
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         pause_at = 12 if tree_workload else 16
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, pause_at=pause_at
-        )
+        launcher = barrier.launcher(pause_at=pause_at)
         clock = ControlledLifetimeClock()
         owner = ParentLifetime(
             clock=clock,
@@ -139,9 +130,7 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                 deadline = actual_clock.monotonic_ns() + 5_000_000_000
 
                 writer = resources.enter_context(
-                    await entered_fifo(
-                        barrier.descriptor, reading, deadline, actual_clock
-                    )
+                    await barrier.entered(deadline, actual_clock)
                 )
                 helper = owner.mutations.helpers[-1]
                 probe_ready_remaining_ns = deadline - actual_clock.monotonic_ns()
@@ -183,9 +172,7 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                     for direct in direct_acquisitions:
                         if direct.done():
                             raise AssertionError(await direct)
-                    admission_ready: asyncio.Future[None] = loop.create_future()
-                    loop.call_soon(admission_ready.set_result, None)
-                    await admission_ready
+                    await turn()
                 assert owner.transport_pending == (1 if workload == "mixed" else slots)
                 assert owner.inventory().pending_operations == 1
                 if workload == "mixed":
@@ -223,9 +210,7 @@ async def test_real_client_subtree_close_fences_stalled_acquire_before_reply(
                             assert actual_clock.monotonic_ns() < readmission_deadline
                             if direct_acquisitions[-1].done():
                                 raise AssertionError(await direct_acquisitions[-1])
-                            admission_ready = loop.create_future()
-                            loop.call_soon(admission_ready.set_result, None)
-                            await admission_ready
+                            await turn()
                 if workload == "execution":
                     assert owner.transport_execution_bytes >= 600000
                     recorded = {

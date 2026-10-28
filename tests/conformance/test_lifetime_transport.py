@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.conformance.transport import ENDPOINT_CONTROL_BYTES, LifetimeEndpoint
 from kora.protocols.lifetime import (
@@ -24,8 +23,12 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from tests.conformance.lifetime_helpers import lifetime_failure_state, unread_bytes
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+)
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -57,9 +60,7 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                 kill_observation_seconds=2.0,
                 drain_seconds=1.0,
             ),
-            launcher=InstalledIOHelperLauncher(
-                home=tmp_path, state_home=tmp_path / "state"
-            ),
+            launcher=installed_launcher(tmp_path),
         )
         running: asyncio.Task[ClosureReport] | None = None
         try:
@@ -173,9 +174,7 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                     unread_bytes(endpoint) or not clock.waiters
                                 ):
                                     assert loop.time() < frontier_deadline
-                                    entered: asyncio.Future[None] = loop.create_future()
-                                    loop.call_soon(entered.set_result, None)
-                                    await entered
+                                    await turn()
                                 assert not running.done(), running.result()
                                 assert not parent.pending
                                 assert not owner.ordinary_slots
@@ -212,9 +211,7 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 - ENDPOINT_CONTROL_BYTES
                             ):
                                 assert loop.time() < frontier_deadline
-                                ready: asyncio.Future[None] = loop.create_future()
-                                loop.call_soon(ready.set_result, None)
-                                await ready
+                                await turn()
                             assert not parent.pending
                             assert any(
                                 slot.wire and slot.task is None

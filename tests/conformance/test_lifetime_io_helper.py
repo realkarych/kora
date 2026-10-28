@@ -1,10 +1,8 @@
 import asyncio
-import errno
 import fcntl
 import os
 import signal
 from contextlib import ExitStack
-from io import FileIO
 from pathlib import Path
 
 import pytest
@@ -14,7 +12,6 @@ from kora.conformance.io_helper import (
     BootstrapMutation,
     CreateTreeMutation,
     HelperError,
-    InstalledIOHelperLauncher,
     IOHelperLauncher,
     MutationResult,
     OpenTreeMutation,
@@ -25,12 +22,17 @@ from kora.conformance.io_helper import (
 )
 from kora.conformance.journal import JournalSnapshot
 from kora.protocols.lifetime import LifetimeReason, OriginalOutcome
-from kora.protocols.time import Clock, SystemClock
-from kora.runner.channels import DescriptorReadiness, wait_future
+from kora.protocols.time import SystemClock
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
+from tests.conformance.lifetime_support import (
+    entered_fifo,
+    installed_launcher,
+    open_fifo_writer,
+)
 from tests.measurements.lifetime_measurement_support import MeasuredIOHelperLauncher
+from tests.support.event_loop import turn
 
 
 def initial_snapshot() -> JournalSnapshot:
@@ -44,42 +46,6 @@ def initial_snapshot() -> JournalSnapshot:
         admission_open=True,
         original_outcome=OriginalOutcome.COMPLETE,
     )
-
-
-async def read_probe(descriptor: int, deadline: int, clock: Clock) -> bytes:
-    readiness = DescriptorReadiness(descriptor, writing=False)
-    try:
-        await wait_future(readiness.ready, deadline, clock)
-        return os.read(descriptor, 1)
-    finally:
-        readiness.close()
-
-
-async def entered_fifo(
-    directory: int, observation: int, deadline: int, clock: Clock
-) -> FileIO:
-    assert await read_probe(observation, deadline, clock) == b"r"
-    with ExitStack() as pending:
-        writer = pending.enter_context(
-            FileIO(await open_fifo_writer(directory, deadline, clock), "wb")
-        )
-        assert await read_probe(observation, deadline, clock) == b"e"
-        pending.pop_all()
-        return writer
-
-
-async def open_fifo_writer(directory: int, deadline: int, clock: Clock) -> int:
-    loop = asyncio.get_running_loop()
-    while clock.monotonic_ns() < deadline:
-        try:
-            return os.open("stall", os.O_WRONLY | os.O_NONBLOCK, dir_fd=directory)
-        except OSError as failure:
-            if failure.errno != errno.ENXIO:
-                raise
-        ready: asyncio.Future[None] = loop.create_future()
-        loop.call_soon(ready.set_result, None)
-        await ready
-    raise TimeoutError("FIFO reader did not become ready")
 
 
 @pytest.mark.asyncio
@@ -171,7 +137,7 @@ async def test_fixed_io_helper_shares_mutation_claim_and_lifecycle_contract(
     clock = SystemClock()
     reading, writing = os.pipe()
     launcher: IOHelperLauncher = (
-        InstalledIOHelperLauncher(home=tmp_path, state_home=tmp_path / "state")
+        installed_launcher(tmp_path)
         if implementation == "installed"
         else MeasuredIOHelperLauncher(tmp_path, writing)
         if implementation == "measured"
@@ -339,10 +305,7 @@ async def test_fifo_writer_waits_for_a_real_reader(tmp_path: Path) -> None:
             pending = tasks.create_task(
                 open_fifo_writer(barrier.descriptor, deadline, clock)
             )
-            loop = asyncio.get_running_loop()
-            yielded: asyncio.Future[None] = loop.create_future()
-            loop.call_soon(yielded.set_result, None)
-            await yielded
+            await turn()
             assert not pending.done()
 
             reading = os.open(

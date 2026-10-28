@@ -15,6 +15,7 @@ from kora.runner.processes import (
     SignalResult,
 )
 from tests.conformance.test_recovered_process_lifetime import domain
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -66,9 +67,7 @@ async def test_closed_capture_readiness_is_not_observed_eof() -> None:
         os.write(writing, b"x")
         while capture.bytes_discarded == 0:
             assert clock.monotonic_ns() < deadline
-            ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-            asyncio.get_running_loop().call_soon(ready.set_result, None)
-            await ready
+            await turn()
         assert not capture.readiness.done()
         assert not capture.eof
 

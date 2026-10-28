@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.protocols.lifetime import (
     BorrowedServiceRequest,
@@ -23,9 +22,12 @@ from kora.protocols.lifetime import (
 )
 from kora.runner.identity import IdentityState, NativeIdentityReader
 from kora.runner.processes import ExitAnchor
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+    limits,
+)
 
 
 async def launch_service_process(
@@ -76,9 +78,7 @@ async def test_conformance_fixture_resources_are_released_with_real_service_clie
     owner = ParentLifetime(
         clock=clock,
         limits=limits(),
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     external: subprocess.Popen[bytes] | None = None
     external_anchor: ExitAnchor | None = None
