@@ -8,11 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kora.conformance.io_helper import (
-    CreateListenersMutation,
-    HelperError,
-    InstalledIOHelperLauncher,
-)
+from kora.conformance.io_helper import CreateListenersMutation, HelperError
 from kora.conformance.lifetime import ParentLifetime
 from kora.protocols.lifetime import (
     CleanupOutcome,
@@ -21,8 +17,11 @@ from kora.protocols.lifetime import (
     TemporaryTreeRequest,
     new_operation_id,
 )
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+)
 
 
 @pytest.mark.asyncio
@@ -34,9 +33,7 @@ async def test_command_listeners_stay_in_the_registered_child_tree(
     original_cwd = Path.cwd()
     owner = ParentLifetime(
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     try:
         async with asyncio.timeout(5):

@@ -30,13 +30,13 @@ from tests.conformance.lifetime_helpers import (
     stop_child,
     unwind_owned,
 )
-from tests.conformance.test_lifetime_cleanup_controls import (
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
     close_recovered_test_owner,
     dispose_test_owner,
+    entered_fifo,
+    limits,
 )
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
 
 
 @pytest.mark.asyncio

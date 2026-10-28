@@ -6,9 +6,11 @@ import pytest
 
 from kora.conformance.lifetime import ParentLifetime, RecoveryAttempts
 from kora.protocols.lifetime import CleanupOutcome, new_operation_id
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    limits,
+)
 from tests.measurements.lifetime_measurement_support import MeasuredIOHelperLauncher
 from tests.measurements.lifetime_observation import MeasuredLoop, Observer
 from tests.measurements.lifetime_workload import establish, launch_value

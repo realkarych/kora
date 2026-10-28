@@ -25,9 +25,11 @@ from kora.runner.identity import (
     NativeIdentityReader,
 )
 from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    limits,
+)
 
 
 async def reap_recovered(

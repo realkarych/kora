@@ -1,7 +1,5 @@
 import asyncio
 import json
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import cast
 
@@ -26,7 +24,6 @@ from kora.conformance.common import (
     utc_now,
 )
 from kora.conformance.inputs import ConformanceInputError
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.conformance.secrets import (
     SecretsConformanceInputs,
@@ -51,14 +48,13 @@ from kora.protocols.lifetime import (
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.secrets import SecretsCapabilities, SecretsProvider
+from tests.conformance.lifetime_support import owned_lifetime
 from tests.conformance.providers import FORBIDDEN, MISSING, REFERENCE
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
 from tests.conformance.test_shared_secrets_checks import (
     LoopBoundSecretsProvider,
     assert_capture_released,
 )
+from tests.support.event_loop import turn
 
 
 def schema() -> JsonObject:
@@ -218,21 +214,6 @@ def selected(adapter: Adapter) -> tuple[ConformanceSelection, ProviderMetadata]:
         b'{"value":"conflicting-fixture-value"}',
     )
     return selection, metadata
-
-
-@asynccontextmanager
-async def owned_lifetime(root: Path) -> AsyncGenerator[ParentLifetime]:
-    clock = ControlledLifetimeClock()
-    owner = ParentLifetime(
-        clock=clock,
-        limits=limits(),
-        launcher=InstalledIOHelperLauncher(home=root, state_home=root / "state"),
-    )
-    try:
-        await asyncio.wait_for(owner.ready(), 5)
-        yield owner
-    finally:
-        await dispose_test_owner(owner, clock)
 
 
 @pytest.mark.asyncio
@@ -431,11 +412,7 @@ async def test_bridge_repeated_cancellation_waits_for_real_cleanup(
             await asyncio.wait_for(adapter.cleanup_started.wait(), 5)
             for _ in range(3):
                 task.cancel()
-                checkpoint: asyncio.Future[None] = (
-                    asyncio.get_running_loop().create_future()
-                )
-                asyncio.get_running_loop().call_soon(checkpoint.set_result, None)
-                await checkpoint
+                await turn()
                 assert not task.done()
                 assert not adapter.created[0].worker.done()
             adapter.cleanup_release.set()

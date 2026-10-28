@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import LifetimeError, ParentLifetime
 from kora.conformance.transport import (
     CALL,
@@ -31,8 +30,12 @@ from kora.protocols.lifetime import (
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelFailure
 from tests.conformance.lifetime_helpers import unread_bytes
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+)
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -44,9 +47,7 @@ async def test_client_rejects_close_reply_at_the_original_deadline(
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     client = LifetimeClient(left, clock=clock)
     actual = SystemClock()
@@ -126,8 +127,6 @@ async def test_client_idle_time_does_not_consume_the_next_reply_budget() -> None
     clock = ControlledLifetimeClock()
     client = LifetimeClient(left, clock=clock)
     peer = BoundedChannel(right, SystemClock())
-    entered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-    asyncio.get_running_loop().call_soon(entered.set_result, None)
 
     async def reply() -> None:
         deadline = SystemClock().monotonic_ns() + 5_000_000_000
@@ -146,7 +145,7 @@ async def test_client_idle_time_does_not_consume_the_next_reply_budget() -> None
 
     response: asyncio.Task[None] | None = None
     try:
-        await entered
+        await turn()
         clock.advance(60_000_000_000)
         response = asyncio.create_task(reply())
         observed = await asyncio.wait_for(client.observe(None), 5)
@@ -175,12 +174,10 @@ async def test_client_partial_reply_keeps_the_budget_started_after_idle() -> Non
     actual = SystemClock()
     client = LifetimeClient(left, clock=clock)
     peer = BoundedChannel(right, actual)
-    entered: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-    asyncio.get_running_loop().call_soon(entered.set_result, None)
     waiting = None
     deadline = actual.monotonic_ns() + 5_000_000_000
     try:
-        await entered
+        await turn()
         clock.advance(29_000_000_000)
         request_deadline = clock.monotonic_ns() + 30_000_000_000
         waiting = asyncio.create_task(client.observe(None))
@@ -199,9 +196,7 @@ async def test_client_partial_reply_keeps_the_budget_started_after_idle() -> Non
         assert right.send(wire[:2]) == 2
         while unread_bytes(left):
             assert actual.monotonic_ns() < deadline
-            progress: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-            asyncio.get_running_loop().call_soon(progress.set_result, None)
-            await progress
+            await turn()
         assert set(clock.waiters.values()) == {request_deadline}
 
         clock.advance(2_000_000_000)
