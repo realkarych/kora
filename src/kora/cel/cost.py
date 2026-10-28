@@ -636,12 +636,25 @@ def held_while(costs: list[NodeCost]) -> tuple[Affine, Affine]:
     return held, peak
 
 
+class PreparedBounds:
+    def __init__(self, environment: Mapping[str, Variable], meter: Meter) -> None:
+        check_environment(environment)
+        self.shapes: BoundShapes = BoundShapes(meter)
+        self.validated: frozenset[str] = frozenset(environment)
+        for variable in environment.values():
+            if not is_variable(variable):
+                raise BoundError("an environment entry is not a variable")
+            check_type(variable.type, meter)
+            self.shapes.convert(variable.bound)
+
+
 class Estimator:
     def __init__(
         self,
         environment: Mapping[str, Variable],
         weights: Weights,
         meter: Meter,
+        prepared: PreparedBounds | None = None,
     ) -> None:
         self.meter: Meter = meter
         self.environment: Mapping[str, Variable] = environment
@@ -650,7 +663,12 @@ class Estimator:
         self.next_scope: int = 0
         self.variables: dict[str, Shape] = {}
         self.default: Variable = Variable(DYN)
-        self.bounds: BoundShapes = BoundShapes(meter)
+        self.bounds: BoundShapes = (
+            BoundShapes(meter) if prepared is None else prepared.shapes
+        )
+        self.validated: frozenset[str] = (
+            frozenset() if prepared is None else prepared.validated
+        )
 
     def node_steps(self, *parts: Affine) -> Affine:
         return sum_affine([Affine.of(self.weights.node), *parts])
@@ -738,7 +756,8 @@ class Estimator:
         variable = self.environment.get(name, self.default)
         if not is_variable(variable):
             raise BoundError("an environment entry is not a variable")
-        check_type(variable.type)
+        if name not in self.validated:
+            check_type(variable.type)
         shape = self.bounds.shape(variable.type, variable.bound)
         self.variables[name] = shape
         return shape
@@ -992,9 +1011,11 @@ def estimate(
     weights: Weights = PROVISIONAL_WEIGHTS,
     budget: Budget = PROVISIONAL_BUDGET,
     meter: Meter | None = None,
+    prepared: PreparedBounds | None = None,
 ) -> Estimate:
     check_environment(environment)
-    estimator = Estimator(environment, weights, meter if meter is not None else Meter())
+    used = meter if meter is not None else Meter()
+    estimator = Estimator(environment, weights, used, prepared)
     cost = estimator.visit(node)
     variables = tuple(sorted(estimator.variables))
     bound = [estimator.variables[name] for name in variables]

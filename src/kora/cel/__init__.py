@@ -1,4 +1,11 @@
-from kora.cel.checked import CheckedExpression, check, check_path, check_typed
+from kora.cel.checked import (
+    CheckedExpression,
+    PreparedEnvironment,
+    check,
+    check_path,
+    check_typed,
+    prepare,
+)
 from kora.cel.checker import Environment, ResultKind
 from kora.cel.cost import (
     DATA_BOUND,
@@ -43,6 +50,7 @@ __all__ = [
     "Path",
     "PathSet",
     "PathSetError",
+    "PreparedEnvironment",
     "Position",
     "Reason",
     "Resolver",
@@ -58,5 +66,6 @@ __all__ = [
     "check_typed",
     "cut",
     "parse_path_set",
+    "prepare",
     "resolve",
 ]

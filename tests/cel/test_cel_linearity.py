@@ -2,7 +2,15 @@ from collections.abc import Callable
 
 import pytest
 
-from kora.cel import Environment, ResultKind, ValueBound, Variable, check, check_typed
+from kora.cel import (
+    Environment,
+    ResultKind,
+    ValueBound,
+    Variable,
+    check,
+    check_typed,
+    prepare,
+)
 from kora.cel.meter import Meter
 from kora.cel.types import DYN, INT, Record, RecordField
 
@@ -172,3 +180,30 @@ def test_cel_typed_check_is_linear_in_steps(family: str) -> None:
         assert count <= TYPED_STEPS_PER_CODE_POINT * len(source)
     for smaller, larger in zip(counts, counts[1:], strict=False):
         assert larger <= 2.5 * smaller
+
+
+def wide_record(width: int) -> Record:
+    return Record({f"f{index}": RecordField(INT, True) for index in range(width)})
+
+
+def expressions_steps(count: int, width: int, prepared: bool) -> int:
+    meter = Meter()
+    plain = Environment({"v": Variable(wide_record(width))}, ResultKind.BOOL)
+    environment = prepare(plain, meter) if prepared else plain
+    for index in range(count):
+        check_typed(f"v.f{index % width} == {index}", environment, meter)
+    return meter.steps
+
+
+def test_cel_prepared_environment_checks_expressions_in_linear_steps() -> None:
+    width = 2000
+    counts = (50, 100, 200)
+
+    prepared = [expressions_steps(count, width, True) for count in counts]
+    unprepared = [expressions_steps(count, width, False) for count in counts]
+
+    for smaller, larger, count in zip(prepared, prepared[1:], counts, strict=False):
+        assert larger - smaller <= 128 * count
+    for smaller, larger, count in zip(unprepared, unprepared[1:], counts, strict=False):
+        assert larger - smaller >= count * width
+    assert prepared[0] >= 2 * width

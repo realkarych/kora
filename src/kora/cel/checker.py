@@ -254,14 +254,19 @@ def literal_key(node: Node) -> tuple[str, object] | None:
 
 
 class Checker:
-    def __init__(self, environment: Environment, meter: Meter) -> None:
+    def __init__(
+        self,
+        environment: Environment,
+        meter: Meter,
+        validated: frozenset[str] = frozenset(),
+    ) -> None:
         self.environment: Environment = environment
         self.meter: Meter = meter
         self.scopes: dict[str, Typed] = {}
         self.paths: dict[tuple[int, Step], int] = {}
         self.facts: dict[int, int] = {}
         self.scope_count: int = 0
-        self.checked: set[str] = set()
+        self.checked: set[str] = set(validated)
         self.integer_negations: set[int] = set()
         self.reads: dict[int, Read] = {}
 
@@ -692,8 +697,13 @@ def read_paths(checker: Checker) -> dict[str, PathSet]:
     return path_sets(reads)
 
 
-def check_types(tree: Node, environment: Environment, meter: Meter) -> TypedTree:
-    checker = Checker(environment, meter)
+def check_types(
+    tree: Node,
+    environment: Environment,
+    meter: Meter,
+    validated: frozenset[str] = frozenset(),
+) -> TypedTree:
+    checker = Checker(environment, meter, validated)
     result = checker.visit(tree).type
     expected = Kind.BOOL if environment.result is ResultKind.BOOL else Kind.STRING
     if not isinstance(result, Dyn) and (

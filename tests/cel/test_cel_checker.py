@@ -16,6 +16,7 @@ from kora.cel import (
     Variable,
     check,
     check_typed,
+    prepare,
 )
 from kora.cel.parser import RENDERING_LIMITS, parse
 from kora.cel.types import DYN, CelType, Record, RecordField
@@ -582,3 +583,58 @@ def test_cel_typed_estimate_is_of_the_rewritten_tree() -> None:
     assert negated.tree == subtracted.tree
     assert negated.rendering == subtracted.rendering
     assert negated.estimate == subtracted.estimate
+
+
+PREPARED_CORPUS: list[tuple[str, ResultKind]] = [
+    *WELL_TYPED,
+    *((source, ResultKind.BOOL) for source, _ in ENUM_LITERALS),
+    *((source, ResultKind.BOOL) for source, _ in MIXED_NUMBERS),
+    *((source, ResultKind.BOOL) for source, _ in OPTIONAL_READS),
+    *((source, ResultKind.BOOL) for source, _ in STRING_SIZES),
+    *((source, ResultKind.BOOL) for source in OVERLOADS),
+    *((source, ResultKind.BOOL) for source, _ in INTEGER_NEGATIONS),
+]
+
+
+def comparable(result: CheckedExpression | Diagnostic) -> object:
+    if isinstance(result, Diagnostic):
+        return result
+    return (
+        result.rendering,
+        result.digest,
+        result.estimate,
+        {name: paths.rendered() for name, paths in result.paths.items()},
+    )
+
+
+@pytest.mark.parametrize(("source", "result_kind"), PREPARED_CORPUS)
+def test_cel_prepared_environment_matches_unprepared_checks(
+    source: str, result_kind: ResultKind
+) -> None:
+    plain = environment(result_kind)
+    prepared = prepare(plain)
+
+    direct = check_typed(source, plain)
+    reused = check_typed(source, prepared)
+
+    assert comparable(reused) == comparable(direct)
+
+
+def test_cel_prepared_environment_refuses_malformed_environments() -> None:
+    proxied = Environment(
+        cast("dict[str, Variable]", MappingProxyType({"v": Variable(DYN)})),
+        ResultKind.BOOL,
+    )
+    not_a_variable = Environment(
+        cast("dict[str, Variable]", {"v": DYN}), ResultKind.BOOL
+    )
+    malformed_type = Environment(
+        {"v": Variable(cast("CelType", "dyn"))}, ResultKind.BOOL
+    )
+
+    with pytest.raises(BoundError, match="not a plain dict"):
+        prepare(proxied)
+    with pytest.raises(BoundError, match="not a variable"):
+        prepare(not_a_variable)
+    with pytest.raises(BoundError, match="not a CEL type"):
+        prepare(malformed_type)

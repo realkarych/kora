@@ -4,7 +4,13 @@ from types import MappingProxyType
 from typing import Final
 
 from kora.cel.checker import Environment, check_types
-from kora.cel.cost import Estimate, Variable, check_environment, estimate
+from kora.cel.cost import (
+    Estimate,
+    PreparedBounds,
+    Variable,
+    check_environment,
+    estimate,
+)
 from kora.cel.diagnostics import Diagnostic, DiagnosticError
 from kora.cel.meter import Meter
 from kora.cel.parser import parse
@@ -79,15 +85,61 @@ def check(
     return CheckedExpression(SEAL, tree, rendering, digest, cost)
 
 
+class PreparedEnvironment:
+    __slots__ = ("_bounds", "_environment")
+
+    def __init__(
+        self, seal: object, environment: Environment, bounds: PreparedBounds
+    ) -> None:
+        if seal is not SEAL:
+            raise TypeError("prepared environments come only from kora.cel.prepare")
+        self._environment: Environment = environment
+        self._bounds: PreparedBounds = bounds
+
+    @property
+    def environment(self) -> Environment:
+        return self._environment
+
+    @property
+    def bounds(self) -> PreparedBounds:
+        return self._bounds
+
+
+def prepare(
+    environment: Environment, meter: Meter | None = None
+) -> PreparedEnvironment:
+    used = meter if meter is not None else Meter()
+    check_environment(environment.variables)
+    snapshot = Environment(
+        dict(environment.variables), environment.result, environment.selection_only
+    )
+    return PreparedEnvironment(SEAL, snapshot, PreparedBounds(snapshot.variables, used))
+
+
 def check_typed(
-    source: str, environment: Environment, meter: Meter | None = None
+    source: str,
+    environment: Environment | PreparedEnvironment,
+    meter: Meter | None = None,
 ) -> CheckedExpression | Diagnostic:
     used = meter if meter is not None else Meter()
+    plain: Environment
+    bounds: PreparedBounds | None
+    if isinstance(environment, PreparedEnvironment):
+        plain, bounds = environment.environment, environment.bounds
+    else:
+        plain, bounds = environment, None
+    validated = frozenset[str]() if bounds is None else bounds.validated
     try:
-        check_environment(environment.variables)
-        typed = check_types(parse(source, meter=used), environment, used)
+        check_environment(plain.variables)
+        typed = check_types(parse(source, meter=used), plain, used, validated)
         rendering = canonical_rendering(typed.tree, used)
-        cost = estimate(typed.tree, len(rendering), environment.variables, meter=used)
+        cost = estimate(
+            typed.tree,
+            len(rendering),
+            plain.variables,
+            meter=used,
+            prepared=bounds,
+        )
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
