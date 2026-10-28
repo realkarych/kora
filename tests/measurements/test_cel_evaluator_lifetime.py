@@ -56,6 +56,28 @@ def gate(report: Report, name: str, passed: bool) -> None:
     assert passed, name
 
 
+def diagnostic(report: Report, name: str, passed: bool, measured: float) -> None:
+    report.environment[f"diagnostic_{name}"] = passed
+    report.environment[f"diagnostic_{name}_measured"] = measured
+
+
+def bounded(
+    report: Report, name: str, measured: int, limit: int, blocking: bool
+) -> None:
+    if blocking:
+        gate(report, name, measured <= limit)
+    else:
+        diagnostic(report, name, measured <= limit, measured)
+
+
+def spans(points: list[dict[str, int | None]], resource: str) -> tuple[int, int]:
+    measured = [point[resource] for point in points]
+    values = [value for value in measured if value is not None]
+    assert len(values) == len(points)
+    late = values[9:]
+    return max(values) - min(values), max(late) - min(late)
+
+
 def resource_gates(
     report: Report,
     name: str,
@@ -64,6 +86,7 @@ def resource_gates(
     *,
     native_traced: bool = False,
     native_untraced: bool = False,
+    rss_gated: bool = False,
 ) -> None:
     for resource in ("descriptors", "threads", "os_threads", "tasks"):
         gate(report, f"{name}_{resource}", len({p[resource] for p in points}) == 1)
@@ -79,14 +102,11 @@ def resource_gates(
             assert report.platform != "linux"
             assert all(value is None for value in values)
             continue
-        measured = [value for value in values if value is not None]
-        assert len(measured) == len(points)
-        gate(
-            report, f"{name}_{resource}_growth", max(measured) - min(measured) <= whole
-        )
-        change = max(measured[9:]) - min(measured[9:])
+        growth, change = spans(points, resource)
+        blocking = resource == "heap" or rss_gated
+        bounded(report, f"{name}_{resource}_growth", growth, whole, blocking)
         if resource != "rss" or not native_traced:
-            gate(report, f"{name}_{resource}_late_growth", change <= late)
+            bounded(report, f"{name}_{resource}_late_growth", change, late, blocking)
     peaks = [p["peak"] for p in points if p["peak"] is not None]
     if native_untraced:
         assert not peaks
@@ -188,6 +208,7 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
             untraced_payload["points"],
             RESOURCE_BUDGETS["native"],
             native_untraced=True,
+            rss_gated=True,
         )
     report.environment["native_late_rss_basis"] = "untraced paired workload"
     for mode in ("native", "lifetime", "loops", "idle", "busy"):
@@ -249,14 +270,16 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                     points,
                     RESOURCE_BUDGETS[mode],
                     native_traced=mode == "native",
+                    rss_gated=mode == "native",
                 )
             if payload["timings"]:
                 timings = sorted(payload["timings"])
                 assert len(timings) == 200
-                gate(
+                diagnostic(
                     report,
                     f"{mode}_{repeat}_hop_p95",
                     timings[189] <= HOP_P95_SECONDS[mode],
+                    timings[189],
                 )
     report.durations["whole_step"] = time.perf_counter() - started
     gate(report, "whole_step_budget", report.durations["whole_step"] <= 150)
@@ -342,3 +365,19 @@ def test_cel_process_exits_with_evaluator_work_in_flight(
     )
     gate(report, f"{name}_exit", elapsed <= 1.0)
     sink_gates(report, name, payload, sink == "blocked")
+
+
+def test_cel_lifetime_heap_gate_detects_a_retained_leak() -> None:
+    code = (
+        "from tests.measurements.cel_workload import run\nprint(run('leaking_loops'))\n"
+    )
+    budget = RESOURCE_BUDGETS["loops"]
+
+    result = run_child(code, full_path(ROOT))
+
+    assert result.code == 0, result.stderr
+    payload: Payload = json.loads(result.stdout)
+    growth, late = spans(payload["points"], "heap")
+    assert payload["mode"] == "leaking_loops"
+    assert growth > budget.heap_growth
+    assert late > budget.late_heap_growth

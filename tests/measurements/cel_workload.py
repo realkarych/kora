@@ -27,6 +27,7 @@ from tests.measurements.harness import current_rss_bytes, open_descriptors
 WARMUP: int = 20
 CYCLES: int = 200
 SAMPLE_EVERY: int = 10
+LEAKED_BYTES_PER_CYCLE: int = 512
 
 
 @dataclass(frozen=True)
@@ -323,7 +324,7 @@ async def hops(busy: bool) -> Measurements:
     )
 
 
-def loops() -> Measurements:
+def loops(leaked_bytes: int = 0) -> Measurements:
     from kora.cel_eval.binding import load_binding
     from kora.cel_eval.evaluate import Compilation
     from kora.cel_eval.thread import ValidationWork
@@ -332,11 +333,14 @@ def loops() -> Measurements:
     owner = EvaluationThread(load_binding())
     checked = expression("true")
     points: list[Point] = []
+    leaked: list[bytearray] = []
     tracemalloc.start()
     retained = tracemalloc.take_snapshot()
     started = time.perf_counter()
     for cycle in range(-WARMUP, CYCLES):
         pending_tasks = 0
+        if leaked_bytes:
+            leaked.append(bytearray(leaked_bytes))
         for outcome in ("cancel", "close", "resume"):
             loop = asyncio.new_event_loop()
 
@@ -384,7 +388,7 @@ def loops() -> Measurements:
     top = tracemalloc.take_snapshot().compare_to(retained, "lineno")[:10]
     tracemalloc.stop()
     return Measurements(
-        mode="loops",
+        mode="leaking_loops" if leaked else "loops",
         seconds=time.perf_counter() - started,
         points=points,
         timings=[],
@@ -397,6 +401,8 @@ def loops() -> Measurements:
 def run(mode: str, traced: bool = True) -> str:
     if mode == "loops":
         result = loops()
+    elif mode == "leaking_loops":
+        result = loops(LEAKED_BYTES_PER_CYCLE)
     elif mode == "native":
         result = asyncio.run(native(traced))
     elif mode == "lifetime":
