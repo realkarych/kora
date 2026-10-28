@@ -25,7 +25,7 @@ remain mandatory. The complete actual diff must still match those conclusions.
 
 The accepted [storage qualification schedule](storage-qualification-schedule-2026-10-26.md)
 is unchanged. A release containing local storage still requires successful
-qualification for its exact release inputs. Failed or missing evidence refuses
+qualification for its exact release revision. Failed or missing evidence refuses
 release. No workload, population, assertion, sampling rule, 480-second child
 deadline, job timeout or protected status is removed, relaxed or reclassified.
 
@@ -77,6 +77,6 @@ There is no successful fresh storage-lifetime qualification for this source
 revision. Merging the refactor establishes no new lifetime, latency or leak-freedom
 guarantee. [Issue #396](https://github.com/realkarych/kora/issues/396) retains the
 timeout and required completion outcome. It must be resolved, and qualification
-of the exact release inputs must pass, before a release containing local storage.
+of the exact release revision must pass, before a release containing local storage.
 The separate macOS `hdiutil detach` exit-16 attribution work remains with
 [issue #302](https://github.com/realkarych/kora/issues/302).
