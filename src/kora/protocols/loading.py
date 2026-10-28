@@ -373,9 +373,6 @@ class ParsedEntryName:
     protocol: ProtocolName | None
     name: str | None
 
-    def is_valid(self) -> bool:
-        return self.protocol is not None and self.name is not None
-
 
 def parse_entry_name(text: str) -> ParsedEntryName:
     head, separator, tail = text.partition(".")

@@ -63,7 +63,6 @@ class ProcessError(Exception):
 class ProcessObservation:
     condition: ProcessCondition
     live_members: tuple[ProcessIdentity, ...]
-    anchor_exited: bool
     capture_eof: bool
 
     @property
@@ -716,33 +715,33 @@ class GatedProcess:
         exited = anchor is not None and anchor.exited
         eof = all(capture.eof for capture in self._captures)
         if registration is None or anchor is None or anchor.unknown:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         if self._process is None or registration.process.pid != self._process.pid:
-            return ProcessObservation(ProcessCondition.MISMATCH, (), exited, eof)
+            return ProcessObservation(ProcessCondition.MISMATCH, (), eof)
         if not complete_identity(registration.process):
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         leader = self._identities.read(registration.process.pid)
         if leader.state is IdentityState.UNKNOWN:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         if leader.process is not None and not self._matches(leader.process):
-            return ProcessObservation(ProcessCondition.MISMATCH, (), exited, eof)
+            return ProcessObservation(ProcessCondition.MISMATCH, (), eof)
         if leader.state is IdentityState.ABSENT and not exited:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         group = self._identities.group(registration.process_group_id, deadline_ns)
         if group.state is not IdentityState.PRESENT:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         if registration.process.pid not in tuple(pid for pid, _ in group.members):
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         member_pids = {pid for pid, _ in group.members}
         try:
             omitted_pending = self._watches.omitted_pending(member_pids, deadline_ns)
         except ProcessError:
-            return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+            return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         live: list[ProcessIdentity] = []
         dead: dict[int, ProcessIdentity] = {}
         for pid, member in group.members:
             if deadline_ns is not None and self._clock.monotonic_ns() >= deadline_ns:
-                return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+                return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
             if member.state is IdentityState.ABSENT:
                 if pid == registration.process.pid and exited:
                     dead[pid] = registration.process
@@ -751,27 +750,25 @@ class GatedProcess:
                 if previous is not None and previous[1].exited:
                     dead[pid] = previous[0]
                     continue
-                return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+                return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
             process = member.process
             if member.state is IdentityState.UNKNOWN or process is None:
-                return ProcessObservation(ProcessCondition.UNKNOWN, (), exited, eof)
+                return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
             try:
                 self._watches.validate(process, registration, deadline_ns)
             except ProcessError as error:
-                return ProcessObservation(error.condition, (), exited, eof)
+                return ProcessObservation(error.condition, (), eof)
             if not process.dead:
                 live.append(process.identity)
                 if pid != registration.process.pid:
                     try:
                         self._watches.retain(process, registration, deadline_ns)
                     except ProcessError as error:
-                        return ProcessObservation(error.condition, (), exited, eof)
+                        return ProcessObservation(error.condition, (), eof)
             else:
                 dead[pid] = process.identity
         if omitted_pending:
-            return ProcessObservation(
-                ProcessCondition.UNKNOWN, tuple(live), exited, eof
-            )
+            return ProcessObservation(ProcessCondition.UNKNOWN, tuple(live), eof)
         condition = (
             ProcessCondition.SETTLED if exited and not live else ProcessCondition.LIVE
         )
@@ -779,7 +776,7 @@ class GatedProcess:
             dead, deadline_ns
         ):
             condition = ProcessCondition.UNKNOWN
-        return ProcessObservation(condition, tuple(live), exited, eof)
+        return ProcessObservation(condition, tuple(live), eof)
 
     def signal(
         self, requested: signal.Signals, deadline_ns: int | None = None

@@ -62,8 +62,6 @@ class LossReason(enum.StrEnum):
     QUEUE_BYTES = "queue_bytes"
     SINK_FAILED = "sink_failed"
     SHUTDOWN = "shutdown"
-    SUPPRESSED = "suppressed"
-    REDACTION_ADMISSION = "secret_admission"
 
 
 @dataclass(frozen=True)

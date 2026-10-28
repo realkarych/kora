@@ -100,15 +100,6 @@ def kora_exercise(kora_artifact_storage_exercise: object) -> object:
     return kora_artifact_storage_exercise
 
 
-async def publish(
-    provider: ArtifactStorage,
-    sealed: SealedStage | PreparedContentRef,
-    key: str,
-    capture: Capture,
-) -> tuple[PromotionRequest, PromotionResult]:
-    return await publish_with_context(provider, sealed, key, context_for(capture))
-
-
 async def publish_with_context(
     provider: ArtifactStorage,
     sealed: SealedStage | PreparedContentRef,

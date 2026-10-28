@@ -34,7 +34,6 @@ from tests.plugins.policy.policy_support import (
 )
 
 NEEDLE: Final[str] = "a" * 92 + "baaa"
-WIDE_PIECE: Final[str] = "\u1f82b"
 ASTRAL: Final[str] = "\U0001f600"
 SLOW_FOLD: Final[str] = "\u1fae"
 DEFAULT_FIND_WINDOW: Final[int] = 2400

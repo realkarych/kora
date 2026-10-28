@@ -29,11 +29,6 @@ PathStep = Field | Position
 class Path:
     steps: tuple[PathStep, ...]
 
-    @property
-    def root(self) -> str:
-        first = self.steps[0]
-        return first.name if isinstance(first, Field) else str(first.index)
-
 
 @dataclass(frozen=True)
 class Absent:

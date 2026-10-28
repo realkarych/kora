@@ -1,5 +1,4 @@
 import contextlib
-import contextvars
 from collections.abc import Generator, Mapping
 
 import structlog.contextvars
@@ -39,7 +38,3 @@ def bound_scope(**values: str | int) -> Generator[None, None, None]:
 
 def current_context() -> dict[str, str | int]:
     return validate_context(structlog.contextvars.get_contextvars())
-
-
-def copy_context() -> contextvars.Context:
-    return contextvars.copy_context()

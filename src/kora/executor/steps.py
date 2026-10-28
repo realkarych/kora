@@ -76,18 +76,11 @@ class Areas:
         return self.publication
 
 
-def is_search_directory(entry: str, roots: Sequence[Path]) -> bool:
-    if not entry.startswith("/"):
-        return False
-    path = Path(entry)
-    return not any(path == root or root in path.parents for root in roots)
-
-
-def resolve_tool(name: str, search_path: Sequence[str], roots: Sequence[Path]) -> str:
+def resolve_tool(name: str, search_path: Sequence[str]) -> str:
     if "/" in name or not name:
         raise ToolMissing
     for entry in search_path:
-        if not is_search_directory(entry, roots):
+        if not entry.startswith("/"):
             continue
         candidate = Path(entry) / name
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -95,10 +88,8 @@ def resolve_tool(name: str, search_path: Sequence[str], roots: Sequence[Path]) -
     raise ToolMissing
 
 
-def resolve_tools(
-    names: Iterable[str], search_path: Sequence[str], roots: Sequence[Path] = ()
-) -> dict[str, str]:
-    return {name: resolve_tool(name, search_path, roots) for name in names}
+def resolve_tools(names: Iterable[str], search_path: Sequence[str]) -> dict[str, str]:
+    return {name: resolve_tool(name, search_path) for name in names}
 
 
 def selected_tools(

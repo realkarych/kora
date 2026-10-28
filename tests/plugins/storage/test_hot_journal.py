@@ -16,7 +16,7 @@ from kora.plugins.storage.local import LocalStorageConfiguration
 from kora.plugins.storage.state import LocalState
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import StorageLimits
-from tests.plugins.storage.inspection import InspectedStorage
+from tests.plugins.storage.inspection import InspectedStorage, current_epoch
 from tests.plugins.storage.pressure_native import collect_process
 
 
@@ -83,17 +83,17 @@ def test_internal_read_recovers_actual_hot_journal_before_returning(
             assert journal.stat().st_size > 512
 
             if entry == "epoch":
-                recovered = provider.control_state().current_epoch()
+                recovered = current_epoch(provider.control_state())
             elif entry == "reader":
                 reader = await provider.read_stage(sealed, context)
                 async with reader:
                     assert await reader.read(16) == b"saved"
-                recovered = provider.control_state().current_epoch()
+                recovered = current_epoch(provider.control_state())
             elif entry == "refused_reader":
                 changed = sealed.model_copy(update={"seal_identity": "foreign"})
                 with pytest.raises(KoraProtocolError, match="storage_conflict"):
                     await provider.read_stage(changed, context)
-                recovered = provider.control_state().current_epoch()
+                recovered = current_epoch(provider.control_state())
             else:
                 state = provider.control_state()
                 descriptor = state.root.fd
@@ -107,7 +107,7 @@ def test_internal_read_recovers_actual_hot_journal_before_returning(
                     os.dup2(backup, descriptor, inheritable=False)
                     os.close(backup)
                 assert failure.value.errno == errno.EBADF
-                recovered = state.current_epoch()
+                recovered = current_epoch(state)
                 backup = os.dup(descriptor)
                 try:
                     with pytest.raises(KoraProtocolError, match="storage_conflict"):

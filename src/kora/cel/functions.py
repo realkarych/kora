@@ -70,12 +70,6 @@ STANDARD_FUNCTIONS: Final[tuple[Function, ...]] = (
     *(Function(name, 0, Form.RECEIVER, INT, Charge.CONSTANT) for name in ACCESSORS),
 )
 
-NARROWED_FUNCTIONS: Final[tuple[tuple[str, int, Form], ...]] = (
-    ("bool", 1, Form.GLOBAL),
-    ("matches", 2, Form.GLOBAL),
-    *((name, 1, Form.RECEIVER) for name in ACCESSORS),
-)
-
 FUNCTIONS: Final[dict[tuple[str, int, Form], Function]] = {
     (function.name, function.arity, function.form): function
     for function in STANDARD_FUNCTIONS

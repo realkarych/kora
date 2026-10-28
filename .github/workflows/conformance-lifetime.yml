@@ -69,6 +69,7 @@ jobs:
           KORA_MEASUREMENT_REVISION: ${{ github.sha }}
           KORA_LIFETIME_CHECKOUT_REVISION: ${{ steps.source_revision.outputs.checkout_revision }}
         run: |
+          mkdir -p measurements
           mkdir -m 700 measurements/conformance-lifetime
           printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_LIFETIME_CHECKOUT_REVISION" "$KORA_MEASUREMENT_REVISION" > measurements/conformance-lifetime/source-revision.txt
           KORA_MEASUREMENT_OUTPUT="$PWD/measurements/conformance-lifetime/report.json" \
