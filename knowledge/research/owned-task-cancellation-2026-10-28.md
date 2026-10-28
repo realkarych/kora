@@ -90,5 +90,24 @@ No public contract, persisted format, dependency, platform, workload, population
 sampler, numerical assertion, release gate or deadline changes. The fix implements
 the existing cancellation and resource-release obligations. Fresh required CI,
 the approved ten-execution unchanged-head campaign, local listing repetitions on
-both operating systems and complete lifetime qualification remain acceptance
-requirements. Older failed, cancelled or incomplete results are not relabeled.
+both operating systems, complete conformance-fixture qualification and all 420
+installed-listing cycles remain merge acceptance requirements. Older failed,
+cancelled or incomplete results are not relabeled.
+
+The owner explicitly approved the [merge and release acceptance boundary](https://github.com/realkarych/kora/issues/311#issuecomment-6474819024),
+with [approval recorded here](https://github.com/realkarych/kora/issues/311#issuecomment-6474966744).
+Only the full installed-command qualification prerequisite for merging this repair
+is removed. Full 270-cycle qualification remains blocking for the exact release
+revision, with unchanged concurrent parents, workloads, instrumentation, assertions
+and deadlines. Issues #349 and #395 remain open; the capacity work is revisited
+before the next local-tooling release candidate.
+
+Run 40723666026 at `62bc1791e6bdc56c52f82b1dfe4f21af86315de3` passed fixture
+and listing qualification. Command completed 261 cycles with release and settled
+observations, then all three parents were interrupted during recovery cycle 87.
+Cycles 87 through 89, successful completion of all three 90-cycle parents and final
+campaign validation remain unqualified. The workflow and command shard were cancelled;
+the required evidence join failed. Completed-cycle observations and parent reaping
+do not establish interrupted-resource release, full command qualification or leak
+freedom. No safe production optimization is established by the retained timing
+data, and no failed qualification is rerun for a passing result.
