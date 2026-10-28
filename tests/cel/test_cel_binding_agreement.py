@@ -3,9 +3,19 @@ from functools import partial
 
 import pytest
 
-from kora.cel import Diagnostic, JsonValue, Reason
+from kora.cel import (
+    CheckedExpression,
+    Diagnostic,
+    Environment,
+    JsonValue,
+    Reason,
+    ResultKind,
+    Variable,
+    check_typed,
+)
 from kora.cel.functions import FUNCTIONS, Form
 from kora.cel.limits import MAX_CODE_POINTS
+from kora.cel.types import BOOL, INT, STRING, CelType, ListOf, Record, RecordField
 from kora.cel_eval.binding import Binding, NativeProgram
 from tests.cel.binding_support import (
     CONTEXT,
@@ -78,6 +88,85 @@ AT_THE_LIMITS: dict[str, tuple[str, str]] = {
     ),
 }
 PANIC: str = "PanicException"
+
+
+def recursive_record() -> Record:
+    fields: dict[str, RecordField] = {"x": RecordField(BOOL, True)}
+    record = Record(fields, None)
+    fields["r"] = RecordField(record, True)
+    return record
+
+
+def nested_record_value(depth: int) -> JsonValue:
+    value: JsonValue = {"x": True}
+    for _ in range(depth):
+        value = {"r": value, "x": True}
+    return value
+
+
+def nested_list_type(depth: int) -> CelType:
+    cel_type: CelType = BOOL
+    for _ in range(depth):
+        cel_type = ListOf(cel_type)
+    return cel_type
+
+
+def nested_list_value(depth: int) -> JsonValue:
+    value: JsonValue = True
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+Bindings = dict[str, tuple[CelType, JsonValue]]
+FLAG: Bindings = {"x": (BOOL, True)}
+TEXT: Bindings = {"s": (STRING, "s")}
+NUMBER: Bindings = {"n": (INT, 7)}
+TYPED_AT_LIMIT: dict[str, tuple[str, Bindings, ResultKind]] = {
+    "addition": (" + ".join(["s"] * 33), TEXT, ResultKind.STRING),
+    "conjunction": (" && ".join(["x"] * 33), FLAG, ResultKind.BOOL),
+    "selection": (
+        "r" + ".r" * 31 + ".x",
+        {"r": (recursive_record(), nested_record_value(31))},
+        ResultKind.BOOL,
+    ),
+    "index": (
+        "l" + "[0]" * 32,
+        {"l": (nested_list_type(32), nested_list_value(32))},
+        ResultKind.BOOL,
+    ),
+    "conditional": ("x ? x : " * 32 + "x", FLAG, ResultKind.BOOL),
+    "negation": ("!" * 32 + "x", FLAG, ResultKind.BOOL),
+    "parenthesized_negation": ("!(" * 16 + "x" + ")" * 16, FLAG, ResultKind.BOOL),
+    "minus_on_variable": ("string(" + "-" * 31 + "n)", NUMBER, ResultKind.STRING),
+    "minus_on_literal": ("string(" + "-" * 31 + "1)", {}, ResultKind.STRING),
+    "parenthesized_minus": (
+        "string(" + "-(" * 15 + "-n" + ")" * 15 + ")",
+        NUMBER,
+        ResultKind.STRING,
+    ),
+    "call_argument": (
+        "string(" + "int(" * 31 + "n" + ")" * 32,
+        NUMBER,
+        ResultKind.STRING,
+    ),
+    "list_of_binary": (
+        "[" * 16 + "s + " * 15 + "s" + "]" * 16 + " == []",
+        TEXT,
+        ResultKind.BOOL,
+    ),
+    "map_values": ("{1: " * 31 + "x" + "}" * 31 + " == {}", FLAG, ResultKind.BOOL),
+    "macro_body": (
+        "l.all(v, " + " && ".join(["v"] * 32) + ")",
+        {"l": (ListOf(BOOL), [True])},
+        ResultKind.BOOL,
+    ),
+}
+
+
+def typed_environment(bindings: Bindings, result: ResultKind) -> Environment:
+    variables = {name: Variable(cel_type) for name, (cel_type, _) in bindings.items()}
+    return Environment(variables, result)
 
 
 @pytest.mark.parametrize(
@@ -255,6 +344,31 @@ def test_cel_limits_at_boundary_compile_in_binding(
 
     assert is_value(compiled)
     assert result[1] != PANIC
+
+
+@pytest.mark.parametrize("shape", sorted(TYPED_AT_LIMIT))
+def test_cel_typed_limits_at_boundary_compile_in_binding(
+    cel_binding: Binding, shape: str
+) -> None:
+    source, bindings, result_kind = TYPED_AT_LIMIT[shape]
+    environment = typed_environment(bindings, result_kind)
+    context = {name: value for name, (_, value) in bindings.items()}
+
+    checked = check_typed(source, environment)
+    deeper = check_typed(f"({source})", environment)
+
+    assert isinstance(checked, CheckedExpression), checked
+    assert isinstance(deeper, Diagnostic)
+    assert deeper.reason is Reason.DEPTH
+    compiled = outcome(
+        cel_binding, partial(cel_binding.native_compile, checked.rendering)
+    )
+    result = outcome(
+        cel_binding,
+        lambda: cel_binding.native_compile(checked.rendering).execute(dict(context)),
+    )
+    assert is_value(compiled)
+    assert is_value(result), result
 
 
 @pytest.mark.parametrize("case", sorted(AT_THE_LIMITS))

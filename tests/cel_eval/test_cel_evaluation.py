@@ -262,3 +262,43 @@ def test_cel_schema_typed_fr_2_5_example_evaluates(cpu: int, expected: bool) -> 
     )
 
     assert result is expected
+
+
+MINIMUM_INT: int = -9223372036854775808
+NUMBERS: Environment = Environment(
+    {"n": Variable(INT), "d": Variable(DOUBLE)}, ResultKind.BOOL
+)
+
+
+@pytest.mark.parametrize(
+    ("source", "value", "expected"),
+    [
+        ("-n == 0", MINIMUM_INT, "overflow"),
+        ("-(n - 1) == 0", MINIMUM_INT + 1, "overflow"),
+        ("-(-9223372036854775808) == n", 0, "overflow"),
+        ("[n].map(y, -y)[0] == 0", MINIMUM_INT, "overflow"),
+        ("---n == 0", MINIMUM_INT, "overflow"),
+        ("-n == 9223372036854775807", MINIMUM_INT + 1, True),
+        ("-n == -5 && -(-n) == 5", 5, True),
+        ("1.0 / -d < 0.0 && string(-d) == '-0'", 0, True),
+    ],
+)
+def test_cel_typed_negation_of_minimum_int_overflows(
+    source: str, value: int, expected: object
+) -> None:
+    from kora.cel_eval.errors import ErrorContext, EvaluationError
+    from kora.cel_eval.evaluate import Machine, ResultType
+
+    machine = Machine(load_binding(), clock)
+    checked = typed_expression(source, NUMBERS)
+
+    result = machine.evaluate(
+        checked,
+        {"n": value, "d": 0.0},
+        {"n": INT, "d": DOUBLE},
+        ErrorContext("when"),
+        ResultType.BOOL,
+    )
+
+    outcome = result.kind.value if isinstance(result, EvaluationError) else result
+    assert outcome == expected

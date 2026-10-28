@@ -14,8 +14,10 @@ from kora.cel import (
     SchemaTypes,
     SchemaView,
     Variable,
+    check,
     check_typed,
 )
+from kora.cel.parser import RENDERING_LIMITS, parse
 from kora.cel.types import DYN, CelType, Record, RecordField
 
 FORM: JsonValue = {
@@ -529,3 +531,38 @@ def test_cel_typed_check_refuses_malformed_environments() -> None:
         check_typed("v == 1", proxied)
     with pytest.raises(BoundError, match="not a plain dict"):
         check_typed("v == 1", listed)
+
+
+INTEGER_NEGATIONS: list[tuple[str, str]] = [
+    ("-inputs.bundle.count < 0", "((0 - inputs.bundle.count) < 0)"),
+    ("-(-inputs.bundle.count) == 1", "((0 - (0 - inputs.bundle.count)) == 1)"),
+    ("---inputs.bundle.count == 1", "((0 - inputs.bundle.count) == 1)"),
+    ("--inputs.bundle.count == 1", "(inputs.bundle.count == 1)"),
+    ("-(5) == -5", "((0 - 5) == -5)"),
+    ("-(-9223372036854775808) == 0", "((0 - -9223372036854775808) == 0)"),
+    (
+        "inputs.bundle.maybe != null && -inputs.bundle.maybe < 0",
+        "((inputs.bundle.maybe != null) && ((0 - inputs.bundle.maybe) < 0))",
+    ),
+    (
+        "[inputs.bundle.count].all(n, -n < 0 && {-n: -n}.size() == 1)",
+        "[inputs.bundle.count].all(n, (((0 - n) < 0) && "
+        "({(0 - n): (0 - n)}.size() == 1)))",
+    ),
+    ("-inputs.bundle.cpu < -0.0", "((-inputs.bundle.cpu) < -0.0)"),
+    ("-double(payload.m) < 0.0", "((-double(payload.m)) < 0.0)"),
+]
+
+
+@pytest.mark.parametrize(("source", "rendering"), INTEGER_NEGATIONS)
+def test_cel_typed_rendering_rewrites_integer_negation(
+    source: str, rendering: str
+) -> None:
+    typed_check = check_typed(source, environment())
+    untyped_check = check(source)
+
+    assert isinstance(typed_check, CheckedExpression)
+    assert isinstance(untyped_check, CheckedExpression)
+    assert typed_check.rendering == rendering
+    assert parse(typed_check.rendering, RENDERING_LIMITS) == typed_check.tree
+    assert untyped_check.tree == parse(source)
