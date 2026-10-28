@@ -57,13 +57,9 @@ class CheckedExpression:
     def bounds(self) -> Mapping[str, ValueBound]:
         return self._bounds
 
-
-def estimated_bounds(
-    environment: Mapping[str, Variable], cost: Estimate
-) -> dict[str, ValueBound]:
-    return {
-        name: environment[name].bound for name in cost.variables if name in environment
-    }
+    @property
+    def bound_bytes(self) -> int:
+        return self._estimate.bound_bytes
 
 
 SEAL: Final[object] = object()
@@ -83,8 +79,7 @@ def check(
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
-    bounds = estimated_bounds(variables, cost)
-    return CheckedExpression(SEAL, tree, rendering, digest, cost, bounds)
+    return CheckedExpression(SEAL, tree, rendering, digest, cost, cost.bounds)
 
 
 def check_typed(
@@ -100,8 +95,7 @@ def check_typed(
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
-    bounds = estimated_bounds(environment.variables, cost)
-    return CheckedExpression(SEAL, tree, rendering, digest, cost, bounds)
+    return CheckedExpression(SEAL, tree, rendering, digest, cost, cost.bounds)
 
 
 def check_path(source: str) -> Path | Diagnostic:

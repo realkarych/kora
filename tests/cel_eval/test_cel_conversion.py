@@ -20,6 +20,36 @@ from kora.cel.types import (
 )
 
 
+def test_cel_binding_uses_the_estimated_cyclic_bound() -> None:
+    from kora.cel.cost import ValueBound, Variable
+    from kora.cel_eval.convert import BoundValues, bind
+
+    fields: dict[str, ValueBound] = {}
+    bound = ValueBound(4096, 256, 1, 16384, fields=fields)
+    fields["self"] = bound
+    checked = check("v.self == v.self", {"v": Variable(DYN, bound)})
+    assert isinstance(checked, CheckedExpression)
+
+    result = bind(checked, {"v": {"self": {"a": 1, "b": 2}}}, {"v": DYN})
+
+    assert isinstance(result, BoundValues)
+
+
+def test_cel_binding_freezes_the_estimated_bound() -> None:
+    from kora.cel.cost import ValueBound, Variable
+    from kora.cel_eval.convert import BoundValues, bind
+
+    fields = {"child": ValueBound(4096, 256, 1, 16384)}
+    bound = ValueBound(4096, 256, 1000, 16384, fields=fields)
+    checked = check("v.child == v.child", {"v": Variable(DYN, bound)})
+    assert isinstance(checked, CheckedExpression)
+    fields["child"] = ValueBound(4096, 256, 0, 16384)
+
+    result = bind(checked, {"v": {"child": {"a": 1}}}, {"v": DYN})
+
+    assert isinstance(result, BoundValues)
+
+
 def expression(source: str) -> CheckedExpression:
     checked = check(source)
     assert isinstance(checked, CheckedExpression)

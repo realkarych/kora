@@ -9,6 +9,45 @@ from tests.cel_eval.test_cel_evaluation import clock
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["validate", "evaluate"])
+async def test_cel_admission_charges_retained_bound_metadata(operation: str) -> None:
+    from kora.cel import CheckedExpression, check
+    from kora.cel.cost import ValueBound, Variable
+    from kora.cel.types import DYN
+    from kora.cel_eval.binding import load_binding
+    from kora.cel_eval.thread import EvaluationThread, Evaluator, Settings
+
+    fields = {str(index): ValueBound(4096, 256, 1, 16384) for index in range(128)}
+    bound = ValueBound(4096, 256, 1000, 16384, fields=fields)
+    checked = check("v == v", {"v": Variable(DYN, bound)})
+    small = check("v == v", {"v": Variable(DYN)})
+    assert isinstance(checked, CheckedExpression)
+    assert isinstance(small, CheckedExpression)
+    owner = EvaluationThread(load_binding(), Settings(outstanding_bytes=16384))
+    evaluator = Evaluator(clock, owner)
+
+    try:
+        compilation = await evaluator.validate(small)
+        result = await evaluator.evaluate(small, {"v": {}}, {}, ErrorContext("when"))
+        request = (
+            evaluator.validate(checked)
+            if operation == "validate"
+            else evaluator.evaluate(checked, {"v": {}}, {}, ErrorContext("when"))
+        )
+        with pytest.raises(EvaluatorUnavailable) as caught:
+            await request
+    finally:
+        await evaluator.close()
+
+    assert compilation.valid
+    assert result is True
+    assert caught.value.reason is UnavailableReason.BUSY
+    assert owner.snapshot().bytes == 0
+    assert owner.snapshot().outstanding == 0
+    assert owner.snapshot().handles == 0
+
+
+@pytest.mark.asyncio
 async def test_cel_evaluation_thread_is_shared_across_handles() -> None:
     from kora.cel_eval.thread import Evaluator
 

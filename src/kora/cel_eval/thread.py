@@ -523,7 +523,9 @@ class Evaluator:
     async def validate(self, checked: CheckedExpression) -> Compilation:
         if len(checked.rendering) > MAX_RENDERING:
             refuse(UnavailableReason.BUSY)
-        result = await self._reply(ValidationWork(checked), len(checked.rendering) * 4)
+        result = await self._reply(
+            ValidationWork(checked), len(checked.rendering) * 4 + checked.bound_bytes
+        )
         if not isinstance(result, Compilation):
             raise_safe(RuntimeError("invalid validation reply"))
         return result
@@ -564,6 +566,7 @@ class Evaluator:
                 + len(context.field) * 4
                 + MAX_EVENT_ID * 4
                 + 1024
+                + request.checked.bound_bytes
             )
             if isinstance(bound, ErrorKind):
                 prepared.append(context.record(bound, self.clock))

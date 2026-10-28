@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import cast
 
 from kora.cel.cost import (
@@ -109,7 +110,10 @@ def checked_bound(bound: object) -> ValueBound:
         raise BoundError("a bound is not a value bound")
     declared = cast(ValueBound, bound)
     sizes = (declared.items, declared.string_bytes)
-    if not all(map(is_integer, sizes)) or not is_plain_mapping(declared.fields):
+    if not all(map(is_integer, sizes)) or not (
+        is_plain_mapping(declared.fields)
+        or isinstance(declared.fields, MappingProxyType)
+    ):
         raise BoundError("a value bound is malformed")
     return declared
 
