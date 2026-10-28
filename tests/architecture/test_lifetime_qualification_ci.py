@@ -24,11 +24,32 @@ INSTALLED = "installed-qualification"
 JOIN = "lifetime-evidence"
 GATES = ((INSTALLED, "required_measurements"), (JOIN, "required_evidence"))
 REVISION = "a" * 40
+RECEIPT = "source-revision.txt"
 SHARD_FILES = {
-    "fixture": ("report.json", "publication.json", "tests.xml"),
-    "listing": ("listing.json", "tests.xml"),
-    "command": ("command.json", "command-artifacts/publication.json", "tests.xml"),
+    "fixture": ("report.json", "publication.json", "tests.xml", RECEIPT),
+    "listing": ("listing.json", "tests.xml", RECEIPT),
+    "command": (
+        "command.json",
+        "command-artifacts/publication.json",
+        "tests.xml",
+        RECEIPT,
+    ),
 }
+REQUIRED_PATHS = [
+    (shard, name) for shard, names in SHARD_FILES.items() for name in names
+]
+INVENTORY_DAMAGE = [
+    ("complete", "", ""),
+    ("extra_artifact", "", ""),
+    ("foreign_revision", "fixture", RECEIPT),
+    *(("missing_shard", shard, "") for shard in SHARD_FILES),
+    *(("linked_shard", shard, "") for shard in SHARD_FILES),
+    *(
+        (damage, shard, name)
+        for damage in ("missing", "linked", "empty", "directory")
+        for shard, name in REQUIRED_PATHS
+    ),
+]
 FAILED_OUTCOMES = ("failure", "cancelled", "skipped", "")
 
 
@@ -99,39 +120,47 @@ def gate_cases() -> list[tuple[str, str, str, str]]:
     return cases
 
 
+def source_receipt(checkout: str) -> str:
+    return f"Actual checkout: {checkout}\nRequested measurement revision: {REVISION}\n"
+
+
+def shard_folder(measurements: Path, shard: str) -> Path:
+    return measurements / f"conformance-lifetime-{REVISION}-{shard}"
+
+
 def write_complete_evidence(root: Path) -> Path:
     measurements = root / "measurements"
-    for shard, names in SHARD_FILES.items():
-        folder = measurements / f"conformance-lifetime-{REVISION}-{shard}"
-        for name in names:
-            path = folder / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("{}\n")
-        (folder / "source-revision.txt").write_text(
-            f"Actual checkout: {REVISION}\nRequested measurement revision: {REVISION}\n"
-        )
+    for shard, name in REQUIRED_PATHS:
+        path = shard_folder(measurements, shard) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source_receipt(REVISION) if name == RECEIPT else "{}\n")
     return measurements
 
 
-def damage_evidence(measurements: Path, damage: str) -> None:
-    prefix = f"conformance-lifetime-{REVISION}"
-    listing = measurements / f"{prefix}-listing" / "listing.json"
-    if damage == "missing_shard":
-        command = measurements / f"{prefix}-command"
-        command.rename(measurements.parent / "removed-command")
-    elif damage == "extra_artifact":
-        (measurements / f"{prefix}-unexpected").mkdir()
-    elif damage == "empty_sidecar":
-        listing.write_text("")
-    elif damage == "linked_sidecar":
-        listing.unlink()
-        listing.symlink_to(measurements / f"{prefix}-fixture" / "report.json")
-    elif damage == "missing_retention_receipt":
-        (measurements / f"{prefix}-command/command-artifacts/publication.json").unlink()
+def damage_evidence(measurements: Path, damage: str, shard: str, name: str) -> None:
+    folder = shard_folder(measurements, shard)
+    path = folder / name
+    outside = measurements.parent / "outside"
+    if damage == "extra_artifact":
+        shard_folder(measurements, "unexpected").mkdir()
     elif damage == "foreign_revision":
-        (measurements / f"{prefix}-fixture" / "source-revision.txt").write_text(
-            f"Actual checkout: {'b' * 40}\nRequested measurement revision: {REVISION}\n"
-        )
+        path.write_text(source_receipt("b" * 40))
+    elif damage == "missing_shard":
+        folder.rename(outside)
+    elif damage == "linked_shard":
+        folder.rename(outside)
+        folder.symlink_to(outside, target_is_directory=True)
+    elif damage == "missing":
+        path.unlink()
+    elif damage == "linked":
+        outside.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(outside)
+    elif damage == "empty":
+        path.write_text("")
+    elif damage == "directory":
+        path.unlink()
+        (path / "content").mkdir(parents=True)
 
 
 def test_lifetime_shards_select_every_measurement_exactly_once() -> None:
@@ -250,24 +279,13 @@ def test_lifetime_join_requires_every_shard_and_its_evidence() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    "damage",
-    [
-        "complete",
-        "missing_shard",
-        "extra_artifact",
-        "empty_sidecar",
-        "linked_sidecar",
-        "missing_retention_receipt",
-        "foreign_revision",
-    ],
-)
+@pytest.mark.parametrize(("damage", "shard", "name"), INVENTORY_DAMAGE)
 def test_lifetime_inventory_accepts_only_every_shard_with_its_receipt(
-    tmp_path: Path, damage: str
+    tmp_path: Path, damage: str, shard: str, name: str
 ) -> None:
     inventory = steps(lifetime_job(JOIN))["inventory"]["run"]
     measurements = write_complete_evidence(tmp_path)
-    damage_evidence(measurements, damage)
+    damage_evidence(measurements, damage, shard, name)
 
     result = subprocess.run(
         ["/bin/bash", "-e", "-c", str(inventory)],

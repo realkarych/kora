@@ -75,7 +75,8 @@ PINNED_MEASUREMENT_COMMAND = re.compile(
     r"uv run --no-sync pytest -q(?: -p no:logging)? -m measurement"
     rf"(?: (?P<matrix>{re.escape(MATRIX_ARGUMENTS)}))?"
     rf"(?: --junitxml={EVIDENCE_PATH})?"
-    r"(?P<modules>(?: tests/measurements/test_[a-z0-9_]+\.py(?:::test_[a-z0-9_]+)?)*)"
+    r"(?P<modules>(?: tests/measurements/test_[a-z0-9_]+\.py"
+    rf"| {re.escape(SHARDED_MEASUREMENT)}::test_[a-z0-9_]+)*)"
 )
 AMBIGUOUS_WORD = re.compile(r"[\s'\"\\]")
 PREPARED_MEASUREMENT_STEPS = frozenset(
@@ -620,9 +621,9 @@ def measurement_lines() -> list[MeasurementLine]:
     found: list[MeasurementLine] = []
     for job_id, value in workflow_jobs().items():
         job = table(value)
-        matrix = table(table(job.get("strategy", {})).get("matrix", {}))
-        rows = [table(row) for row in cast(list[object], matrix.get("include", []))]
-        arguments = tuple(str(row.get("pytest-arguments", "")) for row in rows)
+        arguments = tuple(
+            str(row.get("pytest-arguments", "")) for row in matrix_rows(job)
+        )
         for step in step_list(job):
             for line in command_lines(step.get("run", "")):
                 if "pytest" in line and selects_measurements(line):
@@ -646,6 +647,33 @@ def is_pinned_measurement_command(line: tuple[str, ...]) -> bool:
         and not any(AMBIGUOUS_WORD.search(word) for word in line)
         and bool(pinned["matrix"] or pinned["modules"])
     )
+
+
+@pytest.mark.parametrize(
+    ("selection", "pinned"),
+    [
+        (SHARDED_MEASUREMENT, True),
+        (f"{SHARDED_MEASUREMENT}::test_installed_listing_resources_are_released", True),
+        ("tests/measurements/test_protocol_models_cost.py", True),
+        (
+            "tests/measurements/test_protocol_models_cost.py::test_protocol_import_cost",
+            False,
+        ),
+        (
+            f"{SHARDED_MEASUREMENT} "
+            "tests/measurements/test_logging_overhead.py::test_logging_overhead",
+            False,
+        ),
+    ],
+)
+def test_only_the_sharded_module_may_be_routed_by_test_node(
+    selection: str, pinned: bool
+) -> None:
+    command = f"uv run --no-sync pytest -q -p no:logging -m measurement {selection}"
+
+    accepted = is_pinned_measurement_command(command_lines(command)[0])
+
+    assert accepted is pinned
 
 
 def is_the_only_command(job_id: str, step: dict[str, object]) -> bool:
@@ -816,18 +844,10 @@ def test_scaffold_lanes_keep_fail_closed_settings_and_pinned_steps() -> None:
 
 def test_scaffold_join_keeps_the_required_names() -> None:
     job = table(workflow_jobs()["scaffold"])
-    include = cast(
-        list[dict[str, str]], table(table(job["strategy"])["matrix"])["include"]
-    )
 
-    rendered = [
-        str(job["name"])
-        .replace("${{ matrix.os }}", entry["os"])
-        .replace("${{ matrix.python }}", entry["python"])
-        for entry in include
-    ]
+    names = [rendered(job["name"], entry) for entry in matrix_rows(job)]
 
-    assert rendered == [
+    assert names == [
         "Scaffold (ubuntu-24.04, Python 3.11.17)",
         "Scaffold (ubuntu-24.04, Python 3.15.0)",
         "Scaffold (macos-15, Python 3.11.17)",
