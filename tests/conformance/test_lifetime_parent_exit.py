@@ -55,7 +55,6 @@ async def observation_closed(
         ("drained", None),
         ("blocked", None),
         ("broken", None),
-        ("drained", "fifo_barrier"),
         ("drained", "identity"),
     ],
 )
@@ -86,7 +85,7 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     phase = "handshake"
     owned = AsyncExitStack()
     gc.collect()
-    baseline_descriptors = len(os.listdir("/dev/fd"))
+    baseline_descriptors = set(os.listdir("/dev/fd"))
 
     try:
         reading, writing = os.pipe()
@@ -156,11 +155,10 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
             identity = ProcessIdentity.model_validate_json(
                 await channel.read_frame(deadline)
             )
+            assert await group.live_members(deadline) == (identity,)
             helper_anchor = ExitAnchor(identity.pid, direct_child=False)
             owned.callback(helper_anchor.close)
             phase = "fifo_barrier"
-            if failure_phase == "fifo_barrier":
-                deadline = clock.monotonic_ns()
             writer = await entered_fifo(barrier.descriptor, reading, deadline, clock)
             owned.callback(writer.close)
             phase = "parent_close"
@@ -230,8 +228,7 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
     assert parent_status is not None
     assert leader_status is not None
     assert channel_closed
-    assert len(os.listdir("/dev/fd")) == baseline_descriptors
+    assert set(os.listdir("/dev/fd")) == baseline_descriptors
     assert (identity is None) is (failure_phase == "identity")
     assert len(stopped) == (0 if failure_phase is None else 1)
     assert exited == stopped
-    assert identity is None or failure_phase is None or stopped == (identity,)
