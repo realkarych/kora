@@ -12,6 +12,8 @@ import pytest
 from tests.support.workflows import (
     action_name,
     command_lines,
+    matrix_rows,
+    rendered,
     step_list,
     steps,
     table,
@@ -56,6 +58,9 @@ PRODUCER_EVIDENCE = {
 }
 PRODUCER_JOBS = tuple(PRODUCER_EVIDENCE)
 MATRIX_PRODUCER = "ir-measurements"
+INSTALLED_LIFETIME = "installed-qualification"
+GATED_JOBS = (*PRODUCER_JOBS, INSTALLED_LIFETIME)
+SHARDED_MEASUREMENT = "tests/measurements/test_conformance_lifetime.py"
 GATE = "required_measurements"
 CANCELLATION = "workflow_cancellation"
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,10 +75,15 @@ PINNED_MEASUREMENT_COMMAND = re.compile(
     r"uv run --no-sync pytest -q(?: -p no:logging)? -m measurement"
     rf"(?: (?P<matrix>{re.escape(MATRIX_ARGUMENTS)}))?"
     rf"(?: --junitxml={EVIDENCE_PATH})?"
-    r"(?P<modules>(?: tests/measurements/test_[a-z0-9_]+\.py)*)"
+    r"(?P<modules>(?: tests/measurements/test_[a-z0-9_]+\.py(?:::test_[a-z0-9_]+)?)*)"
 )
 AMBIGUOUS_WORD = re.compile(r"[\s'\"\\]")
-PREPARED_MEASUREMENT_STEPS = frozenset({("qualification", "lifetime_measurement")})
+PREPARED_MEASUREMENT_STEPS = frozenset(
+    {
+        ("qualification", "lifetime_measurement"),
+        (INSTALLED_LIFETIME, "lifetime_measurement"),
+    }
+)
 SOURCE_REVISION_FORMAT = "Actual checkout: %s\\nRequested measurement revision: %s\\n"
 UNCANCELLED = "${{ !cancelled() }}"
 SCAFFOLD_PLATFORMS = (
@@ -206,6 +216,7 @@ def test_producer_proof_covers_every_required_step(job_id: str) -> None:
         "pricing-measurements",
         "git-publication-measurements",
         "qualification",
+        INSTALLED_LIFETIME,
     ],
 )
 def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> None:
@@ -368,8 +379,8 @@ def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None
     assert schedule
     assert all(isinstance(entry["cron"], str) for entry in schedule)
     assert document["permissions"] == {"contents": "read"}
-    assert set(jobs) == {"qualification"}
-    assert "qualification" not in table(workflow_document()["jobs"])
+    assert set(jobs) == {"qualification", INSTALLED_LIFETIME, "lifetime-evidence"}
+    assert not set(jobs) & set(table(workflow_document()["jobs"]))
     assert "qualification" not in cast(
         list[str], table(workflow_jobs()["cel-measurements"])["needs"]
     )
@@ -401,7 +412,7 @@ def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None
             "-m",
             "measurement",
             f"--junitxml={evidence}/tests.xml",
-            "tests/measurements/test_conformance_lifetime.py",
+            f"{SHARDED_MEASUREMENT}::test_conformance_fixture_resources_are_released",
         ),
     ]
     assert [line[:-1] for line in capture] == [
@@ -424,8 +435,7 @@ def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None
     }
     for identity in ("lifetime_evidence", "lifetime_upload"):
         assert selected[identity]["if"] == (
-            "${{ always() && !cancelled() && "
-            "steps.lifetime_measurement.outcome != 'skipped' }}"
+            "${{ always() && steps.lifetime_measurement.outcome != 'skipped' }}"
         )
     environment = table(selected["lifetime_measurement"]["env"])
     assert environment["KORA_LIFETIME_CHECKOUT_REVISION"] == (
@@ -433,6 +443,10 @@ def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None
     )
     assert environment["KORA_MEASUREMENT_REVISION"] == "${{ github.sha }}"
     assert action_name(upload["uses"]) == "actions/upload-artifact"
+    assert (
+        table(upload["with"])["name"]
+        == "conformance-lifetime-${{ github.sha }}-fixture"
+    )
     assert table(upload["with"])["if-no-files-found"] == "error"
     assert table(upload["with"])["include-hidden-files"] is True
 
@@ -454,14 +468,22 @@ def run_lifetime_preparation(
     )
 
 
+LIFETIME_SHARDS = [
+    (job_id, row)
+    for job_id in ("qualification", INSTALLED_LIFETIME)
+    for row in matrix_rows(table(workflow_jobs()[job_id]))
+]
+
+
+@pytest.mark.parametrize(("job_id", "row"), LIFETIME_SHARDS)
 def test_lifetime_measurement_prepares_private_evidence_in_a_fresh_checkout(
-    tmp_path: Path,
+    tmp_path: Path, job_id: str, row: dict[str, object]
 ) -> None:
-    run = str(
-        steps(table(workflow_jobs()["qualification"]))["lifetime_measurement"]["run"]
-    )
+    selected = steps(table(workflow_jobs()[job_id]))
+    run = rendered(selected["lifetime_measurement"]["run"], row)
     preparation = run[: run.index("KORA_MEASUREMENT_OUTPUT=")]
-    evidence = tmp_path / "measurements" / "conformance-lifetime"
+    upload = table(selected["lifetime_upload"]["with"])
+    evidence = tmp_path / rendered(upload["path"], row)
 
     fresh = run_lifetime_preparation(preparation, tmp_path, "a" * 40, "b" * 40)
     repeated = run_lifetime_preparation(preparation, tmp_path, "c" * 40, "d" * 40)
@@ -635,7 +657,7 @@ def is_the_only_command(job_id: str, step: dict[str, object]) -> bool:
 def is_gated_measurement_step(job_id: str, step: dict[str, object]) -> bool:
     if job_id == MATRIX_PRODUCER:
         return "id" in step
-    return job_id in PRODUCER_EVIDENCE and step.get("id") in required_steps(
+    return job_id in GATED_JOBS and step.get("id") in required_steps(
         table(workflow_jobs()[job_id])
     )
 
@@ -653,7 +675,9 @@ def test_original_resource_and_cel_commands_keep_their_artifacts() -> None:
     ]
 
     assert all(is_pinned_measurement_command(line) for _, _, line, _ in lines)
-    assert sorted(routes) == sorted(measurement_modules() - routed_elsewhere)
+    assert sorted(routes) == sorted(
+        [*(measurement_modules() - routed_elsewhere), SHARDED_MEASUREMENT]
+    )
     assert all(is_gated_measurement_step(job_id, step) for job_id, step, _, _ in lines)
     assert all(is_the_only_command(job_id, step) for job_id, step, _, _ in lines)
     assert all(

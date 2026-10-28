@@ -18,7 +18,7 @@ After dropping result, task, exception and schema references and collecting garb
 
 Separately exercise 1,100 offered registry events, blocked and broken parent diagnostic sinks, and actual command exit. Offered volume alone does not prove queue saturation; report observed loss/queue counters and complete-delivery versus refused-incomplete results accurately. Synchronous private-directory setup/removal/evidence operations have no hard interruption guarantee for arbitrary filesystem stalls; the fourteen-second listing phases govern process/group/channel closure.
 
-The existing 240-cycle foundation study and collector remain unchanged. Listing writes a separate sidecar and raw artifacts within the existing qualification output directory, and is invoked by the existing qualification test module. No workflow topology, coverage, timeout or ten-minute budget changes. Record total qualification time; a capacity failure must be fixed without silently reducing either population.
+The existing 240-cycle foundation study and collector remain unchanged. Listing writes a separate sidecar and raw artifacts within the existing qualification output directory, and is invoked by the existing qualification test module. No workflow topology, coverage, timeout or ten-minute budget changes. Record total qualification time; a capacity failure must be fixed without silently reducing either population. That capacity failure occurred on hosted runners; since the [hosted measurement shards](conformance-lifetime-measurement-2026-10-23.md#hosted-measurement-shards-2026-10-28) of 2026-10-28, the nightly workflow runs listing as its own shard and pytest process with an unchanged population, and its cutoff no longer includes foundation time.
 
 ## Observed result
 
