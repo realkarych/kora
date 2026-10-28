@@ -200,7 +200,10 @@ def test_retained_success_cannot_be_published_as_removed(
     assert all(home.exists() for home in homes)
 
 
-@pytest.mark.parametrize("record", ["unreaped", "missing", "malformed", "linked"])
+@pytest.mark.parametrize(
+    "record",
+    ["unreaped", "missing", "malformed", "linked", "lax", "inconsistent"],
+)
 def test_unsettled_cohort_parent_keeps_its_archive_but_stays_unverified(
     tmp_path: Path, short_home: Path, record: str
 ) -> None:
@@ -213,6 +216,10 @@ def test_unsettled_cohort_parent_keeps_its_archive_but_stays_unverified(
         exit_record.unlink()
     elif record == "malformed":
         exit_record.write_text("{}")
+    elif record == "lax":
+        exit_record.write_text('{"pid": "4242", "returncode": 0, "reaped": "yes"}')
+    elif record == "inconsistent":
+        exit_record.write_text('{"pid": 4242, "returncode": null, "reaped": true}')
     else:
         exit_record.unlink()
         exit_record.symlink_to(output / "report.artifacts/0" / PARENT_EXIT)

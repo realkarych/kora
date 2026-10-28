@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
 
 PARENT_EXIT = "parent-exit.json"
 PARENT_EXIT_BYTES = 256
@@ -46,11 +46,17 @@ class EvidenceError(ValueError):
 
 
 class ParentResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     pid: int
     returncode: int | None
     reaped: bool
+
+    @model_validator(mode="after")
+    def reaped_exactly_with_returncode(self) -> "ParentResult":
+        if self.reaped is not (self.returncode is not None):
+            raise ValueError("reaped must match an observed return code")
+        return self
 
 
 @dataclass(frozen=True)

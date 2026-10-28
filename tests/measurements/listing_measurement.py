@@ -136,11 +136,21 @@ def measure_listing(output: Path) -> None:
         assert total == 420
         assert time.monotonic() < deadline
     finally:
-        sidecar["datasets"] = datasets
-        sidecar["seconds"] = time.monotonic() - started
-        sidecar["remaining_qualification_seconds"] = deadline - time.monotonic()
-        (output.parent / "listing.json").write_text(json.dumps(sidecar, sort_keys=True))
-        if time.monotonic() >= deadline and sys.exception() is None:
-            raise TimeoutError(
-                "listing evidence publication exceeded qualification deadline"
-            )
+        publish_listing(sidecar, datasets, output, started, deadline)
+
+
+def publish_listing(
+    sidecar: JsonObject,
+    datasets: list[JsonValue],
+    output: Path,
+    started: float,
+    deadline: float,
+) -> None:
+    sidecar["datasets"] = datasets
+    sidecar["seconds"] = time.monotonic() - started
+    sidecar["remaining_qualification_seconds"] = deadline - time.monotonic()
+    (output.parent / "listing.json").write_text(json.dumps(sidecar, sort_keys=True))
+    if time.monotonic() >= deadline and sys.exception() is None:
+        raise TimeoutError(
+            "listing evidence publication exceeded qualification deadline"
+        )
