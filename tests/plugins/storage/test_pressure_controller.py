@@ -385,8 +385,8 @@ def test_pressure_owner_closes_after_parent_interrupt(
 
     assert status != 0, child_diagnostic(error_output)
     assert report.provider_started, child_diagnostic(error_output)
-    assert report.failure == reason
-    assert report.resources_closed
+    assert report.failure == reason, child_diagnostic(error_output)
+    assert report.resources_closed, child_diagnostic(error_output)
     assert not (directory / "mounted").exists()
 
 
