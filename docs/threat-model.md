@@ -1,6 +1,6 @@
 # Threat model
 
-CEL integer negation amendment dated 2026-10-28 (the TM-04 evidence): typed checks rewrite integer negation so the binding's wrapping negation is not reachable from checked author expressions, under [issue #372](https://github.com/realkarych/kora/issues/372) with the implementation plan approved by the project owner; wording pending line-by-line owner review. Actors, controls and deployment limitations are unchanged.
+CEL integer negation amendment dated 2026-10-28 (the TM-04 evidence): typed checks rewrite integer negation so the binding's wrapping negation is not reachable from checked author expressions, under [issue #372](https://github.com/realkarych/kora/issues/372) with the implementation plan approved by the project owner; the wording was reviewed line by line and approved by the project owner on 2026-10-28. Actors, controls and deployment limitations are unchanged.
 
 CEL schema-driven checker amendment dated 2026-10-27 (the TM-04 evidence): the schema mapping and checker land under [issue #337](https://github.com/realkarych/kora/issues/337) and [issue #330](https://github.com/realkarych/kora/issues/330), with the implementation plan approved by the project owner on #330; the wording was reviewed line by line and approved by the project owner on 2026-10-28. Actors, controls and deployment limitations are unchanged.
 

@@ -1,6 +1,6 @@
 # Implementation plan
 
-CEL integer negation amendment dated 2026-10-28: the project owner approved the [#372 implementation plan](https://github.com/realkarych/kora/issues/372#issuecomment-6464510730); wording pending line-by-line owner review.
+CEL integer negation amendment dated 2026-10-28: the project owner approved the [#372 implementation plan](https://github.com/realkarych/kora/issues/372#issuecomment-6464510730); the wording was reviewed line by line and approved by the project owner on 2026-10-28.
 
 CEL schema-driven checker amendment dated 2026-10-27: the project owner approved the [#330 implementation plan](https://github.com/realkarych/kora/issues/330#issuecomment-6451106230), including its split at the 1,000-line limit; the schema mapping lands under [issue #337](https://github.com/realkarych/kora/issues/337) and the checker under [issue #330](https://github.com/realkarych/kora/issues/330); the wording was reviewed line by line and approved by the project owner on 2026-10-28.
 
