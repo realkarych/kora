@@ -333,6 +333,11 @@ DECLARED_SCHEMA: JsonValue = {
     },
     "additionalProperties": {"type": "array", "maxItems": 0},
 }
+LOOSE_BESIDE_STRING: JsonValue = {
+    "type": "object",
+    "properties": {"description": {"type": "string"}},
+    "additionalProperties": {"type": "string", "maxLength": 1},
+}
 ROOT_LIST: JsonValue = {"type": "array", "maxItems": 1}
 ROOT_STRING: JsonValue = {"type": "string", "maxLength": 1}
 DECLARED_VALUES: list[tuple[str, JsonValue, JsonValue, bool]] = [
@@ -343,7 +348,8 @@ DECLARED_VALUES: list[tuple[str, JsonValue, JsonValue, bool]] = [
         True,
     ),
     ("within_utf8_bytes", DECLARED_SCHEMA, {"tags": ["ab"], "name": "abcd"}, True),
-    ("loose_declared_property", DECLARED_SCHEMA, {"description": "a" * 100}, True),
+    ("loose_declared_property", LOOSE_BESIDE_STRING, {"description": "a" * 100}, True),
+    ("tightened_additional_string", LOOSE_BESIDE_STRING, {"other": "abcde"}, False),
     ("too_many_items", DECLARED_SCHEMA, {"tags": ["a", "b", "c"]}, False),
     ("nested_string_too_long", DECLARED_SCHEMA, {"tags": ["a", "abcde"]}, False),
     ("field_string_too_long", DECLARED_SCHEMA, {"name": "abcdefghi"}, False),
