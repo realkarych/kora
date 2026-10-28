@@ -86,7 +86,6 @@ def resource_gates(
     *,
     native_traced: bool = False,
     native_untraced: bool = False,
-    rss_gated: bool = False,
 ) -> None:
     for resource in ("descriptors", "threads", "os_threads", "tasks"):
         gate(report, f"{name}_{resource}", len({p[resource] for p in points}) == 1)
@@ -103,7 +102,7 @@ def resource_gates(
             assert all(value is None for value in values)
             continue
         growth, change = spans(points, resource)
-        blocking = resource == "heap" or rss_gated
+        blocking = resource == "heap" or native_traced or native_untraced
         bounded(report, f"{name}_{resource}_growth", growth, whole, blocking)
         if resource != "rss" or not native_traced:
             bounded(report, f"{name}_{resource}_late_growth", change, late, blocking)
@@ -208,7 +207,6 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
             untraced_payload["points"],
             RESOURCE_BUDGETS["native"],
             native_untraced=True,
-            rss_gated=True,
         )
     report.environment["native_late_rss_basis"] = "untraced paired workload"
     for mode in ("native", "lifetime", "loops", "idle", "busy"):
@@ -270,7 +268,6 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                     points,
                     RESOURCE_BUDGETS[mode],
                     native_traced=mode == "native",
-                    rss_gated=mode == "native",
                 )
             if payload["timings"]:
                 timings = sorted(payload["timings"])
@@ -372,12 +369,17 @@ def test_cel_lifetime_heap_gate_detects_a_retained_leak() -> None:
         "from tests.measurements.cel_workload import run\nprint(run('leaking_loops'))\n"
     )
     budget = RESOURCE_BUDGETS["loops"]
+    gated = new_report()
 
     result = run_child(code, full_path(ROOT))
 
     assert result.code == 0, result.stderr
+    assert result.stderr == ""
     payload: Payload = json.loads(result.stdout)
-    growth, late = spans(payload["points"], "heap")
     assert payload["mode"] == "leaking_loops"
+    growth, late = spans(payload["points"], "heap")
     assert growth > budget.heap_growth
     assert late > budget.late_heap_growth
+    with pytest.raises(AssertionError, match="leaking_loops_heap_growth"):
+        resource_gates(gated, "leaking_loops", payload["points"], budget)
+    assert gated.gates["leaking_loops_heap_growth"] is False
