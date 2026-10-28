@@ -25,13 +25,13 @@ from kora.executor.digests import (
 from kora.executor.failures import (
     ExecutorError,
     Phase,
-    fail,
+    deadline_due,
     invalid,
     misconfigured,
     unavailable,
 )
 from kora.executor.files import (
-    open_directory,
+    opened,
     private_directory,
     remove_private_directory,
     scratch_directory,
@@ -348,7 +348,7 @@ class Executor:
                 remaining_ns / NANOSECONDS_PER_SECOND,
             )
         except TimeoutError:
-            fail(ErrorClass.TIMEOUT, "deadline_due", Phase.SEAL)
+            deadline_due(Phase.SEAL)
         ctx.logger.emit(PHASE_FINISHED, phase=Phase.SEAL.value, outcome="sealed")
         return sealed
 
@@ -763,12 +763,9 @@ class ReadsHeads(Protocol):
 
 
 def replace_digest_file(work: Path, digest: str) -> None:
-    directory = open_directory(work)
-    try:
+    with opened(work) as directory:
         try:
             os.unlink(PREPARED_DIGEST_FILE, dir_fd=directory)
         except FileNotFoundError:
             pass
         write_new_file(directory, PREPARED_DIGEST_FILE, digest.encode("ascii"), 0o600)
-    finally:
-        os.close(directory)

@@ -51,7 +51,7 @@ WORKFLOW_TRIGGERS = {
     "osv-scanner.yml": {"pull_request", "push", "schedule"},
     "storage.yml": {"workflow_dispatch", "schedule"},
 }
-REQUIRED_JOB_CONDITIONS = {
+GATING_JOB_CONDITIONS = {
     "ci.yml:scaffold": "${{ always() }}",
     "ci.yml:cel-measurements": "${{ always() }}",
     "osv-scanner.yml:pull-request": "github.event_name == 'pull_request'",
@@ -75,7 +75,7 @@ JOB_PERMISSIONS = {
         "security-events": "write",
     },
 }
-REQUIRED_CONTEXTS = frozenset(
+BRANCH_PROTECTION_CONTEXTS = frozenset(
     {
         "Markdown lint",
         "Links and anchors",
@@ -92,9 +92,10 @@ REQUIRED_CONTEXTS = frozenset(
         "Dependencies introduced by the pull request",
         "CEL evaluator lifetime",
         "Console browser checks",
-        "Required storage evidence",
     }
 )
+RELEASE_QUALIFICATION_CONTEXTS = frozenset({"Required storage evidence"})
+GATING_CONTEXTS = BRANCH_PROTECTION_CONTEXTS | RELEASE_QUALIFICATION_CONTEXTS
 
 
 def workflow_job_entries() -> list[tuple[str, dict[str, object]]]:
@@ -358,18 +359,18 @@ def test_every_environment_file_write_sets_one_reviewed_name() -> None:
     assert written == ENVIRONMENT_FILE_NAMES
 
 
-def test_every_required_status_context_is_produced() -> None:
+def test_every_gating_status_context_is_produced() -> None:
     jobs = workflow_job_entries()
 
     produced = {name for _, job in jobs for name in rendered_names(job)}
-    required = [
+    gating = [
         (location, job)
         for location, job in jobs
-        if REQUIRED_CONTEXTS.intersection(rendered_names(job))
+        if GATING_CONTEXTS.intersection(rendered_names(job))
     ]
 
-    assert produced >= REQUIRED_CONTEXTS
+    assert produced >= GATING_CONTEXTS
     assert {
-        location: job["if"] for location, job in required if "if" in job
-    } == REQUIRED_JOB_CONDITIONS
-    assert all("continue-on-error" not in job for _, job in required)
+        location: job["if"] for location, job in gating if "if" in job
+    } == GATING_JOB_CONDITIONS
+    assert all("continue-on-error" not in job for _, job in gating)

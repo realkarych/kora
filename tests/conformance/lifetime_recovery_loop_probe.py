@@ -2,7 +2,6 @@ import asyncio
 import gc
 import os
 import signal
-import subprocess
 import sys
 from contextlib import ExitStack
 from io import FileIO
@@ -11,17 +10,18 @@ from pathlib import Path
 import pytest
 
 from kora.conformance.lifetime import LifetimeError, RecoveryAttempt, RecoveryAttempts
-from kora.protocols.lifetime import CleanupOutcome, CleanupReference, LifetimeReason
+from kora.protocols.lifetime import CleanupOutcome, LifetimeReason
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_lifetime_recovery_ownership import (
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    StallBarrier,
+    limits,
     recovery_progress,
+    retained_invocation,
     settle_recovery_attempts,
+    stall_barrier,
 )
-from tests.conformance.test_parent_lifetime import limits
 
 
 async def retain(
@@ -29,21 +29,9 @@ async def retain(
     registry: RecoveryAttempts,
     launcher: ProbeIOHelperLauncher,
     clock: ControlledLifetimeClock,
-    reading: int,
-    directory: int,
+    barrier: StallBarrier,
 ) -> tuple[RecoveryAttempt, FileIO]:
-    previous = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
-            str(home),
-            "tree",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    reference = CleanupReference(invocation_id=previous.stdout.decode("ascii"))
+    reference = retained_invocation(home, "tree")
     caller = asyncio.create_task(
         registry.resume(
             reference,
@@ -64,9 +52,7 @@ async def retain(
     assert owner is not None
     helper = owner.mutations.helpers[-1]
     with ExitStack() as pending:
-        writer = pending.enter_context(
-            await entered_fifo(directory, reading, deadline, SystemClock())
-        )
+        writer = pending.enter_context(await barrier.entered(deadline, SystemClock()))
         while not helper.descriptors:
             await recovery_progress(caller, deadline)
         clock.advance(int(owner.limits.acquisition_seconds * 1_000_000_000) + 1)
@@ -111,21 +97,14 @@ async def refuse(
 
 def main(home: Path) -> None:
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(home)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            home, writing, barrier.descriptor, phase="after", pause_at=2
-        )
+        barrier = stall_barrier(resources, home)
+        launcher = barrier.launcher(phase="after", pause_at=2)
         clock = ControlledLifetimeClock()
         registry = RecoveryAttempts()
         loop = asyncio.new_event_loop()
         try:
             attempt, writer = loop.run_until_complete(
-                retain(home, registry, launcher, clock, reading, barrier.descriptor)
+                retain(home, registry, launcher, clock, barrier)
             )
             resources.enter_context(writer)
             loop.close()

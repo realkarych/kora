@@ -8,18 +8,15 @@ from kora.conformance.storage_support import (
     BytesSource,
     operation,
     seal_bytes,
-    single_manifest,
     single_part,
+    stage_release,
     stage_spec,
+    write_single_part,
 )
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import (
-    MutationReceipt,
-    StageReleaseRequest,
-    StorageLimits,
-    StorageMutationSet,
-)
+from kora.protocols.storage_models import StorageLimits
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_local_storage_stage_receipt_survives_restart_and_retires(
@@ -43,27 +40,10 @@ def test_local_storage_stage_receipt_survives_restart_and_retires(
         retire = operation(restarted.identity(), "retire-1", "retire_stage", stage)
         retired = await restarted.retire_stage(retire, stage, context)
         observed = await restarted.observe(begin, context)
-        receipts = tuple(
-            sorted(
-                (
-                    MutationReceipt(
-                        version=1,
-                        operation_id=op.operation_id,
-                        kind=op.kind,
-                        request_digest=op.request_digest,
-                        outcome_digest=result.metadata_digest(),
-                    )
-                    for op, result in ((begin, stage), (retire, retired))
-                ),
-                key=lambda item: item.operation_id,
-            )
-        )
-        acknowledged = StorageMutationSet(version=1, stage=stage, receipts=receipts)
-        release = StageReleaseRequest(
-            version=1,
-            stage=stage,
+        release = stage_release(
+            stage,
+            ((begin, stage), (retire, retired)),
             persisted_outcome_revision="outcome-1",
-            mutation_set_digest=acknowledged.metadata_digest(),
             issuance_closed="closed-issuers-1",
         )
         released = await restarted.release_stage(release, context)
@@ -100,11 +80,7 @@ def test_cancelled_native_result_closes_transferred_lease(
     from kora.plugins.storage.files import FileLease, RootAnchor
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         anchor = RootAnchor.open(tmp_path / "store", StorageLimits(version=1))
         started = threading.Event()
         finish = threading.Event()
@@ -150,11 +126,7 @@ def test_local_storage_seal_replay_refuses_a_different_stage(
     import asyncio
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         sealed, manifest, seal = await seal_bytes(
             provider, "sealed", b"immutable-data", context
@@ -182,11 +154,7 @@ def test_local_storage_retirement_cleans_failed_parts_and_refuses_reads(
     from kora.protocols.storage_models import NoEffectFailure, StageWrite
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         payload = b"retired part"
         sealed, _, _ = await seal_bytes(provider, "sealed", payload, context)
@@ -242,9 +210,7 @@ def test_local_storage_refuses_replaced_control_inode(tmp_path: Path) -> None:
     import asyncio
     import shutil
 
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
     provider = LocalArtifactStorage(configuration)
     asyncio.run(provider.aclose())
     database = tmp_path / "store" / "control.sqlite"
@@ -265,33 +231,16 @@ def test_local_storage_cancelled_reader_handoff_closes_undelivered_stream(
     import asyncio
     from dataclasses import replace
 
-    from kora.protocols.storage_models import StageWrite
     from tests.plugins.storage.activity import ReaderHandoffActivity
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         activity = ReaderHandoffActivity()
         context = replace(context_for(kora_capture), activity=activity)
         payload = b"handoff"
-        spec = stage_spec(provider.identity(), "stage", payload)
-        stage = await provider.begin_stage(
-            operation(provider.identity(), "begin", "begin_stage", spec), spec, context
+        stage, _, manifest = await write_single_part(
+            provider, "stage", payload, context, begin_id="begin", part_id="part"
         )
-        part_spec = single_part(payload)
-        write = operation(
-            provider.identity(),
-            "part",
-            "write_part",
-            StageWrite(version=1, stage=stage, spec=part_spec),
-        )
-        part = await provider.write_part(
-            write, stage, part_spec, BytesSource(payload), context
-        )
-        manifest = single_manifest(stage, part_spec, part.part_identity)
         sealed = await provider.seal_stage(
             operation(provider.identity(), "seal", "seal_stage", manifest),
             stage,
@@ -329,11 +278,7 @@ def test_local_storage_invalid_prefix_is_typed_and_closes_source(
     from kora.protocols.storage_models import PrefixCapture
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         spec = stage_spec(provider.identity(), "prefix", b"abc")
         part_spec = single_part(b"abc")
@@ -366,11 +311,7 @@ def test_closed_receiver_closes_an_unconsumed_input(
     from kora.protocols.storage_models import StageWrite
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         spec = stage_spec(provider.identity(), "stage", b"bytes")
         part_spec = single_part(b"bytes")

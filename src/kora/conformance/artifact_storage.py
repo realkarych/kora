@@ -18,30 +18,28 @@ from kora.conformance.common import (
 from kora.conformance.storage_support import (
     BytesSource,
     acknowledge_stage,
+    content_address,
+    delete_release,
+    delete_request,
     digest,
     operation,
+    preparation_request,
+    promotion_request,
     repeated_digest,
     seal_bytes,
+    seal_prefix,
     seal_repeated,
     single_manifest,
     single_part,
     stage_spec,
+    write_single_part,
 )
 from kora.ir.json import JsonObject
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage import ArtifactStorage
 from kora.protocols.storage_models import (
-    ContentAddress,
-    ContentPreparation,
-    DeleteArguments,
-    DeleteReleaseRequest,
-    DeleteRequest,
-    ManifestPrefix,
-    PrefixCapture,
-    PreparationArguments,
     PreparedContentRef,
-    PromotionArguments,
     PromotionRequest,
     PromotionResult,
     SealedStage,
@@ -106,20 +104,11 @@ async def publish_with_context(
     key: str,
     context: ProtocolContext,
 ) -> tuple[PromotionRequest, PromotionResult]:
-    arguments = PromotionArguments(
-        version=1,
-        content=sealed,
-        address=ContentAddress(
-            version=1,
-            storage_identity=provider.identity(),
-            payload_digest=sealed.payload_digest,
-        ),
-        content_generation=1,
-    )
-    request = PromotionRequest(
-        version=1,
-        operation=operation(provider.identity(), key, "promote", arguments),
-        arguments=arguments,
+    request = promotion_request(
+        provider.identity(),
+        key,
+        sealed,
+        content_address(provider.identity(), sealed.payload_digest),
     )
     return request, await provider.promote(request, context)
 
@@ -164,60 +153,32 @@ async def check_artifact_storage_staging_round_trip(
         "immutable reread has the exact full digest",
     )
     output = f"prepared-{size}".encode()
-    preparation = PreparationArguments(
-        version=1,
-        source=upload.content,
-        maximum_output_size=len(output),
-        expected_output_digest=digest(output),
-    )
     prepared = await provider.prepare_content(
-        ContentPreparation(
-            version=1,
-            operation=operation(
-                provider.identity(), "prepare", "prepare_content", preparation
-            ),
-            arguments=preparation,
+        preparation_request(
+            provider.identity(), "prepare", upload.content, len(output), digest(output)
         ),
         BytesSource(output),
         context,
     )
     prefix_payload = b"k" * (min(size, 65536) + 1)
+    prefix_count = len(prefix_payload) - 1
     spec = stage_spec(provider.identity(), "prefix", prefix_payload)
     stage = await provider.begin_stage(
         operation(provider.identity(), "prefix-begin", "begin_stage", spec),
         spec,
         context,
     )
-    part = single_part(prefix_payload)
-    capture = PrefixCapture(
-        version=1, stage=stage, source_spec=part, count=len(prefix_payload) - 1
-    )
     source = BytesSource(prefix_payload)
-    prefix = await provider.capture_prefix(
-        operation(provider.identity(), "capture", "capture_prefix", capture),
+    incomplete = await seal_prefix(
+        provider,
         stage,
-        part,
-        capture.count,
+        single_part(prefix_payload),
+        prefix_count,
         source,
         context,
-    )
-    manifest = StageManifest(
-        version=1,
-        stage=stage,
-        parts=(),
-        prefix=ManifestPrefix(
-            version=1,
-            source_spec=part,
-            count=prefix.count,
-            digest=prefix.digest,
-            private_identity=prefix.private_identity,
-        ),
-    )
-    incomplete = await provider.seal_stage(
-        operation(provider.identity(), "prefix-seal", "seal_stage", manifest),
-        stage,
-        manifest,
-        context,
+        capture_id="capture",
+        seal_id="prefix-seal",
+        manifest_count="captured",
     )
     restarted = storage_factory()
     try:
@@ -243,7 +204,7 @@ async def check_artifact_storage_staging_round_trip(
         "prefix sealing never claims a complete source",
     )
     check(
-        source.closed and source.offset == capture.count,
+        source.closed and source.offset == prefix_count,
         "prefix capture closes without consuming the tail",
     )
 
@@ -265,19 +226,9 @@ async def check_artifact_storage_promotion_is_create_only(
     first, _, _ = await seal_bytes(provider, "first", b"same-bytes", context)
     second, _, _ = await seal_bytes(provider, "second", b"same-bytes", context)
     raw, _, _ = await seal_bytes(provider, "candidate", b"raw-bytes", context)
-    preparation = PreparationArguments(
-        version=1,
-        source=raw,
-        maximum_output_size=8,
-        expected_output_digest=digest(b"prepared"),
-    )
     prepared = await provider.prepare_content(
-        ContentPreparation(
-            version=1,
-            operation=operation(
-                provider.identity(), "prepare", "prepare_content", preparation
-            ),
-            arguments=preparation,
+        preparation_request(
+            provider.identity(), "prepare", raw, 8, digest(b"prepared")
         ),
         BytesSource(b"prepared"),
         context,
@@ -304,61 +255,30 @@ async def check_artifact_storage_promotion_is_create_only(
             await publish_with_context(provider, content, f"forged-{index}", context)
         check(
             not await provider.exists(
-                ContentAddress(
-                    version=1,
-                    storage_identity=provider.identity(),
-                    payload_digest=content.payload_digest,
-                ),
-                context,
+                content_address(provider.identity(), content.payload_digest), context
             ),
             "a first-call foreign binding cannot publish bytes",
         )
-    wrong_destination = ContentAddress(
-        version=1,
-        storage_identity=provider.identity(),
-        payload_digest=digest(b"wrong-destination"),
+    wrong_destination = content_address(
+        provider.identity(), digest(b"wrong-destination")
     )
-    wrong_arguments = PromotionArguments(
-        version=1, content=prepared, address=wrong_destination, content_generation=1
+    wrong_request = promotion_request(
+        provider.identity(), "wrong-destination", prepared, wrong_destination
     )
     with pytest.raises(KoraProtocolError):
-        await provider.promote(
-            PromotionRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(),
-                    "wrong-destination",
-                    "promote",
-                    wrong_arguments,
-                ),
-                arguments=wrong_arguments,
-            ),
-            context,
-        )
+        await provider.promote(wrong_request, context)
     check(
         not await provider.exists(wrong_destination, context),
         "destination mismatch is refused before publication",
     )
-    binding_spec = stage_spec(provider.identity(), "binding", b"bound")
-    binding = await provider.begin_stage(
-        operation(provider.identity(), "binding-begin", "begin_stage", binding_spec),
-        binding_spec,
+    binding, part_spec, manifest = await write_single_part(
+        provider,
+        "binding",
+        b"bound",
         context,
+        begin_id="binding-begin",
+        part_id="binding-part",
     )
-    part_spec = single_part(b"bound")
-    part = await provider.write_part(
-        operation(
-            provider.identity(),
-            "binding-part",
-            "write_part",
-            StageWrite(version=1, stage=binding, spec=part_spec),
-        ),
-        binding,
-        part_spec,
-        BytesSource(b"bound"),
-        context,
-    )
-    manifest = single_manifest(binding, part_spec, part.part_identity)
     foreign_part = single_manifest(binding, part_spec, "foreign-part")
     foreign_stage = StageManifest.model_validate(
         {**manifest.model_dump(), "stage": first.stage}
@@ -383,7 +303,7 @@ async def check_artifact_storage_promotion_is_create_only(
         context,
     )
     check(
-        valid.payload_digest == binding_spec.payload_digest,
+        valid.payload_digest == digest(b"bound"),
         "refused bindings preserve the valid stage",
     )
     prefix_spec = stage_spec(provider.identity(), "incomplete", b"x")
@@ -392,51 +312,22 @@ async def check_artifact_storage_promotion_is_create_only(
         prefix_spec,
         context,
     )
-    source_spec = single_part(b"x")
-    capture = PrefixCapture(
-        version=1, stage=prefix_stage, source_spec=source_spec, count=0
-    )
-    prefix = await provider.capture_prefix(
-        operation(provider.identity(), "incomplete-prefix", "capture_prefix", capture),
+    incomplete = await seal_prefix(
+        provider,
         prefix_stage,
-        source_spec,
+        single_part(b"x"),
         0,
         BytesSource(b"x"),
         context,
-    )
-    incomplete_manifest = StageManifest(
-        version=1,
-        stage=prefix_stage,
-        parts=(),
-        prefix=ManifestPrefix(
-            version=1,
-            source_spec=source_spec,
-            count=0,
-            digest=prefix.digest,
-            private_identity=prefix.private_identity,
-        ),
-    )
-    incomplete = await provider.seal_stage(
-        operation(
-            provider.identity(),
-            "incomplete-seal",
-            "seal_stage",
-            incomplete_manifest,
-        ),
-        prefix_stage,
-        incomplete_manifest,
-        context,
+        capture_id="incomplete-prefix",
+        seal_id="incomplete-seal",
+        manifest_count="requested",
     )
     with pytest.raises(KoraProtocolError):
         await publish_with_context(provider, incomplete, "incomplete-publish", context)
     check(
         not await provider.exists(
-            ContentAddress(
-                version=1,
-                storage_identity=provider.identity(),
-                payload_digest=incomplete.payload_digest,
-            ),
-            context,
+            content_address(provider.identity(), incomplete.payload_digest), context
         ),
         "an incomplete raw source cannot be published",
     )
@@ -451,18 +342,8 @@ async def check_artifact_storage_promotion_is_create_only(
     selected_reader = await provider.get(selected.content, context)
     async with selected_reader:
         selected_bytes = b"".join([chunk async for chunk in selected_reader])
-    arguments = PreparationArguments(
-        version=1,
-        source=first,
-        maximum_output_size=8,
-        expected_output_digest=digest(b"prepared"),
-    )
-    request = ContentPreparation(
-        version=1,
-        operation=operation(
-            provider.identity(), "late-prepare", "prepare_content", arguments
-        ),
-        arguments=arguments,
+    request = preparation_request(
+        provider.identity(), "late-prepare", first, 8, digest(b"prepared")
     )
     with pytest.raises(KoraProtocolError):
         await provider.prepare_content(request, BytesSource(b"prepared"), context)
@@ -476,12 +357,7 @@ async def check_artifact_storage_promotion_is_create_only(
     check(selected_bytes == b"prepared", "publication selects the prepared candidate")
     check(
         not await provider.exists(
-            ContentAddress(
-                version=1,
-                storage_identity=provider.identity(),
-                payload_digest=raw.payload_digest,
-            ),
-            context,
+            content_address(provider.identity(), raw.payload_digest), context
         ),
         "prepared publication does not publish raw bytes",
     )
@@ -507,20 +383,12 @@ async def check_artifact_storage_promotion_replay_preserves_outcome(
 ) -> None:
     sealed, manifest, _ = await seal_bytes(provider, "replay", b"original", context)
     request, original = await publish_with_context(provider, sealed, "publish", context)
-    arguments = DeleteArguments(
-        version=1, address=original.content.address, deletion_generation=1
-    )
-    deletion = DeleteRequest(
-        version=1,
-        operation=operation(provider.identity(), "delete", "delete_content", arguments),
-        arguments=arguments,
-    )
+    deletion = delete_request(provider.identity(), "delete", original.content.address)
 
     await provider.delete_content(deletion, context)
     await provider.release_delete(
-        DeleteReleaseRequest(
-            version=1,
-            operation=deletion.operation,
+        delete_release(
+            deletion.operation,
             persisted_outcome_revision="saved-delete",
             issuance_closed="closed-delete",
         ),
@@ -673,21 +541,13 @@ async def check_artifact_storage_deletion_lifetime(
 ) -> None:
     sealed, _, _ = await seal_bytes(provider, "deletion", b"delete-me", context)
     _, published = await publish_with_context(provider, sealed, "publish", context)
-    arguments = DeleteArguments(
-        version=1, address=published.content.address, deletion_generation=1
-    )
-    request = DeleteRequest(
-        version=1,
-        operation=operation(provider.identity(), "delete", "delete_content", arguments),
-        arguments=arguments,
-    )
+    request = delete_request(provider.identity(), "delete", published.content.address)
 
     deleted = await provider.delete_content(request, context)
     replayed = await provider.delete_content(request, context)
     released = await provider.release_delete(
-        DeleteReleaseRequest(
-            version=1,
-            operation=request.operation,
+        delete_release(
+            request.operation,
             persisted_outcome_revision="saved-delete",
             issuance_closed="closed-delete",
         ),
@@ -790,14 +650,7 @@ async def check_artifact_storage_range_lifetime(
     sealed, _, _ = await seal_bytes(provider, "range-reader", b"reader", context)
     _, published = await publish_with_context(provider, sealed, "publish", context)
     reader = await provider.get_range(published.content, 1, 2, context)
-    arguments = DeleteArguments(
-        version=1, address=published.content.address, deletion_generation=1
-    )
-    request = DeleteRequest(
-        version=1,
-        operation=operation(provider.identity(), "delete", "delete_content", arguments),
-        arguments=arguments,
-    )
+    request = delete_request(provider.identity(), "delete", published.content.address)
 
     with pytest.raises(KoraProtocolError):
         await provider.delete_content(request, context)

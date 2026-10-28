@@ -15,6 +15,7 @@ from kora.protocols.storage_models import (
     StorageScanCursor,
     StorageScanEntry,
 )
+from tests.plugins.storage.configuration import local_configuration
 from tests.plugins.storage.lifetime_boundaries import check_inventory_position
 
 
@@ -121,11 +122,7 @@ def test_inventory_reports_actual_bounded_query_work(tmp_path: Path) -> None:
     ) as capture:
 
         async def scenario() -> None:
-            provider = LocalArtifactStorage(
-                LocalStorageConfiguration(
-                    root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-                )
-            )
+            provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
             context = context_for(capture)
             spec = stage_spec(provider.identity(), "private-key-marker", b"")
             await provider.begin_stage(

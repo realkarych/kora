@@ -9,13 +9,13 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.conformance.storage_support import operation
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.plugins.storage.local import LocalArtifactStorage
 from kora.protocols.storage_models import (
     NoEffectFailure,
     PromotionRequest,
     PromotionResult,
-    StorageLimits,
 )
+from tests.plugins.storage.configuration import local_configuration
 
 
 @pytest.mark.parametrize(
@@ -67,9 +67,7 @@ def test_promotion_process_crash_preserves_original_attribution(
         (first / encoded[2:4]).mkdir(mode=0o700)
 
     async def reconcile() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(root=str(root), limits=StorageLimits(version=1))
-        )
+        provider = LocalArtifactStorage(local_configuration(root))
         context = context_for(kora_capture)
         stage = request.arguments.content.stage
 

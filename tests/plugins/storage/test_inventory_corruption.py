@@ -7,17 +7,15 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.plugins.storage.local import LocalArtifactStorage
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import StorageLimits
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_inventory_refuses_malformed_persisted_content_as_integrity_error(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
     initial = LocalArtifactStorage(configuration)
     asyncio.run(initial.aclose())
     with closing(sqlite3.connect(tmp_path / "store" / "control.sqlite")) as connection:

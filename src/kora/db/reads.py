@@ -1,8 +1,19 @@
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import Field, dataclass, fields
 from datetime import datetime
+from typing import TypeAlias, TypeVar
 
-from sqlalchemy import exists, func, select, true
+from sqlalchemy import (
+    Column,
+    ColumnElement,
+    Executable,
+    Exists,
+    Table,
+    exists,
+    func,
+    select,
+    true,
+)
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.tables import (
@@ -23,6 +34,8 @@ from kora.db.types import JsonValue
 
 DEFAULT_PAGE_SIZE: int = 100
 MAX_PAGE_SIZE: int = 1000
+
+RowT = TypeVar("RowT")
 
 
 class PageSizeError(ValueError):
@@ -164,129 +177,60 @@ class SweepPage:
     wrapped: bool
 
 
-NAMESPACE_COLUMNS = (
-    namespace.c.id,
-    namespace.c.name,
-    namespace.c.policy_revision,
-    namespace.c.policy,
-    namespace.c.created_at,
-    namespace.c.updated_at,
-)
-TOKEN_COLUMNS = (
-    api_token.c.id,
-    api_token.c.kind,
-    api_token.c.digest,
-    api_token.c.owner,
-    api_token.c.namespaces,
-    api_token.c.approve,
-    api_token.c.platform,
-    api_token.c.runtime,
-    api_token.c.expires_at,
-)
-WORKER_COLUMNS = (
-    worker.c.id,
-    worker.c.incarnation_id,
-    worker.c.execution_domain_id,
-    worker.c.runtime,
-    worker.c.version,
-    worker.c.capacity,
-    worker.c.last_seen_at,
-    worker.c.token_id,
-)
-GRAPH_COLUMNS = (graph.c.id, graph.c.namespace_id, graph.c.name)
-GRAPH_VERSION_COLUMNS = (
-    graph_version.c.id,
-    graph_version.c.graph_id,
-    graph_version.c.number,
-    graph_version.c.ir,
-    graph_version.c.ir_digest,
-    graph_version.c.source_digest,
-    graph_version.c.execution_contract,
-    graph_version.c.execution_contract_digest,
-    graph_version.c.deployment_digest,
-    graph_version.c.resolved_digests,
-    graph_version.c.resources,
-    graph_version.c.deployed_by,
-    graph_version.c.deployed_at,
-    graph_version.c.status,
-)
-RUN_COLUMNS = (
-    run.c.id,
-    run.c.namespace_id,
-    run.c.graph_id,
-    run.c.graph_version_id,
-    run.c.rerun_of_run_id,
-    run.c.idempotency_key,
-    run.c.target_key,
-    run.c.target_held_since,
-    run.c.params,
-    run.c.cel_params_projection,
-    run.c.allow_unenforced_secrets,
-    run.c.status,
-    run.c.needs_scheduling,
-    run.c.trigger,
-    run.c.limits,
-    run.c.retention,
-    run.c.started_at,
-    run.c.deadline_expired_at,
-    run.c.finished_at,
-)
-NODE_INSTANCE_COLUMNS = (
-    node_instance.c.id,
-    node_instance.c.run_id,
-    node_instance.c.node_path,
-    node_instance.c.kind,
-    node_instance.c.status,
-    node_instance.c.trigger_rule,
-    node_instance.c.subgraph_attempt,
-    node_instance.c.top_level,
-    node_instance.c.consumed_versions,
-    node_instance.c.current_attempt_id,
-    node_instance.c.branch_selection,
-    node_instance.c.attempt_count,
-    node_instance.c.started_at,
-    node_instance.c.deadline_expired_at,
-    node_instance.c.provider_wait_deadline,
-)
-EVENT_COLUMNS = (
-    event.c.id,
-    event.c.namespace_id,
-    event.c.run_id,
-    event.c.node_instance_id,
-    event.c.attempt_id,
-    event.c.kind,
-    event.c.actor,
-    event.c.payload,
-    event.c.at,
-)
+RowColumns: TypeAlias = tuple[Column[object], ...]
+
+
+def columns_of(table: Table, row_fields: Iterable[Field[object]]) -> RowColumns:
+    return tuple(table.c[row_field.name] for row_field in row_fields)
+
+
+NAMESPACE_COLUMNS: RowColumns = columns_of(namespace, fields(NamespaceRow))
+TOKEN_COLUMNS: RowColumns = columns_of(api_token, fields(TokenRow))
+WORKER_COLUMNS: RowColumns = columns_of(worker, fields(WorkerRow))
+GRAPH_COLUMNS: RowColumns = columns_of(graph, fields(GraphRow))
+GRAPH_VERSION_COLUMNS: RowColumns = columns_of(graph_version, fields(GraphVersionRow))
+RUN_COLUMNS: RowColumns = columns_of(run, fields(RunRow))
+NODE_INSTANCE_COLUMNS: RowColumns = columns_of(node_instance, fields(NodeInstanceRow))
+EVENT_COLUMNS: RowColumns = columns_of(event, fields(EventRow))
+
+
+async def first_row(
+    connection: AsyncConnection, row_type: type[RowT], statement: Executable
+) -> RowT | None:
+    found = (await connection.execute(statement)).first()
+    return None if found is None else row_type(*found)
+
+
+def physical_attempt(run_id: str | ColumnElement[str]) -> Exists:
+    return exists().where(
+        node_instance.c.run_id == run_id,
+        attempt.c.node_instance_id == node_instance.c.id,
+        attempt.c.status.in_(NON_TERMINAL_ATTEMPT_STATUSES),
+    )
 
 
 async def namespace_by_name(
     connection: AsyncConnection, name: str
 ) -> NamespaceRow | None:
     statement = select(*NAMESPACE_COLUMNS).where(namespace.c.name == name)
-    row = (await connection.execute(statement)).first()
-    return None if row is None else NamespaceRow(*row)
+    return await first_row(connection, NamespaceRow, statement)
 
 
 async def namespace_by_id(
     connection: AsyncConnection, namespace_id: str
 ) -> NamespaceRow | None:
     statement = select(*NAMESPACE_COLUMNS).where(namespace.c.id == namespace_id)
-    row = (await connection.execute(statement)).first()
-    return None if row is None else NamespaceRow(*row)
+    return await first_row(connection, NamespaceRow, statement)
 
 
 async def token_by_digest(connection: AsyncConnection, digest: str) -> TokenRow | None:
     statement = select(*TOKEN_COLUMNS).where(api_token.c.digest == digest)
-    row = (await connection.execute(statement)).first()
-    return None if row is None else TokenRow(*row)
+    return await first_row(connection, TokenRow, statement)
 
 
 async def worker_by_id(connection: AsyncConnection, worker_id: str) -> WorkerRow | None:
     statement = select(*WORKER_COLUMNS).where(worker.c.id == worker_id)
-    row = (await connection.execute(statement)).first()
-    return None if row is None else WorkerRow(*row)
+    return await first_row(connection, WorkerRow, statement)
 
 
 async def graph_by_name(
@@ -295,8 +239,7 @@ async def graph_by_name(
     statement = select(*GRAPH_COLUMNS).where(
         graph.c.namespace_id == namespace_id, graph.c.name == name
     )
-    row = (await connection.execute(statement)).first()
-    return None if row is None else GraphRow(*row)
+    return await first_row(connection, GraphRow, statement)
 
 
 async def graph_version_by_number(
@@ -311,8 +254,7 @@ async def graph_version_by_number(
             graph_version.c.number == number,
         )
     )
-    row = (await connection.execute(statement)).first()
-    return None if row is None else GraphVersionRow(*row)
+    return await first_row(connection, GraphVersionRow, statement)
 
 
 async def run_by_id(
@@ -321,8 +263,7 @@ async def run_by_id(
     statement = select(*RUN_COLUMNS).where(
         run.c.namespace_id == namespace_id, run.c.id == run_id
     )
-    row = (await connection.execute(statement)).first()
-    return None if row is None else RunRow(*row)
+    return await first_row(connection, RunRow, statement)
 
 
 async def node_instances_of_run(
@@ -367,20 +308,12 @@ async def has_unfinished_top_level_instance(
 
 
 async def has_physical_attempt(connection: AsyncConnection, run_id: str) -> bool:
-    physical = exists().where(
-        node_instance.c.run_id == run_id,
-        attempt.c.node_instance_id == node_instance.c.id,
-        attempt.c.status.in_(NON_TERMINAL_ATTEMPT_STATUSES),
-    )
+    physical = physical_attempt(run_id)
     return bool((await connection.execute(select(physical))).scalar())
 
 
 async def execution_run_usage(connection: AsyncConnection, graph_id: str) -> int:
-    physical = exists().where(
-        node_instance.c.run_id == run.c.id,
-        attempt.c.node_instance_id == node_instance.c.id,
-        attempt.c.status.in_(NON_TERMINAL_ATTEMPT_STATUSES),
-    )
+    physical = physical_attempt(run.c.id)
     statement = select(func.count(run.c.id)).where(run.c.graph_id == graph_id, physical)
     return int((await connection.execute(statement)).scalar_one())
 
@@ -388,11 +321,7 @@ async def execution_run_usage(connection: AsyncConnection, graph_id: str) -> int
 async def namespace_outstanding_usage(
     connection: AsyncConnection, namespace_id: str
 ) -> int:
-    physical = exists().where(
-        node_instance.c.run_id == run.c.id,
-        attempt.c.node_instance_id == node_instance.c.id,
-        attempt.c.status.in_(NON_TERMINAL_ATTEMPT_STATUSES),
-    )
+    physical = physical_attempt(run.c.id)
     statement = select(func.count(run.c.id)).where(
         run.c.namespace_id == namespace_id,
         run.c.status.in_(OUTSTANDING_RUN_STATUSES)

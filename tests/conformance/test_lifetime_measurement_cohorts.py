@@ -12,10 +12,10 @@ import pytest
 from tests.measurements.lifetime_cohorts import (
     Cohort,
     Parent,
-    ParentResult,
     cleanup_parents,
     run_cohorts,
 )
+from tests.measurements.lifetime_evidence import PARENT_EXIT, ParentResult
 from tests.measurements.lifetime_measurement_support import descriptor_kinds
 
 CHILD: str = """
@@ -130,7 +130,7 @@ async def test_measurement_supervisor_owns_exceptional_parent_exit(
 
             for cohort in cohorts:
                 result = ParentResult.model_validate_json(
-                    (cohort.folder / "parent-exit.json").read_bytes()
+                    (cohort.folder / PARENT_EXIT).read_bytes()
                 )
                 assert result.reaped
                 assert result.returncode is not None

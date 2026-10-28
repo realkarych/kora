@@ -1,5 +1,4 @@
-from kora.executor.failures import Phase, fail
-from kora.ir.node import ErrorClass
+from kora.executor.failures import Phase, deadline_due
 from kora.protocols.deadlines import (
     ExecutionDeadline,
     LocalThresholds,
@@ -32,7 +31,7 @@ class PhaseGuard:
 
     def check(self, phase: Phase) -> None:
         if self.due():
-            fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+            deadline_due(phase)
 
     def bound_ns(self, own_bound_ns: int, phase: Phase) -> int:
         self.check(phase)
@@ -40,5 +39,5 @@ class PhaseGuard:
             own_bound_ns, self.installed, self.clock.monotonic_ns()
         )
         if bound <= 0:
-            fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+            deadline_due(phase)
         return bound

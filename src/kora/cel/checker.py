@@ -6,6 +6,7 @@ from typing import Final
 from kora.cel.cost import BoundError, Variable, check_type, is_variable
 from kora.cel.diagnostics import Reason, fail
 from kora.cel.meter import Meter
+from kora.cel.rewrite import rewrite_integer_negations
 from kora.cel.tree import (
     Binary,
     BinaryOperator,
@@ -252,6 +253,7 @@ class Checker:
         self.facts: dict[int, int] = {}
         self.scope_count: int = 0
         self.checked: set[str] = set()
+        self.integer_negations: set[int] = set()
 
     def key(self, parent: int | None, step: Step | None) -> int | None:
         if parent is None or step is None:
@@ -448,6 +450,8 @@ class Checker:
         kind = kind_of(inner.type)
         if kind not in (Kind.INT, Kind.DOUBLE):
             raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
+        if kind is Kind.INT:
+            self.integer_negations.add(id(node))
         return Typed(unwrap(inner.type))
 
     def conditional(self, node: Conditional) -> Typed:
@@ -626,11 +630,13 @@ def ordered(left: CelType, right: CelType) -> bool:
     return kinds[0] is kinds[1] and kinds[0] in ORDERED
 
 
-def check_types(tree: Node, environment: Environment, meter: Meter) -> CelType:
-    result = Checker(environment, meter).visit(tree).type
+def check_types(tree: Node, environment: Environment, meter: Meter) -> Node:
+    checker = Checker(environment, meter)
+    result = checker.visit(tree).type
     expected = Kind.BOOL if environment.result is ResultKind.BOOL else Kind.STRING
     if not isinstance(result, Dyn) and (
         isinstance(result, Nullable) or kind_of(result) is not expected
     ):
         raise fail(Reason.WRONG_RESULT_TYPE, 0)
-    return result
+    negations = frozenset(checker.integer_negations)
+    return rewrite_integer_negations(tree, negations, meter)

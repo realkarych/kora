@@ -10,52 +10,34 @@ from kora.conformance.common import context_for
 from kora.conformance.storage_support import (
     BytesSource,
     RepeatedSource,
+    content_address,
+    delete_release,
+    delete_request,
     digest,
-    operation,
+    preparation_request,
+    promotion_request,
     seal_bytes,
     seal_repeated,
 )
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.plugins.storage.local import LocalArtifactStorage
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import (
-    ContentAddress,
-    ContentPreparation,
-    DeleteArguments,
-    DeleteReleaseRequest,
-    DeleteRequest,
-    PreparationArguments,
-    PreparedContentRef,
-    PromotionArguments,
-    PromotionRequest,
-    StorageLimits,
-)
+from kora.protocols.storage_models import PreparedContentRef
 from tests.plugins.storage.activity import StorageBarrierActivity
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_interrupted_identical_preparation_stays_within_reserved_peak(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async def scenario() -> None:
-        configuration = LocalStorageConfiguration(
-            root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-        )
+        configuration = local_configuration(tmp_path / "store")
         provider = LocalArtifactStorage(configuration)
         context = context_for(kora_capture)
         size = 65536
         upload = await seal_repeated(provider, "interrupted-alias", size, context)
         raw = upload.content
-        arguments = PreparationArguments(
-            version=1,
-            source=raw,
-            maximum_output_size=size,
-            expected_output_digest=raw.payload_digest,
-        )
-        request = ContentPreparation(
-            version=1,
-            operation=operation(
-                provider.identity(), "prepare", "prepare_content", arguments
-            ),
-            arguments=arguments,
+        request = preparation_request(
+            provider.identity(), "prepare", raw, size, raw.payload_digest
         )
         barrier = StorageBarrierActivity(
             "storage.prepare_content.effect_persisted", on_exit=True
@@ -79,22 +61,11 @@ def test_interrupted_identical_preparation_stays_within_reserved_peak(
             candidate = await recovered.prepare_content(
                 request, RepeatedSource(size), context
             )
-            promotion_arguments = PromotionArguments(
-                version=1,
-                content=candidate,
-                address=ContentAddress(
-                    version=1,
-                    storage_identity=recovered.identity(),
-                    payload_digest=raw.payload_digest,
-                ),
-                content_generation=1,
-            )
-            promotion = PromotionRequest(
-                version=1,
-                operation=operation(
-                    recovered.identity(), "promote", "promote", promotion_arguments
-                ),
-                arguments=promotion_arguments,
+            promotion = promotion_request(
+                recovered.identity(),
+                "promote",
+                candidate,
+                content_address(recovered.identity(), raw.payload_digest),
             )
             published = await recovered.promote(promotion, context)
             private_files = tuple((tmp_path / "store" / "stages" / "0").iterdir())
@@ -114,28 +85,14 @@ def test_identical_preparation_aliases_raw_parts(
     tmp_path: Path, kora_capture: Capture, size: int
 ) -> None:
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         upload = await seal_repeated(provider, "alias", size, context)
         raw = upload.content
         stage_directory = tmp_path / "store" / "stages" / "0"
         before = {path.name: path.stat().st_ino for path in stage_directory.iterdir()}
-        arguments = PreparationArguments(
-            version=1,
-            source=raw,
-            maximum_output_size=size,
-            expected_output_digest=raw.payload_digest,
-        )
-        request = ContentPreparation(
-            version=1,
-            operation=operation(
-                provider.identity(), "prepare", "prepare_content", arguments
-            ),
-            arguments=arguments,
+        request = preparation_request(
+            provider.identity(), "prepare", raw, size, raw.payload_digest
         )
 
         try:
@@ -150,22 +107,11 @@ def test_identical_preparation_aliases_raw_parts(
             async with reader:
                 async for chunk in reader:
                     observed.update(chunk)
-            promotion_arguments = PromotionArguments(
-                version=1,
-                content=candidate,
-                address=ContentAddress(
-                    version=1,
-                    storage_identity=provider.identity(),
-                    payload_digest=raw.payload_digest,
-                ),
-                content_generation=1,
-            )
-            promotion = PromotionRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), "promote", "promote", promotion_arguments
-                ),
-                arguments=promotion_arguments,
+            promotion = promotion_request(
+                provider.identity(),
+                "promote",
+                candidate,
+                content_address(provider.identity(), raw.payload_digest),
             )
             result = await provider.promote(promotion, context)
         finally:
@@ -184,33 +130,15 @@ def test_prepared_candidate_replays_exactly_and_refuses_changed_bytes(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         output = b"validated-prepared-output" * 8192
         sealed, _, _ = await seal_bytes(provider, "stage", b"raw-source", context)
-        preparation = PreparationArguments(
-            version=1,
-            source=sealed,
-            maximum_output_size=len(output),
-            expected_output_digest=digest(output),
-        )
-        prepare = ContentPreparation(
-            version=1,
-            operation=operation(
-                provider.identity(), "prepare", "prepare_content", preparation
-            ),
-            arguments=preparation,
+        prepare = preparation_request(
+            provider.identity(), "prepare", sealed, len(output), digest(output)
         )
         source = BytesSource(output)
-        address = ContentAddress(
-            version=1,
-            storage_identity=provider.identity(),
-            payload_digest=digest(output),
-        )
+        address = content_address(provider.identity(), digest(output))
 
         try:
             candidate = await provider.prepare_content(prepare, source, context)
@@ -221,17 +149,8 @@ def test_prepared_candidate_replays_exactly_and_refuses_changed_bytes(
                 await provider.prepare_content(
                     prepare, BytesSource(b"changed"), context
                 )
-            arguments = PromotionArguments(
-                version=1, content=candidate, address=address, content_generation=1
-            )
             result = await provider.promote(
-                PromotionRequest(
-                    version=1,
-                    operation=operation(
-                        provider.identity(), "promote", "promote", arguments
-                    ),
-                    arguments=arguments,
-                ),
+                promotion_request(provider.identity(), "promote", candidate, address),
                 context,
             )
             reader = await provider.get(result.content, context)
@@ -255,39 +174,14 @@ def test_content_deletion_refuses_held_readers_prunes_shards_and_compacts_eviden
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
         sealed, _, _ = await seal_bytes(provider, "stage", b"deleted-content", context)
-        address = ContentAddress(
-            version=1,
-            storage_identity=provider.identity(),
-            payload_digest=sealed.payload_digest,
-        )
-        promotion = PromotionArguments(
-            version=1, content=sealed, address=address, content_generation=1
-        )
+        address = content_address(provider.identity(), sealed.payload_digest)
         published = await provider.promote(
-            PromotionRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), "promote", "promote", promotion
-                ),
-                arguments=promotion,
-            ),
-            context,
+            promotion_request(provider.identity(), "promote", sealed, address), context
         )
-        arguments = DeleteArguments(version=1, address=address, deletion_generation=1)
-        deletion = DeleteRequest(
-            version=1,
-            operation=operation(
-                provider.identity(), "delete", "delete_content", arguments
-            ),
-            arguments=arguments,
-        )
+        deletion = delete_request(provider.identity(), "delete", address)
 
         try:
             held = await provider.get_range(published.content, 0, 1, context)
@@ -297,9 +191,8 @@ def test_content_deletion_refuses_held_readers_prunes_shards_and_compacts_eviden
             await provider.delete_content(deletion, context)
             absent = await provider.exists(address, context)
             await provider.release_delete(
-                DeleteReleaseRequest(
-                    version=1,
-                    operation=deletion.operation,
+                delete_release(
+                    deletion.operation,
                     persisted_outcome_revision="delete-outcome",
                     issuance_closed="delete-issuers-closed",
                 ),
