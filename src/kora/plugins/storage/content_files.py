@@ -3,7 +3,12 @@ import os
 
 from kora.plugins.storage.errors import refuse
 from kora.plugins.storage.files import FileLease, RootAnchor
-from kora.plugins.storage.payload import FileSegment, PayloadFiles, PrivateFile
+from kora.plugins.storage.payload import (
+    FileSegment,
+    PayloadFiles,
+    PrivateFile,
+    same_file,
+)
 from kora.protocols.storage_models import ContentAddress
 
 
@@ -123,8 +128,7 @@ class ContentFiles:
         if actual is None:
             return
         if (
-            actual.identity.device != expected.identity.device
-            or actual.identity.inode != expected.identity.inode
+            not same_file(actual.identity, expected.identity)
             or actual.size != expected.size
         ):
             refuse("storage_integrity")

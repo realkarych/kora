@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Final
 
 from kora.executor import CONTENT_REFUSED
-from kora.executor.failures import Phase, fail, misconfigured
+from kora.executor.failures import Phase, deadline_due, fail, misconfigured
 from kora.executor.guard import PhaseGuard
 from kora.ir.globs import (
     Fuel,
@@ -130,9 +130,9 @@ async def check_protected(
             remaining_ns / NANOSECONDS_PER_SECOND,
         )
     except TimeoutError:
-        fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+        deadline_due(phase)
     if result.finding is Finding.CANCELLED:
-        fail(ErrorClass.TIMEOUT, "deadline_due", phase)
+        deadline_due(phase)
     if result.finding in (Finding.RULE, Finding.FUEL):
         logger.emit(
             CONTENT_REFUSED,

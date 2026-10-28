@@ -16,11 +16,12 @@ from kora.executor.digests import input_digest, sha256_digest
 from kora.executor.failures import ExecutorError, Phase, unavailable
 from kora.executor.files import (
     DIRECTORY_FLAGS,
-    NEW_FILE_FLAGS,
     descend,
-    open_directory,
+    new_file,
+    opened,
     private_directory,
     remove_private_directory,
+    write_all,
 )
 from kora.ir.node import ErrorClass
 from kora.protocols.common import BoundaryModel
@@ -50,6 +51,7 @@ HFS_IGNORABLE: Final[frozenset[str]] = frozenset("‌‍‎‏‪‫‬‭‮⁪
 OBJECT_ID_LENGTHS: Final[frozenset[int]] = frozenset({40, 64})
 HEX: Final[frozenset[str]] = frozenset("0123456789abcdef")
 MAX_HEAD_BYTES: Final[int] = 4096
+PATH_REFUSED: Final[str] = "sealed_path_refused"
 
 
 class Hasher(Protocol):
@@ -94,7 +96,7 @@ class SealedWriter:
     records: list[str] = field(default_factory=lambda: [])
 
 
-def refused(code: str = "sealed_path_refused") -> ExecutorError:
+def refused(code: str = PATH_REFUSED) -> ExecutorError:
     return ExecutorError(ErrorClass.ARTIFACT_INVALID, code, Phase.SEAL)
 
 
@@ -146,21 +148,31 @@ def checked_paths(entries: Sequence[ManifestEntry]) -> None:
             raise refused("sealed_gitlink_invalid")
 
 
-def read_regular(directory: int, name: str, limit: int, code: str) -> bytes:
+@contextmanager
+def opened_regular(
+    directory: int, name: str, code: str
+) -> Generator[tuple[int, os.stat_result]]:
     try:
         descriptor = os.open(name, READ_FLAGS, dir_fd=directory)
     except OSError:
         raise refused(code) from None
     try:
         status = os.fstat(descriptor)
-        if not stat.S_ISREG(status.st_mode) or status.st_size > limit:
+        if not stat.S_ISREG(status.st_mode):
+            raise refused(code)
+        yield descriptor, status
+    finally:
+        os.close(descriptor)
+
+
+def read_regular(directory: int, name: str, limit: int, code: str) -> bytes:
+    with opened_regular(directory, name, code) as (descriptor, status):
+        if status.st_size > limit:
             raise refused(code)
         data = os.read(descriptor, limit + 1)
         if len(data) > limit:
             raise refused(code)
         return data
-    finally:
-        os.close(descriptor)
 
 
 class ExportedHead(BoundaryModel):
@@ -197,16 +209,6 @@ def head_document(data: bytes) -> tuple[str, bool]:
     if not is_object_id(record.head):
         raise refused("sealed_head_malformed")
     return record.head, record.bundle
-
-
-def new_file(directory: int, name: str) -> int:
-    return os.open(name, NEW_FILE_FLAGS, 0o600, dir_fd=directory)
-
-
-def write_all(descriptor: int, data: bytes | memoryview) -> None:
-    view = memoryview(data)
-    while view:
-        view = view[os.write(descriptor, view) :]
 
 
 def write_file(directory: int, name: str, data: bytes) -> str:
@@ -330,13 +332,8 @@ def seal_symlink(writer: SealedWriter, parent: int, name: str, path: str) -> Non
 def seal_regular(
     writer: SealedWriter, parent: int, name: str, path: str, device: int
 ) -> None:
-    try:
-        source = os.open(name, READ_FLAGS, dir_fd=parent)
-    except OSError:
-        raise refused() from None
-    try:
-        status = os.fstat(source)
-        if not stat.S_ISREG(status.st_mode) or status.st_dev != device:
+    with opened_regular(parent, name, PATH_REFUSED) as (source, status):
+        if status.st_dev != device:
             raise refused()
         charge(writer, status.st_size)
         mode = EXECUTABLE_MODE if status.st_mode & stat.S_IXUSR else REGULAR_MODE
@@ -344,8 +341,6 @@ def seal_regular(
         writer.records.append(
             record_text(path, mode, status.st_size, digest, position, None)
         )
-    finally:
-        os.close(source)
 
 
 def seal_entry(
@@ -375,15 +370,6 @@ def seal_entry(
         raise refused() from None
     finally:
         os.close(parent)
-
-
-@contextmanager
-def opened(path: Path) -> Generator[int]:
-    descriptor = open_directory(path)
-    try:
-        yield descriptor
-    finally:
-        os.close(descriptor)
 
 
 def write_sealed(
@@ -432,14 +418,10 @@ def write_sealed(
 def copy_bundle(
     export: int, output: int, bounds: SealBounds, cancelled: threading.Event
 ) -> str:
-    try:
-        source = os.open(BUNDLE_FILE, READ_FLAGS, dir_fd=export)
-    except OSError:
-        raise refused("sealed_bundle_missing") from None
-    try:
-        status = os.fstat(source)
-        if not stat.S_ISREG(status.st_mode):
-            raise refused("sealed_bundle_missing")
+    with opened_regular(export, BUNDLE_FILE, "sealed_bundle_missing") as (
+        source,
+        status,
+    ):
         if status.st_size > bounds.max_bundle_bytes:
             raise refused("sealed_bundle_oversized")
         target = new_file(output, BUNDLE_FILE)
@@ -449,8 +431,6 @@ def copy_bundle(
         finally:
             os.close(target)
         return "sha256:" + digest.hexdigest()
-    finally:
-        os.close(source)
 
 
 def seal_sync(
