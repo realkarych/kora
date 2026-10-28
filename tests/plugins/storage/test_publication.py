@@ -31,7 +31,7 @@ from tests.plugins.storage.inspection import InspectedStorage
 class ImmediateSource(BytesSource):
     def __init__(self, payload: bytes) -> None:
         super().__init__(payload, chunk_size=1)
-        self.entered = asyncio.Event()
+        self.entered: asyncio.Event = asyncio.Event()
 
     async def read(self, maximum: int) -> bytes:
         chunk = await super().read(maximum)
