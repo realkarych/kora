@@ -3,6 +3,7 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,23 @@ from kora.runner.processes import RecoveredProcess, SignalResult
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
+
+
+async def reap_recovered(
+    processes: Sequence[RecoveredProcess],
+    clock: SystemClock,
+    accepted: tuple[SignalResult, ...],
+) -> None:
+    if not processes:
+        return
+    process, *remaining = processes
+    try:
+        deadline = clock.monotonic_ns() + 5_000_000_000
+        assert process.signal(signal.SIGKILL, deadline) in accepted
+        await process.settle(deadline)
+        process.release(deadline)
+    finally:
+        await reap_recovered(remaining, clock, accepted)
 
 
 @pytest.mark.asyncio
@@ -138,60 +156,58 @@ async def test_corrupt_journal_cannot_lose_live_process_ownership(
         for entry in journal.entries
         if isinstance(entry.registration, ProcessRegistration)
     ]
-    assert len(processes) == 2
-    original = journal.entries[-1]
-    if corruption == "duplicate":
-        changed = original.model_copy(
-            update={"resource_id": journal.entries[-2].resource_id}
-        )
-    elif corruption == "parent":
-        changed = original.model_copy(
-            update={"parent_resource_id": original.resource_id}
-        )
-    elif corruption == "kind":
-        changed = original.model_copy(update={"kind": ResourceKind.TEMPORARY_TREE})
-    elif corruption == "operation":
-        changed = original.model_copy(update={"acquisition_id": "e" * 32})
-    elif corruption == "revision":
-        changed = original.model_copy(update={"revision": journal.revision + 1})
-    else:
-        changed = original
-    corrupt = journal.model_copy(
-        update={
-            "entries": (*journal.entries[:-1], changed),
-            "pending_effects": ("f" * 32,)
-            if corruption == "pending"
-            else journal.pending_effects,
-        }
-    )
-    retained = corrupt.model_dump_json().encode()
-    path.write_bytes(retained)
-    owner = ParentLifetime(
-        limits=limits(),
-        recovery=reference,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
-    )
-
     try:
-        with pytest.raises(LifetimeError):
-            await owner.ready()
-        assert path.read_bytes() == retained
-        assert all(
-            process.observe(clock.monotonic_ns() + 5_000_000_000).live_members
-            for process in processes
-        )
-    finally:
-        await owner.close(None)
-        for process in processes:
-            deadline = clock.monotonic_ns() + 5_000_000_000
-            assert process.signal(signal.SIGKILL, deadline) in (
-                SignalResult.SENT,
-                SignalResult.SETTLED,
+        assert len(processes) == 2
+        original = journal.entries[-1]
+        if corruption == "duplicate":
+            changed = original.model_copy(
+                update={"resource_id": journal.entries[-2].resource_id}
             )
-            await process.settle(deadline)
-            process.release(deadline)
+        elif corruption == "parent":
+            changed = original.model_copy(
+                update={"parent_resource_id": original.resource_id}
+            )
+        elif corruption == "kind":
+            changed = original.model_copy(update={"kind": ResourceKind.TEMPORARY_TREE})
+        elif corruption == "operation":
+            changed = original.model_copy(update={"acquisition_id": "e" * 32})
+        elif corruption == "revision":
+            changed = original.model_copy(update={"revision": journal.revision + 1})
+        else:
+            changed = original
+        corrupt = journal.model_copy(
+            update={
+                "entries": (*journal.entries[:-1], changed),
+                "pending_effects": ("f" * 32,)
+                if corruption == "pending"
+                else journal.pending_effects,
+            }
+        )
+        retained = corrupt.model_dump_json().encode()
+        path.write_bytes(retained)
+        owner = ParentLifetime(
+            limits=limits(),
+            recovery=reference,
+            launcher=InstalledIOHelperLauncher(
+                home=tmp_path, state_home=tmp_path / "state"
+            ),
+        )
+
+        try:
+            with pytest.raises(LifetimeError):
+                await owner.ready()
+
+            assert path.read_bytes() == retained
+            assert all(
+                process.observe(clock.monotonic_ns() + 5_000_000_000).live_members
+                for process in processes
+            )
+        finally:
+            await owner.close(None)
+    finally:
+        await reap_recovered(
+            processes, clock, (SignalResult.SENT, SignalResult.SETTLED)
+        )
 
 
 @pytest.mark.asyncio
@@ -228,86 +244,90 @@ async def test_recovery_close_preserves_complete_inventory(
     independent = RecoveredProcess(
         registration, independent_clock, NativeIdentityReader()
     )
-    barrier = DirectoryAnchor.open_path(tmp_path)
-    os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-    reading, writing = os.pipe()
-    launcher = ProbeIOHelperLauncher(tmp_path, writing, barrier.descriptor, pause_at=1)
-    clock = ControlledLifetimeClock()
-    owner = ParentLifetime(
-        limits=limits(), recovery=reference, launcher=launcher, clock=clock
-    )
-    loop = asyncio.get_running_loop()
     try:
-        await launcher.wait_for_start(1)
-        with await entered_fifo(
-            barrier.descriptor,
-            reading,
-            independent_clock.monotonic_ns() + 5_000_000_000,
-            independent_clock,
-        ) as writer:
-            if case == "substituted_tree":
-                tree = journal.entries[0].registration
-                assert isinstance(tree, TemporaryTreeRegistration)
-                tree_path = path.parent / tree.name
-                tree_path.rename(path.parent / "retained-original")
-                tree_path.mkdir(mode=0o700)
-                closing = None
-            else:
-                closing = asyncio.create_task(owner.close(None))
-                await owner.closure_started.wait()
-
-            writer.close()
-            if case == "substituted_tree":
-                with pytest.raises(LifetimeError):
-                    await owner.ready()
-                retained = path.read_bytes()
-                closing = asyncio.create_task(owner.close(None))
-                await owner.closure_started.wait()
-                clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
-                reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
-                while not independent.observe(reap_deadline).settled:
-                    assert independent_clock.monotonic_ns() < reap_deadline
-                    wake: asyncio.Future[None] = loop.create_future()
-                    loop.call_soon(wake.set_result, None)
-                    await wake
-                clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
-                report = await asyncio.wait_for(closing, 5)
-                assert report.state is CleanupOutcome.UNKNOWN
-                assert path.read_bytes() == retained
-                assert tuple(owner.records) == tuple(
-                    entry.resource_id for entry in journal.entries
-                )
-            else:
-                assert closing is not None
-                await owner.ready()
-                clock.advance(int(owner.limits.cooperative_seconds * 1_000_000_000) + 1)
-                reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
-                while not independent.observe(reap_deadline).settled:
-                    assert independent_clock.monotonic_ns() < reap_deadline
-                    wake = loop.create_future()
-                    loop.call_soon(wake.set_result, None)
-                    await wake
-                clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
-                report = await asyncio.wait_for(closing, 5)
-                assert report.state is CleanupOutcome.CLOSED
-                assert independent.observe(
-                    independent_clock.monotonic_ns() + 5_000_000_000
-                ).settled
-                assert not path.parent.exists()
-    finally:
+        loop = asyncio.get_running_loop()
+        barrier = DirectoryAnchor.open_path(tmp_path)
+        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
+        reading, writing = os.pipe()
+        launcher = ProbeIOHelperLauncher(
+            tmp_path, writing, barrier.descriptor, pause_at=1
+        )
+        clock = ControlledLifetimeClock()
+        owner = ParentLifetime(
+            limits=limits(), recovery=reference, launcher=launcher, clock=clock
+        )
         try:
-            await dispose_test_owner(owner, clock)
+            await launcher.wait_for_start(1)
+            with await entered_fifo(
+                barrier.descriptor,
+                reading,
+                independent_clock.monotonic_ns() + 5_000_000_000,
+                independent_clock,
+            ) as writer:
+                if case == "substituted_tree":
+                    tree = journal.entries[0].registration
+                    assert isinstance(tree, TemporaryTreeRegistration)
+                    tree_path = path.parent / tree.name
+                    tree_path.rename(path.parent / "retained-original")
+                    tree_path.mkdir(mode=0o700)
+                    closing = None
+                else:
+                    closing = asyncio.create_task(owner.close(None))
+                    await owner.closure_started.wait()
+
+                writer.close()
+                if case == "substituted_tree":
+                    with pytest.raises(LifetimeError):
+                        await owner.ready()
+                    retained = path.read_bytes()
+                    closing = asyncio.create_task(owner.close(None))
+                    await owner.closure_started.wait()
+                    clock.advance(
+                        int(owner.limits.cooperative_seconds * 1_000_000_000) + 1
+                    )
+                    reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
+                    while not independent.observe(reap_deadline).settled:
+                        assert independent_clock.monotonic_ns() < reap_deadline
+                        wake: asyncio.Future[None] = loop.create_future()
+                        loop.call_soon(wake.set_result, None)
+                        await wake
+                    clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
+                    report = await asyncio.wait_for(closing, 5)
+                    assert report.state is CleanupOutcome.UNKNOWN
+                    assert path.read_bytes() == retained
+                    assert tuple(owner.records) == tuple(
+                        entry.resource_id for entry in journal.entries
+                    )
+                else:
+                    assert closing is not None
+                    await owner.ready()
+                    clock.advance(
+                        int(owner.limits.cooperative_seconds * 1_000_000_000) + 1
+                    )
+                    reap_deadline = independent_clock.monotonic_ns() + 5_000_000_000
+                    while not independent.observe(reap_deadline).settled:
+                        assert independent_clock.monotonic_ns() < reap_deadline
+                        wake = loop.create_future()
+                        loop.call_soon(wake.set_result, None)
+                        await wake
+                    clock.advance(int(owner.limits.term_seconds * 1_000_000_000) + 1)
+                    report = await asyncio.wait_for(closing, 5)
+                    assert report.state is CleanupOutcome.CLOSED
+                    assert independent.observe(
+                        independent_clock.monotonic_ns() + 5_000_000_000
+                    ).settled
+                    assert not path.parent.exists()
         finally:
-            deadline = independent_clock.monotonic_ns() + 5_000_000_000
-            assert independent.signal(signal.SIGKILL, deadline) in (
-                SignalResult.SENT,
-                SignalResult.SETTLED,
-            )
-            await independent.settle(deadline)
-            independent.release(deadline)
-            os.close(reading)
-            os.close(writing)
-            barrier.close()
+            try:
+                await dispose_test_owner(owner, clock)
+            finally:
+                os.close(reading)
+                os.close(writing)
+                barrier.close()
+    finally:
+        await reap_recovered(
+            (independent,), independent_clock, (SignalResult.SENT, SignalResult.SETTLED)
+        )
 
 
 class ExpiringIdentityReader:
@@ -361,38 +381,35 @@ async def test_close_report_never_restarts_expired_process_observation(
     independent = RecoveredProcess(
         registration, independent_clock, NativeIdentityReader()
     )
-    reader = ExpiringIdentityReader()
-    owner = ParentLifetime(
-        limits=limits(),
-        recovery=reference,
-        identities=reader,
-        clock=reader.clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
-    )
-    await owner.ready()
-    reader.expiry = reader.clock.monotonic_ns() + int(
-        (
-            owner.limits.cooperative_seconds
-            + owner.limits.term_seconds
-            + owner.limits.kill_observation_seconds
-            + owner.limits.drain_seconds
-        )
-        * 1_000_000_000
-    )
-
     try:
+        reader = ExpiringIdentityReader()
+        owner = ParentLifetime(
+            limits=limits(),
+            recovery=reference,
+            identities=reader,
+            clock=reader.clock,
+            launcher=InstalledIOHelperLauncher(
+                home=tmp_path, state_home=tmp_path / "state"
+            ),
+        )
+        await owner.ready()
+        reader.expiry = reader.clock.monotonic_ns() + int(
+            (
+                owner.limits.cooperative_seconds
+                + owner.limits.term_seconds
+                + owner.limits.kill_observation_seconds
+                + owner.limits.drain_seconds
+            )
+            * 1_000_000_000
+        )
+
         report = await owner.close(None)
 
         assert report.state is CleanupOutcome.UNKNOWN
         assert reader.after_expiry_reads == 0
         assert path.exists()
     finally:
-        deadline = independent_clock.monotonic_ns() + 5_000_000_000
-        assert independent.signal(signal.SIGKILL, deadline) is SignalResult.SENT
-        await independent.settle(deadline)
-        independent.release(deadline)
+        await reap_recovered((independent,), independent_clock, (SignalResult.SENT,))
 
 
 @pytest.mark.asyncio
@@ -418,35 +435,35 @@ async def test_recovery_control_capacity_keeps_entire_older_inventory(
     original = JournalSnapshot.model_validate_json(path.read_bytes())
     registration = original.entries[-1].registration
     assert isinstance(registration, ProcessRegistration)
-    extended = original.model_copy(
-        update={
-            "entries": (
-                *original.entries,
-                *(
-                    JournalEntry(
-                        resource_id=new_operation_id(),
-                        parent_resource_id=None,
-                        kind=ResourceKind.TEMPORARY_TREE,
-                        state=ResourceState.RESERVED,
-                        revision=1,
-                    )
-                    for _ in range(100)
-                ),
-            )
-        }
-    )
-    path.write_bytes(extended.model_dump_json().encode())
     clock = SystemClock()
     independent = RecoveredProcess(registration, clock, NativeIdentityReader())
-    owner = ParentLifetime(
-        limits=limits(),
-        recovery=reference,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
-    )
-
     try:
+        extended = original.model_copy(
+            update={
+                "entries": (
+                    *original.entries,
+                    *(
+                        JournalEntry(
+                            resource_id=new_operation_id(),
+                            parent_resource_id=None,
+                            kind=ResourceKind.TEMPORARY_TREE,
+                            state=ResourceState.RESERVED,
+                            revision=1,
+                        )
+                        for _ in range(100)
+                    ),
+                )
+            }
+        )
+        path.write_bytes(extended.model_dump_json().encode())
+        owner = ParentLifetime(
+            limits=limits(),
+            recovery=reference,
+            launcher=InstalledIOHelperLauncher(
+                home=tmp_path, state_home=tmp_path / "state"
+            ),
+        )
+
         with pytest.raises(LifetimeError):
             await owner.ready()
         after_takeover = path.read_bytes()
@@ -467,7 +484,4 @@ async def test_recovery_control_capacity_keeps_entire_older_inventory(
         )
         assert owner.dispose_recovery_observers()
     finally:
-        deadline = clock.monotonic_ns() + 5_000_000_000
-        assert independent.signal(signal.SIGKILL, deadline) is SignalResult.SENT
-        await independent.settle(deadline)
-        independent.release(deadline)
+        await reap_recovered((independent,), clock, (SignalResult.SENT,))
