@@ -13,22 +13,18 @@ from kora.conformance.storage_support import (
     seal_repeated,
     stage_spec,
 )
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.plugins.storage.local import LocalArtifactStorage
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import StorageLimits
 from tests.plugins.storage.clock import StorageClock
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_expired_storage_call_preserves_replay_and_cleanup(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = replace(context_for(kora_capture), clock=StorageClock())
         expired = replace(
             context,

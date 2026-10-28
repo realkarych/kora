@@ -19,6 +19,8 @@ from tests.plugins.storage.pressure_native import (
     process_token,
 )
 
+REPOSITORY: Path = Path(__file__).resolve().parents[3]
+
 
 @pytest.mark.parametrize("repetitions", [1, 4096])
 def test_closed_failed_command_does_not_block_pressure_recovery(
@@ -82,6 +84,23 @@ def controller_arguments(directory: Path, workload: str) -> list[str]:
     ]
 
 
+def start_controller(directory: Path, workload: str) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        controller_arguments(directory, workload),
+        cwd=REPOSITORY,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+def next_signal(process: subprocess.Popen[bytes]) -> bytes:
+    assert process.stdout is not None
+    ready, _, _ = select.select([process.stdout], [], [], 30)
+    assert ready
+    return process.stdout.readline(1024)
+
+
 def read_report(directory: Path) -> PressureReport:
     report = PressureReport.model_validate_json(
         (directory / "report.json").read_bytes()
@@ -103,7 +122,7 @@ def recover_owner(directory: Path) -> None:
                 "--recover",
                 str(manifest),
             ],
-            cwd=Path(__file__).resolve().parents[3],
+            cwd=REPOSITORY,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=60,
@@ -139,18 +158,11 @@ def controller_diagnostics(directory: Path) -> tuple[bytes | None, ...]:
 def run_controller(
     directory: Path, workload: str
 ) -> tuple[subprocess.CompletedProcess[bytes], PressureReport]:
-    arguments = controller_arguments(directory, workload)
-    process = subprocess.Popen(
-        arguments,
-        cwd=Path(__file__).resolve().parents[3],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    process = start_controller(directory, workload)
     try:
         output, error_output, status = collect_process(process, 120)
         return (
-            subprocess.CompletedProcess(arguments, status, output, error_output),
+            subprocess.CompletedProcess(process.args, status, output, error_output),
             read_report(directory),
         )
     finally:
@@ -205,7 +217,7 @@ def test_pressure_controller_closes_before_stopped_diagnostic_reader(
 
         process = subprocess.Popen(
             controller_arguments(directory, "command-failure"),
-            cwd=Path(__file__).resolve().parents[3],
+            cwd=REPOSITORY,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=writer,
@@ -310,21 +322,11 @@ def test_pressure_owner_recovers_legacy_source_directory(tmp_path: Path) -> None
     from tests.plugins.storage.pressure_images import image_name
 
     directory = tmp_path / "legacy-owner"
-    process = subprocess.Popen(
-        controller_arguments(directory, "parent-eof"),
-        cwd=Path(__file__).resolve().parents[3],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    process = start_controller(directory, "parent-eof")
 
     try:
-        assert process.stdout is not None
-        ready, _, _ = select.select([process.stdout], [], [], 30)
-        assert ready
-        assert process.stdout.readline(1024) == b"provider_started\n", (
-            controller_diagnostics(directory)
-        )
+        signal = next_signal(process)
+        assert signal == b"provider_started\n", controller_diagnostics(directory)
         mounted = (directory / "mounted").stat()
         legacy = directory / "volume-root"
         legacy.mkdir(mode=0o700, exist_ok=True)
@@ -358,20 +360,11 @@ def test_pressure_owner_closes_after_parent_interrupt(
     tmp_path: Path, workload: str, reason: str
 ) -> None:
     directory = tmp_path / "interrupted"
-    process = subprocess.Popen(
-        controller_arguments(directory, workload),
-        cwd=Path(__file__).resolve().parents[3],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    process = start_controller(directory, workload)
     assert process.stdin is not None
-    assert process.stdout is not None
 
     try:
-        readable, _, _ = select.select([process.stdout], [], [], 30)
-        assert readable
-        phase = process.stdout.readline(1024)
+        phase = next_signal(process)
         assert phase == b"provider_started\n", controller_diagnostics(directory)
         if workload == "parent-eof":
             process.stdin.close()
@@ -400,7 +393,7 @@ def test_pressure_owner_refuses_writable_ancestor_before_acquisition(
 
     result = subprocess.run(
         controller_arguments(directory, "partial-acquisition"),
-        cwd=Path(__file__).resolve().parents[3],
+        cwd=REPOSITORY,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=30,
@@ -425,7 +418,7 @@ def test_pressure_owner_refuses_symlinked_acquisition_ancestor(tmp_path: Path) -
 
     result = subprocess.run(
         controller_arguments(directory, "partial-acquisition"),
-        cwd=Path(__file__).resolve().parents[3],
+        cwd=REPOSITORY,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=30,
@@ -477,20 +470,10 @@ def test_storage_pressure_controller_recovers_partial_acquisition(
     tmp_path: Path,
 ) -> None:
     directory = tmp_path / "partial"
-    process = subprocess.Popen(
-        controller_arguments(directory, "partial-acquisition"),
-        cwd=Path(__file__).resolve().parents[3],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert process.stdout is not None
+    process = start_controller(directory, "partial-acquisition")
 
     try:
-        readable, _, _ = select.select([process.stdout], [], [], 30)
-        assert readable
-        signal = process.stdout.readline(1024)
-        assert signal == b"image_created\n"
+        assert next_signal(process) == b"image_created\n"
         process.kill()
         process.wait(timeout=10)
         recovered = subprocess.run(
@@ -501,7 +484,7 @@ def test_storage_pressure_controller_recovers_partial_acquisition(
                 "--recover",
                 str(directory / "pressure-manifest.json"),
             ],
-            cwd=Path(__file__).resolve().parents[3],
+            cwd=REPOSITORY,
             capture_output=True,
             timeout=60,
             check=False,
@@ -517,20 +500,10 @@ def test_storage_pressure_controller_recovers_partial_acquisition(
 
 def test_pressure_owner_reconciles_lost_attachment_response(tmp_path: Path) -> None:
     directory = tmp_path / "lost-attachment"
-    process = subprocess.Popen(
-        controller_arguments(directory, "lost-attachment-response"),
-        cwd=Path(__file__).resolve().parents[3],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    process = start_controller(directory, "lost-attachment-response")
     try:
-        assert process.stdout is not None
-        readable, _, _ = select.select([process.stdout], [], [], 30)
-        assert readable
-        assert process.stdout.readline(1024) == b"attachment_created\n", (
-            controller_diagnostics(directory)
-        )
+        signal = next_signal(process)
+        assert signal == b"attachment_created\n", controller_diagnostics(directory)
         from tests.plugins.storage.pressure_controller import read_manifest
 
         saved = read_manifest(directory / "pressure-manifest.json")
@@ -637,18 +610,9 @@ def test_unknown_image_identity_refuses_cleanup_before_detach(tmp_path: Path) ->
 
 def test_pressure_owner_recovers_interrupted_manifest_write(tmp_path: Path) -> None:
     directory = tmp_path / "pending-manifest"
-    process = subprocess.Popen(
-        controller_arguments(directory, "pending-manifest-write"),
-        cwd=Path(__file__).resolve().parents[3],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    process = start_controller(directory, "pending-manifest-write")
     try:
-        assert process.stdout is not None
-        ready, _, _ = select.select([process.stdout], [], [], 30)
-        assert ready
-        response = process.stdout.readline(1024)
+        response = next_signal(process)
         assert response == b"manifest_pending\n", controller_diagnostics(directory)
         pending = directory / "pressure-manifest.pending"
         assert pending.exists()
@@ -667,18 +631,9 @@ def test_pressure_owner_recovers_interrupted_manifest_write(tmp_path: Path) -> N
 
 def test_pressure_recovery_lease_refuses_a_concurrent_owner(tmp_path: Path) -> None:
     directory = tmp_path / "concurrent-recovery"
-    original = subprocess.Popen(
-        controller_arguments(directory, "partial-acquisition"),
-        cwd=Path(__file__).resolve().parents[3],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    original = start_controller(directory, "partial-acquisition")
     try:
-        assert original.stdout is not None
-        ready, _, _ = select.select([original.stdout], [], [], 30)
-        assert ready
-        assert original.stdout.readline(1024) == b"image_created\n"
+        assert next_signal(original) == b"image_created\n"
         original.kill()
         original.wait(timeout=10)
         recovery = subprocess.Popen(
@@ -691,16 +646,13 @@ def test_pressure_recovery_lease_refuses_a_concurrent_owner(tmp_path: Path) -> N
                 "--workload",
                 "recovery-paused",
             ],
-            cwd=Path(__file__).resolve().parents[3],
+            cwd=REPOSITORY,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         try:
-            assert recovery.stdout is not None
-            ready, _, _ = select.select([recovery.stdout], [], [], 30)
-            assert ready
-            assert recovery.stdout.readline(1024) == b"recovery_owned\n"
+            assert next_signal(recovery) == b"recovery_owned\n"
 
             contender = subprocess.run(
                 [
@@ -710,7 +662,7 @@ def test_pressure_recovery_lease_refuses_a_concurrent_owner(tmp_path: Path) -> N
                     "--recover",
                     str(directory / "pressure-manifest.json"),
                 ],
-                cwd=Path(__file__).resolve().parents[3],
+                cwd=REPOSITORY,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=10,

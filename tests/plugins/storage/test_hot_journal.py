@@ -12,10 +12,9 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.conformance.storage_support import operation, seal_bytes
-from kora.plugins.storage.local import LocalStorageConfiguration
 from kora.plugins.storage.state import LocalState
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import StorageLimits
+from tests.plugins.storage.configuration import local_configuration
 from tests.plugins.storage.inspection import InspectedStorage, current_epoch
 from tests.plugins.storage.pressure_native import collect_process
 
@@ -48,9 +47,7 @@ def test_internal_read_recovers_actual_hot_journal_before_returning(
     context = context_for(kora_capture)
 
     async def scenario() -> None:
-        provider = InspectedStorage(
-            LocalStorageConfiguration(root=str(root), limits=StorageLimits(version=1))
-        )
+        provider = InspectedStorage(local_configuration(root))
         try:
             sealed, _, seal = await seal_bytes(provider, "journal", b"saved", context)
             with ExitStack() as ownership:

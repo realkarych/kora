@@ -15,6 +15,7 @@ from kora.plugins.storage.readers import ReaderManager
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import StorageLimits
 from tests.plugins.storage.activity import StorageBarrierActivity
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_reader_ticket_closes_when_owner_lock_refuses(
@@ -128,11 +129,7 @@ def test_provider_shutdown_closes_all_readers_after_read_failure(
 ) -> None:
     async def scenario() -> None:
         configured = tmp_path / "store"
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(configured), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(configured))
         context = context_for(kora_capture)
         sealed, _, _ = await seal_bytes(provider, "failed", b"readable", context)
         other, _, _ = await seal_bytes(provider, "other", b"second", context)

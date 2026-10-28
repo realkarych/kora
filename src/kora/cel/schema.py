@@ -3,6 +3,15 @@ from enum import Enum
 from typing import Final, cast
 from urllib.parse import unquote
 
+from kora.cel.cost import (
+    DATA_BOUND,
+    DATA_BYTES,
+    DATA_ITEMS,
+    DATA_STRING_BYTES,
+    DATA_VALUES,
+    ValueBound,
+    Variable,
+)
 from kora.cel.meter import Meter
 from kora.cel.paths import JsonValue
 from kora.cel.types import (
@@ -27,9 +36,11 @@ Resolver = Callable[[str], JsonValue | None]
 Located = tuple[JsonValue, JsonValue]
 MemoKey = tuple[int, int, "SchemaView"]
 TargetKey = tuple[int, int]
-Mapping = Generator[Located, CelType, CelType]
+Mapped = tuple[CelType, ValueBound | None]
+Mapping = Generator[Located, Mapped, Mapped]
 
 NULL_TYPE: Final[str] = "null"
+UTF8_BYTES_PER_CODE_POINT: Final[int] = 4
 SCALAR_TYPES: Final[dict[str, CelType]] = {
     "integer": INT,
     "number": DOUBLE,
@@ -129,7 +140,59 @@ def strings(values: list[JsonValue]) -> list[str]:
     return names
 
 
+def size_keyword(schema: JsonObject, name: str) -> int | None:
+    if name not in schema:
+        return None
+    value = schema[name]
+    integral = isinstance(value, int) or (
+        isinstance(value, float) and value.is_integer()
+    )
+    if isinstance(value, bool) or not integral:
+        raise SchemaError("a schema size keyword is not a non-negative integer")
+    size = int(cast("int | float", value))
+    if size < 0:
+        raise SchemaError("a schema size keyword is not a non-negative integer")
+    return size
+
+
+def item_limit(schema: JsonObject) -> int:
+    declared = size_keyword(schema, "maxItems")
+    return DATA_ITEMS if declared is None else min(DATA_ITEMS, declared)
+
+
+def string_limit(schema: JsonObject) -> int:
+    declared = size_keyword(schema, "maxLength")
+    if declared is None:
+        return DATA_STRING_BYTES
+    return min(DATA_STRING_BYTES, declared * UTF8_BYTES_PER_CODE_POINT)
+
+
+UNTIGHTENED: Final[ValueBound] = ValueBound(
+    DATA_BYTES, DATA_VALUES, DATA_ITEMS, DATA_STRING_BYTES
+)
+
+
+def tightened(
+    items: int = DATA_ITEMS,
+    string_bytes: int = DATA_STRING_BYTES,
+    element: ValueBound | None = None,
+    fields: dict[str, ValueBound] | None = None,
+) -> ValueBound | None:
+    declared = {} if fields is None else fields
+    loose = items == DATA_ITEMS and string_bytes == DATA_STRING_BYTES
+    if loose and element is None and not declared:
+        return None
+    return ValueBound(DATA_BYTES, DATA_VALUES, items, string_bytes, element, declared)
+
+
+def variable_of(mapped: Mapped) -> Variable:
+    cel_type, bound = mapped
+    return Variable(cel_type, DATA_BOUND if bound is None else bound)
+
+
 def check_keywords(schema: JsonObject) -> None:
+    size_keyword(schema, "maxItems")
+    size_keyword(schema, "maxLength")
     entry(schema, "properties", dict)
     entry(schema, "additionalProperties", (dict, bool))
     patterns = cast(
@@ -157,6 +220,7 @@ class SchemaTypes:
         self.resolver: Resolver = resolver
         self.meter: Meter = meter if meter is not None else Meter()
         self.memo: dict[MemoKey, CelType] = {}
+        self.bounds: dict[MemoKey, ValueBound | None] = {}
         self.active: set[MemoKey] = set()
         self.documents: dict[str, JsonValue] = {}
         self.references: dict[tuple[int, str], Located] = {}
@@ -167,11 +231,22 @@ class SchemaTypes:
     def document(
         self, schema: JsonValue, view: SchemaView = SchemaView.PLAIN
     ) -> CelType:
-        return self.mapped(schema, schema, view)
+        return self.mapped(schema, schema, view)[0]
 
     def reference(self, uri: str, view: SchemaView = SchemaView.PLAIN) -> CelType:
         schema, root = self.resolve(None, uri)
-        return self.mapped(schema, root, view)
+        return self.mapped(schema, root, view)[0]
+
+    def variable(
+        self, schema: JsonValue, view: SchemaView = SchemaView.PLAIN
+    ) -> Variable:
+        return variable_of(self.mapped(schema, schema, view))
+
+    def reference_variable(
+        self, uri: str, view: SchemaView = SchemaView.PLAIN
+    ) -> Variable:
+        schema, root = self.resolve(None, uri)
+        return variable_of(self.mapped(schema, root, view))
 
     def resolve(self, root: JsonValue, uri: str) -> Located:
         cache_key = (id(root), uri)
@@ -255,7 +330,7 @@ class SchemaTypes:
             self.held.append(link)
         return located
 
-    def mapped(self, schema: JsonValue, root: JsonValue, view: SchemaView) -> CelType:
+    def mapped(self, schema: JsonValue, root: JsonValue, view: SchemaView) -> Mapped:
         self.written = []
         finished = False
         try:
@@ -269,6 +344,7 @@ class SchemaTypes:
     def forget(self) -> None:
         for key in self.written:
             del self.memo[key]
+            self.bounds.pop(key, None)
         self.active.clear()
 
     def remember(self, key: MemoKey, cel_type: CelType) -> None:
@@ -276,7 +352,11 @@ class SchemaTypes:
             self.written.append(key)
         self.memo[key] = cel_type
 
-    def drive(self, schema: JsonValue, root: JsonValue, view: SchemaView) -> CelType:
+    def finish(self, key: MemoKey, mapped: Mapped) -> None:
+        self.remember(key, mapped[0])
+        self.bounds[key] = mapped[1]
+
+    def drive(self, schema: JsonValue, root: JsonValue, view: SchemaView) -> Mapped:
         stack: list[tuple[MemoKey, Mapping]] = []
         result = self.start(schema, root, view, stack)
         while stack:
@@ -288,7 +368,7 @@ class SchemaTypes:
             except StopIteration as finished:
                 stack.pop()
                 self.active.discard(key)
-                self.remember(key, finished.value)
+                self.finish(key, finished.value)
                 result = finished.value
                 continue
             result = self.start(child, child_root, view, stack)
@@ -302,19 +382,19 @@ class SchemaTypes:
         root: JsonValue,
         view: SchemaView,
         stack: list[tuple[MemoKey, Mapping]],
-    ) -> CelType | None:
+    ) -> Mapped | None:
         located = self.target(schema, root)
         if located is None:
-            return DYN
+            return DYN, None
         found, found_root = located
         if not isinstance(found, dict):
-            return DYN
+            return DYN, None
         key = (id(found), id(found_root), view)
         known = self.memo.get(key)
         if known is not None:
-            return known
+            return known, self.bounds.get(key)
         if key in self.active:
-            return DYN
+            return DYN, None
         self.meter.tick()
         self.held.append(found)
         self.active.add(key)
@@ -326,7 +406,7 @@ class SchemaTypes:
     ) -> Mapping:
         check_keywords(schema)
         if is_null_schema(schema):
-            return NULL if view is SchemaView.STRUCTURED_OUTPUT else DYN
+            return (NULL if view is SchemaView.STRUCTURED_OUTPUT else DYN), None
         declared = schema.get("type")
         values = enumerated(schema)
         kind: str | None
@@ -334,7 +414,7 @@ class SchemaTypes:
             names = strings(cast("list[JsonValue]", declared))
             others = {name for name in names if name != NULL_TYPE}
             if len(others) != 1:
-                return DYN
+                return DYN, None
             kind = others.pop()
             wrap = NULL_TYPE in names
         elif isinstance(declared, str):
@@ -346,19 +426,20 @@ class SchemaTypes:
             wrap = NULL_TYPE in kinds
             kinds.discard(NULL_TYPE)
             if len(kinds) != 1:
-                return DYN
+                return DYN, None
             kind = kinds.pop()
         else:
             other = self.nullable_pair(schema, root)
             if other is not None:
-                return nullable((yield other, root))
+                inner, bound = yield other, root
+                return nullable(inner), bound
             kind, wrap = keyword_kind(schema), False
         if kind is None:
-            return DYN
+            return DYN, None
         if kind == "object" and isinstance(schema.get("properties"), dict):
             return (yield from self.record(schema, root, key, wrap))
-        mapped = yield from self.typed(schema, root, kind, values)
-        return nullable(mapped) if wrap else mapped
+        mapped, bound = yield from self.typed(schema, root, kind, values)
+        return (nullable(mapped) if wrap else mapped), bound
 
     def nullable_pair(self, schema: JsonObject, root: JsonValue) -> JsonValue | None:
         for name in ("anyOf", "oneOf"):
@@ -386,18 +467,23 @@ class SchemaTypes:
         values: list[JsonValue] | None,
     ) -> Mapping:
         if kind == "string":
-            return self.string(values)
+            return self.string(values), tightened(string_bytes=string_limit(schema))
         scalar = SCALAR_TYPES.get(kind)
         if scalar is not None:
-            return scalar
+            return scalar, None
         if kind == "array":
+            limit = item_limit(schema)
             items = schema.get("items")
             if "prefixItems" in schema or items is None:
-                return ListOf(DYN)
-            return ListOf((yield items, root))
+                return ListOf(DYN), tightened(items=limit)
+            element, bound = yield items, root
+            return ListOf(element), tightened(items=limit, element=bound)
         if kind == "object":
             value = map_value(schema)
-            return MapOf(STRING, DYN if value is None else (yield value, root))
+            if value is None:
+                return MapOf(STRING, DYN), None
+            element, bound = yield value, root
+            return MapOf(STRING, element), tightened(element=bound)
         raise SchemaError("a schema type is not a JSON Schema type name")
 
     def string(self, values: list[JsonValue] | None) -> CelType:
@@ -420,16 +506,23 @@ class SchemaTypes:
         names = set(strings(required))
         extra_schema = additional_schema(schema)
         extra: CelType | None = DYN if extra_schema is not False else None
+        extra_bound: ValueBound | None = None
         if isinstance(extra_schema, dict):
-            extra = yield extra_schema, root
+            extra, extra_bound = yield extra_schema, root
         fields: dict[str, RecordField] = {}
         record = Record(fields, extra)
         mapped = nullable(record) if wrap else record
         self.remember(key, mapped)
+        bounds: dict[str, ValueBound] = {}
         for name, member in properties.items():
             self.meter.tick()
-            fields[name] = RecordField((yield member, root), name in names)
-        return mapped
+            member_type, member_bound = yield member, root
+            fields[name] = RecordField(member_type, name in names)
+            if member_bound is not None:
+                bounds[name] = member_bound
+            elif extra_bound is not None:
+                bounds[name] = UNTIGHTENED
+        return mapped, tightened(element=extra_bound, fields=bounds)
 
 
 def additional_schema(schema: JsonObject) -> JsonValue:

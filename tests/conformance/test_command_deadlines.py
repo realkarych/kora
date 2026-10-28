@@ -14,11 +14,13 @@ from kora.observability import LoggingSettings
 from kora.protocols.lifetime import CleanupOutcome, OriginalOutcome
 from kora.protocols.metadata import ProtocolName
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
-from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_io_helper import entered_fifo, read_probe
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    read_probe,
+    stall_barrier,
+)
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -32,15 +34,8 @@ async def test_command_owns_interrupted_listener_receipt_and_startup_deadline(
         capture = resources.enter_context(
             captured(CLI_COMPONENT, LoggingSettings(), "command-deadline", utc_now)
         )
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
-        launcher = ProbeIOHelperLauncher(
-            tmp_path, writing, barrier.descriptor, phase="after", pause_at=(1, 7)
-        )
+        barrier = stall_barrier(resources, tmp_path)
+        launcher = barrier.launcher(phase="after", pause_at=(1, 7))
         command = ConformanceCommand(
             capture.diagnostics, clock=clock, launcher=launcher
         )
@@ -59,23 +54,19 @@ async def test_command_owns_interrupted_listener_receipt_and_startup_deadline(
                     if mode == "setup_failure":
                         assert (
                             await read_probe(
-                                reading, actual.monotonic_ns() + 5_000_000_000, actual
+                                barrier.reading,
+                                actual.monotonic_ns() + 5_000_000_000,
+                                actual,
                             )
                             == b"r"
                         )
                         raise RuntimeError("command setup interrupted")
-                    with await entered_fifo(
-                        barrier.descriptor,
-                        reading,
-                        actual.monotonic_ns() + 5_000_000_000,
-                        actual,
+                    with await barrier.entered(
+                        actual.monotonic_ns() + 5_000_000_000, actual
                     ):
                         clock.advance(15_000_000_000)
-                    with await entered_fifo(
-                        barrier.descriptor,
-                        reading,
-                        actual.monotonic_ns() + 5_000_000_000,
-                        actual,
+                    with await barrier.entered(
+                        actual.monotonic_ns() + 5_000_000_000, actual
                     ):
                         assert launcher.starts == 7
                         helper = command.owner.mutations.helpers[-1]
@@ -88,11 +79,8 @@ async def test_command_owns_interrupted_listener_receipt_and_startup_deadline(
                             operation.cancel()
                         else:
                             clock.advance(16_000_000_000)
-                        loop = asyncio.get_running_loop()
                         while helper.descriptors:
-                            turn: asyncio.Future[None] = loop.create_future()
-                            loop.call_soon(turn.set_result, None)
-                            await turn
+                            await turn()
                         for descriptor in descriptors:
                             with pytest.raises(OSError, match="Bad file descriptor"):
                                 os.fstat(descriptor)

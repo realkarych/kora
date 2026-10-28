@@ -3,18 +3,15 @@ import errno
 import os
 import signal
 import sys
-from collections.abc import Sequence
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
 import pytest
 
-from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher, IOHelper
+from kora.conformance.io_helper import IOHelper
 from kora.conformance.lifetime import ParentLifetime
 from kora.protocols.lifetime import (
     CleanupOutcome,
-    ClosureReport,
     ProcessDomain,
     ProcessLaunch,
     ProcessOutput,
@@ -24,63 +21,18 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
-from kora.runner.processes import GatedProcess, RecoveredProcess
-from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.conformance.test_parent_lifetime import limits
-from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
+from kora.runner.processes import GatedProcess
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    close_recovered_test_owner,
+    dispose_test_owner,
+    installed_launcher,
+    limits,
+    stall_barrier,
+)
+from tests.support.event_loop import turn
 
-
-async def close_recovered_test_owner(
-    owner: ParentLifetime,
-    clock: ControlledLifetimeClock,
-    observers: Sequence[RecoveredProcess],
-) -> ClosureReport:
-    actual = SystemClock()
-    closing = owner.request_close(None)
-    clock.advance(duration_ns(owner.limits.cooperative_seconds) + 1)
-    deadline = actual.monotonic_ns() + 5_000_000_000
-    while not all(observer.observe(deadline).settled for observer in observers):
-        assert actual.monotonic_ns() < deadline
-        wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        asyncio.get_running_loop().call_soon(wake.set_result, None)
-        await wake
-    if observers and owner.cleanup_effect is None:
-        clock.advance(duration_ns(owner.limits.term_seconds) + 1)
-    return await asyncio.wait_for(
-        asyncio.shield(closing),
-        max(0, (deadline - actual.monotonic_ns()) / 1_000_000_000),
-    )
-
-
-async def dispose_test_owner(
-    owner: ParentLifetime, clock: ControlledLifetimeClock | ProbeClock
-) -> None:
-    closing = owner.request_close(None)
-    clock.advance(40_000_000_000)
-    deadline = clock.monotonic_ns() + 5_000_000_000
-    async with asyncio.timeout(5):
-        for helper in tuple(owner.mutations.helpers):
-            if not helper.closed:
-                helper.signal(signal.SIGKILL)
-                assert await helper.settle(deadline)
-        await asyncio.shield(closing)
-        assert owner.inventory().cleanup_effect_tasks == 0
-        assert owner.inventory().cleanup_driver_tasks == 0
-        for record in owner.records.values():
-            process = record.process or record.recovered
-            if process is not None and not process.closed:
-                process.signal(signal.SIGKILL, deadline)
-                await process.settle(deadline)
-                if isinstance(process, GatedProcess):
-                    await process.drain(deadline)
-                process.release(deadline)
-            if record.directory is not None:
-                record.directory.close()
-        assert owner.inventory().retained_processes == 0
-        assert owner.mutations.dispose_settled()
+__all__ = ["close_recovered_test_owner", "dispose_test_owner"]
 
 
 @pytest.mark.asyncio
@@ -89,20 +41,11 @@ async def test_failure_disposal_closes_unadopted_bootstrap_descriptors(
     tmp_path: Path, failure_before_disposal: bool
 ) -> None:
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
         actual = SystemClock()
         owner = ParentLifetime(
-            clock=clock,
-            limits=limits(),
-            launcher=ProbeIOHelperLauncher(
-                tmp_path, writing, barrier.descriptor, phase="after"
-            ),
+            clock=clock, limits=limits(), launcher=barrier.launcher(phase="after")
         )
         deadline = actual.monotonic_ns() + 5_000_000_000
         helper: IOHelper | None = None
@@ -114,17 +57,11 @@ async def test_failure_disposal_closes_unadopted_bootstrap_descriptors(
         )
         with expected:
             try:
-                resources.enter_context(
-                    await entered_fifo(barrier.descriptor, reading, deadline, actual)
-                )
+                resources.enter_context(await barrier.entered(deadline, actual))
                 helper = owner.mutations.helpers[0]
                 while len(helper.descriptors) != 3:
                     assert actual.monotonic_ns() < deadline
-                    wake: asyncio.Future[None] = (
-                        asyncio.get_running_loop().create_future()
-                    )
-                    asyncio.get_running_loop().call_soon(wake.set_result, None)
-                    await wake
+                    await turn()
                 descriptors = helper.descriptors
                 assert not helper.closed
                 assert owner.mutations.pending == 1
@@ -176,9 +113,7 @@ async def test_failure_disposal_releases_prepared_and_active_process_owners(
     owner = ParentLifetime(
         clock=clock,
         limits=limits(),
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     process: GatedProcess | None = None
     pid: int | None = None
@@ -235,9 +170,7 @@ async def test_failure_disposal_releases_prepared_and_active_process_owners(
             deadline = actual.monotonic_ns() + 5_000_000_000
             while process.capture_bytes == 0:
                 assert actual.monotonic_ns() < deadline
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
 
         with pytest.raises(RuntimeError, match="original owned test failure"):
             await fail_after_preparation()
@@ -283,9 +216,7 @@ async def test_full_close_preserves_scoped_report_owners_and_terminal_joins(
     owner = ParentLifetime(
         clock=clock,
         limits=limits(),
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
     )
     try:
         tree = await owner.reserve(
@@ -374,19 +305,12 @@ async def test_first_scoped_close_during_root_removal_joins_actual_helper_exit(
     tmp_path: Path, phase: str
 ) -> None:
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         clock = ControlledLifetimeClock()
         owner = ParentLifetime(
             clock=clock,
             limits=limits(),
-            launcher=ProbeIOHelperLauncher(
-                tmp_path, writing, barrier.descriptor, phase=phase, pause_at=8
-            ),
+            launcher=barrier.launcher(phase=phase, pause_at=8),
         )
         try:
             tree = await owner.reserve(
@@ -406,12 +330,10 @@ async def test_first_scoped_close_during_root_removal_joins_actual_helper_exit(
                 assert actual_clock.monotonic_ns() < deadline
                 if full.done():
                     raise AssertionError(full.result())
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+                await turn()
             helper = owner.mutations.helpers[-1]
             writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, actual_clock)
+                await barrier.entered(deadline, actual_clock)
             )
 
             scoped = owner.request_close(tree.token.resource_id)

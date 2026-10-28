@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher, read_journal
+from kora.conformance.io_helper import read_journal
 from kora.conformance.lifetime import ParentLifetime
 from kora.conformance.transport import LifetimeEndpoint
 from kora.protocols.lifetime import (
@@ -23,12 +23,13 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.filesystem import DirectoryAnchor
-from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
-from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
-from tests.conformance.test_lifetime_io_helper import entered_fifo
-from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
-from tests.measurements.lifetime_workload import turn
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    dispose_test_owner,
+    installed_launcher,
+    stall_barrier,
+)
+from tests.support.event_loop import turn
 
 
 @pytest.mark.asyncio
@@ -39,9 +40,7 @@ async def test_command_outcome_precedes_terminal_report_and_journal_removal(
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
         await_command_outcome=True,
     )
     try:
@@ -64,11 +63,8 @@ async def test_command_outcome_precedes_terminal_report_and_journal_removal(
             assert invocation is not None
 
             closing = owner.request_close(None)
-            loop = asyncio.get_running_loop()
             while not directory.closed or owner.cleanup_effect is not None:
-                turn: asyncio.Future[None] = loop.create_future()
-                loop.call_soon(turn.set_result, None)
-                await turn
+                await turn()
             assert not closing.done()
             assert not invocation.closed
             owner.finalize_command_outcome(outcome)
@@ -90,9 +86,7 @@ async def test_missing_command_outcome_uses_original_close_deadline(
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
         await_command_outcome=True,
     )
     try:
@@ -125,9 +119,7 @@ async def test_late_failed_command_outcome_distinguishes_durable_publication(
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
         await_command_outcome=True,
     )
     try:
@@ -153,11 +145,8 @@ async def test_late_failed_command_outcome_distinguishes_durable_publication(
                 owner.retain_unverified_resources()
 
             closing = owner.request_close(None)
-            loop = asyncio.get_running_loop()
             while publication_failed and not owner.mutations.failed:
-                turn: asyncio.Future[None] = loop.create_future()
-                loop.call_soon(turn.set_result, None)
-                await turn
+                await turn()
             assert not closing.done()
             owner.finalize_command_outcome(OriginalOutcome.FAILED)
             owner.set_original_outcome(OriginalOutcome.CANCELLED)
@@ -181,9 +170,7 @@ async def test_scoped_cleanup_does_not_wait_for_command_outcome(tmp_path: Path) 
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
         await_command_outcome=True,
     )
     try:
@@ -218,17 +205,10 @@ async def test_blocked_command_outcome_publication_keeps_original_deadline(
 ) -> None:
     clock = ControlledLifetimeClock()
     with ExitStack() as resources:
-        barrier = DirectoryAnchor.open_path(tmp_path)
-        resources.callback(barrier.close)
-        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
-        reading, writing = os.pipe()
-        resources.callback(os.close, reading)
-        resources.callback(os.close, writing)
+        barrier = stall_barrier(resources, tmp_path)
         owner = ParentLifetime(
             clock=clock,
-            launcher=ProbeIOHelperLauncher(
-                tmp_path, writing, barrier.descriptor, pause_at=2
-            ),
+            launcher=barrier.launcher(pause_at=2),
             await_command_outcome=True,
         )
         try:
@@ -239,11 +219,8 @@ async def test_blocked_command_outcome_publication_keeps_original_deadline(
                 final = owner.invocation_cleanup.final
                 owner.finalize_command_outcome(OriginalOutcome.FAILED)
                 actual = SystemClock()
-                with await entered_fifo(
-                    barrier.descriptor,
-                    reading,
-                    actual.monotonic_ns() + 5_000_000_000,
-                    actual,
+                with await barrier.entered(
+                    actual.monotonic_ns() + 5_000_000_000, actual
                 ):
                     clock.advance(final - clock.monotonic_ns())
                     report = await asyncio.shield(closing)
@@ -267,9 +244,7 @@ async def test_retained_endpoint_reports_late_failure_before_unknown(
     clock = ControlledLifetimeClock()
     owner = ParentLifetime(
         clock=clock,
-        launcher=InstalledIOHelperLauncher(
-            home=tmp_path, state_home=tmp_path / "state"
-        ),
+        launcher=installed_launcher(tmp_path),
         await_command_outcome=True,
     )
     retained: LifetimeEndpoint | None = None

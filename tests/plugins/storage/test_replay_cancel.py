@@ -5,16 +5,14 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import operation, seal_repeated, single_part
-from kora.plugins.storage.local import LocalStorageConfiguration
-from kora.protocols.storage_models import (
-    ContentPreparation,
-    PartRef,
-    PreparationArguments,
-    PreparedContentRef,
-    StorageLimits,
+from kora.conformance.storage_support import (
+    preparation_request,
+    seal_repeated,
+    single_part,
 )
+from kora.protocols.storage_models import PartRef, PreparedContentRef
 from tests.measurements.storage_lifetime_workload import InterruptedSource
+from tests.plugins.storage.configuration import local_configuration
 from tests.plugins.storage.inspection import InspectedStorage
 
 
@@ -23,25 +21,17 @@ def test_artifact_storage_replay_validates_supplied_bytes_on_cancel(
     tmp_path: Path, kora_capture: Capture, kind: str
 ) -> None:
     async def scenario() -> None:
-        configuration = LocalStorageConfiguration(
-            root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-        )
+        configuration = local_configuration(tmp_path / "store")
         provider = InspectedStorage(configuration)
         context = context_for(kora_capture)
         try:
             upload = await seal_repeated(provider, "replay", 65536, context)
-            preparation = PreparationArguments(
-                version=1,
-                source=upload.content,
-                maximum_output_size=65536,
-                expected_output_digest=upload.content.payload_digest,
-            )
-            request = ContentPreparation(
-                version=1,
-                operation=operation(
-                    provider.identity(), "prepare", "prepare_content", preparation
-                ),
-                arguments=preparation,
+            request = preparation_request(
+                provider.identity(),
+                "prepare",
+                upload.content,
+                65536,
+                upload.content.payload_digest,
             )
             from kora.conformance.storage_support import RepeatedSource
 

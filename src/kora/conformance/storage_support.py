@@ -1,14 +1,25 @@
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
-from typing import Self
+from typing import Literal, Self
 
 from kora.protocols.common import ProtocolContext
 from kora.protocols.storage import ArtifactStorage
 from kora.protocols.storage_models import (
+    ContentAddress,
+    ContentPreparation,
+    DeleteArguments,
+    DeleteReleaseRequest,
+    DeleteRequest,
     ManifestPart,
+    ManifestPrefix,
     MutationReceipt,
     PartSpec,
+    PrefixCapture,
+    PreparationArguments,
+    PromotionArguments,
+    PromotionRequest,
+    PublishableContent,
     SealedStage,
     StageManifest,
     StageRef,
@@ -108,15 +119,120 @@ def single_manifest(
     )
 
 
-async def seal_bytes(
+def content_address(identity: StorageIdentity, payload_digest: str) -> ContentAddress:
+    return ContentAddress(
+        version=1, storage_identity=identity, payload_digest=payload_digest
+    )
+
+
+def promotion_request(
+    identity: StorageIdentity,
+    operation_id: str,
+    content: PublishableContent,
+    address: ContentAddress,
+    content_generation: int = 1,
+) -> PromotionRequest:
+    arguments = PromotionArguments(
+        version=1,
+        content=content,
+        address=address,
+        content_generation=content_generation,
+    )
+    return PromotionRequest(
+        version=1,
+        operation=operation(identity, operation_id, "promote", arguments),
+        arguments=arguments,
+    )
+
+
+def preparation_request(
+    identity: StorageIdentity,
+    operation_id: str,
+    source: SealedStage,
+    maximum_output_size: int,
+    expected_output_digest: str,
+) -> ContentPreparation:
+    arguments = PreparationArguments(
+        version=1,
+        source=source,
+        maximum_output_size=maximum_output_size,
+        expected_output_digest=expected_output_digest,
+    )
+    return ContentPreparation(
+        version=1,
+        operation=operation(identity, operation_id, "prepare_content", arguments),
+        arguments=arguments,
+    )
+
+
+def delete_request(
+    identity: StorageIdentity, operation_id: str, address: ContentAddress
+) -> DeleteRequest:
+    arguments = DeleteArguments(version=1, address=address, deletion_generation=1)
+    return DeleteRequest(
+        version=1,
+        operation=operation(identity, operation_id, "delete_content", arguments),
+        arguments=arguments,
+    )
+
+
+def delete_release(
+    issued: StorageOperationRef,
+    *,
+    persisted_outcome_revision: str,
+    issuance_closed: str,
+) -> DeleteReleaseRequest:
+    return DeleteReleaseRequest(
+        version=1,
+        operation=issued,
+        persisted_outcome_revision=persisted_outcome_revision,
+        issuance_closed=issuance_closed,
+    )
+
+
+def stage_release(
+    stage: StageRef,
+    outcomes: Iterable[tuple[StorageOperationRef, StorageModel]],
+    *,
+    persisted_outcome_revision: str,
+    issuance_closed: str,
+) -> StageReleaseRequest:
+    receipts = (
+        MutationReceipt(
+            version=1,
+            operation_id=issued.operation_id,
+            kind=issued.kind,
+            request_digest=issued.request_digest,
+            outcome_digest=outcome.metadata_digest(),
+        )
+        for issued, outcome in outcomes
+    )
+    acknowledged = StorageMutationSet(
+        version=1,
+        stage=stage,
+        receipts=tuple(sorted(receipts, key=lambda item: item.operation_id)),
+    )
+    return StageReleaseRequest(
+        version=1,
+        stage=stage,
+        persisted_outcome_revision=persisted_outcome_revision,
+        mutation_set_digest=acknowledged.metadata_digest(),
+        issuance_closed=issuance_closed,
+    )
+
+
+async def write_single_part(
     provider: ArtifactStorage,
     stage_id: str,
     payload: bytes,
     context: ProtocolContext,
-) -> tuple[SealedStage, StageManifest, StorageOperationRef]:
+    *,
+    begin_id: str,
+    part_id: str,
+) -> tuple[StageRef, PartSpec, StageManifest]:
     spec = stage_spec(provider.identity(), stage_id, payload)
     stage = await provider.begin_stage(
-        operation(provider.identity(), stage_id + "-begin", "begin_stage", spec),
+        operation(provider.identity(), begin_id, "begin_stage", spec),
         spec,
         context,
     )
@@ -124,7 +240,7 @@ async def seal_bytes(
     part = await provider.write_part(
         operation(
             provider.identity(),
-            stage_id + "-part",
+            part_id,
             "write_part",
             StageWrite(version=1, stage=stage, spec=part_spec),
         ),
@@ -133,9 +249,68 @@ async def seal_bytes(
         BytesSource(payload),
         context,
     )
-    manifest = single_manifest(stage, part_spec, part.part_identity)
+    return stage, part_spec, single_manifest(stage, part_spec, part.part_identity)
+
+
+async def seal_bytes(
+    provider: ArtifactStorage,
+    stage_id: str,
+    payload: bytes,
+    context: ProtocolContext,
+) -> tuple[SealedStage, StageManifest, StorageOperationRef]:
+    stage, _, manifest = await write_single_part(
+        provider,
+        stage_id,
+        payload,
+        context,
+        begin_id=stage_id + "-begin",
+        part_id=stage_id + "-part",
+    )
     seal = operation(provider.identity(), stage_id + "-seal", "seal_stage", manifest)
     return await provider.seal_stage(seal, stage, manifest, context), manifest, seal
+
+
+async def seal_prefix(
+    provider: ArtifactStorage,
+    stage: StageRef,
+    source_spec: PartSpec,
+    count: int,
+    source: BytesSource,
+    context: ProtocolContext,
+    *,
+    capture_id: str,
+    seal_id: str,
+    manifest_count: Literal["captured", "requested"],
+) -> SealedStage:
+    capture = PrefixCapture(
+        version=1, stage=stage, source_spec=source_spec, count=count
+    )
+    prefix = await provider.capture_prefix(
+        operation(provider.identity(), capture_id, "capture_prefix", capture),
+        stage,
+        source_spec,
+        count,
+        source,
+        context,
+    )
+    manifest = StageManifest(
+        version=1,
+        stage=stage,
+        parts=(),
+        prefix=ManifestPrefix(
+            version=1,
+            source_spec=source_spec,
+            count=prefix.count if manifest_count == "captured" else count,
+            digest=prefix.digest,
+            private_identity=prefix.private_identity,
+        ),
+    )
+    return await provider.seal_stage(
+        operation(provider.identity(), seal_id, "seal_stage", manifest),
+        stage,
+        manifest,
+        context,
+    )
 
 
 class RepeatedSource(BytesSource):
@@ -223,7 +398,7 @@ async def acknowledge_stage(
     retired = await provider.retire_stage(retire, stage, context)
     if not retired.completed:
         raise AssertionError("actual stage cleanup must complete before acknowledgment")
-    receipts: list[MutationReceipt] = []
+    outcomes: list[tuple[StorageOperationRef, StorageModel]] = []
     for issued in (*operations, retire):
         observed = await provider.observe(issued, context)
         if (
@@ -234,24 +409,10 @@ async def acknowledge_stage(
             raise AssertionError(
                 "every issued outcome must be persisted before acknowledgment"
             )
-        receipts.append(
-            MutationReceipt(
-                version=1,
-                operation_id=issued.operation_id,
-                kind=issued.kind,
-                request_digest=issued.request_digest,
-                outcome_digest=observed.result.metadata_digest(),
-            )
-        )
-    acknowledged = StorageMutationSet(
-        version=1,
-        stage=stage,
-        receipts=tuple(sorted(receipts, key=lambda item: item.operation_id)),
-    )
-    return StageReleaseRequest(
-        version=1,
-        stage=stage,
+        outcomes.append((issued, observed.result))
+    return stage_release(
+        stage,
+        outcomes,
         persisted_outcome_revision="persisted-storage-outcome",
-        mutation_set_digest=acknowledged.metadata_digest(),
         issuance_closed="all-storage-issuers-closed",
     )

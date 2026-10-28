@@ -1,8 +1,18 @@
 import math
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import cast
 
-from kora.cel.cost import DATA_BYTES, DATA_VALUES
+from kora.cel.cost import (
+    DATA_BYTES,
+    DATA_VALUES,
+    BoundError,
+    ValueBound,
+    is_exact_bound,
+    is_integer,
+    is_plain_mapping,
+)
+from kora.cel.paths import JsonValue
 from kora.cel_eval.errors import ErrorKind
 
 MAX_BYTES: int = DATA_BYTES
@@ -93,3 +103,39 @@ def measure(value: object) -> Size | ErrorKind:
         if size > MAX_BYTES:
             return ErrorKind.BOUND_EXCEEDED
     return Size(size, count)
+
+
+def checked_bound(bound: object) -> ValueBound:
+    if not is_exact_bound(bound):
+        raise BoundError("a bound is not a value bound")
+    declared = cast(ValueBound, bound)
+    sizes = (declared.items, declared.string_bytes)
+    if not all(map(is_integer, sizes)) or not (
+        is_plain_mapping(declared.fields)
+        or isinstance(declared.fields, MappingProxyType)
+    ):
+        raise BoundError("a value bound is malformed")
+    return declared
+
+
+def admitted(value: JsonValue, bound: ValueBound) -> bool:
+    pending: list[tuple[JsonValue, object]] = [(value, bound)]
+    while pending:
+        current, unchecked = pending.pop()
+        declared = checked_bound(unchecked)
+        if isinstance(current, str):
+            if len(current.encode("utf-8")) > declared.string_bytes:
+                return False
+        elif isinstance(current, list):
+            if len(current) > declared.items:
+                return False
+            if declared.element is not None:
+                pending.extend((child, declared.element) for child in current)
+        elif isinstance(current, dict):
+            if len(current) > declared.items:
+                return False
+            for key, child in current.items():
+                child_bound = declared.fields.get(key, declared.element)
+                if child_bound is not None:
+                    pending.append((child, child_bound))
+    return True

@@ -6,9 +6,8 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
-
 from kora.runner.processes import ExitAnchor
+from tests.measurements.lifetime_evidence import PARENT_EXIT, ParentResult
 
 
 @dataclass(frozen=True)
@@ -16,14 +15,6 @@ class Cohort:
     arguments: tuple[str, ...]
     home: Path
     folder: Path
-
-
-class ParentResult(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    pid: int
-    returncode: int | None
-    reaped: bool
 
 
 @dataclass
@@ -138,7 +129,7 @@ async def run_cohorts(
             try:
                 for parent in parents:
                     result = parent.result()
-                    (parent.cohort.folder / "parent-exit.json").write_text(
+                    (parent.cohort.folder / PARENT_EXIT).write_text(
                         result.model_dump_json()
                     )
             finally:
