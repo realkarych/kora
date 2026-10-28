@@ -2,7 +2,7 @@ import asyncio
 import sqlite3
 
 import pytest
-from sqlalchemy import CheckConstraint, inspect, select, text, update
+from sqlalchemy import CheckConstraint, Connection, event, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import (
@@ -30,12 +30,35 @@ async def test_price_schema_upgrade_preserves_history(
     empty_database_settings: DatabaseSettings,
 ) -> None:
     database = Database(empty_database_settings)
+    reflected_tables: list[str] = []
+
+    def capture_reflection(
+        connection: Connection,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        prefix = "PRAGMA main.table_xinfo("
+        if statement.startswith(prefix):
+            reflected_tables.append(statement.removeprefix(prefix).removesuffix(")"))
+
+    def open_migration(settings: DatabaseSettings) -> Database:
+        migration = Database(settings)
+        event.listen(
+            migration.writer_engine.sync_engine,
+            "before_cursor_execute",
+            capture_reflection,
+        )
+        return migration
+
     try:
         async with database.transaction() as connection:
             before = await connection.run_sync(seed_predecessor)
 
         await database.close()
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_database(empty_database_settings, open_migration)
         database = Database(empty_database_settings)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
@@ -74,6 +97,11 @@ async def test_price_schema_upgrade_preserves_history(
         assert after == before
         assert differences == []
         assert retry.steps == 0
+        assert reflected_tables == (
+            ['"price_table"', '"usage_record"']
+            if database.dialect is Dialect.SQLITE
+            else []
+        )
         assert all(
             "price_table_id" not in item["constrained_columns"] for item in references
         )

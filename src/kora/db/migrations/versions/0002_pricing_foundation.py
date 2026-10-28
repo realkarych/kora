@@ -103,7 +103,9 @@ def upgrade_sqlite(connection: Connection) -> None:
                 )
             op.add_column(table_name, column)
     for table_name in ("price_table", "usage_record"):
-        predecessor = Table(table_name, MetaData(), autoload_with=connection)
+        predecessor = Table(
+            table_name, MetaData(), autoload_with=connection, resolve_fks=False
+        )
         with op.batch_alter_table(
             table_name, recreate="always", copy_from=predecessor
         ) as batch:
