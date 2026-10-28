@@ -88,8 +88,7 @@ def check_typed(
     used = meter if meter is not None else Meter()
     try:
         check_environment(environment.variables)
-        tree = parse(source, meter=used)
-        check_types(tree, environment, used)
+        tree = check_types(parse(source, meter=used), environment, used)
         rendering = canonical_rendering(tree, used)
         cost = estimate(tree, len(rendering), environment.variables, meter=used)
     except DiagnosticError as error:
