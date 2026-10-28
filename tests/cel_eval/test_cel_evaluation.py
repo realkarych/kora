@@ -32,7 +32,14 @@ def clock() -> datetime:
         ("[1][4] == 1", "index_out_of_range"),
         ("1 / 0 == 1", "division_by_zero"),
         ("9223372036854775807 + 1 == 0", "overflow"),
-        ("timestamp('bad') == timestamp('bad')", "internal_fault"),
+        ("timestamp('bad') == timestamp('bad')", "invalid_argument"),
+        ("int('abc') == 1", "invalid_argument"),
+        ("uint('-1') == 1u", "invalid_argument"),
+        ("double('x') == 1.0", "invalid_argument"),
+        ("duration('1x') == duration('1s')", "invalid_argument"),
+        ("int(dyn([1])) == 1", "invalid_argument"),
+        ("string(dyn(true)) == 'true'", "invalid_argument"),
+        ("dyn(1).startsWith('a')", "invalid_argument"),
     ],
 )
 def test_cel_binding_exceptions_map_to_error_kinds(source: str, kind: str) -> None:
@@ -47,6 +54,7 @@ def test_cel_binding_exceptions_map_to_error_kinds(source: str, kind: str) -> No
 
     assert isinstance(result, EvaluationError)
     assert result.kind.value == kind
+    assert result.fault is None
     assert result.field == context.field
     assert result.event_id == "evt-1"
     assert result.at == AT

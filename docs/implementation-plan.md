@@ -2,7 +2,7 @@
 
 CEL schema-tightened bounds amendment dated 2026-10-28: the project owner approved the [#374 implementation plan](https://github.com/realkarych/kora/issues/374#issuecomment-6464511300), including the binding check of declared bounds; wording pending line-by-line owner review.
 
-CEL schema-driven checker amendment dated 2026-10-27: the project owner approved the [#330 implementation plan](https://github.com/realkarych/kora/issues/330#issuecomment-6451106230), including its split at the 1,000-line limit; the schema mapping lands under [issue #337](https://github.com/realkarych/kora/issues/337) and the checker under [issue #330](https://github.com/realkarych/kora/issues/330); wording pending line-by-line owner review.
+CEL schema-driven checker amendment dated 2026-10-27: the project owner approved the [#330 implementation plan](https://github.com/realkarych/kora/issues/330#issuecomment-6451106230), including its split at the 1,000-line limit; the schema mapping lands under [issue #337](https://github.com/realkarych/kora/issues/337) and the checker under [issue #330](https://github.com/realkarych/kora/issues/330); the wording was reviewed line by line and approved by the project owner on 2026-10-28.
 
 Local-tooling completion amendment dated 2026-10-23: the project owner approved the [#215 implementation plan and exact wording](https://github.com/realkarych/kora/issues/215#issuecomment-6369162911), with [approval recorded on 2026-10-23](https://github.com/realkarych/kora/issues/215#issuecomment-6369354298).
 
