@@ -645,6 +645,7 @@ An `Evaluator` belongs to its creating event loop. Closing a handle rejects its 
   | `IndexError` | `index_out_of_range` |
   | `ZeroDivisionError` | `division_by_zero` |
   | `OverflowError` | `overflow` |
+  | `RuntimeError` at execution | `invalid_argument`: a function received a value it cannot accept, such as an unparseable string in `int()`, `uint()`, `double()`, `timestamp()` or `duration()`, or a `dyn` value of a kind the function does not take ([issue #373](https://github.com/realkarych/kora/issues/373)) |
 
 - Raised by kora itself:
   - `bound_exceeded`;
@@ -652,7 +653,7 @@ An `Evaluator` belongs to its creating event loop. Closing a handle rejects its 
   - `invalid_value` for values outside exact JSON types or Unicode scalar strings, or whose JSON kind does not match the declared CEL type (section 7.4);
   - `wrong_result_type`: anything that is not exactly `bool`, or `string` for reasons; Python truthiness never applies;
   - `projection_unavailable`.
-- `internal_fault`, logged at ERROR, covers everything the checker should already have prevented: a `ValueError` or `RuntimeError` at execution, and the binding's parser panic.
+- `internal_fault`, logged at ERROR, covers everything the checker should already have prevented: a `ValueError` at execution, any failure to compile the checked rendering (`runtime_error` among them), and the binding's parser panic.
 
 **Catching.** Exceptions are caught narrowly, around the binding call only; kora's own conversion code runs outside that handler.
 
@@ -802,7 +803,8 @@ The schema-driven checker of section 7.4 landed under [issue #337](https://githu
 | `test_cel_until_error_does_not_degrade_integration` | repeated `until` errors leave the integration's failure count and interval unchanged |
 | `test_cel_dyn_result_requires_exact_bool` | `observation.body.ready` returning `"false"` is `wrong_result_type`, never true |
 | `test_cel_evaluation_allowance_yields_between_batches` | at the allowance, the pass commits, leaves `needs_scheduling` set and serves another run of another namespace; each transaction evaluates at least one expression; the rest continues after a restart |
-| `test_cel_binding_exceptions_map_to_error_kinds` | each documented binding exception maps to its kind, with a null `offset` |
+| `test_cel_binding_exceptions_map_to_error_kinds` | each documented binding exception maps to its kind, with a null `offset`; unparseable strings in the conversion functions and `dyn` arguments of another kind are `invalid_argument` |
+| `test_cel_invalid_argument_is_not_an_internal_fault` | a `RuntimeError` at execution is `invalid_argument` with a null `fault`, while a compile failure and a `ValueError` at execution stay `internal_fault` with their fault classes |
 | `test_cel_maps_only_documented_native_errors` | each native exception maps to its documented kind and fault, the parser panic to `internal_fault` with the fault `panic`, and the error carries neither the native message nor its cause |
 | `test_cel_cancellation_propagates_through_evaluation` | `asyncio.CancelledError`, `KeyboardInterrupt` and `SystemExit` raised during evaluation still propagate |
 | `test_cel_persisted_errors_exclude_values` | no stored, returned or logged error carries expression text, values or binding messages. This includes binding messages that contain payload keys, DEBUG output and exception chains, in every sink: wait, binding, approval, event, API, CLI, MCP and logs |

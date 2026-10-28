@@ -205,7 +205,7 @@ async def lifetime() -> Measurements:
         (ZeroDivisionError, ErrorKind.DIVISION_BY_ZERO),
         (OverflowError, ErrorKind.OVERFLOW),
         (ValueError, ErrorKind.INTERNAL_FAULT),
-        (RuntimeError, ErrorKind.INTERNAL_FAULT),
+        (RuntimeError, ErrorKind.INVALID_ARGUMENT),
         (Panic, ErrorKind.INTERNAL_FAULT),
     )
     failure_requests = [

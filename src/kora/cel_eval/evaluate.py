@@ -81,7 +81,7 @@ def execute(binding: Binding, program: Program, values: BoundValues) -> object:
     except ValueError:
         return NativeFailure(ErrorKind.INTERNAL_FAULT, Fault.VALUE_ERROR)
     except RuntimeError:
-        return NativeFailure(ErrorKind.INTERNAL_FAULT, Fault.RUNTIME_ERROR)
+        return NativeFailure(ErrorKind.INVALID_ARGUMENT)
     except binding.panic:
         return NativeFailure(ErrorKind.INTERNAL_FAULT, Fault.PANIC)
 
