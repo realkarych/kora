@@ -5,20 +5,52 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import BytesSource, digest, operation, stage_spec
+from kora.conformance.storage_support import (
+    BytesSource,
+    digest,
+    operation,
+    preparation_request,
+    seal_prefix,
+    single_part,
+    stage_spec,
+)
 from kora.plugins.storage.local import LocalStorageConfiguration
+from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import (
-    ContentPreparation,
-    ManifestPrefix,
     PartSpec,
     PrefixCapture,
-    PreparationArguments,
-    StageManifest,
+    StageSpec,
     StageWrite,
     StorageLimits,
 )
 from tests.plugins.storage.inspection import InspectedStorage
+
+
+async def write_failed_part(
+    provider: InspectedStorage, payload: bytes, context: ProtocolContext
+) -> tuple[StageSpec, PartSpec, KoraProtocolError]:
+    spec = stage_spec(provider.identity(), "failed-part", payload)
+    part = single_part(payload)
+    await provider.begin_stage(
+        operation(provider.identity(), "begin", "begin_stage", spec),
+        spec,
+        context,
+    )
+    with pytest.raises(KoraProtocolError) as failed_write:
+        await provider.write_part(
+            operation(
+                provider.identity(),
+                "failed",
+                "write_part",
+                StageWrite(version=1, stage=spec.stage, spec=part),
+            ),
+            spec.stage,
+            part,
+            BytesSource(payload + b"!"),
+            context,
+        )
+    return spec, part, failed_write.value
 
 
 def test_prefix_admission_charges_the_failed_part(
@@ -33,34 +65,10 @@ def test_prefix_admission_charges_the_failed_part(
         )
         context = context_for(kora_capture)
         payload = b"k" * 524288
-        spec = stage_spec(provider.identity(), "failed-part", payload)
-        part = PartSpec(
-            version=1,
-            index=0,
-            byte_offset=0,
-            size=len(payload),
-            digest=digest(payload),
-            final=True,
-        )
         try:
-            await provider.begin_stage(
-                operation(provider.identity(), "begin", "begin_stage", spec),
-                spec,
-                context,
+            spec, part, failed_write = await write_failed_part(
+                provider, payload, context
             )
-            with pytest.raises(KoraProtocolError) as failed_write:
-                await provider.write_part(
-                    operation(
-                        provider.identity(),
-                        "failed",
-                        "write_part",
-                        StageWrite(version=1, stage=spec.stage, spec=part),
-                    ),
-                    spec.stage,
-                    part,
-                    BytesSource(payload + b"!"),
-                    context,
-                )
             capture = PrefixCapture(
                 version=1, stage=spec.stage, source_spec=part, count=1
             )
@@ -78,7 +86,7 @@ def test_prefix_admission_charges_the_failed_part(
         finally:
             await provider.aclose()
 
-        assert failed_write.value.code == "storage_conflict"
+        assert failed_write.code == "storage_conflict"
         assert refused_prefix.value.code == "storage_capacity"
         assert reserved == 1048576
         provider.assert_closed()
@@ -98,80 +106,27 @@ def test_preparation_preserves_the_retained_failed_part_reservation(
         )
         context = context_for(kora_capture)
         payload = b"k" * 524288
-        spec = stage_spec(provider.identity(), "failed-part", payload)
-        part = PartSpec(
-            version=1,
-            index=0,
-            byte_offset=0,
-            size=len(payload),
-            digest=digest(payload),
-            final=True,
-        )
         try:
-            await provider.begin_stage(
-                operation(provider.identity(), "begin", "begin_stage", spec),
-                spec,
-                context,
+            spec, part, failed_write = await write_failed_part(
+                provider, payload, context
             )
-            with pytest.raises(KoraProtocolError) as failed_write:
-                await provider.write_part(
-                    operation(
-                        provider.identity(),
-                        "failed",
-                        "write_part",
-                        StageWrite(version=1, stage=spec.stage, spec=part),
-                    ),
-                    spec.stage,
-                    part,
-                    BytesSource(payload + b"!"),
-                    context,
-                )
-            capture = PrefixCapture(
-                version=1, stage=spec.stage, source_spec=part, count=1
-            )
-            prefix = await provider.capture_prefix(
-                operation(provider.identity(), "prefix", "capture_prefix", capture),
+            sealed = await seal_prefix(
+                provider,
                 spec.stage,
                 part,
                 1,
                 BytesSource(payload),
                 context,
+                capture_id="prefix",
+                seal_id="seal",
+                manifest_count="requested",
             )
-            manifest = StageManifest(
-                version=1,
-                stage=spec.stage,
-                parts=(),
-                prefix=ManifestPrefix(
-                    version=1,
-                    source_spec=part,
-                    count=1,
-                    digest=prefix.digest,
-                    private_identity=prefix.private_identity,
-                ),
-            )
-            sealed = await provider.seal_stage(
-                operation(provider.identity(), "seal", "seal_stage", manifest),
-                spec.stage,
-                manifest,
-                context,
-            )
-            arguments = PreparationArguments(
-                version=1,
-                source=sealed,
-                maximum_output_size=1,
-                expected_output_digest=digest(b"p"),
+            request = preparation_request(
+                provider.identity(), "prepare", sealed, 1, digest(b"p")
             )
 
             prepared = await provider.prepare_content(
-                ContentPreparation(
-                    version=1,
-                    operation=operation(
-                        provider.identity(), "prepare", "prepare_content", arguments
-                    ),
-                    arguments=arguments,
-                ),
-                BytesSource(b"p"),
-                context,
+                request, BytesSource(b"p"), context
             )
             counts = provider.resource_counts()
             held = sum(
@@ -181,7 +136,7 @@ def test_preparation_preserves_the_retained_failed_part_reservation(
         finally:
             await provider.aclose()
 
-        assert failed_write.value.code == "storage_conflict"
+        assert failed_write.code == "storage_conflict"
         assert prepared.total_size == 1
         assert held == 524290
         assert counts["reserved_bytes"] == 1048578

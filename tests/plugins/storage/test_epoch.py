@@ -9,25 +9,18 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.conformance.storage_support import (
     acknowledge_stage,
+    content_address,
+    delete_release,
+    delete_request,
     operation,
+    promotion_request,
     seal_repeated,
+    stage_release,
     stage_spec,
 )
-from kora.plugins.storage.local import LocalStorageConfiguration
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import MAX_COUNT
-from kora.protocols.storage_models import (
-    ContentAddress,
-    DeleteArguments,
-    DeleteReleaseRequest,
-    DeleteRequest,
-    MutationReceipt,
-    PromotionArguments,
-    PromotionRequest,
-    StageReleaseRequest,
-    StorageLimits,
-    StorageMutationSet,
-)
+from tests.plugins.storage.configuration import local_configuration
 from tests.plugins.storage.inspection import InspectedStorage
 
 
@@ -35,9 +28,7 @@ def test_local_storage_epoch_exhaustion_preserves_cleanup(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     configured = tmp_path / "store"
-    configuration = LocalStorageConfiguration(
-        root=str(configured), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(configured)
     provider = InspectedStorage(configuration)
     context = context_for(kora_capture)
     spec = stage_spec(provider.identity(), "tracked", b"")
@@ -75,30 +66,11 @@ def test_local_storage_epoch_exhaustion_preserves_cleanup(
                 terminal.identity(), "retire", "retire_stage", spec.stage
             )
             retired = await terminal.retire_stage(retire, spec.stage, context)
-            receipts = tuple(
-                sorted(
-                    (
-                        MutationReceipt(
-                            version=1,
-                            operation_id=op.operation_id,
-                            kind=op.kind,
-                            request_digest=op.request_digest,
-                            outcome_digest=result.metadata_digest(),
-                        )
-                        for op, result in ((begin, spec.stage), (retire, retired))
-                    ),
-                    key=lambda item: item.operation_id,
-                )
-            )
-            acknowledged = StorageMutationSet(
-                version=1, stage=spec.stage, receipts=receipts
-            )
             released = await terminal.release_stage(
-                StageReleaseRequest(
-                    version=1,
-                    stage=spec.stage,
+                stage_release(
+                    spec.stage,
+                    ((begin, spec.stage), (retire, retired)),
                     persisted_outcome_revision="terminal-outcome",
-                    mutation_set_digest=acknowledged.metadata_digest(),
                     issuance_closed="terminal-closed",
                 ),
                 context,
@@ -123,26 +95,15 @@ def test_reconstructed_receiver_acknowledges_compacted_ownership(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async def scenario() -> None:
-        configuration = LocalStorageConfiguration(
-            root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-        )
+        configuration = local_configuration(tmp_path / "store")
         provider = InspectedStorage(configuration)
         context = context_for(kora_capture)
         upload = await seal_repeated(provider, "released", 1, context)
-        arguments = PromotionArguments(
-            version=1,
-            content=upload.content,
-            address=ContentAddress(
-                version=1,
-                storage_identity=provider.identity(),
-                payload_digest=upload.content.payload_digest,
-            ),
-            content_generation=1,
-        )
-        promotion = PromotionRequest(
-            version=1,
-            operation=operation(provider.identity(), "promote", "promote", arguments),
-            arguments=arguments,
+        promotion = promotion_request(
+            provider.identity(),
+            "promote",
+            upload.content,
+            content_address(provider.identity(), upload.content.payload_digest),
         )
         published = await provider.promote(promotion, context)
         release = await acknowledge_stage(
@@ -154,37 +115,26 @@ def test_reconstructed_receiver_acknowledges_compacted_ownership(
         await provider.release_stage(release, context)
         await provider.aclose()
         provider = InspectedStorage(configuration)
-        delete_arguments = DeleteArguments(
-            version=1, address=published.content.address, deletion_generation=1
-        )
-        deletion = DeleteRequest(
-            version=1,
-            operation=operation(
-                provider.identity(), "delete", "delete_content", delete_arguments
-            ),
-            arguments=delete_arguments,
+        deletion = delete_request(
+            provider.identity(), "delete", published.content.address
         )
         await provider.delete_content(deletion, context)
-        delete_release = DeleteReleaseRequest(
-            version=1,
-            operation=deletion.operation,
+        deletion_release = delete_release(
+            deletion.operation,
             persisted_outcome_revision="saved-delete",
             issuance_closed="closed-delete",
         )
-        await provider.release_delete(delete_release, context)
+        await provider.release_delete(deletion_release, context)
         await provider.aclose()
         provider = InspectedStorage(configuration)
         replacement = await seal_repeated(provider, "replacement", 1, context)
-        replacement_arguments = arguments.model_copy(
-            update={"content": replacement.content, "content_generation": 2}
-        )
         recreated = await provider.promote(
-            PromotionRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), "recreate", "promote", replacement_arguments
-                ),
-                arguments=replacement_arguments,
+            promotion_request(
+                provider.identity(),
+                "recreate",
+                replacement.content,
+                promotion.arguments.address,
+                content_generation=2,
             ),
             context,
         )
@@ -192,7 +142,7 @@ def test_reconstructed_receiver_acknowledges_compacted_ownership(
 
         try:
             stage_ack = await provider.release_stage(release, context)
-            delete_ack = await provider.release_delete(delete_release, context)
+            delete_ack = await provider.release_delete(deletion_release, context)
             observation = await provider.observe(deletion.operation, context)
             existing = await provider.exists(recreated.content.address, context)
             after = provider.epoch()

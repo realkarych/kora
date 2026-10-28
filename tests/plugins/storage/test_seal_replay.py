@@ -4,46 +4,21 @@ from pathlib import Path
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import (
-    BytesSource,
-    operation,
-    single_manifest,
-    single_part,
-    stage_spec,
-)
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
-from kora.protocols.storage_models import StageWrite, StorageLimits
+from kora.conformance.storage_support import operation, write_single_part
+from kora.plugins.storage.local import LocalArtifactStorage
 from tests.plugins.storage.activity import StorageBarrierActivity
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_exact_seal_contender_returns_original_after_stage_closes(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(kora_capture)
-        spec = stage_spec(provider.identity(), "stage", b"contender")
-        stage = await provider.begin_stage(
-            operation(provider.identity(), "begin", "begin_stage", spec), spec, context
+        stage, _, manifest = await write_single_part(
+            provider, "stage", b"contender", context, begin_id="begin", part_id="part"
         )
-        part_spec = single_part(b"contender")
-        part = await provider.write_part(
-            operation(
-                provider.identity(),
-                "part",
-                "write_part",
-                StageWrite(version=1, stage=stage, spec=part_spec),
-            ),
-            stage,
-            part_spec,
-            BytesSource(b"contender"),
-            context,
-        )
-        manifest = single_manifest(stage, part_spec, part.part_identity)
         seal = operation(provider.identity(), "seal", "seal_stage", manifest)
         barrier = StorageBarrierActivity("storage.seal_stage.ownership_pending")
         contender = asyncio.create_task(

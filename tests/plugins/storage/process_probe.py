@@ -7,15 +7,15 @@ from multiprocessing.connection import Connection
 
 from kora.conformance.capture import captured
 from kora.conformance.common import CONFORMANCE_COMPONENT, context_for, utc_now
-from kora.conformance.storage_support import digest, operation, seal_bytes
+from kora.conformance.storage_support import (
+    content_address,
+    digest,
+    promotion_request,
+    seal_bytes,
+)
 from kora.observability import LoggingSettings
 from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
-from kora.protocols.storage_models import (
-    ContentAddress,
-    PromotionArguments,
-    PromotionRequest,
-    StorageLimits,
-)
+from kora.protocols.storage_models import StorageLimits
 
 
 class ProcessBarrierActivity:
@@ -55,20 +55,11 @@ def promotion_probe(root: str, boundary: str, connection: Connection) -> None:
             sealed, _, _ = await seal_bytes(
                 provider, "crashed", b"crash-content", context
             )
-            address = ContentAddress(
-                version=1,
-                storage_identity=provider.identity(),
-                payload_digest=digest(b"crash-content"),
-            )
-            arguments = PromotionArguments(
-                version=1, content=sealed, address=address, content_generation=1
-            )
-            request = PromotionRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), "crashed-promote", "promote", arguments
-                ),
-                arguments=arguments,
+            request = promotion_request(
+                provider.identity(),
+                "crashed-promote",
+                sealed,
+                content_address(provider.identity(), digest(b"crash-content")),
             )
             activity = ProcessBarrierActivity(
                 connection, boundary, request.canonical_bytes()
