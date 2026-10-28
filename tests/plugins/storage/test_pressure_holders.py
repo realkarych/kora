@@ -1,4 +1,5 @@
 import ast
+import errno
 import inspect
 import os
 import select
@@ -79,6 +80,25 @@ def test_holder_note_rendering_is_bounded_and_content_free() -> None:
     assert "errors layout=none" in limited
     assert "volume_entries=unbound" in limited
     assert "::" not in result
+    observation.layouts = {
+        "bsd",
+        "cwd",
+        "fdinfo",
+        "fds",
+        "identity",
+        "mapped",
+        "pidpath",
+        "short",
+    }
+    observation.errors = {f"fdinfo.{value}": 1 for value in errno.errorcode.values()}
+    observation.errors.update({name + ".layout": 1 for name in observation.layouts})
+    adverse = render(observation, HolderLimits())
+    errors_line = next(
+        line for line in adverse.splitlines() if line.startswith("errors ")
+    )
+    assert len(errors_line.encode("ascii")) <= 512
+    assert all(name in errors_line for name in observation.layouts)
+    assert ",+" in errors_line
 
 
 def volume_stat(

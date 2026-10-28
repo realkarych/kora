@@ -355,10 +355,14 @@ def elapsed_line(observation: Observation) -> str:
 
 
 def render(note: Observation, limits: HolderLimits) -> str:
+    error_prefix = (
+        "errors layout=" + (",".join(sorted(note.layouts)) or "none") + " transient="
+    )
     tokens = [f"{key}.{count}" for key, count in sorted(note.errors.items())]
     kept_errors: list[str] = []
     for token in tokens:
-        if len(",".join([*kept_errors, token])) > 480:
+        proposed = ",".join([*kept_errors, token])
+        if len(error_prefix + proposed + f",+{len(tokens)}") > 512:
             break
         kept_errors.append(token)
     errors = ",".join(kept_errors) or "none"
@@ -370,10 +374,7 @@ def render(note: Observation, limits: HolderLimits) -> str:
         f"other_uid_processes={note.other_uid} holders={note.holder_count}"
         + (" query=" + note.query_failure if note.query_failure else ""),
         elapsed_line(note),
-        "errors layout="
-        + (",".join(sorted(note.layouts)) or "none")
-        + " transient="
-        + errors,
+        error_prefix + errors,
         f"target=volume capture={note.capture} before={note.before} "
         f"after={note.after} matching=" + ("on" if note.matching else "off"),
         *(
