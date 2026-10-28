@@ -10,14 +10,15 @@ from kora.ir.json import JsonObject, parse_json_object
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.storage.access import ContentAccess
 from kora.plugins.storage.deletion import ContentDeleter
-from kora.plugins.storage.errors import refuse, require_deadline
+from kora.plugins.storage.errors import refuse
 from kora.plugins.storage.files import FileLease, RootAnchor, random_identity
 from kora.plugins.storage.inventory import scan
+from kora.plugins.storage.payload import try_lease
 from kora.plugins.storage.preparation import ContentPreparer
 from kora.plugins.storage.publication import ContentPublisher
 from kora.plugins.storage.readers import LocalReadStream, ReaderManager
 from kora.plugins.storage.staging import StagedPayloads
-from kora.plugins.storage.state import LocalState
+from kora.plugins.storage.state import LocalState, unsettled_observation
 from kora.protocols.common import BoundaryModel, ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import MAX_COUNT
@@ -108,11 +109,6 @@ CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
 )
 
 
-def close_lease(lease: FileLease | None) -> None:
-    if lease is not None:
-        lease.close()
-
-
 class LocalArtifactStorage:
     name: str = "local"
     config_schema: JsonObject = CONFIG_SCHEMA
@@ -128,7 +124,6 @@ class LocalArtifactStorage:
         )
         try:
             self._state = LocalState(self._root)
-            self._epoch = self._state.initial_epoch
         except BaseException:
             self._root.close()
             raise
@@ -146,13 +141,11 @@ class LocalArtifactStorage:
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
         self._readers = ReaderManager(self._root, self.io, self.start_read)
-        self._staging = StagedPayloads(
-            self._root, self._state, self._epoch, self.io, self._readers
-        )
+        self._staging = StagedPayloads(self._root, self._state, self.io, self._readers)
         self._preparer = ContentPreparer(self._state, self._staging, self.io)
         self._publisher = ContentPublisher(self._state, self._staging, self.io)
-        self._access = ContentAccess(self._state, self._epoch, self.io, self._readers)
-        self._deleter = ContentDeleter(self._state, self._epoch, self.io)
+        self._access = ContentAccess(self._state, self.io, self._readers)
+        self._deleter = ContentDeleter(self._state, self.io)
 
     def identity(self) -> StorageIdentity:
         return self._root.identity
@@ -309,13 +302,10 @@ class LocalArtifactStorage:
 
             def mutate() -> StageRef:
                 with self._state.transaction(write=True) as connection:
-                    saved = self._state.receipt(connection, operation)
-                    if saved is not None and saved.state == "settled":
-                        if not isinstance(saved.result, StageRef):
-                            refuse("storage_conflict")
-                        return saved.result
-                    require_deadline(ctx)
-                    self._state.admit_epoch(connection, self._epoch)
+                    saved = self._state.settled_receipt(connection, operation, StageRef)
+                    if saved is not None:
+                        return saved
+                    self._state.admit(connection, ctx)
                     record = self._state.stage(connection, spec.stage)
                     if record is not None:
                         if record[1] != "open" or record[3] != spec:
@@ -583,13 +573,7 @@ class LocalArtifactStorage:
                     saved = self._state.receipt(connection, operation)
                     if saved is not None:
                         return saved
-                    return MutationObservation(
-                        version=1,
-                        operation=operation,
-                        state="evidence_unavailable",
-                        result=None,
-                        effects_closed=False,
-                    )
+                    return unsettled_observation(operation, "evidence_unavailable")
 
             return await self.io(read, control=True)
 
@@ -603,11 +587,11 @@ class LocalArtifactStorage:
 
             def close_admission() -> tuple[int, int] | StageRetirement:
                 with self._state.transaction(write=True) as connection:
-                    saved = self._state.receipt(connection, operation)
-                    if saved is not None and saved.state == "settled":
-                        if not isinstance(saved.result, StageRetirement):
-                            refuse("storage_conflict")
-                        return saved.result
+                    saved = self._state.settled_receipt(
+                        connection, operation, StageRetirement
+                    )
+                    if saved is not None:
+                        return saved
                     record = self._state.stage(connection, stage)
                     if record is None:
                         if self._state.epoch(connection) == MAX_COUNT:
@@ -620,7 +604,7 @@ class LocalArtifactStorage:
                                 remaining_bytes=0,
                                 remaining_effects=0,
                             )
-                        self._state.admit_epoch(connection, self._epoch)
+                        self._state.admit_epoch(connection)
                         self._state.allocate_stage(connection, stage, None)
                         record = self._state.stage(connection, stage)
                         if record is None:
@@ -638,10 +622,8 @@ class LocalArtifactStorage:
             if isinstance(admitted, StageRetirement):
                 return admitted
             slot, remaining = admitted
-            ownership = await self.io(
-                lambda: self._root.try_lock(f"stage-{slot}"),
-                control=True,
-                on_cancel=close_lease,
+            ownership = await try_lease(
+                self.io, self._root, f"stage-{slot}", control=True
             )
             if ownership is None:
                 return StageRetirement(
@@ -697,10 +679,8 @@ class LocalArtifactStorage:
             slot = await self.io(locate, control=True)
             if slot is None:
                 return StorageReleaseResult(version=1, state="released")
-            ownership = await self.io(
-                lambda: self._root.try_lock(f"stage-{slot}"),
-                control=True,
-                on_cancel=close_lease,
+            ownership = await try_lease(
+                self.io, self._root, f"stage-{slot}", control=True
             )
             if ownership is None:
                 return StorageReleaseResult(version=1, state="pending")
@@ -726,12 +706,7 @@ class LocalArtifactStorage:
                                 != request.mutation_set_digest
                             ):
                                 refuse("storage_conflict")
-                            current = self._state.epoch(connection)
-                            if current < MAX_COUNT:
-                                connection.execute(
-                                    "UPDATE root SET epoch=? WHERE singleton=1",
-                                    (current + 1,),
-                                )
+                            self._state.advance_epoch(connection)
                             connection.execute(
                                 "DELETE FROM receipts WHERE owner_kind='stage' AND "
                                 "owner_key=?",

@@ -20,7 +20,7 @@ from kora.cel.types import (
     member_type,
     unwrap,
 )
-from kora.cel_eval.bounds import MAX_BYTES, MAX_VALUES, measure
+from kora.cel_eval.bounds import MAX_BYTES, MAX_VALUES, admitted, measure
 from kora.cel_eval.errors import ErrorKind
 
 MAX_DOUBLE_INTEGER: int = int(sys.float_info.max)
@@ -115,6 +115,7 @@ def bind(
     values: Mapping[str, object],
     types: Mapping[str, CelType],
 ) -> BoundValues | ErrorKind:
+    declared = checked.bounds
     result: dict[str, JsonValue] = {}
     total_bytes = 0
     total_values = 0
@@ -136,6 +137,9 @@ def bind(
         converted = convert(value, types.get(name, DYN))
         if isinstance(converted, ErrorKind):
             return converted
+        variable_bound = declared.get(name)
+        if variable_bound is not None and not admitted(converted, variable_bound):
+            return ErrorKind.BOUND_EXCEEDED
         after = measure(converted)
         if isinstance(after, ErrorKind):
             return after

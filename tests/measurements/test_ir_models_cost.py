@@ -70,6 +70,7 @@ from tests.measurements.ir_document_workload import (
     document_workloads,
 )
 from tests.measurements.ir_remaining_workload import (
+    Workload,
     fixture_manifest,
     remaining_workloads,
 )
@@ -574,7 +575,7 @@ def config_schema(total: int) -> Callable[[], object]:
     return lambda: parse_config_schema(document)
 
 
-WORKLOADS: dict[str, tuple[Callable[[], object], int, bool, int]] = {
+WORKLOADS: dict[str, Workload] = {
     **{
         name: (parse(document), 1, True, DENSE_MEASURED)
         for name, document in DENSE.items()
@@ -616,8 +617,25 @@ WORKLOADS: dict[str, tuple[Callable[[], object], int, bool, int]] = {
 }
 
 
-def configuration_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]]:
-    workloads: dict[str, tuple[Callable[[], object], int, bool, int]] = {}
+def validate_and_export(
+    prefix: str, model: type[BaseModel], document: dict[str, object], count: int
+) -> dict[str, Workload]:
+    return {
+        f"{prefix}_{action_name}": (
+            factory(model, document),
+            count,
+            True,
+            DENSE_MEASURED,
+        )
+        for action_name, factory in (
+            ("validate", validation_action),
+            ("export", export_action),
+        )
+    }
+
+
+def configuration_workloads() -> dict[str, Workload]:
+    workloads: dict[str, Workload] = {}
     for shape, configurations in (("minimal", MINIMAL), ("populated", POPULATED)):
         for model, document in configurations.items():
             workloads[f"config_{model.__name__}_{shape}"] = (
@@ -647,16 +665,11 @@ def configuration_workloads() -> dict[str, tuple[Callable[[], object], int, bool
             "network_policy": egress,
         }
         for model, document in ((CommandConfig, command), (McpServer, server)):
-            for action_name, factory in (
-                ("validate", validation_action),
-                ("export", export_action),
-            ):
-                workloads[f"config_{model.__name__}_{size}_{action_name}"] = (
-                    factory(model, document),
-                    size,
-                    True,
-                    DENSE_MEASURED,
+            workloads.update(
+                validate_and_export(
+                    f"config_{model.__name__}_{size}", model, document, size
                 )
+            )
         for valid in (True, False):
             duration = "1" * size + ("s" if valid else "!")
             resource = {
@@ -730,16 +743,11 @@ def configuration_workloads() -> dict[str, tuple[Callable[[], object], int, bool
         **MINIMAL[CommandConfig],
         "resources": resources,
     }
-    for action_name, factory in (
-        ("validate", validation_action),
-        ("export", export_action),
-    ):
-        workloads[f"config_nested_extensions_64_{action_name}"] = (
-            factory(CommandConfig, nested_command),
-            64,
-            True,
-            DENSE_MEASURED,
+    workloads.update(
+        validate_and_export(
+            "config_nested_extensions_64", CommandConfig, nested_command, 64
         )
+    )
     for name, last in (
         ("resource", {**extended, "size": 262145}),
         ("extension", {**RESOURCE, "x-meta": too_deep()}),
@@ -754,8 +762,8 @@ def configuration_workloads() -> dict[str, tuple[Callable[[], object], int, bool
     return workloads
 
 
-def control_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]]:
-    workloads: dict[str, tuple[Callable[[], object], int, bool, int]] = {}
+def control_workloads() -> dict[str, Workload]:
+    workloads: dict[str, Workload] = {}
     for shape, configurations in (
         ("minimal", CONTROL_MINIMAL),
         ("populated", CONTROL_POPULATED),
@@ -772,16 +780,11 @@ def control_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]
         targets = ["target"] * size
         branch_targets: dict[str, object] = {"cases": [{"when": "true", "to": targets}]}
         for name, document in (("cases", branch_cases), ("targets", branch_targets)):
-            for action_name, factory in (
-                ("validate", validation_action),
-                ("export", export_action),
-            ):
-                workloads[f"control_branch_{name}_{size}_{action_name}"] = (
-                    factory(BranchConfig, document),
-                    size,
-                    True,
-                    DENSE_MEASURED,
+            workloads.update(
+                validate_and_export(
+                    f"control_branch_{name}_{size}", BranchConfig, document, size
                 )
+            )
         invalid_case: dict[str, object] = {"when": "true", "to": ["a" * 64 + "\n"]}
         refusals: dict[str, dict[str, object]] = {
             "last_case": {"cases": [CASE] * (size - 1) + [invalid_case]},
@@ -807,16 +810,9 @@ def control_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]
                 DENSE_MEASURED,
             )
     branch_else: dict[str, object] = {"cases": [CASE], "else": ["target"] * 10000}
-    for action_name, factory in (
-        ("validate", validation_action),
-        ("export", export_action),
-    ):
-        workloads[f"control_else_10000_{action_name}"] = (
-            factory(BranchConfig, branch_else),
-            10000,
-            True,
-            DENSE_MEASURED,
-        )
+    workloads.update(
+        validate_and_export("control_else_10000", BranchConfig, branch_else, 10000)
+    )
     workloads["control_else_refused_last_10000"] = (
         validation_action(
             BranchConfig,
@@ -843,16 +839,9 @@ def control_workloads() -> dict[str, tuple[Callable[[], object], int, bool, int]
         "cases": [extended, extended],
         "else": ["target"],
     }
-    for action_name, factory in (
-        ("validate", validation_action),
-        ("export", export_action),
-    ):
-        workloads[f"control_case_extensions_2_{action_name}"] = (
-            factory(BranchConfig, nested_branch),
-            2,
-            True,
-            DENSE_MEASURED,
-        )
+    workloads.update(
+        validate_and_export("control_case_extensions_2", BranchConfig, nested_branch, 2)
+    )
     for name, extension in (
         ("oversize", deep_extension(MAX_CANONICAL_BYTES + 4096)),
         ("depth", too_deep()),
@@ -906,6 +895,13 @@ def test_ir_model_validation_cost(report: Report, workload: str) -> None:
     assert retained < RETAINED_LIMIT_BYTES
 
 
+def assert_clean_exit(result: ProcessResult) -> None:
+    assert not result.timed_out
+    assert not result.overflow
+    assert result.code == 0, result.stderr.decode()
+    assert result.stderr == b""
+
+
 @pytest.mark.parametrize("run", range(3))
 def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
     before = (open_descriptors(), threading.active_count())
@@ -914,10 +910,7 @@ def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
         deadline_seconds=180,
     )
 
-    assert not completed.timed_out
-    assert not completed.overflow
-    assert completed.code == 0, completed.stderr.decode()
-    assert completed.stderr == b""
+    assert_clean_exit(completed)
     assert (open_descriptors(), threading.active_count()) == before
     result = cast("dict[str, object]", json.loads(completed.stdout))
     report.environment[f"config_lifetime_{run}"] = completed.stdout.decode()
@@ -971,10 +964,7 @@ def test_ir_schema_repeated_lifetime(report: Report, run: int) -> None:
     report.environment[f"schema_lifetime_{run}_parent_threads_after"] = after[1]
 
     assert after == before
-    assert not completed.timed_out
-    assert not completed.overflow
-    assert completed.code == 0, completed.stderr.decode()
-    assert completed.stderr == b""
+    assert_clean_exit(completed)
     result = cast("dict[str, object]", json.loads(completed.stdout))
     assert result["pid"] == completed.pid
     assert result["revision"] == report.revision
@@ -1075,6 +1065,62 @@ def test_shared_diagnostic_action_cost(report: Report) -> None:
     assert len(actions) == 44
 
 
+def run_lifecycle_child(
+    report: Report, module: str, mode: str, name: str, repeat: int, count: int
+) -> ProcessResult:
+    argv = [sys.executable, "-m", module, mode, report.revision, name]
+    started = time.perf_counter()
+    result = run_process(argv)
+    elapsed = time.perf_counter() - started
+    report.environment[f"{name}_stdout"] = result.stdout.decode()
+    report.environment[f"{name}_stderr"] = result.stderr.decode()
+    report.environment[f"{name}_exit"] = result.code
+    report.samples.append(Sample(f"{name}_process", repeat, count, elapsed))
+    return result
+
+
+def released_lifecycle(
+    report: Report,
+    result: ProcessResult,
+    before: tuple[int, int],
+    traced: bool,
+    name: str,
+) -> Lifecycle:
+    assert_clean_exit(result)
+    assert (open_descriptors(), threading.active_count()) == before
+    payload = Lifecycle.model_validate_json(result.stdout)
+    assert payload.traced is traced
+    assert payload.pid == result.pid
+    assert payload.revision == report.revision
+    assert payload.run == name
+    return payload
+
+
+def assert_lifecycle_resources(payload: Lifecycle, traced: bool) -> None:
+    for counter in ("descriptors", "threads", "os_threads"):
+        values = [getattr(point, counter) for point in payload.points]
+        assert all(value == values[0] for value in values)
+    if payload.platform == "linux":
+        assert all(
+            point.rss is not None
+            and point.high_water is not None
+            and point.os_threads is not None
+            for point in payload.points
+        )
+    if traced:
+        baseline = payload.points[0].heap
+        assert baseline is not None
+        assert all(
+            point.heap is not None and point.heap - baseline < RETAINED_LIMIT_BYTES
+            for point in payload.points
+        )
+    else:
+        assert all(
+            point.heap is None and point.peak is None and point.tracer is None
+            for point in payload.points
+        )
+
+
 @pytest.mark.parametrize(
     ("repeat", "traced"),
     [(0, True), (0, False), (1, True), (1, False), (2, True), (2, False)],
@@ -1087,56 +1133,16 @@ def test_shared_diagnostic_resource_lifetime(
     mode = "traced" if traced else "untraced"
     name = f"diagnostic_{mode}_{repeat}"
     before = (open_descriptors(), threading.active_count())
-    argv = [
-        sys.executable,
-        "-m",
-        "tests.measurements.diagnostic_workload",
-        mode,
-        report.revision,
-        name,
-    ]
 
-    started = time.perf_counter()
-    result = run_process(argv)
-    elapsed = time.perf_counter() - started
-    report.environment[f"{name}_stdout"] = result.stdout.decode()
-    report.environment[f"{name}_stderr"] = result.stderr.decode()
-    report.environment[f"{name}_exit"] = result.code
-    report.samples.append(Sample(f"{name}_process", repeat, 1, elapsed))
+    result = run_lifecycle_child(
+        report, "tests.measurements.diagnostic_workload", mode, name, repeat, 1
+    )
 
-    assert not result.timed_out
-    assert not result.overflow
-    assert result.code == 0
-    assert result.stderr == b""
-    assert (open_descriptors(), threading.active_count()) == before
-    payload = Lifecycle.model_validate_json(result.stdout)
-    assert payload.traced is traced
-    assert payload.pid == result.pid
-    assert payload.revision == report.revision
-    assert payload.run == name
+    payload = released_lifecycle(report, result, before, traced, name)
     assert payload.successes == 26_000
     assert payload.refusals == 18_000
     assert [p.cycle for p in payload.points] == list(range(0, 1001, 100))
-    for resource in ("descriptors", "threads", "os_threads"):
-        values = [getattr(p, resource) for p in payload.points]
-        assert all(value == values[0] for value in values)
-    if payload.platform == "linux":
-        assert all(
-            p.rss is not None and p.high_water is not None and p.os_threads is not None
-            for p in payload.points
-        )
-    if traced:
-        baseline = payload.points[0].heap
-        assert baseline is not None
-        assert all(
-            p.heap is not None and p.heap - baseline < RETAINED_LIMIT_BYTES
-            for p in payload.points
-        )
-    else:
-        assert all(
-            p.heap is None and p.peak is None and p.tracer is None
-            for p in payload.points
-        )
+    assert_lifecycle_resources(payload, traced)
     report.gates[f"{name}_resources_released"] = True
 
 
@@ -1177,59 +1183,17 @@ def test_vcs_ref_validation_lifetime(report: Report, repeat: int, traced: bool) 
     mode = "traced" if traced else "untraced"
     name = f"vcs_ref_{mode}_{repeat}"
     before = (open_descriptors(), threading.active_count())
-    argv = [
-        sys.executable,
-        "-m",
-        "tests.measurements.vcs_ref_workload",
-        mode,
-        report.revision,
-        name,
-    ]
 
-    started = time.perf_counter()
-    result = run_process(argv)
-    elapsed = time.perf_counter() - started
-    report.environment[f"{name}_stdout"] = result.stdout.decode()
-    report.environment[f"{name}_stderr"] = result.stderr.decode()
-    report.environment[f"{name}_exit"] = result.code
-    report.samples.append(Sample(f"{name}_process", repeat, 500, elapsed))
+    result = run_lifecycle_child(
+        report, "tests.measurements.vcs_ref_workload", mode, name, repeat, 500
+    )
 
-    assert not result.timed_out
-    assert not result.overflow
-    assert result.code == 0, result.stderr.decode()
-    assert result.stderr == b""
-    assert (open_descriptors(), threading.active_count()) == before
-    payload = Lifecycle.model_validate_json(result.stdout)
-    assert payload.traced is traced
-    assert payload.pid == result.pid
-    assert payload.revision == report.revision
-    assert payload.run == name
+    payload = released_lifecycle(report, result, before, traced, name)
     assert payload.successes == 284
     assert payload.refusals == 216
     assert [point.cycle for point in payload.points] == list(range(0, 501, 25))
     assert len(payload.retaining_paths) == 2
-    for counter in ("descriptors", "threads", "os_threads"):
-        values = [getattr(point, counter) for point in payload.points]
-        assert all(value == values[0] for value in values)
-    if payload.platform == "linux":
-        assert all(
-            point.rss is not None
-            and point.high_water is not None
-            and point.os_threads is not None
-            for point in payload.points
-        )
-    if traced:
-        baseline = payload.points[0].heap
-        assert baseline is not None
-        assert all(
-            point.heap is not None and point.heap - baseline < RETAINED_LIMIT_BYTES
-            for point in payload.points
-        )
-    else:
-        assert all(
-            point.heap is None and point.peak is None and point.tracer is None
-            for point in payload.points
-        )
+    assert_lifecycle_resources(payload, traced)
     report.gates[f"{name}_lifecycle_assertions_passed"] = True
     report.environment[f"{name}_native_growth_review"] = "required"
 
@@ -1269,10 +1233,7 @@ def test_vcs_ref_cold_public_import(report: Report, repeat: int) -> None:
             report.environment[f"vcs_import_{name}_{repeat}"] = (
                 completed.stdout.decode()
             )
-            assert not completed.timed_out
-            assert not completed.overflow
-            assert completed.code == 0, completed.stderr.decode()
-            assert completed.stderr == b""
+            assert_clean_exit(completed)
             measured = cast("dict[str, object]", json.loads(completed.stdout))
             assert measured["descriptors_before"] == measured["descriptors_after"]
             assert measured["threads_before"] == measured["threads_after"]

@@ -17,10 +17,10 @@ from kora.observability import Level, LoggingSettings
 from kora.plugins.storage.local import (
     COMPONENT,
     LocalArtifactStorage,
-    LocalStorageConfiguration,
 )
-from kora.protocols.storage_models import StageWrite, StorageLimits
+from kora.protocols.storage_models import StageWrite
 from tests.plugins.storage.activity import StorageBarrierActivity
+from tests.plugins.storage.configuration import local_configuration
 
 
 class FailingSource(BytesSource):
@@ -43,10 +43,7 @@ def test_storage_unexpected_failure_has_one_safe_reporting_owner(
             ),
         )
         provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "private-root-marker"),
-                limits=StorageLimits(version=1),
-            )
+            local_configuration(tmp_path / "private-root-marker")
         )
         source = FailingSource(b"k")
 
@@ -91,11 +88,7 @@ def test_storage_concurrent_contexts_do_not_cross_requests(tmp_path: Path) -> No
     with captured(
         COMPONENT, LoggingSettings(level=Level.DEBUG), "storage-context", utc_now
     ) as capture:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(
-                root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-            )
-        )
+        provider = LocalArtifactStorage(local_configuration(tmp_path / "store"))
         context = context_for(capture)
         left = replace(
             context,

@@ -26,6 +26,15 @@ class ChannelError(Exception):
         super().__init__(reason.value)
 
 
+async def cancel_task(task: asyncio.Task[T]) -> None:
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        if not task.cancelled():
+            raise
+
+
 async def wait_future(ready: asyncio.Future[T], deadline_ns: int, clock: Clock) -> None:
     if ready.done():
         ready.result()
@@ -40,12 +49,7 @@ async def wait_future(ready: asyncio.Future[T], deadline_ns: int, clock: Clock) 
             raise ChannelError(ChannelFailure.DEADLINE)
         ready.result()
     finally:
-        timeout.cancel()
-        try:
-            await timeout
-        except asyncio.CancelledError:
-            if not timeout.cancelled():
-                raise
+        await cancel_task(timeout)
 
 
 class DescriptorReadiness:

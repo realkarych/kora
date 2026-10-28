@@ -20,6 +20,8 @@ Separately exercise 1,100 offered registry events, blocked and broken parent dia
 
 The existing 240-cycle foundation study and collector remain unchanged. Listing writes a separate sidecar and raw artifacts within the existing qualification output directory, and is invoked by the existing qualification test module. No workflow topology, coverage, timeout or ten-minute budget changes. Record total qualification time; a capacity failure must be fixed without silently reducing either population.
 
+CI shard amendment, 2026-10-28, [approved explicitly by the project owner](https://github.com/realkarych/kora/pull/379#issuecomment-6468762431): that capacity failure occurred on hosted runners. The [hosted measurement shards](conformance-lifetime-measurement-2026-10-23.md#hosted-measurement-shards-2026-10-28) run listing as its own nightly job and pytest process with an unchanged population, so its cutoff no longer includes foundation time and its sidecar `seconds` and `remaining_qualification_seconds` refer to that shard alone. Total qualification time is recorded by the per-measurement sidecar time and the workflow run's duration from the first shard's start to the join's completion.
+
 ## Observed result
 
 The combined qualification passed at `ac713f7989304e3312f51b51d664c859dcaa5fd5` on 2026-10-26: `2 passed in 392.32s`. The environment was CPython 3.11.17 on macOS 27.0.1 arm64, using the locked development environment on the permitted shared host. The command was `KORA_TEST_DATABASES=sqlite KORA_MEASUREMENT_REVISION=ac713f7989304e3312f51b51d664c859dcaa5fd5 KORA_MEASUREMENT_OUTPUT=<private-directory>/report.json uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_conformance_lifetime.py`.

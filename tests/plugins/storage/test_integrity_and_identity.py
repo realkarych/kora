@@ -7,9 +7,9 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.conformance.storage_support import operation, stage_spec
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
+from kora.plugins.storage.local import LocalArtifactStorage
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import StorageLimits
+from tests.plugins.storage.configuration import local_configuration
 
 
 def test_provider_private_control_refuses_existing_metadata_directory(
@@ -26,9 +26,7 @@ def test_provider_private_control_refuses_existing_metadata_directory(
     finally:
         connection.close()
     before = database.read_bytes()
-    configuration = LocalStorageConfiguration(
-        root=str(root), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(root)
 
     with pytest.raises(KoraProtocolError) as refused:
         LocalArtifactStorage(configuration)
@@ -41,9 +39,7 @@ def test_provider_private_control_refuses_existing_metadata_directory(
 def test_storage_identity_source_is_injected_and_not_reissued_on_restart(
     tmp_path: Path,
 ) -> None:
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
     issued: list[str] = []
 
     def new_identity() -> str:
@@ -71,9 +67,7 @@ def test_storage_identity_source_is_injected_and_not_reissued_on_restart(
 def test_corrupt_saved_outcome_is_a_content_free_integrity_error(
     tmp_path: Path, kora_capture: Capture, encoded: str
 ) -> None:
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
     context = context_for(kora_capture)
 
     async def scenario() -> None:

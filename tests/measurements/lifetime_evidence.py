@@ -8,6 +8,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+
+PARENT_EXIT = "parent-exit.json"
+PARENT_EXIT_BYTES = 256
+HOME_REFERENCE_BYTES = 128
+
 
 class StepOutcome(StrEnum):
     SUCCESS = "success"
@@ -29,12 +35,28 @@ class EvidenceReason(StrEnum):
     UNAVAILABLE = "unavailable"
     MISSING_UNKNOWN = "missing_unknown"
     UNEXPECTED_RETENTION = "unexpected_retention"
+    PARENT_UNREAPED = "parent_unreaped"
+    PARENT_EXIT_UNAVAILABLE = "parent_exit_unavailable"
 
 
 class EvidenceError(ValueError):
     def __init__(self, reason: EvidenceReason) -> None:
         self.reason = reason
         super().__init__(reason.value)
+
+
+class ParentResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    pid: int
+    returncode: int | None
+    reaped: bool
+
+    @model_validator(mode="after")
+    def reaped_exactly_with_returncode(self) -> "ParentResult":
+        if self.reaped is not (self.returncode is not None):
+            raise ValueError("reaped must match an observed return code")
+        return self
 
 
 @dataclass(frozen=True)
@@ -55,21 +77,26 @@ def private_directory(path: Path) -> None:
         raise EvidenceError(EvidenceReason.INVALID_REFERENCE)
 
 
-def home_reference(path: Path, temporary_root: Path) -> Path:
+def bounded_record(path: Path, limit: int) -> bytes:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         observed = os.fstat(descriptor)
         if (
             not stat.S_ISREG(observed.st_mode)
             or observed.st_uid != os.getuid()
-            or not 1 <= observed.st_size <= 128
+            or not 1 <= observed.st_size <= limit
         ):
             raise EvidenceError(EvidenceReason.INVALID_REFERENCE)
-        encoded = os.read(descriptor, 129)
+        encoded = os.read(descriptor, limit + 1)
     finally:
         os.close(descriptor)
-    if len(encoded) > 128:
+    if len(encoded) > limit:
         raise EvidenceError(EvidenceReason.INVALID_REFERENCE)
+    return encoded
+
+
+def home_reference(path: Path, temporary_root: Path) -> Path:
+    encoded = bounded_record(path, HOME_REFERENCE_BYTES)
     try:
         home = Path(encoded.decode("ascii"))
     except UnicodeError as failure:
@@ -91,18 +118,32 @@ def archive_private(root: Path, output: Path) -> None:
         archive.add(root, arcname="state", recursive=True)
 
 
+def unsettled_parent(folder: Path) -> EvidenceReason | None:
+    try:
+        result = ParentResult.model_validate_json(
+            bounded_record(folder / PARENT_EXIT, PARENT_EXIT_BYTES)
+        )
+    except (OSError, EvidenceError, ValidationError):
+        return EvidenceReason.PARENT_EXIT_UNAVAILABLE
+    return None if result.reaped else EvidenceReason.PARENT_UNREAPED
+
+
 def cohort_evidence(
     folder: Path, output: Path, index: int, outcome: StepOutcome, temporary_root: Path
 ) -> EvidenceItem:
     private_directory(folder)
     home = home_reference(folder / "home.txt", temporary_root)
+    unsettled = unsettled_parent(folder)
     try:
         home.lstat()
     except FileNotFoundError:
-        if outcome is StepOutcome.SUCCESS:
+        if outcome is StepOutcome.SUCCESS and unsettled is None:
             return EvidenceItem(index, EvidenceState.REMOVED)
-        raise EvidenceError(EvidenceReason.MISSING_UNKNOWN) from None
+        missing = EvidenceReason.MISSING_UNKNOWN if unsettled is None else unsettled
+        raise EvidenceError(missing) from None
     archive_private(home, output / f"retained-{index}.tar")
+    if unsettled is not None:
+        raise EvidenceError(unsettled)
     if outcome is StepOutcome.SUCCESS:
         raise EvidenceError(EvidenceReason.UNEXPECTED_RETENTION)
     return EvidenceItem(index, EvidenceState.RETAINED)
