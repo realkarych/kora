@@ -2,13 +2,16 @@ import ctypes
 import errno
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, cast
+from typing import BinaryIO, Final, Protocol, cast
 
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
+
+STATUS_CAPACITY_BYTES: Final[int] = 4096
 
 
 class IdentityState(StrEnum):
@@ -101,14 +104,31 @@ class GetHostUuid(Protocol):
     def __call__(self, result: object, timeout: object) -> int: ...
 
 
+def open_status(pid: int) -> BinaryIO:
+    return open(f"/proc/{pid}/stat", "rb", buffering=0)
+
+
+def status_fields(status: BinaryIO) -> tuple[bytes, ...]:
+    content = status.read(STATUS_CAPACITY_BYTES)
+    _, separator, tail = content.rpartition(b")")
+    if not separator or len(content) >= STATUS_CAPACITY_BYTES:
+        raise ValueError("process status is malformed")
+    return tuple(tail.split())
+
+
 class NativeIdentityReader:
     def __init__(
-        self, *, clock: Clock | None = None, max_scan_entries: int = 65536
+        self,
+        *,
+        clock: Clock | None = None,
+        max_scan_entries: int = 65536,
+        status_opener: Callable[[int], BinaryIO] = open_status,
     ) -> None:
         if isinstance(max_scan_entries, bool) or not 1 <= max_scan_entries <= 65536:
             raise ValueError("native process scan capacity must be between 1 and 65536")
         self._clock = clock if clock is not None else SystemClock()
         self._max_scan_entries = max_scan_entries
+        self._open_status = status_opener
         self._library: ctypes.CDLL | None = None
         self._host: str | None = None
         self._boot: str | None = None
@@ -174,7 +194,8 @@ class NativeIdentityReader:
             return IdentityObservation(IdentityState.UNKNOWN)
 
     def _linux_read(self, pid: int) -> IdentityObservation:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        with self._open_status(pid) as status:
+            fields = status_fields(status)
         namespace = os.readlink(f"/proc/{pid}/ns/pid")
         group = int(fields[2])
         session = int(fields[3])
@@ -188,7 +209,7 @@ class NativeIdentityReader:
         )
         return IdentityObservation(
             IdentityState.PRESENT,
-            ProcessSnapshot(identity, group, session, fields[0] in ("Z", "X")),
+            ProcessSnapshot(identity, group, session, fields[0] in (b"Z", b"X")),
         )
 
     def _darwin_read(self, pid: int) -> IdentityObservation:
@@ -240,13 +261,9 @@ class NativeIdentityReader:
                             continue
                         pid = int(entry.name)
                         try:
-                            fields = (
-                                Path(f"/proc/{pid}/stat")
-                                .read_text()
-                                .rsplit(")", 1)[1]
-                                .split()
-                            )
-                        except FileNotFoundError:
+                            with self._open_status(pid) as status:
+                                fields = status_fields(status)
+                        except (FileNotFoundError, ProcessLookupError):
                             continue
                         if int(fields[2]) != process_group_id:
                             continue

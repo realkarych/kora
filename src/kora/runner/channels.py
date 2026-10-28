@@ -29,10 +29,10 @@ class ChannelError(Exception):
 async def cancel_task(task: asyncio.Task[T]) -> None:
     task.cancel()
     try:
-        await task
-    except asyncio.CancelledError:
-        if not task.cancelled():
-            raise
+        await asyncio.gather(task, return_exceptions=True)
+    finally:
+        if task.done() and not task.cancelled():
+            task.result()
 
 
 async def wait_future(ready: asyncio.Future[T], deadline_ns: int, clock: Clock) -> None:
