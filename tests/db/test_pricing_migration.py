@@ -20,6 +20,7 @@ from kora.db.migrations import (
 )
 from kora.db.tables import metadata, price_table, usage_record
 from tests.db.closing import until
+from tests.db.predecessor import upgraded_predecessor
 from tests.db.seed import START, predecessor_snapshot, seed_predecessor
 from tests.db.test_migrations import differences_ignoring_expression_indexes
 
@@ -500,13 +501,8 @@ async def test_migration_lease_closed_before_stamp_keeps_predecessor(
 async def test_pricing_tags_reject_partial_or_out_of_domain_rows(
     empty_database_settings: DatabaseSettings,
 ) -> None:
-    database = Database(empty_database_settings)
+    database = await upgraded_predecessor(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            await connection.run_sync(seed_predecessor)
-        await database.close()
-        await upgrade_database(empty_database_settings)
-        database = Database(empty_database_settings)
         rejected = [
             "UPDATE price_table SET version = 1 WHERE id = 'old-price'",
             "UPDATE price_table SET normalization_version = 1 WHERE id = 'old-price'",

@@ -32,7 +32,6 @@ from tests.support.event_loop import turn
 
 RECOVERY_PROBE: Final = Path(__file__).with_name("lifetime_recovery_probe.py")
 SENT_OR_SETTLED: Final = frozenset((SignalResult.SENT, SignalResult.SETTLED))
-SENT_ONLY: Final = frozenset((SignalResult.SENT,))
 
 
 class ControlledLifetimeClock(SystemClock):

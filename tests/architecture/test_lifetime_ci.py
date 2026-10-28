@@ -12,6 +12,8 @@ from typing import cast
 import pytest
 
 from tests.measurements.lifetime_evidence import (
+    PARENT_EXIT,
+    ParentResult,
     StepOutcome,
     collect_cohorts,
     collect_full_disk,
@@ -22,6 +24,11 @@ from tests.measurements.lifetime_evidence import (
 def short_home() -> Iterator[Path]:
     with tempfile.TemporaryDirectory(prefix="kora-ci-") as location:
         yield Path(location).resolve()
+
+
+def write_parent_exit(folder: Path, *, reaped: bool) -> None:
+    result = ParentResult(pid=4242, returncode=0 if reaped else None, reaped=reaped)
+    (folder / PARENT_EXIT).write_text(result.model_dump_json())
 
 
 def evidence_layout(
@@ -40,6 +47,7 @@ def evidence_layout(
         folder = artifacts / str(index)
         folder.mkdir(mode=0o700)
         (folder / "home.txt").write_text(str(home), encoding="ascii")
+        write_parent_exit(folder, reaped=True)
         homes.append(home)
     return output, temporary, tuple(homes)
 
@@ -48,6 +56,12 @@ def publication(output: Path) -> dict[str, object]:
     value: object = json.loads((output / "publication.json").read_text())
     assert isinstance(value, dict)
     return cast(dict[str, object], value)
+
+
+def items(output: Path) -> list[dict[str, object]]:
+    value = publication(output)["items"]
+    assert isinstance(value, list)
+    return [cast(dict[str, object], item) for item in cast(list[object], value)]
 
 
 @pytest.mark.parametrize("outcome", [StepOutcome.FAILURE, StepOutcome.CANCELLED])
@@ -184,6 +198,64 @@ def test_retained_success_cannot_be_published_as_removed(
     assert publication(output)["verified"] is False
     assert all((output / f"retained-{index}.tar").exists() for index in range(3))
     assert all(home.exists() for home in homes)
+
+
+@pytest.mark.parametrize(
+    "record",
+    ["unreaped", "missing", "malformed", "linked", "lax", "inconsistent"],
+)
+def test_unsettled_cohort_parent_keeps_its_archive_but_stays_unverified(
+    tmp_path: Path, short_home: Path, record: str
+) -> None:
+    output, temporary, _ = evidence_layout(tmp_path, short_home)
+    folder = output / "report.artifacts/1"
+    exit_record = folder / PARENT_EXIT
+    if record == "unreaped":
+        write_parent_exit(folder, reaped=False)
+    elif record == "missing":
+        exit_record.unlink()
+    elif record == "malformed":
+        exit_record.write_text("{}")
+    elif record == "lax":
+        exit_record.write_text('{"pid": "4242", "returncode": 0, "reaped": "yes"}')
+    elif record == "inconsistent":
+        exit_record.write_text('{"pid": 4242, "returncode": null, "reaped": true}')
+    else:
+        exit_record.unlink()
+        exit_record.symlink_to(output / "report.artifacts/0" / PARENT_EXIT)
+
+    passed = collect_cohorts(output, StepOutcome.CANCELLED, temporary)
+
+    reason = "parent_unreaped" if record == "unreaped" else "parent_exit_unavailable"
+    assert not passed
+    assert publication(output) == {
+        "verified": False,
+        "items": [
+            {"index": 0, "state": "retained", "reason": "complete"},
+            {"index": 1, "state": "unverified", "reason": reason},
+            {"index": 2, "state": "retained", "reason": "complete"},
+        ],
+    }
+    assert all((output / f"retained-{index}.tar").is_file() for index in range(3))
+
+
+def test_removed_home_of_an_unreaped_parent_is_not_published_as_removed(
+    tmp_path: Path, short_home: Path
+) -> None:
+    output, temporary, homes = evidence_layout(tmp_path, short_home)
+    for home in homes:
+        shutil.rmtree(home)
+    write_parent_exit(output / "report.artifacts/2", reaped=False)
+
+    passed = collect_cohorts(output, StepOutcome.SUCCESS, temporary)
+
+    assert not passed
+    assert [item["state"] for item in items(output)] == [
+        "removed",
+        "removed",
+        "unverified",
+    ]
+    assert items(output)[2]["reason"] == "parent_unreaped"
 
 
 def test_full_disk_publication_captures_before_root_disposal(tmp_path: Path) -> None:
