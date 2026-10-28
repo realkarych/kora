@@ -24,7 +24,7 @@ from kora.runner.identity import (
     IdentityState,
     NativeIdentityReader,
 )
-from kora.runner.processes import RecoveredProcess, SignalResult
+from kora.runner.processes import ExitAnchor, RecoveredProcess, SignalResult
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
@@ -45,6 +45,73 @@ async def reap_recovered(
         process.release(deadline)
     finally:
         await reap_recovered(remaining, clock, accepted)
+
+
+@pytest.mark.asyncio
+async def test_journal_recovery_reaps_siblings_after_a_cleanup_assertion(
+    tmp_path: Path,
+) -> None:
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
+            str(tmp_path),
+            "pair",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
+    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    journal = JournalSnapshot.model_validate_json(path.read_bytes())
+    clock = SystemClock()
+    registrations = [
+        entry.registration
+        for entry in journal.entries
+        if isinstance(entry.registration, ProcessRegistration)
+    ]
+    processes = [
+        RecoveredProcess(registration, clock, NativeIdentityReader())
+        for registration in registrations
+    ]
+    anchors: list[ExitAnchor] = []
+    exited: list[bool] = []
+
+    try:
+        for registration in registrations:
+            anchors.append(ExitAnchor(registration.process.pid, direct_child=False))
+        with pytest.raises(AssertionError, match=r"in \(\)"):
+            await reap_recovered(processes, clock, ())
+        deadline = clock.monotonic_ns() + 5_000_000_000
+        for anchor in anchors:
+            await anchor.wait(deadline, clock)
+        exited = [anchor.exited for anchor in anchors]
+    finally:
+        deadline = clock.monotonic_ns() + 5_000_000_000
+        try:
+            for process in processes:
+                process.signal(signal.SIGKILL, deadline)
+            for anchor in anchors:
+                await anchor.wait(deadline, clock)
+            for process in processes:
+                while not process.observe(deadline).settled:
+                    assert clock.monotonic_ns() < deadline
+                    wake: asyncio.Future[None] = (
+                        asyncio.get_running_loop().create_future()
+                    )
+                    asyncio.get_running_loop().call_soon(wake.set_result, None)
+                    await wake
+                process.release(deadline)
+        finally:
+            for process in processes:
+                process.dispose_observation()
+            for anchor in anchors:
+                anchor.close()
+
+    assert len(processes) == 2
+    assert exited == [True, True]
+    assert all(process.closed for process in processes)
 
 
 @pytest.mark.asyncio
