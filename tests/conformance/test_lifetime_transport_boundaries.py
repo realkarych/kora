@@ -30,6 +30,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelFailure
+from tests.conformance.lifetime_helpers import unread_bytes
 from tests.conformance.test_lifetime_cleanup_controls import dispose_test_owner
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 
@@ -196,7 +197,7 @@ async def test_client_partial_reply_keeps_the_budget_started_after_idle() -> Non
             + encoded
         )
         assert right.send(wire[:2]) == 2
-        while len(clock.waiters) < 3:
+        while unread_bytes(left):
             assert actual.monotonic_ns() < deadline
             progress: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             asyncio.get_running_loop().call_soon(progress.set_result, None)

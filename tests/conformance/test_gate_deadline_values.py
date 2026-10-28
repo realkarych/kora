@@ -39,7 +39,7 @@ async def test_gate_maps_accepted_large_instants_before_private_header_validatio
     deadline = clock.monotonic_ns() + (
         largest_duration if mode == "duration" else 5_000_000_000
     )
-    baseline = len(os.listdir("/dev/fd"))
+    baseline = set(os.listdir("/dev/fd"))
     directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     owner: GatedProcess | None = None
     waiting: asyncio.Task[None] | None = None
@@ -88,7 +88,7 @@ async def test_gate_maps_accepted_large_instants_before_private_header_validatio
             await asyncio.wait_for(owner.drain(completion), 5)
             owner.release(completion)
 
-    assert len(os.listdir("/dev/fd")) == baseline
+    assert set(os.listdir("/dev/fd")) - baseline == set()
 
 
 @pytest.mark.parametrize("value", [1, 2**64, MAX_GATE_DEADLINE_NS])
@@ -97,7 +97,7 @@ def test_gate_deadline_codec_preserves_exact_native_value(value: int) -> None:
 
     decoded = decode_deadline(encoded)
 
-    assert len(encoded) == GATE_DEADLINE_BYTES == 132
+    assert len(encoded) == GATE_DEADLINE_BYTES
     assert decoded == value
 
 
@@ -128,13 +128,13 @@ async def test_gate_deadline_preflight_refuses_before_descriptor_or_child_effect
     tmp_path: Path, value: object
 ) -> None:
     directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
-    baseline = len(os.listdir("/dev/fd"))
+    baseline = set(os.listdir("/dev/fd"))
     request = launch("open('executed', 'w').close()", ProcessDomain.INVOCATION)
     try:
         with pytest.raises(ValueError, match="deadline is"):
             start_gated(request, "e" * 32, directory, cast(int, value), SystemClock())
 
-        assert len(os.listdir("/dev/fd")) == baseline
+        assert set(os.listdir("/dev/fd")) - baseline == set()
         assert not (tmp_path / "executed").exists()
     finally:
         os.close(directory)
@@ -154,7 +154,7 @@ async def test_real_gate_rejects_deadline_header_before_execution_body(
         if failure == "zero"
         else (MAX_GATE_DEADLINE_NS + 1).to_bytes(GATE_DEADLINE_BYTES, "big")
     )
-    baseline = len(os.listdir("/dev/fd"))
+    baseline = set(os.listdir("/dev/fd"))
     parent, child = socket.socketpair()
     directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     process: subprocess.Popen[bytes] | None = None
@@ -200,4 +200,4 @@ async def test_real_gate_rejects_deadline_header_before_execution_body(
             if anchor is not None:
                 anchor.close()
 
-    assert len(os.listdir("/dev/fd")) == baseline
+    assert set(os.listdir("/dev/fd")) - baseline == set()

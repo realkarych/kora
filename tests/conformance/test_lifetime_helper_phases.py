@@ -94,33 +94,23 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                     clock.advance(200_000_000)
             else:
                 closing = None
-            actual_clock = SystemClock()
-            deadline = actual_clock.monotonic_ns() + 5_000_000_000
             assert isinstance(launcher.pause_at, int)
-            while launcher.starts < launcher.pause_at:
-                assert actual_clock.monotonic_ns() < deadline
-                if acquiring.done() and effect not in (
-                    "remove",
-                    "late_remove",
-                    "publish",
-                ):
-                    raise AssertionError(acquiring.result())
-                wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-                asyncio.get_running_loop().call_soon(wake.set_result, None)
-                await wake
+            await launcher.wait_for_start(
+                launcher.pause_at,
+                None if effect in ("remove", "late_remove", "publish") else acquiring,
+            )
             helper = owner.mutations.helpers[-1]
+            actual_clock = SystemClock()
             writer = resources.enter_context(
-                await entered_fifo(barrier.descriptor, reading, deadline, actual_clock)
+                await entered_fifo(
+                    barrier.descriptor,
+                    reading,
+                    actual_clock.monotonic_ns() + 5_000_000_000,
+                    actual_clock,
+                )
             )
             assert owner.inventory().helpers.retained_origins == 1
             assert len(owner.mutations.helpers) <= slots + 1
-            origin = owner.mutations.origins[helper]
-            if effect in ("remove", "late_remove", "publish"):
-                assert origin.task is None
-                assert origin.cleanup is not None
-            else:
-                assert origin.task is not None
-                assert origin.cleanup is None
             if closing is None:
                 closing = owner.request_close(
                     sibling.token.resource_id

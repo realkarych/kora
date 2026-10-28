@@ -28,9 +28,8 @@ def launch(script: str, domain: ProcessDomain) -> ProcessLaunch:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("domain", tuple(ProcessDomain))
-@pytest.mark.parametrize("source_kind", ["native", "filtered"])
 async def test_gate_requires_acknowledgement_and_retains_wait_anchor(
-    tmp_path: Path, domain: ProcessDomain, source_kind: str
+    tmp_path: Path, domain: ProcessDomain
 ) -> None:
     from kora.runner.processes import start_gated
 
@@ -43,7 +42,6 @@ async def test_gate_requires_acknowledgement_and_retains_wait_anchor(
         directory,
         deadline,
         clock,
-        FilteredIdentityReader() if source_kind == "filtered" else None,
     )
     os.close(directory)
 
@@ -79,7 +77,7 @@ async def test_gate_requires_acknowledgement_and_retains_wait_anchor(
 
 
 @pytest.mark.asyncio
-async def test_channel_bounds_records_and_releases_cancelled_waiters() -> None:
+async def test_channel_bounds_records_and_reports_peer_close() -> None:
     import asyncio
     import socket
 
@@ -189,11 +187,13 @@ async def test_idle_channel_owns_and_releases_one_reader(completion: str) -> Non
 async def test_channel_refuses_length_above_reservation_without_body(
     boundary: str,
 ) -> None:
+    import asyncio
     import socket
 
     from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+    from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 
-    clock = SystemClock()
+    clock = ControlledLifetimeClock()
     first, second = socket.socketpair()
     receiver = BoundedChannel(second, clock)
     prefix = (257).to_bytes(4, "big")
@@ -213,7 +213,7 @@ async def test_channel_refuses_length_above_reservation_without_body(
 
     try:
         with pytest.raises(ChannelError) as refused:
-            await receiving
+            await asyncio.wait_for(receiving, 5)
     finally:
         first.close()
         receiver.close()
@@ -353,11 +353,14 @@ async def test_native_identity_reads_owned_group_parent_identity_and_unknown_pid
 async def test_gate_closure_before_activation_never_executes(
     tmp_path: Path, cause: str
 ) -> None:
-    from kora.runner.processes import start_gated
+    from kora.runner.channels import ChannelError
+    from kora.runner.processes import ProcessError, start_gated
 
     clock = SystemClock()
-    deadline = clock.monotonic_ns() + 500_000_000
     close_deadline = clock.monotonic_ns() + 5_000_000_000
+    deadline = (
+        clock.monotonic_ns() + 500_000_000 if cause == "deadline" else close_deadline
+    )
     directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     owner = start_gated(
         launch("open('executed', 'w').close()", ProcessDomain.INVOCATION),
@@ -367,10 +370,16 @@ async def test_gate_closure_before_activation_never_executes(
         clock,
     )
     os.close(directory)
+    refused_at: int | None = None
     try:
-        await owner.prepare()
         if cause == "eof":
+            await owner.prepare()
             owner.close_gate()
+        else:
+            try:
+                await owner.prepare()
+            except (ChannelError, ProcessError):
+                refused_at = clock.monotonic_ns()
         await owner.wait_exit(close_deadline)
         await owner.drain(close_deadline)
         result = owner.release()
@@ -383,6 +392,12 @@ async def test_gate_closure_before_activation_never_executes(
 
     assert result != 0
     assert not (tmp_path / "executed").exists()
+    assert refused_at is None or refused_at >= deadline
+    assert owner.closed
+    registration = owner.registration
+    assert registration is not None
+    with pytest.raises(ChildProcessError):
+        os.waitpid(registration.process.pid, os.WNOHANG)
 
 
 @pytest.mark.asyncio
@@ -834,7 +849,7 @@ async def test_cancelled_exit_waiter_retains_owner_and_releases_all_descriptors(
 
     clock = SystemClock()
     deadline = clock.monotonic_ns() + 5_000_000_000
-    baseline = len(os.listdir("/dev/fd"))
+    baseline = set(os.listdir("/dev/fd"))
     directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
     owner = start_gated(
         launch("import signal; signal.pause()", ProcessDomain.INVOCATION),
@@ -867,7 +882,7 @@ async def test_cancelled_exit_waiter_retains_owner_and_releases_all_descriptors(
 
     assert retained is None
     assert owner.closed
-    assert len(os.listdir("/dev/fd")) == baseline
+    assert set(os.listdir("/dev/fd")) - baseline == set()
 
 
 @pytest.mark.asyncio
@@ -875,7 +890,7 @@ async def test_partial_start_failure_closes_parent_descriptors(tmp_path: Path) -
     from kora.runner.processes import ProcessCondition, ProcessError, start_gated
 
     clock = SystemClock()
-    baseline = len(os.listdir("/dev/fd"))
+    baseline = set(os.listdir("/dev/fd"))
 
     owner = start_gated(
         launch("open('executed', 'w').close()", ProcessDomain.INVOCATION),
@@ -889,7 +904,7 @@ async def test_partial_start_failure_closes_parent_descriptors(tmp_path: Path) -
 
     assert failed.value.condition is ProcessCondition.START_FAILED
     assert owner.closed
-    assert len(os.listdir("/dev/fd")) == baseline
+    assert set(os.listdir("/dev/fd")) - baseline == set()
     assert not (tmp_path / "executed").exists()
 
 

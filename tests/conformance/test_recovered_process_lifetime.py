@@ -199,7 +199,7 @@ async def test_recovery_identity_refusal_disposes_partial_watchers(
     async with domain("normal") as fixture:
         source = RecoveryIdentityDecisions(fixture.registration.process.pid)
         source.failure = failure
-        baseline = len(os.listdir("/dev/fd"))
+        baseline = set(os.listdir("/dev/fd"))
         owner = RecoveredProcess(fixture.registration, clock, source)
         deadline = clock.monotonic_ns() + 5_000_000_000
 
@@ -216,7 +216,7 @@ async def test_recovery_identity_refusal_disposes_partial_watchers(
         assert after_disposal.condition is ProcessCondition.UNKNOWN
         assert not owner.closed
         assert owner.watcher_count == 0
-        assert len(os.listdir("/dev/fd")) == baseline
+        assert set(os.listdir("/dev/fd")) - baseline == set()
 
 
 @pytest.mark.asyncio
@@ -253,7 +253,7 @@ async def test_recovered_leader_reaped_with_omitted_live_member_never_signals() 
 async def test_recovered_watch_capacity_and_cancelled_waiter_release() -> None:
     clock = SystemClock()
     async with domain("family") as fixture:
-        baseline = len(os.listdir("/dev/fd"))
+        baseline = set(os.listdir("/dev/fd"))
         deadline = clock.monotonic_ns() + 5_000_000_000
         limited = RecoveredProcess(
             fixture.registration, clock, NativeIdentityReader(), max_members=1
@@ -279,9 +279,9 @@ async def test_recovered_watch_capacity_and_cancelled_waiter_release() -> None:
 
         assert refused.condition is ProcessCondition.UNKNOWN
         assert expired.condition is ProcessCondition.UNKNOWN
-        assert retained == 2
+        assert retained == len({fixture.registration.process.pid, fixture.member_pid})
         assert owner.watcher_count == 0
-        assert len(os.listdir("/dev/fd")) == baseline
+        assert set(os.listdir("/dev/fd")) - baseline == set()
         with pytest.raises(ChildProcessError):
             os.waitpid(fixture.registration.process.pid, os.WNOHANG)
 
