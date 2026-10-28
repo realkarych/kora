@@ -54,6 +54,7 @@ def test_cel_binding_exceptions_map_to_error_kinds(source: str, kind: str) -> No
 
     assert isinstance(result, EvaluationError)
     assert result.kind.value == kind
+    assert result.fault is None
     assert result.field == context.field
     assert result.event_id == "evt-1"
     assert result.at == AT
