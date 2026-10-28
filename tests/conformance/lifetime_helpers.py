@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import termios
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     from kora.conformance.lifetime import ParentLifetime
 
 HELPER_START_GUARD_SECONDS: float = 5.0
+
+
+async def unwind_owned(owned: AsyncExitStack) -> None:
+    await owned.__aexit__(*sys.exc_info())
 
 
 def unread_bytes(endpoint: socket.socket) -> int:

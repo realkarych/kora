@@ -1,3 +1,5 @@
+import asyncio
+import errno
 import gc
 import json
 import os
@@ -30,6 +32,7 @@ from tests.conformance.lifetime_helpers import (
     release_recovered,
     signal_recovered,
     stop_child,
+    unwind_owned,
 )
 from tests.conformance.test_lifetime_cleanup_controls import (
     close_recovered_test_owner,
@@ -38,6 +41,36 @@ from tests.conformance.test_lifetime_cleanup_controls import (
 from tests.conformance.test_lifetime_io_helper import entered_fifo, read_probe
 from tests.conformance.test_lifetime_pending_helpers import ControlledLifetimeClock
 from tests.conformance.test_parent_lifetime import limits
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_lifetime_unwind_preserves_body_failure_after_cleanup_failure(
+    cancelled: bool,
+) -> None:
+    reading, writing = os.pipe()
+    owned = AsyncExitStack()
+    owned.callback(os.close, reading)
+    owned.callback(os.close, writing)
+    owned.callback(os.close, -1)
+    failure = asyncio.CancelledError() if cancelled else AssertionError("body failure")
+    caught: OSError | None = None
+
+    try:
+        try:
+            raise failure
+        finally:
+            await unwind_owned(owned)
+    except OSError as error:
+        caught = error
+
+    assert caught is not None
+    assert caught.errno == errno.EBADF
+    assert caught.__context__ is failure
+    for descriptor in (reading, writing):
+        with pytest.raises(OSError, match=r"\[Errno 9\]") as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
 
 
 async def observation_closed(
@@ -215,7 +248,7 @@ async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_reco
                 raise
             caught = failure
     finally:
-        await owned.aclose()
+        await unwind_owned(owned)
     stopped = group.stopped
     exited = group.exited
     parent_status = parent.returncode

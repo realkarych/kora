@@ -28,6 +28,7 @@ from tests.conformance.lifetime_helpers import (
     release_recovered,
     signal_recovered,
     stop_child,
+    unwind_owned,
 )
 from tests.conformance.test_lifetime_cleanup_controls import (
     close_recovered_test_owner,
@@ -177,4 +178,4 @@ async def test_recovery_claim_excludes_unpublished_and_crashed_parent_writers(
         assert recovered.inventory().helpers.claim_descriptors == 0
         assert not path.parent.exists()
     finally:
-        await owned.aclose()
+        await unwind_owned(owned)
