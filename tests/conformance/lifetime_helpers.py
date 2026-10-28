@@ -6,7 +6,8 @@ import socket
 import subprocess
 import sys
 import termios
-from contextlib import AsyncExitStack
+from collections.abc import Sequence
+from contextlib import AsyncExitStack, ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -101,6 +102,37 @@ async def stop_child(
     finally:
         anchor.close()
         process.poll()
+
+
+async def stop_io_helper(helper: IOHelper, cleanup: CleanupDeadline) -> None:
+    try:
+        if not helper.closed:
+            deadline = cleanup()
+            assert helper.signal(signal.SIGKILL, deadline)
+            assert await helper.settle(deadline)
+    finally:
+        with ExitStack() as local:
+            local.callback(helper.process.poll)
+            local.callback(helper.anchor.close)
+            local.callback(helper.channel.close)
+            for descriptor in helper.take_descriptors():
+                local.callback(os.close, descriptor)
+
+
+async def join_helper_operation(
+    operation: asyncio.Task[object], observed: Sequence[BaseException] = ()
+) -> None:
+    if operation.done():
+        if not operation.cancelled():
+            error = operation.exception()
+            if error is not None and not any(error is known for known in observed):
+                raise error
+        return
+    operation.cancel()
+    try:
+        await operation
+    except asyncio.CancelledError:
+        assert operation.cancelled()
 
 
 class RetainedHelperGroup:
