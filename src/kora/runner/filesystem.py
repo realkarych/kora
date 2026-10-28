@@ -6,7 +6,7 @@ from typing import Annotated
 from pydantic import Field, StrictStr, field_validator
 
 from kora.protocols.boundary import BoundaryModel
-from kora.protocols.lifetime import Uint32, Uint64
+from kora.protocols.lifetime_records import Uint32, Uint64
 
 
 class FilesystemError(Exception):

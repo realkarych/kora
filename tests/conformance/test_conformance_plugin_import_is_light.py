@@ -108,6 +108,20 @@ def test_fixed_lifetime_helper_imports_no_cel_checker() -> None:
     assert found == []
 
 
+def test_fixed_lifetime_helper_imports_no_parent_lifetime_or_launch_models() -> None:
+    parent_modules = (
+        "kora.protocols.lifetime",
+        "kora.runner.processes",
+        "kora.runner.gate",
+    )
+    found = loaded(
+        "kora.conformance.io_helper",
+        parent_modules,
+    )
+
+    assert set(found).isdisjoint(parent_modules)
+
+
 @pytest.mark.parametrize(
     "module",
     [
@@ -154,3 +168,29 @@ def test_lifetime_public_records_share_protocol_identity_without_runtime_imports
 
     assert result.code == 0, result.stderr
     assert json.loads(result.stdout) == []
+
+
+def test_lifetime_leaf_records_preserve_all_canonical_public_exports() -> None:
+    source = (
+        "from kora import conformance\n"
+        "from kora.protocols import lifetime, lifetime_records\n"
+        "from kora.runner import identity, processes\n"
+        "for name in ('InvocationId', 'ResourceId', 'OperationId', 'Revision', "
+        "'Generation', 'Uint64', 'Uint32', 'ResourceKind', 'ResourceState', "
+        "'LifetimeReason', 'OriginalOutcome', 'LocalRuntimeBinding', "
+        "'ProcessRegistration', 'LocalRuntimeRegistration', "
+        "'TemporaryTreeRegistration', 'BorrowedServiceRegistration', "
+        "'ResourceRegistration'):\n"
+        "    assert getattr(lifetime, name) is getattr(lifetime_records, name)\n"
+        "for name in ('ResourceKind', 'ResourceState', 'LifetimeReason', "
+        "'OriginalOutcome', 'LocalRuntimeBinding', 'ProcessRegistration', "
+        "'LocalRuntimeRegistration', 'TemporaryTreeRegistration', "
+        "'BorrowedServiceRegistration'):\n"
+        "    assert getattr(conformance, name) is getattr(lifetime_records, name)\n"
+        "assert processes.complete_identity is identity.complete_identity\n"
+    )
+
+    result = run_python(["-I", "-c", source], {})
+
+    assert result.code == 0, result.stderr
+    assert result.stdout == b""

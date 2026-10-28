@@ -11,6 +11,13 @@ from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
 
 
+def complete_identity(identity: ProcessIdentity) -> bool:
+    return all(
+        value is not None
+        for value in (identity.host_id, identity.boot_id, identity.pid_namespace)
+    )
+
+
 class IdentityState(StrEnum):
     PRESENT = "present"
     ABSENT = "absent"

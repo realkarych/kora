@@ -37,6 +37,9 @@ from kora.runner.identity import (
     NativeIdentityReader,
     ProcessSnapshot,
 )
+from kora.runner.identity import (
+    complete_identity as complete_identity,
+)
 
 
 class ProcessCondition(StrEnum):
@@ -168,13 +171,6 @@ class ExitAnchor:
             self._queue.close()
             self._queue = None
         self._ready.cancel()
-
-
-def complete_identity(identity: ProcessIdentity) -> bool:
-    return all(
-        value is not None
-        for value in (identity.host_id, identity.boot_id, identity.pid_namespace)
-    )
 
 
 def matches_domain(process: ProcessSnapshot, registration: ProcessRegistration) -> bool:

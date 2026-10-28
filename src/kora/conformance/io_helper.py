@@ -16,7 +16,7 @@ from pydantic import Field, StrictInt, TypeAdapter, ValidationError
 from kora.conformance.journal import JournalSnapshot
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.identity import ProcessIdentity
-from kora.protocols.lifetime import InvocationId, LifetimeReason, Revision
+from kora.protocols.lifetime_records import InvocationId, LifetimeReason, Revision
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import (
     BoundedChannel,
@@ -34,8 +34,7 @@ from kora.runner.filesystem import (
     remove_directory,
     verify_private,
 )
-from kora.runner.identity import IdentityState, NativeIdentityReader
-from kora.runner.processes import ExitAnchor, ProcessError, complete_identity
+from kora.runner.identity import IdentityState, NativeIdentityReader, complete_identity
 
 
 class BootstrapMutation(BoundaryModel):
@@ -113,6 +112,8 @@ class IOHelper:
     def __init__(
         self, process: subprocess.Popen[bytes], endpoint: socket.socket, clock: Clock
     ) -> None:
+        from kora.runner.processes import ExitAnchor
+
         self.process = process
         self.anchor = ExitAnchor(process.pid)
         self.channel = BoundedChannel(endpoint, clock)
@@ -197,6 +198,8 @@ class IOHelper:
         return True
 
     async def settle(self, deadline_ns: int) -> bool:
+        from kora.runner.processes import ProcessError
+
         try:
             await self.anchor.wait(deadline_ns, self.clock)
         except (ChannelError, ProcessError):

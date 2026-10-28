@@ -4,7 +4,7 @@ from pydantic import Field, StrictBool, model_validator
 
 from kora.protocols.boundary import BoundaryModel
 from kora.protocols.identity import ProcessIdentity
-from kora.protocols.lifetime import (
+from kora.protocols.lifetime_records import (
     BorrowedServiceRegistration,
     Generation,
     InvocationId,
