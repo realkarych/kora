@@ -1,8 +1,8 @@
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 from tests.support.observability import ProcessResult, run_python
+from tests.support.provider_distributions import Distribution, write_distribution
 
 PROBE: Path = Path(__file__).with_name("loading_probe.py")
 DISCOVERY_CYCLES: int = 20
@@ -33,13 +33,6 @@ BROKEN_MODULE: str = f'raise ImportError("{SENTINEL}")\n'
 RAISING_MODULE: str = (
     f'def provider() -> object:\n    raise RuntimeError("{SENTINEL}")\n'
 )
-
-
-@dataclass(frozen=True)
-class Distribution:
-    name: str
-    version: str
-    entries: dict[str, str]
 
 
 MAIN: Distribution = Distribution(
@@ -84,25 +77,6 @@ PROVIDERS: dict[str, tuple[str, str]] = {
     "delta_one": ("runtime", "delta"),
     "epsilon": ("runtime", "epsilon"),
 }
-
-
-def write_distribution(site: Path, distribution: Distribution) -> None:
-    folder = site / (
-        f"{distribution.name.replace('-', '_')}-{distribution.version}.dist-info"
-    )
-    folder.mkdir()
-    (folder / "METADATA").write_text(
-        "Metadata-Version: 2.1\n"
-        f"Name: {distribution.name}\n"
-        f"Version: {distribution.version}\n"
-    )
-    lines = [
-        f"{name} = {value}" if value else name
-        for name, value in distribution.entries.items()
-    ]
-    (folder / "entry_points.txt").write_text(
-        "[kora.provider]\n" + "\n".join(lines) + "\n"
-    )
 
 
 def write_modules(site: Path) -> None:
