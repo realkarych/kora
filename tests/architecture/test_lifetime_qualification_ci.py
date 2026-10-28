@@ -202,6 +202,7 @@ def test_installed_lifetime_shards_keep_their_own_budget_and_evidence() -> None:
     assert measurement[-1] == (
         "KORA_MEASUREMENT_OUTPUT="
         "$PWD/measurements/conformance-lifetime-${{matrix.run}}/report.json",
+        "exec",
         "uv",
         "run",
         "--no-sync",

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -139,7 +140,7 @@ def measure_listing(output: Path) -> None:
         sidecar["seconds"] = time.monotonic() - started
         sidecar["remaining_qualification_seconds"] = deadline - time.monotonic()
         (output.parent / "listing.json").write_text(json.dumps(sidecar, sort_keys=True))
-        if time.monotonic() >= deadline:
+        if time.monotonic() >= deadline and sys.exception() is None:
             raise TimeoutError(
                 "listing evidence publication exceeded qualification deadline"
             )

@@ -8,6 +8,7 @@ import pytest
 from kora.ir.json import JsonObject
 from tests.measurements.command_measurement import publish_command
 from tests.measurements.lifetime_cohorts import Cohort
+from tests.measurements.lifetime_evidence import PARENT_EXIT, ParentResult
 
 
 def test_command_evidence_preserves_later_cohorts_and_original_failure(
@@ -26,6 +27,11 @@ def test_command_evidence_preserves_later_cohorts_and_original_failure(
             home = root / f"kora-life-{index:08}"
             home.mkdir(mode=0o700)
             (parent / "home.txt").write_text(str(home))
+            (parent / PARENT_EXIT).write_text(
+                ParentResult(
+                    pid=4000 + index, returncode=0, reaped=True
+                ).model_dump_json()
+            )
             cohorts.append(Cohort((), home, parent))
         (cohorts[0].folder / "home.txt").unlink()
         (cohorts[1].home / "journal").write_text("retained")

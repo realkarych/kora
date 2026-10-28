@@ -73,7 +73,7 @@ jobs:
           mkdir -m 700 measurements/conformance-lifetime
           printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_LIFETIME_CHECKOUT_REVISION" "$KORA_MEASUREMENT_REVISION" > measurements/conformance-lifetime/source-revision.txt
           KORA_MEASUREMENT_OUTPUT="$PWD/measurements/conformance-lifetime/report.json" \
-            uv run --no-sync pytest -q -p no:logging -m measurement --junitxml=measurements/conformance-lifetime/tests.xml tests/measurements/test_conformance_lifetime.py::test_conformance_fixture_resources_are_released
+            exec uv run --no-sync pytest -q -p no:logging -m measurement --junitxml=measurements/conformance-lifetime/tests.xml tests/measurements/test_conformance_lifetime.py::test_conformance_fixture_resources_are_released
       - name: Preserve lifetime raw data and retained roots
         id: lifetime_evidence
         if: ${{ always() && steps.lifetime_measurement.outcome != 'skipped' }}
@@ -186,7 +186,7 @@ jobs:
           mkdir -m 700 measurements/conformance-lifetime-${{ matrix.run }}
           printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_LIFETIME_CHECKOUT_REVISION" "$KORA_MEASUREMENT_REVISION" > measurements/conformance-lifetime-${{ matrix.run }}/source-revision.txt
           KORA_MEASUREMENT_OUTPUT="$PWD/measurements/conformance-lifetime-${{ matrix.run }}/report.json" \
-            uv run --no-sync pytest -q -p no:logging -m measurement ${{ matrix.pytest-arguments }} --junitxml=measurements/conformance-lifetime-${{ matrix.run }}/tests.xml
+            exec uv run --no-sync pytest -q -p no:logging -m measurement ${{ matrix.pytest-arguments }} --junitxml=measurements/conformance-lifetime-${{ matrix.run }}/tests.xml
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: lifetime_upload
         if: ${{ always() && steps.lifetime_measurement.outcome != 'skipped' }}

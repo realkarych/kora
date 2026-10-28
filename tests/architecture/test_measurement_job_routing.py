@@ -61,6 +61,7 @@ MATRIX_PRODUCER = "ir-measurements"
 INSTALLED_LIFETIME = "installed-qualification"
 GATED_JOBS = (*PRODUCER_JOBS, INSTALLED_LIFETIME)
 SHARDED_MEASUREMENT = "tests/measurements/test_conformance_lifetime.py"
+LIFETIME_JOBS = frozenset(table(workflow_document("conformance-lifetime.yml")["jobs"]))
 GATE = "required_measurements"
 CANCELLATION = "workflow_cancellation"
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +73,7 @@ MATRIX_ARGUMENTS = "${{matrix.pytest-arguments}}"
 EVIDENCE_PATH = r"measurements/(?:[A-Za-z0-9_./-]|\$\{\{matrix\.run\}\})+"
 PINNED_MEASUREMENT_COMMAND = re.compile(
     rf"(?:KORA_MEASUREMENT_OUTPUT=(?:\$PWD/)?{EVIDENCE_PATH} )?"
+    r"(?P<replacing>exec )?"
     r"uv run --no-sync pytest -q(?: -p no:logging)? -m measurement"
     rf"(?: (?P<matrix>{re.escape(MATRIX_ARGUMENTS)}))?"
     rf"(?: --junitxml={EVIDENCE_PATH})?"
@@ -406,6 +408,7 @@ def test_lifetime_qualification_is_separate_and_preserves_its_evidence() -> None
         ),
         (
             f"KORA_MEASUREMENT_OUTPUT=$PWD/{evidence}/report.json",
+            "exec",
             *PYTEST,
             "-q",
             "-p",
@@ -640,12 +643,15 @@ def selected_modules(line: tuple[str, ...], arguments: tuple[str, ...]) -> set[s
     return set(MEASUREMENT_MODULE.findall(" ".join((*line, *matrix))))
 
 
-def is_pinned_measurement_command(line: tuple[str, ...]) -> bool:
+def is_pinned_measurement_command(
+    line: tuple[str, ...], *, replaces_shell: bool
+) -> bool:
     pinned = PINNED_MEASUREMENT_COMMAND.fullmatch(" ".join(line))
     return (
         pinned is not None
         and not any(AMBIGUOUS_WORD.search(word) for word in line)
         and bool(pinned["matrix"] or pinned["modules"])
+        and (pinned["replacing"] is not None) is replaces_shell
     )
 
 
@@ -671,7 +677,34 @@ def test_only_the_sharded_module_may_be_routed_by_test_node(
 ) -> None:
     command = f"uv run --no-sync pytest -q -p no:logging -m measurement {selection}"
 
-    accepted = is_pinned_measurement_command(command_lines(command)[0])
+    accepted = is_pinned_measurement_command(
+        command_lines(command)[0], replaces_shell=False
+    )
+
+    assert accepted is pinned
+
+
+@pytest.mark.parametrize(
+    ("prefix", "replaces_shell", "pinned"),
+    [
+        ("exec ", True, True),
+        ("", True, False),
+        ("exec ", False, False),
+        ("", False, True),
+    ],
+)
+def test_only_lifetime_measurements_replace_their_step_shell(
+    prefix: str, replaces_shell: bool, pinned: bool
+) -> None:
+    command = (
+        "KORA_MEASUREMENT_OUTPUT=$PWD/measurements/conformance-lifetime/report.json "
+        f"{prefix}uv run --no-sync pytest -q -p no:logging -m measurement "
+        f"{SHARDED_MEASUREMENT}::test_conformance_fixture_resources_are_released"
+    )
+
+    accepted = is_pinned_measurement_command(
+        command_lines(command)[0], replaces_shell=replaces_shell
+    )
 
     assert accepted is pinned
 
@@ -702,7 +735,10 @@ def test_original_resource_and_cel_commands_keep_their_artifacts() -> None:
         for module in selected_modules(line, arguments)
     ]
 
-    assert all(is_pinned_measurement_command(line) for _, _, line, _ in lines)
+    assert all(
+        is_pinned_measurement_command(line, replaces_shell=job_id in LIFETIME_JOBS)
+        for job_id, _, line, _ in lines
+    )
     assert sorted(routes) == sorted(
         [*(measurement_modules() - routed_elsewhere), SHARDED_MEASUREMENT]
     )
