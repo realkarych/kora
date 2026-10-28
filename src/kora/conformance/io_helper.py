@@ -27,10 +27,13 @@ from kora.runner.channels import (
 from kora.runner.filesystem import (
     DirectoryAnchor,
     DirectoryIdentity,
+    FileCapacityError,
     FilesystemError,
     create_directory,
     file_identity,
     identity_of,
+    open_private_file,
+    read_private_file,
     remove_directory,
     verify_private,
 )
@@ -320,17 +323,11 @@ def establish_state_root() -> DirectoryAnchor:
 
 
 def open_claim(directory: DirectoryAnchor, name: str) -> int:
-    descriptor = os.open(
-        name,
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-        0o600,
-        dir_fd=directory.descriptor,
-    )
+    descriptor = open_private_file(directory, name, os.O_RDWR | os.O_CREAT)
     try:
-        verify_private(descriptor, directory=False)
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return descriptor
-    except (OSError, FilesystemError):
+    except OSError:
         os.close(descriptor)
         raise
 
@@ -641,22 +638,11 @@ async def serve_mutation(endpoint: socket.socket, descriptors: tuple[int, ...]) 
 
 def read_journal(directory: DirectoryAnchor) -> JournalSnapshot:
     directory.verify()
-    descriptor = os.open(
-        "journal",
-        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
-        dir_fd=directory.descriptor,
-    )
     try:
-        verify_private(descriptor, directory=False)
-        result = bytearray()
-        while len(result) <= 1048576:
-            chunk = os.read(descriptor, min(65536, 1048577 - len(result)))
-            if not chunk:
-                return JournalSnapshot.model_validate_json(result)
-            result.extend(chunk)
-        raise HelperError(LifetimeReason.CAPACITY_EXCEEDED)
-    finally:
-        os.close(descriptor)
+        encoded = read_private_file(directory, "journal", 1048576)
+    except FileCapacityError:
+        raise HelperError(LifetimeReason.CAPACITY_EXCEEDED) from None
+    return JournalSnapshot.model_validate_json(encoded)
 
 
 def main() -> int:
