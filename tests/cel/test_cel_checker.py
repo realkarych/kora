@@ -549,6 +549,11 @@ INTEGER_NEGATIONS: list[tuple[str, str]] = [
         "[inputs.bundle.count].all(n, (((0 - n) < 0) && "
         "({(0 - n): (0 - n)}.size() == 1)))",
     ),
+    (
+        "(inputs.bundle.count > 0 ? inputs.bundle.count : -inputs.bundle.count) > 0",
+        "(((inputs.bundle.count > 0) ? inputs.bundle.count : "
+        "(0 - inputs.bundle.count)) > 0)",
+    ),
     ("-inputs.bundle.cpu < -0.0", "((-inputs.bundle.cpu) < -0.0)"),
     ("-double(payload.m) < 0.0", "((-double(payload.m)) < 0.0)"),
 ]
@@ -566,3 +571,14 @@ def test_cel_typed_rendering_rewrites_integer_negation(
     assert typed_check.rendering == rendering
     assert parse(typed_check.rendering, RENDERING_LIMITS) == typed_check.tree
     assert untyped_check.tree == parse(source)
+
+
+def test_cel_typed_estimate_is_of_the_rewritten_tree() -> None:
+    negated = check_typed("-inputs.bundle.count < 0", environment())
+    subtracted = check_typed("0 - inputs.bundle.count < 0", environment())
+
+    assert isinstance(negated, CheckedExpression)
+    assert isinstance(subtracted, CheckedExpression)
+    assert negated.tree == subtracted.tree
+    assert negated.rendering == subtracted.rendering
+    assert negated.estimate == subtracted.estimate

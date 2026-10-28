@@ -2,17 +2,24 @@ from kora.cel.meter import Meter
 from kora.cel.tree import (
     Binary,
     BinaryOperator,
+    BoolLiteral,
+    BytesLiteral,
     Call,
     Comprehension,
     Conditional,
+    DoubleLiteral,
     Has,
+    Identifier,
     Index,
     IntLiteral,
     ListLiteral,
     MapEntry,
     MapLiteral,
     Node,
+    NullLiteral,
     Select,
+    StringLiteral,
+    UintLiteral,
     Unary,
 )
 
@@ -80,7 +87,16 @@ class NegationRewriter:
                 return Comprehension(
                     macro, self.node(range_), variable, self.nodes(arguments), offset
                 )
-            case _:
+            case (
+                IntLiteral()
+                | UintLiteral()
+                | DoubleLiteral()
+                | StringLiteral()
+                | BytesLiteral()
+                | BoolLiteral()
+                | NullLiteral()
+                | Identifier()
+            ):
                 return node
 
 

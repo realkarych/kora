@@ -356,19 +356,41 @@ def test_cel_typed_limits_at_boundary_compile_in_binding(
 
     checked = check_typed(source, environment)
     deeper = check_typed(f"({source})", environment)
+    rendering = checked.rendering if isinstance(checked, CheckedExpression) else ""
+    compiled = outcome(cel_binding, partial(cel_binding.native_compile, rendering))
+    result = outcome(
+        cel_binding,
+        lambda: cel_binding.native_compile(rendering).execute(dict(context)),
+    )
 
     assert isinstance(checked, CheckedExpression), checked
     assert isinstance(deeper, Diagnostic)
     assert deeper.reason is Reason.DEPTH
-    compiled = outcome(
-        cel_binding, partial(cel_binding.native_compile, checked.rendering)
-    )
-    result = outcome(
-        cel_binding,
-        lambda: cel_binding.native_compile(checked.rendering).execute(dict(context)),
-    )
     assert is_value(compiled)
     assert is_value(result), result
+
+
+def test_cel_widest_typed_negation_compiles_in_binding(cel_binding: Binding) -> None:
+    count = (MAX_CODE_POINTS - 7) // 3
+    source = "[" + ",".join(["-n"] * count) + "] == []"
+    environment = typed_environment(NUMBER, ResultKind.BOOL)
+    minimum: dict[str, JsonValue] = {"n": -9223372036854775808}
+
+    checked = check_typed(source, environment)
+    rendering = checked.rendering if isinstance(checked, CheckedExpression) else ""
+    ordinary = outcome(
+        cel_binding,
+        lambda: cel_binding.native_compile(rendering).execute({"n": 7}),
+    )
+    overflowing = outcome(
+        cel_binding,
+        lambda: cel_binding.native_compile(rendering).execute(dict(minimum)),
+    )
+
+    assert len(source) <= MAX_CODE_POINTS
+    assert isinstance(checked, CheckedExpression)
+    assert ordinary == ("bool", "False")
+    assert overflowing == ("error", "OverflowError")
 
 
 @pytest.mark.parametrize("case", sorted(AT_THE_LIMITS))

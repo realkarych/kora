@@ -13,7 +13,16 @@ from kora.cel import (
     check_typed,
 )
 from kora.cel.checked import SEAL
-from kora.cel.types import BOOL, DOUBLE, DYN, INT, CelType, Record, RecordField
+from kora.cel.types import (
+    BOOL,
+    DOUBLE,
+    DYN,
+    INT,
+    CelType,
+    Nullable,
+    Record,
+    RecordField,
+)
 from kora.cel_eval.binding import load_binding
 from tests.cel_eval.test_cel_conversion import expression, no_documents
 
@@ -266,7 +275,8 @@ def test_cel_schema_typed_fr_2_5_example_evaluates(cpu: int, expected: bool) -> 
 
 MINIMUM_INT: int = -9223372036854775808
 NUMBERS: Environment = Environment(
-    {"n": Variable(INT), "d": Variable(DOUBLE)}, ResultKind.BOOL
+    {"n": Variable(INT), "d": Variable(DOUBLE), "o": Variable(Nullable(INT))},
+    ResultKind.BOOL,
 )
 
 
@@ -281,6 +291,7 @@ NUMBERS: Environment = Environment(
         ("-n == 9223372036854775807", MINIMUM_INT + 1, True),
         ("-n == -5 && -(-n) == 5", 5, True),
         ("1.0 / -d < 0.0 && string(-d) == '-0'", 0, True),
+        ("-o == 0", 0, "no_overload"),
     ],
 )
 def test_cel_typed_negation_of_minimum_int_overflows(
@@ -294,8 +305,8 @@ def test_cel_typed_negation_of_minimum_int_overflows(
 
     result = machine.evaluate(
         checked,
-        {"n": value, "d": 0.0},
-        {"n": INT, "d": DOUBLE},
+        {"n": value, "d": 0.0, "o": None},
+        {"n": INT, "d": DOUBLE, "o": Nullable(INT)},
         ErrorContext("when"),
         ResultType.BOOL,
     )
