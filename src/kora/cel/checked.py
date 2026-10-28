@@ -4,7 +4,15 @@ from types import MappingProxyType
 from typing import Final
 
 from kora.cel.checker import Environment, check_types
-from kora.cel.cost import Estimate, ValueBound, Variable, check_environment, estimate
+from kora.cel.cost import (
+    Estimate,
+    PreparedCost,
+    ValueBound,
+    Variable,
+    check_environment,
+    estimate,
+    prepare_cost,
+)
 from kora.cel.diagnostics import Diagnostic, DiagnosticError
 from kora.cel.meter import Meter
 from kora.cel.parser import parse
@@ -65,6 +73,32 @@ class CheckedExpression:
 SEAL: Final[object] = object()
 
 
+class PreparedEnvironment:
+    __slots__ = ("_cost", "_environment")
+
+    def __init__(
+        self, seal: object, environment: Environment, cost: PreparedCost
+    ) -> None:
+        if seal is not SEAL:
+            raise TypeError("prepared environments come only from kora.cel.prepare")
+        self._environment: Environment = environment
+        self._cost: PreparedCost = cost
+
+    def check(self, source: str, meter: Meter) -> CheckedExpression | Diagnostic:
+        return typed_check(source, self._environment, meter, self._cost)
+
+
+def prepare(
+    environment: Environment, meter: Meter | None = None
+) -> PreparedEnvironment:
+    used = meter if meter is not None else Meter()
+    cost = prepare_cost(environment.variables, used)
+    snapshot = Environment(
+        dict(environment.variables), environment.result, environment.selection_only
+    )
+    return PreparedEnvironment(SEAL, snapshot, cost)
+
+
 def check(
     source: str,
     environment: Mapping[str, Variable] | None = None,
@@ -83,14 +117,32 @@ def check(
 
 
 def check_typed(
-    source: str, environment: Environment, meter: Meter | None = None
+    source: str,
+    environment: Environment | PreparedEnvironment,
+    meter: Meter | None = None,
 ) -> CheckedExpression | Diagnostic:
     used = meter if meter is not None else Meter()
+    if isinstance(environment, PreparedEnvironment):
+        return environment.check(source, used)
+    return typed_check(source, environment, used)
+
+
+def typed_check(
+    source: str,
+    environment: Environment,
+    used: Meter,
+    prepared: PreparedCost | None = None,
+) -> CheckedExpression | Diagnostic:
     try:
-        check_environment(environment.variables)
-        tree = check_types(parse(source, meter=used), environment, used)
+        if prepared is None:
+            check_environment(environment.variables)
+        tree = check_types(
+            parse(source, meter=used), environment, used, prepared is not None
+        )
         rendering = canonical_rendering(tree, used)
-        cost = estimate(tree, len(rendering), environment.variables, meter=used)
+        cost = estimate(
+            tree, len(rendering), environment.variables, meter=used, prepared=prepared
+        )
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()

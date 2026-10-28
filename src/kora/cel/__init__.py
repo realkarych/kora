@@ -1,4 +1,11 @@
-from kora.cel.checked import CheckedExpression, check, check_path, check_typed
+from kora.cel.checked import (
+    CheckedExpression,
+    PreparedEnvironment,
+    check,
+    check_path,
+    check_typed,
+    prepare,
+)
 from kora.cel.checker import Environment, ResultKind
 from kora.cel.cost import (
     DATA_BOUND,
@@ -32,6 +39,7 @@ __all__ = [
     "JsonValue",
     "Path",
     "Position",
+    "PreparedEnvironment",
     "Reason",
     "Resolver",
     "ResultKind",
@@ -44,5 +52,6 @@ __all__ = [
     "check",
     "check_path",
     "check_typed",
+    "prepare",
     "resolve",
 ]

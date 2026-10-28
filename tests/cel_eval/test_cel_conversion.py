@@ -4,7 +4,16 @@ from collections.abc import Mapping
 
 import pytest
 
-from kora.cel import CheckedExpression, JsonValue, SchemaTypes, check
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    JsonValue,
+    ResultKind,
+    SchemaTypes,
+    check,
+    check_typed,
+    prepare,
+)
 from kora.cel.types import (
     BOOL,
     DOUBLE,
@@ -20,14 +29,22 @@ from kora.cel.types import (
 )
 
 
-def test_cel_binding_uses_the_estimated_cyclic_bound() -> None:
+@pytest.mark.parametrize("prepared", [False, True])
+def test_cel_binding_uses_the_estimated_cyclic_bound(prepared: bool) -> None:
     from kora.cel.cost import ValueBound, Variable
     from kora.cel_eval.convert import BoundValues, bind
 
     fields: dict[str, ValueBound] = {}
     bound = ValueBound(4096, 256, 1, 16384, fields=fields)
     fields["self"] = bound
-    checked = check("v.self == v.self", {"v": Variable(DYN, bound)})
+    variables = {"v": Variable(DYN, bound)}
+    checked = (
+        check_typed(
+            "v.self == v.self", prepare(Environment(variables, ResultKind.BOOL))
+        )
+        if prepared
+        else check("v.self == v.self", variables)
+    )
     assert isinstance(checked, CheckedExpression)
 
     result = bind(checked, {"v": {"self": {"a": 1, "b": 2}}}, {"v": DYN})
@@ -402,8 +419,9 @@ DECLARED_VALUES: list[tuple[str, JsonValue, JsonValue, bool]] = [
     [(schema, value, admitted) for _, schema, value, admitted in DECLARED_VALUES],
     ids=[name for name, _, _, _ in DECLARED_VALUES],
 )
+@pytest.mark.parametrize("prepared", [False, True])
 async def test_cel_binding_refuses_data_over_declared_bounds(
-    schema: JsonValue, value: JsonValue, admitted: bool
+    schema: JsonValue, value: JsonValue, admitted: bool, prepared: bool
 ) -> None:
     from kora.cel_eval.convert import BoundValues, bind
     from kora.cel_eval.errors import ErrorContext, ErrorKind, EvaluationError
@@ -411,7 +429,12 @@ async def test_cel_binding_refuses_data_over_declared_bounds(
     from tests.cel_eval.test_cel_evaluation import clock
 
     variable = SchemaTypes(no_documents).variable(schema)
-    bounded = check("v == v", {"v": variable})
+    variables = {"v": variable}
+    bounded = (
+        check_typed("v == v", prepare(Environment(variables, ResultKind.BOOL)))
+        if prepared
+        else check("v == v", variables)
+    )
     unbounded = expression("v == v")
     assert isinstance(bounded, CheckedExpression)
     evaluator = Evaluator(clock)

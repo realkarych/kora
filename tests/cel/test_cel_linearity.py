@@ -2,6 +2,7 @@ from collections.abc import Callable
 
 import pytest
 
+import kora.cel as cel
 from kora.cel import Environment, ResultKind, ValueBound, Variable, check, check_typed
 from kora.cel.meter import Meter
 from kora.cel.types import DYN, INT, Record, RecordField
@@ -172,3 +173,65 @@ def test_cel_typed_check_is_linear_in_steps(family: str) -> None:
         assert count <= TYPED_STEPS_PER_CODE_POINT * len(source)
     for smaller, larger in zip(counts, counts[1:], strict=False):
         assert larger <= 2.5 * smaller
+
+
+@pytest.mark.parametrize("width", [128, 512, 2048])
+@pytest.mark.parametrize("expressions", [16, 64, 256])
+def test_cel_prepared_environment_checks_expressions_in_linear_steps(
+    width: int, expressions: int
+) -> None:
+    record = Record({f"f{index}": RecordField(INT, True) for index in range(width)})
+    environment = Environment({"r": Variable(record)}, ResultKind.BOOL)
+    meter = Meter()
+
+    prepared = cel.prepare(environment, meter)
+    preparation = meter.steps
+    outcomes = [
+        check_typed(f"r.f{index % width} > 0", prepared, meter)
+        for index in range(expressions)
+    ]
+
+    assert all(isinstance(outcome, cel.CheckedExpression) for outcome in outcomes)
+    assert width <= preparation <= 4 * width + 64
+    assert meter.steps - preparation <= 256 * expressions
+
+
+@pytest.mark.parametrize("width", [128, 512])
+def test_cel_prepared_environment_counts_each_referenced_bound_union(
+    width: int,
+) -> None:
+    leaf = ValueBound(bytes=10, values=1, items=0, string_bytes=0)
+    bound = ValueBound(
+        bytes=4096,
+        values=256,
+        items=1000,
+        string_bytes=0,
+        fields={f"f{index}": leaf for index in range(width)},
+    )
+    environment = Environment(
+        {"a": Variable(DYN, bound), "b": Variable(DYN, bound)}, ResultKind.BOOL
+    )
+    meter = Meter()
+    prepared = cel.prepare(environment, meter)
+    preparation = meter.steps
+
+    outcomes = [check_typed("a == b", prepared, meter) for _ in range(16)]
+
+    assert all(isinstance(outcome, cel.CheckedExpression) for outcome in outcomes)
+    assert width <= preparation <= 16 * width + 128
+    assert 16 * width <= meter.steps - preparation <= 16 * (16 * width + 128)
+
+
+def test_cel_preparation_visits_shared_types_once_across_variables() -> None:
+    width = 2048
+    record = Record({f"f{index}": RecordField(INT, True) for index in range(width)})
+    variables = {f"v{index}": Variable(record) for index in range(128)}
+    meter = Meter()
+
+    prepared = cel.prepare(Environment(variables, ResultKind.BOOL), meter)
+    preparation = meter.steps
+    checked = check_typed("v0.f0 > 0", prepared, meter)
+
+    assert isinstance(checked, cel.CheckedExpression)
+    assert width <= preparation <= 4 * width + 32 * len(variables)
+    assert meter.steps - preparation <= 256

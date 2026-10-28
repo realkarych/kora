@@ -10,8 +10,18 @@ from tests.cel_eval.test_cel_evaluation import clock
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["validate", "evaluate"])
-async def test_cel_admission_charges_retained_bound_metadata(operation: str) -> None:
-    from kora.cel import CheckedExpression, check
+@pytest.mark.parametrize("prepared", [False, True])
+async def test_cel_admission_charges_retained_bound_metadata(
+    operation: str, prepared: bool
+) -> None:
+    from kora.cel import (
+        CheckedExpression,
+        Environment,
+        ResultKind,
+        check,
+        check_typed,
+        prepare,
+    )
     from kora.cel.cost import ValueBound, Variable
     from kora.cel.types import DYN
     from kora.cel_eval.binding import load_binding
@@ -19,7 +29,12 @@ async def test_cel_admission_charges_retained_bound_metadata(operation: str) -> 
 
     fields = {str(index): ValueBound(4096, 256, 1, 16384) for index in range(128)}
     bound = ValueBound(4096, 256, 1000, 16384, fields=fields)
-    checked = check("v == v", {"v": Variable(DYN, bound)})
+    variables = {"v": Variable(DYN, bound)}
+    checked = (
+        check_typed("v == v", prepare(Environment(variables, ResultKind.BOOL)))
+        if prepared
+        else check("v == v", variables)
+    )
     small = check("v == v", {"v": Variable(DYN)})
     assert isinstance(checked, CheckedExpression)
     assert isinstance(small, CheckedExpression)

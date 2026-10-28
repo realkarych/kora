@@ -12,14 +12,17 @@ from kora.cel import (
     CheckedExpression,
     Code,
     Diagnostic,
+    Environment,
     Estimate,
     JsonValue,
     Reason,
+    ResultKind,
     SchemaTypes,
     ValueBound,
     Variable,
     Weights,
     check,
+    prepare,
 )
 from kora.cel.cost import estimate
 from kora.cel.diagnostics import DiagnosticError
@@ -811,9 +814,16 @@ MALFORMED_BOUNDS: list[MalformedLeg] = [
 @pytest.mark.parametrize(
     "leg", MALFORMED_BOUNDS, ids=[leg.name for leg in MALFORMED_BOUNDS]
 )
-def test_cel_cost_estimate_refuses_malformed_bounds(leg: MalformedLeg) -> None:
-    with pytest.raises(BoundError, match=leg.message):
-        check(leg.source, leg.environment)
+@pytest.mark.parametrize("prepared", [False, True])
+def test_cel_cost_estimate_refuses_malformed_bounds(
+    leg: MalformedLeg, prepared: bool
+) -> None:
+    if prepared:
+        with pytest.raises(BoundError, match=leg.message):
+            prepare(Environment(leg.environment, ResultKind.BOOL))
+    else:
+        with pytest.raises(BoundError, match=leg.message):
+            check(leg.source, leg.environment)
 
 
 def test_cel_cost_estimate_does_not_examine_unreferenced_variables() -> None:

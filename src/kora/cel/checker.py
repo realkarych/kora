@@ -245,7 +245,9 @@ def literal_key(node: Node) -> tuple[str, object] | None:
 
 
 class Checker:
-    def __init__(self, environment: Environment, meter: Meter) -> None:
+    def __init__(
+        self, environment: Environment, meter: Meter, validated: bool = False
+    ) -> None:
         self.environment: Environment = environment
         self.meter: Meter = meter
         self.scopes: dict[str, Typed] = {}
@@ -253,6 +255,7 @@ class Checker:
         self.facts: dict[int, int] = {}
         self.scope_count: int = 0
         self.checked: set[str] = set()
+        self.validated: bool = validated
         self.integer_negations: set[int] = set()
 
     def key(self, parent: int | None, step: Step | None) -> int | None:
@@ -311,7 +314,7 @@ class Checker:
     def variable_type(self, name: str, variable: object) -> CelType:
         if not isinstance(variable, Variable) or not is_variable(variable):
             raise BoundError("an environment entry is not a variable")
-        if name not in self.checked:
+        if not self.validated and name not in self.checked:
             check_type(variable.type, self.meter)
             self.checked.add(name)
         return variable.type
@@ -630,8 +633,10 @@ def ordered(left: CelType, right: CelType) -> bool:
     return kinds[0] is kinds[1] and kinds[0] in ORDERED
 
 
-def check_types(tree: Node, environment: Environment, meter: Meter) -> Node:
-    checker = Checker(environment, meter)
+def check_types(
+    tree: Node, environment: Environment, meter: Meter, validated: bool = False
+) -> Node:
+    checker = Checker(environment, meter, validated)
     result = checker.visit(tree).type
     expected = Kind.BOOL if environment.result is ResultKind.BOOL else Kind.STRING
     if not isinstance(result, Dyn) and (

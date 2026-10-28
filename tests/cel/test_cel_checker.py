@@ -1,8 +1,10 @@
 from types import MappingProxyType
 from typing import cast
+from weakref import ReferenceType, ref
 
 import pytest
 
+import kora.cel as cel
 from kora.cel import (
     BoundError,
     CheckedExpression,
@@ -18,7 +20,7 @@ from kora.cel import (
     check_typed,
 )
 from kora.cel.parser import RENDERING_LIMITS, parse
-from kora.cel.types import DYN, CelType, Record, RecordField
+from kora.cel.types import DYN, INT, STRING, CelType, Record, RecordField
 
 FORM: JsonValue = {
     "type": "object",
@@ -520,7 +522,8 @@ def test_cel_accepts_well_typed_expressions(
     assert isinstance(result, CheckedExpression), result
 
 
-def test_cel_typed_check_refuses_malformed_environments() -> None:
+@pytest.mark.parametrize("prepared", [False, True])
+def test_cel_typed_check_refuses_malformed_environments(prepared: bool) -> None:
     proxied = Environment(
         cast("dict[str, Variable]", MappingProxyType({"v": Variable(DYN)})),
         ResultKind.BOOL,
@@ -528,9 +531,9 @@ def test_cel_typed_check_refuses_malformed_environments() -> None:
     listed = Environment(cast("dict[str, Variable]", [Variable(DYN)]), ResultKind.BOOL)
 
     with pytest.raises(BoundError, match="not a plain dict"):
-        check_typed("v == 1", proxied)
+        check_typed("v == 1", cel.prepare(proxied) if prepared else proxied)
     with pytest.raises(BoundError, match="not a plain dict"):
-        check_typed("v == 1", listed)
+        check_typed("v == 1", cel.prepare(listed) if prepared else listed)
 
 
 INTEGER_NEGATIONS: list[tuple[str, str]] = [
@@ -557,6 +560,134 @@ INTEGER_NEGATIONS: list[tuple[str, str]] = [
     ("-inputs.bundle.cpu < -0.0", "((-inputs.bundle.cpu) < -0.0)"),
     ("-double(payload.m) < 0.0", "((-double(payload.m)) < 0.0)"),
 ]
+
+
+@pytest.mark.parametrize(
+    ("source", "result_kind"),
+    WELL_TYPED
+    + [(source, ResultKind.BOOL) for source, _ in INTEGER_NEGATIONS]
+    + [(source, ResultKind.BOOL) for source in OVERLOADS]
+    + [
+        (source, ResultKind.BOOL)
+        for source, _ in ENUM_LITERALS + MIXED_NUMBERS + OPTIONAL_READS + STRING_SIZES
+    ]
+    + [("missing == 1", ResultKind.BOOL), ("((", ResultKind.BOOL)],
+)
+def test_cel_prepared_environment_matches_unprepared_checks(
+    source: str, result_kind: ResultKind
+) -> None:
+    original = environment(result_kind)
+    prepared = cel.prepare(original)
+
+    ordinary = check_typed(source, original)
+    reused = check_typed(source, prepared)
+
+    if isinstance(ordinary, Diagnostic):
+        assert reused == ordinary
+    else:
+        assert isinstance(reused, CheckedExpression)
+        assert reused.tree == ordinary.tree
+        assert reused.rendering == ordinary.rendering
+        assert reused.digest == ordinary.digest
+        assert reused.estimate == ordinary.estimate
+
+
+def test_cel_prepared_environment_is_sealed_and_snapshots_variable_mapping() -> None:
+    from kora.cel.cost import PreparedCost
+
+    variables = {"v": Variable(INT)}
+    original = Environment(variables, ResultKind.BOOL)
+    prepared = cel.prepare(original)
+    variables["v"] = Variable(STRING)
+    variables["new"] = Variable(INT)
+
+    checked = check_typed("v > 0", prepared)
+    added = check_typed("new > 0", prepared)
+    with pytest.raises(TypeError, match="only from kora.cel.prepare"):
+        cel.PreparedEnvironment(object(), original, cast("PreparedCost", object()))
+
+    assert isinstance(checked, CheckedExpression)
+    assert isinstance(added, Diagnostic)
+    assert added.reason is Reason.UNKNOWN_IDENTIFIER
+
+
+def test_cel_preparation_refuses_an_invalid_unused_variable() -> None:
+    variables = {"v": Variable(INT), "unused": Variable(cast("CelType", "invalid"))}
+    original = Environment(variables, ResultKind.BOOL)
+
+    checked = check_typed("v > 0", original)
+
+    assert isinstance(checked, CheckedExpression)
+    with pytest.raises(BoundError, match="not a CEL type"):
+        cel.prepare(original)
+
+
+@pytest.mark.parametrize("depth", [0, 31, 32, 33, 65])
+@pytest.mark.parametrize("cyclic", [False, True])
+def test_cel_prepared_environment_preserves_normalized_bounds_and_charges(
+    depth: int, cyclic: bool
+) -> None:
+    leaf = cel.ValueBound(10, 1, 0, 0)
+    fields: dict[str, cel.ValueBound] = {"leaf": leaf}
+    bound = cel.ValueBound(4096, 256, 1000, 16384, fields=fields)
+    if cyclic:
+        fields["cycle"] = bound
+    for _ in range(depth):
+        bound = cel.ValueBound(4096, 256, 1000, 16384, element=bound)
+    original = Environment(
+        {"a": Variable(DYN, bound), "b": Variable(DYN, bound), "unused": Variable(DYN)},
+        ResultKind.BOOL,
+    )
+    prepared = cel.prepare(original)
+    sources = ["a == a", "a == b", "b == b", "true"]
+
+    pairs = [
+        (check_typed(source, original), check_typed(source, prepared))
+        for source in sources
+    ]
+
+    for ordinary, reused in pairs:
+        assert isinstance(ordinary, CheckedExpression)
+        assert isinstance(reused, CheckedExpression)
+        assert reused.estimate == ordinary.estimate
+        assert reused.bounds == ordinary.bounds
+    single = pairs[0][1]
+    combined = pairs[1][1]
+    repeated = check_typed("a == a", prepared)
+    assert isinstance(single, CheckedExpression)
+    assert isinstance(combined, CheckedExpression)
+    assert isinstance(repeated, CheckedExpression)
+    assert single.bounds["a"] is repeated.bounds["a"]
+    assert combined.bounds["a"] is not combined.bounds["b"]
+    assert "unused" not in combined.bounds
+    if depth == 0 and not cyclic:
+        assert single.bound_bytes == 2728
+        assert combined.bound_bytes == 4176
+    with pytest.raises(TypeError):
+        cast("dict[str, cel.ValueBound]", single.bounds)["a"] = leaf
+    with pytest.raises(TypeError):
+        cast("dict[str, cel.ValueBound]", single.bounds["a"].fields)["new"] = leaf
+
+
+def detached_prepared_expression() -> tuple[
+    CheckedExpression, ReferenceType[Record], ReferenceType[cel.ValueBound]
+]:
+    record = Record({"n": RecordField(INT, True)})
+    bound = cel.ValueBound(4096, 256, 1000, 16384)
+    prepared = cel.prepare(Environment({"r": Variable(record, bound)}, ResultKind.BOOL))
+    checked = check_typed("r.n > 0", prepared)
+    assert isinstance(checked, CheckedExpression)
+    return checked, ref(record), ref(bound)
+
+
+def test_cel_prepared_checked_expression_releases_source_graphs() -> None:
+    checked, record, bound = detached_prepared_expression()
+
+    retained = checked.bounds["r"]
+
+    assert retained.bytes == 4096
+    assert record() is None
+    assert bound() is None
 
 
 @pytest.mark.parametrize(("source", "rendering"), INTEGER_NEGATIONS)

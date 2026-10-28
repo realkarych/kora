@@ -352,14 +352,16 @@ def check_environment(environment: Mapping[str, Variable]) -> None:
         raise BoundError("an environment name is not a string")
 
 
-def check_type(root: object, meter: Meter | None = None) -> None:
-    seen: set[int] = set()
+def check_type(
+    root: object, meter: Meter | None = None, seen: set[int] | None = None
+) -> None:
+    visited: set[int] = set() if seen is None else seen
     pending: list[object] = [root]
     while pending:
         cel_type = pending.pop()
-        if id(cel_type) in seen:
+        if id(cel_type) in visited:
             continue
-        seen.add(id(cel_type))
+        visited.add(id(cel_type))
         children = type_children(cel_type)
         if meter is not None:
             meter.tick(1 + len(children) + allowed_size(cel_type))
@@ -595,15 +597,18 @@ class Estimate:
 
 
 def binding_bounds(
-    variables: Mapping[str, Shape], meter: Meter
+    variables: Mapping[str, Shape],
+    meter: Meter,
+    snapshots: dict[int, ValueBound] | None = None,
 ) -> tuple[Mapping[str, ValueBound], int]:
-    memo: dict[int, ValueBound] = {}
+    memo: dict[int, ValueBound] = {} if snapshots is None else snapshots
+    seen: set[int] = set()
     charge = BOUND_VARIABLE_BYTES
     for root in variables.values():
         pending = [(root, False)]
         while pending:
             shape, finished = pending.pop()
-            if id(shape) in memo:
+            if id(shape) in seen:
                 continue
             meter.tick()
             if not finished:
@@ -612,20 +617,22 @@ def binding_bounds(
                     pending.append((shape.element, False))
                 pending.extend((child, False) for child in shape.fields.values())
                 continue
-            fields = {name: memo[id(child)] for name, child in shape.fields.items()}
+            seen.add(id(shape))
             charge += BOUND_NODE_BYTES + sum(
                 BOUND_FIELD_BYTES + len(name) * BOUND_NAME_CHARACTER_BYTES
-                for name in fields
+                for name in shape.fields
             )
-            meter.tick(sum(len(name) for name in fields))
-            memo[id(shape)] = ValueBound(
-                min(shape.bytes.concrete(), DATA_BYTES),
-                min(shape.values.concrete(), DATA_VALUES),
-                min(shape.items, DATA_ITEMS),
-                min(shape.string_bytes, DATA_STRING_BYTES),
-                memo[id(shape.element)] if shape.element is not None else None,
-                MappingProxyType(fields),
-            )
+            meter.tick(sum(len(name) for name in shape.fields))
+            if id(shape) not in memo:
+                fields = {name: memo[id(child)] for name, child in shape.fields.items()}
+                memo[id(shape)] = ValueBound(
+                    min(shape.bytes.concrete(), DATA_BYTES),
+                    min(shape.values.concrete(), DATA_VALUES),
+                    min(shape.items, DATA_ITEMS),
+                    min(shape.string_bytes, DATA_STRING_BYTES),
+                    memo[id(shape.element)] if shape.element is not None else None,
+                    MappingProxyType(fields),
+                )
     charge += sum(
         BOUND_VARIABLE_BYTES + len(name) * BOUND_NAME_CHARACTER_BYTES
         for name in variables
@@ -634,6 +641,28 @@ def binding_bounds(
     return MappingProxyType(
         {name: memo[id(root)] for name, root in variables.items()}
     ), charge
+
+
+@dataclass(frozen=True)
+class PreparedCost:
+    shapes: Mapping[str, Shape]
+    snapshots: dict[int, ValueBound]
+
+
+def prepare_cost(environment: Mapping[str, Variable], meter: Meter) -> PreparedCost:
+    check_environment(environment)
+    checked: set[int] = set()
+    converter = BoundShapes(meter)
+    shapes: dict[str, Shape] = {}
+    for name, variable in environment.items():
+        meter.tick(1 + len(name))
+        if not is_variable(variable):
+            raise BoundError("an environment entry is not a variable")
+        check_type(variable.type, meter, checked)
+        shapes[name] = converter.shape(variable.type, variable.bound)
+    snapshots: dict[int, ValueBound] = {}
+    binding_bounds(shapes, meter, snapshots)
+    return PreparedCost(MappingProxyType(shapes), snapshots)
 
 
 @dataclass(frozen=True)
@@ -691,6 +720,7 @@ class Estimator:
         environment: Mapping[str, Variable],
         weights: Weights,
         meter: Meter,
+        prepared: PreparedCost | None = None,
     ) -> None:
         self.meter: Meter = meter
         self.environment: Mapping[str, Variable] = environment
@@ -700,6 +730,7 @@ class Estimator:
         self.variables: dict[str, Shape] = {}
         self.default: Variable = Variable(DYN)
         self.bounds: BoundShapes = BoundShapes(meter)
+        self.prepared: PreparedCost | None = prepared
 
     def node_steps(self, *parts: Affine) -> Affine:
         return sum_affine([Affine.of(self.weights.node), *parts])
@@ -784,6 +815,11 @@ class Estimator:
         known = self.variables.get(name)
         if known is not None:
             return known
+        if self.prepared is not None:
+            prepared = self.prepared.shapes.get(name)
+            if prepared is not None:
+                self.variables[name] = prepared
+                return prepared
         variable = self.environment.get(name, self.default)
         if not is_variable(variable):
             raise BoundError("an environment entry is not a variable")
@@ -1041,9 +1077,13 @@ def estimate(
     weights: Weights = PROVISIONAL_WEIGHTS,
     budget: Budget = PROVISIONAL_BUDGET,
     meter: Meter | None = None,
+    prepared: PreparedCost | None = None,
 ) -> Estimate:
-    check_environment(environment)
-    estimator = Estimator(environment, weights, meter if meter is not None else Meter())
+    if prepared is None:
+        check_environment(environment)
+    estimator = Estimator(
+        environment, weights, meter if meter is not None else Meter(), prepared
+    )
     cost = estimator.visit(node)
     variables = tuple(sorted(estimator.variables))
     bound = [estimator.variables[name] for name in variables]
@@ -1067,6 +1107,7 @@ def estimate(
     retained, bound_bytes = binding_bounds(
         {name: estimator.variables[name] for name in variables if name in environment},
         estimator.meter,
+        prepared.snapshots if prepared is not None else None,
     )
     return Estimate(
         steps,
