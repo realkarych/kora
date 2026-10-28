@@ -34,6 +34,14 @@ from tests.conformance.lifetime_helpers import (
     stop_child,
     unwind_owned,
 )
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    close_recovered_test_owner,
+    dispose_test_owner,
+    entered_fifo,
+    limits,
+    read_probe,
+)
 
 
 @pytest.mark.asyncio
@@ -64,16 +72,6 @@ async def test_lifetime_unwind_preserves_body_failure_after_cleanup_failure(
         with pytest.raises(OSError, match=r"\[Errno 9\]") as closed:
             os.fstat(descriptor)
         assert closed.value.errno == errno.EBADF
-
-
-from tests.conformance.lifetime_support import (
-    ControlledLifetimeClock,
-    close_recovered_test_owner,
-    dispose_test_owner,
-    entered_fifo,
-    limits,
-    read_probe,
-)
 
 
 async def observation_closed(
