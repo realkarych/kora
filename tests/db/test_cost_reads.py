@@ -19,10 +19,10 @@ from kora.db.cost_reads import (
     read_usage_page,
     read_usage_source,
 )
-from kora.db.migrations import upgrade_database
 from kora.db.tables import approval_request, attempt, price_table, usage_record
 from kora.ir.cost import PriceRevision, RunCost
-from tests.db.seed import START, Seeder, seed_predecessor
+from tests.db.predecessor import upgraded_predecessor
+from tests.db.seed import START, Seeder
 
 
 @pytest.mark.asyncio
@@ -179,14 +179,8 @@ async def test_price_snapshot_survives_request_retention(database: Database) -> 
 async def test_cost_reads_preserve_predecessor_distinctions(
     empty_database_settings: DatabaseSettings,
 ) -> None:
-    database = Database(empty_database_settings)
+    database = await upgraded_predecessor(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            await connection.run_sync(seed_predecessor)
-        await database.close()
-        await upgrade_database(empty_database_settings)
-        database = Database(empty_database_settings)
-
         async with database.read_transaction() as connection:
             saved = await read_attempt_price(connection, "old-namespace", "old-attempt")
             unmatched = await read_attempt_price(
@@ -228,13 +222,8 @@ async def test_cost_reads_preserve_predecessor_distinctions(
 async def test_cost_reads_bound_stored_payloads(
     empty_database_settings: DatabaseSettings, size: int
 ) -> None:
-    database = Database(empty_database_settings)
+    database = await upgraded_predecessor(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            await connection.run_sync(seed_predecessor)
-        await database.close()
-        await upgrade_database(empty_database_settings)
-        database = Database(empty_database_settings)
         marker = "PRIVATE-COST-MARKER"
         large = {"marker": marker + "x" * size}
         huge_approval = {"marker": marker + "x" * (size * 20)}
@@ -387,13 +376,8 @@ async def test_latest_price_uses_scope_index_with_generic_plan(
 async def test_cost_reads_bound_predecessor_scalar_bytes(
     empty_database_settings: DatabaseSettings,
 ) -> None:
-    database = Database(empty_database_settings)
+    database = await upgraded_predecessor(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            await connection.run_sync(seed_predecessor)
-        await database.close()
-        await upgrade_database(empty_database_settings)
-        database = Database(empty_database_settings)
         oversized_id = "x" * 10000
         if database.dialect is Dialect.POSTGRESQL:
             with pytest.raises(DBAPIError):
@@ -432,13 +416,8 @@ async def test_cost_reads_bound_predecessor_scalar_bytes(
 async def test_price_and_approval_snapshots_round_trip_and_refuse_malformed_versions(
     empty_database_settings: DatabaseSettings,
 ) -> None:
-    database = Database(empty_database_settings)
+    database = await upgraded_predecessor(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            await connection.run_sync(seed_predecessor)
-        await database.close()
-        await upgrade_database(empty_database_settings)
-        database = Database(empty_database_settings)
         snapshot = RunCost(
             version=1,
             as_of=START,
@@ -534,13 +513,8 @@ async def test_price_and_approval_snapshots_round_trip_and_refuse_malformed_vers
 async def test_modern_source_is_validated_without_reclassifying_it(
     empty_database_settings: DatabaseSettings,
 ) -> None:
-    database = Database(empty_database_settings)
+    database = await upgraded_predecessor(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            await connection.run_sync(seed_predecessor)
-        await database.close()
-        await upgrade_database(empty_database_settings)
-        database = Database(empty_database_settings)
         async with database.transaction() as connection:
             await connection.execute(
                 update(usage_record)

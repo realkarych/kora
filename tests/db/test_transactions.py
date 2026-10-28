@@ -76,12 +76,7 @@ def slow_statement(database: Database) -> str:
 
 async def names(database: Database) -> list[str]:
     async with database.read_transaction() as connection:
-        rows = (
-            await connection.execute(
-                select(namespace.c.name).order_by(namespace.c.name)
-            )
-        ).all()
-    return [str(row[0]) for row in rows]
+        return await names_through(connection)
 
 
 async def commit_path(database: Database) -> None:
@@ -165,20 +160,11 @@ async def cancelled_waiting_for_the_pool_path(database: Database) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     try:
-
-        async def holder() -> None:
-            async with narrow.transaction() as connection:
-                await Seeder(connection).namespace("pool-holder")
-                entered.set()
-                await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-
-        async def waiter() -> None:
-            async with narrow.transaction() as connection:
-                await Seeder(connection).namespace("pool-waiter")
-
-        holding = asyncio.create_task(holder())
+        holding = asyncio.create_task(
+            hold_writer(narrow, "pool-holder", entered, release)
+        )
         await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-        waiting = asyncio.create_task(waiter())
+        waiting = asyncio.create_task(write(narrow, "pool-waiter"))
         await asyncio.sleep(0)
         waiting.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -194,20 +180,9 @@ async def cancelled_waiting_for_the_pool_path(database: Database) -> None:
 async def cancelled_while_waiting_path(database: Database) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
-
-    async def holder() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("holder")
-            entered.set()
-            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-
-    async def waiter() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("waiter")
-
-    holding = asyncio.create_task(holder())
+    holding = asyncio.create_task(hold_writer(database, "holder", entered, release))
     await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-    waiting = asyncio.create_task(waiter())
+    waiting = asyncio.create_task(write(database, "waiter"))
     await asyncio.sleep(0)
     if database.dialect is Dialect.SQLITE:
         waiting.cancel()
@@ -313,20 +288,9 @@ async def test_close_waits_for_the_unit_in_flight_then_refuses_new_work(
 ) -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
-
-    async def holder() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("held")
-            entered.set()
-            await asyncio.wait_for(release.wait(), BARRIER_SECONDS)
-
-    async def queued() -> None:
-        async with database.transaction() as connection:
-            await Seeder(connection).namespace("queued")
-
-    holding = asyncio.create_task(holder())
+    holding = asyncio.create_task(hold_writer(database, "held", entered, release))
     await asyncio.wait_for(entered.wait(), BARRIER_SECONDS)
-    waiting = asyncio.create_task(queued())
+    waiting = asyncio.create_task(write(database, "queued"))
     await asyncio.sleep(0)
     closing = asyncio.create_task(database.close(deadline_seconds=BARRIER_SECONDS))
     for _ in range(10):

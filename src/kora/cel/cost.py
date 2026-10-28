@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import cached_property
+from types import MappingProxyType
 from typing import Final, cast
 
 from kora.cel.diagnostics import Reason, fail
@@ -64,6 +65,10 @@ DATA_ITEMS: Final[int] = 1000
 DATA_STRING_BYTES: Final[int] = 16384
 DATA_DEPTH: Final[int] = 32
 SCALAR_BYTES: Final[int] = 24
+BOUND_NODE_BYTES: Final[int] = 1024
+BOUND_FIELD_BYTES: Final[int] = 128
+BOUND_VARIABLE_BYTES: Final[int] = 256
+BOUND_NAME_CHARACTER_BYTES: Final[int] = 8
 COMPARISON_OPERATORS: Final[frozenset[BinaryOperator]] = frozenset(
     {
         BinaryOperator.EQUAL,
@@ -585,6 +590,50 @@ class Estimate:
     memory: int
     compile_steps: int
     variables: tuple[str, ...]
+    bounds: Mapping[str, ValueBound] = field(repr=False)
+    bound_bytes: int
+
+
+def binding_bounds(
+    variables: Mapping[str, Shape], meter: Meter
+) -> tuple[Mapping[str, ValueBound], int]:
+    memo: dict[int, ValueBound] = {}
+    charge = BOUND_VARIABLE_BYTES
+    for root in variables.values():
+        pending = [(root, False)]
+        while pending:
+            shape, finished = pending.pop()
+            if id(shape) in memo:
+                continue
+            meter.tick()
+            if not finished:
+                pending.append((shape, True))
+                if shape.element is not None:
+                    pending.append((shape.element, False))
+                pending.extend((child, False) for child in shape.fields.values())
+                continue
+            fields = {name: memo[id(child)] for name, child in shape.fields.items()}
+            charge += BOUND_NODE_BYTES + sum(
+                BOUND_FIELD_BYTES + len(name) * BOUND_NAME_CHARACTER_BYTES
+                for name in fields
+            )
+            meter.tick(sum(len(name) for name in fields))
+            memo[id(shape)] = ValueBound(
+                min(shape.bytes.concrete(), DATA_BYTES),
+                min(shape.values.concrete(), DATA_VALUES),
+                min(shape.items, DATA_ITEMS),
+                min(shape.string_bytes, DATA_STRING_BYTES),
+                memo[id(shape.element)] if shape.element is not None else None,
+                MappingProxyType(fields),
+            )
+    charge += sum(
+        BOUND_VARIABLE_BYTES + len(name) * BOUND_NAME_CHARACTER_BYTES
+        for name in variables
+    )
+    meter.tick(sum(len(name) for name in variables))
+    return MappingProxyType(
+        {name: memo[id(root)] for name, root in variables.items()}
+    ), charge
 
 
 @dataclass(frozen=True)
@@ -1012,9 +1061,15 @@ def estimate(
         raise fail(Reason.MEMORY, node.offset)
     if steps > budget.steps:
         raise fail(Reason.STEPS, node.offset)
+    retained, bound_bytes = binding_bounds(
+        {name: estimator.variables[name] for name in variables if name in environment},
+        estimator.meter,
+    )
     return Estimate(
         steps,
         memory,
         rendering_length * weights.rendering_character,
         variables,
+        retained,
+        bound_bytes,
     )

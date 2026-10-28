@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   qualification:
-    name: Local conformance lifetime qualification
+    name: Lifetime qualification (conformance fixture)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -63,7 +63,7 @@ jobs:
           test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
           printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
           printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
-      - name: Measure local conformance lifetime
+      - name: Measure conformance fixture lifetime
         id: lifetime_measurement
         env:
           KORA_MEASUREMENT_REVISION: ${{ github.sha }}
@@ -73,19 +73,19 @@ jobs:
           mkdir -m 700 measurements/conformance-lifetime
           printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_LIFETIME_CHECKOUT_REVISION" "$KORA_MEASUREMENT_REVISION" > measurements/conformance-lifetime/source-revision.txt
           KORA_MEASUREMENT_OUTPUT="$PWD/measurements/conformance-lifetime/report.json" \
-            uv run --no-sync pytest -q -p no:logging -m measurement --junitxml=measurements/conformance-lifetime/tests.xml tests/measurements/test_conformance_lifetime.py
+            exec uv run --no-sync pytest -q -p no:logging -m measurement --junitxml=measurements/conformance-lifetime/tests.xml tests/measurements/test_conformance_lifetime.py::test_conformance_fixture_resources_are_released
       - name: Preserve lifetime raw data and retained roots
         id: lifetime_evidence
-        if: ${{ always() && !cancelled() && steps.lifetime_measurement.outcome != 'skipped' }}
+        if: ${{ always() && steps.lifetime_measurement.outcome != 'skipped' }}
         env:
           KORA_LIFETIME_MEASUREMENT_OUTCOME: ${{ steps.lifetime_measurement.outcome }}
         run: |
           uv run --no-sync python -m tests.measurements.lifetime_evidence cohorts "$PWD/measurements/conformance-lifetime" "$KORA_LIFETIME_MEASUREMENT_OUTCOME" /tmp
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: lifetime_upload
-        if: ${{ always() && !cancelled() && steps.lifetime_measurement.outcome != 'skipped' }}
+        if: ${{ always() && steps.lifetime_measurement.outcome != 'skipped' }}
         with:
-          name: conformance-lifetime-measurement
+          name: conformance-lifetime-${{ github.sha }}-fixture
           path: measurements/conformance-lifetime
           include-hidden-files: true
           if-no-files-found: error
@@ -120,3 +120,164 @@ jobs:
           test "$FINAL_SYNC_OUTCOME" = success
           test "$WORKFLOW_CANCELLED" = false
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+
+  installed-qualification:
+    name: Lifetime qualification (installed ${{ matrix.run }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - run: listing
+            pytest-arguments: tests/measurements/test_conformance_lifetime.py::test_installed_listing_resources_are_released
+          - run: command
+            pytest-arguments: tests/measurements/test_conformance_lifetime.py::test_installed_command_resources_are_released
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_TEST_DATABASES: sqlite
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: conformance-lifetime-${{ matrix.run }}
+      - name: Install locked dependencies
+        id: dependencies
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" \
+            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+            --require-hashes \
+            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-build-hashes \
+            --editable .
+          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
+      - name: Record actual and requested source revisions
+        id: source_revision
+        env:
+          KORA_WORKFLOW_REVISION: ${{ github.sha }}
+          KORA_REQUESTED_REVISION: ${{ github.sha }}
+        run: |
+          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
+          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
+          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
+          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
+      - name: Measure installed lifetime
+        id: lifetime_measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.sha }}
+          KORA_LIFETIME_CHECKOUT_REVISION: ${{ steps.source_revision.outputs.checkout_revision }}
+        run: |
+          mkdir -p measurements
+          mkdir -m 700 measurements/conformance-lifetime-${{ matrix.run }}
+          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_LIFETIME_CHECKOUT_REVISION" "$KORA_MEASUREMENT_REVISION" > measurements/conformance-lifetime-${{ matrix.run }}/source-revision.txt
+          KORA_MEASUREMENT_OUTPUT="$PWD/measurements/conformance-lifetime-${{ matrix.run }}/report.json" \
+            exec uv run --no-sync pytest -q -p no:logging -m measurement ${{ matrix.pytest-arguments }} --junitxml=measurements/conformance-lifetime-${{ matrix.run }}/tests.xml
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        id: lifetime_upload
+        if: ${{ always() && steps.lifetime_measurement.outcome != 'skipped' }}
+        with:
+          name: conformance-lifetime-${{ github.sha }}-${{ matrix.run }}
+          path: measurements/conformance-lifetime-${{ matrix.run }}
+          include-hidden-files: true
+          if-no-files-found: error
+      - name: Check the synced environment and unchanged dependency files
+        id: final_sync
+        if: ${{ always() && !cancelled() }}
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require every qualification step
+        id: required_measurements
+        if: ${{ always() }}
+        env:
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
+          LIFETIME_MEASUREMENT_OUTCOME: ${{ steps.lifetime_measurement.outcome }}
+          LIFETIME_UPLOAD_OUTCOME: ${{ steps.lifetime_upload.outcome }}
+          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$SOURCE_REVISION_OUTCOME" = success
+          test "$LIFETIME_MEASUREMENT_OUTCOME" = success
+          test "$LIFETIME_UPLOAD_OUTCOME" = success
+          test "$FINAL_SYNC_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
+
+  lifetime-evidence:
+    name: Required lifetime evidence
+    needs: [qualification, installed-qualification]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_MEASUREMENT_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        id: download
+        if: ${{ always() && !cancelled() }}
+        with:
+          pattern: conformance-lifetime-${{ github.sha }}-*
+          path: measurements
+          merge-multiple: false
+      - name: Verify the evidence and source receipt of every shard
+        id: inventory
+        if: ${{ always() && !cancelled() && steps.download.outcome == 'success' }}
+        run: |
+          KORA_LIFETIME_EVIDENCE="measurements/conformance-lifetime-$KORA_MEASUREMENT_REVISION"
+          test "$(find measurements -mindepth 1 -maxdepth 1 -print | LC_ALL=C sort)" = "$(printf '%s\n' "$KORA_LIFETIME_EVIDENCE-command" "$KORA_LIFETIME_EVIDENCE-fixture" "$KORA_LIFETIME_EVIDENCE-listing")"
+          for shard in fixture listing command; do
+            test ! -L "$KORA_LIFETIME_EVIDENCE-$shard"
+          done
+          for path in fixture/report.json fixture/publication.json fixture/tests.xml fixture/source-revision.txt listing/listing.json listing/tests.xml listing/source-revision.txt command/command.json command/command-artifacts/publication.json command/tests.xml command/source-revision.txt; do
+            test -f "$KORA_LIFETIME_EVIDENCE-$path"
+            test ! -L "$KORA_LIFETIME_EVIDENCE-$path"
+            test -s "$KORA_LIFETIME_EVIDENCE-$path"
+          done
+          for shard in fixture listing command; do
+            test "$(cat "$KORA_LIFETIME_EVIDENCE-$shard/source-revision.txt")" = "$(printf 'Actual checkout: %s\nRequested measurement revision: %s' "$KORA_MEASUREMENT_REVISION" "$KORA_MEASUREMENT_REVISION")"
+          done
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require every shard and its evidence
+        id: required_evidence
+        if: ${{ always() }}
+        env:
+          FIXTURE_RESULT: ${{ needs.qualification.result }}
+          FIXTURE_VERIFIED: ${{ needs.qualification.outputs.verified }}
+          INSTALLED_RESULT: ${{ needs.installed-qualification.result }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          INVENTORY_OUTCOME: ${{ steps.inventory.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$FIXTURE_RESULT" = success
+          test "$FIXTURE_VERIFIED" = true
+          test "$INSTALLED_RESULT" = success
+          test "$DOWNLOAD_OUTCOME" = success
+          test "$INVENTORY_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false

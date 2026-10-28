@@ -148,6 +148,18 @@ class MutationOwner:
                 if not timeout.cancelled():
                     raise
 
+    def _adopt(self, result: MutationResult) -> JournalSnapshot:
+        helper = self.helpers[-1]
+        if result.root is None or result.directory is None or result.journal is None:
+            raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
+        root, directory, claim = helper.take_descriptors()
+        self.root = DirectoryAnchor(root, result.root)
+        self.directory = DirectoryAnchor(directory, result.directory)
+        self.claim = claim
+        self.snapshot = result.journal
+        self.prune()
+        return result.journal
+
     async def bootstrap(
         self, snapshot: JournalSnapshot, deadline: int
     ) -> JournalSnapshot:
@@ -160,16 +172,7 @@ class MutationOwner:
             None,
             deadline,
         )
-        helper = self.helpers[-1]
-        if result.root is None or result.directory is None or result.journal is None:
-            raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
-        root, directory, claim = helper.take_descriptors()
-        self.root = DirectoryAnchor(root, result.root)
-        self.directory = DirectoryAnchor(directory, result.directory)
-        self.claim = claim
-        self.snapshot = result.journal
-        self.prune()
-        return result.journal
+        return self._adopt(result)
 
     async def recover(
         self, reference: CleanupReference, owner: ProcessIdentity, deadline: int
@@ -183,16 +186,7 @@ class MutationOwner:
             None,
             deadline,
         )
-        helper = self.helpers[-1]
-        if result.root is None or result.directory is None or result.journal is None:
-            raise HelperError(LifetimeReason.JOURNAL_UNAVAILABLE)
-        root, directory, claim = helper.take_descriptors()
-        self.root = DirectoryAnchor(root, result.root)
-        self.directory = DirectoryAnchor(directory, result.directory)
-        self.claim = claim
-        self.snapshot = result.journal
-        self.prune()
-        return result.journal
+        return self._adopt(result)
 
     async def publish(self, snapshot: JournalSnapshot, deadline: int) -> None:
         directory = self.directory

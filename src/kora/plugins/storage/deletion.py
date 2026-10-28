@@ -1,10 +1,22 @@
 from kora.plugins.storage.content_files import ContentFiles, address_lock, content_path
 from kora.plugins.storage.errors import refuse
-from kora.plugins.storage.payload import FileRunner, FileSegment, PrivateFile
-from kora.plugins.storage.staging import close_lease
-from kora.plugins.storage.state import LocalState, integer, row_values, text
+from kora.plugins.storage.payload import (
+    FileRunner,
+    FileSegment,
+    PrivateFile,
+    exclusive_lease,
+    try_lease,
+)
+from kora.plugins.storage.state import (
+    LocalState,
+    free_slot,
+    integer,
+    operation_value,
+    row_values,
+    settled_result,
+    text,
+)
 from kora.protocols.common import ProtocolContext
-from kora.protocols.identity import MAX_COUNT
 from kora.protocols.storage_models import (
     ContentRef,
     DeleteReleaseRequest,
@@ -15,20 +27,19 @@ from kora.protocols.storage_models import (
 
 
 class ContentDeleter:
-    def __init__(self, state: LocalState, epoch: int, runner: FileRunner) -> None:
+    def __init__(self, state: LocalState, runner: FileRunner) -> None:
         self.state = state
         self.root = state.root
-        self.epoch = epoch
         self.runner = runner
         self.files = ContentFiles(self.root)
 
     def allocate(self, request: DeleteRequest) -> int | DeleteResult:
         with self.state.transaction(write=True) as connection:
-            saved = self.state.receipt(connection, request.operation)
-            if saved is not None and saved.state == "settled":
-                if not isinstance(saved.result, DeleteResult):
-                    refuse("storage_conflict")
-                return saved.result
+            saved = self.state.settled_receipt(
+                connection, request.operation, DeleteResult
+            )
+            if saved is not None:
+                return saved
             row = row_values(
                 connection.execute(
                     "SELECT slot, request FROM deletions WHERE operation_id=?",
@@ -39,20 +50,11 @@ class ContentDeleter:
                 if DeleteRequest.model_validate_json(text(row[1])) != request:
                     refuse("storage_conflict")
                 return integer(row[0])
-            self.state.admit_epoch(connection, self.epoch)
-            occupied: set[int] = set()
-            for value in connection.execute("SELECT slot FROM deletions").fetchall():
-                checked = row_values(value)
-                if checked is None:
-                    refuse("storage_integrity")
-                occupied.add(integer(checked[0]))
-            slot = next(
-                (
-                    index
-                    for index in range(self.root.manifest.limits.deletion_slots)
-                    if index not in occupied
-                ),
-                None,
+            self.state.admit_epoch(connection)
+            slot = free_slot(
+                connection,
+                "SELECT slot FROM deletions",
+                self.root.manifest.limits.deletion_slots,
             )
             if slot is None:
                 refuse("storage_capacity")
@@ -77,10 +79,9 @@ class ContentDeleter:
             saved = self.state.receipt(connection, request.operation)
             if saved is None:
                 refuse("storage_issuer_closed")
-            if saved.state == "settled":
-                if not isinstance(saved.result, DeleteResult):
-                    refuse("storage_conflict")
-                return saved.result
+            settled = settled_result(saved, DeleteResult)
+            if settled is not None:
+                return settled
             row = row_values(
                 connection.execute(
                     "SELECT slot, request, target, device, inode, resolved "
@@ -138,21 +139,16 @@ class ContentDeleter:
         located = await self.runner(lambda: self.allocate(request), control=True)
         if isinstance(located, DeleteResult):
             return located
-        ownership = await self.runner(
-            lambda: self.root.try_lock(f"delete-{located}"),
-            control=True,
-            on_cancel=close_lease,
+        ownership = await exclusive_lease(
+            self.runner, self.root, f"delete-{located}", control=True
         )
-        if ownership is None:
-            refuse("storage_busy")
         with ownership:
-            stripe = await self.runner(
-                lambda: self.root.try_lock(address_lock(request.arguments.address)),
+            stripe = await exclusive_lease(
+                self.runner,
+                self.root,
+                address_lock(request.arguments.address),
                 control=True,
-                on_cancel=close_lease,
             )
-            if stripe is None:
-                refuse("storage_busy")
             with stripe:
                 admitted = await self.runner(
                     lambda: self.admit(request, located), control=True
@@ -219,23 +215,19 @@ class ContentDeleter:
                     or saved.state != "settled"
                 ):
                     refuse("storage_busy")
-                row = row_values(
-                    connection.execute(
+                return integer(
+                    operation_value(
+                        connection,
                         "SELECT slot FROM deletions WHERE operation_id=?",
-                        (request.operation.operation_id,),
-                    ).fetchone()
+                        request.operation,
+                    )
                 )
-                if row is None:
-                    refuse("storage_integrity")
-                return integer(row[0])
 
         slot = await self.runner(locate, control=True)
         if slot is None:
             return StorageReleaseResult(version=1, state="released")
-        ownership = await self.runner(
-            lambda: self.root.try_lock(f"delete-{slot}"),
-            control=True,
-            on_cancel=close_lease,
+        ownership = await try_lease(
+            self.runner, self.root, f"delete-{slot}", control=True
         )
         if ownership is None:
             return StorageReleaseResult(version=1, state="pending")
@@ -259,12 +251,7 @@ class ContentDeleter:
                         )
                         if row != (slot,):
                             refuse("storage_conflict")
-                        current = self.state.epoch(connection)
-                        if current < MAX_COUNT:
-                            connection.execute(
-                                "UPDATE root SET epoch=? WHERE singleton=1",
-                                (current + 1,),
-                            )
+                        self.state.advance_epoch(connection)
                         connection.execute(
                             "DELETE FROM receipts WHERE operation_id=?",
                             (request.operation.operation_id,),

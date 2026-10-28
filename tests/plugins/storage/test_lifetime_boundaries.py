@@ -13,6 +13,7 @@ from tests.measurements.storage_lifetime_manifest import Workload
 from tests.measurements.storage_lifetime_resources import process_ownership
 from tests.measurements.storage_lifetime_workload import cycle
 from tests.plugins.storage.activity import StorageBarrierActivity
+from tests.plugins.storage.configuration import local_configuration
 from tests.plugins.storage.lifetime_boundaries import (
     bounded_reconstruction,
     inventory_workload,
@@ -25,9 +26,7 @@ from tests.plugins.storage.lifetime_boundaries import (
 def test_local_storage_inventory_query_work(
     tmp_path: Path, kora_capture: Capture, boundary_report: Report, count: int
 ) -> None:
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
 
     asyncio.run(
         inventory_workload(
@@ -41,9 +40,7 @@ def test_local_storage_inventory_query_work(
 def test_local_storage_receiver_churn_is_bounded(
     tmp_path: Path, kora_capture: Capture, boundary_report: Report
 ) -> None:
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
 
     asyncio.run(
         receiver_churn(configuration, context_for(kora_capture), boundary_report)
@@ -76,9 +73,7 @@ def test_local_storage_control_progress_under_saturation(
 def test_three_epoch_changes_return_pending_before_a_later_request_progresses(
     tmp_path: Path, kora_capture: Capture, boundary_report: Report
 ) -> None:
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
 
     asyncio.run(
         bounded_reconstruction(
@@ -95,9 +90,7 @@ def test_local_storage_prefix_boundaries(
 ) -> None:
     import time
 
-    configuration = LocalStorageConfiguration(
-        root=str(tmp_path / "store"), limits=StorageLimits(version=1)
-    )
+    configuration = local_configuration(tmp_path / "store")
     context = context_for(kora_capture)
     repeats = 3 if count == 16777215 else 1
 

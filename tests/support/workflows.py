@@ -51,6 +51,20 @@ def steps(job: dict[str, object]) -> dict[str, dict[str, object]]:
     return {str(step["id"]): step for step in step_list(job) if "id" in step}
 
 
+def matrix_rows(job: dict[str, object]) -> list[dict[str, object]]:
+    unexpanded: list[object] = [{}]
+    strategy = table(job.get("strategy", {}))
+    rows = table(strategy.get("matrix", {})).get("include", unexpanded)
+    return [table(row) for row in cast(list[object], rows)]
+
+
+def rendered(text: object, row: dict[str, object]) -> str:
+    result = str(text)
+    for key, value in row.items():
+        result = result.replace(f"${{{{ matrix.{key} }}}}", str(value))
+    return result
+
+
 def action_name(uses: object) -> str:
     assert isinstance(uses, str)
     return uses.partition("@")[0]

@@ -25,10 +25,36 @@ class FileRunner(Protocol):
     ) -> Result: ...
 
 
+def close_lease(lease: FileLease | None) -> None:
+    if lease is not None:
+        lease.close()
+
+
+async def try_lease(
+    runner: FileRunner, root: RootAnchor, name: str, control: bool = False
+) -> FileLease | None:
+    return await runner(
+        lambda: root.try_lock(name), control=control, on_cancel=close_lease
+    )
+
+
+async def exclusive_lease(
+    runner: FileRunner, root: RootAnchor, name: str, control: bool = False
+) -> FileLease:
+    lease = await try_lease(runner, root, name, control)
+    if lease is None:
+        refuse("storage_busy")
+    return lease
+
+
 class PrivateFile(StorageModel):
     private_identity: Identifier
     device: Count
     inode: Count | None
+
+
+def same_file(first: PrivateFile, second: PrivateFile) -> bool:
+    return first.device == second.device and first.inode == second.inode
 
 
 @dataclass(frozen=True)

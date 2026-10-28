@@ -12,11 +12,16 @@ from pathlib import Path
 from kora.conformance.storage_support import (
     RepeatedSource,
     acknowledge_stage,
+    content_address,
+    delete_release,
+    delete_request,
     digest,
     operation,
+    promotion_request,
     repeated_digest,
     seal_bytes,
     seal_repeated,
+    single_part,
     stage_spec,
 )
 from kora.plugins.storage.content_files import content_path
@@ -27,17 +32,12 @@ from kora.plugins.storage.state import LocalState
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import (
-    ContentAddress,
     ContentRef,
-    DeleteArguments,
-    DeleteReleaseRequest,
     DeleteRequest,
     ManifestPart,
     MutationObservation,
     PartRef,
     PartSpec,
-    PromotionArguments,
-    PromotionRequest,
     StageManifest,
     StageRef,
     StageSpec,
@@ -70,11 +70,7 @@ def seed_inventory(configuration: LocalStorageConfiguration, count: int) -> floa
         records: list[tuple[str, str, int, int]] = []
         for index in range(count):
             payload = index.to_bytes(16, "big")
-            address = ContentAddress(
-                version=1,
-                storage_identity=root.identity,
-                payload_digest=digest(payload),
-            )
+            address = content_address(root.identity, digest(payload))
             reference = ContentRef(
                 version=1,
                 address=address,
@@ -231,11 +227,7 @@ async def inventory_workload(
         check_inventory_position(restarted, emitted, final_cursor)
         if restarted.entries != final.entries:
             raise AssertionError("restart changed the same keyset page")
-        address = ContentAddress(
-            version=1,
-            storage_identity=provider.identity(),
-            payload_digest=emitted[count // 2],
-        )
+        address = content_address(provider.identity(), emitted[count // 2])
         content = await provider.exists(address, context)
         if content is None:
             raise AssertionError("the offline valid content fixture is missing")
@@ -257,46 +249,18 @@ async def inventory_workload(
             created, created_manifest, created_seal = await seal_bytes(
                 peer, "concurrent-created", new_payload, context
             )
-            publication_arguments = PromotionArguments(
-                version=1,
-                content=created,
-                address=ContentAddress(
-                    version=1,
-                    storage_identity=peer.identity(),
-                    payload_digest=created.payload_digest,
-                ),
-                content_generation=1,
-            )
-            publication = PromotionRequest(
-                version=1,
-                operation=operation(
-                    peer.identity(),
-                    "concurrent-publish",
-                    "promote",
-                    publication_arguments,
-                ),
-                arguments=publication_arguments,
+            publication = promotion_request(
+                peer.identity(),
+                "concurrent-publish",
+                created,
+                content_address(peer.identity(), created.payload_digest),
             )
             await peer.promote(publication, context)
             deleted_key = emitted[count // 2 + 1]
-            deleted_arguments = DeleteArguments(
-                version=1,
-                address=ContentAddress(
-                    version=1,
-                    storage_identity=peer.identity(),
-                    payload_digest=deleted_key,
-                ),
-                deletion_generation=1,
-            )
-            deletion = DeleteRequest(
-                version=1,
-                operation=operation(
-                    peer.identity(),
-                    "concurrent-delete",
-                    "delete_content",
-                    deleted_arguments,
-                ),
-                arguments=deleted_arguments,
+            deletion = delete_request(
+                peer.identity(),
+                "concurrent-delete",
+                content_address(peer.identity(), deleted_key),
             )
             removed = await peer.delete_content(deletion, context)
             if not removed.deleted_object:
@@ -362,9 +326,8 @@ async def inventory_workload(
             )
             await peer.release_stage(acknowledgment, context)
             await peer.release_delete(
-                DeleteReleaseRequest(
-                    version=1,
-                    operation=deletion.operation,
+                delete_release(
+                    deletion.operation,
                     persisted_outcome_revision="saved-concurrent-delete",
                     issuance_closed="closed-concurrent-delete",
                 ),
@@ -595,21 +558,10 @@ async def maximum_slots(
         )
         deletions: list[DeleteRequest] = []
         for index in range(33):
-            arguments = DeleteArguments(
-                version=1,
-                address=ContentAddress(
-                    version=1,
-                    storage_identity=provider.identity(),
-                    payload_digest=f"sha256:{index:064x}",
-                ),
-                deletion_generation=1,
-            )
-            request = DeleteRequest(
-                version=1,
-                operation=operation(
-                    provider.identity(), f"delete-{index}", "delete_content", arguments
-                ),
-                arguments=arguments,
+            request = delete_request(
+                provider.identity(),
+                f"delete-{index}",
+                content_address(provider.identity(), f"sha256:{index:064x}"),
             )
             if index == 32:
                 await assert_refusal(
@@ -637,14 +589,7 @@ async def maximum_slots(
             for index in range(1, 9):
                 owner = provider if index <= 4 else peer
                 stage, issued = uploads[index]
-                part = PartSpec(
-                    version=1,
-                    index=0,
-                    byte_offset=0,
-                    size=0,
-                    digest=digest(b""),
-                    final=True,
-                )
+                part = single_part(b"")
                 write = operation(
                     owner.identity(),
                     f"slot-{index}-part",
@@ -667,12 +612,7 @@ async def maximum_slots(
                 uploads[index] = stage, (*issued, write)
             await assert_refusal(
                 provider.exists(
-                    ContentAddress(
-                        version=1,
-                        storage_identity=provider.identity(),
-                        payload_digest=digest(b""),
-                    ),
-                    context,
+                    content_address(provider.identity(), digest(b"")), context
                 ),
                 "storage_busy",
             )
@@ -728,9 +668,8 @@ async def maximum_slots(
                 await provider.release_stage(acknowledgment, context)
             for request in deletions:
                 await provider.release_delete(
-                    DeleteReleaseRequest(
-                        version=1,
-                        operation=request.operation,
+                    delete_release(
+                        request.operation,
                         persisted_outcome_revision="saved-delete",
                         issuance_closed="closed-delete",
                     ),

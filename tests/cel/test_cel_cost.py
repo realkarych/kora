@@ -13,7 +13,9 @@ from kora.cel import (
     Code,
     Diagnostic,
     Estimate,
+    JsonValue,
     Reason,
+    SchemaTypes,
     ValueBound,
     Variable,
     Weights,
@@ -111,8 +113,23 @@ def rejected_by_budget(
     return refused.value.diagnostic
 
 
-def test_cel_cost_estimate_rejects_compounding_concatenation() -> None:
-    environment = {"l": string_list(items=1, element=16 * KIB, total=16 * KIB + 4)}
+def schema_list_of_one() -> Variable:
+    schema: JsonValue = {"type": "array", "maxItems": 1, "items": {"type": "string"}}
+    return SchemaTypes(lambda uri: None).variable(schema)
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        string_list(items=1, element=16 * KIB, total=16 * KIB + 4),
+        schema_list_of_one(),
+    ],
+    ids=["given_bounds", "max_items"],
+)
+def test_cel_cost_estimate_rejects_compounding_concatenation(
+    variable: Variable,
+) -> None:
+    environment = {"l": variable}
     eight = "+".join(["{v}"] * 8)
     compounding = ".".join(
         ["l"]
@@ -131,6 +148,24 @@ def test_cel_cost_estimate_rejects_compounding_concatenation() -> None:
     assert diagnostic.code is Code.LIMIT
     assert diagnostic.reason is Reason.MEMORY
     assert isinstance(fitting, CheckedExpression)
+
+
+@pytest.mark.parametrize(("max_items", "admitted"), [(None, False), (10, True)])
+def test_cel_cost_estimate_uses_schema_max_items(
+    max_items: int | None, admitted: bool
+) -> None:
+    schema: dict[str, JsonValue] = {"type": "array", "items": {"type": "string"}}
+    if max_items is not None:
+        schema["maxItems"] = max_items
+    variable = SchemaTypes(lambda uri: None).variable(schema)
+
+    result = check("l.map(a, l.map(b, a + b)).size() > 0", {"l": variable})
+
+    if admitted:
+        assert isinstance(result, CheckedExpression)
+    else:
+        assert isinstance(result, Diagnostic)
+        assert result.reason is Reason.STEPS
 
 
 def test_cel_cost_estimate_bounds_comprehension_results() -> None:

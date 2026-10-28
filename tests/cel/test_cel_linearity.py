@@ -131,6 +131,12 @@ TYPED_FAMILIES: dict[str, Callable[[int], str]] = {
     "typed_selections": lambda size: (
         "[" + ", ".join(["r.r.r.r.r.n"] * ((size - 20) // 13)) + "].size() > 0"
     ),
+    "integer_negations": lambda size: (
+        "[" + ", ".join(["-r.n"] * ((size - 20) // 6)) + "].size() > 0"
+    ),
+    "dense_integer_negations": lambda size: (
+        "[" + ",".join(["-r.n"] * ((size - 20) // 5)) + "].size() > 0"
+    ),
     "distinct_map_keys": lambda size: (
         "{" + ", ".join(f"'{index}': 1" for index in range(size // 11)) + "}.size() > 0"
     ),

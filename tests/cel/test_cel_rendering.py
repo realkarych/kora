@@ -2,11 +2,19 @@ from collections.abc import Callable
 
 import pytest
 
-from kora.cel import Reason
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    Reason,
+    ResultKind,
+    Variable,
+    check_typed,
+)
 from kora.cel.diagnostics import DiagnosticError
-from kora.cel.limits import MAX_RENDERING_DEPTH
+from kora.cel.limits import MAX_CODE_POINTS, MAX_RENDERING_DEPTH
 from kora.cel.parser import RENDERING_LIMITS, parse
 from kora.cel.render import canonical_rendering
+from kora.cel.types import INT
 from tests.cel.conformance.cases import read_cases, vendored_files
 from tests.cel.conformance.selection import rejection_for
 from tests.cel.generator import generated_expressions
@@ -132,3 +140,29 @@ def test_cel_rendering_beyond_the_reparse_bound_is_refused() -> None:
         parse(rendering, RENDERING_LIMITS)
 
     assert raised.value.diagnostic.reason is Reason.DEPTH
+
+
+def negations(count: int) -> str:
+    return "[" + ",".join(["-n"] * count) + "] == []"
+
+
+def double_negations(count: int) -> str:
+    return "[" + ",".join(["-(-n)"] * count) + "] == []"
+
+
+@pytest.mark.parametrize("build", [negations, double_negations])
+def test_cel_typed_rendering_stays_within_the_reparse_bounds(
+    build: Callable[[int], str],
+) -> None:
+    count = max(
+        n for n in range(1, MAX_CODE_POINTS) if len(build(n)) <= MAX_CODE_POINTS
+    )
+    source = build(count)
+    environment = Environment({"n": Variable(INT)}, ResultKind.BOOL)
+
+    checked = check_typed(source, environment)
+
+    assert isinstance(checked, CheckedExpression)
+    assert checked.rendering.count("(0 - ") >= count
+    assert len(checked.rendering) <= RENDERING_EXPANSION * len(source)
+    assert bracket_depth(checked.rendering) <= MAX_RENDERING_DEPTH

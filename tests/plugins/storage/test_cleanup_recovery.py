@@ -9,15 +9,18 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
-from kora.conformance.storage_support import BytesSource, digest, operation, seal_bytes
-from kora.plugins.storage.files import RootAnchor
-from kora.plugins.storage.local import LocalArtifactStorage, LocalStorageConfiguration
-from kora.protocols.errors import KoraProtocolError
-from kora.protocols.storage_models import (
-    ContentPreparation,
-    PreparationArguments,
-    StorageLimits,
+from kora.conformance.storage_support import (
+    BytesSource,
+    digest,
+    operation,
+    preparation_request,
+    seal_bytes,
 )
+from kora.plugins.storage.files import RootAnchor
+from kora.plugins.storage.local import LocalArtifactStorage
+from kora.protocols.errors import KoraProtocolError
+from kora.protocols.storage_models import StorageLimits
+from tests.plugins.storage.configuration import local_configuration
 
 UNPRIVILEGED_UID: Final[int] = 65534
 
@@ -34,23 +37,11 @@ def test_private_cleanup_failure_retains_intent_until_directory_closes(
     context = context_for(kora_capture)
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(root=str(root), limits=StorageLimits(version=1))
-        )
+        provider = LocalArtifactStorage(local_configuration(root))
         try:
             sealed, _, _ = await seal_bytes(provider, "cleanup", b"raw", context)
-            arguments = PreparationArguments(
-                version=1,
-                source=sealed,
-                maximum_output_size=16,
-                expected_output_digest=digest(b"prepared"),
-            )
-            request = ContentPreparation(
-                version=1,
-                operation=operation(
-                    provider.identity(), "prepare", "prepare_content", arguments
-                ),
-                arguments=arguments,
+            request = preparation_request(
+                provider.identity(), "prepare", sealed, 16, digest(b"prepared")
             )
             await provider.prepare_content(request, BytesSource(b"prepared"), context)
             private = next((root / "stages").glob("*/part-0")).parent
@@ -98,9 +89,7 @@ def test_retirement_refuses_payload_symlink_substitution(
     context = context_for(kora_capture)
 
     async def scenario() -> None:
-        provider = LocalArtifactStorage(
-            LocalStorageConfiguration(root=str(root), limits=StorageLimits(version=1))
-        )
+        provider = LocalArtifactStorage(local_configuration(root))
         try:
             sealed, _, _ = await seal_bytes(provider, "confined", b"owned", context)
             private = next((root / "stages").glob("*/part-0"))

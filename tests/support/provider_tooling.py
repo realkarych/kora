@@ -149,7 +149,9 @@ def prepare_wheelhouse(output: Path, *, conformance: bool = False) -> None:
                 pending.append(requirement)
 
 
-def build_core_wheel(output: Path) -> Path:
+def build_wheel(
+    source: Path, output: Path, *, environment: Mapping[str, str] | None = None
+) -> None:
     run_setup(
         [
             "uv",
@@ -161,9 +163,30 @@ def build_core_wheel(output: Path) -> Path:
             "--wheel",
             "--out-dir",
             str(output),
-            str(REPOSITORY),
+            str(source),
         ],
-        environment={**os.environ, "KORA_BUILD_OFFLINE": "1"},
+        environment=environment,
+    )
+
+
+def create_virtual_environment(directory: Path) -> Path:
+    run_setup(
+        [
+            "uv",
+            "venv",
+            "--offline",
+            "--no-project",
+            "--python",
+            sys.executable,
+            str(directory),
+        ]
+    )
+    return directory / "bin" / "python"
+
+
+def build_core_wheel(output: Path) -> Path:
+    build_wheel(
+        REPOSITORY, output, environment={**os.environ, "KORA_BUILD_OFFLINE": "1"}
     )
     return next(output.glob("kora-*.whl"))
 
@@ -205,37 +228,12 @@ def build_fixture_wheel(
     (source / "pyproject.toml").write_text(project)
     output = root / "wheels"
     output.mkdir()
-    run_setup(
-        [
-            "uv",
-            "build",
-            "--offline",
-            "--no-build-isolation",
-            "--python",
-            sys.executable,
-            "--wheel",
-            "--out-dir",
-            str(output),
-            str(source),
-        ]
-    )
+    build_wheel(source, output)
     return next(output.glob("*.whl"))
 
 
 def install_measurement_fixture(root: Path, fixture_wheel: Path) -> Path:
-    environment = root / "measurement-environment"
-    run_setup(
-        [
-            "uv",
-            "venv",
-            "--offline",
-            "--no-project",
-            "--python",
-            sys.executable,
-            str(environment),
-        ]
-    )
-    python = environment / "bin" / "python"
+    python = create_virtual_environment(root / "measurement-environment")
     result = subprocess.run(
         [
             str(python),
@@ -272,11 +270,14 @@ class InstalledTooling:
     python: Path
     outside: Path
 
+    def command(self, *arguments: str) -> list[str]:
+        return [str(self.python), "-I", "-m", "kora", *arguments]
+
     def run(
         self, *arguments: str, environment: Mapping[str, str] | None = None
     ) -> ProcessResult:
         completed = subprocess.run(
-            [str(self.python), "-I", "-m", "kora", *arguments],
+            self.command(*arguments),
             cwd=self.outside,
             env={"PATH": os.defpath, **({} if environment is None else environment)},
             capture_output=True,
@@ -289,19 +290,7 @@ class InstalledTooling:
 def install_tooling(
     root: Path, wheelhouse: Path, fixture_wheel: Path, *, conformance: bool = False
 ) -> InstalledTooling:
-    environment = root / "installed"
-    run_setup(
-        [
-            "uv",
-            "venv",
-            "--offline",
-            "--no-project",
-            "--python",
-            sys.executable,
-            str(environment),
-        ]
-    )
-    python = environment / "bin" / "python"
+    python = create_virtual_environment(root / "installed")
     run_setup(
         [
             "uv",

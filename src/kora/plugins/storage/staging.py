@@ -1,18 +1,27 @@
 import hashlib
+from collections.abc import Awaitable, Callable
 from contextlib import ExitStack
 from functools import partial
 
-from kora.plugins.storage.errors import refuse, require_deadline
-from kora.plugins.storage.files import FileLease, RootAnchor
+from kora.plugins.storage.errors import refuse
+from kora.plugins.storage.files import RootAnchor
 from kora.plugins.storage.payload import (
     FileRunner,
     FileSegment,
     PayloadFiles,
     PrivateFile,
+    exclusive_lease,
     raw_content_identity,
 )
 from kora.plugins.storage.readers import LocalReadStream, ReaderManager
-from kora.plugins.storage.state import LocalState, StorageConnection, row_values, text
+from kora.plugins.storage.state import (
+    LocalState,
+    Settled,
+    StorageConnection,
+    operation_value,
+    settled_result,
+    text,
+)
 from kora.protocols.common import ProtocolContext
 from kora.protocols.storage import StorageByteStream
 from kora.protocols.storage_models import (
@@ -20,7 +29,6 @@ from kora.protocols.storage_models import (
     ManifestPart,
     ManifestPrefix,
     MutationObservation,
-    NoEffectFailure,
     PartRef,
     PartSpec,
     PrefixCapture,
@@ -35,14 +43,12 @@ from kora.protocols.storage_models import (
 )
 
 
-def close_lease(lease: FileLease | None) -> None:
-    if lease is not None:
-        lease.close()
-
-
-async def verify_source(
-    source: StorageByteStream, size: int, expected: str, prefix: bool
-) -> None:
+async def consume_exact(
+    source: StorageByteStream,
+    size: int,
+    prefix: bool,
+    write: Callable[[bytes], Awaitable[None]] | None = None,
+) -> str:
     digest = hashlib.sha256()
     consumed = 0
     while consumed < size:
@@ -50,11 +56,19 @@ async def verify_source(
         chunk = await source.read(maximum)
         if type(chunk) is not bytes or len(chunk) > maximum or not chunk:
             refuse("storage_conflict")
+        if write is not None:
+            await write(chunk)
         consumed += len(chunk)
         digest.update(chunk)
     if not prefix and await source.read(1):
         refuse("storage_conflict")
-    if "sha256:" + digest.hexdigest() != expected:
+    return "sha256:" + digest.hexdigest()
+
+
+async def verify_source(
+    source: StorageByteStream, size: int, expected: str, prefix: bool
+) -> None:
+    if await consume_exact(source, size, prefix) != expected:
         refuse("storage_conflict")
 
 
@@ -63,13 +77,11 @@ class StagedPayloads:
         self,
         root: RootAnchor,
         state: LocalState,
-        receiver_epoch: int,
         runner: FileRunner,
         readers: ReaderManager,
     ) -> None:
         self.root = root
         self.state = state
-        self.receiver_epoch = receiver_epoch
         self.runner = runner
         self.readers = readers
         self.files = PayloadFiles(root)
@@ -83,11 +95,26 @@ class StagedPayloads:
             if saved is not None and saved.state == "settled":
                 self.root.synchronize_directory(self.root.fd)
                 return -1, saved
-            require_deadline(ctx)
-            self.state.admit_epoch(connection, self.receiver_epoch)
+            self.state.admit(connection, ctx)
             if record is None or record[1] != "open" or record[3] is None:
                 refuse("storage_unavailable")
             return record[0], saved
+
+    def lookup_content(
+        self,
+        operation: StorageOperationRef,
+        content: SealedStage | PreparedContentRef,
+        kind: type[Settled],
+        ctx: ProtocolContext,
+    ) -> int | Settled:
+        with self.state.transaction(synchronize=False) as connection:
+            saved = self.state.settled_receipt(connection, operation, kind)
+            if saved is not None:
+                self.root.synchronize_directory(self.root.fd)
+                return saved
+            self.state.admit(connection, ctx)
+            slot, _ = self.resolve(connection, content)
+            return slot
 
     def admit_piece(
         self,
@@ -104,8 +131,7 @@ class StagedPayloads:
             saved = self.state.receipt(connection, operation)
             if saved is not None and saved.state == "settled":
                 return saved
-            require_deadline(ctx)
-            self.state.admit_epoch(connection, self.receiver_epoch)
+            self.state.admit(connection, ctx)
             record = self.state.stage(connection, stage)
             if (
                 record is None
@@ -150,16 +176,7 @@ class StagedPayloads:
                 stage,
                 max(record[2], 2 * self.state.retained_stage_bytes(connection, stage)),
             )
-            identity = self.state.file_identity(connection, operation)
-            if identity is None:
-                identity = PrivateFile(
-                    version=1,
-                    private_identity=self.root.new_identity(),
-                    device=self.root.manifest.device,
-                    inode=None,
-                )
-                self.state.save_file_identity(connection, operation, identity)
-            return identity
+            return self.state.ensure_file_identity(connection, operation)
 
     async def write(
         self,
@@ -182,11 +199,7 @@ class StagedPayloads:
             slot, saved = await self.runner(lambda: self.lookup(operation, stage, ctx))
             if saved is not None and saved.state == "settled":
                 return await self.replay(saved, source, prefix)
-            ownership = await self.runner(
-                lambda: self.root.try_lock(f"stage-{slot}"), on_cancel=close_lease
-            )
-            if ownership is None:
-                refuse("storage_busy")
+            ownership = await exclusive_lease(self.runner, self.root, f"stage-{slot}")
             with ownership:
                 admitted = await self.runner(
                     lambda: self.admit_piece(
@@ -207,23 +220,14 @@ class StagedPayloads:
                         on_cancel=lambda result: result[0].close(),
                     )
                     try:
-                        digest = hashlib.sha256()
-                        consumed = 0
-                        while consumed < maximum_size:
-                            bound = min(MAX_CHUNK_BYTES, maximum_size - consumed)
-                            chunk = await source.read(bound)
-                            if (
-                                type(chunk) is not bytes
-                                or len(chunk) > bound
-                                or not chunk
-                            ):
-                                refuse("storage_conflict")
-                            await self.runner(partial(self.files.write, writer, chunk))
-                            consumed += len(chunk)
-                            digest.update(chunk)
-                        if not prefix and await source.read(1):
-                            refuse("storage_conflict")
-                        actual = "sha256:" + digest.hexdigest()
+                        actual = await consume_exact(
+                            source,
+                            maximum_size,
+                            prefix,
+                            lambda chunk: self.runner(
+                                partial(self.files.write, writer, chunk)
+                            ),
+                        )
                         if not prefix and actual != spec.digest:
                             refuse("storage_conflict")
                         await self.runner(lambda: self.files.finish(writer, slot))
@@ -339,28 +343,23 @@ class StagedPayloads:
         ctx: ProtocolContext,
     ) -> SealedStage:
         slot, saved = await self.runner(lambda: self.lookup(operation, stage, ctx))
-        if saved is not None and saved.state == "settled":
-            if not isinstance(saved.result, SealedStage):
-                refuse("storage_conflict")
-            return saved.result
+        replayed = settled_result(saved, SealedStage)
+        if replayed is not None:
+            return replayed
         with ExitStack() as ownership:
             async with ctx.activity.span("storage.seal_stage.ownership_pending"):
-                lease = await self.runner(
-                    lambda: self.root.try_lock(f"stage-{slot}"), on_cancel=close_lease
+                ownership.enter_context(
+                    await exclusive_lease(self.runner, self.root, f"stage-{slot}")
                 )
-                if lease is None:
-                    refuse("storage_busy")
-                ownership.enter_context(lease)
 
             def admit() -> tuple[tuple[FileSegment, ...], str, int] | SealedStage:
                 with self.state.transaction(write=True) as connection:
-                    saved = self.state.receipt(connection, operation)
-                    if saved is not None and saved.state == "settled":
-                        if not isinstance(saved.result, SealedStage):
-                            refuse("storage_conflict")
-                        return saved.result
-                    require_deadline(ctx)
-                    self.state.admit_epoch(connection, self.receiver_epoch)
+                    saved = self.state.settled_receipt(
+                        connection, operation, SealedStage
+                    )
+                    if saved is not None:
+                        return saved
+                    self.state.admit(connection, ctx)
                     record = self.state.stage(connection, stage)
                     if (
                         record is None
@@ -444,15 +443,12 @@ class StagedPayloads:
                     self.files.path(record[0], "prepare"), identity, content.total_size
                 ),
             )
-        values = row_values(
-            connection.execute(
-                "SELECT arguments FROM receipts WHERE operation_id=?",
-                (observation.operation.operation_id,),
-            ).fetchone()
+        arguments = operation_value(
+            connection,
+            "SELECT arguments FROM receipts WHERE operation_id=?",
+            observation.operation,
         )
-        if values is None:
-            refuse("storage_integrity")
-        manifest = StageManifest.model_validate_json(text(values[0]))
+        manifest = StageManifest.model_validate_json(text(arguments))
         return record[0], self.segments(connection, content.stage, manifest, record[0])
 
     async def read(
@@ -460,8 +456,7 @@ class StagedPayloads:
     ) -> LocalReadStream:
         def locate() -> tuple[int, tuple[FileSegment, ...]]:
             with self.state.transaction(synchronize=False) as connection:
-                require_deadline(ctx)
-                self.state.admit_epoch(connection, self.receiver_epoch)
+                self.state.admit(connection, ctx)
                 return self.resolve(connection, content)
 
         slot, segments = await self.runner(locate)
@@ -499,15 +494,7 @@ class StagedPayloads:
             with self.state.transaction(write=True) as connection:
                 for semantic, observation, _ in observations:
                     if observation.state == "pending" and semantic != "retire":
-                        self.state.settle(
-                            connection,
-                            observation.operation,
-                            NoEffectFailure(
-                                version=1,
-                                operation=observation.operation,
-                                code="storage_issuer_closed",
-                            ),
-                        )
+                        self.state.abandon(connection, observation.operation)
 
         if any(
             observation.state == "pending" and semantic != "retire"

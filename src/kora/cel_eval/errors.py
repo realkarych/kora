@@ -10,6 +10,7 @@ Clock = Callable[[], datetime]
 class ErrorKind(StrEnum):
     MISSING_FIELD = "missing_field"
     NO_OVERLOAD = "no_overload"
+    INVALID_ARGUMENT = "invalid_argument"
     INDEX_OUT_OF_RANGE = "index_out_of_range"
     DIVISION_BY_ZERO = "division_by_zero"
     OVERFLOW = "overflow"

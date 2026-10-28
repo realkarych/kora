@@ -161,16 +161,12 @@ def test_local_storage_payload_files_are_anchored_and_no_follow(tmp_path: Path) 
 def test_publication_closes_destination_when_source_directory_is_missing(
     tmp_path: Path,
 ) -> None:
+    from kora.conformance.storage_support import content_address
     from kora.plugins.storage.content_files import ContentFiles
     from kora.plugins.storage.payload import FileSegment, PrivateFile
-    from kora.protocols.storage_models import ContentAddress
 
     with RootAnchor.open(tmp_path / "store", StorageLimits(version=1)) as root:
-        address = ContentAddress(
-            version=1,
-            storage_identity=root.identity,
-            payload_digest="sha256:" + "1" * 64,
-        )
+        address = content_address(root.identity, "sha256:" + "1" * 64)
         witness = FileSegment(
             ("missing", "part"),
             PrivateFile(
