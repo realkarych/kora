@@ -75,6 +75,16 @@ class Evidence:
     gates: frozenset[str]
     samples: Counter[tuple[str, int, int]]
 
+    def union(self, *others: "Evidence") -> "Evidence":
+        samples = Counter(self.samples)
+        for other in others:
+            samples.update(other.samples)
+        return Evidence(
+            self.nodes.union(*(other.nodes for other in others)),
+            self.gates.union(*(other.gates for other in others)),
+            samples,
+        )
+
 
 class MeasurementSample(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
@@ -418,24 +428,27 @@ class SchemaProcess(BaseModel):
     parent_threads_after: int = Field(gt=0)
 
 
-def configuration_evidence(run: int) -> Evidence:
+def worker_evidence(test: str, workload: str, gate: str, run: int) -> Evidence:
+    cycles = (250, 500, 750, 1000)
     return Evidence(
-        frozenset({f"{NODE}test_ir_configuration_repeated_lifetime[{run}]"}),
-        frozenset(
-            f"config_lifetime_{run}_{cycle}_retained" for cycle in (250, 500, 750, 1000)
-        ),
-        Counter(("config_lifetime", run, cycle) for cycle in (250, 500, 750, 1000)),
+        frozenset({f"{NODE}{test}[{run}]"}),
+        frozenset(f"{workload}_{run}_{cycle}_{gate}" for cycle in cycles),
+        Counter((workload, run, cycle) for cycle in cycles),
+    )
+
+
+def configuration_evidence(run: int) -> Evidence:
+    return worker_evidence(
+        "test_ir_configuration_repeated_lifetime", "config_lifetime", "retained", run
     )
 
 
 def schema_evidence(run: int) -> Evidence:
-    return Evidence(
-        frozenset({f"{NODE}test_ir_schema_repeated_lifetime[{run}]"}),
-        frozenset(
-            f"schema_lifetime_{run}_{cycle}_resources_released"
-            for cycle in (250, 500, 750, 1000)
-        ),
-        Counter(("schema_lifetime", run, cycle) for cycle in (250, 500, 750, 1000)),
+    return worker_evidence(
+        "test_ir_schema_repeated_lifetime",
+        "schema_lifetime",
+        "resources_released",
+        run,
     )
 
 
@@ -458,14 +471,6 @@ def accepted_evidence() -> Evidence:
             (f"diagnostic_{action.name}", repeat, 1) for repeat in range(MEASURED)
         )
     for run in range(3):
-        worker = configuration_evidence(run)
-        nodes.update(worker.nodes)
-        gates.update(worker.gates)
-        samples.update(worker.samples)
-        schema_worker = schema_evidence(run)
-        nodes.update(schema_worker.nodes)
-        gates.update(schema_worker.gates)
-        samples.update(schema_worker.samples)
         for traced in (True, False):
             mode = "traced" if traced else "untraced"
             nodes.add(f"{NODE}test_shared_diagnostic_resource_lifetime[{run}-{traced}]")
@@ -485,17 +490,14 @@ def accepted_evidence() -> Evidence:
             nodes.add(f"{NODE}test_vcs_ref_validation_lifetime[{run}-{traced}]")
             gates.add(f"vcs_ref_{mode}_{run}_lifecycle_assertions_passed")
             samples[(f"vcs_ref_{mode}_{run}_process", run, BATCHES * INTERVAL)] += 1
-    return Evidence(frozenset(nodes), frozenset(gates), samples)
+    return Evidence(frozenset(nodes), frozenset(gates), samples).union(
+        *(configuration_evidence(run) for run in range(3)),
+        *(schema_evidence(run) for run in range(3)),
+    )
 
 
 def expected_evidence() -> Evidence:
-    accepted = accepted_evidence()
-    accounting = accounting_evidence()
-    return Evidence(
-        accepted.nodes | accounting.nodes,
-        accepted.gates | accounting.gates,
-        accepted.samples + accounting.samples,
-    )
+    return accepted_evidence().union(accounting_evidence())
 
 
 def shard_evidence() -> tuple[Evidence, ...]:
@@ -503,11 +505,7 @@ def shard_evidence() -> tuple[Evidence, ...]:
     worker1 = configuration_evidence(1)
     worker2 = configuration_evidence(2)
     schemas = tuple(schema_evidence(run) for run in range(3))
-    schema_nodes = frozenset[str]().union(*(worker.nodes for worker in schemas))
-    schema_gates = frozenset[str]().union(*(worker.gates for worker in schemas))
-    schema_samples = sum(
-        (worker.samples for worker in schemas), Counter[tuple[str, int, int]]()
-    )
+    owned = worker1.union(worker2, *schemas)
     children = accounting_children()
     timing = accounting_evidence(
         [child for child in children if child.mode == "timing"]
@@ -517,28 +515,18 @@ def shard_evidence() -> tuple[Evidence, ...]:
     )
     return (
         Evidence(
-            accepted.nodes - worker1.nodes - worker2.nodes - schema_nodes,
-            accepted.gates - worker1.gates - worker2.gates - schema_gates,
+            accepted.nodes - owned.nodes,
+            accepted.gates - owned.gates,
             Counter(
                 {
                     key: count
                     for key, count in accepted.samples.items()
-                    if key not in worker1.samples
-                    and key not in worker2.samples
-                    and key not in schema_samples
+                    if key not in owned.samples
                 }
             ),
         ),
-        Evidence(
-            worker1.nodes | timing.nodes,
-            worker1.gates | timing.gates,
-            worker1.samples + timing.samples,
-        ),
-        Evidence(
-            worker2.nodes | lifetime.nodes,
-            worker2.gates | lifetime.gates,
-            worker2.samples + lifetime.samples,
-        ),
+        worker1.union(timing),
+        worker2.union(lifetime),
         *schemas,
     )
 

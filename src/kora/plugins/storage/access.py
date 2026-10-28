@@ -1,6 +1,6 @@
 from kora.plugins.storage.content_files import ContentFiles, address_lock, content_path
-from kora.plugins.storage.errors import refuse, require_deadline
-from kora.plugins.storage.payload import FileRunner, FileSegment
+from kora.plugins.storage.errors import refuse
+from kora.plugins.storage.payload import FileRunner, FileSegment, same_file
 from kora.plugins.storage.readers import LocalReadStream, ReaderManager
 from kora.plugins.storage.state import LocalState
 from kora.protocols.common import ProtocolContext
@@ -9,19 +9,17 @@ from kora.protocols.storage_models import ContentAddress, ContentRef
 
 class ContentAccess:
     def __init__(
-        self, state: LocalState, epoch: int, runner: FileRunner, readers: ReaderManager
+        self, state: LocalState, runner: FileRunner, readers: ReaderManager
     ) -> None:
         self.state = state
         self.root = state.root
-        self.epoch = epoch
         self.runner = runner
         self.readers = readers
         self.files = ContentFiles(self.root)
 
     def locate(self, content: ContentRef, ctx: ProtocolContext) -> FileSegment:
         with self.state.transaction(synchronize=False) as connection:
-            require_deadline(ctx)
-            self.state.admit_epoch(connection, self.epoch)
+            self.state.admit(connection, ctx)
             indexed = self.state.content(connection, content.address)
         if indexed is None:
             refuse("storage_unavailable")
@@ -42,10 +40,9 @@ class ContentAccess:
             actual = self.files.locate(content.address)
             if actual is None:
                 refuse("storage_unavailable")
-            if (actual.identity.device, actual.identity.inode, actual.size) != (
-                segment.identity.device,
-                segment.identity.inode,
-                segment.size,
+            if (
+                not same_file(actual.identity, segment.identity)
+                or actual.size != segment.size
             ):
                 refuse("storage_integrity")
 
@@ -65,19 +62,18 @@ class ContentAccess:
                 refuse("storage_busy")
             with stripe:
                 with self.state.transaction(synchronize=False) as connection:
-                    require_deadline(ctx)
-                    self.state.admit_epoch(connection, self.epoch)
+                    self.state.admit(connection, ctx)
                     indexed = self.state.content(connection, address)
                 actual = self.files.locate(address)
                 if indexed is None:
                     if actual is not None:
                         refuse("storage_unavailable")
                     return None
-                if actual is None or (
-                    actual.identity.device,
-                    actual.identity.inode,
-                    actual.size,
-                ) != (indexed[1].device, indexed[1].inode, indexed[0].total_size):
+                if (
+                    actual is None
+                    or not same_file(actual.identity, indexed[1])
+                    or actual.size != indexed[0].total_size
+                ):
                     refuse("storage_integrity")
                 return indexed[0]
 

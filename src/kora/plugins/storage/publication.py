@@ -2,21 +2,22 @@ import os
 from dataclasses import dataclass
 
 from kora.plugins.storage.content_files import ContentFiles, address_lock
-from kora.plugins.storage.errors import refuse, require_deadline
+from kora.plugins.storage.errors import refuse
 from kora.plugins.storage.payload import (
     FileRunner,
     FileSegment,
     PayloadFiles,
     PrivateFile,
+    exclusive_lease,
     raw_content_identity,
+    same_file,
 )
-from kora.plugins.storage.staging import StagedPayloads, close_lease
+from kora.plugins.storage.staging import StagedPayloads
 from kora.plugins.storage.state import LocalState, StorageConnection, row_values, text
 from kora.protocols.common import ProtocolContext
 from kora.protocols.storage_models import (
     MAX_CHUNK_BYTES,
     ContentRef,
-    NoEffectFailure,
     PreparedContentRef,
     PromotionArguments,
     PromotionRequest,
@@ -47,32 +48,16 @@ class ContentPublisher:
         self.files = PayloadFiles(self.root)
         self.contents = ContentFiles(self.root)
 
-    def lookup(
-        self, request: PromotionRequest, ctx: ProtocolContext
-    ) -> int | PromotionResult:
-        with self.state.transaction(synchronize=False) as connection:
-            saved = self.state.receipt(connection, request.operation)
-            if saved is not None and saved.state == "settled":
-                if not isinstance(saved.result, PromotionResult):
-                    refuse("storage_conflict")
-                self.root.synchronize_directory(self.root.fd)
-                return saved.result
-            require_deadline(ctx)
-            self.state.admit_epoch(connection, self.staging.receiver_epoch)
-            slot, _ = self.staging.resolve(connection, request.arguments.content)
-            return slot
-
     def admit(
         self, request: PromotionRequest, slot: int, ctx: ProtocolContext
     ) -> PublicationWork | PromotionResult:
         with self.state.transaction(write=True) as connection:
-            saved = self.state.receipt(connection, request.operation)
-            if saved is not None and saved.state == "settled":
-                if not isinstance(saved.result, PromotionResult):
-                    refuse("storage_conflict")
-                return saved.result
-            require_deadline(ctx)
-            self.state.admit_epoch(connection, self.staging.receiver_epoch)
+            saved = self.state.settled_receipt(
+                connection, request.operation, PromotionResult
+            )
+            if saved is not None:
+                return saved
+            self.state.admit(connection, ctx)
             content = request.arguments.content
             checked_slot, segments = self.staging.resolve(connection, content)
             if checked_slot != slot:
@@ -155,17 +140,13 @@ class ContentPublisher:
             if indexed is not None:
                 refuse("storage_integrity")
             return None
-        created = work.identity.inode is not None and (
-            target.identity.device,
-            target.identity.inode,
-        ) == (work.identity.device, work.identity.inode)
+        created = work.identity.inode is not None and same_file(
+            target.identity, work.identity
+        )
         if created:
             reference = work.reference
         else:
-            if indexed is None or (indexed[1].device, indexed[1].inode) != (
-                target.identity.device,
-                target.identity.inode,
-            ):
+            if indexed is None or not same_file(indexed[1], target.identity):
                 refuse("storage_integrity")
             reference = indexed[0]
         if (
@@ -204,31 +185,27 @@ class ContentPublisher:
                         target.identity.inode,
                     ),
                 )
-            elif indexed[0] != result.content or (
-                indexed[1].device,
-                indexed[1].inode,
-            ) != (target.identity.device, target.identity.inode):
+            elif indexed[0] != result.content or not same_file(
+                indexed[1], target.identity
+            ):
                 refuse("storage_integrity")
             self.state.settle(connection, result.operation, result)
 
     async def promote(
         self, request: PromotionRequest, ctx: ProtocolContext
     ) -> PromotionResult:
-        located = await self.runner(lambda: self.lookup(request, ctx))
+        located = await self.runner(
+            lambda: self.staging.lookup_content(
+                request.operation, request.arguments.content, PromotionResult, ctx
+            )
+        )
         if isinstance(located, PromotionResult):
             return located
-        ownership = await self.runner(
-            lambda: self.root.try_lock(f"stage-{located}"), on_cancel=close_lease
-        )
-        if ownership is None:
-            refuse("storage_busy")
+        ownership = await exclusive_lease(self.runner, self.root, f"stage-{located}")
         with ownership:
-            stripe = await self.runner(
-                lambda: self.root.try_lock(address_lock(request.arguments.address)),
-                on_cancel=close_lease,
+            stripe = await exclusive_lease(
+                self.runner, self.root, address_lock(request.arguments.address)
             )
-            if stripe is None:
-                refuse("storage_busy")
             with stripe:
                 admitted = await self.runner(lambda: self.admit(request, located, ctx))
                 if isinstance(admitted, PromotionResult):
@@ -312,13 +289,12 @@ class ContentPublisher:
         request = await self.runner(pending, control=True)
         if request is None:
             return
-        stripe = await self.runner(
-            lambda: self.root.try_lock(address_lock(request.arguments.address)),
+        stripe = await exclusive_lease(
+            self.runner,
+            self.root,
+            address_lock(request.arguments.address),
             control=True,
-            on_cancel=close_lease,
         )
-        if stripe is None:
-            refuse("storage_busy")
         with stripe:
             async with ctx.activity.span("storage.promote.reconcile"):
 
@@ -335,8 +311,7 @@ class ContentPublisher:
                     target = self.contents.locate(request.arguments.address)
                     if (
                         target is not None
-                        and (target.identity.device, target.identity.inode)
-                        == (work.identity.device, work.identity.inode)
+                        and same_file(target.identity, work.identity)
                         and row != (1,)
                     ):
                         refuse("storage_integrity")
@@ -348,14 +323,6 @@ class ContentPublisher:
                             request.arguments.address, content=False
                         )
                         with self.state.transaction(write=True) as connection:
-                            self.state.settle(
-                                connection,
-                                request.operation,
-                                NoEffectFailure(
-                                    version=1,
-                                    operation=request.operation,
-                                    code="storage_issuer_closed",
-                                ),
-                            )
+                            self.state.abandon(connection, request.operation)
 
                 await self.runner(reconcile, control=True)

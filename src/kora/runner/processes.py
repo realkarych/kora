@@ -27,6 +27,7 @@ from kora.runner.channels import (
     CaptureDrain,
     ChannelError,
     ChannelFailure,
+    cancel_task,
     wait_future,
 )
 from kora.runner.gate import ExecutionConfig, encode_deadline
@@ -293,12 +294,7 @@ async def wait_member_change(
             timeout.result()
             raise ChannelError(ChannelFailure.DEADLINE)
     finally:
-        timeout.cancel()
-        try:
-            await timeout
-        except asyncio.CancelledError:
-            if not timeout.cancelled():
-                raise
+        await cancel_task(timeout)
 
 
 @dataclass(frozen=True)

@@ -61,3 +61,7 @@ def misconfigured(code: str, phase: Phase) -> NoReturn:
 
 def unavailable(code: str, phase: Phase) -> NoReturn:
     fail(ErrorClass.INFRASTRUCTURE, code, phase)
+
+
+def deadline_due(phase: Phase) -> NoReturn:
+    fail(ErrorClass.TIMEOUT, "deadline_due", phase)

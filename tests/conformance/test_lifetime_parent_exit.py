@@ -1,165 +1,270 @@
+import asyncio
+import errno
+import gc
 import json
 import os
-import signal
 import socket
 import subprocess
 import sys
-from io import FileIO
+from contextlib import AsyncExitStack, ExitStack
 from pathlib import Path
 
 import pytest
 
+from kora.conformance.io_helper import InstalledIOHelperLauncher
+from kora.conformance.journal import JournalSnapshot
 from kora.conformance.lifetime import ParentLifetime
 from kora.protocols.identity import ProcessIdentity
-from kora.protocols.lifetime import CleanupOutcome, ClosureReport
-from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError
+from kora.protocols.lifetime import (
+    CleanupOutcome,
+    CleanupReference,
+    ClosureReport,
+    ProcessRegistration,
+)
+from kora.protocols.time import Clock, SystemClock
+from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import NativeIdentityReader
-from kora.runner.processes import ExitAnchor
-from tests.conformance.lifetime_support import (
-    SENT_OR_SETTLED,
-    ControlledLifetimeClock,
-    close_recovered_test_owner,
-    dispose_test_owner,
-    entered_fifo,
-    independent_process,
-    installed_launcher,
-    kill_independent,
-    limits,
-    retained_invocation,
-    retained_journal,
+from kora.runner.processes import ExitAnchor, RecoveredProcess
+from tests.conformance.lifetime_helpers import (
+    CleanupDeadline,
+    RetainedHelperGroup,
+    release_recovered,
+    signal_recovered,
+    stop_child,
+    unwind_owned,
 )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sink_mode", ["drained", "blocked", "broken"])
-async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_recovery(
-    tmp_path: Path, sink_mode: str
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_lifetime_unwind_preserves_body_failure_after_cleanup_failure(
+    cancelled: bool,
 ) -> None:
-    reference = retained_invocation(tmp_path, "live")
-    clock = SystemClock()
-    _, journal = retained_journal(tmp_path, reference.invocation_id)
-    independent = independent_process(journal, clock)
-    barrier = DirectoryAnchor.open_path(tmp_path)
-    os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
     reading, writing = os.pipe()
-    first, second = socket.socketpair()
-    diagnostic_read, diagnostic_write = os.pipe()
-    os.set_blocking(diagnostic_write, False)
-    if sink_mode == "blocked":
-        while True:
-            try:
-                os.write(diagnostic_write, b"x" * 4096)
-            except BlockingIOError:
-                break
-    if sink_mode == "broken":
-        os.close(diagnostic_read)
-    parent = subprocess.Popen(
+    owned = AsyncExitStack()
+    owned.callback(os.close, reading)
+    owned.callback(os.close, writing)
+    owned.callback(os.close, -1)
+    failure = asyncio.CancelledError() if cancelled else AssertionError("body failure")
+    caught: OSError | None = None
+
+    try:
+        try:
+            raise failure
+        finally:
+            await unwind_owned(owned)
+    except OSError as error:
+        caught = error
+
+    assert caught is not None
+    assert caught.errno == errno.EBADF
+    assert caught.__context__ is failure
+    for descriptor in (reading, writing):
+        with pytest.raises(OSError, match=r"\[Errno 9\]") as closed:
+            os.fstat(descriptor)
+        assert closed.value.errno == errno.EBADF
+
+
+from tests.conformance.lifetime_support import (
+    ControlledLifetimeClock,
+    close_recovered_test_owner,
+    dispose_test_owner,
+    entered_fifo,
+    limits,
+    read_probe,
+)
+
+
+async def observation_closed(
+    descriptor: int, cleanup: CleanupDeadline, clock: Clock
+) -> None:
+    deadline = cleanup()
+    while await read_probe(descriptor, deadline, clock):
+        assert clock.monotonic_ns() < deadline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sink_mode", "failure_phase"),
+    [
+        ("drained", None),
+        ("blocked", None),
+        ("broken", None),
+        ("drained", "identity"),
+    ],
+)
+async def test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_recovery(
+    tmp_path: Path, sink_mode: str, failure_phase: str | None
+) -> None:
+    probe = subprocess.run(
         [
             sys.executable,
             "-I",
-            str(Path(__file__).with_name("lifetime_helpers.py")),
+            str(Path(__file__).with_name("lifetime_recovery_probe.py")),
             str(tmp_path),
-            reference.invocation_id,
-            str(second.fileno()),
-            str(writing),
-            str(barrier.descriptor),
-            sink_mode,
+            "live",
         ],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=diagnostic_write,
-        close_fds=True,
-        pass_fds=(second.fileno(), writing, barrier.descriptor),
+        check=True,
+        capture_output=True,
     )
-    second.close()
-    os.close(diagnostic_write)
-    channel = BoundedChannel(first, clock)
-    anchor = ExitAnchor(parent.pid)
-    deadline = clock.monotonic_ns() + 10_000_000_000
-    assert await channel.read_frame(deadline) == sink_mode.encode("ascii")
-    assert await channel.read_frame(deadline) == reference.invocation_id.encode("ascii")
-    identity = ProcessIdentity.model_validate_json(await channel.read_frame(deadline))
-    helper_anchor = ExitAnchor(identity.pid, direct_child=False)
+    reference = CleanupReference(invocation_id=probe.stdout.decode("ascii"))
+    clock = SystemClock()
+    path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
+    journal = JournalSnapshot.model_validate_json(path.read_bytes())
+    registration = journal.entries[-1].registration
+    assert isinstance(registration, ProcessRegistration)
     recovery_clock = ControlledLifetimeClock()
-    recovered: ParentLifetime | None = None
-    phase = "fifo_barrier"
-    writer: FileIO | None = None
+    cleanup = CleanupDeadline(clock, 5_000_000_000)
+    caught: ChannelError | None = None
+    identity: ProcessIdentity | None = None
+    phase = "handshake"
+    owned = AsyncExitStack()
+    gc.collect()
+    baseline_descriptors = set(os.listdir("/dev/fd"))
 
     try:
-        writer = await entered_fifo(barrier.descriptor, reading, deadline, clock)
-        phase = "parent_close"
-        await channel.write_frame(b"close", deadline)
-        report = ClosureReport.model_validate_json(
-            await channel.read_record(deadline, 1048576)
+        reading, writing = os.pipe()
+        owned.callback(os.close, reading)
+        owned.push_async_callback(observation_closed, reading, cleanup, clock)
+        inherited = owned.enter_context(ExitStack())
+        inherited.callback(os.close, writing)
+        independent = RecoveredProcess(registration, clock, NativeIdentityReader())
+        owned.push_async_callback(release_recovered, independent, cleanup, clock)
+        barrier = DirectoryAnchor.open_path(tmp_path)
+        owned.callback(barrier.close)
+        os.mkfifo("stall", 0o600, dir_fd=barrier.descriptor)
+        first, second = socket.socketpair()
+        channel = BoundedChannel(first, clock)
+        owned.callback(channel.close)
+        inherited.callback(second.close)
+        diagnostic_read, diagnostic_write = os.pipe()
+        inherited.callback(os.close, diagnostic_write)
+        os.set_blocking(diagnostic_write, False)
+        if sink_mode == "blocked":
+            while True:
+                try:
+                    os.write(diagnostic_write, b"x" * 4096)
+                except BlockingIOError:
+                    break
+        if sink_mode == "broken":
+            os.close(diagnostic_read)
+        else:
+            owned.callback(os.close, diagnostic_read)
+        group = RetainedHelperGroup(clock)
+        owned.push_async_callback(group.close, cleanup)
+        parent = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                str(Path(__file__).with_name("lifetime_helpers.py")),
+                str(tmp_path),
+                reference.invocation_id,
+                str(second.fileno()),
+                str(writing),
+                str(barrier.descriptor),
+                sink_mode,
+                "reopen",
+                str(group.process_group_id),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=diagnostic_write,
+            close_fds=True,
+            pass_fds=(second.fileno(), writing, barrier.descriptor),
         )
-        await anchor.wait(deadline, clock)
-        parent.wait(timeout=0)
-        await helper_anchor.wait(deadline, clock)
-        recovered = ParentLifetime(
-            clock=recovery_clock,
-            limits=limits(),
-            recovery=reference,
-            launcher=installed_launcher(tmp_path),
-        )
-        await recovered.ready()
-        final = await close_recovered_test_owner(
-            recovered, recovery_clock, (independent,)
-        )
+        anchor = ExitAnchor(parent.pid)
+        owned.push_async_callback(stop_child, parent, anchor, cleanup, clock)
+        owned.callback(signal_recovered, independent, cleanup)
+        inherited.close()
+        deadline = clock.monotonic_ns() + 10_000_000_000
 
-        assert report.state is CleanupOutcome.UNKNOWN
-        assert parent.returncode == 1
-        assert helper_anchor.exited
-        assert final.state is CleanupOutcome.CLOSED
-        assert recovered.inventory().helpers.claim_descriptors == 0
-        assert not tuple(tmp_path.rglob(reference.invocation_id))
-        if sink_mode == "drained":
-            encoded = os.read(diagnostic_read, 65536)
-            records: list[dict[str, object]] = [
-                json.loads(line) for line in encoded.splitlines()
-            ]
-            unknown = [
-                record
-                for record in records
-                if record.get("event") == "conformance.lifetime.unknown"
-            ]
-            assert len(unknown) == 1
-            assert unknown[0]["level"] == "WARNING"
-            assert unknown[0]["invocation_id"] == reference.invocation_id
-            assert str(tmp_path).encode() not in encoded
-            assert b"signal.pause" not in encoded
-    except ChannelError as failure:
-        failure.add_note(
-            f"phase={phase}, remaining_ns={deadline - clock.monotonic_ns()}, "
-            f"parent_status={parent.poll()}, helper_identity={identity}"
-        )
-        raise
-    finally:
-        if writer is not None:
-            writer.close()
-        deadline = clock.monotonic_ns() + 5_000_000_000
-        if parent.returncode is None:
-            parent.send_signal(signal.SIGKILL)
+        try:
+            assert await channel.read_frame(deadline) == sink_mode.encode("ascii")
+            assert await channel.read_frame(deadline) == reference.invocation_id.encode(
+                "ascii"
+            )
+            if failure_phase == "identity":
+                assert await read_probe(reading, deadline, clock) == b"r"
+                deadline = clock.monotonic_ns()
+            phase = "identity"
+            identity = ProcessIdentity.model_validate_json(
+                await channel.read_frame(deadline)
+            )
+            assert await group.live_members(deadline) == (identity,)
+            helper_anchor = ExitAnchor(identity.pid, direct_child=False)
+            owned.callback(helper_anchor.close)
+            phase = "fifo_barrier"
+            writer = await entered_fifo(barrier.descriptor, reading, deadline, clock)
+            owned.callback(writer.close)
+            phase = "parent_close"
+            await channel.write_frame(b"close", deadline)
+            report = ClosureReport.model_validate_json(
+                await channel.read_record(deadline, 1048576)
+            )
             await anchor.wait(deadline, clock)
             parent.wait(timeout=0)
-        if not helper_anchor.exited:
-            current = NativeIdentityReader().read(identity.pid)
-            if current.process is not None and current.process.identity == identity:
-                os.kill(identity.pid, signal.SIGKILL)
             await helper_anchor.wait(deadline, clock)
-        await kill_independent(independent, deadline, SENT_OR_SETTLED)
-        if recovered is not None:
-            await dispose_test_owner(recovered, recovery_clock)
-        channel.close()
-        anchor.close()
-        helper_anchor.close()
-        if sink_mode != "broken":
-            os.close(diagnostic_read)
-        os.close(reading)
-        os.close(writing)
-        barrier.close()
+            recovered = ParentLifetime(
+                clock=recovery_clock,
+                limits=limits(),
+                recovery=reference,
+                launcher=InstalledIOHelperLauncher(
+                    home=tmp_path, state_home=tmp_path / "state"
+                ),
+            )
+            owned.push_async_callback(dispose_test_owner, recovered, recovery_clock)
+            await recovered.ready()
+            final = await close_recovered_test_owner(
+                recovered, recovery_clock, (independent,)
+            )
 
-    assert parent.returncode is not None
-    assert helper_anchor.exited
-    assert channel.closed
+            assert report.state is CleanupOutcome.UNKNOWN
+            assert parent.returncode == 1
+            assert helper_anchor.exited
+            assert final.state is CleanupOutcome.CLOSED
+            assert recovered.inventory().helpers.claim_descriptors == 0
+            assert not tuple(tmp_path.rglob(reference.invocation_id))
+            if sink_mode == "drained":
+                encoded = os.read(diagnostic_read, 65536)
+                records: list[dict[str, object]] = [
+                    json.loads(line) for line in encoded.splitlines()
+                ]
+                unknown = [
+                    record
+                    for record in records
+                    if record.get("event") == "conformance.lifetime.unknown"
+                ]
+                assert len(unknown) == 1
+                assert unknown[0]["level"] == "WARNING"
+                assert unknown[0]["invocation_id"] == reference.invocation_id
+                assert str(tmp_path).encode() not in encoded
+                assert b"signal.pause" not in encoded
+        except ChannelError as failure:
+            failure.add_note(
+                f"phase={phase}, remaining_ns={deadline - clock.monotonic_ns()}, "
+                f"parent_status={parent.poll()}, helper_identity={identity}"
+            )
+            if not (
+                failure_phase == phase and failure.reason is ChannelFailure.DEADLINE
+            ):
+                raise
+            caught = failure
+    finally:
+        await unwind_owned(owned)
+    stopped = group.stopped
+    exited = group.exited
+    parent_status = parent.returncode
+    leader_status = group.leader.returncode
+    channel_closed = channel.closed
+    del group, parent, anchor, channel, first, second
+    gc.collect()
+
+    assert (caught is not None) is (failure_phase is not None)
+    assert parent_status is not None
+    assert leader_status is not None
+    assert channel_closed
+    assert set(os.listdir("/dev/fd")) == baseline_descriptors
+    assert (identity is None) is (failure_phase == "identity")
+    assert len(stopped) == (0 if failure_phase is None else 1)
+    assert exited == stopped

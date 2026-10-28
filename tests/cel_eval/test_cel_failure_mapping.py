@@ -41,7 +41,7 @@ class FailureBinding:
         (ZeroDivisionError, ErrorKind.DIVISION_BY_ZERO, None),
         (OverflowError, ErrorKind.OVERFLOW, None),
         (ValueError, ErrorKind.INTERNAL_FAULT, Fault.VALUE_ERROR),
-        (RuntimeError, ErrorKind.INTERNAL_FAULT, Fault.RUNTIME_ERROR),
+        (RuntimeError, ErrorKind.INVALID_ARGUMENT, None),
         (Panic, ErrorKind.INTERNAL_FAULT, Fault.PANIC),
     ],
 )
@@ -72,3 +72,51 @@ def test_cel_cancellation_propagates_through_evaluation(
 
     with pytest.raises(failure):
         machine.evaluate(checked, {}, {}, ErrorContext("when"), ResultType.BOOL)
+
+
+class CompileFailureBinding:
+    def __init__(self, failure: type[BaseException]) -> None:
+        self.failure = failure
+
+    def compile(self, expression: str) -> NativeProgram:
+        raise self.failure("private-native-message")
+
+    def binding(self) -> Binding:
+        return Binding("fake", Panic, self.compile)
+
+
+@pytest.mark.parametrize(
+    ("binding", "kind", "fault"),
+    [
+        (FailureBinding(RuntimeError).binding(), ErrorKind.INVALID_ARGUMENT, None),
+        (
+            CompileFailureBinding(RuntimeError).binding(),
+            ErrorKind.INTERNAL_FAULT,
+            Fault.RUNTIME_ERROR,
+        ),
+        (
+            CompileFailureBinding(ValueError).binding(),
+            ErrorKind.INTERNAL_FAULT,
+            Fault.VALUE_ERROR,
+        ),
+        (
+            FailureBinding(ValueError).binding(),
+            ErrorKind.INTERNAL_FAULT,
+            Fault.VALUE_ERROR,
+        ),
+    ],
+    ids=["execution_runtime", "compile_runtime", "compile_value", "execution_value"],
+)
+def test_cel_invalid_argument_is_not_an_internal_fault(
+    binding: Binding, kind: ErrorKind, fault: Fault | None
+) -> None:
+    machine = Machine(binding, clock)
+
+    result = machine.evaluate(
+        expression("true"), {}, {}, ErrorContext("when"), ResultType.BOOL
+    )
+
+    assert isinstance(result, EvaluationError)
+    assert result.kind is kind
+    assert result.fault is fault
+    assert "private-native-message" not in repr(result)
