@@ -1,0 +1,101 @@
+{
+  "checked_on": "2026-10-28",
+  "base_revision": "8d8b766e776e52371921bfdfde2e1955932dfe71",
+  "source": "src/kora/plugins/storage/preparation.py",
+  "base_source_sha256": "092e8defd80c98f2d030dbae0ef993d076faeb4b63b96bc160da50ddd1a42aae",
+  "candidate_source_sha256": "50131da1299fc3f1cd961b7e6a60dc760c410ed5df93fa1606ce8d0dca72aebc",
+  "lock_sha256": "561740bd6ed3a6f5a60d8235bcc5cfb0627168d9941756cc5001a189282ba733",
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "python": "CPython 3.11.17",
+  "instrumentation": "cProfile on the event-loop thread plus tracemalloc with one frame, both covering the complete existing alias cycle",
+  "load": "shared local host; serial diagnostic runs with fresh private roots; no host/cache equivalence or latency guarantee",
+  "scope": "one64KiB and one16MiB alias cycle per variant; all results retained; no qualification population or gate changed",
+  "probe_sha256": "50c47d4d6d22f5650b1ffd41780b33352b3f82804368d94ce4b1d4de4baee862",
+  "command": "PYTHONPATH=src:. .venv/bin/python <external-probe.py> <size> <output.json>",
+  "results": [
+    {
+      "variant": "base",
+      "size": 65536,
+      "seconds": 0.6240044579899404,
+      "traced_current_bytes": 388641,
+      "traced_peak_bytes": 516157,
+      "disposable_counts": {
+        "stage_rows": 0,
+        "delete_rows": 0,
+        "receipts": 0,
+        "content_rows": 0,
+        "reserved_bytes": 0,
+        "owned_jobs": 0,
+        "native_jobs": 0,
+        "readers": 0,
+        "connections": 0
+      },
+      "control_observer_seconds": 0.0008747499960009009,
+      "executor_submissions": 103,
+      "raw_json_sha256": "964cff4088ab125e426eacdc41075c0ed7cf8715bc67bba226a15cc9fe52319b"
+    },
+    {
+      "variant": "base",
+      "size": 16777216,
+      "seconds": 1.0485673750226852,
+      "traced_current_bytes": 390968,
+      "traced_peak_bytes": 525269,
+      "disposable_counts": {
+        "stage_rows": 0,
+        "delete_rows": 0,
+        "receipts": 0,
+        "content_rows": 0,
+        "reserved_bytes": 0,
+        "owned_jobs": 0,
+        "native_jobs": 0,
+        "readers": 0,
+        "connections": 0
+      },
+      "control_observer_seconds": 0.0005804169923067093,
+      "executor_submissions": 1633,
+      "raw_json_sha256": "f7d7989379ecb1ba2bcd2628a4d6c9a29986127a3978d1808098046e80f337ba"
+    },
+    {
+      "variant": "head",
+      "size": 65536,
+      "seconds": 0.5519293750112411,
+      "traced_current_bytes": 398132,
+      "traced_peak_bytes": 526360,
+      "disposable_counts": {
+        "stage_rows": 0,
+        "delete_rows": 0,
+        "receipts": 0,
+        "content_rows": 0,
+        "reserved_bytes": 0,
+        "owned_jobs": 0,
+        "native_jobs": 0,
+        "readers": 0,
+        "connections": 0
+      },
+      "control_observer_seconds": 0.0007282079895958304,
+      "executor_submissions": 102,
+      "raw_json_sha256": "ee116c2bf22575bb08e3cea585544119e833955419fd4116d6ad0da12723b8ce"
+    },
+    {
+      "variant": "head",
+      "size": 16777216,
+      "seconds": 0.8818345000036061,
+      "traced_current_bytes": 399396,
+      "traced_peak_bytes": 533380,
+      "disposable_counts": {
+        "stage_rows": 0,
+        "delete_rows": 0,
+        "receipts": 0,
+        "content_rows": 0,
+        "reserved_bytes": 0,
+        "owned_jobs": 0,
+        "native_jobs": 0,
+        "readers": 0,
+        "connections": 0
+      },
+      "control_observer_seconds": 0.0006948340160306543,
+      "executor_submissions": 1377,
+      "raw_json_sha256": "e09fcabbde7bfd4bd40ab18254d2c321549542864b29e18821a13f6ea8b5ee30"
+    }
+  ]
+}

@@ -10,6 +10,7 @@ from kora.conformance.common import context_for
 from kora.conformance.storage_support import (
     BytesSource,
     RepeatedSource,
+    acknowledge_stage,
     content_address,
     delete_release,
     delete_request,
@@ -24,6 +25,122 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.storage_models import PreparedContentRef
 from tests.plugins.storage.activity import StorageBarrierActivity
 from tests.plugins.storage.configuration import local_configuration
+from tests.plugins.storage.inspection import InspectedStorage
+
+
+class ImmediateSource(BytesSource):
+    def __init__(self, payload: bytes) -> None:
+        super().__init__(payload, chunk_size=1)
+        self.entered = asyncio.Event()
+
+    async def read(self, maximum: int) -> bytes:
+        chunk = await super().read(maximum)
+        if chunk:
+            self.entered.set()
+        return chunk
+
+
+def test_identical_preparation_yields_for_cancellation_before_eof(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async def scenario() -> None:
+        configuration = local_configuration(tmp_path / "store")
+        provider = InspectedStorage(configuration)
+        context = context_for(kora_capture)
+        payload = b"k" * 65536
+        source = ImmediateSource(payload)
+        try:
+            upload = await seal_repeated(
+                provider, "cancel-alias", len(payload), context
+            )
+            request = preparation_request(
+                provider.identity(),
+                "prepare",
+                upload.content,
+                len(payload),
+                digest(payload),
+            )
+            preparing = asyncio.create_task(
+                provider.prepare_content(request, source, context)
+            )
+
+            await asyncio.wait_for(source.entered.wait(), 5)
+            preparing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await preparing
+        finally:
+            await provider.aclose()
+        recovered = InspectedStorage(configuration)
+        try:
+            pending = await recovered.observe(request.operation, context)
+            candidate = await recovered.prepare_content(
+                request, BytesSource(payload), context
+            )
+            reader = await recovered.read_stage(candidate, context)
+            async with reader:
+                reread = b"".join([chunk async for chunk in reader])
+            acknowledgment = await acknowledge_stage(
+                recovered,
+                upload.content.stage,
+                (*upload.operations, request.operation),
+                context,
+            )
+            released = await recovered.release_stage(acknowledgment, context)
+            counts = recovered.resource_counts()
+        finally:
+            await recovered.aclose()
+
+        assert source.closed
+        assert 0 < source.offset < len(payload)
+        assert pending.state == "pending"
+        assert pending.result is None
+        assert reread == payload
+        assert released.state == "released"
+        assert all(value == 0 for value in counts.values())
+        provider.assert_closed()
+        recovered.assert_closed()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("payload", [b"raq", b"ra", b"rawx"])
+def test_identical_preparation_refuses_invalid_source_before_alias_settlement(
+    tmp_path: Path, kora_capture: Capture, payload: bytes
+) -> None:
+    async def scenario() -> None:
+        provider = InspectedStorage(local_configuration(tmp_path / "store"))
+        context = context_for(kora_capture)
+        source = BytesSource(payload)
+        try:
+            sealed, _, _ = await seal_bytes(provider, "raw", b"raw", context)
+            request = preparation_request(
+                provider.identity(), "prepare", sealed, 3, digest(b"raw")
+            )
+
+            with pytest.raises(KoraProtocolError) as refused:
+                await provider.prepare_content(request, source, context)
+            pending = await provider.observe(request.operation, context)
+            candidate = await provider.prepare_content(
+                request, BytesSource(b"raw"), context
+            )
+            replay = await provider.prepare_content(
+                request, BytesSource(b"raw"), context
+            )
+            reader = await provider.read_stage(candidate, context)
+            async with reader:
+                reread = b"".join([chunk async for chunk in reader])
+        finally:
+            await provider.aclose()
+
+        assert source.closed
+        assert refused.value.code == "storage_conflict"
+        assert pending.state == "pending"
+        assert pending.result is None
+        assert candidate == replay
+        assert reread == b"raw"
+        provider.assert_closed()
+
+    asyncio.run(scenario())
 
 
 def test_interrupted_identical_preparation_stays_within_reserved_peak(
@@ -32,28 +149,33 @@ def test_interrupted_identical_preparation_stays_within_reserved_peak(
     async def scenario() -> None:
         configuration = local_configuration(tmp_path / "store")
         provider = LocalArtifactStorage(configuration)
-        context = context_for(kora_capture)
-        size = 65536
-        upload = await seal_repeated(provider, "interrupted-alias", size, context)
-        raw = upload.content
-        request = preparation_request(
-            provider.identity(), "prepare", raw, size, raw.payload_digest
-        )
-        barrier = StorageBarrierActivity(
-            "storage.prepare_content.effect_persisted", on_exit=True
-        )
-        source = RepeatedSource(size)
-        prepared = asyncio.create_task(
-            provider.prepare_content(
-                request, source, replace(context, activity=barrier)
+        try:
+            context = context_for(kora_capture)
+            size = 65536
+            upload = await seal_repeated(provider, "interrupted-alias", size, context)
+            raw = upload.content
+            request = preparation_request(
+                provider.identity(), "prepare", raw, size, raw.payload_digest
             )
-        )
+            barrier = StorageBarrierActivity(
+                "storage.prepare_content.effect_persisted", on_exit=True
+            )
+            source = RepeatedSource(size)
+            prepared = asyncio.create_task(
+                provider.prepare_content(
+                    request, source, replace(context, activity=barrier)
+                )
+            )
 
-        await asyncio.wait_for(barrier.entered.wait(), 5)
-        prepared.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await prepared
-        await provider.aclose()
+            await asyncio.wait_for(barrier.entered.wait(), 5)
+            preparation_bytes = (
+                (tmp_path / "store" / "stages" / "0" / "prepare").stat().st_size
+            )
+            prepared.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await prepared
+        finally:
+            await provider.aclose()
         recovered = LocalArtifactStorage(configuration)
         try:
             observation = await recovered.observe(request.operation, context)
@@ -73,6 +195,8 @@ def test_interrupted_identical_preparation_stays_within_reserved_peak(
             await recovered.aclose()
 
         assert source.closed
+        assert source.offset == size
+        assert preparation_bytes == 0
         assert published.created_object
         assert sum(path.stat().st_size for path in private_files) <= 2 * size
         assert "prepare" not in {path.name for path in private_files}

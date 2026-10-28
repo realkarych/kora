@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 from functools import partial
 
@@ -100,6 +101,12 @@ class ContentPreparer:
                         digest = hashlib.sha256()
                         size = 0
                         maximum = request.arguments.maximum_output_size
+                        raw = request.arguments.source
+                        expected_alias = (
+                            request.arguments.expected_output_digest
+                            == raw.payload_digest
+                            and maximum == raw.total_size
+                        )
                         while True:
                             bound = min(MAX_CHUNK_BYTES, maximum - size + 1)
                             chunk = await source.read(bound)
@@ -111,7 +118,12 @@ class ContentPreparer:
                             if size > maximum:
                                 refuse("storage_conflict")
                             digest.update(chunk)
-                            await self.runner(partial(self.files.write, writer, chunk))
+                            if expected_alias:
+                                await asyncio.sleep(0)
+                            else:
+                                await self.runner(
+                                    partial(self.files.write, writer, chunk)
+                                )
                         actual_digest = "sha256:" + digest.hexdigest()
                         if (
                             request.arguments.expected_output_digest is not None
@@ -119,8 +131,9 @@ class ContentPreparer:
                             != request.arguments.expected_output_digest
                         ):
                             refuse("storage_conflict")
+                        if expected_alias and size != raw.total_size:
+                            refuse("storage_conflict")
                         await self.runner(lambda: self.files.finish(writer, slot))
-                        raw = request.arguments.source
                         identical = (
                             size == raw.total_size
                             and actual_digest == raw.payload_digest
