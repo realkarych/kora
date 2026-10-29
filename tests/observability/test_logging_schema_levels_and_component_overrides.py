@@ -15,6 +15,8 @@ from tests.observability.conftest import (
     TEST_COMPONENT,
     Configure,
     Pipe,
+    configured_with_reader,
+    finished_output,
     run_kora,
 )
 
@@ -80,9 +82,10 @@ def test_text_format_renders_the_same_sanitized_record() -> None:
 
 
 def test_every_level_renders_with_its_name(configure: Configure, pipe: Pipe) -> None:
-    diagnostics = configure(LoggingSettings(level=Level.DEBUG), pipe.write_end)
+    diagnostics = configured_with_reader(
+        configure, pipe, LoggingSettings(level=Level.DEBUG)
+    )
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     for spec in LEVEL_EVENTS.values():
         log.emit(spec, text="note")
@@ -96,15 +99,12 @@ def test_component_threshold_filters_before_processing(
     configure: Configure, pipe: Pipe
 ) -> None:
     settings = LoggingSettings(level=Level.WARNING)
-    diagnostics = configure(settings, pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, settings)
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     log.emit(LEVEL_EVENTS[Level.INFO], text="hidden")
     log.emit(LEVEL_EVENTS[Level.ERROR], text="shown")
-    diagnostics.shutdown()
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
+    finished_output(diagnostics, pipe)
 
     events = [record["event"] for record in pipe.reader.records()]
     assert events == ["testing.error"]
@@ -157,15 +157,12 @@ def test_third_party_logger_is_bridged_only_when_allowlisted(
     configure: Configure, pipe: Pipe
 ) -> None:
     settings = LoggingSettings(third_party={"vendor": Level.INFO})
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, settings)
 
     logging.getLogger("vendor.lib").info("marker-one")
     logging.getLogger("other.lib").warning("marker-two")
     logging.getLogger("vendor.lib").debug("marker-three")
-    diagnostics.shutdown()
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
+    finished_output(diagnostics, pipe)
 
     records = pipe.reader.records()
     assert [record["event"] for record in records] == ["thirdparty.record"]
@@ -216,9 +213,8 @@ def test_bare_invocation_exits_two_with_usage() -> None:
 
 
 def test_note_fields_of_every_kind_render(configure: Configure, pipe: Pipe) -> None:
-    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, LoggingSettings())
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     log.emit(
         NOTE,
