@@ -246,11 +246,15 @@ run: Table = Table(
     document("trigger"),
     document("limits"),
     document("retention"),
+    Column("retention_version", Integer, nullable=True),
     timestamp("started_at", nullable=True),
     timestamp("deadline_expired_at", nullable=True),
     timestamp("finished_at", nullable=True),
     *audit_columns(),
     UniqueConstraint("graph_id", "idempotency_key"),
+    CheckConstraint(
+        "retention_version IS NULL OR retention_version = 1", name="retention_version"
+    ),
     Index("ix_run_namespace_target", "namespace_id", "target_key"),
     Index(
         "ix_run_needs_scheduling",

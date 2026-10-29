@@ -16,6 +16,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from kora.db.retention import StoredRetention, classify_retention_snapshot
 from kora.db.tables import (
     FINISHED_NODE_STATUSES,
     NON_TERMINAL_ATTEMPT_STATUSES,
@@ -126,6 +127,7 @@ class RunRow:
     trigger: JsonValue
     limits: JsonValue
     retention: JsonValue
+    retention_version: int | None
     started_at: datetime | None
     deadline_expired_at: datetime | None
     finished_at: datetime | None
@@ -264,6 +266,18 @@ async def run_by_id(
         run.c.namespace_id == namespace_id, run.c.id == run_id
     )
     return await first_row(connection, RunRow, statement)
+
+
+async def retention_snapshot_by_run_id(
+    connection: AsyncConnection, namespace_id: str, run_id: str
+) -> StoredRetention | None:
+    statement = select(run.c.retention_version, run.c.retention).where(
+        run.c.namespace_id == namespace_id, run.c.id == run_id
+    )
+    found = (await connection.execute(statement)).first()
+    if found is None:
+        return None
+    return classify_retention_snapshot(found[0], found[1])
 
 
 async def node_instances_of_run(

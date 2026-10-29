@@ -22,12 +22,14 @@ from kora.db.reads import (
     namespace_by_name,
     namespace_outstanding_usage,
     node_instances_of_run,
+    retention_snapshot_by_run_id,
     run_by_id,
     target_holders,
     token_by_digest,
     worker_by_id,
 )
-from kora.db.tables import api_token, node_instance
+from kora.db.retention import RetentionSnapshot, UnversionedRetention
+from kora.db.tables import api_token, node_instance, run
 from tests.db.seed import START, Seeder
 
 MARKED_RUNS: int = 1000
@@ -293,6 +295,20 @@ async def test_registry_reads_are_namespace_scoped(database: Database) -> None:
         node_id = await seeder.node(run_id, "step")
         event_ids = await seeder.events(namespace_id, run_id, EVENTS)
         other_run = await seeder.run(namespace_id, graph_id, version_id)
+        malformed_run = await seeder.run(namespace_id, graph_id, version_id)
+        await connection.execute(
+            update(run)
+            .where(run.c.id == run_id)
+            .values(
+                retention_version=1,
+                retention={"transcripts": "0d", "artifact_payloads": "forever"},
+            )
+        )
+        await connection.execute(
+            update(run)
+            .where(run.c.id == malformed_run)
+            .values(retention_version=1, retention={"private": "invalid"})
+        )
         await seeder.events(namespace_id, other_run, OTHER_EVENTS)
         await seeder.events(other_namespace, None, OTHER_EVENTS)
         token_id = await seeder.token("a" * 64, kind="service", owner="worker-1")
@@ -327,6 +343,21 @@ async def test_registry_reads_are_namespace_scoped(database: Database) -> None:
             await run_by_id(connection, namespace_id, "0" * 26),
             await worker_by_id(connection, "worker-2"),
         )
+        own_snapshot = await retention_snapshot_by_run_id(
+            connection, namespace_id, run_id
+        )
+        unversioned_snapshot = await retention_snapshot_by_run_id(
+            connection, namespace_id, other_run
+        )
+        foreign_snapshot = await retention_snapshot_by_run_id(
+            connection, other_namespace, run_id
+        )
+        missing_snapshot = await retention_snapshot_by_run_id(
+            connection, namespace_id, "0" * 26
+        )
+        malformed_foreign_snapshot = await retention_snapshot_by_run_id(
+            connection, other_namespace, malformed_run
+        )
     plan = await executed_plan(
         database,
         lambda connection: events_of_run(connection, namespace_id, run_id, None, 100),
@@ -349,6 +380,10 @@ async def test_registry_reads_are_namespace_scoped(database: Database) -> None:
     assert [row.id for row in first_page + second_page + third_page] == event_ids
     assert [row.payload for row in third_page][-1] == {"index": EVENTS - 1}
     assert missing == (None, None, None)
+    assert own_snapshot == RetentionSnapshot("0d", "forever")
+    assert unversioned_snapshot == UnversionedRetention()
+    assert foreign_snapshot is missing_snapshot is malformed_foreign_snapshot is None
+    assert foreign_snapshot != unversioned_snapshot
     assert "ix_event_run_id_id" in plan
     with pytest.raises(PageSizeError):
         await events_of_run(connection, namespace_id, run_id, None, 0)

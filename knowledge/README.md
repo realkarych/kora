@@ -44,6 +44,8 @@ Use the entry section, follow its dependencies and read the governing decision b
 
 ## Open design and focused evidence
 
+The retention snapshot foundation under [#443](https://github.com/realkarych/kora/issues/443) provides detached resolved inputs, a nullable format tag and namespace-scoped metadata reads. Unversioned historical JSON is preserved without adoption. Production immutable run writes, owner admission and cleanup remain pending under [#216](https://github.com/realkarych/kora/issues/216); the foundation does not establish first-slice retention readiness.
+
 For the local artifact-storage implementation, [storage section 7.4](specs/protocols.md#74-local-provider-implementation-contract-issue-255) defines the selected epoch, physical identity, stable private control path and finite settings. The [implementation evidence record](reviews/local-artifact-storage-2026-10-23.md) maps conformance, resource and CI obligations; [dated platform research](research/local-storage-platforms-2026-10-23.md) supports native locking/ACL and private SQLite mechanics. Provider-only results do not activate real API/metadata/retention consumers.
 
 [Open implementation questions](architecture/detailed.md#open-implementation-questions) separate undecided mechanics from constraints already settled by ADRs. [Deferred proposals](../docs/proposals/) are alternatives, not implementation instructions.

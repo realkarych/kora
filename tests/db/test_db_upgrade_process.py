@@ -19,7 +19,7 @@ from tests.db.seed import START, Seeder, seed_predecessor
 from tests.db.test_pricing_migration import price_check, retained_index_progress
 from tests.observability.conftest import ProcessResult, run_kora
 
-HEAD_REVISION: str = "0002"
+HEAD_REVISION: str = "0003"
 HIDDEN_MARKER: str = "PASSWORD-MARKER-4471"
 USER_MARKER: str = "usermarker4472"
 HOST_MARKER: str = "hostmarker4473.invalid"
@@ -68,7 +68,7 @@ def test_db_upgrade_succeeds_and_reruns_as_a_no_op(tmp_path: Path) -> None:
         for record in records(second)
         if record["event"] == "db.migration.finished"
     ]
-    assert first_finished[0]["steps"] == 2
+    assert first_finished[0]["steps"] == 3
     assert second_finished[0]["steps"] == 0
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     with closing(sqlite3.connect(path)) as connection:
@@ -244,7 +244,7 @@ async def test_db_upgrade_partial_failure_is_content_free(
         assert events(failed).count("db.transaction.failed") == 1
         assert events(failed).count("db.migration.failed") == 1
         assert recovered.code == 0
-        assert recovered.stdout == b"0002\n"
+        assert recovered.stdout == b"0003\n"
         assert events(recovered).count("db.migration.finished") == 1
     finally:
         await database.close()
@@ -387,8 +387,8 @@ async def test_db_upgrade_index_failure_is_content_free_and_recoverable(
         assert chain
         assert all(set(entry) <= {"type", "module", "frames"} for entry in chain)
         assert recovered.code == 0
-        assert recovered.stdout == b"0002\n"
-        assert recovered_revision == "0002"
+        assert recovered.stdout == b"0003\n"
+        assert recovered_revision == "0003"
         assert events(recovered).count("db.migration.finished") == 1
     finally:
         await database.close()
