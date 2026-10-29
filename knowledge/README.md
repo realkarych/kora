@@ -44,6 +44,8 @@ Use the entry section, follow its dependencies and read the governing decision b
 
 ## Open design and focused evidence
 
+The [recovered-settlement observation design](research/recovered-settlement-observation-2026-10-30.md) records #440's owner-approved 100 ms waiting amendment, native evidence and authority limits. Runtime delivery and supported-platform evidence remain with #369; the remaining tests-only cleanup under #368 follows that implementation.
+
 The retention snapshot foundation under [#443](https://github.com/realkarych/kora/issues/443) provides detached resolved inputs, a nullable format tag and namespace-scoped metadata reads. Unversioned historical JSON is preserved without adoption. Production immutable run writes, owner admission and cleanup remain pending under [#216](https://github.com/realkarych/kora/issues/216); the foundation does not establish first-slice retention readiness.
 
 For the local artifact-storage implementation, [storage section 7.4](specs/protocols.md#74-local-provider-implementation-contract-issue-255) defines the selected epoch, physical identity, stable private control path and finite settings. The [implementation evidence record](reviews/local-artifact-storage-2026-10-23.md) maps conformance, resource and CI obligations; [dated platform research](research/local-storage-platforms-2026-10-23.md) supports native locking/ACL and private SQLite mechanics. Provider-only results do not activate real API/metadata/retention consumers.
