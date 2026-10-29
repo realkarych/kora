@@ -353,3 +353,33 @@ The slowest macOS sample, at 556 s, projects to the 7:00 line. The 6:00 conditio
 - a change moves source checks or builds into `remainder`;
 - a moved or co-scheduled test fails a deadline in a hosted run;
 - the expected IR evidence values stop being deterministic within a process.
+
+### Required measurement balance, 2026-10-29
+
+Issue [#271](https://github.com/realkarych/kora/issues/271) preserves six IR runners and moves provider-loading/protocol-model work into `provider-protocol-measurements`. The existing resource job key and check name remain for compatibility; it retains logging, metadata and all full-disk steps. Both jobs own locked setup, source receipts, final environment verification, cancellation refusal and complete required-step proofs. CEL requires both job results and both proofs. Artifact names, workloads and hard limits are unchanged. Scaffold source/build assignment stays unchanged; PR #301 owns its separate placement change.
+
+The six partitions assign whole existing tests and validation-name families. Shard 0 retains configuration worker 0, VcsRef action/import, diagnostics and failure cases. Shards 1/2 retain configuration workers 1/2 and their accounting timing/lifetime ownership, with dense/schema and control validation respectively. Shards 3/4 pair schema workers 0/1 with remaining and configuration/document validation. Shard 5 pairs schema worker 2 with VcsRef lifetime and every other validation name, including unmatched future prefixes. Literal full parameter prefixes prevent substring overlap. Real collection and evidence checks require exact node, gate and sample-multiplicity ownership.
+
+| Shard | Tests | Gates | Samples |
+|---|---:|---:|---:|
+| 0 | 13 | 123 | 2,427 |
+| 1 | 24 | 188 | 2,761 |
+| 2 | 58 | 643 | 852 |
+| 3 | 65 | 68 | 964 |
+| 4 | 114 | 117 | 1,914 |
+| 5 | 85 | 88 | 1,750 |
+| Complete union | 359 | 1,227 | 10,668 |
+
+Comparison against base `e6c0730f1ebdd0e7d809e8f8a7780034cb0aba97` requires identical node/gate identities and sample Counter keys/multiplicities, not only totals. No measurement function, fixture, warm-up, cycle, numerical assertion, child deadline, output bound or resource-release check changes.
+
+The [implementation plan](https://github.com/realkarych/kora/issues/271#issuecomment-6488313379) records source/proof ownership. The owner authorized implementation and ordinary shipping of this scope; this does not approve reduced acceptance. Independent correctness, security and performance design reviews found no blocking defect; source and executable acceptance still require their own evidence.
+
+#### Sampling and retained outcomes
+
+The inherited [#268 method](https://github.com/realkarych/kora/issues/268#issuecomment-6410429531) requires three interleaved serial base/head full-workflow samples, B/H/B/H/B/H, with fixed source identities. A sample starts only after the preceding attempt completes. Attempt `run_started_at` to the last job completion includes own queueing and dependent jobs. The initial PR push/scanners remain a separate observation. External replacement causes and the maximum of three replacements per side retain all originals; favorable-outcome reruns are forbidden.
+
+Report each head shard's job-duration median and `max / min - 1`, all three pipeline totals, and each sample's measurement-versus-Scaffold comparison. The retained criteria are IR imbalance at most 30%, median pipeline below 450 seconds and no measurement job more than 30 seconds longer than the slowest Scaffold shard. All mandatory final-head results must pass separately from timing.
+
+Pre-change [CI 40745060259](https://github.com/realkarych/kora/actions/runs/40745060259), at `e6c0730`, observed IR jobs 496/225/250/206/210/172 seconds and resource time 388 seconds. This single run motivates packing and establishes no comparison acceptance. It failed macOS `test_storage_case_runner_retains_failed_domain[task]`, tracked by #408 and existing PR #409; its short failed conformance duration, skipped build and refused joins are not healthy headroom evidence. #301's historical native-storage failures also retain their outcomes. Neither repair is part of #271.
+
+Hosted comparison and final-head acceptance remain pending until their revision-matched runs and artifacts are recorded. Static balance or local passing collection/evidence tests establish no hosted performance guarantee.

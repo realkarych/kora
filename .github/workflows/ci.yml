@@ -536,34 +536,6 @@ jobs:
           name: metadata-database-lifetime-measurement
           path: measurements/metadata-database-lifetime.json
           if-no-files-found: error
-      - name: Measure provider loading cost
-        id: provider_loading_measurement
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        id: provider_upload
-        if: ${{ !cancelled() && steps.provider_loading_measurement.outcome != 'skipped' }}
-        with:
-          name: provider-loading-cost-measurement
-          path: measurements/provider-loading-cost.json
-          if-no-files-found: error
-      - name: Measure protocol model and secret registration cost
-        id: protocol_models_measurement
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
-            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
-        id: protocol_upload
-        if: ${{ !cancelled() && steps.protocol_models_measurement.outcome != 'skipped' }}
-        with:
-          name: protocol-models-cost-measurement
-          path: measurements/protocol-models-cost.json
-          if-no-files-found: error
       - name: Prepare bounded full-disk mount
         id: full_disk_prepare
         run: |
@@ -625,10 +597,6 @@ jobs:
           LOGGING_UPLOAD_OUTCOME: ${{ steps.logging_upload.outcome }}
           DATABASE_MEASUREMENT_OUTCOME: ${{ steps.database_measurement.outcome }}
           DATABASE_UPLOAD_OUTCOME: ${{ steps.database_upload.outcome }}
-          PROVIDER_LOADING_MEASUREMENT_OUTCOME: ${{ steps.provider_loading_measurement.outcome }}
-          PROVIDER_UPLOAD_OUTCOME: ${{ steps.provider_upload.outcome }}
-          PROTOCOL_MODELS_MEASUREMENT_OUTCOME: ${{ steps.protocol_models_measurement.outcome }}
-          PROTOCOL_UPLOAD_OUTCOME: ${{ steps.protocol_upload.outcome }}
           FULL_DISK_PREPARE_OUTCOME: ${{ steps.full_disk_prepare.outcome }}
           FULL_DISK_OUTCOME: ${{ steps.full_disk.outcome }}
           FULL_DISK_EVIDENCE_OUTCOME: ${{ steps.full_disk_evidence.outcome }}
@@ -643,15 +611,124 @@ jobs:
           test "$LOGGING_UPLOAD_OUTCOME" = success
           test "$DATABASE_MEASUREMENT_OUTCOME" = success
           test "$DATABASE_UPLOAD_OUTCOME" = success
-          test "$PROVIDER_LOADING_MEASUREMENT_OUTCOME" = success
-          test "$PROVIDER_UPLOAD_OUTCOME" = success
-          test "$PROTOCOL_MODELS_MEASUREMENT_OUTCOME" = success
-          test "$PROTOCOL_UPLOAD_OUTCOME" = success
           test "$FULL_DISK_PREPARE_OUTCOME" = success
           test "$FULL_DISK_OUTCOME" = success
           test "$FULL_DISK_EVIDENCE_OUTCOME" = success
           test "$FULL_DISK_CLEANUP_OUTCOME" = success
           test "$FULL_DISK_UPLOAD_OUTCOME" = success
+          test "$FINAL_SYNC_OUTCOME" = success
+          test "$WORKFLOW_CANCELLED" = false
+          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+
+  provider-protocol-measurements:
+    name: Provider and protocol measurements
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      verified: ${{ steps.required_measurements.outputs.verified }}
+      checkout_revision: ${{ steps.source_revision.outputs.checkout_revision }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      KORA_TEST_DATABASES: sqlite,postgresql
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: provider-protocol-measurements
+      - name: Install locked dependencies
+        id: dependencies
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt \
+            --output-file "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" \
+            --target "$KORA_BUILD_CONSTRAINT_DIR/backend" \
+            --require-hashes \
+            --requirements "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt" \
+            --require-build-hashes \
+            --editable .
+          printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
+      - name: Record actual and requested source revisions
+        id: source_revision
+        env:
+          KORA_WORKFLOW_REVISION: ${{ github.sha }}
+          KORA_REQUESTED_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_CHECKOUT_REVISION="$(git rev-parse HEAD)"
+          test "$KORA_CHECKOUT_REVISION" = "$KORA_WORKFLOW_REVISION"
+          printf 'Actual checkout: %s\nRequested measurement revision: %s\n' "$KORA_CHECKOUT_REVISION" "$KORA_REQUESTED_REVISION"
+          printf 'checkout_revision=%s\n' "$KORA_CHECKOUT_REVISION" >> "$GITHUB_OUTPUT"
+      - name: Measure provider loading cost
+        id: provider_loading_measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/provider-loading-cost.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_provider_loading_cost.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        id: provider_upload
+        if: ${{ !cancelled() && steps.provider_loading_measurement.outcome != 'skipped' }}
+        with:
+          name: provider-loading-cost-measurement
+          path: measurements/provider-loading-cost.json
+          if-no-files-found: error
+      - name: Measure protocol model and secret registration cost
+        id: protocol_models_measurement
+        env:
+          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          KORA_MEASUREMENT_OUTPUT=measurements/protocol-models-cost.json \
+            uv run --no-sync pytest -q -p no:logging -m measurement tests/measurements/test_protocol_models_cost.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        id: protocol_upload
+        if: ${{ !cancelled() && steps.protocol_models_measurement.outcome != 'skipped' }}
+        with:
+          name: protocol-models-cost-measurement
+          path: measurements/protocol-models-cost.json
+          if-no-files-found: error
+      - name: Check the synced environment and unchanged dependency files
+        id: final_sync
+        if: ${{ always() && !cancelled() }}
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel
+          git diff --exit-code -- pyproject.toml uv.lock web/package.json \
+            web/pnpm-lock.yaml web/pnpm-workspace.yaml
+      - name: Record workflow cancellation
+        id: workflow_cancellation
+        if: ${{ cancelled() }}
+        run: exit 0
+      - name: Require every producer step
+        id: required_measurements
+        if: ${{ always() }}
+        env:
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          SOURCE_REVISION_OUTCOME: ${{ steps.source_revision.outcome }}
+          PROVIDER_LOADING_MEASUREMENT_OUTCOME: ${{ steps.provider_loading_measurement.outcome }}
+          PROVIDER_UPLOAD_OUTCOME: ${{ steps.provider_upload.outcome }}
+          PROTOCOL_MODELS_MEASUREMENT_OUTCOME: ${{ steps.protocol_models_measurement.outcome }}
+          PROTOCOL_UPLOAD_OUTCOME: ${{ steps.protocol_upload.outcome }}
+          FINAL_SYNC_OUTCOME: ${{ steps.final_sync.outcome }}
+          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+        run: |
+          test "$DEPENDENCIES_OUTCOME" = success
+          test "$SOURCE_REVISION_OUTCOME" = success
+          test "$PROVIDER_LOADING_MEASUREMENT_OUTCOME" = success
+          test "$PROVIDER_UPLOAD_OUTCOME" = success
+          test "$PROTOCOL_MODELS_MEASUREMENT_OUTCOME" = success
+          test "$PROTOCOL_UPLOAD_OUTCOME" = success
           test "$FINAL_SYNC_OUTCOME" = success
           test "$WORKFLOW_CANCELLED" = false
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
@@ -932,22 +1009,22 @@ jobs:
         include:
           - run: 0
             pytest-arguments: >-
-              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]'
+              tests/measurements/test_ir_models_cost.py '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' '--deselect=tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' '--deselect=tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' '--deselect=tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime'
           - run: 1
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost'
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_acceptance' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_refuses_unexpected_rejection' 'tests/measurements/test_ir_models_cost.py::test_cost_checker_releases_nested_values' 'tests/measurements/test_ir_models_cost.py::test_cost_process_failure_preserves_lossless_evidence' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_cost' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[dense_ or test_ir_model_validation_cost[schema_)'
           - run: 2
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime'
+              'tests/measurements/test_ir_models_cost.py::test_ir_configuration_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_accounting_value_lifetime' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[control_)'
           - run: 3
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]'
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[0]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[remaining_)'
           - run: 4
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]'
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[1]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' -k 'not test_ir_model_validation_cost or (test_ir_model_validation_cost[config_ or test_ir_model_validation_cost[document_)'
           - run: 5
             pytest-arguments: >-
-              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]'
+              'tests/measurements/test_ir_models_cost.py::test_ir_schema_repeated_lifetime[2]' 'tests/measurements/test_ir_models_cost.py::test_ir_model_validation_cost' 'tests/measurements/test_ir_models_cost.py::test_vcs_ref_validation_lifetime' -k 'not test_ir_model_validation_cost or (not (test_ir_model_validation_cost[dense_ or test_ir_model_validation_cost[schema_ or test_ir_model_validation_cost[control_ or test_ir_model_validation_cost[remaining_ or test_ir_model_validation_cost[config_ or test_ir_model_validation_cost[document_))'
     env:
       KORA_TEST_DATABASES: sqlite
       KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -1089,7 +1166,7 @@ jobs:
 
   cel-measurements:
     name: CEL evaluator lifetime
-    needs: [scaffold, ir-measurements, resource-measurements, pricing-measurements, cel-producer, git-publication-measurements]
+    needs: [scaffold, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1183,6 +1260,8 @@ jobs:
           IR_MATRIX_RESULT: ${{ needs.ir-measurements.result }}
           RESOURCE_RESULT: ${{ needs.resource-measurements.result }}
           RESOURCE_VERIFIED: ${{ needs.resource-measurements.outputs.verified }}
+          PROVIDER_PROTOCOL_RESULT: ${{ needs.provider-protocol-measurements.result }}
+          PROVIDER_PROTOCOL_VERIFIED: ${{ needs.provider-protocol-measurements.outputs.verified }}
           PRICING_RESULT: ${{ needs.pricing-measurements.result }}
           PRICING_VERIFIED: ${{ needs.pricing-measurements.outputs.verified }}
           CEL_RESULT: ${{ needs.cel-producer.result }}
@@ -1202,6 +1281,7 @@ jobs:
           test "$SCAFFOLD_RESULT" = success
           test "$IR_MATRIX_RESULT" = success
           test "$RESOURCE_RESULT" = success
+          test "$PROVIDER_PROTOCOL_RESULT" = success
           test "$PRICING_RESULT" = success
           test "$CEL_RESULT" = success
           test "$GIT_PUBLICATION_RESULT" = success
@@ -1214,6 +1294,7 @@ jobs:
           test "$CEL_COST_DOWNLOAD_OUTCOME" = success
           test "$CEL_INVENTORY_OUTCOME" = success
           test "$RESOURCE_VERIFIED" = true
+          test "$PROVIDER_PROTOCOL_VERIFIED" = true
           test "$PRICING_VERIFIED" = true
           test "$CEL_VERIFIED" = true
           test "$GIT_PUBLICATION_VERIFIED" = true

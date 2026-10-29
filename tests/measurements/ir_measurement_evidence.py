@@ -75,6 +75,13 @@ class Evidence:
     gates: frozenset[str]
     samples: Counter[tuple[str, int, int]]
 
+    def without(self, other: "Evidence") -> "Evidence":
+        return Evidence(
+            self.nodes - other.nodes,
+            self.gates - other.gates,
+            self.samples - other.samples,
+        )
+
     def union(self, *others: "Evidence") -> "Evidence":
         samples = Counter(self.samples)
         for other in others:
@@ -500,12 +507,59 @@ def expected_evidence() -> Evidence:
     return accepted_evidence().union(accounting_evidence())
 
 
+def validation_evidence(names: tuple[str, ...]) -> Evidence:
+    return Evidence(
+        frozenset(f"{NODE}test_ir_model_validation_cost[{name}]" for name in names),
+        frozenset(f"{name}_retained_at_baseline" for name in names),
+        Counter(
+            (name, repeat, WORKLOADS[name][1])
+            for name in names
+            for repeat in range(WORKLOADS[name][3])
+        ),
+    )
+
+
+def vcs_ref_lifetime_evidence() -> Evidence:
+    return Evidence(
+        frozenset(
+            f"{NODE}test_vcs_ref_validation_lifetime[{run}-{traced}]"
+            for run in range(3)
+            for traced in (True, False)
+        ),
+        frozenset(
+            f"vcs_ref_{mode}_{run}_lifecycle_assertions_passed"
+            for run in range(3)
+            for mode in ("traced", "untraced")
+        ),
+        Counter(
+            (f"vcs_ref_{mode}_{run}_process", run, BATCHES * INTERVAL)
+            for run in range(3)
+            for mode in ("traced", "untraced")
+        ),
+    )
+
+
 def shard_evidence() -> tuple[Evidence, ...]:
     accepted = accepted_evidence()
     worker1 = configuration_evidence(1)
     worker2 = configuration_evidence(2)
     schemas = tuple(schema_evidence(run) for run in range(3))
-    owned = worker1.union(worker2, *schemas)
+    prefixes = (
+        ("dense_", "schema_"),
+        ("control_",),
+        ("remaining_",),
+        ("config_", "document_"),
+    )
+    validation = tuple(
+        validation_evidence(tuple(name for name in WORKLOADS if name.startswith(group)))
+        for group in prefixes
+    )
+    assigned = tuple(prefix for group in prefixes for prefix in group)
+    remaining = validation_evidence(
+        tuple(name for name in WORKLOADS if not name.startswith(assigned))
+    )
+    vcs_lifetime = vcs_ref_lifetime_evidence()
+    owned = worker1.union(worker2, *schemas, *validation, remaining, vcs_lifetime)
     children = accounting_children()
     timing = accounting_evidence(
         [child for child in children if child.mode == "timing"]
@@ -514,20 +568,12 @@ def shard_evidence() -> tuple[Evidence, ...]:
         [child for child in children if child.mode != "timing"]
     )
     return (
-        Evidence(
-            accepted.nodes - owned.nodes,
-            accepted.gates - owned.gates,
-            Counter(
-                {
-                    key: count
-                    for key, count in accepted.samples.items()
-                    if key not in owned.samples
-                }
-            ),
-        ),
-        worker1.union(timing),
-        worker2.union(lifetime),
-        *schemas,
+        accepted.without(owned),
+        worker1.union(timing, validation[0]),
+        worker2.union(lifetime, validation[1]),
+        schemas[0].union(validation[2]),
+        schemas[1].union(validation[3]),
+        schemas[2].union(remaining, vcs_lifetime),
     )
 
 

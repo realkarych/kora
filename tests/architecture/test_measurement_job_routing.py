@@ -33,16 +33,19 @@ PRODUCER_EVIDENCE = {
         (
             "measurement",
             "database_measurement",
-            "provider_loading_measurement",
-            "protocol_models_measurement",
             "full_disk",
         ),
         (
             "logging_upload",
             "database_upload",
+            "full_disk_upload",
+        ),
+    ),
+    "provider-protocol-measurements": ProducerEvidence(
+        ("provider_loading_measurement", "protocol_models_measurement"),
+        (
             "provider_upload",
             "protocol_upload",
-            "full_disk_upload",
         ),
     ),
     "qualification": ProducerEvidence(("lifetime_measurement",), ("lifetime_upload",)),
@@ -236,6 +239,7 @@ def test_producer_proof_covers_every_required_step(job_id: str) -> None:
     "job_id",
     [
         "resource-measurements",
+        "provider-protocol-measurements",
         "pricing-measurements",
         "git-publication-measurements",
         "qualification",
@@ -270,7 +274,7 @@ def test_measurement_jobs_verify_their_own_final_environment(job_id: str) -> Non
 def test_full_disk_route_preserves_private_evidence_before_disposal() -> None:
     selected = steps(table(workflow_jobs()["resource-measurements"]))
     required = (
-        "protocol_upload",
+        "database_upload",
         "full_disk_prepare",
         "full_disk",
         "full_disk_evidence",
