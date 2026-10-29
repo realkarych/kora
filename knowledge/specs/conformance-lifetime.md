@@ -2,7 +2,7 @@
 
 Accepted by the project owner on 2026-10-23 under [issue #231](https://github.com/realkarych/kora/issues/231#issuecomment-6367958968). The generic local library is implemented under #247 and installed command composition under [#215](https://github.com/realkarych/kora/issues/215), with [command evidence and qualification limits](../research/configured-command-2026-10-27.md). Real runtime/testing-runner implementation and evidence remain with their work items. [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) governs this contract; [protocols section 13](protocols.md#local-conformance-command) defines the surrounding installed-provider command.
 
-Recovered-settlement amendment approved by the project owner on 2026-10-30 under [#440](https://github.com/realkarych/kora/issues/440#issuecomment-6508816138). Its [observation and wait design](../research/recovered-settlement-observation-2026-10-30.md) remains pending implementation and supported-platform evidence under #369.
+Recovered-settlement amendment approved by the project owner on 2026-10-30 under [#440](https://github.com/realkarych/kora/issues/440#issuecomment-6508816138). The generic local lifetime library implements its [observation and wait design](../research/recovered-settlement-observation-2026-10-30.md) under #369, with [implementation evidence](../research/recovered-settlement-implementation-2026-10-30.md). Production-consumer activation and its aggregate-concurrency qualification remain pending.
 
 ## Impact
 

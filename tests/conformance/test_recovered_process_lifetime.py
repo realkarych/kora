@@ -1,6 +1,7 @@
 import asyncio
 import ctypes
 import errno
+import gc
 import os
 import signal
 import socket
@@ -8,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 
 from kora.protocols.lifetime import ProcessRegistration
 from kora.protocols.time import SystemClock
+from kora.runner.channels import ChannelError, ChannelFailure
 from kora.runner.identity import (
     GroupObservation,
     IdentityObservation,
@@ -29,6 +31,8 @@ from kora.runner.processes import (
     RecoveredProcess,
     SignalResult,
 )
+from tests.conformance.lifetime_helpers import join_helper_operation
+from tests.conformance.lifetime_support import ControlledLifetimeClock
 
 
 class ReapedDomain:
@@ -55,6 +59,10 @@ class ReapedDomain:
 
 @asynccontextmanager
 async def domain(mode: str) -> AsyncGenerator[ReapedDomain]:
+    if mode in ("held", "held_family"):
+        async with held_domain(mode) as fixture:
+            yield fixture
+        return
     clock = SystemClock()
     with tempfile.TemporaryDirectory(prefix="kr-", dir="/tmp") as directory:
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -117,6 +125,302 @@ async def domain(mode: str) -> AsyncGenerator[ReapedDomain]:
             process.wait()
             anchor.close()
             listener.close()
+
+
+async def finish_held_domain(
+    process: subprocess.Popen[bytes], anchor: ExitAnchor, handles: ExitStack
+) -> None:
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    try:
+        handles.close()
+        await anchor.wait(deadline, clock)
+        assert process.wait() == 0
+    finally:
+        anchor.close()
+        process.poll()
+
+
+@asynccontextmanager
+async def held_domain(mode: str) -> AsyncGenerator[ReapedDomain]:
+    with tempfile.TemporaryDirectory(prefix="kr-", dir="/tmp") as directory:
+        async with AsyncExitStack() as owned:
+            handles = ExitStack()
+            owned.callback(handles.close)
+            listener = handles.enter_context(
+                socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            )
+            address = str(Path(directory) / "s")
+            listener.bind(address)
+            listener.listen(3)
+            listener.setblocking(False)
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    str(
+                        Path(__file__).resolve().parents[1]
+                        / "support/recovered_process_child.py"
+                    ),
+                    address,
+                    mode,
+                    "reaper",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            anchor = ExitAnchor(process.pid)
+            owned.push_async_callback(finish_held_domain, process, anchor, handles)
+            loop = asyncio.get_running_loop()
+            reaper, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
+            handles.callback(reaper.close)
+            assert await asyncio.wait_for(loop.sock_recv(reaper, 64), 5) == b"reaper"
+            await loop.sock_sendall(reaper, b"s")
+            leader, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
+            handles.callback(leader.close)
+            pid = int(await asyncio.wait_for(loop.sock_recv(leader, 64), 5))
+            observed = NativeIdentityReader().read(pid)
+            assert observed.process is not None
+            registration = ProcessRegistration(
+                process=observed.process.identity,
+                process_group_id=observed.process.process_group_id,
+                session_id=observed.process.session_id,
+                acquisition_operation_id="b" * 32,
+            )
+            fixture = ReapedDomain(leader, reaper, registration)
+            if mode == "held_family":
+                await loop.sock_sendall(leader, b"s")
+                fixture.member, _ = await asyncio.wait_for(
+                    loop.sock_accept(listener), 5
+                )
+                handles.callback(fixture.member.close)
+                fixture.member_pid = int(
+                    await asyncio.wait_for(loop.sock_recv(fixture.member, 64), 5)
+                )
+            yield fixture
+
+
+class SettlementClock(ControlledLifetimeClock):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered: asyncio.Event = asyncio.Event()
+        self.sleeps: list[int] = []
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        self.sleeps.append(deadline_ns)
+        self.entered.set()
+        await super().sleep_until(deadline_ns)
+
+
+async def settlement_waiting(
+    waiter: asyncio.Task[None], clock: SettlementClock, count: int = 1
+) -> None:
+    async def entered() -> None:
+        while len(clock.sleeps) < count:
+            clock.entered.clear()
+            await clock.entered.wait()
+
+    barrier = asyncio.create_task(entered())
+    try:
+        await asyncio.wait(
+            (waiter, barrier), timeout=5, return_when=asyncio.FIRST_COMPLETED
+        )
+        if waiter.done():
+            waiter.result()
+        assert barrier.done()
+        assert not waiter.done()
+    finally:
+        await join_helper_operation(barrier)
+
+
+async def release_reaper(fixture: ReapedDomain) -> None:
+    await asyncio.get_running_loop().sock_sendall(fixture.reaper, b"r")
+    await fixture.reap()
+
+
+def assert_empty_domain(fixture: ReapedDomain) -> None:
+    reader = NativeIdentityReader()
+    assert reader.read(fixture.registration.process.pid).state is IdentityState.ABSENT
+    group = reader.group(fixture.registration.process_group_id)
+    assert group.state is IdentityState.PRESENT
+    assert group.members == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_observed_alive", [True, False])
+@pytest.mark.parametrize(
+    "completion", ["reap", "deadline", "cancel", "dispose", "dispose_at_deadline"]
+)
+async def test_recovered_settle_waits_for_reap_of_exited_leader(
+    first_observed_alive: bool, completion: str
+) -> None:
+    clock = SettlementClock()
+    actual = SystemClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            owner = RecoveredProcess(
+                fixture.registration, clock, NativeIdentityReader()
+            )
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+            if first_observed_alive:
+                assert owner.observe(deadline).condition is ProcessCondition.LIVE
+            exited = ExitAnchor(fixture.registration.process.pid, direct_child=False)
+            owned.callback(exited.close)
+            os.kill(fixture.registration.process.pid, signal.SIGKILL)
+            await exited.wait(actual.monotonic_ns() + 5_000_000_000, actual)
+            listed = NativeIdentityReader().group(fixture.registration.process_group_id)
+            assert listed.state is IdentityState.PRESENT
+            assert len(listed.members) == 1
+            native = listed.members[0][1]
+            if sys.platform == "linux":
+                assert native.state is IdentityState.PRESENT
+                assert native.process is not None
+                assert native.process.dead
+            else:
+                assert native.state is IdentityState.ABSENT
+            waiter = asyncio.create_task(owner.settle(deadline))
+            observed_errors: list[BaseException] = []
+            owned.push_async_callback(join_helper_operation, waiter, observed_errors)
+
+            await settlement_waiting(waiter, clock)
+            observation = owner.observe(deadline)
+            assert observation.condition is ProcessCondition.UNKNOWN
+            assert not observation.group_empty
+            assert owner.watcher_count == int(first_observed_alive)
+            assert len(clock.waiters) == 1
+            if not first_observed_alive:
+                assert owner.readiness() == ()
+                assert clock.sleeps[-1] == clock.monotonic_ns() + 100_000_000
+            for requested in (signal.SIGTERM, signal.SIGKILL):
+                assert owner.signal(requested, deadline) is SignalResult.UNKNOWN
+            with pytest.raises(ProcessError):
+                owner.release(deadline)
+            remaining = waiter
+            if completion == "cancel":
+                remaining = asyncio.create_task(owner.settle(deadline))
+                owned.push_async_callback(
+                    join_helper_operation, remaining, observed_errors
+                )
+                await settlement_waiting(remaining, clock, len(clock.sleeps) + 1)
+                assert len(clock.waiters) == 2
+                native_pending = owner.readiness()
+                waiter.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await waiter
+                assert len(clock.waiters) == 1
+                assert all(not future.cancelled() for future in native_pending)
+                assert not remaining.done()
+            elif completion in ("deadline", "dispose_at_deadline"):
+                clock.advance(5_000_000_000)
+                if completion == "dispose_at_deadline":
+                    owner.dispose_observation()
+                with pytest.raises(ChannelError) as expired:
+                    await waiter
+                observed_errors.append(expired.value)
+                assert expired.value.reason is ChannelFailure.DEADLINE
+                owner.dispose_observation()
+                assert not clock.waiters
+            elif completion == "dispose":
+                owner.dispose_observation()
+                with pytest.raises(ProcessError) as disposed:
+                    await asyncio.wait_for(waiter, 5)
+                observed_errors.append(disposed.value)
+                assert disposed.value.condition is ProcessCondition.UNKNOWN
+                assert not clock.waiters
+                with pytest.raises(ProcessError) as refused:
+                    await owner.settle(deadline)
+                assert refused.value.condition is ProcessCondition.UNKNOWN
+                assert not owner.closed
+            await release_reaper(fixture)
+            if completion in ("reap", "cancel"):
+                clock.advance(100_000_000)
+                await asyncio.wait_for(remaining, 5)
+                assert not clock.waiters
+                assert owner.observe(deadline).settled
+                owner.release(deadline)
+                assert owner.closed
+
+            assert_empty_domain(fixture)
+            owner.dispose_observation()
+            assert owner.watcher_count == 0
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+async def test_recovered_late_member_refresh_is_independent_of_live_leader() -> None:
+    clock = SettlementClock()
+    actual = SystemClock()
+    async with domain("held_family") as fixture:
+        assert fixture.member_pid is not None
+        assert fixture.member is not None
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            owner = RecoveredProcess(
+                fixture.registration, clock, NativeIdentityReader()
+            )
+            owned.callback(owner.dispose_observation)
+            exited = ExitAnchor(fixture.member_pid, direct_child=False)
+            owned.callback(exited.close)
+            os.kill(fixture.member_pid, signal.SIGKILL)
+            await exited.wait(actual.monotonic_ns() + 5_000_000_000, actual)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+            waiter = asyncio.create_task(owner.settle(deadline))
+            owned.push_async_callback(join_helper_operation, waiter)
+
+            await settlement_waiting(waiter, clock)
+            observation = owner.observe(deadline)
+            expected = (
+                ProcessCondition.LIVE
+                if sys.platform == "linux"
+                else ProcessCondition.UNKNOWN
+            )
+            assert observation.condition is expected
+            assert owner.watcher_count == 1
+            assert owner.readiness()
+            assert list(clock.waiters.values()) == [clock.monotonic_ns() + 100_000_000]
+            assert owner.signal(signal.SIGTERM, deadline) is (
+                SignalResult.SENT
+                if expected is ProcessCondition.LIVE
+                else SignalResult.UNKNOWN
+            )
+            with pytest.raises(ProcessError):
+                owner.release(deadline)
+            count = len(clock.sleeps)
+            clock.advance(400_000_000)
+            await settlement_waiting(waiter, clock, count + 1)
+            assert list(clock.waiters.values()) == [clock.monotonic_ns() + 100_000_000]
+            loop = asyncio.get_running_loop()
+            await loop.sock_sendall(fixture.leader, b"r")
+            assert (
+                await asyncio.wait_for(loop.sock_recv(fixture.leader, 64), 5)
+                == b"reaped"
+            )
+            group = NativeIdentityReader().group(fixture.registration.process_group_id)
+            assert fixture.member_pid not in {pid for pid, _ in group.members}
+            count = len(clock.sleeps)
+            clock.advance(100_000_000)
+            await settlement_waiting(waiter, clock, count + 1)
+            assert list(clock.waiters.values()) == [deadline]
+            assert owner.observe(deadline).condition is ProcessCondition.LIVE
+            assert not waiter.done()
+            fixture.leader.shutdown(socket.SHUT_WR)
+            await release_reaper(fixture)
+            await asyncio.wait_for(waiter, 5)
+            owner.release(deadline)
+
+            assert owner.closed
+            assert owner.watcher_count == 0
+            assert not clock.waiters
+            assert_empty_domain(fixture)
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
 
 
 @pytest.mark.asyncio
@@ -190,12 +494,284 @@ class RecoveryIdentityDecisions:
         )
 
 
+class CollectionRefusalDecisions(RecoveryIdentityDecisions):
+    def __init__(self, fixture: ReapedDomain, retained: bool, failure: str) -> None:
+        super().__init__(fixture.registration.process.pid)
+        self.member_pid: int | None = fixture.member_pid
+        self.retained: bool = retained
+        self.group_failure: str = failure
+
+    def read(self, pid: int) -> IdentityObservation:
+        if pid == self.pid and not self.retained:
+            return IdentityObservation(IdentityState.ABSENT)
+        return super().read(pid)
+
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        group = super().group(process_group_id, deadline_ns)
+        leader = self.native.read(self.pid)
+        process = leader.process
+        assert process is not None
+        assert self.member_pid is not None
+        if self.group_failure == "unreadable":
+            refused = IdentityObservation(IdentityState.UNKNOWN)
+        elif self.group_failure == "malformed":
+            refused = IdentityObservation(IdentityState.PRESENT)
+        else:
+            candidate = (
+                replace(process, session_id=process.session_id + 1)
+                if self.group_failure == "scope"
+                else replace(
+                    process,
+                    identity=process.identity.model_copy(
+                        update={"start_time": process.identity.start_time + 1}
+                    ),
+                )
+            )
+            refused = replace(leader, process=candidate)
+        return replace(
+            group,
+            members=(
+                (self.member_pid, IdentityObservation(IdentityState.ABSENT)),
+                (self.pid, refused),
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retained", [True, False])
+@pytest.mark.parametrize("failure", ["unreadable", "malformed", "reused", "scope"])
+async def test_recovered_terminal_refusal_dominates_waitable_collection(
+    retained: bool, failure: str
+) -> None:
+    clock = SettlementClock()
+    actual = SystemClock()
+    async with domain("held_family") as fixture:
+        assert fixture.member_pid is not None
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            source = CollectionRefusalDecisions(fixture, retained, failure)
+            owner = RecoveredProcess(fixture.registration, clock, source)
+            owned.callback(owner.dispose_observation)
+            exited = ExitAnchor(fixture.member_pid, direct_child=False)
+            owned.callback(exited.close)
+            os.kill(fixture.member_pid, signal.SIGKILL)
+            await exited.wait(actual.monotonic_ns() + 5_000_000_000, actual)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+
+            with pytest.raises(ProcessError) as refused:
+                await asyncio.wait_for(owner.settle(deadline), 5)
+            public = owner.observe(deadline)
+            signals = tuple(
+                owner.signal(requested, deadline)
+                for requested in (signal.SIGTERM, signal.SIGKILL)
+            )
+            owner.dispose_observation()
+
+            assert refused.value.condition is ProcessCondition.UNKNOWN
+            assert public.condition is ProcessCondition.UNKNOWN
+            assert signals == (SignalResult.UNKNOWN, SignalResult.UNKNOWN)
+            assert clock.sleeps == []
+            assert not clock.waiters
+            assert not owner.closed
+            assert owner.watcher_count == 0
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
+class ReapingIdentityDecisions(RecoveryIdentityDecisions):
+    def __init__(
+        self, fixture: ReapedDomain, *, readable_group: bool, unexplained: bool
+    ) -> None:
+        super().__init__(fixture.registration.process.pid)
+        self.fixture: ReapedDomain = fixture
+        self.readable_group: bool = readable_group
+        self.unexplained: bool = unexplained
+        self.before_reap: IdentityObservation | None = None
+
+    def read(self, pid: int) -> IdentityObservation:
+        observed = super().read(pid)
+        if pid != self.pid:
+            return observed
+        if self.before_reap is None:
+            assert observed.process is not None
+            assert not observed.process.dead
+            self.before_reap = observed
+            self.fixture.leader.shutdown(socket.SHUT_WR)
+            self.fixture.reaper.settimeout(5)
+            try:
+                self.fixture.reaper.sendall(b"r")
+                assert self.fixture.reaper.recv(64) == b"0"
+                self.fixture.reaped = True
+            finally:
+                self.fixture.reaper.setblocking(False)
+            return observed
+        return self.before_reap if self.unexplained else observed
+
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        return (
+            super().group(process_group_id, deadline_ns)
+            if self.readable_group
+            else GroupObservation(IdentityState.UNKNOWN)
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["settled", "unreadable", "anchor_refusal"])
+async def test_recovered_settle_confirms_collection_during_watch_establishment(
+    outcome: str,
+) -> None:
+    clock = SettlementClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            source = ReapingIdentityDecisions(
+                fixture,
+                readable_group=outcome != "unreadable",
+                unexplained=outcome == "anchor_refusal",
+            )
+            owner = RecoveredProcess(fixture.registration, clock, source)
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+
+            if outcome == "settled":
+                await asyncio.wait_for(owner.settle(deadline), 5)
+                owner.release(deadline)
+            else:
+                with pytest.raises(ProcessError) as refused:
+                    await asyncio.wait_for(owner.settle(deadline), 5)
+                assert refused.value.condition is ProcessCondition.UNKNOWN
+                with pytest.raises(ProcessError):
+                    owner.release(deadline)
+
+            assert fixture.reaped
+            assert clock.sleeps == []
+            assert not clock.waiters
+            assert owner.closed is (outcome == "settled")
+            assert owner.watcher_count == 0
+            assert_empty_domain(fixture)
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
+class CollectingMemberDecisions(RecoveryIdentityDecisions):
+    def __init__(self, fixture: ReapedDomain) -> None:
+        assert fixture.member_pid is not None
+        super().__init__(fixture.member_pid)
+        self.fixture: ReapedDomain = fixture
+        self.collected: bool = False
+
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        observed = super().group(process_group_id, deadline_ns)
+        if not self.collected:
+            assert self.fixture.member is not None
+            assert self.pid in {pid for pid, _ in observed.members}
+            self.fixture.member.shutdown(socket.SHUT_WR)
+            self.fixture.leader.settimeout(5)
+            try:
+                self.fixture.leader.sendall(b"r")
+                assert self.fixture.leader.recv(64) == b"reaped"
+                self.collected = True
+            finally:
+                self.fixture.leader.setblocking(False)
+        return observed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["observe", "term", "kill"])
+async def test_recovered_collection_race_preserves_unknown_with_live_leader(
+    operation: str,
+) -> None:
+    clock = SettlementClock()
+    async with domain("held_family") as fixture:
+        assert fixture.member_pid is not None
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            source = CollectingMemberDecisions(fixture)
+            owner = RecoveredProcess(fixture.registration, clock, source)
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+
+            if operation == "observe":
+                observed = owner.observe(deadline)
+                assert observed.condition is ProcessCondition.UNKNOWN
+            else:
+                requested = signal.SIGTERM if operation == "term" else signal.SIGKILL
+                assert owner.signal(requested, deadline) is SignalResult.UNKNOWN
+
+            leader = source.native.read(fixture.registration.process.pid).process
+            assert leader is not None
+            assert leader.identity == fixture.registration.process
+            assert not leader.dead
+            assert source.native.read(fixture.member_pid).state is IdentityState.ABSENT
+            assert source.collected
+            assert clock.sleeps == []
+            assert owner.watcher_count == 1
+            owner.dispose_observation()
+            assert owner.watcher_count == 0
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+    assert_empty_domain(fixture)
+
+
+class DeadlineIdentityDecisions(RecoveryIdentityDecisions):
+    def __init__(self, pid: int, clock: SettlementClock, failure: bool) -> None:
+        super().__init__(pid)
+        self.clock: SettlementClock = clock
+        self.failure = "unreadable" if failure else None
+
+    def read(self, pid: int) -> IdentityObservation:
+        observed = super().read(pid)
+        if pid == self.pid:
+            self.clock.advance(5_000_000_000)
+        return observed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("moment", ["initial", "observation", "refusal"])
+async def test_recovered_settle_deadline_precedes_observation_and_refusal(
+    moment: str,
+) -> None:
+    clock = SettlementClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        source = DeadlineIdentityDecisions(
+            fixture.registration.process.pid, clock, moment == "refusal"
+        )
+        owner = RecoveredProcess(fixture.registration, clock, source)
+        deadline = clock.monotonic_ns() + (0 if moment == "initial" else 5_000_000_000)
+
+        try:
+            with pytest.raises(ChannelError) as expired:
+                await owner.settle(deadline)
+        finally:
+            owner.dispose_observation()
+
+        assert expired.value.reason is ChannelFailure.DEADLINE
+        assert source.reads == (0 if moment == "initial" else 1)
+        assert clock.sleeps == []
+        assert not clock.waiters
+        assert owner.watcher_count == 0
+        assert not owner.closed
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["unreadable", "reused", "race", "scope"])
 async def test_recovery_identity_refusal_disposes_partial_watchers(
     failure: str,
 ) -> None:
-    clock = SystemClock()
+    clock = SettlementClock()
     async with domain("normal") as fixture:
         source = RecoveryIdentityDecisions(fixture.registration.process.pid)
         source.failure = failure
@@ -203,6 +779,8 @@ async def test_recovery_identity_refusal_disposes_partial_watchers(
         owner = RecoveredProcess(fixture.registration, clock, source)
         deadline = clock.monotonic_ns() + 5_000_000_000
 
+        with pytest.raises(ProcessError) as settled:
+            await asyncio.wait_for(owner.settle(deadline), 5)
         observed = owner.observe(deadline)
         refused = owner.signal(signal.SIGKILL, deadline)
         with pytest.raises(ProcessError):
@@ -212,11 +790,73 @@ async def test_recovery_identity_refusal_disposes_partial_watchers(
         after_disposal = owner.observe(deadline)
 
         assert observed.condition is ProcessCondition.UNKNOWN
+        assert settled.value.condition is ProcessCondition.UNKNOWN
+        assert clock.sleeps == []
         assert refused is SignalResult.UNKNOWN
         assert after_disposal.condition is ProcessCondition.UNKNOWN
         assert not owner.closed
         assert owner.watcher_count == 0
         assert set(os.listdir("/dev/fd")) - baseline == set()
+
+
+@pytest.mark.asyncio
+async def test_recovered_live_wait_disposal_wakes_without_collection_refresh() -> None:
+    clock = SettlementClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            owner = RecoveredProcess(
+                fixture.registration, clock, NativeIdentityReader()
+            )
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+            waiter = asyncio.create_task(owner.settle(deadline))
+            observed_errors: list[BaseException] = []
+            owned.push_async_callback(join_helper_operation, waiter, observed_errors)
+            await settlement_waiting(waiter, clock)
+            pending = owner.readiness()
+            assert pending
+            assert list(clock.waiters.values()) == [deadline]
+
+            owner.dispose_observation()
+            with pytest.raises(ProcessError) as disposed:
+                await asyncio.wait_for(waiter, 5)
+            observed_errors.append(disposed.value)
+
+            assert disposed.value.condition is ProcessCondition.UNKNOWN
+            assert all(future.cancelled() for future in pending)
+            assert not clock.waiters
+            assert owner.watcher_count == 0
+            assert not owner.closed
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+async def test_recovered_capacity_refusal_does_not_start_a_wait_timer() -> None:
+    clock = SettlementClock()
+    async with domain("held_family") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        owner = RecoveredProcess(
+            fixture.registration, clock, NativeIdentityReader(), max_members=1
+        )
+        deadline = clock.monotonic_ns() + 5_000_000_000
+
+        try:
+            with pytest.raises(ProcessError) as refused:
+                await asyncio.wait_for(owner.settle(deadline), 5)
+        finally:
+            owner.dispose_observation()
+
+        assert refused.value.condition is ProcessCondition.UNKNOWN
+        assert clock.sleeps == []
+        assert not clock.waiters
+        assert owner.watcher_count == 0
+        assert not owner.closed
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
 
 
 @pytest.mark.asyncio

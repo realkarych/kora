@@ -62,14 +62,6 @@ class CleanupDeadline:
         return self.value
 
 
-async def settle_observed(
-    process: RecoveredProcess, deadline: int, clock: Clock
-) -> None:
-    while not process.observe(deadline).settled:
-        assert clock.monotonic_ns() < deadline
-        await turn()
-
-
 def signal_recovered(process: RecoveredProcess, cleanup: CleanupDeadline) -> None:
     process.signal(signal.SIGKILL, cleanup())
 
@@ -87,7 +79,7 @@ async def release_recovered(
     deadline = cleanup()
     try:
         await kill_observed(process, deadline, clock)
-        await settle_observed(process, deadline, clock)
+        await process.settle(deadline)
         process.release(deadline)
     finally:
         if not process.closed:

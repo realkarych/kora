@@ -44,7 +44,7 @@ Use the entry section, follow its dependencies and read the governing decision b
 
 ## Open design and focused evidence
 
-The [recovered-settlement observation design](research/recovered-settlement-observation-2026-10-30.md) records #440's owner-approved 100 ms waiting amendment, native evidence and authority limits. Runtime delivery and supported-platform evidence remain with #369; the remaining tests-only cleanup under #368 follows that implementation.
+The [recovered-settlement observation design](research/recovered-settlement-observation-2026-10-30.md) records #440's owner-approved 100 ms waiting amendment, native evidence and authority limits. The generic local lifetime library implements that amendment under #369, with [implementation evidence](research/recovered-settlement-implementation-2026-10-30.md). Tests-only cleanup under #368 remains pending, as do production-consumer activation and aggregate-scan qualification at admitted concurrency.
 
 The retention snapshot foundation under [#443](https://github.com/realkarych/kora/issues/443) provides detached resolved inputs, a nullable format tag and namespace-scoped metadata reads. Unversioned historical JSON is preserved without adoption. Production immutable run writes, owner admission and cleanup remain pending under [#216](https://github.com/realkarych/kora/issues/216); the foundation does not establish first-slice retention readiness.
 
