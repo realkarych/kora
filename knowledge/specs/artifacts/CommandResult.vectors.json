@@ -1,0 +1,1135 @@
+{
+  "contract": "urn:kora:artifact:CommandResult",
+  "builtin_revision": "1",
+  "status": "publication declarations, not runtime evidence; approval status is recorded in the enclosing proposal",
+  "canonicalization": "kora.command-result-json.v1",
+  "canonical_cases": [
+    {
+      "name": "empty-success",
+      "fixture": "examples/command-result/valid/empty-success.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":0,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 837,
+      "canonical_sha256": "42848a701ffa0bab5a77b80317672b08224c7ac76a92c49b1079de4e2941569d",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "42848a701ffa0bab5a77b80317672b08224c7ac76a92c49b1079de4e2941569d"
+    },
+    {
+      "name": "nonzero-exit",
+      "fixture": "examples/command-result/valid/nonzero-exit.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":1,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":7,\"payload_digest\":\"sha256:6da5b18878e110928643ebcc38dbb7552cf3a296eea56493e23edc2b93eecff8\",\"size\":7,\"storage_ref\":\"local://sha256/6da5b18878e110928643ebcc38dbb7552cf3a296eea56493e23edc2b93eecff8\",\"tail_base64\":\"ZmFpbGVkCg==\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 849,
+      "canonical_sha256": "d176d25cf2e96c4bebf2c6a6a53768ee7b431916ca89ba6fd85b9986f98f194c",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "d176d25cf2e96c4bebf2c6a6a53768ee7b431916ca89ba6fd85b9986f98f194c"
+    },
+    {
+      "name": "external-signal",
+      "fixture": "examples/command-result/valid/external-signal.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":-15,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":15,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 837,
+      "canonical_sha256": "5eab0e6310054f77bc263a30db8ad0331ebc93455d1c18134aed8df4582352af",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "5eab0e6310054f77bc263a30db8ad0331ebc93455d1c18134aed8df4582352af"
+    },
+    {
+      "name": "cancelled-exit-zero",
+      "fixture": "examples/command-result/valid/cancelled-exit-zero.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":0,\"exit_code\":0,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"cancel\",\"termination\":\"interrupted\"}",
+      "canonical_bytes": 841,
+      "canonical_sha256": "e7f0f356eac63be0dd165ea360acef3bd1c9b92efdeb735080b42de07ee8d0b3",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "e7f0f356eac63be0dd165ea360acef3bd1c9b92efdeb735080b42de07ee8d0b3"
+    },
+    {
+      "name": "deadline-kill",
+      "fixture": "examples/command-result/valid/deadline-kill.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":-9,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":9,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"deadline\",\"termination\":\"killed_after_grace\"}",
+      "canonical_bytes": 848,
+      "canonical_sha256": "2fc6d59cc5fcd2fa94956ffcae478b2fce004e552e2bfa4e55e80d710f7fef2b",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "2fc6d59cc5fcd2fa94956ffcae478b2fce004e552e2bfa4e55e80d710f7fef2b"
+    },
+    {
+      "name": "incomplete-capture",
+      "fixture": "examples/command-result/valid/incomplete-capture.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":0,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":false,\"observed_bytes\":2,\"payload_digest\":\"sha256:2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df\",\"size\":2,\"storage_ref\":\"local://sha256/2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df\",\"tail_base64\":\"b2s=\",\"truncated\":true},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 841,
+      "canonical_sha256": "4a9140e3dfbf9508a58bbed2002f41e6a8033155767a11edc559655e9505f543",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "4a9140e3dfbf9508a58bbed2002f41e6a8033155767a11edc559655e9505f543"
+    },
+    {
+      "name": "binary-capture",
+      "fixture": "examples/command-result/valid/binary-capture.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":0,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":15,\"payload_digest\":\"sha256:c1f9d21942a9b31c6f9868c1fe049a603ea5b8a10801b8d2635d9d4937040242\",\"size\":15,\"storage_ref\":\"local://sha256/c1f9d21942a9b31c6f9868c1fe049a603ea5b8a10801b8d2635d9d4937040242\",\"tail_base64\":\"AO+/vRtdMDt0aXRsZQcK\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 859,
+      "canonical_sha256": "f866701b68a6aeaa03221a2d7834bbd18d0b4df61f56b31bb9c3993b906796c8",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "f866701b68a6aeaa03221a2d7834bbd18d0b4df61f56b31bb9c3993b906796c8"
+    },
+    {
+      "name": "protected-paths",
+      "fixture": "examples/command-result/valid/protected-paths.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":0,\"protected_paths\":[\"Makefile\",\"tests/**\"],\"protection\":\"verified\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 855,
+      "canonical_sha256": "a4e2fd684b17480ab07581658f92f5da8b20cdfbf8f732453a1d859955a341c4",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "a4e2fd684b17480ab07581658f92f5da8b20cdfbf8f732453a1d859955a341c4"
+    },
+    {
+      "name": "protected-resources",
+      "fixture": "examples/command-result/valid/protected-resources.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":0,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"protected\",\"resource_set_digest\":\"sha256:ac238bb1de5db1d8c8cee691626af721119ffc241431f22603ce77c22af1e305\",\"resources\":[{\"executable\":true,\"name\":\"bin/run \\\"ñ\\\".sh\",\"sha256\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0},{\"executable\":false,\"name\":\"select_best.py\",\"sha256\":\"sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb\",\"size\":11}],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 1187,
+      "canonical_sha256": "0aff08ee01ddf028211251a2f44e50d46adc4c7581e8bafdf533cb05206ebde8",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "0aff08ee01ddf028211251a2f44e50d46adc4c7581e8bafdf533cb05206ebde8"
+    },
+    {
+      "name": "unprotected-resources",
+      "fixture": "examples/command-result/valid/unprotected-resources.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":1,\"exit_code\":0,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/repository\",\"resource_protection\":\"none\",\"resource_set_digest\":\"sha256:ac238bb1de5db1d8c8cee691626af721119ffc241431f22603ce77c22af1e305\",\"resources\":[{\"executable\":true,\"name\":\"bin/run \\\"ñ\\\".sh\",\"sha256\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0},{\"executable\":false,\"name\":\"select_best.py\",\"sha256\":\"sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb\",\"size\":11}],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 1182,
+      "canonical_sha256": "59fb507376bdaf8d9a7f63e1f67679288c5e7f7079f588d954aa8e99091928f6",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "59fb507376bdaf8d9a7f63e1f67679288c5e7f7079f588d954aa8e99091928f6"
+    },
+    {
+      "name": "integer-and-unicode",
+      "fixture": "examples/command-result/valid/integer-and-unicode.json",
+      "canonical": "{\"base_commit\":\"base-1\",\"commit\":\"candidate-1\",\"duration_ms\":9223372036854775807,\"exit_code\":0,\"protected_paths\":[],\"protection\":\"unprotected\",\"repo\":\"local://example/ñ\",\"resource_protection\":\"none\",\"resource_set_digest\":null,\"resources\":[],\"signal\":null,\"stderr\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stdout\":{\"eof\":true,\"observed_bytes\":0,\"payload_digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0,\"storage_ref\":\"local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"tail_base64\":\"\",\"truncated\":false},\"stop_reason\":\"completed\",\"termination\":\"none\"}",
+      "canonical_bytes": 847,
+      "canonical_sha256": "5390cb978e8a09b132bd95f6eb8bd9347bb48de63aa799189a6addcd714ffc14",
+      "selected_pointers": [
+        ""
+      ],
+      "selected_sha256": "5390cb978e8a09b132bd95f6eb8bd9347bb48de63aa799189a6addcd714ffc14"
+    }
+  ],
+  "structural_invalid_fixtures": [
+    "examples/command-result/invalid/null-exit.json",
+    "examples/command-result/invalid/boolean-exit.json",
+    "examples/command-result/invalid/negative-duration.json",
+    "examples/command-result/invalid/unknown-protection.json",
+    "examples/command-result/invalid/unknown-termination.json",
+    "examples/command-result/invalid/unbound-parsed-json.json",
+    "examples/command-result/invalid/false-path-protection.json",
+    "examples/command-result/invalid/missing-base.json",
+    "examples/command-result/invalid/signal-on-exit.json",
+    "examples/command-result/invalid/malformed-tail.json",
+    "examples/command-result/invalid/unknown-resource-field.json"
+  ],
+  "semantic_cases": [
+    {
+      "name": "signal-does-not-match-negative-exit",
+      "value": {
+        "exit_code": -15,
+        "signal": 9,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "signal must equal minus exit_code"
+    },
+    {
+      "name": "unlabelled-capture-loss",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/fae972222d455a2eaee1661ad9625502ec3bfc5ec38b87a6eec5afd5107331b5",
+          "payload_digest": "sha256:fae972222d455a2eaee1661ad9625502ec3bfc5ec38b87a6eec5afd5107331b5",
+          "size": 67108864,
+          "observed_bytes": 67108865,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ=="
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "truncated must be true for the coherent 64 MiB retained ASCII-a prefix with one additional observed byte; only the truncation flag is wrong"
+    },
+    {
+      "name": "retained-size-exceeds-observed",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df",
+          "payload_digest": "sha256:2689367b205c16ce32ed4200942b8b8b1e262dfc70d9bc9fbc77c49699a4f1df",
+          "size": 2,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": "b2s="
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "size may not exceed observed_bytes"
+    },
+    {
+      "name": "empty-stream-nonempty-tail",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": "YQ=="
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "decoded tail length must equal min(size,4096)"
+    },
+    {
+      "name": "resource-set-hash-mismatch",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [
+          {
+            "executable": true,
+            "name": "bin/run \"ñ\".sh",
+            "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "size": 0
+          },
+          {
+            "executable": false,
+            "name": "select_best.py",
+            "sha256": "sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb",
+            "size": 11
+          }
+        ],
+        "resource_set_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "resource_protection": "protected",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "set digest must equal existing IR manifest bytes"
+    },
+    {
+      "name": "resource-order-mismatch",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [
+          {
+            "executable": false,
+            "name": "select_best.py",
+            "sha256": "sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb",
+            "size": 11
+          },
+          {
+            "executable": true,
+            "name": "bin/run \"ñ\".sh",
+            "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "size": 0
+          }
+        ],
+        "resource_set_digest": "sha256:ac238bb1de5db1d8c8cee691626af721119ffc241431f22603ce77c22af1e305",
+        "resource_protection": "protected",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "resources must be in manifest UTF-8 name order; the unchanged set digest still covers the independently name-sorted IR manifest"
+    },
+    {
+      "name": "duplicate-resource-name",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [
+          {
+            "executable": true,
+            "name": "bin/run \"ñ\".sh",
+            "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "size": 0
+          },
+          {
+            "executable": false,
+            "name": "bin/run \"ñ\".sh",
+            "sha256": "sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb",
+            "size": 11
+          }
+        ],
+        "resource_set_digest": "sha256:347e49b183f7ef4073491d0917d891d030cc176beac60915f7a352a52d4af755",
+        "resource_protection": "protected",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "names are unique even when entries differ"
+    },
+    {
+      "name": "invalid-protected-path",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [
+          "../tests"
+        ],
+        "protection": "verified",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "existing protected-path syntax applies"
+    },
+    {
+      "name": "resource-name-not-nfc",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [
+          {
+            "executable": true,
+            "name": "bin/é.sh",
+            "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "size": 0
+          },
+          {
+            "executable": false,
+            "name": "select_best.py",
+            "sha256": "sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb",
+            "size": 11
+          }
+        ],
+        "resource_set_digest": "sha256:87853b58a02a970a00f42dac7cb6a4a41b9c6f8a208882952268d6cb7ac19def",
+        "resource_protection": "protected",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "resource name must already be NFC"
+    },
+    {
+      "name": "typed-float-duration",
+      "value": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1.0,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "accepted": false,
+      "reason": "exact integer types and integer tokens only"
+    }
+  ],
+  "raw_invalid_cases": [
+    {
+      "name": "duplicate-root-member",
+      "base": "empty-success",
+      "transform": "append a second exit_code member with integer value 1 before the closing root brace",
+      "reason": "duplicate decoded key before schema validation"
+    },
+    {
+      "name": "float-exit-token",
+      "base": "empty-success",
+      "replace_integer_token": {
+        "member": "exit_code",
+        "token": "0.0"
+      },
+      "reason": "integer tokens only"
+    },
+    {
+      "name": "noncanonical-wire",
+      "base": "empty-success",
+      "transform": "append one LF",
+      "reason": "canonical-wire comparison before promotion"
+    }
+  ],
+  "stream_cases": [
+    {
+      "name": "at-capture-cap",
+      "retained": {
+        "unit_ascii": "a",
+        "count": 67108864
+      },
+      "observed_bytes": 67108864,
+      "eof": true,
+      "truncated": false,
+      "tail": {
+        "unit_ascii": "a",
+        "count": 4096
+      },
+      "payload_digest": "sha256:fae972222d455a2eaee1661ad9625502ec3bfc5ec38b87a6eec5afd5107331b5"
+    },
+    {
+      "name": "over-capture-cap",
+      "retained": {
+        "unit_ascii": "a",
+        "count": 67108864
+      },
+      "observed_bytes": 67108865,
+      "eof": true,
+      "truncated": true,
+      "tail": {
+        "unit_ascii": "a",
+        "count": 4096
+      },
+      "payload_digest": "sha256:fae972222d455a2eaee1661ad9625502ec3bfc5ec38b87a6eec5afd5107331b5"
+    },
+    {
+      "name": "tail-boundary",
+      "sizes": [
+        0,
+        1,
+        4095,
+        4096,
+        4097
+      ],
+      "tail_rule": "last min(size,4096) retained sanitized bytes; no UTF-8 repair or marker"
+    },
+    {
+      "name": "stream-masker-invalid-utf8-normalization",
+      "raw_hex": "00ff1b5d303b7469746c65070a",
+      "normalization": "existing incremental UTF-8 decode with errors=replace, literal masking, emitted-text UTF-8 encoding before all capture counts/digests/tails",
+      "retained_hex": "00efbfbd1b5d303b7469746c65070a",
+      "size": 15,
+      "observed_bytes": 15,
+      "eof": true,
+      "truncated": false,
+      "payload_digest": "sha256:c1f9d21942a9b31c6f9868c1fe049a603ea5b8a10801b8d2635d9d4937040242",
+      "tail_base64": "AO+/vRtdMDt0aXRsZQcK",
+      "root_fixture": "examples/command-result/valid/binary-capture.json"
+    }
+  ],
+  "resource_manifest": {
+    "canonical": "[{\"executable\":true,\"name\":\"bin/run \\\"ñ\\\".sh\",\"sha256\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"size\":0},{\"executable\":false,\"name\":\"select_best.py\",\"sha256\":\"sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb\",\"size\":11}]",
+    "expected_digest": "sha256:ac238bb1de5db1d8c8cee691626af721119ffc241431f22603ce77c22af1e305",
+    "authority": "existing IR section 4 command-resource vector; unchanged"
+  },
+  "replay_cases": [
+    {
+      "name": "exit",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 1,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "8549d5181ff82a59b71340226fafe10de3a0cff1427ec5837e92ec4639cf1297",
+      "selected_sha256": "8549d5181ff82a59b71340226fafe10de3a0cff1427ec5837e92ec4639cf1297",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "duration",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 2,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "bc57564e034032e0d425fd71f055da553b170fdf83ebaaf21a7b4b943cc54101",
+      "selected_sha256": "bc57564e034032e0d425fd71f055da553b170fdf83ebaaf21a7b4b943cc54101",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "workspace-commit",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-2",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "a03499a8c30bdf9ba3375eb6216017079f9013af018d196236a105f280a4332d",
+      "selected_sha256": "a03499a8c30bdf9ba3375eb6216017079f9013af018d196236a105f280a4332d",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "workspace-base",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-2",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "51a2ce961a530bca2e7ebd54ad4904820eb1775335eb41c424683eec909229d6",
+      "selected_sha256": "51a2ce961a530bca2e7ebd54ad4904820eb1775335eb41c424683eec909229d6",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "workspace-repo",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/other",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "e7db6e81be566a766ece6806ddea94a894f519fe42658c2ce92301e39811aafa",
+      "selected_sha256": "e7db6e81be566a766ece6806ddea94a894f519fe42658c2ce92301e39811aafa",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "capture",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/d67e2e944994496c8d8ec76eed0cf9f09679448d584b532bebf941852a37f5ed",
+          "payload_digest": "sha256:d67e2e944994496c8d8ec76eed0cf9f09679448d584b532bebf941852a37f5ed",
+          "size": 7,
+          "observed_bytes": 7,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": "Y2hhbmdlZA=="
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "58790c463c3e02a61d6ae3ea10c8df035fd873830fab71ba2b2e8bb5dcd248ab",
+      "selected_sha256": "58790c463c3e02a61d6ae3ea10c8df035fd873830fab71ba2b2e8bb5dcd248ab",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "resource-protection",
+      "before": "protected-resources",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [
+          {
+            "executable": true,
+            "name": "bin/run \"ñ\".sh",
+            "sha256": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "size": 0
+          },
+          {
+            "executable": false,
+            "name": "select_best.py",
+            "sha256": "sha256:62bdb208de6dc6b169a467f646f50ca39e6c203fa6f6732431624d8dec1e77fb",
+            "size": 11
+          }
+        ],
+        "resource_set_digest": "sha256:ac238bb1de5db1d8c8cee691626af721119ffc241431f22603ce77c22af1e305",
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "59fb507376bdaf8d9a7f63e1f67679288c5e7f7079f588d954aa8e99091928f6",
+      "selected_sha256": "59fb507376bdaf8d9a7f63e1f67679288c5e7f7079f588d954aa8e99091928f6",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "protected-paths",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "none",
+        "stop_reason": "completed",
+        "duration_ms": 1,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [
+          "Makefile",
+          "tests/**"
+        ],
+        "protection": "verified",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "a4e2fd684b17480ab07581658f92f5da8b20cdfbf8f732453a1d859955a341c4",
+      "selected_sha256": "a4e2fd684b17480ab07581658f92f5da8b20cdfbf8f732453a1d859955a341c4",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "cancelled-exit-zero",
+      "before": "empty-success",
+      "after": {
+        "exit_code": 0,
+        "signal": null,
+        "termination": "interrupted",
+        "stop_reason": "cancel",
+        "duration_ms": 0,
+        "repo": "local://example/repository",
+        "commit": "candidate-1",
+        "base_commit": "base-1",
+        "protected_paths": [],
+        "protection": "unprotected",
+        "resources": [],
+        "resource_set_digest": null,
+        "resource_protection": "none",
+        "stdout": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        },
+        "stderr": {
+          "storage_ref": "local://sha256/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "payload_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "size": 0,
+          "observed_bytes": 0,
+          "eof": true,
+          "truncated": false,
+          "tail_base64": ""
+        }
+      },
+      "complete_sha256": "e7f0f356eac63be0dd165ea360acef3bd1c9b92efdeb735080b42de07ee8d0b3",
+      "selected_sha256": "e7f0f356eac63be0dd165ea360acef3bd1c9b92efdeb735080b42de07ee8d0b3",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "object-member-order",
+      "base": "empty-success",
+      "transform": "reverse object member order recursively",
+      "complete_sha256": "42848a701ffa0bab5a77b80317672b08224c7ac76a92c49b1079de4e2941569d",
+      "selected_sha256": "42848a701ffa0bab5a77b80317672b08224c7ac76a92c49b1079de4e2941569d",
+      "same_output_replay": "read_only_original_descriptor"
+    },
+    {
+      "name": "same-selected-digest-different-contract",
+      "base": "empty-success",
+      "transform": "different saved effective contract identity",
+      "same_output_replay": "source_output_conflict"
+    },
+    {
+      "name": "expired-owner-exact-replay",
+      "base": "empty-success",
+      "same_output_replay": "read_only_original_descriptor_with_expired_availability",
+      "restore_content": false,
+      "renew_retention": false
+    }
+  ],
+  "no_result_cases": [
+    "preparation/refusal before command execution acknowledgement",
+    "protected_path_modified",
+    "resource integrity mismatch before command launch",
+    "launch rejected or failed before command execution acknowledgement",
+    "no authenticated observed command-leader exit",
+    "capture descriptors cannot be durably sealed and identity-bound"
+  ],
+  "publication_scope": "schema/descriptor/fixture integrity only; semantic/raw/canonical/replay/capture/provenance execution remains with named implementing owners",
+  "admission_cases": [
+    {
+      "name": "raw-root-cap",
+      "limit": 1048576,
+      "over_limit_refused_before_decode": true
+    },
+    {
+      "name": "canonical-root-cap",
+      "limit": 1048576,
+      "over_limit_refused_before_full_allocation": true
+    },
+    {
+      "name": "root-depth",
+      "limit": 16,
+      "over_limit_refused_before_decode": true
+    },
+    {
+      "name": "resource-manifest-bounds",
+      "resources": 64,
+      "per_resource_bytes": 262144,
+      "name_utf8_bytes": 4096,
+      "component_utf8_bytes": 255,
+      "both_sides_of_each_bound_required": true
+    },
+    {
+      "name": "protected-path-bounds",
+      "count": 64,
+      "characters_per_glob": 4096,
+      "segments_per_glob": 32,
+      "aggregate_utf8_bytes": 65536,
+      "aggregate_pieces": 8192,
+      "aggregate_non_ascii_characters": 16384,
+      "both_sides_of_each_bound_required": true
+    },
+    {
+      "name": "tail-byte-agreement",
+      "trusted_retained_bytes_required": true,
+      "valid_base64_with_wrong_suffix_refused": true
+    },
+    {
+      "name": "known-capture-size-zero",
+      "size": 0,
+      "observed_bytes": 0,
+      "eof": false,
+      "truncated": true,
+      "empty_tail": true,
+      "meaning": "known empty retained capture with unobserved EOF, not a placeholder for unavailable bytes"
+    },
+    {
+      "name": "derived-command-result-list-activation",
+      "status": "pending implementation",
+      "owners": [
+        3,
+        9,
+        10,
+        11,
+        12
+      ],
+      "scope": "List[CommandResult], recursively derived lists, scheduler collect/export aggregate materialization, canonicalization/digest/summary, persistence and bounded read delivery",
+      "saved_semantics": "preserve generic saved list/item semantics; root/capture/upload/CEL bounds establish no whole-aggregate bound",
+      "activation_prerequisite": "owner-approved concrete aggregate admission/materialization ownership and applicable existing regression/resource evidence before activation",
+      "new_numeric_default": null,
+      "new_campaign": false
+    }
+  ]
+}
