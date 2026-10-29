@@ -53,6 +53,8 @@ body:
         diagnostic measurements and selected independent review or qualifying reuse.
         Include transitive effects, actual resource release and observability impact where relevant.
         Name the delivered outcome, work outside this change and stopping conditions.
+        MVP merge acceptance uses one successful complete final-head CI execution and focused
+        regressions; do not add consecutive CI, repeated test-file or extra qualification campaigns.
         Preserve approved gates unless the owner explicitly approves a named reduction.
         Missing required evidence is unverified; absent capabilities name their implementing issue and activation trigger.
     validations:
