@@ -537,7 +537,9 @@ jobs:
       - name: Measure local runtime lock contention
         env:
           KORA_MEASUREMENT_OUTPUT: measurements/lock-contention.json
-        run: uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
+        run: |
+          mkdir -p measurements
+          uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
         with:

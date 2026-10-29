@@ -158,7 +158,8 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
         list[object], scaffold.get("needs", [])
     )
     assert command_lines(diagnostics["run"]) == [
-        (*PYTEST, "-q", "-m", "measurement", LANE_DIAGNOSTIC_MEASUREMENT)
+        ("mkdir", "-p", "measurements"),
+        (*PYTEST, "-q", "-m", "measurement", LANE_DIAGNOSTIC_MEASUREMENT),
     ]
     assert MEASUREMENT_MODULE.findall(str(diagnostics["run"])) == [
         LANE_DIAGNOSTIC_MEASUREMENT
