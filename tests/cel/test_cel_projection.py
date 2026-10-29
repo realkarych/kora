@@ -127,6 +127,22 @@ def test_cel_projection_notation_refuses_malformed_paths(path: str) -> None:
         cel.parse_projection_path(path)
 
 
+def test_cel_projection_notation_refuses_oversized_numeric_paths() -> None:
+    from kora.cel.diagnostics import DiagnosticError
+
+    path = "[" + "9" * 5000 + "]"
+
+    with pytest.raises(DiagnosticError) as caught:
+        cel.parse_projection_path(path)
+
+    assert caught.value.diagnostic.reason is cel.Reason.INVALID_PATH
+    assert caught.value.diagnostic.code is cel.Code.SYNTAX
+    assert caught.value.diagnostic.offset == 0
+    assert str(caught.value) == "invalid_path"
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+
+
 def test_cel_projection_whole_paths_subsume_deeper_reads() -> None:
     paths = cel.PathSet((".a.b", ".a", ".c.x"), (".a", ".a.d", ".c"))
 

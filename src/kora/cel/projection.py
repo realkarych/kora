@@ -43,7 +43,10 @@ def parse_projection_path(
     used = Meter() if meter is None else meter
     if len(text) > 16 * MAX_CODE_POINTS:
         raise fail(Reason.LENGTH, 16 * MAX_CODE_POINTS)
-    tokens = lex(text, used)
+    try:
+        tokens = lex(text, used)
+    except ValueError:
+        raise fail(Reason.INVALID_PATH, 0) from None
     position = 0
     steps: list[ProjectionStep] = []
     while tokens[position].kind is not TokenKind.END:
