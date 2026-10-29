@@ -132,6 +132,7 @@ def native_command_label(arguments: tuple[str, ...]) -> NativeCommandLabel:
         ("/usr/bin/hdiutil", "create"): "hdiutil create",
         ("/usr/bin/hdiutil", "attach"): "hdiutil attach",
         ("/usr/bin/hdiutil", "detach"): "hdiutil detach",
+        ("/usr/sbin/diskutil", "eject"): "diskutil eject",
         ("/usr/bin/hdiutil", "info"): "hdiutil info",
         ("/usr/bin/hdiutil", "imageinfo"): "hdiutil imageinfo",
         ("/usr/sbin/mkfs.ext4",): "mkfs.ext4",
@@ -185,6 +186,7 @@ def command(
         raise PressureFailure(
             "command_terminated",
             command_stderr=error_output,
+            command_stdout=output,
             command_label=native_command_label(arguments),
             command_status=status,
         )
@@ -196,6 +198,7 @@ def command(
         raise PressureFailure(
             "command_failed",
             command_stderr=error_output,
+            command_stdout=output,
             command_label=native_command_label(arguments),
             command_status=status,
         )

@@ -23,6 +23,7 @@ def preserve_owner(manifest: Path, output: Path, prefix: str) -> None:
     for source, destination in (
         ("child-stderr.txt", f"{prefix}.stderr.txt"),
         ("command-stderr.txt", f"{prefix}.command.stderr.txt"),
+        ("command-stdout.txt", f"{prefix}.command.stdout.txt"),
     ):
         failure = manifest.parent / source
         if not failure.exists():
