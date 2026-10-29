@@ -13,8 +13,6 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from kora.ir.json import utf8_length
-
 if TYPE_CHECKING:
     from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 
@@ -28,9 +26,12 @@ def bounded_text(value: str, limit: int) -> str:
         raise PydanticCustomError(
             "diagnostic_text_limit", "text exceeds its byte limit"
         )
-    length = utf8_length(value)
-    if length is None:
-        raise PydanticCustomError("diagnostic_unicode", "text contains invalid Unicode")
+    try:
+        length = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise PydanticCustomError(
+            "diagnostic_unicode", "text contains invalid Unicode"
+        ) from error
     if length > limit:
         raise PydanticCustomError(
             "diagnostic_text_limit", "text exceeds its byte limit"

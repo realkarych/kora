@@ -1,11 +1,14 @@
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
 
-from pydantic import PlainValidator
-from pydantic_core import PydanticCustomError
-
-from kora.ir.json import JsonObject, JsonObjectField, parsed_or_none
+from kora.ir.json import (
+    DEFAULT_MAX_DEPTH,
+    CanonicalBudget,
+    JsonObject,
+    JsonObjectField,
+    JsonShapeError,
+    parse_object,
+)
 from kora.observability import ComponentLogger
 from kora.observability.policy import CONTEXT_IDENTIFIER
 from kora.protocols.activity import ActivityReporter
@@ -60,13 +63,14 @@ class Pending:
     issue: int
 
 
-def budgeted_object(
-    limit: int, refusal: Callable[[], PydanticCustomError]
-) -> PlainValidator:
-    def check(value: object) -> JsonObjectField:
-        parsed = parsed_or_none(value, limit)
-        if parsed is None:
-            raise refusal()
-        return JsonObjectField(parsed)
-
-    return PlainValidator(check)
+def budgeted_object(value: object, limit: int) -> JsonObjectField | None:
+    if not isinstance(value, dict):
+        return None
+    budget = CanonicalBudget(limit)
+    try:
+        parsed = parse_object(
+            cast("dict[object, object]", value), DEFAULT_MAX_DEPTH, 1, budget
+        )
+    except JsonShapeError:
+        return None
+    return JsonObjectField(parsed)

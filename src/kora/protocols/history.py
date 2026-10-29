@@ -6,6 +6,7 @@ from typing import Annotated, Final, Literal, Self
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     StrictBool,
     Tag,
@@ -16,7 +17,6 @@ from pydantic_core import PydanticCustomError
 
 from kora.ir.json import parse_json_object
 from kora.ir.vcs_ref_json import canonical_bytes
-from kora.protocols.boundary import refusal_discriminator
 from kora.protocols.common import BoundaryModel
 from kora.protocols.evidence import (
     MAX_ENVELOPE_BYTES,
@@ -317,7 +317,11 @@ RecoveryRead = Annotated[
     Annotated[ResumeRead, Tag("resume")]
     | Annotated[BeginRead, Tag("begin")]
     | Annotated[AcknowledgeRead, Tag("acknowledge")],
-    refusal_discriminator(record_kind, history_refused),
+    Discriminator(
+        record_kind,
+        custom_error_type="history_invalid",
+        custom_error_message="the history is invalid",
+    ),
 ]
 
 
