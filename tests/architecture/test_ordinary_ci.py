@@ -42,6 +42,8 @@ GROUP_ARGUMENTS = {
 }
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
+    "PREPARATION_OUTCOME",
+    "TEARDOWN_OUTCOME",
     "FRONTEND_OUTCOME",
     "STATIC_OUTCOME",
     "TESTS_OUTCOME",
@@ -49,10 +51,13 @@ COMPLETION_FIELDS = (
     "DISTRIBUTIONS_OUTCOME",
     "FINAL_SYNC_OUTCOME",
 )
+WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
+WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
-    "conformance": {},
-    "remainder": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
-    "storage": {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"},
+    "conformance": WITHOUT_FIXTURES,
+    "remainder": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
+    "local-runtime": WITHOUT_BUILDS,
 }
 
 
@@ -256,9 +261,38 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
     assert ("if", "test", "$KORA_SCAFFOLD_LANE", "=", "conformance", ";", "then") in (
         outer
     )
-    assert ("if", "test", "$KORA_SCAFFOLD_LANE", "!=", "storage", ";", "then") in (
-        outer
-    )
+    assert (
+        "if",
+        "test",
+        "$KORA_SCAFFOLD_LANE",
+        "!=",
+        "storage",
+        "&&",
+        "test",
+        "$KORA_SCAFFOLD_LANE",
+        "!=",
+        "local-runtime",
+        ";",
+        "then",
+    ) in outer
+    assert (
+        "elif",
+        "uv",
+        "run",
+        "--no-sync",
+        "pytest",
+        "-q",
+        "${KORA_SCAFFOLD_SELECTION[@]}",
+        "${KORA_SCAFFOLD_ARGUMENTS[@]}",
+        "--junitxml=$KORA_SCAFFOLD_DIRECTORY/junit.xml",
+        ">",
+        "$KORA_SCAFFOLD_DIRECTORY/tests.stdout",
+        "2",
+        ">",
+        "$KORA_SCAFFOLD_DIRECTORY/tests.stderr",
+        ";",
+        "then",
+    ) in outer
     assert set(selected["tests"]) == {"name", "id", "run"}
     assert action_name(upload["uses"]) == "actions/upload-artifact"
     assert table(upload["with"])["path"] == "${{ env.KORA_SCAFFOLD_DIRECTORY }}"

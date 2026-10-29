@@ -10,12 +10,12 @@ from tests.measurements.storage_evidence_fixture import write_junit
 from tests.scaffold_evidence import (
     COHORTS,
     ENVIRONMENTS,
-    GENERAL_ARGUMENTS,
+    LANE_ARGUMENTS,
     LANES,
     SHARD_CHILDREN,
-    STORAGE_ARGUMENTS,
     collection_nodes,
     record_lane,
+    required_host_fixtures,
     verify_scaffold,
 )
 
@@ -31,15 +31,40 @@ GENERAL_NODES = (
     "tests/test_other.py::test_value",
 )
 STORAGE_NODES = ("tests/plugins/storage/test_value.py::test_value[sqlite]",)
+LOCAL_CONTRACT_NODES = (
+    "tests/plugins/runtime/local/test_lock.py::test_registry_lock_is_bounded",
+    "tests/plugins/runtime/local/test_lock.py::"
+    "test_local_runtime_releases_resources[lock_timeout]",
+)
+
+
+def node_of(identity: str) -> str:
+    name, _, parameter = identity.partition("[")
+    module, _, function = name.rpartition(".")
+    suffix = f"[{parameter}" if parameter else ""
+    return f"{module.replace('.', '/')}.py::{function}{suffix}"
+
+
+def local_nodes(operating_system: str) -> tuple[str, ...]:
+    required = sorted(required_host_fixtures(operating_system))
+    return (*(node_of(identity) for identity in required), *LOCAL_CONTRACT_NODES)
+
+
+def lane_nodes(lane: str, operating_system: str) -> tuple[str, ...]:
+    if lane == "storage":
+        return STORAGE_NODES
+    if lane == "local-runtime":
+        return local_nodes(operating_system)
+    return GENERAL_NODES
 
 
 def collection_text(nodes: tuple[str, ...]) -> str:
     return "\n".join(nodes) + f"\n\n{len(nodes)} tests collected in 0.01s\n"
 
 
-def lane_files(root: Path, lane: str) -> None:
+def lane_files(root: Path, lane: str, operating_system: str) -> None:
     root.mkdir(parents=True)
-    selected = STORAGE_NODES if lane == "storage" else GENERAL_NODES
+    selected = lane_nodes(lane, operating_system)
     (root / "selected.txt").write_text(collection_text(selected))
     (root / "selected.stderr").write_text("")
     (root / "collection.exit").write_text("0\n")
@@ -48,7 +73,8 @@ def lane_files(root: Path, lane: str) -> None:
     (root / "tests.stderr").write_text("")
     if lane == "conformance":
         (root / "complete.txt").write_text(
-            "\n".join((*GENERAL_NODES, *STORAGE_NODES)) + "\n"
+            "\n".join((*GENERAL_NODES, *STORAGE_NODES, *local_nodes(operating_system)))
+            + "\n"
         )
         (root / "complete.stderr").write_text("")
         (root / "complete.exit").write_text("0\n")
@@ -73,7 +99,7 @@ def complete_evidence(root: Path) -> None:
     for operating_system, python, databases in ENVIRONMENTS:
         for lane in LANES:
             directory = root / f"scaffold-tests-{operating_system}-{python}-{lane}"
-            lane_files(directory, lane)
+            lane_files(directory, lane, operating_system)
             record_lane(
                 directory,
                 "123",
@@ -84,7 +110,7 @@ def complete_evidence(root: Path) -> None:
                 python,
                 databases,
                 lane,
-                STORAGE_ARGUMENTS if lane == "storage" else GENERAL_ARGUMENTS,
+                LANE_ARGUMENTS[lane],
             )
 
 
@@ -103,7 +129,8 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
 
     result = verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
-    assert result == {"environments": 3, "lanes": 9, "tests": 18}
+    local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
+    assert result == {"environments": 3, "lanes": 12, "tests": 18 + local}
 
 
 @pytest.mark.parametrize(
@@ -158,7 +185,7 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
     ("corruption", "failure", "match"),
     [
         ("missing", FileNotFoundError, "receipt.json"),
-        ("extra", EvidenceFailure, "exactly nine lanes"),
+        ("extra", EvidenceFailure, "exactly twelve lanes"),
         ("stale", EvidenceFailure, "mismatched provenance"),
         ("hash", EvidenceFailure, "hash differs from its receipt"),
         ("failed", EvidenceFailure, "execution did not succeed"),
@@ -266,7 +293,7 @@ def test_collection_preserves_parameter_identity(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("corruption", "match"),
     [
-        ("missing lane", "exactly nine lanes"),
+        ("missing lane", "exactly twelve lanes"),
         ("unequal inventories", "shards differ"),
         ("different cohorts", "shards differ"),
         ("wrong shard", "unexpected file coverage"),
@@ -317,6 +344,51 @@ def test_scaffold_evidence_requires_both_general_shards_to_agree(
         changed.append("integration.xml")
     if directory.exists():
         rehash(directory, changed)
+
+    with pytest.raises(EvidenceFailure, match=match):
+        verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
+
+
+@pytest.mark.parametrize(
+    ("corruption", "match"),
+    [
+        ("missing host fixture", "lacks its host fixture tests"),
+        ("misplaced host fixture", "do not partition"),
+        ("outside path", "outside its path"),
+        ("arguments", "different pytest arguments"),
+    ],
+)
+def test_local_runtime_lane_requires_its_host_fixture_tests(
+    tmp_path: Path, corruption: str, match: str
+) -> None:
+    complete_evidence(tmp_path)
+    directory = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-local-runtime"
+    nodes = local_nodes("ubuntu-24.04")
+    changed: list[str] = []
+    if corruption == "missing host fixture":
+        kept = tuple(node for node in nodes if "network_filesystem" not in node)
+        (directory / "selected.txt").write_text(collection_text(kept))
+        write_junit(
+            directory / "junit.xml", collection_nodes(directory / "selected.txt")
+        )
+        changed.extend(("selected.txt", "junit.xml"))
+    elif corruption == "misplaced host fixture":
+        conformance = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-conformance"
+        complete = conformance / "complete.txt"
+        complete.write_text(complete.read_text() + "tests/db/test_host.py::test_host\n")
+        rehash(conformance, ["complete.txt"])
+    elif corruption == "outside path":
+        extended = (*nodes, "tests/test_other.py::test_value")
+        (directory / "selected.txt").write_text(collection_text(extended))
+        write_junit(
+            directory / "junit.xml", collection_nodes(directory / "selected.txt")
+        )
+        changed.extend(("selected.txt", "junit.xml"))
+    else:
+        data = parse_json_object(json.loads((directory / "receipt.json").read_text()))
+        data["arguments"] = ["tests/plugins/runtime/local"]
+        (directory / "receipt.json").write_text(json.dumps(data))
+    rehash(directory, changed)
 
     with pytest.raises(EvidenceFailure, match=match):
         verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
