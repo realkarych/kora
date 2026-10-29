@@ -23,7 +23,7 @@ from kora.ir import (
     summarize_structured_output,
 )
 from kora.ir.json import JsonValue
-from kora.ir.structured_json import MAX_JSON_BYTES
+from kora.ir.structured_json import MAX_JSON_BYTES, encode_snapshot, snapshot
 from kora.observability.redaction import MASK, SecretRegistry
 from tests.ir.structured_output_cases import (
     ARTIFACTS,
@@ -380,3 +380,48 @@ def test_structured_output_null_and_numeric_identity() -> None:
     assert integer != floating
     assert math.copysign(1, cast("float", values[3])) == -1.0
     assert canonical_structured_output(null) == b"null"
+
+
+@pytest.mark.parametrize(
+    "character",
+    [
+        *(chr(code) for code in range(32)),
+        '"',
+        "\\",
+        "/",
+        "\x7f",
+        "é",
+        "🦉",
+        '\x00\b\f\n\r\t\x1fé🦉\\"/',
+    ],
+    ids=[
+        *(f"control-{code}" for code in range(32)),
+        "quote",
+        "backslash",
+        "slash",
+        "del",
+        "utf8-two",
+        "utf8-four",
+        "mixed",
+    ],
+)
+@pytest.mark.parametrize("position", ["key", "value"])
+def test_structured_json_escape_budget_matches_encoded_bytes(
+    character: str, position: str
+) -> None:
+    fragment = character * 257
+    source = {fragment: "value"} if position == "key" else {"key": fragment}
+    expected = json.dumps(
+        source,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+    owned = snapshot(source, max_bytes=len(expected))
+
+    assert encode_snapshot(owned) == expected
+    with pytest.raises(StructuredOutputValidationError) as failure:
+        snapshot(source, max_bytes=len(expected) - 1)
+    assert failure.value.violation.code == "SO004"

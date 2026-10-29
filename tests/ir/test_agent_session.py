@@ -412,7 +412,11 @@ def verify_empty(value: AgentSession) -> None:
         verify_empty,
     ],
 )
-@pytest.mark.parametrize("raw", [None, b"{}", fixture_bytes(), b" " * 4194305])
+@pytest.mark.parametrize(
+    "raw",
+    [None, b"{}", fixture_bytes(), b" " * 4194305],
+    ids=("missing", "empty-object", "noncanonical", "over-raw-limit"),
+)
 def test_agent_session_forged_exports(
     action: Callable[[AgentSession], object], raw: object
 ) -> None:

@@ -15,6 +15,9 @@ MAX_INTEGER_DIGITS: int = 4215
 _SURROGATES: re.Pattern[str] = re.compile(r"[\ud800-\udfff]")
 _ESCAPES: re.Pattern[str] = re.compile(r'["\\\x00-\x1f]')
 _SHORT_ESCAPES: frozenset[str] = frozenset('"\\\b\f\n\r\t')
+_LONG_ESCAPES: frozenset[str] = (
+    frozenset(chr(value) for value in range(32)) - _SHORT_ESCAPES
+)
 _MESSAGES: dict[str, str] = {
     "SO001": "StructuredOutput raw JSON exceeds its byte limit.",
     "SO002": "StructuredOutput JSON encoding is invalid.",
@@ -55,8 +58,9 @@ def spend_string(text: str, budget: CanonicalBudget, domain_code: str) -> None:
         for offset in range(0, len(text), 4096):
             chunk = text[offset : offset + 4096]
             budget.spend(len(chunk.encode("utf-8")) - len(chunk))
-    for match in _ESCAPES.finditer(text):
-        budget.spend(1 if match[0] in _SHORT_ESCAPES else 5)
+    if _ESCAPES.search(text) is not None:
+        budget.spend(sum(text.count(char) for char in _SHORT_ESCAPES))
+        budget.spend(5 * sum(text.count(char) for char in _LONG_ESCAPES))
 
 
 def admit_value(
