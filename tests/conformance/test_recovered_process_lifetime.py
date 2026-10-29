@@ -722,6 +722,162 @@ async def test_recovered_collection_race_preserves_unknown_with_live_leader(
     assert_empty_domain(fixture)
 
 
+class GroupCollectionDecisions(RecoveryIdentityDecisions):
+    def __init__(self, fixture: ReapedDomain, fresh: str) -> None:
+        super().__init__(fixture.registration.process.pid)
+        self.fixture: ReapedDomain = fixture
+        self.fresh: str = fresh
+        self.before_scan: IdentityObservation | None = None
+        self.collected: bool = False
+        self.classified: bool = False
+
+    def read(self, pid: int) -> IdentityObservation:
+        observed = super().read(pid)
+        if pid != self.pid:
+            return observed
+        if not self.collected:
+            if self.before_scan is None:
+                self.before_scan = observed
+            return observed
+        if self.classified:
+            return observed
+        self.classified = True
+        assert observed.state is IdentityState.ABSENT
+        assert self.before_scan is not None
+        snapshot = self.before_scan.process
+        assert snapshot is not None
+        if self.fresh == "absent":
+            return observed
+        if self.fresh == "unknown":
+            return IdentityObservation(IdentityState.UNKNOWN)
+        if self.fresh == "malformed":
+            return IdentityObservation(IdentityState.PRESENT)
+        current = replace(snapshot, dead=self.fresh != "live")
+        if self.fresh == "identity":
+            current = replace(
+                current,
+                identity=current.identity.model_copy(
+                    update={"start_time": current.identity.start_time + 1}
+                ),
+            )
+        elif self.fresh == "domain":
+            current = replace(current, session_id=current.session_id + 1)
+        return IdentityObservation(IdentityState.PRESENT, current)
+
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        if not self.collected:
+            assert self.before_scan is not None
+            os.kill(self.pid, signal.SIGKILL)
+            self.fixture.reaper.settimeout(5)
+            try:
+                self.fixture.reaper.sendall(b"r")
+                assert int(self.fixture.reaper.recv(64)) == -signal.SIGKILL
+                self.fixture.reaped = True
+                self.collected = True
+            finally:
+                self.fixture.reaper.setblocking(False)
+        return super().group(process_group_id, deadline_ns)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh", ["absent", "dead"])
+async def test_recovered_settle_confirms_collection_after_live_leader_leaves_scan(
+    fresh: str,
+) -> None:
+    clock = SettlementClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            source = GroupCollectionDecisions(fixture, fresh)
+            owner = RecoveredProcess(fixture.registration, clock, source)
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+
+            await asyncio.wait_for(owner.settle(deadline), 5)
+            owner.release(deadline)
+
+            assert source.collected
+            assert source.classified
+            assert owner.closed
+            assert owner.watcher_count == 0
+            assert not clock.waiters
+            assert_empty_domain(fixture)
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh", ["absent", "dead"])
+@pytest.mark.parametrize("operation", ["observe", "term", "kill"])
+async def test_recovered_missing_leader_recheck_preserves_signal_refusal(
+    fresh: str, operation: str
+) -> None:
+    clock = SettlementClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            source = GroupCollectionDecisions(fixture, fresh)
+            owner = RecoveredProcess(fixture.registration, clock, source)
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+
+            if operation == "observe":
+                observed = owner.observe(deadline)
+                assert observed.condition is ProcessCondition.UNKNOWN
+            else:
+                requested = signal.SIGTERM if operation == "term" else signal.SIGKILL
+                assert owner.signal(requested, deadline) is SignalResult.UNKNOWN
+            pending = owner.readiness()
+            assert pending
+            assert all(not future.done() for future in pending)
+            assert source.classified
+            await asyncio.wait_for(owner.settle(deadline), 5)
+            owner.release(deadline)
+
+            assert owner.closed
+            assert owner.watcher_count == 0
+            assert not clock.waiters
+            assert_empty_domain(fixture)
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fresh", ["unknown", "malformed", "identity", "domain", "live"]
+)
+async def test_recovered_missing_leader_recheck_refuses_terminal_observation(
+    fresh: str,
+) -> None:
+    clock = SettlementClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            source = GroupCollectionDecisions(fixture, fresh)
+            owner = RecoveredProcess(fixture.registration, clock, source)
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+
+            with pytest.raises(ProcessError) as refused:
+                await asyncio.wait_for(owner.settle(deadline), 5)
+            owner.dispose_observation()
+
+            assert refused.value.condition is ProcessCondition.UNKNOWN
+            assert source.classified
+            assert not owner.closed
+            assert owner.watcher_count == 0
+            assert clock.sleeps == []
+            assert not clock.waiters
+            assert_empty_domain(fixture)
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
+
+
 class DeadlineIdentityDecisions(RecoveryIdentityDecisions):
     def __init__(self, pid: int, clock: SettlementClock, failure: bool) -> None:
         super().__init__(pid)
