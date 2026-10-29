@@ -6,6 +6,8 @@ from typing import Final
 from kora.cel.cost import BoundError, Variable, check_type, is_variable
 from kora.cel.diagnostics import Reason, fail
 from kora.cel.meter import Meter
+from kora.cel.paths import Field
+from kora.cel.projection import Element, Key, PathSet, ProjectionStep, Trie
 from kora.cel.rewrite import rewrite_integer_negations
 from kora.cel.tree import (
     Binary,
@@ -257,6 +259,8 @@ class Checker:
         self.checked: set[str] = set()
         self.validated: bool = validated
         self.integer_negations: set[int] = set()
+        self.reads: dict[int, bool] = {}
+        self.projection_steps: dict[int, ProjectionStep] = {}
 
     def key(self, parent: int | None, step: Step | None) -> int | None:
         if parent is None or step is None:
@@ -264,7 +268,18 @@ class Checker:
         self.meter.tick()
         return self.paths.setdefault((parent, step), len(self.paths))
 
-    def visit(self, node: Node) -> Typed:
+    def read(self, path: int | None, whole: bool = True) -> None:
+        if path is not None:
+            self.meter.tick()
+            self.reads[path] = self.reads.get(path, False) or whole
+
+    def visit(self, node: Node, reading: bool = True) -> Typed:
+        result = self.expression(node)
+        if reading:
+            self.read(result.path)
+        return result
+
+    def expression(self, node: Node) -> Typed:
         self.meter.tick()
         match node:
             case Identifier():
@@ -295,7 +310,7 @@ class Checker:
     def operand(self, node: Node) -> Typed:
         if isinstance(node, Identifier):
             return self.identifier(node, selected=True)
-        return self.visit(node)
+        return self.visit(node, reading=False)
 
     def identifier(self, node: Identifier, selected: bool) -> Typed:
         name = node.name
@@ -329,6 +344,8 @@ class Checker:
     def select(self, node: Select) -> Typed:
         inner = self.operand(node.operand)
         path = self.key(inner.path, node.name)
+        if path is not None:
+            self.projection_steps[path] = Field(node.name)
         container = unwrap(inner.type)
         if isinstance(container, Dyn):
             return Typed(DYN, path)
@@ -344,11 +361,27 @@ class Checker:
         return Typed(declared.type, path)
 
     def index(self, node: Index) -> Typed:
-        inner = self.visit(node.operand)
+        inner = self.visit(node.operand, reading=False)
         key = self.visit(node.index)
         step = literal_step(node.index)
         path = self.key(inner.path, step)
         container = unwrap(inner.type)
+        if path is not None:
+            self.projection_steps[path] = (
+                Element.ALL
+                if isinstance(step, int)
+                else Key(step)
+                if isinstance(step, str)
+                else Element.ALL
+            )
+            if (
+                isinstance(container, Record)
+                and isinstance(step, str)
+                and step in container.fields
+            ):
+                self.projection_steps[path] = Field(step)
+        if step is None or isinstance(step, int) and not isinstance(container, ListOf):
+            self.read(inner.path)
         key_kind = kind_of(key.type)
         dynamic_key = isinstance(key.type, Dyn)
         if isinstance(container, Dyn):
@@ -381,7 +414,8 @@ class Checker:
 
     def has(self, node: Has) -> Typed:
         target = node.target
-        container = unwrap(self.operand(target.operand).type)
+        inner = self.operand(target.operand)
+        container = unwrap(inner.type)
         if isinstance(container, MapOf):
             raise fail(Reason.UNKNOWN_FIELD, target.offset)
         if isinstance(container, Record):
@@ -389,6 +423,10 @@ class Checker:
                 raise fail(Reason.UNKNOWN_FIELD, target.offset)
         elif not isinstance(container, Dyn):
             raise fail(Reason.NO_MATCHING_OVERLOAD, target.offset)
+        path = self.key(inner.path, target.name)
+        if path is not None:
+            self.projection_steps[path] = Field(target.name)
+        self.read(path, whole=False)
         return Typed(BOOL)
 
     def path_of(self, node: Node) -> int | None:
@@ -474,7 +512,7 @@ class Checker:
             )
             self.boolean(self.guarded(facts, node.right), node.offset)
             return Typed(BOOL)
-        right = self.visit(node.right)
+        right = self.visit(node.right, reading=operator is not BinaryOperator.IN)
         if operator in (BinaryOperator.EQUAL, BinaryOperator.NOT_EQUAL):
             if not equatable(left.type, right.type):
                 raise fail(Reason.NO_MATCHING_OVERLOAD, node.offset)
@@ -487,6 +525,21 @@ class Checker:
             return Typed(BOOL)
         if operator is BinaryOperator.IN:
             self.membership(node, left, right)
+            container = unwrap(right.type)
+            if isinstance(node.left, StringLiteral) and isinstance(
+                container, MapOf | Record
+            ):
+                path = self.key(right.path, node.left.value)
+                if path is not None:
+                    self.projection_steps[path] = (
+                        Field(node.left.value)
+                        if isinstance(container, Record)
+                        and node.left.value in container.fields
+                        else Key(node.left.value)
+                    )
+                self.read(path, whole=False)
+            else:
+                self.read(right.path)
             return Typed(BOOL)
         return Typed(self.arithmetic(node, left.type, right.type))
 
@@ -619,6 +672,32 @@ class Checker:
             return Typed(ListOf(element))
         return Typed(BOOL)
 
+    def projections(self) -> Mapping[str, PathSet]:
+        ancestors = {
+            path: (parent, step) for (parent, step), path in self.paths.items()
+        }
+        roots: dict[str, Trie] = {}
+        for path, whole in self.reads.items():
+            steps: list[ProjectionStep] = []
+            current = path
+            while current in ancestors:
+                self.meter.tick()
+                parent, step = ancestors[current]
+                if parent == VARIABLE_ROOT and isinstance(step, str):
+                    root = roots.setdefault(step, Trie())
+                    root.insert(tuple(reversed(steps)), whole, self.meter)
+                    break
+                if parent == SCOPE_ROOT:
+                    break
+                projected = self.projection_steps.get(current)
+                if projected is None:
+                    projected = Field(step) if isinstance(step, str) else Element.ALL
+                steps.append(projected)
+                current = parent
+        return {
+            name: PathSet.from_trie(root, self.meter) for name, root in roots.items()
+        }
+
 
 def ordered(left: CelType, right: CelType) -> bool:
     kinds = (kind_of(left), kind_of(right))
@@ -635,7 +714,7 @@ def ordered(left: CelType, right: CelType) -> bool:
 
 def check_types(
     tree: Node, environment: Environment, meter: Meter, validated: bool = False
-) -> Node:
+) -> tuple[Node, Mapping[str, PathSet]]:
     checker = Checker(environment, meter, validated)
     result = checker.visit(tree).type
     expected = Kind.BOOL if environment.result is ResultKind.BOOL else Kind.STRING
@@ -644,4 +723,4 @@ def check_types(
     ):
         raise fail(Reason.WRONG_RESULT_TYPE, 0)
     negations = frozenset(checker.integer_negations)
-    return rewrite_integer_negations(tree, negations, meter)
+    return rewrite_integer_negations(tree, negations, meter), checker.projections()

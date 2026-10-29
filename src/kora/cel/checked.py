@@ -17,12 +17,21 @@ from kora.cel.diagnostics import Diagnostic, DiagnosticError
 from kora.cel.meter import Meter
 from kora.cel.parser import parse
 from kora.cel.paths import Path, parse_path
+from kora.cel.projection import PathSet, projection_bytes
 from kora.cel.render import canonical_rendering
 from kora.cel.tree import Node
 
 
 class CheckedExpression:
-    __slots__ = ("_bounds", "_digest", "_estimate", "_rendering", "_tree")
+    __slots__ = (
+        "_bounds",
+        "_digest",
+        "_estimate",
+        "_rendering",
+        "_tree",
+        "_projections",
+        "_projection_bytes",
+    )
 
     def __init__(
         self,
@@ -32,6 +41,7 @@ class CheckedExpression:
         digest: str,
         estimate: Estimate,
         bounds: Mapping[str, ValueBound],
+        projections: Mapping[str, PathSet] | None = None,
     ) -> None:
         if seal is not SEAL:
             raise TypeError("checked expressions come only from kora.cel.check")
@@ -40,6 +50,10 @@ class CheckedExpression:
         self._digest: str = digest
         self._estimate: Estimate = estimate
         self._bounds: Mapping[str, ValueBound] = MappingProxyType(dict(bounds))
+        self._projections: Mapping[str, PathSet] = MappingProxyType(
+            {} if projections is None else dict(projections)
+        )
+        self._projection_bytes: int = projection_bytes(self._projections)
 
     @property
     def tree(self) -> Node:
@@ -68,6 +82,14 @@ class CheckedExpression:
     @property
     def bound_bytes(self) -> int:
         return self._estimate.bound_bytes
+
+    @property
+    def projections(self) -> Mapping[str, PathSet]:
+        return self._projections
+
+    @property
+    def projection_bytes(self) -> int:
+        return self._projection_bytes
 
 
 SEAL: Final[object] = object()
@@ -136,7 +158,7 @@ def typed_check(
     try:
         if prepared is None:
             check_environment(environment.variables)
-        tree = check_types(
+        tree, projections = check_types(
             parse(source, meter=used), environment, used, prepared is not None
         )
         rendering = canonical_rendering(tree, used)
@@ -146,7 +168,9 @@ def typed_check(
     except DiagnosticError as error:
         return error.diagnostic
     digest = hashlib.sha256(rendering.encode("ascii")).hexdigest()
-    return CheckedExpression(SEAL, tree, rendering, digest, cost, cost.bounds)
+    return CheckedExpression(
+        SEAL, tree, rendering, digest, cost, cost.bounds, projections
+    )
 
 
 def check_path(source: str) -> Path | Diagnostic:
