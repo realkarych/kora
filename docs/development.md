@@ -2,6 +2,8 @@
 
 The owner-approved [verification audit amendment](../knowledge/research/approved-verification-audit-2026-10-29.md) defines current diagnostic comparisons, review reuse and CI admission. General contributor requirements follow [AGENTS.md](../AGENTS.md); historical observations below retain their original revisions and results.
 
+Pull-request event amendment dated 2026-10-29: the project owner approved the [bounded plan and exact wording](https://github.com/realkarych/kora/issues/421#issuecomment-6506244166), with [approval recorded on 2026-10-29](https://github.com/realkarych/kora/issues/421#issuecomment-6506490282).
+
 Manual storage qualification amendment dated 2026-10-29: the project owner approved [issue #426](https://github.com/realkarych/kora/issues/426) to remove the daily storage qualification schedule while retaining complete manual qualification before a release.
 
 Local-runtime lane amendment dated 2026-10-27: the `host_fixture` marker and the `local-runtime` scaffold lane of [issue #312](https://github.com/realkarych/kora/issues/312), whose placement the project owner approved on 2026-10-27; wording pending line-by-line owner review.
@@ -100,6 +102,8 @@ pnpm --dir web install --frozen-lockfile
 The disposable target primes registry metadata for the isolated build resolver using the locked build requirements and their hashes. Locked sync installs cached artifacts without necessarily populating that metadata, so it is insufficient on a fresh cache. The target is separate from the project environment and is not used by the build itself.
 
 ## Source checks and distributions
+
+Ordinary CI and security workflows run when a pull request opens, changes its source revision or reopens, including while it is a draft. Marking the same revision ready for review does not start another CI or security execution. Failed or cancelled required results remain unresolved until the normal correction or explicitly justified recovery process supplies passing final-revision evidence.
 
 Run every source check, then build the sdist and build a wheel from that sdist under isolated, hash-constrained build requirements:
 
