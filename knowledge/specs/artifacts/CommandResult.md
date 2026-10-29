@@ -1,6 +1,6 @@
 # CommandResult revision 1
 
-Status: owner-approved contract publication under [issue #432](https://github.com/realkarych/kora/issues/432#issuecomment-6506488944), dated 2026-10-29. The project owner approved the complete plan, contract and exact human-facing documentation wording. Models, providers and real consumers remain pending the activation owners below. Governing decisions are [ADR-0008](../../../docs/decisions/0008-content-bound-approvals.md), [ADR-0009](../../../docs/decisions/0009-target-repository-trust-boundary.md) and [ADR-0018](../../../docs/decisions/0018-immutable-attempt-history.md). VcsRef and StructuredOutput schemas, descriptors, vectors and hashes remain unchanged.
+Status: owner-approved contract publication under [issue #432](https://github.com/realkarych/kora/issues/432#issuecomment-6506488944), dated 2026-10-29. The project owner approved the complete plan, contract and exact human-facing documentation wording. Raw/native model admission, canonical identity, detached summaries and supplied-capture byte integrity are implemented under [issue #451](https://github.com/realkarych/kora/issues/451). Providers and real consumers remain pending the activation owners below. Governing decisions are [ADR-0008](../../../docs/decisions/0008-content-bound-approvals.md), [ADR-0009](../../../docs/decisions/0009-target-repository-trust-boundary.md) and [ADR-0018](../../../docs/decisions/0018-immutable-attempt-history.md). VcsRef and StructuredOutput schemas, descriptors, vectors and hashes remain unchanged.
 
 ## 1. Payload and immutable identity
 
@@ -84,7 +84,7 @@ Raw decoding, canonicalization, strict integer semantics, relational predicates,
 
 | Obligation | Owner and activation |
 |---|---|
-| Closed model, strict raw/native validation, canonical bytes, whole selection and summary | Separate CommandResult model delivery under #138, work item 2; `test_command_result_schema_matches_model`, `test_command_result_rejects_invalid_payload`, `test_command_result_canonical_identity`, `test_command_result_behavior_bounds` |
+| Closed model, strict raw/native validation, canonical bytes, whole selection and summary | Implemented under #451, coordinated by #138, work item 2; `test_command_result_schema_matches_model`, `test_command_result_rejects_invalid_payload`, `test_command_result_canonical_identity`, `test_command_result_behavior_bounds` |
 | Installed ArtifactType behavior and runner/API agreement | Work item 8 with 13/14/17; real artifact-type conformance and same saved effective contract; schema shape never establishes capture/protection provenance |
 | Exit, duration, cause, no-result cases and exact stream/tail facts | Command executor 13 and runtime 14, worker 17; extend `test_failed_gate_reaches_command_failed`, `test_command_output_volume_is_bounded` and add `test_command_result_preserves_observed_termination` with deterministic clocks/barriers and supported real process coverage |
 | Protected paths and resources | Existing protected-path and command-resource cases, especially `test_resource_set_digest_vector`, `test_resource_digest_mismatch_fails_attempt`, `test_candidate_cannot_alter_resources`, `test_unprotected_runtime_reports_protection_none`; #45 and work items 3/13/14/17 |
@@ -95,3 +95,11 @@ Raw decoding, canonicalization, strict integer semantics, relational predicates,
 | CEL projection | Work items 3/4/8/10; saved CommandResult schema and frozen paths, ordinary artifact-payload retention and existing projection/data limits. Tails and captures grant no permanent metadata exception. |
 
 Pure publication starts no executable component or logger. Existing TM-04/TM-10 cover admission/resource bounds, TM-06/TM-07 content and diagnostics, TM-08/TM-11 trusted evidence and replay, and TM-12 immutable contract/evidence limits. No actor, privilege or new delivery operation is introduced by the approved publication scope. Future activation supplies its diagnostics and resource evidence under the existing kora-verify routing. This publication adds no measurement campaign, CI lane, timeout or acceptance framework.
+
+## 7. Standalone model boundary
+
+`kora.ir.CommandResult` owns immutable canonical bytes. Native and raw parsers validate the closed revision-1 domain and return fresh detached JSON through values and summaries. Canonical bytes and digests revalidate unchecked state. Fixed `CR001`–`CR006` violations contain no payload or caller-authored path. Shared JSON and protected-path helpers retain their existing semantics and limits; resource manifests retain their independent IR/JCS identity.
+
+`verify_command_result_captures` checks the size, full digest and exact tail of already supplied retained stdout/stderr bytes, preflighting both 64 MiB bounds before hashing either stream. It reads no reference and establishes no sanitation, producer provenance, owner binding, authorization, process closure or success authority. For a capture of at most 4 KiB, the model also checks the full digest against the complete bytes present in its tail. Larger captures require the explicit byte check for integrity. Raw parsing may canonicalize whitespace; the future addressed upload consumer still refuses noncanonical wire bytes before promotion.
+
+The [model evidence record](../../research/command-result-model-evidence-2026-10-30.md) records checks and diagnostic limits. Actual capture wire mapping, installed behavior, runtime/worker producers, replay/retention, CEL/checker integration and derived aggregates keep the activation owners and prerequisites above. Standalone model evidence does not activate those consumers.

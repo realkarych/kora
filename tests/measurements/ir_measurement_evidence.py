@@ -20,6 +20,10 @@ from pydantic import (
     ValidationError,
 )
 
+from tests.measurements.command_result_workload import cases as command_cases
+from tests.measurements.command_result_workload import (
+    lifetime_cases as command_lifetime_cases,
+)
 from tests.measurements.cost_workload import (
     DENSE_MEASURED as COST_DENSE_MEASURED,
 )
@@ -273,6 +277,48 @@ def structured_output_evidence() -> Evidence:
         )
         + Counter(
             (f"structured_output_{mode}_{run}_process", run, 500)
+            for run in range(3)
+            for mode in ("traced", "untraced")
+        ),
+    )
+
+
+@cache
+def expected_command_inventory() -> tuple[tuple[str, ...], str]:
+    actions, manifest = command_cases()
+    return tuple(action.name for action in actions), json.dumps(manifest)
+
+
+@cache
+def expected_command_lifetime_manifest() -> dict[str, dict[str, int]]:
+    return command_lifetime_cases()[2]
+
+
+def command_result_evidence() -> Evidence:
+    return Evidence(
+        frozenset(
+            {f"{NODE}test_command_result_action_cost"}
+            | {
+                f"{NODE}test_command_result_validation_lifetime[{run}-{traced}]"
+                for run in range(3)
+                for traced in (True, False)
+            }
+        ),
+        frozenset(
+            {f"{name}_memory_observed" for name in expected_command_inventory()[0]}
+            | {
+                f"command_result_{mode}_{run}_lifecycle_assertions_passed"
+                for run in range(3)
+                for mode in ("traced", "untraced")
+            }
+        ),
+        Counter(
+            (name, repeat, 1)
+            for name in expected_command_inventory()[0]
+            for repeat in range(DENSE_MEASURED)
+        )
+        + Counter(
+            (f"command_result_{mode}_{run}_process", run, 500)
             for run in range(3)
             for mode in ("traced", "untraced")
         ),
@@ -551,6 +597,7 @@ def accepted_evidence() -> Evidence:
         *(configuration_evidence(run) for run in range(3)),
         *(schema_evidence(run) for run in range(3)),
         structured_output_evidence(),
+        command_result_evidence(),
     )
 
 
@@ -611,7 +658,7 @@ def shard_evidence() -> tuple[Evidence, ...]:
         tuple(name for name in WORKLOADS if not name.startswith(assigned))
     )
     vcs_lifetime = vcs_ref_lifetime_evidence()
-    structured = structured_output_evidence()
+    structured = structured_output_evidence().union(command_result_evidence())
     owned = worker1.union(
         worker2, *schemas, *validation, remaining, vcs_lifetime, structured
     )
@@ -938,6 +985,61 @@ def verify_structured_output_evidence(
                 )
             ):
                 raise ValueError("inconsistent IR StructuredOutput lifetime evidence")
+
+
+def verify_command_result_evidence(
+    report: MeasurementReport, expected: Evidence
+) -> None:
+    manifest = report.environment.get("command_result_fixture_manifest")
+    if f"{NODE}test_command_result_action_cost" in expected.nodes:
+        if not isinstance(manifest, str):
+            raise ValueError("incomplete IR CommandResult fixture manifest")
+        try:
+            recorded = VCS_REF_MANIFEST.validate_json(manifest, strict=True)
+        except ValidationError:
+            raise ValueError("incomplete IR CommandResult fixture manifest") from None
+        if recorded != VCS_REF_MANIFEST.validate_json(
+            expected_command_inventory()[1], strict=True
+        ):
+            raise ValueError("inconsistent IR CommandResult fixture manifest")
+    elif manifest is not None:
+        raise ValueError("unselected IR CommandResult fixture manifest")
+    for run in range(3):
+        for traced in (True, False):
+            if (
+                f"{NODE}test_command_result_validation_lifetime[{run}-{traced}]"
+                not in expected.nodes
+            ):
+                continue
+            mode = "traced" if traced else "untraced"
+            name = f"command_result_{mode}_{run}"
+            raw = report.environment.get(f"{name}_stdout")
+            if not isinstance(raw, str) or len(raw.encode()) > 256 * 1024:
+                raise ValueError("incomplete IR CommandResult lifetime evidence")
+            try:
+                payload = Lifecycle.model_validate_json(raw, strict=True)
+            except ValidationError:
+                raise ValueError(
+                    "incomplete IR CommandResult lifetime evidence"
+                ) from None
+            if (
+                report.environment.get(f"{name}_stderr") != ""
+                or type(report.environment.get(f"{name}_exit")) is not int
+                or report.environment[f"{name}_exit"] != 0
+                or payload.traced is not traced
+                or payload.revision != report.revision
+                or payload.run != name
+                or payload.successes != 248
+                or payload.refusals != 252
+                or payload.fixtures != expected_command_lifetime_manifest()
+                or len(payload.retaining_paths) != 2
+                or [point.cycle for point in payload.points] != list(range(0, 501, 25))
+                or any(
+                    len({getattr(point, counter) for point in payload.points}) != 1
+                    for counter in ("threads", "os_threads", "descriptors")
+                )
+            ):
+                raise ValueError("inconsistent IR CommandResult lifetime evidence")
 
 
 def accounting_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1270,6 +1372,7 @@ def verify_memory_observations(
         ("diagnostic", "test_shared_diagnostic_resource_lifetime", 1000, 100),
         ("vcs_ref", "test_vcs_ref_validation_lifetime", 500, 25),
         ("structured_output", "test_structured_output_validation_lifetime", 500, 25),
+        ("command_result", "test_command_result_validation_lifetime", 500, 25),
     ):
         for run in range(3):
             if f"{NODE}{test}[{run}-True]" not in expected.nodes:
@@ -1343,6 +1446,7 @@ def verify_report(
     verify_schema_payloads(report, expected, schema_diagnostics)
     verify_vcs_ref_evidence(report, expected)
     verify_structured_output_evidence(report, expected)
+    verify_command_result_evidence(report, expected)
     verify_memory_observations(report, expected, memory_diagnostics)
     verify_accounting_evidence(
         report, expected, [] if diagnostics is None else diagnostics, memory_diagnostics
@@ -1424,7 +1528,7 @@ def verify_union(directory: Path, revision: str) -> dict[str, object]:
         frozenset(selected) != full.nodes
         or frozenset(gates) != full.gates
         or samples != full.samples
-        or (len(selected), len(gates), sum(samples.values())) != (366, 1271, 11054)
+        or (len(selected), len(gates), sum(samples.values())) != (373, 1306, 11350)
     ):
         raise ValueError("incomplete IR evidence union")
     return {

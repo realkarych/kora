@@ -8,6 +8,17 @@ from kora.ir.diagnostics import (
 )
 
 if TYPE_CHECKING:
+    from kora.ir.command_result import (
+        CommandResult,
+        CommandResultValidationError,
+        canonical_command_result,
+        command_result_digest,
+        parse_command_result,
+        parse_command_result_json,
+        require_command_result_revision,
+        summarize_command_result,
+        verify_command_result_captures,
+    )
     from kora.ir.config import (
         AgentConfig,
         BranchCase,
@@ -91,6 +102,15 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "CommandResult",
+    "CommandResultValidationError",
+    "canonical_command_result",
+    "command_result_digest",
+    "parse_command_result",
+    "parse_command_result_json",
+    "require_command_result_revision",
+    "summarize_command_result",
+    "verify_command_result_captures",
     "StructuredOutput",
     "StructuredOutputValidationError",
     "canonical_structured_output",
@@ -285,6 +305,20 @@ def __getattr__(name: str) -> object:
         from kora.ir import structured_output
 
         return getattr(structured_output, name)
+    if name in {
+        "CommandResult",
+        "CommandResultValidationError",
+        "canonical_command_result",
+        "command_result_digest",
+        "parse_command_result",
+        "parse_command_result_json",
+        "require_command_result_revision",
+        "summarize_command_result",
+        "verify_command_result_captures",
+    }:
+        from kora.ir import command_result
+
+        return getattr(command_result, name)
     if name in {"VcsRef", "PrincipalRef"}:
         from kora.ir import vcs_ref
 
