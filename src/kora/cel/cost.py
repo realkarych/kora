@@ -816,10 +816,7 @@ class Estimator:
             is_typed_sequence(left.shape.type) and is_typed_sequence(right.shape.type)
         ):
             shape = replace(shape, bytes=shape.bytes.join(Affine.of(SCALAR_BYTES)))
-        steps = steps.plus(shape.bytes.times(self.weights.concat_byte))
-        steps = steps.plus(shape.values.times(self.weights.concat_value))
-        allocated = self.allocation(shape.bytes)
-        return NodeCost(shape, steps, peak.join(held.plus(allocated)), allocated)
+        return self.collection(shape, steps, held, peak)
 
     def sequence(
         self, nodes: list[Node]

@@ -15,7 +15,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from kora.ir import PrincipalRef, VcsRef
-from kora.ir.json import JsonObject
+from kora.ir.json import JsonObject, fits_utf8
 from kora.ir.scalars import Digest, EnvName
 from kora.ir.vcs_ref import MAX_PATH_BYTES, MAX_PATHS, ChangedPath
 from kora.ir.vcs_ref_json import MAX_JSON_BYTES, canonical_size
@@ -69,24 +69,12 @@ def vcs_refused() -> PydanticCustomError:
     return PydanticCustomError("vcs_value_invalid", "the VCS value is invalid")
 
 
-def utf8_size(value: str) -> int | None:
-    try:
-        return len(value.encode("utf-8"))
-    except UnicodeEncodeError:
-        return None
-
-
-def fits(value: str, limit: int) -> bool:
-    size = utf8_size(value)
-    return size is not None and size <= limit
-
-
 def is_text(value: object, limit: int) -> bool:
     return (
         isinstance(value, str)
         and len(value) > 0
         and value.isprintable()
-        and fits(value, limit)
+        and fits_utf8(value, limit)
     )
 
 
@@ -99,30 +87,25 @@ def bounded_text(limit: int) -> AfterValidator:
     return AfterValidator(check)
 
 
+def path_fits(value: str) -> bool:
+    return fits_utf8(value, MAX_PATH_TEXT_BYTES) and all(
+        fits_utf8(part, MAX_COMPONENT_BYTES) for part in value.split("/")
+    )
+
+
 def relative_path(value: str) -> str:
-    if not fits(value, MAX_PATH_TEXT_BYTES) or any(
-        not fits(part, MAX_COMPONENT_BYTES) for part in value.split("/")
-    ):
+    if not path_fits(value):
         raise vcs_refused()
     return value
 
 
-def no_nul(value: str) -> str:
-    if "\x00" in value or utf8_size(value) is None:
-        raise vcs_refused()
-    return value
+def nul_free_text(limit: int) -> AfterValidator:
+    def check(value: str) -> str:
+        if "\x00" in value or not fits_utf8(value, limit):
+            raise vcs_refused()
+        return value
 
-
-def bounded_diff_stat(value: str) -> str:
-    if not fits(no_nul(value), MAX_DIFF_STAT_BYTES):
-        raise vcs_refused()
-    return value
-
-
-def bounded_argument(value: str) -> str:
-    if not fits(no_nul(value), MAX_ARGUMENT_BYTES):
-        raise vcs_refused()
-    return value
+    return AfterValidator(check)
 
 
 def is_message(value: object) -> bool:
@@ -130,14 +113,8 @@ def is_message(value: object) -> bool:
         isinstance(value, str)
         and len(value) > 0
         and "\x00" not in value
-        and fits(value, MAX_COMMIT_MESSAGE_BYTES)
+        and fits_utf8(value, MAX_COMMIT_MESSAGE_BYTES)
     )
-
-
-def binding_text(value: str) -> str:
-    if not is_text(value, MAX_BINDING_BYTES):
-        raise vcs_refused()
-    return value
 
 
 def is_executor_set(value: object) -> bool:
@@ -159,13 +136,15 @@ LocationText = Annotated[StrictText, bounded_text(MAX_PATH_TEXT_BYTES)]
 DiffStat = Annotated[
     str,
     StringConstraints(strict=True, max_length=MAX_DIFF_STAT_BYTES),
-    AfterValidator(bounded_diff_stat),
+    nul_free_text(MAX_DIFF_STAT_BYTES),
 ]
 RelativePath = Annotated[ChangedPath, AfterValidator(relative_path)]
 Argument = Annotated[
-    str, StringConstraints(strict=True), AfterValidator(bounded_argument)
+    str, StringConstraints(strict=True), nul_free_text(MAX_ARGUMENT_BYTES)
 ]
-Binding = Annotated[str, StringConstraints(strict=True), AfterValidator(binding_text)]
+Binding = Annotated[
+    str, StringConstraints(strict=True), bounded_text(MAX_BINDING_BYTES)
+]
 BindingRevision = Annotated[StrictInt, Field(ge=1, le=MAX_BINDING_REVISION)]
 NamedItems = Annotated[tuple[Identifier, ...], Field(max_length=MAX_NAMED_ITEMS)]
 StepEnv = Annotated[

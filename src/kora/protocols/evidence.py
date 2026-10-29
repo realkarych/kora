@@ -2,10 +2,11 @@ from collections.abc import Mapping
 from enum import StrEnum
 from typing import Annotated, Final, Literal, Self, cast
 
-from pydantic import Discriminator, Field, StringConstraints, Tag, model_validator
+from pydantic import Field, StringConstraints, Tag, model_validator
 from pydantic_core import PydanticCustomError
 
 from kora.ir import VcsRef
+from kora.protocols.boundary import refusal_discriminator
 from kora.protocols.common import BoundaryModel
 from kora.protocols.errors import ERROR_CODE
 from kora.protocols.identity import (
@@ -112,11 +113,7 @@ def record_kind(value: object) -> object:
 RuntimeRecord = Annotated[
     Annotated[TerminationReceipt, Tag("termination")]
     | Annotated[NormalCompletionQuiescence, Tag("normal_completion")],
-    Discriminator(
-        record_kind,
-        custom_error_type="evidence_invalid",
-        custom_error_message="the evidence is invalid",
-    ),
+    refusal_discriminator(record_kind, evidence_refused),
 ]
 
 

@@ -1,6 +1,6 @@
 import hashlib
 import json
-from typing import Annotated, Final, Literal, Self
+from typing import Annotated, Final, Literal, Self, cast
 
 from pydantic import (
     Field,
@@ -15,6 +15,7 @@ from pydantic_core import PydanticCustomError
 
 from kora.ir.json import MAX_INTEGER_BITS, JsonObject, JsonShapeError, parse_json_object
 from kora.ir.scalars import Digest
+from kora.ir.vcs_ref_json import canonical_bytes as canonical_json
 from kora.ir.vcs_ref_json import lexical_depth_valid, refuse_constant, unique_object
 from kora.protocols.common import BoundaryModel
 from kora.protocols.identity import Count, Identifier
@@ -96,12 +97,7 @@ class StorageModel(BoundaryModel):
             )
             if not isinstance(value, dict):
                 raise ValueError("storage metadata must be a JSON object")
-            canonical = json.dumps(
-                value,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
+            canonical = canonical_json(cast("JsonObject", value))
             if len(canonical) > MAX_STORAGE_METADATA:
                 raise ValueError("storage metadata exceeds its JSON boundary")
         except (ValueError, RecursionError):
@@ -116,12 +112,7 @@ class StorageModel(BoundaryModel):
         )
 
     def canonical_bytes(self) -> bytes:
-        return json.dumps(
-            self.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
+        return canonical_json(self.model_dump(mode="json"))
 
     def metadata_digest(self) -> str:
         return "sha256:" + hashlib.sha256(self.canonical_bytes()).hexdigest()
@@ -168,6 +159,13 @@ class PartSpec(StorageModel):
         return self
 
 
+def require_strict_cut(count: int, source_spec: PartSpec) -> None:
+    if count >= source_spec.size:
+        raise PydanticCustomError(
+            "storage_prefix", "prefix must be a strict source cut"
+        )
+
+
 class PartRef(StorageModel):
     stage: StageRef
     spec: PartSpec
@@ -191,10 +189,7 @@ class PrefixRef(StorageModel):
 
     @model_validator(mode="after")
     def bounded_prefix(self) -> Self:
-        if self.count >= self.source_spec.size:
-            raise PydanticCustomError(
-                "storage_prefix", "prefix must be a strict source cut"
-            )
+        require_strict_cut(self.count, self.source_spec)
         return self
 
 
@@ -211,10 +206,7 @@ class ManifestPrefix(StorageModel):
 
     @model_validator(mode="after")
     def bounded_prefix(self) -> Self:
-        if self.count >= self.source_spec.size:
-            raise PydanticCustomError(
-                "storage_prefix", "prefix must be a strict source cut"
-            )
+        require_strict_cut(self.count, self.source_spec)
         return self
 
 
@@ -305,10 +297,7 @@ def request_digest(
         "kind": kind,
         "arguments": arguments.model_dump(mode="json"),
     }
-    encoded = json.dumps(
-        preimage, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return "sha256:" + hashlib.sha256(canonical_json(preimage)).hexdigest()
 
 
 class StageWrite(StorageModel):
@@ -323,10 +312,7 @@ class PrefixCapture(StorageModel):
 
     @model_validator(mode="after")
     def strict_cut(self) -> Self:
-        if self.count >= self.source_spec.size:
-            raise PydanticCustomError(
-                "storage_prefix", "prefix must be a strict source cut"
-            )
+        require_strict_cut(self.count, self.source_spec)
         return self
 
 

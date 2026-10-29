@@ -5,6 +5,7 @@ from typing import Annotated, Final, NoReturn, Protocol, cast, final
 from pydantic import PlainSerializer, PlainValidator, SerializationInfo, ValidationInfo
 from pydantic_core import PydanticCustomError
 
+from kora.ir.json import fits_utf8, utf8_length
 from kora.observability import (
     ProcessDiagnostics,
     SecretAdmissionError,
@@ -27,14 +28,6 @@ class SecretRevealRefused(Exception):
 class SecretRenderRefused(TypeError):
     def __init__(self) -> None:
         super().__init__("a secret value cannot be serialised or copied")
-
-
-def is_encodable(value: str) -> bool:
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return True
 
 
 def registered_forms(value: str) -> tuple[str, ...]:
@@ -67,7 +60,7 @@ class SecretScope:
         diagnostics = self._diagnostics
         if diagnostics is None:
             raise SecretAdmissionError("diagnostics are not configured")
-        if not is_encodable(value):
+        if utf8_length(value) is None:
             raise SecretAdmissionError("the secret is not valid text")
         with self._lock:
             if self._released:
@@ -192,9 +185,7 @@ def transfer_scope(info: ValidationInfo) -> SecretScope | None:
 
 
 def transfer_text(value: object) -> str | None:
-    if not isinstance(value, str) or not is_encodable(value):
-        return None
-    if len(value.encode("utf-8")) > MAX_TRANSFER_BYTES:
+    if not isinstance(value, str) or not fits_utf8(value, MAX_TRANSFER_BYTES):
         return None
     return value
 
