@@ -1,3 +1,4 @@
+import ast
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,26 @@ def resolve_relative(module: SourceModule, level: int, name: str) -> str:
     package_parts = parts if module.path.stem == "__init__" else parts[:-1]
     base_parts = package_parts[: len(package_parts) - (level - 1)]
     return ".".join([*base_parts, name] if name else base_parts)
+
+
+def parse_module(module: SourceModule) -> ast.Module:
+    return ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+
+
+def import_source(module: SourceModule, node: ast.ImportFrom) -> str:
+    source = node.module or ""
+    if node.level > 0:
+        source = resolve_relative(module, node.level, source)
+    return source
+
+
+def expression_name(node: ast.expr, bindings: dict[str, str]) -> str | None:
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        owner = expression_name(node.value, bindings)
+        return None if owner is None else f"{owner}.{node.attr}"
+    return None
 
 
 def write_module(source_root: Path, module: str, source: str) -> None:
