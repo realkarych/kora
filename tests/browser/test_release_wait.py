@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 SCENARIOS: tuple[str, ...] = (
-    ("released", "persistent-live", "temporary-denial", "persistent-denial")
+    (
+        "released",
+        "persistent-live",
+        "temporary-denial",
+        "persistent-denial",
+        "temporary-admission",
+        "persistent-admission",
+    )
     if sys.platform == "linux"
     else ("released", "persistent-live")
 )
@@ -19,7 +26,7 @@ ROOT: Path = Path(__file__).resolve().parents[2]
 def test_release_wait_observes_real_process_lifetime(scenario: str) -> None:
     node = shutil.which("node")
     assert node is not None
-    visibility = "denied" if scenario.endswith("denial") else "readable"
+    visibility = "denied" if scenario.endswith(("denial", "admission")) else "readable"
     command = [sys.executable, str(Path(__file__).with_name("held_process.py"))]
     with subprocess.Popen(
         [*command, visibility],
@@ -29,6 +36,7 @@ def test_release_wait_observes_real_process_lifetime(scenario: str) -> None:
     ) as held:
         try:
             assert held.stdout is not None
+            assert held.stdin is not None
             assert select.select([held.stdout], [], [], 10)[0]
             assert held.stdout.readline() == b"ready\n"
 
@@ -38,7 +46,10 @@ def test_release_wait_observes_real_process_lifetime(scenario: str) -> None:
                     str(ROOT / "web/tests/browser/resource-probe.ts"),
                     scenario,
                     str(held.pid),
+                    str(held.stdin.fileno()),
+                    str(held.stdout.fileno()),
                 ],
+                pass_fds=(held.stdin.fileno(), held.stdout.fileno()),
                 capture_output=True,
                 timeout=15,
                 check=False,
