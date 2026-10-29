@@ -17,6 +17,7 @@ from kora.plugins.storage.readers import LocalReadStream, ReaderManager
 from kora.plugins.storage.state import (
     LocalState,
     Settled,
+    StageObservations,
     StorageConnection,
     operation_value,
     settled_result,
@@ -280,12 +281,11 @@ class StagedPayloads:
 
     def segments(
         self,
-        connection: StorageConnection,
         stage: StageRef,
         manifest: StageManifest,
         slot: int,
+        observations: StageObservations,
     ) -> tuple[FileSegment, ...]:
-        observations = self.state.stage_observations(connection, stage)
         parts: list[tuple[PartRef, PrivateFile]] = []
         prefix: tuple[PrefixRef, PrivateFile] | None = None
         for _, observation, identity in observations:
@@ -368,7 +368,12 @@ class StagedPayloads:
                         or record[3] is None
                     ):
                         refuse("storage_conflict")
-                    segments = self.segments(connection, stage, manifest, slot)
+                    segments = self.segments(
+                        stage,
+                        manifest,
+                        slot,
+                        self.state.stage_observations(connection, stage),
+                    )
                     self.state.register(
                         connection, operation, manifest, "stage", stage.stage_id, "seal"
                     )
@@ -414,21 +419,34 @@ class StagedPayloads:
         connection: StorageConnection,
         content: SealedStage | PreparedContentRef,
     ) -> tuple[int, tuple[FileSegment, ...]]:
+        return self._resolve_with_observations(connection, content, {})
+
+    def _resolve_with_observations(
+        self,
+        connection: StorageConnection,
+        content: SealedStage | PreparedContentRef,
+        observations: dict[StageRef, StageObservations],
+    ) -> tuple[int, tuple[FileSegment, ...]]:
         record = self.state.stage(connection, content.stage)
         if record is None or record[1] != "sealed":
             refuse("storage_unavailable")
-        saved = tuple(
-            (item, identity)
-            for _, item, identity in self.state.stage_observations(
+        if content.stage not in observations:
+            observations[content.stage] = self.state.stage_observations(
                 connection, content.stage
             )
+        stage_observations = observations[content.stage]
+        saved = tuple(
+            (item, identity)
+            for _, item, identity in stage_observations
             if item.result == content
         )
         if len(saved) != 1:
             refuse("storage_conflict")
         observation, identity = saved[0]
         if isinstance(content, PreparedContentRef):
-            source_slot, source_segments = self.resolve(connection, content.source)
+            source_slot, source_segments = self._resolve_with_observations(
+                connection, content.source, observations
+            )
             if content.content_identity == raw_content_identity(content.source):
                 if (
                     content.total_size != content.source.total_size
@@ -449,7 +467,9 @@ class StagedPayloads:
             observation.operation,
         )
         manifest = StageManifest.model_validate_json(text(arguments))
-        return record[0], self.segments(connection, content.stage, manifest, record[0])
+        return record[0], self.segments(
+            content.stage, manifest, record[0], stage_observations
+        )
 
     async def read(
         self, content: SealedStage | PreparedContentRef, ctx: ProtocolContext

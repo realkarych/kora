@@ -27,6 +27,9 @@ from kora.protocols.storage_models import (
 )
 
 StorageConnection: TypeAlias = sqlite3.Connection
+StageObservations: TypeAlias = tuple[
+    tuple[str, MutationObservation, PrivateFile | None], ...
+]
 Settled = TypeVar("Settled", bound=MutationResult)
 
 SCHEMA: Final[tuple[str, ...]] = (
@@ -470,7 +473,7 @@ class LocalState:
 
     def stage_observations(
         self, connection: sqlite3.Connection, stage: StageRef
-    ) -> tuple[tuple[str, MutationObservation, PrivateFile | None], ...]:
+    ) -> StageObservations:
         records: list[tuple[str, MutationObservation, PrivateFile | None]] = []
         for row in rows(
             connection.execute(
