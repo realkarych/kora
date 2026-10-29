@@ -151,3 +151,40 @@ branch or campaign was changed by this integration.
 No qualification workload, numerical gate, database coverage, supported platform or
 hard deadline changes. The historical command-qualification failure and its full
 release obligation remain with #395; this work performs no further attribution campaign.
+
+## Adverse storage-task fixture on 2026-10-29
+
+The integrated-head [macOS conformance job](https://github.com/realkarych/kora/actions/runs/40817993287/job/123263537325)
+failed `test_storage_case_runner_retains_failed_domain[task]`: its deliberately pending
+task was collected before the case runner inspected live tasks. The child logged
+pending-task destruction and then failed its expected refusal assertion. This job
+reported one failure and 454 passing cases; its [native evidence](https://github.com/realkarych/kora/actions/runs/40817993287/artifacts/12873363303)
+remains failed. Requested head was `cceb0ec0645e6e8e3f0872ab9ed7c175b402f072`;
+the actual checkout was `74cfae49df54c54762d8c3485515e312529df410`.
+
+The [bounded plan amendment](https://github.com/realkarych/kora/issues/368#issuecomment-6488174277)
+adds explicit task ownership only in `tests/conformance/storage_case_probe.py`.
+Both direct and late adverse tasks enter the adapter's typed strong collection.
+Each terminal mode creates at most one; successful modes add none and failed-sequence
+refusal prevents another exercise. The existing parent-owned process teardown ends
+their lifetime. Remaining tasks still require `TASKS_LIVE`, failed-domain retention
+and actual child closure/reaping under the existing deadlines.
+
+The direct task case now waits for a task-entry event before collecting garbage.
+Without retention, one controlled execution reproduced the CI failure in 2.04 seconds.
+After retention, the complete parent test file passed all 14 cases in 30.55 seconds.
+The forced collection stays in the regression. No task is cancelled to turn the
+adverse scenario into successful case cleanup.
+
+Independent correctness and resource-ownership reviewers inspected proposal, actual
+fixture delta and red/green evidence, then [returned passing scoped results](https://github.com/realkarych/kora/pull/406#issuecomment-6488271178).
+The inspected probe SHA-256 is
+`c60497f95cbc77e8989cc809c6ef78c8c19af7ac3194dd581fc9db6d4f32dabe`.
+Full Ruff lint/format passed for 650 files, strict Pyright reported zero errors or
+warnings, and architecture passed 800 cases in 28.23 seconds. Fresh final-head
+supported-platform CI remains required. Earlier unchanged six-file inputs retain
+their original execution revisions rather than becoming new full-suite results.
+
+The production runner, parent assertions, contracts, gates, platforms and dependencies
+are unchanged. There is no new execution or signal authority. The correction contains
+zero production lines and does not start the dependent #369 or shared #368 work.

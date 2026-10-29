@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import os
 import socket
@@ -54,7 +55,9 @@ async def effect(
     raise AssertionError("case ownership does not run the configuration driver")
 
 
-async def wait_forever() -> None:
+async def wait_forever(entered: asyncio.Event | None = None) -> None:
+    if entered is not None:
+        entered.set()
     await asyncio.get_running_loop().create_future()
 
 
@@ -117,6 +120,7 @@ class Adapter:
         self.cleaned: list[object | None] = []
         self.configurations: list[JsonObject] = []
         self.native_results: list[bool] = []
+        self.retained_tasks: list[asyncio.Task[None]] = []
         self.started: asyncio.Future[None] | None = None
         self.joining = threading.Event()
 
@@ -182,7 +186,7 @@ class Adapter:
             (current / "foreign").write_bytes(b"preserve")
 
     def late_work(self) -> None:
-        asyncio.create_task(wait_forever())
+        self.retained_tasks.append(asyncio.create_task(wait_forever()))
 
     def native_work(self) -> None:
         expected = self.directories[-1]
@@ -217,7 +221,10 @@ class Adapter:
             except asyncio.CancelledError:
                 assert waiting.cancelled()
         elif self.mode == "task":
-            asyncio.create_task(wait_forever())
+            entered = asyncio.Event()
+            self.retained_tasks.append(asyncio.create_task(wait_forever(entered)))
+            await entered.wait()
+            gc.collect()
         else:
             with captured(
                 CONFORMANCE_COMPONENT, LoggingSettings(), "storage-case", utc_now
