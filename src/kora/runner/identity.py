@@ -2,13 +2,16 @@ import ctypes
 import errno
 import os
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, cast
+from typing import BinaryIO, Final, Protocol, cast
 
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
+
+STATUS_CAPACITY_BYTES: Final[int] = 4096
 
 
 class IdentityState(StrEnum):
@@ -101,17 +104,80 @@ class GetHostUuid(Protocol):
     def __call__(self, result: object, timeout: object) -> int: ...
 
 
+VISIBLE_PROCFS_OPTIONS: frozenset[str] = frozenset({"hidepid=0", "hidepid=off"})
+
+
+def hides_processes(option: str) -> bool:
+    if option.startswith("hidepid="):
+        return option not in VISIBLE_PROCFS_OPTIONS
+    return option == "subset=pid"
+
+
+def mount_hides_processes(mountinfo: bytes) -> bool:
+    if len(mountinfo) > 1048576:
+        return True
+    for line in mountinfo.decode("utf-8", "surrogateescape").splitlines():
+        fields, separator, rest = line.partition(" - ")
+        mount = fields.split(" ")
+        described = rest.split(" ")
+        if separator and len(mount) >= 5 and mount[4] == "/proc":
+            if len(described) < 3 or described[0] != "proc":
+                return True
+            if any(hides_processes(option) for option in described[2].split(",")):
+                return True
+    return False
+
+
+def procfs_hides_processes() -> bool:
+    with open("/proc/self/mountinfo", "rb") as source:
+        return mount_hides_processes(source.read(1048577))
+
+
+def procfs_is_own() -> bool:
+    status = Path("/proc/self/status").read_text()
+    lines = [line for line in status.splitlines() if line.startswith("NSpid:")]
+    return len(lines) == 1 and lines[0].split() == ["NSpid:", str(os.getpid())]
+
+
+def observer_namespace() -> str | None:
+    try:
+        if not procfs_is_own() or procfs_hides_processes():
+            return None
+        return os.readlink("/proc/self/ns/pid")
+    except (OSError, UnicodeError):
+        return None
+
+
+def open_status(pid: int) -> BinaryIO:
+    return open(f"/proc/{pid}/stat", "rb", buffering=0)
+
+
+def status_fields(status: BinaryIO) -> tuple[bytes, ...]:
+    content = status.read(STATUS_CAPACITY_BYTES)
+    _, separator, tail = content.rpartition(b")")
+    if not separator or len(content) >= STATUS_CAPACITY_BYTES:
+        raise ValueError("process status is malformed")
+    return tuple(tail.split())
+
+
 class NativeIdentityReader:
     def __init__(
-        self, *, clock: Clock | None = None, max_scan_entries: int = 65536
+        self,
+        *,
+        clock: Clock | None = None,
+        max_scan_entries: int = 65536,
+        status_opener: Callable[[int], BinaryIO] = open_status,
     ) -> None:
         if isinstance(max_scan_entries, bool) or not 1 <= max_scan_entries <= 65536:
             raise ValueError("native process scan capacity must be between 1 and 65536")
         self._clock = clock if clock is not None else SystemClock()
         self._max_scan_entries = max_scan_entries
+        self._open_status = status_opener
         self._library: ctypes.CDLL | None = None
         self._host: str | None = None
         self._boot: str | None = None
+        self._namespace: str | None = None
+        self._owner = os.getpid()
         if sys.platform == "darwin":
             self._library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
             library = self._library
@@ -153,6 +219,7 @@ class NativeIdentityReader:
                 == 0
             ):
                 self._boot = boot.value.decode("ascii")
+            self._namespace = self._boot
         elif sys.platform == "linux":
             try:
                 self._host = Path("/etc/machine-id").read_text().strip()
@@ -160,10 +227,13 @@ class NativeIdentityReader:
             except OSError:
                 self._host = None
                 self._boot = None
+            self._namespace = observer_namespace()
         else:
             raise ValueError("unsupported local process platform")
 
     def read(self, pid: int) -> IdentityObservation:
+        if os.getpid() != self._owner:
+            return IdentityObservation(IdentityState.UNKNOWN)
         try:
             if sys.platform == "linux":
                 return self._linux_read(pid)
@@ -174,21 +244,21 @@ class NativeIdentityReader:
             return IdentityObservation(IdentityState.UNKNOWN)
 
     def _linux_read(self, pid: int) -> IdentityObservation:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-        namespace = os.readlink(f"/proc/{pid}/ns/pid")
+        with self._open_status(pid) as status:
+            fields = status_fields(status)
         group = int(fields[2])
         session = int(fields[3])
         identity = ProcessIdentity(
             host_id=self._host,
             boot_id=self._boot,
-            pid_namespace=namespace,
+            pid_namespace=self._namespace,
             pid=pid,
             start_time=int(fields[19]),
             leads_group=pid == group,
         )
         return IdentityObservation(
             IdentityState.PRESENT,
-            ProcessSnapshot(identity, group, session, fields[0] in ("Z", "X")),
+            ProcessSnapshot(identity, group, session, fields[0] in (b"Z", b"X")),
         )
 
     def _darwin_read(self, pid: int) -> IdentityObservation:
@@ -205,7 +275,7 @@ class NativeIdentityReader:
         identity = ProcessIdentity(
             host_id=self._host,
             boot_id=self._boot,
-            pid_namespace=self._boot,
+            pid_namespace=self._namespace,
             pid=info.pid,
             start_time=info.start_seconds * 1_000_000 + info.start_microseconds,
             leads_group=info.pid == info.process_group_id,
@@ -240,13 +310,9 @@ class NativeIdentityReader:
                             continue
                         pid = int(entry.name)
                         try:
-                            fields = (
-                                Path(f"/proc/{pid}/stat")
-                                .read_text()
-                                .rsplit(")", 1)[1]
-                                .split()
-                            )
-                        except FileNotFoundError:
+                            with self._open_status(pid) as status:
+                                fields = status_fields(status)
+                        except (FileNotFoundError, ProcessLookupError):
                             continue
                         if int(fields[2]) != process_group_id:
                             continue

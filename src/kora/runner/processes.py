@@ -9,7 +9,7 @@ import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, cast
+from typing import Final, Protocol, cast
 
 from pydantic import TypeAdapter
 
@@ -71,6 +71,9 @@ class ProcessObservation:
         return self.condition is ProcessCondition.SETTLED
 
 
+NOTE_REAP: Final[int] = 0x10000000
+
+
 class QueueHandle(Protocol):
     def fileno(self) -> int: ...
 
@@ -83,16 +86,29 @@ class ExitAnchor:
         self._direct_child = direct_child
         self._loop = asyncio.get_running_loop()
         self._ready: asyncio.Future[None] = self._loop.create_future()
+        self._reaped: asyncio.Future[None] = self._loop.create_future()
         self._pidfd: int | None = None
+        self._poller: QueueHandle | None = None
         self._queue: QueueHandle | None = None
         self._descriptor: int | None = None
         self.exited = False
+        self.reaped = False
         self.unknown = False
         try:
             if sys.platform == "linux":
                 self._pidfd = os.pidfd_open(pid)
                 self._descriptor = self._pidfd
+                if not direct_child:
+                    poller = select.epoll()
+                    self._poller = poller
+                    poller.register(self._pidfd, select.EPOLLIN | select.EPOLLONESHOT)
+                    self._descriptor = poller.fileno()
             elif sys.platform == "darwin":
+                retention, notes = (
+                    (select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT)
+                    if direct_child
+                    else (select.KQ_EV_CLEAR, select.KQ_NOTE_EXIT | NOTE_REAP)
+                )
                 queue = select.kqueue()
                 self._queue = queue
                 queue.control(
@@ -100,8 +116,8 @@ class ExitAnchor:
                         select.kevent(
                             pid,
                             filter=select.KQ_FILTER_PROC,
-                            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                            fflags=select.KQ_NOTE_EXIT,
+                            flags=select.KQ_EV_ADD | retention,
+                            fflags=notes,
                         )
                     ],
                     0,
@@ -114,6 +130,7 @@ class ExitAnchor:
         except OSError:
             self.unknown = True
             self._ready.set_result(None)
+            self._reaped.set_result(None)
 
     def _observe_exit(self) -> None:
         try:
@@ -126,23 +143,35 @@ class ExitAnchor:
                         return
                     self.exited = status.si_pid == self._pid
                     self.unknown = not self.exited
-                else:
+                elif self._poller is not None:
+                    poller = cast(select.epoll, self._poller)
+                    events = poller.poll(0)
+                    if not events:
+                        return
                     self.exited = True
+                    self.reaped = any(mask & select.EPOLLHUP for _, mask in events)
+                    if not self.reaped:
+                        poller.modify(self._pidfd, select.EPOLLHUP)
             elif sys.platform == "darwin" and self._queue is not None:
-                events = cast(select.kqueue, self._queue).control(None, 1, 0)
+                events = cast(select.kqueue, self._queue).control(None, 2, 0)
                 if not events:
                     return
-                self.exited = any(
-                    event.ident == self._pid and event.fflags & select.KQ_NOTE_EXIT
-                    for event in events
+                owned = tuple(event for event in events if event.ident == self._pid)
+                self.exited = self.exited or any(
+                    event.fflags & select.KQ_NOTE_EXIT for event in owned
                 )
+                self.reaped = any(event.fflags & NOTE_REAP for event in owned)
                 self.unknown = not self.exited
         except OSError:
             self.unknown = True
-        if self._descriptor is not None:
-            self._loop.remove_reader(self._descriptor)
-        if not self._ready.done():
+        if not self._ready.done() and (self.exited or self.unknown):
             self._ready.set_result(None)
+        if self._direct_child or self.reaped or self.unknown:
+            if self._descriptor is not None:
+                self._loop.remove_reader(self._descriptor)
+                self._descriptor = None
+            if not self._reaped.done():
+                self._reaped.set_result(None)
 
     async def wait(self, deadline_ns: int, clock: Clock) -> None:
         if self.unknown:
@@ -157,10 +186,17 @@ class ExitAnchor:
     def readiness(self) -> asyncio.Future[None]:
         return self._ready
 
+    @property
+    def next_change(self) -> asyncio.Future[None]:
+        return self._reaped if self.exited else self._ready
+
     def close(self) -> None:
         if self._descriptor is not None:
             self._loop.remove_reader(self._descriptor)
             self._descriptor = None
+        if self._poller is not None:
+            self._poller.close()
+            self._poller = None
         if self._pidfd is not None:
             os.close(self._pidfd)
             self._pidfd = None
@@ -168,6 +204,7 @@ class ExitAnchor:
             self._queue.close()
             self._queue = None
         self._ready.cancel()
+        self._reaped.cancel()
 
 
 def complete_identity(identity: ProcessIdentity) -> bool:
@@ -269,9 +306,9 @@ class MemberWatches:
 
     def pending(self) -> tuple[asyncio.Future[None], ...]:
         return tuple(
-            anchor.readiness
+            anchor.next_change
             for _, anchor in self.entries.values()
-            if not anchor.exited and not anchor.readiness.done()
+            if not anchor.next_change.done()
         )
 
     def dispose(self) -> None:
@@ -677,6 +714,13 @@ class GatedProcess:
             and process.session_id == registration.session_id
         )
 
+    def _reaped_since_scan(self, process: ProcessSnapshot) -> bool:
+        return (
+            process.dead
+            and self._identities.read(process.identity.pid).state
+            is IdentityState.ABSENT
+        )
+
     def _confirm_dead_group(
         self, known_dead: dict[int, ProcessIdentity], deadline_ns: int | None
     ) -> bool:
@@ -735,6 +779,7 @@ class GatedProcess:
             return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
         live: list[ProcessIdentity] = []
         dead: dict[int, ProcessIdentity] = {}
+        unreaped = False
         for pid, member in group.members:
             if deadline_ns is not None and self._clock.monotonic_ns() >= deadline_ns:
                 return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
@@ -745,6 +790,7 @@ class GatedProcess:
                 previous = self._watches.entries.get(pid)
                 if previous is not None and previous[1].exited:
                     dead[pid] = previous[0]
+                    unreaped = unreaped or not previous[1].reaped
                     continue
                 return ProcessObservation(ProcessCondition.UNKNOWN, (), eof)
             process = member.process
@@ -754,19 +800,24 @@ class GatedProcess:
                 self._watches.validate(process, registration, deadline_ns)
             except ProcessError as error:
                 return ProcessObservation(error.condition, (), eof)
+            if pid != registration.process.pid:
+                try:
+                    self._watches.retain(process, registration, deadline_ns)
+                except ProcessError as error:
+                    if self._reaped_since_scan(process):
+                        continue
+                    return ProcessObservation(error.condition, (), eof)
             if not process.dead:
                 live.append(process.identity)
-                if pid != registration.process.pid:
-                    try:
-                        self._watches.retain(process, registration, deadline_ns)
-                    except ProcessError as error:
-                        return ProcessObservation(error.condition, (), eof)
             else:
                 dead[pid] = process.identity
+                unreaped = unreaped or pid != registration.process.pid
         if omitted_pending:
             return ProcessObservation(ProcessCondition.UNKNOWN, tuple(live), eof)
         condition = (
-            ProcessCondition.SETTLED if exited and not live else ProcessCondition.LIVE
+            ProcessCondition.SETTLED
+            if exited and not live and not unreaped
+            else ProcessCondition.LIVE
         )
         if condition is ProcessCondition.SETTLED and not self._confirm_dead_group(
             dead, deadline_ns
@@ -822,13 +873,11 @@ class GatedProcess:
             if self._clock.monotonic_ns() >= deadline_ns:
                 raise ChannelError(ChannelFailure.DEADLINE)
             anchors = [member[1] for member in self._watches.entries.values()]
+            pending = self._watches.pending()
             if self._anchor is not None:
                 anchors.append(self._anchor)
-            pending = tuple(
-                anchor.readiness
-                for anchor in anchors
-                if not anchor.exited and not anchor.readiness.done()
-            )
+                if not self._anchor.exited and not self._anchor.readiness.done():
+                    pending += (self._anchor.readiness,)
             if not pending or any(anchor.unknown for anchor in anchors):
                 raise ProcessError(ProcessCondition.UNKNOWN)
             await wait_member_change(pending, deadline_ns, self._clock)

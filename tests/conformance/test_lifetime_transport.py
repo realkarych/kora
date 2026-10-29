@@ -5,6 +5,8 @@ import sys
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
+from types import CoroutineType
+from typing import cast
 
 import pytest
 
@@ -40,6 +42,7 @@ from tests.support.event_loop import turn
         "idle",
         "cancel_frame",
         "cancel_execution",
+        "cancel_join",
         "header_partial",
         "header_oversized",
         "header_malformed",
@@ -50,6 +53,8 @@ from tests.support.event_loop import turn
 async def test_conformance_fixture_resources_are_released_through_real_client_process(
     tmp_path: Path, mode: str
 ) -> None:
+    cancel_join = mode == "cancel_join"
+    mode = "cancel_frame" if cancel_join else mode
     with ExitStack() as resources:
         clock = ControlledLifetimeClock()
         owner = ParentLifetime(
@@ -217,9 +222,46 @@ async def test_conformance_fixture_resources_are_released_through_real_client_pr
                                 slot.wire and slot.task is None
                                 for slot in owner.ordinary_slots
                             )
+                            join_cancellation: asyncio.Task[None] | None = None
+                            endpoint_tasks = tuple(
+                                cast(asyncio.Task[None], task)
+                                for task in asyncio.all_tasks()
+                                if isinstance(
+                                    coroutine := task.get_coro(), CoroutineType
+                                )
+                                and coroutine.cr_code.co_qualname
+                                in (
+                                    "LifetimeEndpoint._read",
+                                    "LifetimeEndpoint._write",
+                                )
+                            )
+                            if cancel_join:
+                                assert len(endpoint_tasks) == 2
+                                serving = running
+
+                                async def interrupt_join() -> None:
+                                    await asyncio.gather(
+                                        *endpoint_tasks, return_exceptions=True
+                                    )
+                                    serving.cancel()
+
+                                join_cancellation = asyncio.create_task(
+                                    interrupt_join()
+                                )
                             running.cancel()
                             with pytest.raises(asyncio.CancelledError):
                                 await running
+                            if join_cancellation is not None:
+                                await join_cancellation
+                                assert all(task.done() for task in endpoint_tasks)
+                                assert not parent.pending
+                                assert not parent.resources
+                                assert (
+                                    parent.control_bytes == parent.execution_bytes == 0
+                                )
+                                assert owner.transport_control_bytes == 0
+                                assert owner.transport_execution_bytes == 0
+                                assert not owner.ordinary_slots
                             report = await owner.close(None)
                         else:
                             running = asyncio.create_task(parent.run())

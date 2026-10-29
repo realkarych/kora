@@ -2,6 +2,7 @@ import argparse
 import fcntl
 import multiprocessing
 import os
+import re
 import select
 import stat
 import subprocess
@@ -15,6 +16,11 @@ from typing import Self
 
 from kora.plugins.storage.files import DIRECTORY_FLAGS, FileLease, trusted_directory
 from tests.plugins.storage import pressure_images
+from tests.plugins.storage.pressure_holders import (
+    Binding,
+    HolderObserver,
+    ObservationContext,
+)
 from tests.plugins.storage.pressure_models import (
     ImageStamp,
     PressureFailure,
@@ -171,9 +177,13 @@ def read_manifest(path: Path) -> PressureManifest:
 
 class PressureController:
     def __init__(
-        self, manifest: PressureManifest, lease: FileLease | None = None
+        self,
+        manifest: PressureManifest,
+        lease: FileLease | None = None,
+        observer: HolderObserver | None = None,
     ) -> None:
         self.manifest = manifest
+        self.observer = observer if observer is not None else HolderObserver()
         self.directory = Path(manifest.directory)
         self.lease = (
             lease
@@ -460,6 +470,20 @@ class PressureController:
         if self.manifest.child is not None:
             wait_closed(self.manifest.child, 15)
 
+    def observe_holders(self, binding: Binding) -> str:
+        command = self.manifest.command
+        token = (
+            None
+            if command is None
+            else re.fullmatch(r"darwin:([0-9]{1,20}):-?[0-9]{1,10}", command.identity)
+        )
+        context = ObservationContext(
+            os.getpid(),
+            None if token is None else int(token[1]),
+            os.path.realpath(sys.executable),
+        )
+        return self.observer.observe(binding, context)
+
     def cleanup(self) -> None:
         self.cleaning = True
         self.validate_directory()
@@ -482,7 +506,13 @@ class PressureController:
                 self.manifest = self.manifest.model_copy(update={"image_stamp": stamp})
                 self.persist()
                 if self.manifest.attachment_requested:
-                    pressure_images.detach(self.directory, stamp, self.effect)
+                    pressure_images.detach(
+                        self.directory,
+                        stamp,
+                        self.effect,
+                        self.observe_holders,
+                        self.manifest.directory_stamp.device,
+                    )
             elif self.manifest.attachment_requested:
                 raise PressureFailure("attachment_unresolved")
             self.manifest = self.manifest.model_copy(update={"detached": True})
@@ -527,7 +557,9 @@ class PressureController:
         save(self.directory / "report.json", self.report.model_dump_json().encode())
 
 
-def create(directory: Path) -> PressureController:
+def create(
+    directory: Path, observer: HolderObserver | None = None
+) -> PressureController:
     if sys.platform not in {"darwin", "linux"}:
         raise PressureFailure("platform_unsupported")
     canonical, descriptor = open_directory(directory, create=True)
@@ -559,7 +591,7 @@ def create(directory: Path) -> PressureController:
                 },
             }
         )
-        controller = PressureController(manifest, lease)
+        controller = PressureController(manifest, lease, observer)
         controller.persist()
         return controller
     except BaseException:

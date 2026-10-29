@@ -5,7 +5,7 @@ import { once } from 'node:events'
 import { fileURLToPath } from 'node:url'
 import { chromium } from 'playwright'
 import type { Browser, BrowserServer } from 'playwright'
-import { nativeResources, verifyReleased } from './resources.ts'
+import { admitResources, nativeResources, verifyReleased } from './resources.ts'
 import type { NativeResources } from './resources.ts'
 import { LocalProxy } from './proxy.ts'
 
@@ -38,6 +38,22 @@ export function childEnvironment(): Record<string, string> {
 
 const activeOwners = new Set<Ownership>()
 
+export function scheduleClose(deadline: number, callback: () => void): () => void {
+  const remaining = deadline - performance.now()
+  if (remaining <= 0) {
+    callback()
+    return () => undefined
+  }
+  const timer = setTimeout(callback, remaining)
+  return () => { clearTimeout(timer) }
+}
+
+interface OwnershipInputs {
+  server?: ChildProcess
+  observe?: typeof nativeResources
+  schedule?: typeof scheduleClose
+}
+
 export async function closeOwners(): Promise<void> {
   await Promise.allSettled([...activeOwners].map(owner => owner.close()))
 }
@@ -56,9 +72,18 @@ export class Ownership {
   private closing: Promise<Cleanup> | undefined
   private readonly acquiring = new Set<Promise<unknown>>()
   readonly traceDirectory: string | undefined
+  private readonly observe: typeof nativeResources
+  private readonly schedule: typeof scheduleClose
 
-  constructor(traceDirectory?: string) {
+  constructor(traceDirectory?: string, inputs: OwnershipInputs = {}) {
     this.traceDirectory = traceDirectory
+    this.observe = inputs.observe ?? nativeResources
+    this.schedule = inputs.schedule ?? scheduleClose
+    this.server = inputs.server
+    if (this.server) {
+      assert(this.server.pid)
+      this.pids.add(this.server.pid)
+    }
     activeOwners.add(this)
   }
 
@@ -160,15 +185,27 @@ export class Ownership {
       }
     }
     await Promise.allSettled([...this.acquiring])
-    collect(await Promise.allSettled([this.sample()]), ['sample'])
+    const deadline = performance.now() + 5000
+    const roots = [this.server, this.browserServer?.process()].filter((child): child is ChildProcess => child !== undefined && child.exitCode === null && child.signalCode === null)
+    const validate = (): void => {
+      for (const root of roots) assert(root.exitCode === null && root.signalCode === null, 'Owned root exited during admission')
+    }
+    const accept = (resources: NativeResources): void => {
+      validate()
+      assert(performance.now() < deadline, 'Ownership admission deadline expired')
+      for (const root of roots) assert(root.pid !== undefined && resources.pids.includes(root.pid), 'Owned root missing from admission snapshot')
+      for (const pid of resources.pids) this.pids.add(pid)
+    }
+    collect(await Promise.allSettled([admitResources([...this.pids], deadline, validate, accept, this.observe)]), ['sample'])
     let forced = false
     const browserProcess = this.browserServer?.process()
     const closeBrowser = async (): Promise<void> => {
-      const timer = setTimeout(() => { forced = true; void this.browserServer?.kill() }, 5000)
+      if (!this.browserServer) return
+      const cancel = this.schedule(deadline, () => { forced = true; void this.browserServer?.kill() })
       try {
         try { await this.browser?.close() }
-        finally { await this.browserServer?.close() }
-      } finally { clearTimeout(timer) }
+        finally { await this.browserServer.close() }
+      } finally { cancel() }
     }
     const closeServer = async (): Promise<void> => {
       const server = this.server
@@ -176,8 +213,8 @@ export class Ownership {
         const closed = once(server, 'close')
         if (server.connected) server.send({ event: 'stop' })
         else server.kill('SIGTERM')
-        const timer = setTimeout(() => { forced = true; server.kill('SIGKILL') }, 5000)
-        try { await closed } finally { clearTimeout(timer) }
+        const cancel = this.schedule(deadline, () => { forced = true; server.kill('SIGKILL') })
+        try { await closed } finally { cancel() }
       }
     }
     collect(await Promise.allSettled([closeBrowser(), closeServer(), this.proxy.close()]), ['browser', 'server', 'proxy'])

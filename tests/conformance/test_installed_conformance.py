@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 import sys
+from collections import deque
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -230,14 +231,30 @@ async def installed_run(
                     await owner.closure_started.wait()
                     clock.use_system_time()
 
+                feedback_origin = SystemClock().monotonic_ns()
+                feedback_progress: deque[tuple[str, int]] = deque(maxlen=6)
+
+                def mark_feedback(stage: str) -> None:
+                    if stop_on_feedback:
+                        feedback_progress.append(
+                            (stage, SystemClock().monotonic_ns() - feedback_origin)
+                        )
+
                 async def feedback() -> tuple[int, ...]:
                     observed: list[int] = []
                     for phase in feedback_phases:
-                        endpoint, _ = await loop.sock_accept(listeners[3])
+                        endpoint: socket.socket | None = None
+                        stage = "accept"
                         try:
+                            endpoint, _ = await loop.sock_accept(listeners[3])
+                            mark_feedback("accepted")
+                            stage = "receive"
                             assert await loop.sock_recv(endpoint, 1) == bytes([phase])
+                            mark_feedback("received")
                             observed.append(process.capture_bytes)
+                            stage = "acknowledge"
                             await loop.sock_sendall(endpoint, b"a")
+                            mark_feedback("acknowledged")
                             if stop_on_feedback:
                                 invocation = owner.mutations.directory
                                 assert invocation is not None
@@ -254,18 +271,53 @@ async def installed_run(
                                     invocation.descriptor
                                 )
                                 assert process.observe().live_members
+                                stage = "close"
+                                mark_feedback("close_requested")
                                 owner.request_close(None)
                                 clock.advance(
                                     duration_ns(owner.limits.cooperative_seconds) + 1
                                 )
                                 closure = await owner.close(None)
+                                mark_feedback("close_reported")
                                 assert closure.state is CleanupOutcome.CLOSED
                                 assert process.closed
                                 assert process.returncode is not None
                                 assert invocation.closed
                                 assert owner.inventory().retained_trees == 0
+                        except asyncio.CancelledError as failure:
+                            if stop_on_feedback:
+                                control = owner.invocation_cleanup
+                                dependencies = owner.recovery_dependencies()[:16]
+                                failure.add_note(
+                                    repr(
+                                        {
+                                            "feedback_stage": stage,
+                                            "real_offsets_ns": tuple(feedback_progress),
+                                            "decision_clock_ns": clock.monotonic_ns(),
+                                            "decision_close_deadlines_ns": (
+                                                control.start,
+                                                control.cooperative,
+                                                control.term,
+                                                control.final,
+                                            ),
+                                            "closure_ready": control.result.done(),
+                                            "inventory": owner.inventory(),
+                                            "owned_frames": tuple(
+                                                (
+                                                    frame.f_code.co_name[:64],
+                                                    frame.f_lineno,
+                                                )
+                                                for task in dependencies
+                                                if isinstance(task, asyncio.Task)
+                                                for frame in task.get_stack(limit=1)
+                                            ),
+                                        }
+                                    )
+                                )
+                            raise
                         finally:
-                            endpoint.close()
+                            if endpoint is not None:
+                                endpoint.close()
                     return tuple(observed)
 
                 serving = asyncio.create_task(lifetime())
@@ -313,6 +365,7 @@ async def installed_run(
                         b'{"value":"conflicting-fixture-value"}', deadline
                     )
                     if stop_on_feedback:
+                        mark_feedback("inputs_sent")
                         await asyncio.wait_for(observing, 20)
                     result = ChildResult.model_validate_json(
                         await channel.read_record(deadline, 4096)
