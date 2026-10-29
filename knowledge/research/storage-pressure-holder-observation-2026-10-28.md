@@ -143,3 +143,4 @@ after detach, or DiskArbitration dissenter evidence names an mds-family process.
 Any remedy requires a separate storage issue and decision record. A natural busy
 eject with holders=0 triggers the owner's separate diskutil dissenter-reporting
 plan, with its own review and approval; this observer does not implement it.
+The trigger recurred on 2026-10-29. [Issue #419's bounded native-release implementation](storage-pressure-native-eject-2026-10-29.md) uses the owner's subsequent autonomous routine-fix authorization, preserves actual release checks and retains both private refusal streams without claiming complete dissenter attribution.
