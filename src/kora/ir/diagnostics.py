@@ -13,7 +13,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
-from kora.ir.json import utf8_length
+from kora.ir.text import utf8_length
 
 if TYPE_CHECKING:
     from kora.cel.diagnostics import Diagnostic as CelDiagnostic

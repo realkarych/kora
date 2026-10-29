@@ -5,6 +5,9 @@ from typing import TypeAlias, cast
 from pydantic import GetCoreSchemaHandler, GetJsonSchemaHandler
 from pydantic_core import CoreSchema, PydanticCustomError, core_schema
 
+from kora.ir.text import fits_utf8 as fits_utf8
+from kora.ir.text import utf8_length as utf8_length
+
 JsonValue: TypeAlias = (
     None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 )
@@ -131,18 +134,6 @@ def escaped_extra(text: str, rule: str) -> int:
 
 def utf8_extra(text: str) -> int:
     return len(text.encode("utf-8")) - len(text)
-
-
-def utf8_length(text: str) -> int | None:
-    try:
-        return len(text.encode("utf-8"))
-    except UnicodeEncodeError:
-        return None
-
-
-def fits_utf8(text: str, limit: int) -> bool:
-    length = utf8_length(text)
-    return length is not None and length <= limit
 
 
 def canonical_string(text: str) -> bytes | None:
