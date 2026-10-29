@@ -309,8 +309,10 @@ class LifetimeClient:
                     if timeout.done() and self.clock.monotonic_ns() >= deadline:
                         raise ChannelError(ChannelFailure.DEADLINE)
                 finally:
-                    await cancel_task(changed)
-                    await cancel_task(timeout)
+                    try:
+                        await cancel_task(changed)
+                    finally:
+                        await cancel_task(timeout)
         except (ChannelError, OSError) as error:
             self._disconnect(
                 error.reason
@@ -667,15 +669,54 @@ class LifetimeEndpoint:
             await asyncio.gather(reader, writer)
         finally:
             self._shutdown()
-            await cancel_task(reader)
-            await cancel_task(writer)
-            for pending in tuple(self.pending.values()):
-                if pending.task is not None:
-                    await cancel_task(pending.task)
+            interruption: asyncio.CancelledError | None = None
+            failures: list[BaseException] = []
+
+            async def settle(tasks: tuple[asyncio.Task[None], ...]) -> None:
+                nonlocal interruption
+                for task in tasks:
+                    task.cancel()
+                joined = asyncio.gather(*tasks, return_exceptions=True)
+                while not joined.done():
+                    try:
+                        await asyncio.shield(joined)
+                    except asyncio.CancelledError as error:
+                        if interruption is None:
+                            interruption = error
+                failures.extend(
+                    result
+                    for result in joined.result()
+                    if isinstance(result, BaseException)
+                    and not isinstance(result, asyncio.CancelledError)
+                )
+
+            await settle((reader, writer))
+            await settle(
+                tuple(
+                    pending.task
+                    for pending in self.pending.values()
+                    if pending.task is not None
+                )
+            )
             for request_id in tuple(self.pending):
                 self._release_pending(request_id)
             self.resources.clear()
             self._release_bytes(ENDPOINT_CONTROL_BYTES, 0)
+            failure: BaseException | None = (
+                None
+                if not failures
+                else failures[0]
+                if len(failures) == 1
+                else BaseExceptionGroup("lifetime_endpoint_cleanup_failures", failures)
+            )
+            if interruption is not None:
+                try:
+                    raise interruption
+                finally:
+                    if failure is not None:
+                        raise failure
+            if failure is not None:
+                raise failure
         return await self.owner.close(None)
 
     def _check_resource(self, resource_id: ResourceId | None) -> None:

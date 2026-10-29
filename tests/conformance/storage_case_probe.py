@@ -5,13 +5,14 @@ import os
 import socket
 import sys
 import threading
-from collections.abc import Generator
+import weakref
+from collections.abc import Coroutine, Generator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from types import FrameType
-from typing import cast
+from typing import TypeVar, cast
 
 import pytest
 
@@ -42,6 +43,8 @@ from kora.protocols.metadata import ProtocolName, ProviderMetadata
 from kora.protocols.storage import ArtifactStorage
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 
+T = TypeVar("T")
+
 
 async def failure(
     provider: ArtifactStorage, config: JsonObject, context: ProtocolContext, marker: str
@@ -59,6 +62,19 @@ async def wait_forever(entered: asyncio.Event | None = None) -> None:
     if entered is not None:
         entered.set()
     await asyncio.get_running_loop().create_future()
+
+
+async def wait_started(started: asyncio.Future[None]) -> None:
+    started.set_result(None)
+    await wait_forever()
+
+
+def probe_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    coro: Generator[asyncio.Future[object] | None, None, T]
+    | Coroutine[object, object, T],
+) -> asyncio.Task[T]:
+    return asyncio.Task(coro, loop=loop)
 
 
 def observe_pool_join(
@@ -122,6 +138,8 @@ class Adapter:
         self.native_results: list[bool] = []
         self.retained_tasks: list[asyncio.Task[None]] = []
         self.started: asyncio.Future[None] | None = None
+        self.collected: weakref.ref[asyncio.Task[None]] | None = None
+        self.direct: asyncio.Task[None] | None = None
         self.joining = threading.Event()
 
     async def prepare(
@@ -225,6 +243,15 @@ class Adapter:
             self.retained_tasks.append(asyncio.create_task(wait_forever(entered)))
             await entered.wait()
             gc.collect()
+        elif self.mode == "collected":
+            self.started = asyncio.get_running_loop().create_future()
+            self.collected = weakref.ref(
+                asyncio.create_task(wait_started(self.started), name="collected")
+            )
+            await self.started
+            gc.collect()
+        elif self.mode == "direct":
+            self.direct = asyncio.Task(wait_forever())
         else:
             with captured(
                 CONFORMANCE_COMPONENT, LoggingSettings(), "storage-case", utc_now
@@ -274,9 +301,18 @@ def run(address: str, feedback_address: str, mode: str, root: str) -> None:
             startup.close()
 
     if mode in {"success", "native", "blocked"}:
+        if mode == "success":
+            runner.get_loop().set_task_factory(probe_task_factory)
+            with pytest.raises(StorageCaseError) as occupied:
+                cases.run(exercise)
+            assert occupied.value.reason is StorageCaseReason.TASK_FACTORY_OCCUPIED
+            assert not adapter.directories
+            assert runner.get_loop().get_task_factory() is probe_task_factory
+            runner.get_loop().set_task_factory(None)
         for _ in range(2):
             with pool_join_observation(adapter.joining, mode):
                 cases.run(exercise)
+            assert runner.get_loop().get_task_factory() is None
             assert Path.cwd() == startup_path
             assert not adapter.directories[-1].exists()
             if mode in {"native", "blocked"}:
@@ -299,15 +335,20 @@ def run(address: str, feedback_address: str, mode: str, root: str) -> None:
             with pool_join_observation(adapter.joining, mode):
                 cases.run(exercise)
         error = caught.value
+        assert runner.get_loop().get_task_factory() is None
         if mode == "substitute":
             assert isinstance(error, StorageCaseError)
             assert error.reason is StorageCaseReason.CLEANUP_UNKNOWN
             assert Path.cwd() == startup_path
         else:
             assert Path.cwd() == adapter.directories[-1]
-        if mode in {"late", "task"}:
+        if mode in {"late", "task", "collected", "direct"}:
             assert isinstance(error, StorageCaseError)
             assert error.reason is StorageCaseReason.TASKS_LIVE
+        if mode == "collected":
+            assert adapter.collected is not None
+            gc.collect()
+            assert adapter.collected() is None
         if mode == "cancel":
             assert isinstance(error, asyncio.CancelledError)
         if mode in {"prepare", "bind", "construct", "exercise", "cleanup"}:

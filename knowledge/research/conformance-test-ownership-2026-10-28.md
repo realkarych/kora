@@ -3,7 +3,7 @@
 Checked on 2026-10-28 under [issue #368](https://github.com/realkarych/kora/issues/368).
 The [implementation plan](https://github.com/realkarych/kora/issues/368#issuecomment-6475685796)
 is published under the owner's standing authorization for routine fixes and verification.
-This record describes the prepared FIFO slice; it does not establish completion of the issue.
+This record describes the FIFO/helper/task slice tracked by [issue #416](https://github.com/realkarych/kora/issues/416). Parent #368 remains open for its other named ownership boundaries.
 
 ## Scope and dependency boundary
 
@@ -14,9 +14,9 @@ failed-reply, finalization and pending-execution barriers in
 `tests/conformance/test_lifetime_pending_helpers.py`.
 
 The recovered-domain handshake fixture, live/pair probe handoff and journal consumers
-remain pending. Their shared fixture changes follow the production settlement repair
-in [#369](https://github.com/realkarych/kora/issues/369), which depends on
-[#359](https://github.com/realkarych/kora/pull/359). No production correction or caller
+remain pending in #368. Their shared fixture changes follow the production settlement repair
+in [#369](https://github.com/realkarych/kora/issues/369). Its dependency
+[#359](https://github.com/realkarych/kora/pull/359) was accepted on 2026-10-29. No production correction or caller
 polling-workaround removal is included in this slice. Already merged #365, #377 and
 #380 coverage remains.
 

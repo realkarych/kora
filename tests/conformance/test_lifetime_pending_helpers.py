@@ -1,8 +1,10 @@
 import asyncio
 import gc
 import os
+import signal
 from contextlib import AsyncExitStack, ExitStack
 from pathlib import Path
+from types import CoroutineType
 
 import pytest
 
@@ -18,8 +20,11 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import IdentityState, NativeIdentityReader
+from kora.runner.processes import ExitAnchor
 from tests.conformance.lifetime_helpers import (
+    ProbeIOHelperLauncher,
     join_helper_operation,
     unwind_owned,
 )
@@ -29,9 +34,105 @@ from tests.conformance.lifetime_support import (
     limits,
     stall_barrier,
 )
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
 from tests.support.event_loop import turn
 
 __all__ = ["ControlledLifetimeClock"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("original_failure", [False, True], ids=["ordinary", "failure"])
+async def test_disposal_joins_cleanup_effect_after_unknown_report(
+    tmp_path: Path, original_failure: bool
+) -> None:
+    with ExitStack() as resources:
+        barrier = stall_barrier(resources, tmp_path)
+        clock = ProbeClock()
+        clock.use_system_time()
+        actual = SystemClock()
+        owner = ParentLifetime(
+            limits=limits().model_copy(update={"cooperative_seconds": 15.0}),
+            launcher=barrier.launcher(pause_at=3, phase="after"),
+            clock=clock,
+        )
+        original = ValueError("original_test_failure")
+        caught_failure: ValueError | None = None
+
+        async def dispose_after_failure() -> None:
+            try:
+                if original_failure:
+                    raise original
+            finally:
+                await dispose_test_owner(owner, clock)
+
+        try:
+            await asyncio.wait_for(owner.ready(), 5)
+            tree = await owner.reserve(
+                ReservationRequest(
+                    operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
+                )
+            )
+            closing = owner.request_close(None)
+            writer = resources.enter_context(
+                await barrier.entered(actual.monotonic_ns() + 5_000_000_000, actual)
+            )
+            effect = owner.cleanup_effect
+            assert effect is not None
+            async with asyncio.timeout(5):
+                while True:
+                    awaiting: object = effect.task.get_coro()
+                    while isinstance(awaiting, CoroutineType):
+                        if awaiting.cr_code is ExitAnchor.wait.__code__:
+                            break
+                        awaiting = awaiting.cr_await
+                    if isinstance(awaiting, CoroutineType):
+                        break
+                    assert not effect.task.done()
+                    await turn()
+            clock.advance(40_000_000_000)
+            owner.request_close(tree.token.resource_id)
+            async with asyncio.timeout(5):
+                report = await closing
+            assert report.state is CleanupOutcome.UNKNOWN
+            assert not effect.task.done()
+            helper = owner.mutations.helpers[-1]
+            helper.signal(signal.SIGKILL)
+            async with asyncio.timeout(5):
+                await helper.anchor.readiness
+            assert helper.release()
+            assert not effect.task.done()
+
+            if original_failure:
+                with pytest.raises(
+                    ValueError, match="^original_test_failure$"
+                ) as failure:
+                    await dispose_after_failure()
+                caught_failure = failure.value
+            else:
+                await dispose_after_failure()
+
+            assert caught_failure is (original if original_failure else None)
+            assert effect.task.done()
+            inventory = owner.inventory()
+            assert inventory.cleanup_effect_tasks == 0
+            assert inventory.cleanup_driver_tasks == 0
+            assert inventory.pending_operations == 0
+            assert inventory.helpers.live_helpers == 0
+            assert inventory.helpers.directory_descriptors == 0
+            assert inventory.helpers.claim_descriptors == 0
+            writer.close()
+        finally:
+            owner.request_close(None)
+            clock.advance(40_000_000_000)
+            async with asyncio.timeout(5):
+                for helper in tuple(owner.mutations.helpers):
+                    if not helper.closed:
+                        helper.signal(signal.SIGKILL)
+                        assert await helper.settle(clock.monotonic_ns() + 5_000_000_000)
+                dependencies = owner.recovery_dependencies()
+                if dependencies:
+                    await asyncio.wait(dependencies)
+                assert owner.mutations.dispose_settled()
 
 
 @pytest.mark.asyncio
