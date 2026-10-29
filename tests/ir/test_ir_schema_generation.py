@@ -408,6 +408,7 @@ def test_ir_ignored_root_boundary_never_traverses_values() -> None:
 
 def test_ir_schema_measurement_inventory_preserves_all_actions() -> None:
     from tests.measurements.ir_measurement_evidence import (
+        agent_session_evidence,
         command_result_evidence,
         expected_evidence,
         structured_output_evidence,
@@ -416,8 +417,10 @@ def test_ir_schema_measurement_inventory_preserves_all_actions() -> None:
     from tests.measurements.test_ir_models_cost import WORKLOADS
 
     expected = expected_evidence()
-    previous = expected.without(command_result_evidence()).without(
-        structured_output_evidence()
+    previous = (
+        expected.without(agent_session_evidence())
+        .without(command_result_evidence())
+        .without(structured_output_evidence())
     )
     manifest = cast(
         "dict[str, dict[str, object]]", json.loads(schema_fixture_manifest())
@@ -438,7 +441,7 @@ def test_ir_schema_measurement_inventory_preserves_all_actions() -> None:
         len(expected.nodes),
         len(expected.gates),
         sum(expected.samples.values()),
-    ) == (373, 1306, 11350)
+    ) == (380, 1340, 11636)
     assert (
         len(previous.nodes),
         len(previous.gates),

@@ -8,6 +8,17 @@ from kora.ir.diagnostics import (
 )
 
 if TYPE_CHECKING:
+    from kora.ir.agent_session import (
+        AgentSession,
+        AgentSessionValidationError,
+        agent_session_digest,
+        canonical_agent_session,
+        parse_agent_session,
+        parse_agent_session_json,
+        require_agent_session_revision,
+        summarize_agent_session,
+        verify_agent_session_transcript,
+    )
     from kora.ir.command_result import (
         CommandResult,
         CommandResultValidationError,
@@ -102,6 +113,15 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "AgentSession",
+    "AgentSessionValidationError",
+    "canonical_agent_session",
+    "agent_session_digest",
+    "parse_agent_session",
+    "parse_agent_session_json",
+    "require_agent_session_revision",
+    "summarize_agent_session",
+    "verify_agent_session_transcript",
     "CommandResult",
     "CommandResultValidationError",
     "canonical_command_result",
@@ -305,6 +325,20 @@ def __getattr__(name: str) -> object:
         from kora.ir import structured_output
 
         return getattr(structured_output, name)
+    if name in {
+        "AgentSession",
+        "AgentSessionValidationError",
+        "canonical_agent_session",
+        "agent_session_digest",
+        "parse_agent_session",
+        "parse_agent_session_json",
+        "require_agent_session_revision",
+        "summarize_agent_session",
+        "verify_agent_session_transcript",
+    }:
+        from kora.ir import agent_session
+
+        return getattr(agent_session, name)
     if name in {
         "CommandResult",
         "CommandResultValidationError",

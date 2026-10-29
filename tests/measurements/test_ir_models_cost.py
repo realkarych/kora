@@ -46,6 +46,8 @@ from tests.ir.control_cases import CASE
 from tests.ir.control_cases import MINIMAL as CONTROL_MINIMAL
 from tests.ir.control_cases import POPULATED as CONTROL_POPULATED
 from tests.ir.test_cost_models import rates_payload, revision_payload
+from tests.measurements.agent_session_workload import cases as session_cases
+from tests.measurements.agent_session_workload import exercise as exercise_session
 from tests.measurements.cel_measurement_process import ProcessResult, run_process
 from tests.measurements.command_result_workload import cases as command_cases
 from tests.measurements.command_result_workload import exercise as exercise_command
@@ -1309,6 +1311,62 @@ def test_command_result_validation_lifetime(
 
     result = run_lifecycle_child(
         report, "tests.measurements.command_result_workload", mode, name, repeat, 500
+    )
+
+    payload = released_lifecycle(report, result, before, traced, name)
+    assert payload.successes == 248
+    assert payload.refusals == 252
+    assert [point.cycle for point in payload.points] == list(range(0, 501, 25))
+    assert len(payload.retaining_paths) == 2
+    assert_lifecycle_resources(report, name, payload, traced)
+    report.gates[f"{name}_lifecycle_assertions_passed"] = True
+
+
+def test_agent_session_action_cost(report: Report) -> None:
+    actions, manifest = session_cases()
+    report.environment["agent_session_fixture_manifest"] = json.dumps(manifest)
+    for case in actions:
+        for _ in range(WARM_UP):
+            exercise_session(case)
+
+    for case in actions:
+        for repeat in range(DENSE_MEASURED):
+            started = time.perf_counter()
+            exercise_session(case)
+            report.samples.append(
+                Sample(case.name, repeat, 1, time.perf_counter() - started)
+            )
+        gc.collect()
+        tracemalloc.start()
+        baseline = tracemalloc.get_traced_memory()[0]
+        exercise_session(case)
+        gc.collect()
+        retained, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        report.environment[f"{case.name}_peak_bytes"] = peak
+        report.environment[f"{case.name}_retained_bytes"] = retained - baseline
+        report.diagnostic(
+            f"{case.name}_retained_bytes",
+            retained - baseline,
+            RETAINED_LIMIT_BYTES,
+            allow_equal=False,
+        )
+        report.gates[f"{case.name}_memory_observed"] = True
+
+
+@pytest.mark.parametrize(
+    ("repeat", "traced"),
+    [(0, True), (0, False), (1, True), (1, False), (2, True), (2, False)],
+)
+def test_agent_session_validation_lifetime(
+    report: Report, repeat: int, traced: bool
+) -> None:
+    mode = "traced" if traced else "untraced"
+    name = f"agent_session_{mode}_{repeat}"
+    before = (open_descriptors(), threading.active_count())
+
+    result = run_lifecycle_child(
+        report, "tests.measurements.agent_session_workload", mode, name, repeat, 500
     )
 
     payload = released_lifecycle(report, result, before, traced, name)

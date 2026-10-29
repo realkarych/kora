@@ -126,8 +126,10 @@ def admit_value(
     return document
 
 
-def snapshot(value: object, domain_code: str = "SO003") -> JsonValue:
-    return admit_value(value, CanonicalBudget(), set(), 0, domain_code)
+def snapshot(
+    value: object, domain_code: str = "SO003", *, max_bytes: int = MAX_JSON_BYTES
+) -> JsonValue:
+    return admit_value(value, CanonicalBudget(max_bytes), set(), 0, domain_code)
 
 
 def encode_snapshot(value: JsonValue) -> bytes:
@@ -183,10 +185,10 @@ def valid_unicode(value: JsonValue) -> bool:
     return True
 
 
-def decode_json(payload: object) -> JsonValue:
+def decode_json(payload: object, *, max_bytes: int = MAX_JSON_BYTES) -> JsonValue:
     if type(payload) is not bytes:
         refuse("SO002")
-    if len(payload) > MAX_JSON_BYTES:
+    if len(payload) > max_bytes:
         refuse("SO001")
     if not lexical_depth_valid(payload):
         refuse("SO002")
