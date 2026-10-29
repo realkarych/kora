@@ -1,16 +1,63 @@
 import assert from 'node:assert/strict'
-import { nativeResources, verifyReleased } from './resources.ts'
+import { readSync, writeSync } from 'node:fs'
+import { admitResources, nativeResources, verifyReleased } from './resources.ts'
 
 function permissionDenied(error: unknown): boolean {
   return error instanceof Error && 'code' in error && (error.code === 'EACCES' || error.code === 'EPERM')
 }
 
-const [scenario, rawPid] = process.argv.slice(2)
+const [scenario, rawPid, writeDescriptor, readDescriptor] = process.argv.slice(2)
 const pid = Number(rawPid)
+assert(scenario)
 assert(Number.isSafeInteger(pid) && pid > 0)
-assert(scenario === 'released' || scenario === 'persistent-live' || scenario === 'temporary-denial' || scenario === 'persistent-denial')
+assert(['released', 'persistent-live', 'temporary-denial', 'persistent-denial', 'temporary-admission', 'persistent-admission'].includes(scenario))
 
-if (scenario === 'released' || scenario === 'persistent-live') {
+if (scenario.endsWith('admission')) {
+  let firstDenial: unknown
+  let accepted = false
+  const observe: typeof nativeResources = async roots => {
+    try { return await nativeResources(roots) }
+    catch (error) {
+      assert(permissionDenied(error))
+      if (firstDenial === undefined) {
+        firstDenial = error
+        if (scenario === 'temporary-admission') {
+          assert.equal(writeSync(Number(writeDescriptor), 'r'), 1)
+          const response = Buffer.alloc(9)
+          let received = 0
+          while (received < response.length) {
+            const count = readSync(Number(readDescriptor), response, received, response.length - received, null)
+            assert(count > 0)
+            received += count
+          }
+          assert.equal(response.toString(), 'readable\n')
+          process.kill(pid, 0)
+        }
+      }
+      throw error
+    }
+  }
+  const admission = admitResources([pid], performance.now() + 5000, () => { process.kill(pid, 0) }, resources => {
+    assert.deepEqual(resources.pids, [pid])
+    assert.equal(resources.processes, 1)
+    assert(resources.descriptors !== null && resources.descriptors >= 3)
+    accepted = true
+  }, observe)
+
+  if (scenario === 'temporary-admission') {
+    await admission
+
+    assert(accepted)
+    assert(firstDenial instanceof Error)
+    process.kill(pid, 0)
+    process.kill(pid, 'SIGTERM')
+  } else {
+    await assert.rejects(admission, error => error === firstDenial && permissionDenied(error))
+
+    assert(!accepted)
+    process.kill(pid, 0)
+  }
+} else if (scenario === 'released' || scenario === 'persistent-live') {
   const acquired = await nativeResources([pid])
   assert.deepEqual(acquired.pids, [pid])
   assert.equal(acquired.processes, 1)
