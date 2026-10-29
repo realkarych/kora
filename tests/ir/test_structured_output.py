@@ -24,6 +24,7 @@ from kora.ir import (
 )
 from kora.ir.json import JsonValue
 from kora.ir.structured_json import MAX_JSON_BYTES
+from kora.observability.redaction import MASK, SecretRegistry
 from tests.ir.structured_output_cases import (
     ARTIFACTS,
     CanonicalCase,
@@ -75,12 +76,18 @@ def test_structured_output_canonical_numbers(case: CanonicalCase) -> None:
 
 @pytest.mark.parametrize(("name", "raw"), raw_refusals())
 def test_structured_output_rejects_invalid_payload(name: str, raw: bytes) -> None:
-    assert name
+    expected = (
+        "SO001"
+        if len(raw) > MAX_JSON_BYTES
+        else "SO004"
+        if name == "canonical-over-ceiling-with-bounded-raw"
+        else "SO002"
+    )
 
     with pytest.raises(StructuredOutputValidationError) as refused:
         parse_structured_output_json(raw)
 
-    assert refused.value.violation.code in {"SO001", "SO002", "SO004"}
+    assert refused.value.violation.code == expected
     assert refused.value.violation.path == ()
     assert refused.value.__context__ is None
     assert refused.value.__cause__ is None
@@ -290,13 +297,28 @@ def test_structured_output_descriptor_refuses_reinterpretation(
     assert refused.value.violation.code == "SO005"
 
 
-def test_structured_output_safe_diagnostics(caplog: pytest.LogCaptureFixture) -> None:
-    marker = "private-nonsecret-content-marker"
-    raw = ('{"' + marker + '":1,"' + marker + '":2}').encode()
+@pytest.mark.parametrize("registered", [False, True])
+@pytest.mark.parametrize("failure", ["duplicate", "malformed"])
+def test_structured_output_safe_diagnostics(
+    caplog: pytest.LogCaptureFixture, registered: bool, failure: str
+) -> None:
+    marker = "private-registered-value" if registered else "private-nonsecret-marker"
+    registry = SecretRegistry()
+    registration = registry.register(marker) if registered else None
+    raw = (
+        ('{"' + marker + '":1,"' + marker + '":2}').encode()
+        if failure == "duplicate"
+        else ('{"' + marker + '":').encode()
+    )
     caplog.set_level("DEBUG")
+    assert registry.mask(marker) == (MASK if registered else marker)
 
-    with pytest.raises(StructuredOutputValidationError) as refused:
-        parse_structured_output_json(raw)
+    try:
+        with pytest.raises(StructuredOutputValidationError) as refused:
+            parse_structured_output_json(raw)
+    finally:
+        if registration is not None:
+            registration.release()
 
     assert refused.value.violation.model_dump() == {
         "code": "SO002",
@@ -312,6 +334,22 @@ def test_structured_output_safe_diagnostics(caplog: pytest.LogCaptureFixture) ->
     assert refused.value.__context__ is None
     assert refused.value.__cause__ is None
     assert caplog.records == []
+    assert registry.count() == 0
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [(b"!" * (MAX_JSON_BYTES + 1), "SO001"), (b"!", "SO002")],
+)
+def test_structured_output_raw_size_precedes_decoding(
+    payload: bytes, code: str
+) -> None:
+    raw = payload
+
+    with pytest.raises(StructuredOutputValidationError) as refused:
+        parse_structured_output_json(raw)
+
+    assert refused.value.violation.code == code
 
 
 def test_structured_output_null_and_numeric_identity() -> None:
