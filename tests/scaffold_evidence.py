@@ -20,7 +20,7 @@ ENVIRONMENTS: tuple[tuple[str, str, str], ...] = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-LANES = ("conformance", "remainder", "storage")
+LANES = ("conformance", "remainder", "storage", "local-runtime")
 SHARD_CHILDREN: dict[str, tuple[str, ...]] = {
     "conformance": ("first", "second"),
     "remainder": ("measurements", "integration", "other"),
@@ -30,12 +30,63 @@ GENERAL_ARGUMENTS = (
     "--ignore=tests/plugins/storage",
     "--ignore=tests/conformance/test_artifact_storage_conformance.py",
     "--ignore=tests/conformance/test_installed_conformance.py",
+    "--ignore=tests/plugins/runtime/local",
 )
 STORAGE_ARGUMENTS = (
     "tests/plugins/storage",
     "tests/conformance/test_artifact_storage_conformance.py",
     "tests/conformance/test_installed_conformance.py",
 )
+LOCAL_RUNTIME_PATH = "tests/plugins/runtime/local"
+LOCAL_RUNTIME_ARGUMENTS = ("-m", "not measurement", LOCAL_RUNTIME_PATH)
+LANE_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "conformance": GENERAL_ARGUMENTS,
+    "remainder": GENERAL_ARGUMENTS,
+    "storage": STORAGE_ARGUMENTS,
+    "local-runtime": LOCAL_RUNTIME_ARGUMENTS,
+}
+LOCAL_RUNTIME_MODULE = "tests.plugins.runtime.local"
+LOCAL_RUNTIME_CONTRACTS = (
+    "test_state_root.test_state_root_and_socket_dir_refuse_unsafe_ownership",
+    "test_registry.test_registry_states_and_release",
+    "test_lock.test_registry_lock_is_bounded",
+    "test_lock.test_local_runtime_releases_resources",
+    "test_platform.test_platform_mechanisms",
+)
+
+
+def required_host_fixtures(operating_system: str) -> frozenset[str]:
+    ownership = ["foreign_owner", "foreign_ancestor"]
+    platform = ["other_uid_member"]
+    if operating_system == "ubuntu-24.04":
+        ownership.append("network_filesystem")
+        platform.append("child_namespace_member")
+    owned = (
+        f"{LOCAL_RUNTIME_MODULE}.{LOCAL_RUNTIME_CONTRACTS[0]}[{leg}-{target}]"
+        for leg in ownership
+        for target in ("state_root", "socket_directory")
+    )
+    prepared = (
+        f"{LOCAL_RUNTIME_MODULE}.{LOCAL_RUNTIME_CONTRACTS[4]}[{leg}]"
+        for leg in platform
+    )
+    full = f"{LOCAL_RUNTIME_MODULE}.{LOCAL_RUNTIME_CONTRACTS[1]}"
+    return frozenset([*owned, *prepared, f"{full}[failed_writes_leave_no_temporaries]"])
+
+
+def validate_local_runtime(operating_system: str, selected: frozenset[str]) -> None:
+    if not required_host_fixtures(operating_system) <= selected:
+        raise EvidenceFailure("local runtime lane lacks its host fixture tests")
+    for contract in LOCAL_RUNTIME_CONTRACTS:
+        prefix = f"{LOCAL_RUNTIME_MODULE}.{contract}"
+        if not any(
+            node == prefix or node.startswith(f"{prefix}[") for node in selected
+        ):
+            raise EvidenceFailure("local runtime lane lacks a contract test")
+    if any(not node.startswith(f"{LOCAL_RUNTIME_MODULE}.") for node in selected):
+        raise EvidenceFailure("local runtime lane selected tests outside its path")
+
+
 Digest = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{64}$")]
 Revision = Annotated[StrictStr, Field(pattern=r"^[0-9a-f]{40}$")]
 Identifier = Annotated[StrictStr, Field(pattern=r"^[1-9][0-9]*$")]
@@ -50,7 +101,7 @@ class LaneReceipt(BoundaryModel):
     operating_system: Literal["ubuntu-24.04", "macos-15"]
     python: Literal["3.11.17", "3.15.0"]
     databases: Literal["sqlite", "sqlite,postgresql"]
-    lane: Literal["conformance", "remainder", "storage"]
+    lane: Literal["conformance", "remainder", "storage", "local-runtime"]
     arguments: tuple[StrictStr, ...]
     files: dict[StrictStr, Digest]
 
@@ -124,8 +175,7 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
         "receipt.json"
     }:
         raise EvidenceFailure("scaffold artifact has unexpected file coverage")
-    arguments = STORAGE_ARGUMENTS if receipt.lane == "storage" else GENERAL_ARGUMENTS
-    if receipt.arguments != arguments:
+    if receipt.arguments != LANE_ARGUMENTS[receipt.lane]:
         raise EvidenceFailure("scaffold receipt has different pytest arguments")
     for filename, digest in receipt.files.items():
         encoded = evidence_bytes(directory / filename)
@@ -138,6 +188,8 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
         validate_cohorts(directory, selected, SHARD_CHILDREN[receipt.lane])
     elif junit_nodes(directory / "junit.xml", 16777216) != selected:
         raise EvidenceFailure("scaffold JUnit differs from its collected inventory")
+    if receipt.lane == "local-runtime":
+        validate_local_runtime(receipt.operating_system, selected)
     return selected
 
 
@@ -213,7 +265,7 @@ def verify_scaffold(
         for lane in LANES
     }
     if {path.name for path in root.iterdir()} != expected:
-        raise EvidenceFailure("scaffold evidence does not cover exactly nine lanes")
+        raise EvidenceFailure("scaffold evidence does not cover exactly twelve lanes")
     total = 0
     for operating_system, python, databases in ENVIRONMENTS:
         inventories: dict[str, frozenset[str]] = {}
@@ -266,7 +318,13 @@ def verify_scaffold(
         ):
             raise EvidenceFailure("scaffold shards differ in their general inventory")
         general, storage = inventories["conformance"], inventories["storage"]
-        if general & storage or general | storage != complete:
+        local = inventories["local-runtime"]
+        if (
+            general & storage
+            or general & local
+            or storage & local
+            or general | storage | local != complete
+        ):
             raise EvidenceFailure("scaffold lanes do not partition the complete suite")
         total += len(complete)
     return {"environments": len(ENVIRONMENTS), "lanes": len(expected), "tests": total}
