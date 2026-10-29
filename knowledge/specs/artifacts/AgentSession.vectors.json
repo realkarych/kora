@@ -1,0 +1,658 @@
+{
+  "contract": "urn:kora:artifact:AgentSession",
+  "builtin_revision": "1",
+  "proposal_status": "UNAPPROVED",
+  "canonicalization": "kora.structured-json.v1",
+  "evidence_status": "Only standard-library fixture serialization and byte hashing were performed. No candidate validator, schema engine, runtime, test or build was executed.",
+  "canonical_cases": [
+    {
+      "name": "captured-complete",
+      "canonical": "{\"denials\":{\"complete\":true,\"items\":[],\"total\":0},\"metadata\":{\"billing_class\":\"api_key\",\"duration_ms\":1500,\"harness\":\"claude\",\"installed_version\":\"installed-example\",\"price_table_id\":\"price-example\",\"provenance\":{\"image_digest\":null,\"worker_id\":\"worker-example\"},\"session_id\":\"session-example\",\"stop_reason\":\"success\",\"turns\":1,\"usage\":[{\"basis\":\"price_table\",\"billing_class\":\"api_key\",\"cache_creation_by_ttl\":{\"1h\":0,\"5m\":0},\"cache_creation_tokens\":0,\"cached_input_tokens\":0,\"completeness\":\"complete\",\"delta_of_session_totals\":false,\"input_tokens\":0,\"known_token_fields\":[\"cache_creation_tokens\",\"cached_input_tokens\",\"input_tokens\",\"output_tokens\",\"reasoning_tokens\"],\"model\":\"example-model\",\"observation_id\":\"model-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"output_tokens\":0,\"reasoning_tokens\":0,\"reported_usd\":null,\"usd_estimate\":\"0\"}],\"usage_coverage\":{\"attribution_gap\":false,\"completeness\":\"complete\",\"observation_gap\":false,\"observation_id\":\"coverage-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"version\":1}},\"transcript\":{\"capture\":\"captured\",\"retained_sha256\":\"6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7\",\"retained_size\":18,\"source_sha256\":\"6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7\",\"source_size\":18,\"source_verified\":true,\"truncated\":false}}",
+      "canonical_bytes": 1350,
+      "logical_sha256": "0632f97dc22def92b545292d3658a586dcdc0228edd691ac033a6544567b2acc",
+      "approval_sha256": "0632f97dc22def92b545292d3658a586dcdc0228edd691ac033a6544567b2acc",
+      "retained_transcript_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+      "permanent_view": {
+        "harness": "claude",
+        "installed_version": "installed-example",
+        "session_id": "session-example",
+        "billing_class": "api_key",
+        "usage": [
+          {
+            "model": "example-model",
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_creation_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "known_token_fields": [
+              "cache_creation_tokens",
+              "cached_input_tokens",
+              "input_tokens",
+              "output_tokens",
+              "reasoning_tokens"
+            ],
+            "cache_creation_by_ttl": {
+              "5m": 0,
+              "1h": 0
+            },
+            "completeness": "complete",
+            "basis": "price_table",
+            "billing_class": "api_key",
+            "delta_of_session_totals": false,
+            "usd_estimate": "0"
+          }
+        ],
+        "usage_coverage": {
+          "completeness": "complete",
+          "attribution_gap": false,
+          "observation_gap": false
+        },
+        "turns": 1,
+        "duration_ms": 1500,
+        "stop_reason": "success",
+        "provenance": {
+          "worker_id": "worker-example",
+          "image_digest": null
+        }
+      },
+      "permanent_view_sha256": "fb5d78d16bc2b17f69aa4cd8bf3a249d5c4f10f3900c7c24d8051d589d4082d8"
+    },
+    {
+      "name": "captured-empty",
+      "canonical": "{\"denials\":{\"complete\":true,\"items\":[],\"total\":0},\"metadata\":{\"billing_class\":\"api_key\",\"duration_ms\":1500,\"harness\":\"claude\",\"installed_version\":\"installed-example\",\"price_table_id\":\"price-example\",\"provenance\":{\"image_digest\":null,\"worker_id\":\"worker-example\"},\"session_id\":\"session-example\",\"stop_reason\":\"success\",\"turns\":1,\"usage\":[{\"basis\":\"price_table\",\"billing_class\":\"api_key\",\"cache_creation_by_ttl\":{\"1h\":0,\"5m\":0},\"cache_creation_tokens\":0,\"cached_input_tokens\":0,\"completeness\":\"complete\",\"delta_of_session_totals\":false,\"input_tokens\":0,\"known_token_fields\":[\"cache_creation_tokens\",\"cached_input_tokens\",\"input_tokens\",\"output_tokens\",\"reasoning_tokens\"],\"model\":\"example-model\",\"observation_id\":\"model-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"output_tokens\":0,\"reasoning_tokens\":0,\"reported_usd\":null,\"usd_estimate\":\"0\"}],\"usage_coverage\":{\"attribution_gap\":false,\"completeness\":\"complete\",\"observation_gap\":false,\"observation_id\":\"coverage-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"version\":1}},\"transcript\":{\"capture\":\"captured\",\"retained_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"retained_size\":0,\"source_sha256\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"source_size\":0,\"source_verified\":true,\"truncated\":false}}",
+      "canonical_bytes": 1348,
+      "logical_sha256": "32948df41bb3282bf04ba8ee7d4cd7317a4ef8492a43bf3642105da1f711b0a5",
+      "approval_sha256": "32948df41bb3282bf04ba8ee7d4cd7317a4ef8492a43bf3642105da1f711b0a5",
+      "retained_transcript_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "permanent_view": {
+        "harness": "claude",
+        "installed_version": "installed-example",
+        "session_id": "session-example",
+        "billing_class": "api_key",
+        "usage": [
+          {
+            "model": "example-model",
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_creation_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "known_token_fields": [
+              "cache_creation_tokens",
+              "cached_input_tokens",
+              "input_tokens",
+              "output_tokens",
+              "reasoning_tokens"
+            ],
+            "cache_creation_by_ttl": {
+              "5m": 0,
+              "1h": 0
+            },
+            "completeness": "complete",
+            "basis": "price_table",
+            "billing_class": "api_key",
+            "delta_of_session_totals": false,
+            "usd_estimate": "0"
+          }
+        ],
+        "usage_coverage": {
+          "completeness": "complete",
+          "attribution_gap": false,
+          "observation_gap": false
+        },
+        "turns": 1,
+        "duration_ms": 1500,
+        "stop_reason": "success",
+        "provenance": {
+          "worker_id": "worker-example",
+          "image_digest": null
+        }
+      },
+      "permanent_view_sha256": "fb5d78d16bc2b17f69aa4cd8bf3a249d5c4f10f3900c7c24d8051d589d4082d8"
+    },
+    {
+      "name": "unavailable-no-usage",
+      "canonical": "{\"denials\":{\"complete\":false,\"items\":[],\"total\":0},\"metadata\":{\"billing_class\":null,\"duration_ms\":0,\"harness\":\"claude\",\"installed_version\":null,\"price_table_id\":\"price-example\",\"provenance\":{\"image_digest\":null,\"worker_id\":\"worker-example\"},\"session_id\":null,\"stop_reason\":\"launch_failed\",\"turns\":0,\"usage\":[],\"usage_coverage\":{\"attribution_gap\":false,\"completeness\":\"unavailable\",\"observation_gap\":false,\"observation_id\":null,\"observation_sequence\":null,\"observed_at\":null,\"version\":1}},\"transcript\":{\"capture\":\"unavailable\"}}",
+      "canonical_bytes": 527,
+      "logical_sha256": "5b76988473ad546f920ea41f05e4750bef8c31c989be4fca80c34c5ecaeffb28",
+      "approval_sha256": "5b76988473ad546f920ea41f05e4750bef8c31c989be4fca80c34c5ecaeffb28",
+      "retained_transcript_sha256": null,
+      "permanent_view": {
+        "harness": "claude",
+        "installed_version": null,
+        "session_id": null,
+        "billing_class": null,
+        "usage": [],
+        "usage_coverage": {
+          "completeness": "unavailable",
+          "attribution_gap": false,
+          "observation_gap": false
+        },
+        "turns": 0,
+        "duration_ms": 0,
+        "stop_reason": "launch_failed",
+        "provenance": {
+          "worker_id": "worker-example",
+          "image_digest": null
+        }
+      },
+      "permanent_view_sha256": "094a2626ece5b21935d91e90ba9bee213babaf865cb743289afb246c5aa7c009"
+    },
+    {
+      "name": "subscription-null-usd",
+      "canonical": "{\"denials\":{\"complete\":true,\"items\":[],\"total\":0},\"metadata\":{\"billing_class\":\"subscription\",\"duration_ms\":1500,\"harness\":\"claude\",\"installed_version\":\"installed-example\",\"price_table_id\":\"price-example\",\"provenance\":{\"image_digest\":null,\"worker_id\":\"worker-example\"},\"session_id\":\"session-example\",\"stop_reason\":\"success\",\"turns\":1,\"usage\":[{\"basis\":\"harness_list\",\"billing_class\":\"subscription\",\"cache_creation_by_ttl\":{\"1h\":0,\"5m\":0},\"cache_creation_tokens\":0,\"cached_input_tokens\":0,\"completeness\":\"complete\",\"delta_of_session_totals\":false,\"input_tokens\":0,\"known_token_fields\":[\"cache_creation_tokens\",\"cached_input_tokens\",\"input_tokens\",\"output_tokens\",\"reasoning_tokens\"],\"model\":\"example-model\",\"observation_id\":\"model-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"output_tokens\":0,\"reasoning_tokens\":0,\"reported_usd\":\"0.5\",\"usd_estimate\":null}],\"usage_coverage\":{\"attribution_gap\":false,\"completeness\":\"complete\",\"observation_gap\":false,\"observation_id\":\"coverage-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"version\":1}},\"transcript\":{\"capture\":\"captured\",\"retained_sha256\":\"6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7\",\"retained_size\":18,\"source_sha256\":\"6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7\",\"source_size\":18,\"source_verified\":true,\"truncated\":false}}",
+      "canonical_bytes": 1363,
+      "logical_sha256": "088036075f66ebecf3b9d0f22aa1ac39f2b6b384b32071feaf3635a60733be9d",
+      "approval_sha256": "088036075f66ebecf3b9d0f22aa1ac39f2b6b384b32071feaf3635a60733be9d",
+      "retained_transcript_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+      "permanent_view": {
+        "harness": "claude",
+        "installed_version": "installed-example",
+        "session_id": "session-example",
+        "billing_class": "subscription",
+        "usage": [
+          {
+            "model": "example-model",
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_creation_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "known_token_fields": [
+              "cache_creation_tokens",
+              "cached_input_tokens",
+              "input_tokens",
+              "output_tokens",
+              "reasoning_tokens"
+            ],
+            "cache_creation_by_ttl": {
+              "5m": 0,
+              "1h": 0
+            },
+            "completeness": "complete",
+            "basis": "harness_list",
+            "billing_class": "subscription",
+            "delta_of_session_totals": false,
+            "usd_estimate": null
+          }
+        ],
+        "usage_coverage": {
+          "completeness": "complete",
+          "attribution_gap": false,
+          "observation_gap": false
+        },
+        "turns": 1,
+        "duration_ms": 1500,
+        "stop_reason": "success",
+        "provenance": {
+          "worker_id": "worker-example",
+          "image_digest": null
+        }
+      },
+      "permanent_view_sha256": "2ea9d131c52ca75c2512bd68b41448e17ecb3f3de91817a61b8eed4b56b0c34a"
+    },
+    {
+      "name": "denial-sample-incomplete",
+      "canonical": "{\"denials\":{\"complete\":false,\"items\":[{\"code\":\"denied\",\"pattern\":\"namespace.deny.0\",\"source\":\"policy\",\"tool\":\"Bash\",\"tool_use_id\":\"call-example\"}],\"total\":2},\"metadata\":{\"billing_class\":\"api_key\",\"duration_ms\":1500,\"harness\":\"claude\",\"installed_version\":\"installed-example\",\"price_table_id\":\"price-example\",\"provenance\":{\"image_digest\":null,\"worker_id\":\"worker-example\"},\"session_id\":\"session-example\",\"stop_reason\":\"success\",\"turns\":1,\"usage\":[{\"basis\":\"price_table\",\"billing_class\":\"api_key\",\"cache_creation_by_ttl\":{\"1h\":0,\"5m\":0},\"cache_creation_tokens\":0,\"cached_input_tokens\":0,\"completeness\":\"complete\",\"delta_of_session_totals\":false,\"input_tokens\":0,\"known_token_fields\":[\"cache_creation_tokens\",\"cached_input_tokens\",\"input_tokens\",\"output_tokens\",\"reasoning_tokens\"],\"model\":\"example-model\",\"observation_id\":\"model-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"output_tokens\":0,\"reasoning_tokens\":0,\"reported_usd\":null,\"usd_estimate\":\"0\"}],\"usage_coverage\":{\"attribution_gap\":false,\"completeness\":\"complete\",\"observation_gap\":false,\"observation_id\":\"coverage-final\",\"observation_sequence\":2,\"observed_at\":\"2026-10-29T12:00:00Z\",\"version\":1}},\"transcript\":{\"capture\":\"captured\",\"retained_sha256\":\"6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7\",\"retained_size\":18,\"source_sha256\":\"6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7\",\"source_size\":18,\"source_verified\":true,\"truncated\":false}}",
+      "canonical_bytes": 1458,
+      "logical_sha256": "6752d24c680222cdfe2f03e07c9bc7d181f779c9639d6eae686639a9aa467eb0",
+      "approval_sha256": "6752d24c680222cdfe2f03e07c9bc7d181f779c9639d6eae686639a9aa467eb0",
+      "retained_transcript_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+      "permanent_view": {
+        "harness": "claude",
+        "installed_version": "installed-example",
+        "session_id": "session-example",
+        "billing_class": "api_key",
+        "usage": [
+          {
+            "model": "example-model",
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "cache_creation_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+            "known_token_fields": [
+              "cache_creation_tokens",
+              "cached_input_tokens",
+              "input_tokens",
+              "output_tokens",
+              "reasoning_tokens"
+            ],
+            "cache_creation_by_ttl": {
+              "5m": 0,
+              "1h": 0
+            },
+            "completeness": "complete",
+            "basis": "price_table",
+            "billing_class": "api_key",
+            "delta_of_session_totals": false,
+            "usd_estimate": "0"
+          }
+        ],
+        "usage_coverage": {
+          "completeness": "complete",
+          "attribution_gap": false,
+          "observation_gap": false
+        },
+        "turns": 1,
+        "duration_ms": 1500,
+        "stop_reason": "success",
+        "provenance": {
+          "worker_id": "worker-example",
+          "image_digest": null
+        }
+      },
+      "permanent_view_sha256": "fb5d78d16bc2b17f69aa4cd8bf3a249d5c4f10f3900c7c24d8051d589d4082d8"
+    }
+  ],
+  "replay_cases": [
+    {
+      "name": "same-transcript-changed-turn-count",
+      "candidate": {
+        "metadata": {
+          "harness": "claude",
+          "installed_version": "installed-example",
+          "session_id": "session-example",
+          "billing_class": "api_key",
+          "usage": [
+            {
+              "model": "example-model",
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_creation_tokens": 0,
+              "output_tokens": 0,
+              "reasoning_tokens": 0,
+              "known_token_fields": [
+                "cache_creation_tokens",
+                "cached_input_tokens",
+                "input_tokens",
+                "output_tokens",
+                "reasoning_tokens"
+              ],
+              "cache_creation_by_ttl": {
+                "5m": 0,
+                "1h": 0
+              },
+              "reported_usd": null,
+              "observation_id": "model-final",
+              "observation_sequence": 2,
+              "observed_at": "2026-10-29T12:00:00Z",
+              "completeness": "complete",
+              "basis": "price_table",
+              "billing_class": "api_key",
+              "delta_of_session_totals": false,
+              "usd_estimate": "0"
+            }
+          ],
+          "usage_coverage": {
+            "version": 1,
+            "observation_id": "coverage-final",
+            "observation_sequence": 2,
+            "completeness": "complete",
+            "observed_at": "2026-10-29T12:00:00Z",
+            "attribution_gap": false,
+            "observation_gap": false
+          },
+          "price_table_id": "price-example",
+          "turns": 2,
+          "duration_ms": 1500,
+          "stop_reason": "success",
+          "provenance": {
+            "worker_id": "worker-example",
+            "image_digest": null
+          }
+        },
+        "denials": {
+          "items": [],
+          "total": 0,
+          "complete": true
+        },
+        "transcript": {
+          "capture": "captured",
+          "source_size": 18,
+          "source_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+          "source_verified": true,
+          "retained_size": 18,
+          "retained_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+          "truncated": false
+        }
+      },
+      "retained_transcript_sha256_unchanged": true,
+      "logical_sha256": "f82ed60b9705b7373fc47fd139b2f6565c16ab89c01e8db70994c25cedf41b4d",
+      "outcome": "conflict",
+      "note": "Shape/semantic validation may refuse first; no such candidate can overwrite or match replay by transcript digest alone."
+    },
+    {
+      "name": "same-transcript-changed-usage-snapshot",
+      "candidate": {
+        "metadata": {
+          "harness": "claude",
+          "installed_version": "installed-example",
+          "session_id": "session-example",
+          "billing_class": "api_key",
+          "usage": [
+            {
+              "model": "example-model",
+              "input_tokens": 1,
+              "cached_input_tokens": 0,
+              "cache_creation_tokens": 0,
+              "output_tokens": 0,
+              "reasoning_tokens": 0,
+              "known_token_fields": [
+                "cache_creation_tokens",
+                "cached_input_tokens",
+                "input_tokens",
+                "output_tokens",
+                "reasoning_tokens"
+              ],
+              "cache_creation_by_ttl": {
+                "5m": 0,
+                "1h": 0
+              },
+              "reported_usd": null,
+              "observation_id": "model-final",
+              "observation_sequence": 2,
+              "observed_at": "2026-10-29T12:00:00Z",
+              "completeness": "complete",
+              "basis": "price_table",
+              "billing_class": "api_key",
+              "delta_of_session_totals": false,
+              "usd_estimate": "0"
+            }
+          ],
+          "usage_coverage": {
+            "version": 1,
+            "observation_id": "coverage-final",
+            "observation_sequence": 2,
+            "completeness": "complete",
+            "observed_at": "2026-10-29T12:00:00Z",
+            "attribution_gap": false,
+            "observation_gap": false
+          },
+          "price_table_id": "price-example",
+          "turns": 1,
+          "duration_ms": 1500,
+          "stop_reason": "success",
+          "provenance": {
+            "worker_id": "worker-example",
+            "image_digest": null
+          }
+        },
+        "denials": {
+          "items": [],
+          "total": 0,
+          "complete": true
+        },
+        "transcript": {
+          "capture": "captured",
+          "source_size": 18,
+          "source_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+          "source_verified": true,
+          "retained_size": 18,
+          "retained_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+          "truncated": false
+        }
+      },
+      "retained_transcript_sha256_unchanged": true,
+      "logical_sha256": "6e1ce4fe23a160d5750c2c4f1bfaaa3f434caa7782b422ccb1773cd43f246e0c",
+      "outcome": "conflict",
+      "note": "Shape/semantic validation may refuse first; no such candidate can overwrite or match replay by transcript digest alone."
+    },
+    {
+      "name": "same-transcript-changed-denial-sample",
+      "candidate": {
+        "metadata": {
+          "harness": "claude",
+          "installed_version": "installed-example",
+          "session_id": "session-example",
+          "billing_class": "api_key",
+          "usage": [
+            {
+              "model": "example-model",
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_creation_tokens": 0,
+              "output_tokens": 0,
+              "reasoning_tokens": 0,
+              "known_token_fields": [
+                "cache_creation_tokens",
+                "cached_input_tokens",
+                "input_tokens",
+                "output_tokens",
+                "reasoning_tokens"
+              ],
+              "cache_creation_by_ttl": {
+                "5m": 0,
+                "1h": 0
+              },
+              "reported_usd": null,
+              "observation_id": "model-final",
+              "observation_sequence": 2,
+              "observed_at": "2026-10-29T12:00:00Z",
+              "completeness": "complete",
+              "basis": "price_table",
+              "billing_class": "api_key",
+              "delta_of_session_totals": false,
+              "usd_estimate": "0"
+            }
+          ],
+          "usage_coverage": {
+            "version": 1,
+            "observation_id": "coverage-final",
+            "observation_sequence": 2,
+            "completeness": "complete",
+            "observed_at": "2026-10-29T12:00:00Z",
+            "attribution_gap": false,
+            "observation_gap": false
+          },
+          "price_table_id": "price-example",
+          "turns": 1,
+          "duration_ms": 1500,
+          "stop_reason": "success",
+          "provenance": {
+            "worker_id": "worker-example",
+            "image_digest": null
+          }
+        },
+        "denials": {
+          "items": [
+            {
+              "tool": "Bash",
+              "tool_use_id": "call-example",
+              "source": "policy",
+              "pattern": "namespace.deny.0",
+              "code": "denied"
+            }
+          ],
+          "total": 2,
+          "complete": false
+        },
+        "transcript": {
+          "capture": "captured",
+          "source_size": 18,
+          "source_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+          "source_verified": true,
+          "retained_size": 18,
+          "retained_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+          "truncated": false
+        }
+      },
+      "retained_transcript_sha256_unchanged": true,
+      "logical_sha256": "6752d24c680222cdfe2f03e07c9bc7d181f779c9639d6eae686639a9aa467eb0",
+      "outcome": "conflict",
+      "note": "Shape/semantic validation may refuse first; no such candidate can overwrite or match replay by transcript digest alone."
+    },
+    {
+      "name": "same-transcript-changed-source-declaration",
+      "candidate": {
+        "metadata": {
+          "harness": "claude",
+          "installed_version": "installed-example",
+          "session_id": "session-example",
+          "billing_class": "api_key",
+          "usage": [
+            {
+              "model": "example-model",
+              "input_tokens": 0,
+              "cached_input_tokens": 0,
+              "cache_creation_tokens": 0,
+              "output_tokens": 0,
+              "reasoning_tokens": 0,
+              "known_token_fields": [
+                "cache_creation_tokens",
+                "cached_input_tokens",
+                "input_tokens",
+                "output_tokens",
+                "reasoning_tokens"
+              ],
+              "cache_creation_by_ttl": {
+                "5m": 0,
+                "1h": 0
+              },
+              "reported_usd": null,
+              "observation_id": "model-final",
+              "observation_sequence": 2,
+              "observed_at": "2026-10-29T12:00:00Z",
+              "completeness": "complete",
+              "basis": "price_table",
+              "billing_class": "api_key",
+              "delta_of_session_totals": false,
+              "usd_estimate": "0"
+            }
+          ],
+          "usage_coverage": {
+            "version": 1,
+            "observation_id": "coverage-final",
+            "observation_sequence": 2,
+            "completeness": "complete",
+            "observed_at": "2026-10-29T12:00:00Z",
+            "attribution_gap": false,
+            "observation_gap": false
+          },
+          "price_table_id": "price-example",
+          "turns": 1,
+          "duration_ms": 1500,
+          "stop_reason": "success",
+          "provenance": {
+            "worker_id": "worker-example",
+            "image_digest": null
+          }
+        },
+        "denials": {
+          "items": [],
+          "total": 0,
+          "complete": true
+        },
+        "transcript": {
+          "capture": "captured",
+          "source_size": 18,
+          "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "source_verified": true,
+          "retained_size": 18,
+          "retained_sha256": "6f25d82b9395cad6ca13ae04ea837eb9aed47d51d7b99e4d5f45b20aa8e7fdb7",
+          "truncated": false
+        }
+      },
+      "retained_transcript_sha256_unchanged": true,
+      "logical_sha256": "a803b6c2e58ef44028c25db1167b26f884c518b61a3892b1758b06b9a703ffe0",
+      "outcome": "conflict",
+      "note": "Shape/semantic validation may refuse first; no such candidate can overwrite or match replay by transcript digest alone."
+    },
+    {
+      "name": "identical-after-expiry",
+      "outcome": "read-only saved expired descriptor; no retention renewal or byte effect",
+      "logical_sha256": "0632f97dc22def92b545292d3658a586dcdc0228edd691ac033a6544567b2acc"
+    },
+    {
+      "name": "late-usage-ledger-update",
+      "outcome": "ledger may improve under existing ordered acceptance; saved artifact and approval digest unchanged"
+    },
+    {
+      "name": "different-contract-same-value",
+      "outcome": "conflict; equality also requires the saved effective contract digest"
+    }
+  ],
+  "invalid_cases": [
+    {
+      "name": "unknown-transcript-reference",
+      "file": "examples/agent-session/invalid/unknown-transcript-reference.json",
+      "refusal_layer": "structural",
+      "rule": "closed logical shape excludes caller storage authority"
+    },
+    {
+      "name": "denial-text",
+      "file": "examples/agent-session/invalid/denial-text.json",
+      "refusal_layer": "structural",
+      "rule": "no denial text or arguments"
+    },
+    {
+      "name": "negative-duration",
+      "file": "examples/agent-session/invalid/negative-duration.json",
+      "refusal_layer": "structural",
+      "rule": "nonnegative integer duration"
+    },
+    {
+      "name": "float-duration",
+      "file": "examples/agent-session/invalid/float-duration.json",
+      "refusal_layer": "structural",
+      "rule": "integer millisecond domain"
+    },
+    {
+      "name": "usage-source",
+      "file": "examples/agent-session/invalid/usage-source.json",
+      "refusal_layer": "structural",
+      "rule": "opaque vendor source remains with accounting owner"
+    },
+    {
+      "name": "changed-retained-size",
+      "file": "examples/agent-session/invalid/changed-retained-size.json",
+      "refusal_layer": "semantic",
+      "rule": "untruncated source/retained identity must agree"
+    },
+    {
+      "name": "complete-with-gap",
+      "file": "examples/agent-session/invalid/complete-with-gap.json",
+      "refusal_layer": "semantic",
+      "rule": "complete coverage cannot assert a gap"
+    },
+    {
+      "name": "subscription-numeric-usd",
+      "file": "examples/agent-session/invalid/subscription-numeric-usd.json",
+      "refusal_layer": "semantic",
+      "rule": "subscription USD is null"
+    },
+    {
+      "name": "denial-count-underflow",
+      "file": "examples/agent-session/invalid/denial-count-underflow.json",
+      "refusal_layer": "semantic",
+      "rule": "sample total covers all retained items"
+    },
+    {
+      "name": "claimed-source-verification",
+      "file": "examples/agent-session/invalid/claimed-source-verification.json",
+      "refusal_layer": "semantic",
+      "rule": "truncated source never claims complete verification"
+    }
+  ],
+  "truncation_cases": [
+    {
+      "name": "exact-cap",
+      "source_bytes": 268435456,
+      "truncated": false,
+      "source_verified": true,
+      "rule": "all source bytes received and verified"
+    },
+    {
+      "name": "over-cap",
+      "source_bytes": 268435457,
+      "retained_prefix_bytes": 268435432,
+      "marker_ascii": "\n[transcript truncated]\n",
+      "marker_bytes": 24,
+      "retained_bytes": 268435456,
+      "truncated": true,
+      "source_verified": false,
+      "rule": "retain declared source identity as unverified; no complete-source digest assertion; original completion binding survives expiry"
+    }
+  ]
+}

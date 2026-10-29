@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:kora:artifact:AgentSession",
+  "title": "AgentSession revision 1 logical validation value",
+  "description": "A closed validation/digest value for separately owned metadata, a denial sample and an opaque transcript descriptor. This is not a new wire envelope or a JSON replacement for the primary transcript bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "metadata",
+    "denials",
+    "transcript"
+  ],
+  "properties": {
+    "metadata": {
+      "$ref": "#/$defs/metadata"
+    },
+    "denials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items",
+        "total",
+        "complete"
+      ],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/denial"
+          }
+        },
+        "total": {
+          "$ref": "#/$defs/count"
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "transcript": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capture"
+          ],
+          "properties": {
+            "capture": {
+              "const": "unavailable"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "capture",
+            "source_size",
+            "source_sha256",
+            "source_verified",
+            "retained_size",
+            "retained_sha256",
+            "truncated"
+          ],
+          "properties": {
+            "capture": {
+              "const": "captured"
+            },
+            "source_size": {
+              "$ref": "#/$defs/count"
+            },
+            "source_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "source_verified": {
+              "type": "boolean"
+            },
+            "retained_size": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 268435456
+            },
+            "retained_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[\\x21-\\x7e]+(?![\\s\\S])"
+    },
+    "cost_identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "The unchanged accepted cost Identifier predicate is an additional semantic check; structural validation alone is insufficient."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "token": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "money": {
+      "type": "string",
+      "maxLength": 25,
+      "pattern": "^(?:0|[1-9][0-9]{0,13})(?:\\.[0-9]{0,9}[1-9])?(?![\\s\\S])"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC Z serialization under the unchanged cost Timestamp contract; a real aware instant and canonical spelling are additional semantic checks."
+    },
+    "usage_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_creation_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "known_token_fields",
+        "cache_creation_by_ttl",
+        "reported_usd",
+        "observation_id",
+        "observation_sequence",
+        "observed_at",
+        "completeness",
+        "basis",
+        "billing_class",
+        "delta_of_session_totals",
+        "usd_estimate"
+      ],
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/cost_identifier"
+        },
+        "input_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "cached_input_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "cache_creation_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "output_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "reasoning_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "known_token_fields": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "input_tokens",
+              "cached_input_tokens",
+              "cache_creation_tokens",
+              "output_tokens",
+              "reasoning_tokens"
+            ]
+          }
+        },
+        "cache_creation_by_ttl": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "5m",
+                "1h"
+              ],
+              "properties": {
+                "5m": {
+                  "$ref": "#/$defs/token"
+                },
+                "1h": {
+                  "$ref": "#/$defs/token"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reported_usd": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation_id": {
+          "$ref": "#/$defs/cost_identifier"
+        },
+        "observation_sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "completeness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "harness_list",
+            "harness_managed",
+            "price_table",
+            "gateway"
+          ]
+        },
+        "billing_class": {
+          "enum": [
+            "api_key",
+            "subscription",
+            "gateway",
+            "managed"
+          ]
+        },
+        "delta_of_session_totals": {
+          "type": "boolean"
+        },
+        "usd_estimate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "usage_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "observation_id",
+        "observation_sequence",
+        "completeness",
+        "observed_at",
+        "attribution_gap",
+        "observation_gap"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "observation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/cost_identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sequence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completeness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "observed_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/timestamp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attribution_gap": {
+          "type": "boolean"
+        },
+        "observation_gap": {
+          "type": "boolean"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "harness",
+        "installed_version",
+        "session_id",
+        "billing_class",
+        "usage",
+        "usage_coverage",
+        "price_table_id",
+        "turns",
+        "duration_ms",
+        "stop_reason",
+        "provenance"
+      ],
+      "properties": {
+        "harness": {
+          "$ref": "#/$defs/identifier"
+        },
+        "installed_version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/identifier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "billing_class": {
+          "anyOf": [
+            {
+              "enum": [
+                "api_key",
+                "subscription",
+                "gateway",
+                "managed"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/usage_snapshot"
+          }
+        },
+        "usage_coverage": {
+          "$ref": "#/$defs/usage_coverage"
+        },
+        "price_table_id": {
+          "$ref": "#/$defs/cost_identifier"
+        },
+        "turns": {
+          "$ref": "#/$defs/token"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/count"
+        },
+        "stop_reason": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "worker_id",
+            "image_digest"
+          ],
+          "properties": {
+            "worker_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "image_digest": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "pattern": "^[^\\u0000-\\u001f\\u007f]+(?![\\s\\S])"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "denial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "tool_use_id",
+        "source",
+        "pattern",
+        "code"
+      ],
+      "properties": {
+        "tool": {
+          "$ref": "#/$defs/identifier"
+        },
+        "tool_use_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "source": {
+          "enum": [
+            "harness",
+            "policy"
+          ]
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:namespace|node)\\.(?:allow|deny)\\.(?:0|[1-9][0-9]{0,3})(?![\\s\\S])"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "enum": [
+            "denied",
+            "protected_path",
+            "not_allowed",
+            "request_invalid",
+            "argument_invalid",
+            "harness_rule",
+            "policy_error",
+            "policy_timeout"
+          ]
+        }
+      }
+    }
+  }
+}

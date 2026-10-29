@@ -1,0 +1,28 @@
+{
+  "name": "AgentSession",
+  "builtin_revision": "1",
+  "schema": "urn:kora:artifact:AgentSession",
+  "parent": null,
+  "representation": "kora.agent-session-transcript-primary.v1",
+  "behavior": {
+    "validation": "kora.agent-session-validation.v1",
+    "digest_fields": "kora.agent-session-logical.v1",
+    "summary": "kora.agent-session-summary.v1"
+  },
+  "canonicalization": "kora.structured-json.v1",
+  "validation": {
+    "max_raw_logical_json_bytes": 4194304,
+    "max_canonical_logical_json_bytes": 4194304,
+    "max_json_depth": 16
+  },
+  "digest_selection": [
+    ""
+  ],
+  "logical_identity": "kora.agent-session-logical.v1",
+  "compatibility": {
+    "execution_semantics": "kora.execution.v1",
+    "checker_view": "kora.agent-session-view.v1"
+  },
+  "schema_sha256": "d7a63554c3c50b9237a118f788ffd4a0f0af262bc192c2301db568f7c902e55a",
+  "cel_policy_sha256": "8522225273b2696446b698c3caaab6b9a382a3f8a842c3277da18a1199d7ff30"
+}
