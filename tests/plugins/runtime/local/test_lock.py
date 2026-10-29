@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -9,17 +10,42 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.plugins.runtime.local.runtime import LocalRuntime
+from kora.plugins.runtime.local.spawn import (
+    LAUNCHER_EXIT_NS,
+    Launcher,
+    Launchers,
+    launcher_of,
+)
+from kora.plugins.runtime.local.supervisor import EXIT_REFUSED
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.time import SystemClock
 from kora.runner.registry import (
     LOCK_DEADLINE_NS,
     LOCK_RETRY_NS,
     Entry,
+    Fence,
     Transition,
     TransitionExecutor,
     bind_workspace,
 )
 from tests.plugins.runtime.local.frames_support import StepClock
+from tests.support.local_runners import (
+    EXITING,
+    NEVER_READY,
+    clock_awaited,
+    driven,
+    open_spawning,
+    reap_runners,
+    runner_argv,
+    runner_pids,
+    short_directory,
+    starting_entry,
+    submitted,
+    supervised,
+    written,
+    zombie_children,
+)
 from tests.support.local_runtime import (
     PATH_MARKER,
     READY_DEADLINE_SECONDS,
@@ -279,7 +305,148 @@ async def retrying_caller_sees_close(root: Path, capture: Capture) -> None:
     assert refused == "runtime_closed"
 
 
+def assert_no_runner(root: Path) -> None:
+    reap_runners(root)
+    assert runner_pids(root) == ()
+
+
+async def spawned_runner_is_released(root: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        try:
+            await runtime.submit(submitted(runtime, "attempt-1"), ctx)
+        finally:
+            await runtime.close()
+        killed = reap_runners(root)
+    assert len(killed) == 1
+    assert_no_runner(root)
+
+
+async def readiness_timeout_is_released(root: Path, capture: Capture) -> None:
+    clock = StepClock()
+    ctx = runtime_context(capture, clock)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets", runner=NEVER_READY)
+        try:
+            work = submitted(runtime, "attempt-1")
+            refused = await driven(
+                clock, protocol_error(runtime.submit(work, ctx)), 1_000_000_000
+            )
+        finally:
+            await runtime.close()
+    assert refused.code == "runner_starting"
+    assert runtime.launchers.unsettled == set()
+    assert_no_runner(root)
+
+
+async def cancelled_readiness_is_released(root: Path, capture: Capture) -> None:
+    clock = StepClock()
+    ctx = runtime_context(capture, clock)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets", runner=NEVER_READY)
+        try:
+            submitting = asyncio.ensure_future(
+                runtime.submit(submitted(runtime, "attempt-1"), ctx)
+            )
+            await clock_awaited(clock, submitting)
+            submitting.cancel()
+            cancelled = await asyncio.gather(submitting, return_exceptions=True)
+        finally:
+            await runtime.close()
+    assert isinstance(cancelled[0], asyncio.CancelledError)
+    assert runtime.launchers.settling == set()
+    assert_no_runner(root)
+
+
+async def unsettled_launcher_is_retried(root: Path, capture: Capture) -> None:
+    clock = SystemClock()
+    launchers = Launchers(bound_ns=0)
+    launcher = launcher_of(os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}))
+    await launchers.settled(launcher, clock, kill=False)
+    unsettled = set(launchers.unsettled)
+    launchers.bound_ns = LAUNCHER_EXIT_NS
+    await launchers.drain(clock)
+
+    assert unsettled == {launcher}
+    assert launchers.unsettled == set()
+    assert launcher.reaped
+    assert launcher.closed
+
+
+async def unwatched_launcher_is_killed_and_reaped(root: Path, capture: Capture) -> None:
+    clock = SystemClock()
+    launchers = Launchers()
+    unwatched = Launcher(os.posix_spawn(NEVER_READY[0], list(NEVER_READY), {}), None)
+    await launchers.settled(unwatched, clock, kill=True)
+    collected = os.posix_spawn(EXITING[0], list(EXITING), {})
+    os.waitpid(collected, 0)
+    elsewhere = Launcher(collected, None)
+    await launchers.settled(elsewhere, clock, kill=False)
+
+    assert unwatched.reaped
+    assert elsewhere.reaped
+    assert launchers.unsettled == set()
+
+
+async def close_refuses_a_spawn_after_its_transition(
+    root: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    identifiers = GatedIdentifiers()
+    with short_directory() as base:
+        runtime = await open_spawning(
+            root, ctx, base / "sockets", new_identifier=identifiers
+        )
+        work = submitted(runtime, "attempt-1")
+        identifiers.armed = True
+        submitting = asyncio.create_task(protocol_error(runtime.submit(work, ctx)))
+        try:
+            assert await asyncio.to_thread(
+                identifiers.started.wait, READY_DEADLINE_SECONDS
+            )
+            closing = asyncio.create_task(runtime.close())
+            done, _ = await asyncio.wait({closing}, timeout=0)
+        finally:
+            identifiers.gate.set()
+        refused = await submitting
+        await closing
+    assert done == set()
+    assert refused.code == "runtime_closed"
+    assert runtime.launchers.spawning == set()
+    assert runner_pids(root) == ()
+
+
+async def late_registration_is_released(root: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    with short_directory() as base:
+        sockets = base / "sockets"
+        runtime = await open_spawning(root, ctx, sockets)
+        fence = Fence(retirement_id="retirement-1", fenced_at=ctx.clock.now())
+        try:
+            await written(
+                runtime, "attempt-1", starting_entry(sockets, "a" * 32, fence), ctx
+            )
+            argv = runner_argv(runtime, root, "attempt-1", "a" * 32)
+            outcome = await supervised(argv)
+        finally:
+            await runtime.close()
+        leftovers = os.listdir(sockets)
+    assert outcome.code == EXIT_REFUSED
+    assert leftovers == []
+    assert_no_runner(root)
+
+
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
+    "spawned_runner_is_released": spawned_runner_is_released,
+    "readiness_timeout_is_released": readiness_timeout_is_released,
+    "cancelled_readiness_is_released": cancelled_readiness_is_released,
+    "unsettled_launcher_is_retried": unsettled_launcher_is_retried,
+    "unwatched_launcher_is_killed_and_reaped": unwatched_launcher_is_killed_and_reaped,
+    "late_registration_is_released": late_registration_is_released,
+    "close_refuses_a_spawn_after_its_transition": (
+        close_refuses_a_spawn_after_its_transition
+    ),
     "lock_timeout": lock_timeout,
     "admission_refusal": admission_refusal,
     "cancelled_caller": cancelled_caller,
@@ -299,8 +466,10 @@ async def test_local_runtime_releases_resources(
 ) -> None:
     descriptors = open_descriptors()
     threads = runtime_threads()
+    zombies = zombie_children()
 
     await LEGS[leg](state_root(tmp_path), kora_capture)
 
     assert open_descriptors() == descriptors
     assert runtime_threads() == threads == 0
+    assert zombie_children() == zombies

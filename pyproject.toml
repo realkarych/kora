@@ -29,6 +29,7 @@ classifiers = [
 
 [project.scripts]
 kora = "kora.__main__:main"
+kora-runner = "kora.plugins.runtime.local.supervisor:main"
 
 [project.entry-points."kora.provider"]
 "artifact_storage.local" = "kora.plugins.storage.local:provider_metadata"

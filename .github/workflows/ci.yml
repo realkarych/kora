@@ -533,10 +533,19 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
           cache-suffix: local-runtime-diagnostics-${{ matrix.python }}
-      - run: uv sync --locked --no-build --extra postgres --extra cel --no-install-project
-      - name: Measure local runtime lock contention
+      - name: Install locked source for isolated runner processes
+        run: |
+          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          KORA_DIAGNOSTIC_BUILD_CONSTRAINTS="$(mktemp)"
+          uv export --locked --only-group build --no-emit-project \
+            --format requirements.txt --output-file "$KORA_DIAGNOSTIC_BUILD_CONSTRAINTS"
+          uv pip install --python "$PWD/.venv/bin/python" --no-deps \
+            --build-constraints "$KORA_DIAGNOSTIC_BUILD_CONSTRAINTS" \
+            --require-build-hashes --editable .
+          rm "$KORA_DIAGNOSTIC_BUILD_CONSTRAINTS"
+      - name: Measure local runtime cost
         env:
-          KORA_MEASUREMENT_OUTPUT: measurements/lock-contention.json
+          KORA_MEASUREMENT_OUTPUT: measurements/local-runtime-cost.json
         run: |
           mkdir -p measurements
           uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
@@ -544,7 +553,7 @@ jobs:
         if: ${{ always() }}
         with:
           name: local-runtime-diagnostics-${{ matrix.os }}-${{ matrix.python }}
-          path: measurements/lock-contention.json
+          path: measurements/local-runtime-cost.json
           if-no-files-found: error
 
   resource-measurements:

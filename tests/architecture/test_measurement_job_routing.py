@@ -145,7 +145,7 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     diagnostics = next(
         step
         for step in step_list(table(jobs["local-runtime-diagnostics"]))
-        if step.get("name") == "Measure local runtime lock contention"
+        if step.get("name") == "Measure local runtime cost"
     )
 
     assert {(row["os"], row["python"], row["databases"]) for row in rows} == set(

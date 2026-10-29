@@ -79,6 +79,43 @@ def verify_private(descriptor: int, *, directory: bool) -> None:
         raise FilesystemError("exclusive_file_required")
 
 
+def open_ancestry(path: Path) -> tuple[int, tuple[DirectoryIdentity, ...]]:
+    if not path.is_absolute() or ".." in path.parts:
+        raise FilesystemError("absolute_directory_required")
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    ancestors: list[DirectoryIdentity] = []
+    try:
+        for component in path.parts[1:]:
+            following = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=descriptor,
+            )
+            os.close(descriptor)
+            descriptor = following
+            metadata = os.fstat(descriptor)
+            if metadata.st_uid not in (0, os.getuid()):
+                raise FilesystemError("foreign_ancestor")
+            ancestors.append(identity_of(descriptor, component))
+        return descriptor, tuple(ancestors)
+    except (OSError, FilesystemError):
+        os.close(descriptor)
+        raise
+
+
+def open_created_directory(path: Path) -> "DirectoryAnchor":
+    if path.name in ("", ".", ".."):
+        raise FilesystemError("invalid_relative_name")
+    parent, _ = open_ancestry(path.parent)
+    try:
+        os.mkdir(path.name, mode=0o700, dir_fd=parent)
+    except FileExistsError:
+        pass
+    finally:
+        os.close(parent)
+    return open_local_directory(path)
+
+
 class DirectoryAnchor:
     def __init__(
         self,
@@ -93,25 +130,10 @@ class DirectoryAnchor:
 
     @classmethod
     def open_path(cls, path: Path) -> "DirectoryAnchor":
-        if not path.is_absolute() or ".." in path.parts:
-            raise FilesystemError("absolute_directory_required")
-        descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        ancestors: list[DirectoryIdentity] = []
+        descriptor, ancestors = open_ancestry(path)
         try:
-            for component in path.parts[1:]:
-                following = os.open(
-                    component,
-                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    dir_fd=descriptor,
-                )
-                os.close(descriptor)
-                descriptor = following
-                metadata = os.fstat(descriptor)
-                if metadata.st_uid not in (0, os.getuid()):
-                    raise FilesystemError("foreign_ancestor")
-                ancestors.append(identity_of(descriptor, component))
             verify_private(descriptor, directory=True)
-            return cls(descriptor, identity_of(descriptor, path.name), tuple(ancestors))
+            return cls(descriptor, identity_of(descriptor, path.name), ancestors)
         except (OSError, FilesystemError):
             os.close(descriptor)
             raise

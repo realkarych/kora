@@ -1,5 +1,6 @@
 import errno
 import os
+import stat
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,10 @@ from kora.plugins.runtime.local.runtime import (
     LocalRuntimeConfiguration,
     default_state_root,
 )
+from kora.plugins.runtime.local.spawn import (
+    default_socket_directory,
+    open_socket_directory,
+)
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.runner.filesystem import (
@@ -23,6 +28,8 @@ from kora.runner.filesystem import (
     open_local_directory,
     refused_filesystem,
 )
+from kora.runner.registry import SOCKET_PATH_LENGTH
+from tests.support.local_runners import short_directory
 from tests.support.local_runtime import (
     PATH_MARKER,
     ConstructedIdentityReader,
@@ -31,6 +38,7 @@ from tests.support.local_runtime import (
     private_directory,
     protocol_error,
     runtime_context,
+    state_root,
 )
 
 __all__ = ["kora_capture"]
@@ -80,24 +88,22 @@ def network_filesystem(tmp_path: Path) -> Path:
     return prepared("nfs-mount") / "state"
 
 
-async def refusal_of(target: str, path: Path, ctx: ProtocolContext) -> Exception:
-    try:
-        if target == "runtime":
-            await (await open_runtime(path, ctx)).close()
-        else:
-            open_local_directory(path).close()
-    except (FilesystemError, OSError, KoraProtocolError) as error:
-        return error
-    pytest.fail("the unsafe path was accepted", pytrace=False)
+def missing_parent(tmp_path: Path) -> Path:
+    return tmp_path / f"{PATH_MARKER}-missing" / "sockets"
 
 
-def assert_runtime_refusal(error: Exception) -> None:
+async def refusal_of(
+    target: str, path: Path, base: Path, ctx: ProtocolContext
+) -> KoraProtocolError:
+    if target == "runtime":
+        return await protocol_error(open_runtime(path, ctx))
+    root = state_root(base)
+    return await protocol_error(open_runtime(root, ctx, socket_directory=path))
+
+
+def assert_runtime_refusal(error: Exception, code: str = "state_root_unsafe") -> None:
     assert isinstance(error, KoraProtocolError)
-    assert (error.code, error.retryable, error.details) == (
-        "state_root_unsafe",
-        False,
-        {},
-    )
+    assert (error.code, error.retryable, error.details) == (code, False, {})
     assert PATH_MARKER not in str(error) + repr(error.args)
     assert error.__cause__ is None
     assert error.__context__ is None
@@ -131,6 +137,14 @@ LOCAL_FILESYSTEMS: frozenset[int | str] = frozenset(
 )
 
 
+def socket_refusal_reason(path: Path) -> str:
+    try:
+        open_socket_directory(path).close()
+    except (FilesystemError, OSError) as error:
+        return reason(error)
+    pytest.fail("the unsafe socket directory was accepted", pytrace=False)
+
+
 def reason(error: Exception) -> str:
     if isinstance(error, FilesystemError):
         return str(error.args[0])
@@ -151,19 +165,63 @@ LEGS = [
 async def test_state_root_and_socket_dir_refuse_unsafe_ownership(
     tmp_path: Path, kora_capture: Capture, leg: str, target: str
 ) -> None:
-    path = {**UNPREPARED, **PREPARED}[leg](tmp_path)
-    ctx = runtime_context(kora_capture)
-    before = sorted(os.listdir(tmp_path))
+    with short_directory() as short:
+        base = tmp_path if target == "runtime" else short
+        legs = {**UNPREPARED, **PREPARED}
+        if target == "socket_directory":
+            legs["missing"] = missing_parent
+        path = legs[leg](base)
+        ctx = runtime_context(kora_capture)
+        before = sorted(os.listdir(base))
 
-    refused = await refusal_of(target, path, ctx)
+        refused = await refusal_of(target, path, base, ctx)
 
-    assert sorted(os.listdir(tmp_path)) == before
+        created = sorted(set(os.listdir(base)) - set(before))
+        cause = None if target == "runtime" else socket_refusal_reason(path)
     if target == "runtime":
+        assert created == []
         assert_runtime_refusal(refused)
     else:
-        assert reason(refused) in REASONS[leg]
+        assert created == [f"{PATH_MARKER}-state"]
+        assert cause in REASONS[leg]
+        assert_runtime_refusal(refused, "socket_directory_unsafe")
     records = kora_capture.finish()
     assert all(PATH_MARKER not in str(record) for record in records)
+
+
+@pytest.mark.asyncio
+async def test_socket_directory_creates_only_its_last_component(
+    kora_capture: Capture,
+) -> None:
+    ctx = runtime_context(kora_capture)
+    with short_directory() as base:
+        sockets = base / "sockets"
+        overlong = base / ("x" * SOCKET_PATH_LENGTH)
+        runtime = await open_runtime(state_root(base), ctx, socket_directory=sockets)
+        await runtime.close()
+        refused = await protocol_error(
+            open_runtime(base / f"{PATH_MARKER}-state", ctx, socket_directory=overlong)
+        )
+        mode = stat.S_IMODE(sockets.stat().st_mode)
+        overlong_exists = overlong.exists()
+
+    assert mode == 0o700
+    assert not overlong_exists
+    assert_runtime_refusal(refused, "socket_directory_unsafe")
+
+
+@pytest.mark.asyncio
+async def test_default_socket_directory_opens(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    runtime = await open_runtime(state_root(tmp_path), runtime_context(kora_capture))
+    await runtime.close()
+
+    default = default_socket_directory(sys.platform, os.getuid())
+    metadata = os.lstat(default)
+    assert stat.S_ISDIR(metadata.st_mode)
+    assert (metadata.st_uid, stat.S_IMODE(metadata.st_mode)) == (os.getuid(), 0o700)
+    assert default.resolve() == default
 
 
 @pytest.mark.parametrize(

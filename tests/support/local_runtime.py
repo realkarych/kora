@@ -177,12 +177,14 @@ async def open_runtime(
     ctx: ProtocolContext,
     identities: IdentityReader | None = None,
     new_identifier: Callable[[], str] | None = None,
+    socket_directory: Path | None = None,
 ) -> LocalRuntime:
     return await LocalRuntime.open(
         LocalRuntimeConfiguration(state_root=str(path)),
         ctx,
         identities=ConstructedIdentityReader() if identities is None else identities,
         new_identifier=Identifiers() if new_identifier is None else new_identifier,
+        socket_directory=socket_directory,
     )
 
 

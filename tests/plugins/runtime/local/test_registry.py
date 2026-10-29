@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import shutil
+import stat
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -28,10 +29,19 @@ from kora.runner.registry import (
     Retiring,
     Running,
     Starting,
+    Submitter,
     with_entry,
     write_atomically,
 )
 from tests.plugins.runtime.local.frames_support import StepClock
+from tests.support.local_runners import (
+    open_spawning,
+    own_identity,
+    reap_runners,
+    runner_pids,
+    short_directory,
+    submitted,
+)
 from tests.support.local_runtime import (
     PATH_MARKER,
     ConstructedIdentityReader,
@@ -105,8 +115,10 @@ def started_entries(domain: str) -> dict[str, Entry]:
             deadline=None,
             gate_closed=False,
             request_digest=DIGEST,
+            submitter=Submitter(dispatcher_id="dispatcher-1", process=RUNNER),
             nonce="e" * 32,
             started_at=MOMENT,
+            socket_directory="/run/user/1000/kora",
             fence=None,
         ),
         "running": Running(
@@ -114,6 +126,7 @@ def started_entries(domain: str) -> dict[str, Entry]:
             deadline=None,
             gate_closed=False,
             request_digest=DIGEST,
+            submitter=Submitter(dispatcher_id="dispatcher-1", process=RUNNER),
             runner=RUNNER,
             socket_path="/run/user/1000/kora/0123456789abcdef",
         ),
@@ -212,6 +225,121 @@ async def started_states_refuse_until_runner_retirement(
         "completed": (unavailable, "returned", "returned"),
         "retiring": (unavailable, "returned", "runner_unreachable"),
     }
+
+
+async def submit_cells_follow_the_entry(tmp_path: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    with short_directory() as base:
+        runtime = await open_spawning(state_root(tmp_path), ctx, base / "sockets")
+        work = submitted(runtime, "attempt-x")
+        digest = work.execution_request_digest
+        entries: dict[str, Entry] = {
+            state: entry.model_copy(update={"request_digest": digest})
+            if hasattr(entry, "request_digest")
+            else entry
+            for state, entry in started_entries(runtime.execution_domain_id).items()
+        }
+        entries["retired"] = await retired_entry(runtime, ctx)
+        outcomes: dict[str, str] = {}
+        try:
+            for state, entry in entries.items():
+                attempt = f"attempt-{state}"
+                write_entry(runtime, attempt, entry)
+                again = work.model_copy(update={"attempt_id": attempt})
+                outcomes[state] = await outcome(runtime.submit(again, ctx))
+        finally:
+            await runtime.close()
+    assert outcomes == {
+        "starting": "runner_starting",
+        "running": "returned",
+        "completed": "returned",
+        "retiring": "attempt_retired",
+        "retired": "attempt_retired",
+    }
+    assert runner_pids(tmp_path) == ()
+
+
+async def retired_entry(runtime: LocalRuntime, ctx: ProtocolContext) -> Entry:
+    await runtime.retire("attempt-tombstone", timedelta(0), ctx)
+    entry = await recorded(runtime, "attempt-tombstone")
+    assert entry is not None
+    return entry
+
+
+async def submit_checks_refuse_before_any_effect(
+    tmp_path: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    other = own_identity().model_copy(update={"start_time": 1})
+    with short_directory() as base:
+        runtime = await open_spawning(state_root(tmp_path), ctx, base / "sockets")
+        work = submitted(runtime, "attempt-1")
+        variants = {
+            "domain": work.model_copy(update={"execution_domain_id": "domain-other"}),
+            "null_process": work.model_copy(update={"dispatcher_process": None}),
+            "other_process": work.model_copy(update={"dispatcher_process": other}),
+            "digest": work.model_copy(
+                update={"execution_request_digest": "sha256:" + "2" * 64}
+            ),
+        }
+        try:
+            refused = {
+                name: await protocol_error(runtime.submit(variant, ctx))
+                for name, variant in variants.items()
+            }
+            pinned = replace(ctx, request_digest="sha256-other")
+            refused["context_digest"] = await protocol_error(
+                runtime.submit(work, pinned)
+            )
+            bounded = replace(
+                ctx,
+                deadline=ExecutionDeadline(
+                    at=MOMENT,
+                    scope_kind="attempt",
+                    scope_id="attempt-1",
+                    clock_uncertainty=timedelta(0),
+                    grace=DEADLINE_GRACE,
+                ),
+            )
+            refused["context_deadline"] = await protocol_error(
+                runtime.submit(work, bounded)
+            )
+            entry = await recorded(runtime, "attempt-1")
+        finally:
+            await runtime.close()
+    assert {name: code(error) for name, error in refused.items()} == {
+        "domain": ("execution_domain_mismatch", False),
+        "null_process": ("dispatcher_process_mismatch", False),
+        "other_process": ("dispatcher_process_mismatch", False),
+        "digest": ("workload_conflict", False),
+        "context_digest": ("workload_conflict", False),
+        "context_deadline": ("workload_conflict", False),
+    }
+    assert entry is None
+    assert runner_pids(tmp_path) == ()
+
+
+async def submitter_is_kept_by_registration(tmp_path: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    root = state_root(tmp_path)
+    with short_directory() as base:
+        sockets = base / "sockets"
+        runtime = await open_spawning(root, ctx, sockets)
+        try:
+            await runtime.workspace_target("attempt-1", ctx)
+            shutil.rmtree(sockets)
+            await runtime.submit(submitted(runtime, "attempt-1"), ctx)
+            entry = await recorded(runtime, "attempt-1")
+            recreated = stat.S_IMODE(sockets.stat().st_mode)
+        finally:
+            await runtime.close()
+            reap_runners(root)
+    assert isinstance(entry, Running)
+    assert entry.submitter == Submitter(
+        dispatcher_id="dispatcher-1", process=own_identity()
+    )
+    assert entry.socket_path.startswith(f"{sockets}/")
+    assert recreated == 0o700
 
 
 async def oversized_and_foreign_heads_are_refused(
@@ -552,6 +680,9 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
         started_states_refuse_until_runner_retirement
     ),
     "oversized_and_foreign_heads_are_refused": oversized_and_foreign_heads_are_refused,
+    "submit_cells_follow_the_entry": submit_cells_follow_the_entry,
+    "submit_checks_refuse_before_any_effect": submit_checks_refuse_before_any_effect,
+    "submitter_is_kept_by_registration": submitter_is_kept_by_registration,
     "attempt_ids_map_to_fixed_names": attempt_ids_map_to_fixed_names,
     "crash_temporaries_are_swept": crash_temporaries_are_swept,
     "lineage_is_checked_at_open": lineage_is_checked_at_open,
@@ -592,7 +723,8 @@ async def test_registry_states_and_release(
 
 
 @pytest.mark.parametrize(
-    "method", ["capabilities", "workspace_target", "lookup", "status", "retire"]
+    "method",
+    ["capabilities", "workspace_target", "submit", "lookup", "status", "retire"],
 )
 def test_local_runtime_signatures_match_runtime(method: str) -> None:
     implemented = inspect.signature(getattr(LocalRuntime, method))

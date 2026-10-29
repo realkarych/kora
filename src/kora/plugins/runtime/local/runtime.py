@@ -3,34 +3,54 @@ import os
 import re
 import secrets
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Final
 
 from pydantic import AfterValidator, Field, StrictStr
 
+from kora.executor.digests import object_digest
 from kora.ir.json import JsonObject, parse_json_object
+from kora.observability import CATALOG, EventSpec, FieldKind, Level
+from kora.plugins.runtime.local.spawn import (
+    Launchers,
+    Readiness,
+    default_socket_directory,
+    open_socket_directory,
+    runner_command,
+    runner_environment,
+    spawn_runner,
+)
 from kora.protocols.common import BoundaryModel, ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
-from kora.protocols.identity import Handle
-from kora.protocols.runtime import RuntimeCapabilities, RuntimeStatus
+from kora.protocols.identity import Handle, ProcessIdentity
+from kora.protocols.runtime import RuntimeCapabilities, RuntimeStatus, Workload
+from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget, printable_path
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_local_directory,
 )
-from kora.runner.identity import IdentityReader, NativeIdentityReader
+from kora.runner.identity import (
+    IdentityReader,
+    IdentityState,
+    NativeIdentityReader,
+)
 from kora.runner.registry import (
+    COMPONENT,
     RUNTIME_NAME,
     Applied,
     AttemptKey,
     Entry,
     Registry,
     Retired,
+    Starting,
+    Submitter,
     Transition,
     TransitionExecutor,
     bind_workspace,
@@ -40,6 +60,7 @@ from kora.runner.registry import (
     refusal,
     retire_cell,
     status_cell,
+    submit_cell,
 )
 
 STATE_ROOT_LENGTH: Final[int] = 4052
@@ -48,7 +69,23 @@ REJECTIONS: Final[dict[str, str]] = {
     "state_root_unsafe": "the local state root is missing or unsafe",
     "attempt_invalid": "the attempt id is not valid for this call",
     "handle_invalid": "the handle does not belong to this runtime",
+    "socket_directory_unsafe": (
+        "the local socket directory must be owned by this user with mode 0700"
+    ),
+    "execution_domain_mismatch": "the workload names another execution domain",
+    "dispatcher_process_mismatch": (
+        "the workload's dispatcher process is not the submitting process"
+    ),
 }
+SPAWNED: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.spawn",
+        COMPONENT,
+        Level.INFO,
+        "a local attempt runner was spawned",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.FLOAT},
+    )
+)
 
 StateRoot = Annotated[
     StrictStr,
@@ -101,12 +138,79 @@ def release_root(located: tuple[Path, DirectoryAnchor] | None) -> None:
         located[1].close()
 
 
+def safe_socket_directory(path: Path) -> bool:
+    try:
+        open_socket_directory(path).close()
+    except (OSError, FilesystemError, ValueError):
+        return False
+    return True
+
+
+def verified_socket_directory(path: Path) -> None:
+    if not safe_socket_directory(path):
+        raise rejection("socket_directory_unsafe")
+
+
+def default_socket_path() -> Path | None:
+    try:
+        return default_socket_directory(sys.platform, os.getuid())
+    except (OSError, FilesystemError, ValueError):
+        return None
+
+
+def chosen_socket_directory(configured: Path | None) -> Path:
+    path = configured or default_socket_path()
+    if path is None:
+        raise rejection("socket_directory_unsafe")
+    verified_socket_directory(path)
+    return path
+
+
+def environment_of(home: Callable[[], Path]) -> dict[str, str] | None:
+    try:
+        return runner_environment(sys.platform, home())
+    except (OSError, FilesystemError, RuntimeError, KeyError):
+        return None
+
+
+def launch_environment(home: Callable[[], Path]) -> dict[str, str]:
+    environment = environment_of(home)
+    if environment is None:
+        raise rejection("state_root_unsafe")
+    return environment
+
+
+def own_identity(identities: IdentityReader) -> ProcessIdentity:
+    observation = identities.read(os.getpid())
+    if observation.state is not IdentityState.PRESENT or observation.process is None:
+        raise refusal("lineage_unavailable")
+    return observation.process.identity
+
+
 def expired(deadline: ExecutionDeadline | None, now: datetime) -> bool:
     return deadline is not None and now >= deadline.at - deadline.clock_uncertainty
 
 
 def random_identifier() -> str:
     return secrets.token_hex(16)
+
+
+@dataclass(frozen=True)
+class RunnerLaunch:
+    command: tuple[str, ...]
+    environment: dict[str, str]
+    socket_directory: Path
+    identity: ProcessIdentity
+    clock: Clock
+
+    def argv(self, root: Path, key: AttemptKey, nonce: str) -> tuple[str, ...]:
+        return (
+            *self.command,
+            str(root),
+            key.attempt_id,
+            key.execution_domain_id,
+            nonce,
+        )
 
 
 class LocalRuntime:
@@ -121,13 +225,16 @@ class LocalRuntime:
         registry: Registry,
         executor: TransitionExecutor,
         new_identifier: Callable[[], str],
+        launch: "RunnerLaunch",
     ) -> None:
         self.execution_domain_id = registry.execution_domain_id
         self.registry = registry
         self.executor = executor
+        self.launchers = Launchers()
         self._root_path = root_path
         self._root = root
         self._new_identifier = new_identifier
+        self._launch = launch
         self._closing: asyncio.Task[None] | None = None
 
     @classmethod
@@ -140,6 +247,8 @@ class LocalRuntime:
         new_identifier: Callable[[], str] = random_identifier,
         environment: Mapping[str, str] = os.environ,
         home: Callable[[], Path] = Path.home,
+        runner: Sequence[str] | None = None,
+        socket_directory: Path | None = None,
     ) -> "LocalRuntime":
         executor = TransitionExecutor()
         try:
@@ -149,6 +258,17 @@ class LocalRuntime:
                 else await executor.run(NativeIdentityReader)
             )
             lineage = await executor.run(lambda: lineage_of(reader))
+            identity = await executor.run(lambda: own_identity(reader))
+            sockets = await executor.run(
+                lambda: chosen_socket_directory(socket_directory)
+            )
+            launch = RunnerLaunch(
+                command=tuple(runner_command() if runner is None else runner),
+                environment=await executor.run(lambda: launch_environment(home)),
+                socket_directory=sockets,
+                identity=identity,
+                clock=ctx.clock,
+            )
             located = await executor.run(
                 lambda: anchored_root(configuration, environment, home), release_root
             )
@@ -169,7 +289,7 @@ class LocalRuntime:
             await executor.close()
             raise
         registry = Registry(directory, domain.execution_domain_id, new_identifier)
-        return cls(path, root, registry, executor, new_identifier)
+        return cls(path, root, registry, executor, new_identifier, launch)
 
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities(
@@ -239,6 +359,78 @@ class LocalRuntime:
         key = self.key_of(handle, ctx)
         return status_cell(await self.entry(key), ctx.clock.now())
 
+    def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
+        if workload.execution_domain_id != self.execution_domain_id:
+            raise rejection("execution_domain_mismatch")
+        process = workload.dispatcher_process
+        if process is None or process != self._launch.identity:
+            raise rejection("dispatcher_process_mismatch")
+        digest = object_digest(workload.execution_request)
+        if (
+            digest != workload.execution_request_digest
+            or ctx.request_digest not in (None, digest)
+            or workload.deadline != ctx.deadline
+        ):
+            raise refusal("workload_conflict")
+        return digest
+
+    async def submit(self, workload: Workload, ctx: ProtocolContext) -> Handle:
+        key = self.key(workload.attempt_id, ctx)
+        digest = self.checked_digest(workload, ctx)
+        launch = self._launch
+        await self.executor.run(
+            lambda: verified_socket_directory(launch.socket_directory)
+        )
+        nonce = self._new_identifier()
+        starting = Starting(
+            state="starting",
+            deadline=workload.deadline,
+            gate_closed=False,
+            request_digest=digest,
+            submitter=Submitter(
+                dispatcher_id=workload.dispatcher_id, process=launch.identity
+            ),
+            nonce=nonce,
+            started_at=ctx.clock.now(),
+            socket_directory=str(launch.socket_directory),
+            fence=None,
+        )
+        overdue = expired(workload.deadline, ctx.clock.now())
+        applied = await self.transition(
+            key,
+            lambda entry: submit_cell(
+                entry, digest, workload.deadline, overdue, lambda: starting
+            ),
+            ctx,
+            "submit",
+        )
+        if applied.transition.entry is starting:
+            await self.spawn(launch.argv(self._root_path, key, nonce), ctx)
+        return key.handle()
+
+    async def spawn(self, argv: tuple[str, ...], ctx: ProtocolContext) -> None:
+        started = ctx.clock.monotonic_ns()
+        outcome = "failed"
+        try:
+            readiness = await spawn_runner(
+                argv, self._launch.environment, ctx.clock, self.launchers
+            )
+            outcome = readiness.value
+        except OSError:
+            pass
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except KoraProtocolError:
+            outcome = "closed"
+            raise
+        finally:
+            waited = (ctx.clock.monotonic_ns() - started) / 1_000_000
+            level = Level.INFO if outcome == Readiness.READY.value else Level.WARNING
+            ctx.logger.emit_at(level, SPAWNED, outcome=outcome, waited_ms=waited)
+        if outcome != Readiness.READY.value:
+            raise refusal("runner_starting")
+
     async def retire(
         self, attempt_id: str, grace: timedelta, ctx: ProtocolContext
     ) -> TerminationReceipt:
@@ -263,6 +455,9 @@ class LocalRuntime:
         await asyncio.shield(self._closing)
 
     async def _release(self) -> None:
-        await self.executor.close()
-        self.registry.directory.close()
-        self._root.close()
+        try:
+            await self.launchers.drain(self._launch.clock)
+        finally:
+            await self.executor.close()
+            self.registry.directory.close()
+            self._root.close()
