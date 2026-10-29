@@ -1,12 +1,5 @@
 from typing import TYPE_CHECKING
 
-from kora.ir.diagnostics import (
-    ConfigWarning,
-    ContractViolation,
-    Diagnostic,
-    SourceLocation,
-)
-
 if TYPE_CHECKING:
     from kora.ir.config import (
         AgentConfig,
@@ -44,6 +37,12 @@ if TYPE_CHECKING:
         ParameterTarget,
         SubgraphOutput,
         TargetConfig,
+    )
+    from kora.ir.diagnostics import (
+        ConfigWarning,
+        ContractViolation,
+        Diagnostic,
+        SourceLocation,
     )
     from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
     from kora.ir.export import export_ir, render_ir_json
@@ -154,6 +153,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"ConfigWarning", "ContractViolation", "Diagnostic", "SourceLocation"}:
+        from kora.ir import diagnostics
+
+        return getattr(diagnostics, name)
     if name in {
         "CommandResource",
         "NetworkPolicy",
