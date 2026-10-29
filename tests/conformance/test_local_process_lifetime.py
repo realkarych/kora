@@ -1156,3 +1156,58 @@ async def test_gated_process_settles_only_after_descendants_are_reaped(
     assert group.state is IdentityState.PRESENT
     assert not group.members
     assert remaining.state is IdentityState.ABSENT
+
+
+HIDDEN_CHILD = """
+import ctypes, sys
+library = ctypes.CDLL(None, use_errno=True)
+if sys.platform == "linux":
+    assert library.prctl(4, 0, 0, 0, 0) == 0
+else:
+    assert library.ptrace(31, 0, None, 0) == 0
+sys.stdout.write("ready\\n")
+sys.stdout.flush()
+sys.stdin.read()
+"""
+
+
+def test_native_identity_reads_non_dumpable_member_in_observer_namespace() -> None:
+    import select
+    import subprocess
+
+    from kora.runner.identity import IdentityState, NativeIdentityReader
+
+    reader = NativeIdentityReader()
+    own = reader.read(os.getpid())
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-c", HIDDEN_CHILD],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        process_group=0,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdin is not None
+        ready, _, _ = select.select([child.stdout], [], [], 30)
+        assert ready
+        assert child.stdout.readline() == b"ready\n"
+        observation = reader.read(child.pid)
+        group = reader.group(child.pid)
+    finally:
+        child.kill()
+        child.wait(timeout=30)
+        for stream in (child.stdin, child.stdout):
+            if stream is not None:
+                stream.close()
+
+    assert own.process is not None
+    assert observation.state is IdentityState.PRESENT
+    assert observation.process is not None
+    identity = observation.process.identity
+    assert identity.pid == child.pid
+    assert identity.pid_namespace == own.process.identity.pid_namespace
+    assert identity.leads_group
+    assert group.state is IdentityState.PRESENT
+    assert [(pid, member.state) for pid, member in group.members] == [
+        (child.pid, IdentityState.PRESENT)
+    ]
