@@ -104,6 +104,9 @@ async def dispose_test_owner(
                 helper.signal(signal.SIGKILL)
                 assert await helper.settle(deadline)
         await asyncio.shield(closing)
+        dependencies = owner.recovery_dependencies()
+        if dependencies:
+            await asyncio.wait(dependencies)
         assert owner.inventory().cleanup_effect_tasks == 0
         assert owner.inventory().cleanup_driver_tasks == 0
         for record in owner.records.values():
