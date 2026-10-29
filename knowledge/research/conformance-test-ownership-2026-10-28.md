@@ -62,9 +62,12 @@ cleanup tasks and helper directory/claim descriptors. Garbage collection and exa
 removing retained test handles. The existing warnings-as-errors policy stays active.
 These exact regression assertions do not establish a process-wide heap/RSS envelope.
 
-## Prepared-slice verification
+## Original prepared-slice verification
 
-The three reviewed source inputs are:
+The original prepared snapshot used provider inputs from
+`8d8b766e776e52371921bfdfde2e1955932dfe71` and the three reviewed test inputs below.
+It was committed as `c14883dec3c36d4f1c22391c911944146286543e`; the subsequent
+`91bf7237ddf44be6015288e8ce24ccafb562961a` changed evidence wording only.
 
 | Path under `tests/conformance/` | SHA-256 |
 | --- | --- |
@@ -84,7 +87,7 @@ The first integrated IO run failed four reused-directory fixture cases and one m
 import; preserving the separate inherited descriptor and restoring the import corrected
 those errors. No deadlines or assertions were weakened to address any failure.
 
-The current two-file command is:
+The changed-file command is:
 
 ```sh
 uv run --no-sync pytest -q tests/conformance/test_lifetime_io_helper.py tests/conformance/test_lifetime_pending_helpers.py
@@ -97,15 +100,53 @@ evidence. A fresh Linux aarch64 container with an init reaper, Python 3.11.17 an
 passed all 63 cases in the required six-file selection in 35.36 seconds. The three
 source hashes matched the reviewed macOS inputs; tests ran with networking disabled.
 The container did not include `ps`, so no Linux process-listing evidence is claimed;
-the tests themselves assert native process/group absence. Final-head CI and the full
-issue acceptance remain pending until the dependent work is implemented and checked.
+the expired-barrier and cancellation tests assert native process/group absence.
+Hosted CI [40738242028](https://github.com/realkarych/kora/actions/runs/40738242028)
+subsequently passed for `91bf7237ddf44be6015288e8ce24ccafb562961a` and its execution's
+merge inputs. It completed in 48 minutes 48 seconds including scheduling and dependent
+jobs, exceeding the ten-minute feedback target while passing the hard checks.
+Complete issue acceptance remains pending the dependent implementation.
 
-On the same current source, the macOS architecture selection passed all 734 cases in
-29.25 seconds. The current six-file macOS selection passed all 63 cases in 37.98 seconds. Filtered
+On that original prepared snapshot, the macOS architecture selection passed all 734
+cases in 29.25 seconds. Its six-file selection passed all 63 cases in 37.98 seconds. Filtered
 `ps -axo pid,ppid,pgid,stat,args` listings immediately before and after that run
 contained no process matching this checkout's interpreter or conformance probe paths.
 These listings complement the tests' anchored identity/group assertions, rather than
-substituting for them. Raw logs, JUnit and listing data accompany the PR evidence.
+substituting for them. The original local logs, JUnit and listings were inspected
+before temporary-directory cleanup; they are no longer available locally. Their
+recorded observations remain historical evidence, while hosted CI retains its own
+execution evidence. No old local run is relabeled as an execution of later inputs.
+
+## Accepted-master integration on 2026-10-29
+
+Merge source `63e0bb301bc97d7344fb2b1e39653aafbcc2b059` integrates accepted master
+`e6c0730f1ebdd0e7d809e8f8a7780034cb0aba97`. The three test hashes above remain
+unchanged, but their identity, filesystem and channel providers changed. Earlier local
+results therefore do not establish compatibility with this integrated source.
+
+Fresh macOS checks on that merge source passed:
+
+- The exact six-file issue selection: 63 cases in 38.10 seconds.
+- `uv run --no-sync pytest -q tests/architecture`: 800 cases in 30.84 seconds.
+- Full Ruff lint and format checks: 650 files; strict Pyright: zero errors or warnings.
+
+The local interpreter and launcher remain Python 3.11.17 and uv 0.11.7. Filtered
+process listings before and after the new six-file run again contained no matching
+interpreter or probe process. The new checks do not establish Linux or final-head
+hosted results; those require the integrated PR's current CI.
+
+Independent correctness, security and performance reassessments inspected only the
+changed provider edges consumed by this slice: observer-scoped native identity;
+claim/journal calls into private-file helpers; and existing byte-frame/record writes
+after the memoryview type extension. Each passed. Unchanged test ownership, exception
+visibility and descriptor-method conclusions carry with their original inspected
+inputs. Unconsumed typed-frame methods and unrelated runtime, registry and storage
+behavior did not expand the assignment. Condensation inputs are unchanged.
+
+The complete own diff against the accepted master still contains zero production
+lines. General recovered-domain setup, probe handoff and journal-consumer work remain
+unimplemented behind #369 and #359. No relevant master input or coordinator-owned
+branch or campaign was changed by this integration.
 
 No qualification workload, numerical gate, database coverage, supported platform or
 hard deadline changes. The historical command-qualification failure and its full
