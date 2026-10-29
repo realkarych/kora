@@ -49,7 +49,7 @@ WORKFLOW_TRIGGERS = {
     "conformance-lifetime.yml": {"workflow_dispatch", "schedule"},
     "gitleaks.yml": {"pull_request", "push", "schedule", "workflow_dispatch"},
     "osv-scanner.yml": {"pull_request", "push", "schedule"},
-    "storage.yml": {"workflow_dispatch", "schedule"},
+    "storage.yml": {"workflow_dispatch"},
 }
 GATING_JOB_CONDITIONS = {
     "ci.yml:scaffold": "${{ always() }}",

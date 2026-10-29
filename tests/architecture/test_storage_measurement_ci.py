@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
 
 import pytest
 
@@ -27,16 +26,13 @@ def storage_jobs() -> dict[str, object]:
     return table(workflow_document("storage.yml")["jobs"])
 
 
-def test_storage_qualification_runs_nightly_and_manually() -> None:
+def test_storage_qualification_runs_manually_before_release() -> None:
     workflow = workflow_document("storage.yml")
 
     triggers = table(workflow["on"])
-    schedule = [table(entry) for entry in cast(list[object], triggers["schedule"])]
 
-    assert set(triggers) == {"workflow_dispatch", "schedule"}
+    assert set(triggers) == {"workflow_dispatch"}
     assert triggers["workflow_dispatch"] is None
-    assert schedule
-    assert all(isinstance(entry["cron"], str) for entry in schedule)
     assert table(workflow["concurrency"])["cancel-in-progress"] is False
 
 
