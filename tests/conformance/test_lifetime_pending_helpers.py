@@ -20,11 +20,9 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
-from kora.runner.filesystem import DirectoryAnchor
 from kora.runner.identity import IdentityState, NativeIdentityReader
 from kora.runner.processes import ExitAnchor
 from tests.conformance.lifetime_helpers import (
-    ProbeIOHelperLauncher,
     join_helper_operation,
     unwind_owned,
 )
