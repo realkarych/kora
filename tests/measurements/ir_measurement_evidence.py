@@ -545,7 +545,8 @@ def shard_evidence() -> tuple[Evidence, ...]:
     worker2 = configuration_evidence(2)
     schemas = tuple(schema_evidence(run) for run in range(3))
     prefixes = (
-        ("dense_", "schema_"),
+        ("dense_",),
+        ("schema_",),
         ("control_",),
         ("remaining_",),
         ("config_", "document_"),
@@ -568,11 +569,11 @@ def shard_evidence() -> tuple[Evidence, ...]:
         [child for child in children if child.mode != "timing"]
     )
     return (
-        accepted.without(owned),
-        worker1.union(timing, validation[0]),
-        worker2.union(lifetime, validation[1]),
-        schemas[0].union(validation[2]),
-        schemas[1].union(validation[3]),
+        accepted.without(owned).union(validation[0]),
+        worker1.union(worker2, timing, validation[1]),
+        lifetime.union(validation[2]),
+        schemas[0].union(validation[3]),
+        schemas[1].union(validation[4]),
         schemas[2].union(remaining, vcs_lifetime),
     )
 

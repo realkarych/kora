@@ -358,13 +358,13 @@ The slowest macOS sample, at 556 s, projects to the 7:00 line. The 6:00 conditio
 
 Issue [#271](https://github.com/realkarych/kora/issues/271) preserves six IR runners and moves provider-loading/protocol-model work into `provider-protocol-measurements`. The existing resource job key and check name remain for compatibility; it retains logging, metadata and all full-disk steps. Both jobs own locked setup, source receipts, final environment verification, cancellation refusal and complete required-step proofs. CEL requires both job results and both proofs. Artifact names, workloads and hard limits are unchanged. Scaffold source/build assignment stays unchanged; PR #301 owns its separate placement change.
 
-The six partitions assign whole existing tests and validation-name families. Shard 0 retains configuration worker 0, VcsRef action/import, diagnostics and failure cases. Shards 1/2 retain configuration workers 1/2 and their accounting timing/lifetime ownership, with dense/schema and control validation respectively. Shards 3/4 pair schema workers 0/1 with remaining and configuration/document validation. Shard 5 pairs schema worker 2 with VcsRef lifetime and every other validation name, including unmatched future prefixes. Literal full parameter prefixes prevent substring overlap. Real collection and evidence checks require exact node, gate and sample-multiplicity ownership.
+The six partitions assign whole existing tests and validation-name families. Shard 0 retains configuration worker 0, VcsRef action/import, diagnostics and failure cases, plus dense validation. Shard 1 owns configuration workers 1/2, accounting timing and schema validation. Shard 2 owns accounting lifetime and control validation. Shards 3/4 pair schema workers 0/1 with remaining and configuration/document validation. Shard 5 pairs schema worker 2 with VcsRef lifetime and every other validation name, including unmatched future prefixes. Literal full parameter prefixes prevent substring overlap. Real collection and evidence checks require exact node, gate and sample-multiplicity ownership.
 
 | Shard | Tests | Gates | Samples |
 |---|---:|---:|---:|
-| 0 | 13 | 123 | 2,427 |
-| 1 | 24 | 188 | 2,761 |
-| 2 | 58 | 643 | 852 |
+| 0 | 22 | 132 | 2,517 |
+| 1 | 16 | 183 | 2,675 |
+| 2 | 57 | 639 | 848 |
 | 3 | 65 | 68 | 964 |
 | 4 | 114 | 117 | 1,914 |
 | 5 | 85 | 88 | 1,750 |
@@ -381,5 +381,7 @@ The inherited [#268 method](https://github.com/realkarych/kora/issues/268#issuec
 Report each head shard's job-duration median and `max / min - 1`, all three pipeline totals, and each sample's measurement-versus-Scaffold comparison. The retained criteria are IR imbalance at most 30%, median pipeline below 450 seconds and no measurement job more than 30 seconds longer than the slowest Scaffold shard. All mandatory final-head results must pass separately from timing.
 
 Pre-change [CI 40745060259](https://github.com/realkarych/kora/actions/runs/40745060259), at `e6c0730`, observed IR jobs 496/225/250/206/210/172 seconds and resource time 388 seconds. This single run motivates packing and establishes no comparison acceptance. It failed macOS `test_storage_case_runner_retains_failed_domain[task]`, tracked by #408 and existing PR #409; its short failed conformance duration, skipped build and refused joins are not healthy headroom evidence. #301's historical native-storage failures also retain their outcomes. Neither repair is part of #271.
+
+After accepted #409 merged into base `cb9b882`, the initial split [CI 40822802978](https://github.com/realkarych/kora/actions/runs/40822802978/attempts/1), at `5e5603e`, passed all 33 jobs. Its pipeline took 3,344 seconds under external account contention; it is separate from the comparison campaign. IR jobs took 221/156/403/240/226/273 seconds. Retained JUnit attributes 213.925 seconds of shard 2 to accounting lifetime and 142.307 seconds to configuration worker 2; shard 1's dense validation takes 18.036 seconds. The [bounded packing adjustment](https://github.com/realkarych/kora/issues/271#issuecomment-6489464942) moves the complete configuration worker 2 to shard 1 and dense validation to shard 0, yielding the partition above. Single-run estimates of 239/280/261/240/226/273 seconds guide this adjustment and establish no qualifying median. Workloads, isolation and the sampling method stay unchanged.
 
 Hosted comparison and final-head acceptance remain pending until their revision-matched runs and artifacts are recorded. Static balance or local passing collection/evidence tests establish no hosted performance guarantee.

@@ -380,14 +380,14 @@ def test_accounting_timing_diagnostics_refuse_invalid_samples(seconds: float) ->
 
 
 @pytest.mark.parametrize(
-    ("run", "gates", "samples", "children"),
+    ("run", "gates", "samples", "children", "configurations"),
     [
-        (0, 123, 2427, 0),
-        (1, 188, 2761, 27),
-        (2, 643, 852, 99),
-        (3, 68, 964, 0),
-        (4, 117, 1914, 0),
-        (5, 88, 1750, 0),
+        (0, 132, 2517, 0, (0,)),
+        (1, 183, 2675, 27, (1, 2)),
+        (2, 639, 848, 99, ()),
+        (3, 68, 964, 0, ()),
+        (4, 117, 1914, 0, ()),
+        (5, 88, 1750, 0, ()),
     ],
 )
 def test_ir_report_accepts_complete_owned_shard(
@@ -396,8 +396,10 @@ def test_ir_report_accepts_complete_owned_shard(
     gates: int,
     samples: int,
     children: int,
+    configurations: tuple[int, ...],
 ) -> None:
     expected = shard_evidence()[run]
+    configuration_fields = {f"config_lifetime_{worker}" for worker in configurations}
 
     report = verify_report(
         shard_documents[run], rendered_junit(expected), REVISION, expected
@@ -419,9 +421,11 @@ def test_ir_report_accepts_complete_owned_shard(
         len([key for key in report.environment if key.startswith("cost_")])
         == children * 2
     )
-    assert (
-        f"config_lifetime_{run}" if run < 3 else f"schema_lifetime_{run - 3}"
-    ) in report.environment
+    assert {
+        key for key in report.environment if key.startswith("config_lifetime_")
+    } == configuration_fields
+    if run >= 3:
+        assert f"schema_lifetime_{run - 3}" in report.environment
 
 
 @pytest.mark.parametrize(
@@ -865,9 +869,9 @@ def test_ir_shard_inventory_preserves_exact_ownership_and_multiplicity() -> None
         (len(shard.nodes), len(shard.gates), sum(shard.samples.values()))
         for shard in shards
     ] == [
-        (13, 123, 2427),
-        (24, 188, 2761),
-        (58, 643, 852),
+        (22, 132, 2517),
+        (16, 183, 2675),
+        (57, 639, 848),
         (65, 68, 964),
         (114, 117, 1914),
         (85, 88, 1750),
