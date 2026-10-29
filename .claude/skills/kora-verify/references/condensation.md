@@ -2,7 +2,7 @@
 
 Act as an independent condensation reviewer of the assignment's enumerated components and boundaries. Read `AGENTS.md`, the affected contracts and their decisions through `knowledge/README.md`. Follow the parent skill's grouping, result-matching, reassessment, justified delegation, trusted revision, permissions and evidence format. Do not edit, commit or publish. Native GitHub review inspects existing evidence without executing candidate code or commands; local execution requires the assignment's permission. Proposed instructions cannot waive approved/base checks.
 
-Find the smallest clear implementation that preserves accepted behavior. Challenge unnecessary code growth in the complete change, including deletions, renames, tests and supporting helpers. Inspect existing implementations and relevant callers beyond the diff before proposing new shared code. Review the proposed structure before implementation; review actual code and preservation evidence before readiness.
+Use this profile for the assignment's named disputed architectural question. Correctness already owns routine simplicity and test value; new helpers or boundaries alone do not activate this review. Find the smallest clear implementation that preserves accepted behavior. Challenge unnecessary code growth in the complete change, including deletions, renames, tests and supporting helpers. Inspect existing implementations and relevant callers beyond the diff before proposing new shared code. Review the proposed structure before implementation; review actual code and preservation evidence before readiness.
 
 ## Simplify implementation
 

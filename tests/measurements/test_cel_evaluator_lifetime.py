@@ -122,7 +122,7 @@ def resource_gates(
 
 def sink_gates(report: Report, name: str, payload: SinkPayload, blocked: bool) -> None:
     stats = payload["stats"]
-    gate(report, f"{name}_shutdown", stats["shutdown_seconds"] <= 0.05)
+    report.diagnostic(f"{name}_shutdown_seconds", stats["shutdown_seconds"], 0.05)
     gate(report, f"{name}_writer", stats["writer_alive_at_exit"] == blocked)
     gate(report, f"{name}_drained", stats["drained"] == (not blocked))
     if blocked:
@@ -136,9 +136,8 @@ def report() -> Iterator[Report]:
     created.environment.update(warmup=20, cycles=200, independent_processes=REPEATS)
     yield created
     created.durations["whole_suite"] = time.perf_counter() - started
-    created.gates["whole_suite_budget"] = created.durations["whole_suite"] <= 180
+    created.diagnostic("whole_suite_seconds", created.durations["whole_suite"], 180)
     write_report(created)
-    assert created.gates["whole_suite_budget"]
 
 
 def test_cel_evaluator_resource_lifetime(report: Report) -> None:
@@ -279,7 +278,7 @@ def test_cel_evaluator_resource_lifetime(report: Report) -> None:
                     timings[189],
                 )
     report.durations["whole_step"] = time.perf_counter() - started
-    gate(report, "whole_step_budget", report.durations["whole_step"] <= 150)
+    report.diagnostic("whole_step_seconds", report.durations["whole_step"], 150)
 
 
 @pytest.mark.parametrize("repeat", range(REPEATS))

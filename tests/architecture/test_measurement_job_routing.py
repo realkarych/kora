@@ -71,7 +71,6 @@ ROOT = Path(__file__).resolve().parents[2]
 COMMAND_ROUTED_MEASUREMENT = "tests/measurements/test_pricing_database_lifetime.py"
 STORAGE_WORKFLOW_MEASUREMENT = "tests/measurements/test_artifact_storage_lifetime.py"
 LANE_DIAGNOSTIC_MEASUREMENT = "tests/measurements/test_local_runtime_cost.py"
-LANE_DIAGNOSTIC_STEPS = frozenset({("scaffold-tests", "diagnostics")})
 MEASUREMENT_MODULE = re.compile(r"tests/measurements/test_[a-z0-9_]+\.py")
 PYTEST = ("uv", "run", "--no-sync", "pytest")
 MATRIX_ARGUMENTS = "${{matrix.pytest-arguments}}"
@@ -101,12 +100,13 @@ SCAFFOLD_PLATFORMS = (
 )
 CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
 LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
-LOCAL_RUNTIME_DIAGNOSTICS = "${{ matrix.lane == 'local-runtime' && !cancelled() }}"
+FRONTEND_ONLY = "${{ matrix.lane != 'local-runtime' }}"
 LANE_STEP_CONDITIONS = {
+    "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": FRONTEND_ONLY,
+    "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": FRONTEND_ONLY,
     "static_checks": CONFORMANCE_ONLY,
     "preparation": LOCAL_RUNTIME_ONLY,
-    "diagnostics": LOCAL_RUNTIME_DIAGNOSTICS,
-    "diagnostics_upload": LOCAL_RUNTIME_DIAGNOSTICS,
+    "frontend_dependencies": "${{ matrix.lane != 'local-runtime' }}",
     "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
     "evidence_upload": "${{ always() }}",
     "distributions": CONFORMANCE_ONLY,
@@ -143,7 +143,9 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
         if step.get("id") != "diagnostics"
     )
     diagnostics = next(
-        step for step in scaffold_steps if step.get("id") == "diagnostics"
+        step
+        for step in step_list(table(jobs["local-runtime-diagnostics"]))
+        if step.get("name") == "Measure local runtime lock contention"
     )
 
     assert {(row["os"], row["python"], row["databases"]) for row in rows} == set(
@@ -151,8 +153,13 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     )
     assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
-    assert diagnostics["continue-on-error"] is True
-    assert str(diagnostics["run"]).count("-m measurement") == 1
+    assert table(jobs["local-runtime-diagnostics"])["continue-on-error"] is True
+    assert "local-runtime-diagnostics" not in cast(
+        list[object], scaffold.get("needs", [])
+    )
+    assert command_lines(diagnostics["run"]) == [
+        (*PYTEST, "-q", "-m", "measurement", LANE_DIAGNOSTIC_MEASUREMENT)
+    ]
     assert MEASUREMENT_MODULE.findall(str(diagnostics["run"])) == [
         LANE_DIAGNOSTIC_MEASUREMENT
     ]
@@ -172,7 +179,10 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
         assert required in commands
     for job_id in PRODUCER_JOBS:
         job = table(jobs[job_id])
-        assert "needs" not in job
+        if job_id in {"qualification", INSTALLED_LIFETIME}:
+            assert "needs" not in job
+        else:
+            assert job["needs"] == ["change-scope"]
         assert "strategy" not in job
         assert job["runs-on"] == "ubuntu-24.04"
         assert job["timeout-minutes"] == 10
@@ -195,7 +205,7 @@ def test_producer_jobs_are_exactly_the_jobs_that_publish_a_proof() -> None:
         if "verified" in table(table(value).get("outputs", {}))
     }
 
-    assert publishing == set(PRODUCER_JOBS)
+    assert publishing == set(PRODUCER_JOBS) | {"change-scope", "scaffold-evidence"}
 
 
 @pytest.mark.parametrize("job_id", PRODUCER_JOBS)
@@ -651,9 +661,9 @@ def measurement_lines() -> list[MeasurementLine]:
         arguments = tuple(
             str(row.get("pytest-arguments", "")) for row in matrix_rows(job)
         )
+        if job_id == "local-runtime-diagnostics":
+            continue
         for step in step_list(job):
-            if (job_id, step.get("id")) in LANE_DIAGNOSTIC_STEPS:
-                continue
             for line in command_lines(step.get("run", "")):
                 if "pytest" in line and selects_measurements(line):
                     found.append((job_id, step, line, arguments))
@@ -896,16 +906,13 @@ def test_scaffold_lanes_keep_fail_closed_settings_and_pinned_steps() -> None:
 
     assert job["runs-on"] == "${{ matrix.os }}"
     assert table(job["env"])["KORA_SCAFFOLD_LANE"] == "${{ matrix.lane }}"
-    assert "if" not in job
-    assert "needs" not in job
+    assert job["if"] == "${{ needs.change-scope.outputs.full != 'false' }}"
+    assert job["needs"] == ["change-scope"]
     assert "continue-on-error" not in job
     assert "permissions" not in job
     assert document["permissions"] == {"contents": "read"}
     assert conditions == LANE_STEP_CONDITIONS
-    assert [step_key(step) for step in job_steps if "continue-on-error" in step] == [
-        "diagnostics",
-        "diagnostics_upload",
-    ]
+    assert [step_key(step) for step in job_steps if "continue-on-error" in step] == []
     checkout = job_steps[0]
     assert str(checkout["uses"]).startswith("actions/checkout@")
     assert table(checkout["with"]) == {"persist-credentials": False}

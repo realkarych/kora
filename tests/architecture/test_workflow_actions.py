@@ -20,7 +20,6 @@ ACTION_COMMITS = {
     "actions/upload-artifact": "b7c566a772e6b6bfb58ed0dc250532a479d7789f",
     "astral-sh/setup-uv": "c18668ad3cf93ea998bef934396af7bb5c839dc7",
     "github/codeql-action": "6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee",
-    "gitleaks/gitleaks-action": "e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e",
     "google/osv-scanner-action": "b1d267aea5211fa648d9d442fa64b90dbdcbdd36",
     "lycheeverse/lychee-action": "e7477775783ea5526144ba13e8db5eec57747ce8",
     "pnpm/action-setup": "ea17c68df8912ef543352723c149a84f56e3d413",
@@ -52,6 +51,7 @@ WORKFLOW_TRIGGERS = {
     "storage.yml": {"workflow_dispatch"},
 }
 GATING_JOB_CONDITIONS = {
+    "ci.yml:browser": "${{ always() }}",
     "ci.yml:scaffold": "${{ always() }}",
     "ci.yml:cel-measurements": "${{ always() }}",
     "osv-scanner.yml:pull-request": "github.event_name == 'pull_request'",

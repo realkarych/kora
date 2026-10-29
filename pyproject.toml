@@ -95,7 +95,7 @@ no-build-package = [
 constraint-dependencies = ["wcwidth==0.8.5"]
 
 [tool.pyright]
-include = ["src", "hatch_build.py", "tests"]
+include = ["src", "hatch_build.py", "tests", "scripts/ci"]
 typeCheckingMode = "strict"
 enableTypeIgnoreComments = false
 pythonVersion = "3.11"
@@ -128,6 +128,8 @@ select = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"scripts/ci/secret_scan.py" = ["S603"]
+"scripts/ci/editorial_scope.py" = ["S603"]
 "hatch_build.py" = ["S603"]
 "src/kora/executor/launcher.py" = ["S603"]
 "src/kora/plugins/vcs/git/decoder.py" = ["S603"]
@@ -171,6 +173,7 @@ select = [
 "os._exit".msg = "AGENTS.md Testing: a test process reports its result"
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = [
     "--strict-config",

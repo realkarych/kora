@@ -64,6 +64,20 @@ class Report:
     durations: dict[str, float] = field(default_factory=new_durations)
     environment: dict[str, ExtraValue] = field(default_factory=new_environment)
 
+    def diagnostic(
+        self,
+        name: str,
+        measured: int | float,
+        reference: int | float,
+        *,
+        allow_equal: bool = True,
+    ) -> None:
+        self.environment[f"diagnostic_{name}_measured"] = measured
+        self.environment[f"diagnostic_{name}_reference"] = reference
+        self.environment[f"diagnostic_{name}_exceeded"] = (
+            measured > reference if allow_equal else measured >= reference
+        )
+
     def summary(self) -> dict[str, dict[str, float]]:
         grouped: dict[str, list[float]] = {}
         for sample in self.samples:

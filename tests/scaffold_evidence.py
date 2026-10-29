@@ -117,9 +117,44 @@ def evidence_bytes(path: Path, maximum: int = 16777216) -> bytes:
     return encoded
 
 
+def collection(path: Path) -> frozenset[str]:
+    if not path.is_file():
+        raise ValueError("missing ordinary collection")
+    lines = [line for line in evidence_bytes(path).decode("utf-8").splitlines() if line]
+    if not lines:
+        raise ValueError("empty ordinary collection")
+    summary = re.fullmatch(
+        r"([1-9][0-9]*)(?:/([1-9][0-9]*))? tests? collected"
+        r"(?: \(([1-9][0-9]*) deselected\))? in [0-9]+\.[0-9]+s",
+        lines[-1],
+    )
+    if summary is None:
+        raise ValueError("incomplete ordinary collection summary")
+    selected = int(summary[1])
+    total = int(summary[2]) if summary[2] is not None else selected
+    deselected = int(summary[3]) if summary[3] is not None else 0
+    nodes = lines[:-1]
+    if (
+        total != selected + deselected
+        or (summary[2] is None) != (summary[3] is None)
+        or len(nodes) != selected
+        or any(
+            re.fullmatch(r"tests/[^\r\n]+\.py::[^\r\n]+", node) is None
+            for node in nodes
+        )
+        or len(frozenset(nodes)) != selected
+    ):
+        raise ValueError("invalid ordinary collection inventory")
+    return frozenset(nodes)
+
+
 def collection_nodes(path: Path) -> frozenset[str]:
     nodes: set[str] = set()
-    for line in evidence_bytes(path).decode().splitlines():
+    try:
+        collected = collection(path)
+    except ValueError:
+        raise EvidenceFailure("scaffold collection is incomplete") from None
+    for line in collected:
         if not line:
             continue
         if re.fullmatch(r"[0-9]+(?:/[0-9]+)? tests? collected.*", line):
@@ -144,19 +179,10 @@ def collection_nodes(path: Path) -> frozenset[str]:
 
 
 def expected_files(lane: str) -> frozenset[str]:
-    files = {
-        "selected.txt",
-        "selected.stderr",
-        "collection.exit",
-        "tests.stdout",
-        "tests.stderr",
-        "tests.exit",
-    }
+    files = {"tests.stdout", "tests.stderr", "tests.exit"}
     if lane == "conformance":
         files.update({"complete.txt", "complete.stderr", "complete.exit"})
     if lane in SHARD_CHILDREN:
-        files.update({"full.collection", "inventory.json"})
-        files.update(f"{name}.collection" for name in COHORTS)
         files.update(
             f"{name}.{suffix}"
             for name in SHARD_CHILDREN[lane]
@@ -183,34 +209,20 @@ def validate_lane(directory: Path, receipt: LaneReceipt) -> frozenset[str]:
             raise EvidenceFailure("scaffold evidence hash differs from its receipt")
         if filename.endswith(".exit") and encoded != b"0\n":
             raise EvidenceFailure("scaffold execution did not succeed")
-    selected = collection_nodes(directory / "selected.txt")
-    if receipt.lane in SHARD_CHILDREN:
-        validate_cohorts(directory, selected, SHARD_CHILDREN[receipt.lane])
-    elif junit_nodes(directory / "junit.xml", 16777216) != selected:
-        raise EvidenceFailure("scaffold JUnit differs from its collected inventory")
+    reports = (
+        tuple(f"{name}.xml" for name in SHARD_CHILDREN[receipt.lane])
+        if receipt.lane in SHARD_CHILDREN
+        else ("junit.xml",)
+    )
+    selected: set[str] = set()
+    for filename in reports:
+        nodes = junit_nodes(directory / filename, 16777216)
+        if not nodes or nodes & selected:
+            raise EvidenceFailure("ordinary cohorts overlap or are empty")
+        selected.update(nodes)
     if receipt.lane == "local-runtime":
-        validate_local_runtime(receipt.operating_system, selected)
-    return selected
-
-
-def validate_cohorts(
-    directory: Path, selected: frozenset[str], children: tuple[str, ...]
-) -> None:
-    if collection_nodes(directory / "full.collection") != selected:
-        raise EvidenceFailure("ordinary full collection differs from lane inventory")
-    combined: set[str] = set()
-    for name in COHORTS:
-        nodes = collection_nodes(directory / f"{name}.collection")
-        if (
-            name in children
-            and junit_nodes(directory / f"{name}.xml", 16777216) != nodes
-        ):
-            raise EvidenceFailure("ordinary JUnit differs from its collected inventory")
-        if nodes & combined:
-            raise EvidenceFailure("ordinary cohorts overlap")
-        combined.update(nodes)
-    if frozenset(combined) != selected:
-        raise EvidenceFailure("ordinary cohorts do not partition the lane inventory")
+        validate_local_runtime(receipt.operating_system, frozenset(selected))
+    return frozenset(selected)
 
 
 def record_lane(
@@ -302,29 +314,10 @@ def verify_scaffold(
             inventories[lane] = validate_lane(directory, receipt)
             if lane == "conformance":
                 complete = collection_nodes(directory / "complete.txt")
-        shards = [
-            root / f"scaffold-tests-{operating_system}-{python}-{lane}"
-            for lane in SHARD_CHILDREN
-        ]
-        if (
-            inventories["conformance"] != inventories["remainder"]
-            or evidence_bytes(shards[0] / "inventory.json")
-            != evidence_bytes(shards[1] / "inventory.json")
-            or any(
-                collection_nodes(shards[0] / f"{cohort}.collection")
-                != collection_nodes(shards[1] / f"{cohort}.collection")
-                for cohort in COHORTS
-            )
-        ):
-            raise EvidenceFailure("scaffold shards differ in their general inventory")
-        general, storage = inventories["conformance"], inventories["storage"]
-        local = inventories["local-runtime"]
-        if (
-            general & storage
-            or general & local
-            or storage & local
-            or general | storage | local != complete
-        ):
+        combined = frozenset[str]().union(*inventories.values())
+        if sum(len(nodes) for nodes in inventories.values()) != len(combined):
+            raise EvidenceFailure("scaffold lanes contain duplicate tests")
+        if combined != complete:
             raise EvidenceFailure("scaffold lanes do not partition the complete suite")
         total += len(complete)
     return {"environments": len(ENVIRONMENTS), "lanes": len(expected), "tests": total}

@@ -62,37 +62,43 @@ def collection_text(nodes: tuple[str, ...]) -> str:
     return "\n".join(nodes) + f"\n\n{len(nodes)} tests collected in 0.01s\n"
 
 
+def identities(nodes: tuple[str, ...]) -> frozenset[str]:
+    result: set[str] = set()
+    for node in nodes:
+        filename, _, test = node.partition("::")
+        name, bracket, parameter = test.partition("[")
+        result.add(
+            filename[:-3].replace("/", ".")
+            + "."
+            + name.replace("::", ".")
+            + bracket
+            + parameter
+        )
+    return frozenset(result)
+
+
 def lane_files(root: Path, lane: str, operating_system: str) -> None:
     root.mkdir(parents=True)
     selected = lane_nodes(lane, operating_system)
-    (root / "selected.txt").write_text(collection_text(selected))
-    (root / "selected.stderr").write_text("")
-    (root / "collection.exit").write_text("0\n")
     (root / "tests.exit").write_text("0\n")
     (root / "tests.stdout").write_text("1 passed\n")
     (root / "tests.stderr").write_text("")
     if lane == "conformance":
         (root / "complete.txt").write_text(
-            "\n".join((*GENERAL_NODES, *STORAGE_NODES, *local_nodes(operating_system)))
-            + "\n"
+            collection_text(
+                (*GENERAL_NODES, *STORAGE_NODES, *local_nodes(operating_system))
+            )
         )
         (root / "complete.stderr").write_text("")
         (root / "complete.exit").write_text("0\n")
     if lane in SHARD_CHILDREN:
-        (root / "full.collection").write_text(collection_text(selected))
-        for name, node in zip(COHORTS, selected, strict=True):
-            (root / f"{name}.collection").write_text(collection_text((node,)))
+        groups: dict[str, str] = dict(zip(COHORTS, selected, strict=True))
         for name in SHARD_CHILDREN[lane]:
-            write_junit(
-                root / f"{name}.xml", collection_nodes(root / f"{name}.collection")
-            )
+            write_junit(root / f"{name}.xml", identities((groups[name],)))
             (root / f"{name}.log").write_text("1 passed\n")
             (root / f"{name}.exit").write_text("0\n")
-        (root / "inventory.json").write_text(
-            '{"full":5,"first":1,"second":1,"measurements":1,"integration":1,"other":1}'
-        )
     else:
-        write_junit(root / "junit.xml", collection_nodes(root / "selected.txt"))
+        write_junit(root / "junit.xml", identities(selected))
 
 
 def complete_evidence(root: Path) -> None:
@@ -139,9 +145,9 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
         ("missing", "artifact has unexpected file coverage"),
         ("failed", "execution did not succeed"),
         ("skipped", "test did not pass"),
-        ("mismatch", "ordinary JUnit differs"),
+        ("mismatch", "do not partition"),
         ("overlap", "ordinary cohorts overlap"),
-        ("full", "full collection differs"),
+        ("full", "do not partition"),
     ],
 )
 def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
@@ -165,16 +171,11 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
         write_junit(directory / "second.xml", frozenset({"tests.wrong.test_value"}))
         changed.append("second.xml")
     elif corruption == "overlap":
-        (directory / "second.collection").write_bytes(
-            (directory / "first.collection").read_bytes()
-        )
         (directory / "second.xml").write_bytes((directory / "first.xml").read_bytes())
-        changed.extend(("second.collection", "second.xml"))
+        changed.append("second.xml")
     else:
-        (directory / "full.collection").write_bytes(
-            (directory / "first.collection").read_bytes()
-        )
-        changed.append("full.collection")
+        (directory / "complete.txt").write_text(collection_text((GENERAL_NODES[0],)))
+        changed.append("complete.txt")
     rehash(directory, changed)
 
     with pytest.raises(EvidenceFailure, match=match):
@@ -190,9 +191,9 @@ def test_general_cohort_evidence_refuses_rehashed_semantic_corruption(
         ("hash", EvidenceFailure, "hash differs from its receipt"),
         ("failed", EvidenceFailure, "execution did not succeed"),
         ("skipped", EvidenceFailure, "test did not pass"),
-        ("execution", EvidenceFailure, "JUnit differs"),
+        ("execution", EvidenceFailure, "do not partition"),
         ("union", EvidenceFailure, "do not partition"),
-        ("overlap", EvidenceFailure, "do not partition"),
+        ("overlap", EvidenceFailure, "duplicate tests"),
     ],
 )
 def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
@@ -203,6 +204,7 @@ def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
     if corruption == "union":
         directory = tmp_path / "scaffold-tests-macos-15-3.11.17-conformance"
     receipt = directory / "receipt.json"
+    changed: list[str] = []
     if corruption == "missing":
         receipt.unlink()
     elif corruption == "extra":
@@ -211,54 +213,37 @@ def test_scaffold_evidence_refuses_incomplete_or_mismatched_execution(
         data = parse_json_object(json.loads(receipt.read_text()))
         data["run_id"] = "122"
         receipt.write_text(json.dumps(data))
+    elif corruption == "hash":
+        (directory / "tests.stdout").write_text("changed")
+    elif corruption == "failed":
+        (directory / "tests.exit").write_text("1\n")
+        changed.append("tests.exit")
+    elif corruption == "union":
+        (directory / "complete.txt").write_text(
+            collection_text(
+                (
+                    *GENERAL_NODES,
+                    *STORAGE_NODES,
+                    *local_nodes("macos-15"),
+                    "tests/test_unexecuted.py::test_value",
+                )
+            )
+        )
+        changed.append("complete.txt")
     else:
-        target = {
-            "hash": "tests.stdout",
-            "failed": "tests.exit",
-            "skipped": "junit.xml",
-            "execution": "selected.txt",
-            "union": "complete.txt",
-            "overlap": "selected.txt",
-        }[corruption]
-        path = directory / target
-        if corruption == "union":
-            replacement = path.read_text() + "tests/test_unexecuted.py::test_value\n"
-        elif corruption == "overlap":
-            replacement = (
-                path.read_text()
-                + "tests/test_general.py::TestCase::test_value[sqlite-a::b/c]\n"
-            )
-        else:
-            replacement = {
-                "hash": "changed",
-                "failed": "1\n",
-                "execution": "tests/test_other.py::test_value\n",
-                "skipped": (
-                    '<testsuites><testsuite><testcase classname="a" name="b">'
-                    "<skipped/></testcase></testsuite></testsuites>"
-                ),
-            }[corruption]
-        path.write_text(replacement)
-        changed = [target]
+        target = directory / "junit.xml"
         if corruption == "overlap":
-            junit = directory / "junit.xml"
-            testcase = (
-                '<testcase classname="tests.test_general.TestCase" '
-                'name="test_value[sqlite-a::b/c]"/>'
+            write_junit(target, identities((*STORAGE_NODES, GENERAL_NODES[0])))
+        elif corruption == "execution":
+            write_junit(target, frozenset({"tests.wrong.test_value"}))
+        else:
+            target.write_text(
+                '<testsuites><testsuite><testcase classname="a" name="b">'
+                "<skipped/></testcase></testsuite></testsuites>"
             )
-            junit.write_text(
-                junit.read_text().replace("</testsuite>", testcase + "</testsuite>")
-            )
-            changed.append("junit.xml")
-        if corruption != "hash":
-            data = parse_json_object(json.loads(receipt.read_text()))
-            files = parse_json_object(data["files"])
-            for name in changed:
-                files[name] = hashlib.sha256(
-                    (directory / name).read_bytes()
-                ).hexdigest()
-            data["files"] = files
-            receipt.write_text(json.dumps(data))
+        changed.append("junit.xml")
+    if changed:
+        rehash(directory, changed)
 
     with pytest.raises(failure, match=match):
         verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
@@ -294,10 +279,10 @@ def test_collection_preserves_parameter_identity(tmp_path: Path) -> None:
     ("corruption", "match"),
     [
         ("missing lane", "exactly twelve lanes"),
-        ("unequal inventories", "shards differ"),
-        ("different cohorts", "shards differ"),
+        ("unequal inventories", "unexpected file coverage"),
+        ("different cohorts", "cohorts overlap"),
         ("wrong shard", "unexpected file coverage"),
-        ("remainder junit", "JUnit differs"),
+        ("remainder junit", "do not partition"),
     ],
 )
 def test_scaffold_evidence_requires_both_general_shards_to_agree(
@@ -312,29 +297,11 @@ def test_scaffold_evidence_requires_both_general_shards_to_agree(
         directory.rmdir()
     elif corruption == "unequal inventories":
         (directory / "inventory.json").write_text('{"full":5}')
-        changed.append("inventory.json")
     elif corruption == "different cohorts":
-        (directory / "other.collection").write_text(
-            collection_text((GENERAL_NODES[3],))
+        (directory / "other.xml").write_bytes(
+            (directory / "integration.xml").read_bytes()
         )
-        (directory / "integration.collection").write_text(
-            collection_text((GENERAL_NODES[4],))
-        )
-        write_junit(
-            directory / "other.xml", collection_nodes(directory / "other.collection")
-        )
-        write_junit(
-            directory / "integration.xml",
-            collection_nodes(directory / "integration.collection"),
-        )
-        changed.extend(
-            (
-                "other.collection",
-                "integration.collection",
-                "other.xml",
-                "integration.xml",
-            )
-        )
+        changed.append("other.xml")
     elif corruption == "wrong shard":
         (directory / "first.log").write_text("1 passed\n")
     else:
@@ -342,7 +309,7 @@ def test_scaffold_evidence_requires_both_general_shards_to_agree(
             directory / "integration.xml", frozenset({"tests.wrong.test_value"})
         )
         changed.append("integration.xml")
-    if directory.exists():
+    if changed:
         rehash(directory, changed)
 
     with pytest.raises(EvidenceFailure, match=match):
@@ -367,23 +334,27 @@ def test_local_runtime_lane_requires_its_host_fixture_tests(
     changed: list[str] = []
     if corruption == "missing host fixture":
         kept = tuple(node for node in nodes if "network_filesystem" not in node)
-        (directory / "selected.txt").write_text(collection_text(kept))
-        write_junit(
-            directory / "junit.xml", collection_nodes(directory / "selected.txt")
-        )
-        changed.extend(("selected.txt", "junit.xml"))
+        write_junit(directory / "junit.xml", identities(kept))
+        changed.append("junit.xml")
     elif corruption == "misplaced host fixture":
         conformance = tmp_path / "scaffold-tests-ubuntu-24.04-3.11.17-conformance"
-        complete = conformance / "complete.txt"
-        complete.write_text(complete.read_text() + "tests/db/test_host.py::test_host\n")
+        (conformance / "complete.txt").write_text(
+            collection_text(
+                (
+                    *GENERAL_NODES,
+                    *STORAGE_NODES,
+                    *nodes,
+                    "tests/db/test_host.py::test_host",
+                )
+            )
+        )
         rehash(conformance, ["complete.txt"])
     elif corruption == "outside path":
-        extended = (*nodes, "tests/test_other.py::test_value")
-        (directory / "selected.txt").write_text(collection_text(extended))
         write_junit(
-            directory / "junit.xml", collection_nodes(directory / "selected.txt")
+            directory / "junit.xml",
+            identities((*nodes, "tests/test_other.py::test_value")),
         )
-        changed.extend(("selected.txt", "junit.xml"))
+        changed.append("junit.xml")
     else:
         data = parse_json_object(json.loads((directory / "receipt.json").read_text()))
         data["arguments"] = ["tests/plugins/runtime/local"]

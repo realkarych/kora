@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TypeGuard, cast
 
+import pytest
+
 REPOSITORY_ROOT: Path = Path(__file__).resolve().parents[2]
 PYPROJECT: str = "pyproject.toml"
 GENERATED_FILES: tuple[str, ...] = ("uv.lock", "web/pnpm-lock.yaml")
@@ -307,6 +309,8 @@ RUFF_TABLE: dict[str, object] = {
             "RUF100",
         ],
         "per-file-ignores": {
+            "scripts/ci/secret_scan.py": ["S603"],
+            "scripts/ci/editorial_scope.py": ["S603"],
             "hatch_build.py": ["S603"],
             "src/kora/executor/launcher.py": ["S603"],
             "src/kora/plugins/vcs/git/decoder.py": ["S603"],
@@ -325,7 +329,7 @@ RUFF_TABLE: dict[str, object] = {
     },
 }
 PYRIGHT_TABLE: dict[str, object] = {
-    "include": ["src", "hatch_build.py", "tests"],
+    "include": ["src", "hatch_build.py", "tests", "scripts/ci"],
     "typeCheckingMode": "strict",
     "pythonVersion": "3.11",
     "venvPath": ".",
@@ -333,6 +337,7 @@ PYRIGHT_TABLE: dict[str, object] = {
     "enableTypeIgnoreComments": False,
 }
 PYTEST_TABLE: dict[str, object] = {
+    "pythonpath": ["."],
     "testpaths": ["tests"],
     "addopts": [
         "--strict-config",
@@ -1015,6 +1020,43 @@ def string_list(value: object) -> list[str]:
     return [item for item in items if isinstance(item, str)]
 
 
+def protected_configuration(
+    actual: dict[str, object],
+    recorded: dict[str, object],
+    display_options: dict[str, type[object]],
+) -> bool:
+    protected = dict(actual)
+    for name, expected_type in display_options.items():
+        if name in protected:
+            if type(protected[name]) is not expected_type:
+                return False
+            protected.pop(name)
+    return protected == recorded
+
+
+def protected_scripts(actual: dict[str, object]) -> bool:
+    if any(actual.get(name) != command for name, command in WEB_SCRIPTS.items()):
+        return False
+    lifecycle = {
+        "prepare",
+        "preinstall",
+        "install",
+        "postinstall",
+        "prepublish",
+        "prepublishOnly",
+        "publish",
+        "postpublish",
+        "prepack",
+        "postpack",
+        "dependencies",
+        "pnpm:devPreinstall",
+    }
+    hooks = {prefix + name for prefix in ("pre", "post") for name in WEB_SCRIPTS}
+    return not (actual.keys() & (lifecycle | hooks)) and all(
+        isinstance(value, str) for value in actual.values()
+    )
+
+
 def pyproject_violations(root: Path) -> Iterator[Violation]:
     path = root / PYPROJECT
     if not path.is_file():
@@ -1025,17 +1067,27 @@ def pyproject_violations(root: Path) -> Iterator[Violation]:
     ruff = table(document, "tool", "ruff")
     pyright = table(document, "tool", "pyright")
     pytest_options = table(document, "tool", "pytest", "ini_options")
-    if ruff != RUFF_TABLE:
+    if not protected_configuration(
+        ruff, RUFF_TABLE, {"output-format": str, "show-fixes": bool}
+    ):
         yield Violation(PYPROJECT, 1, "[tool.ruff] differs from the recorded table")
     if string_list(table(ruff, "lint").get("ignore")):
         yield Violation(PYPROJECT, 1, "[tool.ruff.lint] ignore is not empty")
-    if pyright != PYRIGHT_TABLE:
+    if not protected_configuration(pyright, PYRIGHT_TABLE, {"verboseOutput": bool}):
         yield Violation(PYPROJECT, 1, "[tool.pyright] differs from the recorded table")
     if pyright.get("typeCheckingMode") != "strict":
         yield Violation(PYPROJECT, 1, "[tool.pyright] typeCheckingMode is not strict")
     if pyright.get("enableTypeIgnoreComments") is not False:
         yield Violation(PYPROJECT, 1, "[tool.pyright] honours type: ignore comments")
-    if pytest_options != PYTEST_TABLE:
+    if not protected_configuration(
+        pytest_options,
+        PYTEST_TABLE,
+        {
+            "console_output_style": str,
+            "verbosity_assertions": int,
+            "verbosity_test_cases": int,
+        },
+    ):
         yield Violation(
             PYPROJECT, 1, "[tool.pytest.ini_options] differs from the recorded table"
         )
@@ -1076,7 +1128,17 @@ def web_configuration_violations(root: Path) -> Iterator[Violation]:
             yield Violation(relative, 1, "missing")
             continue
         document = json_document(path)
-        if document != recorded:
+        protected = dict(document)
+        options = dict(table(document, "compilerOptions"))
+        display = {"pretty", "diagnostics", "extendedDiagnostics", "noErrorTruncation"}
+        invalid_display = any(
+            type(options[name]) is not bool for name in display & options.keys()
+        )
+        for name in display:
+            options.pop(name, None)
+        if "compilerOptions" in document:
+            protected["compilerOptions"] = options
+        if invalid_display or protected != recorded:
             yield Violation(relative, 1, "differs from the recorded document")
         if relative in STRICT_TSCONFIGS and (
             table(document, "compilerOptions").get("strict") is not True
@@ -1087,7 +1149,7 @@ def web_configuration_violations(root: Path) -> Iterator[Violation]:
     package = root / WEB_PACKAGE
     if not package.is_file():
         yield Violation(WEB_PACKAGE, 1, "missing")
-    elif table(json_document(package), "scripts") != WEB_SCRIPTS:
+    elif not protected_scripts(table(json_document(package), "scripts")):
         yield Violation(WEB_PACKAGE, 1, "scripts differ from the recorded table")
 
 
@@ -1967,3 +2029,44 @@ def test_replacement_guard_rejects_aliases_beside_the_approved_call(
         any("unapproved process replacement" in finding for finding in findings)
         for findings in results.values()
     ), results
+
+
+def test_configuration_guard_allows_display_options_and_independent_commands(
+    tmp_path: Path,
+) -> None:
+    copy_configuration(tmp_path)
+    configuration = tmp_path / PYPROJECT
+    source = configuration.read_text()
+    source = source.replace("[tool.ruff]\n", '[tool.ruff]\noutput-format = "concise"\n')
+    source = source.replace(
+        "[tool.pyright]\n", "[tool.pyright]\nverboseOutput = true\n"
+    )
+    source = source.replace(
+        "[tool.pytest.ini_options]\n",
+        '[tool.pytest.ini_options]\nconsole_output_style = "classic"\n',
+    )
+    configuration.write_text(source)
+    package = json_document(tmp_path / WEB_PACKAGE)
+    table(package, "scripts")["inspect:environment"] = "node --version"
+    (tmp_path / WEB_PACKAGE).write_text(json.dumps(package))
+    typescript = json_document(tmp_path / "web/tsconfig.app.json")
+    table(typescript, "compilerOptions")["pretty"] = True
+    (tmp_path / "web/tsconfig.app.json").write_text(json.dumps(typescript))
+
+    violations = configuration_violations(tmp_path)
+
+    assert violations == []
+
+
+@pytest.mark.parametrize("hook", ["pretypecheck", "postbuild", "prepare", "preinstall"])
+def test_configuration_guard_refuses_new_execution_hooks(
+    tmp_path: Path, hook: str
+) -> None:
+    copy_configuration(tmp_path)
+    package = json_document(tmp_path / WEB_PACKAGE)
+    table(package, "scripts")[hook] = "node --version"
+    (tmp_path / WEB_PACKAGE).write_text(json.dumps(package))
+
+    violations = configuration_violations(tmp_path)
+
+    assert any("scripts differ" in violation for violation in violations)

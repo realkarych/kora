@@ -1,5 +1,8 @@
 # Remaining IR configuration and JSON-data evidence
 
+Current verification classification follows the owner-approved [2026-10-29 audit amendment](approved-verification-audit-2026-10-29.md). The original numerical methods, measurements and failures below remain historical evidence; the amendment names the exact changed gates and preserved limits.
+
+
 Date: 2026-10-23. Scope: [issue #237](https://github.com/realkarych/kora/issues/237), the remaining configuration foundation of [#218](https://github.com/realkarych/kora/issues/218). The owner accepted the contract and exact human-facing wording in [the approval](https://github.com/realkarych/kora/issues/218#issuecomment-6363920858); [the child plan](https://github.com/realkarych/kora/issues/237#issuecomment-6363940279) declares the implementation and measurement scope. This record supplies evidence and reproducible checks, not another behavioral decision.
 
 ## Implemented structural boundary

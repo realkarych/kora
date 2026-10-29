@@ -1,9 +1,7 @@
 import os
-import shlex
 import subprocess
 import sys
 import tomllib
-from fnmatch import fnmatch
 from pathlib import Path
 from typing import cast
 
@@ -11,7 +9,6 @@ import pytest
 
 from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
 from tests.support.workflows import (
-    action_name,
     command_lines,
     steps,
     table,
@@ -32,14 +29,6 @@ FIRST_MODULES = (
     "tests/conformance/test_parent_lifetime.py",
     "tests/conformance/test_recovered_process_lifetime.py",
 )
-COLLECTIONS = (
-    "full.collection",
-    *(f"{cohort}.collection" for cohort in COHORTS),
-)
-GROUP_ARGUMENTS = {
-    "full": '"${general[@]}"',
-    **{cohort: f'"${{{cohort}[@]}}"' for cohort in COHORTS},
-}
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
     "PREPARATION_OUTCOME",
@@ -57,18 +46,14 @@ LANE_OUTCOMES = {
     "conformance": WITHOUT_FIXTURES,
     "remainder": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "local-runtime": WITHOUT_BUILDS,
+    "local-runtime": {**WITHOUT_BUILDS, "FRONTEND_OUTCOME": "skipped"},
 }
 
 
 def shard_evidence(shard: str) -> tuple[str, ...]:
     children = SHARD_CHILDREN[shard]
-    return (
-        *COLLECTIONS,
-        "inventory.json",
-        *(f"{child}.log" for child in children),
-        *(f"{child}.xml" for child in children),
-        *(f"{child}.exit" for child in children),
+    return tuple(
+        f"{child}.{suffix}" for child in children for suffix in ("log", "xml", "exit")
     )
 
 
@@ -99,46 +84,6 @@ def evidence_validation() -> str:
 ORDINARY_OUTPUT = "$KORA_ORDINARY_OUTPUT"
 BASE_TEMPORARY = "tmp-"
 PID_RECORD = ("pids+=", "(", "$!", ")")
-INVENTORY_COMMAND = (
-    "uv",
-    "run",
-    "--no-sync",
-    "python",
-    "-m",
-    "tests.support.ordinary_inventory",
-    ORDINARY_OUTPUT,
-    ">",
-    f"{ORDINARY_OUTPUT}/inventory.json",
-)
-COPY_GUARD = (
-    "if",
-    "test",
-    "-f",
-    f"{ORDINARY_OUTPUT}/$name",
-    "&&",
-    "test",
-    "!",
-    "-L",
-    f"{ORDINARY_OUTPUT}/$name",
-    ";",
-    "then",
-)
-
-
-def collection_command(group: str, arguments: str) -> tuple[str, ...]:
-    return (
-        "uv",
-        "run",
-        "--no-sync",
-        "pytest",
-        "--collect-only",
-        "-q",
-        "-o",
-        f"cache_dir={ORDINARY_OUTPUT}/cache-{group}",
-        *shlex.split(arguments),
-        ">",
-        f"{ORDINARY_OUTPUT}/{group}.collection",
-    )
 
 
 def launch_command(child: str) -> tuple[str, ...]:
@@ -184,58 +129,37 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
     jobs = workflow_jobs()
     lane = table(jobs["scaffold-tests"])
     selected = steps(lane)
-    download = table(steps(table(jobs["scaffold"]))["evidence_download"]["with"])
-    upload = selected["evidence_upload"]
     command = ordinary_shell()
-
     lines = command_lines(command)
     outer = command_lines(selected["tests"]["run"])
-    collections = [line for line in lines if "--collect-only" in line]
-    finished = outer.index(("KORA_ORDINARY_SCRIPT",))
-    copy = next(line for line in outer[finished:] if line[:3] == ("for", "name", "in"))
-    copying = outer.index(
-        ("cp", f"{ORDINARY_OUTPUT}/$name", "$KORA_SCAFFOLD_DIRECTORY/$name")
+    collection = [line for line in outer if "--collect-only" in line]
+    download = table(
+        steps(table(jobs["scaffold-evidence"]))["evidence_download"]["with"]
     )
-    recording = next(
-        index
-        for index, line in enumerate(outer)
-        if line[:7]
-        == (
-            "uv",
-            "run",
-            "--no-sync",
-            "python",
-            "-m",
-            "tests.scaffold_evidence",
-            "record",
-        )
-    )
-    rows = [
-        table(row)
-        for row in cast(
-            list[object], table(table(lane["strategy"])["matrix"])["include"]
-        )
-    ]
-    artifacts = [rendered(str(table(upload["with"])["name"]), row) for row in rows]
 
     assert "${{" not in command
-    assert collections == [
-        collection_command(group, arguments)
-        for group, arguments in GROUP_ARGUMENTS.items()
-    ]
-    assert (
-        lines.index(collections[-1])
-        < lines.index(INVENTORY_COMMAND)
-        < lines.index(("pids=", "()"))
+    assert len(collection) == 1
+    assert collection[0][:8] == (
+        "if",
+        "uv",
+        "run",
+        "--no-sync",
+        "pytest",
+        "--collect-only",
+        "-q",
+        "-m",
     )
+    assert "not measurement" in collection[0]
+    assert not any("--collect-only" in line for line in lines)
+    assert download["pattern"] == "scaffold-tests-*"
     for shard, children in SHARD_CHILDREN.items():
         branch = command_lines(shard_branch(shard))
         names = declared_array(branch, "names")
         launches = [launch_command(child) for child in names]
         assert sorted(names) == sorted(children)
-        assert [line for line in branch if "tests.support.ordinary_pytest" in line] == (
-            launches
-        )
+        assert [
+            line for line in branch if "tests.support.ordinary_pytest" in line
+        ] == launches
         assert all(
             branch[branch.index(launch) + 1] == PID_RECORD for launch in launches
         )
@@ -249,57 +173,13 @@ def test_ordinary_ci_collects_exact_groups_and_uploads_only_evidence() -> None:
         < lines.index(("for", "name", "in", "${evidence[@]}", ";", "do"))
     )
     assert lines[-1] == ("exit", "$result")
+    assert selected["evidence_upload"]["if"] == "${{ always() }}"
     assert (
-        "KORA_ORDINARY_OUTPUT=$(mktemp -d $RUNNER_TEMP/kora-ordinary.XXXXXX)",
-    ) in outer
-    assert (*copy[:3], *copy[-2:]) == ("for", "name", "in", ";", "do")
-    assert sorted(copy[3:-2]) == sorted(
-        {name for shard in SHARD_CHILDREN for name in shard_evidence(shard)}
+        table(selected["evidence_upload"]["with"])["path"]
+        == "${{ env.KORA_SCAFFOLD_DIRECTORY }}"
     )
-    assert outer[copying - 1] == COPY_GUARD
-    assert finished < copying < recording
-    assert ("if", "test", "$KORA_SCAFFOLD_LANE", "=", "conformance", ";", "then") in (
-        outer
-    )
-    assert (
-        "if",
-        "test",
-        "$KORA_SCAFFOLD_LANE",
-        "!=",
-        "storage",
-        "&&",
-        "test",
-        "$KORA_SCAFFOLD_LANE",
-        "!=",
-        "local-runtime",
-        ";",
-        "then",
-    ) in outer
-    assert (
-        "elif",
-        "uv",
-        "run",
-        "--no-sync",
-        "pytest",
-        "-q",
-        "${KORA_SCAFFOLD_SELECTION[@]}",
-        "${KORA_SCAFFOLD_ARGUMENTS[@]}",
-        "--junitxml=$KORA_SCAFFOLD_DIRECTORY/junit.xml",
-        ">",
-        "$KORA_SCAFFOLD_DIRECTORY/tests.stdout",
-        "2",
-        ">",
-        "$KORA_SCAFFOLD_DIRECTORY/tests.stderr",
-        ";",
-        "then",
-    ) in outer
-    assert set(selected["tests"]) == {"name", "id", "run"}
-    assert action_name(upload["uses"]) == "actions/upload-artifact"
-    assert table(upload["with"])["path"] == "${{ env.KORA_SCAFFOLD_DIRECTORY }}"
-    assert len(set(artifacts)) == len(rows)
-    assert all(fnmatch(artifact, str(download["pattern"])) for artifact in artifacts)
-    assert "ordinary_tests" not in selected
-    assert "ordinary_upload" not in selected
+    assert "tests.scaffold_evidence" in str(selected["tests"]["run"])
+    assert "record" in str(selected["tests"]["run"])
 
 
 def configured_testpaths() -> tuple[str, ...]:
@@ -340,7 +220,7 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         )
         if table(value)["lane"] == "conformance"
     )
-    declarations = ordinary_shell().partition("\nuv run ")[0]
+    declarations = ordinary_shell().partition("\npids=()")[0]
     printing = "".join(
         f'printf "%s\\0" "${{{name}[@]}}" > "$KORA_COHORT_OUTPUT/{name}"\n'
         for name in ("general", *COHORTS)

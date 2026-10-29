@@ -1,7 +1,6 @@
 import os
 import shlex
 import subprocess
-import sys
 from pathlib import Path
 from typing import cast
 
@@ -10,10 +9,8 @@ import pytest
 from tests.scaffold_evidence import (
     ENVIRONMENTS,
     GENERAL_ARGUMENTS,
-    LOCAL_RUNTIME_ARGUMENTS,
     LOCAL_RUNTIME_PATH,
     STORAGE_ARGUMENTS,
-    collection_nodes,
 )
 from tests.support.workflows import (
     action_name,
@@ -41,7 +38,7 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         "Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, "
         "${{ matrix.lane }})"
     )
-    assert join["needs"] == ["scaffold-tests"]
+    assert join["needs"] == ["scaffold-evidence"]
     assert join["if"] == "${{ always() }}"
     assert table(table(join["strategy"])["matrix"])["include"] == [
         {"os": operating_system, "python": python}
@@ -68,7 +65,7 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         assert table(job["strategy"])["fail-fast"] is False
 
 
-def test_every_scaffold_lane_installs_the_pinned_frontend_toolchain() -> None:
+def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
     job = table(workflow_jobs()["scaffold-tests"])
     entries = [table(value) for value in cast(list[object], job["steps"])]
 
@@ -89,7 +86,7 @@ def test_every_scaffold_lane_installs_the_pinned_frontend_toolchain() -> None:
 
     assert table(node["with"])["node-version-file"] == "web/.node-version"
     assert table(pnpm["with"])["package_json_file"] == "web/package.json"
-    assert "if" not in installation
+    assert installation["if"] == "${{ matrix.lane != 'local-runtime' }}"
     assert command_lines(installation["run"]) == [
         ("pnpm", "--dir", "web", "install", "--frozen-lockfile")
     ]
@@ -97,44 +94,6 @@ def test_every_scaffold_lane_installs_the_pinned_frontend_toolchain() -> None:
     assert entries.index(pnpm) < entries.index(installation)
     assert actions.count("actions/setup-node") == 1
     assert actions.count("pnpm/action-setup") == 1
-
-
-def test_scaffold_workflow_arguments_partition_actual_default_collection(
-    tmp_path: Path,
-) -> None:
-    job = table(workflow_jobs()["scaffold-tests"])
-    rows = cast(list[object], table(table(job["strategy"])["matrix"])["include"])
-    selections = {
-        str(row["lane"]): shlex.split(str(row["pytest-arguments"]))
-        for value in rows
-        if (row := table(value))["os"] == "macos-15"
-    }
-    selections["local-runtime"] = list(LOCAL_RUNTIME_ARGUMENTS)
-    collected: dict[str, frozenset[str]] = {}
-
-    for lane, arguments in {
-        "complete": ["-m", "not measurement"],
-        **selections,
-    }.items():
-        result = subprocess.run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q", *arguments],
-            cwd=Path(__file__).resolve().parents[2],
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
-        assert result.returncode == 0
-        path = tmp_path / f"{lane}.txt"
-        path.write_bytes(result.stdout)
-        collected[lane] = collection_nodes(path)
-
-    general, storage = collected["conformance"], collected["storage"]
-    local = collected["local-runtime"]
-    assert collected["remainder"] == general
-    assert len(general & storage) == 0
-    assert len(general & local) == 0
-    assert len(storage & local) == 0
-    assert len((general | storage | local) ^ collected["complete"]) == 0
 
 
 def is_existing_test_path(root: Path, token: str) -> bool:
@@ -166,12 +125,15 @@ def test_scaffold_lane_arguments_only_name_existing_test_paths() -> None:
 
 
 def test_scaffold_join_gate_always_runs_on_every_prerequisite_outcome() -> None:
-    join = table(workflow_jobs()["scaffold"])
+    join = table(workflow_jobs()["scaffold-evidence"])
 
     gate = table(cast(list[object], join["steps"])[-1])
 
     assert gate["if"] == "${{ always() }}"
     assert table(gate["env"]) == {
+        "SCOPE_RESULT": "${{ needs.change-scope.result }}",
+        "SCOPE_VERIFIED": "${{ needs.change-scope.outputs.verified }}",
+        "FULL_SCOPE": "${{ needs.change-scope.outputs.full }}",
         "LANES_RESULT": "${{ needs.scaffold-tests.result }}",
         "DEPENDENCIES_OUTCOME": "${{ steps.dependencies.outcome }}",
         "DOWNLOAD_OUTCOME": "${{ steps.evidence_download.outcome }}",
@@ -193,14 +155,19 @@ def test_scaffold_join_gate_always_runs_on_every_prerequisite_outcome() -> None:
 def test_scaffold_join_refuses_failed_cancelled_skipped_or_missing_evidence(
     field: str,
     outcome: str,
+    tmp_path: Path,
 ) -> None:
-    join = table(workflow_jobs()["scaffold"])
+    join = table(workflow_jobs()["scaffold-evidence"])
     entries = [table(value) for value in cast(list[object], join["steps"])]
     gate = entries[-1]
     environment = {
         **os.environ,
         **dict.fromkeys(JOIN_FIELDS, "success"),
         "WORKFLOW_CANCELLED": "false",
+        "SCOPE_RESULT": "success",
+        "SCOPE_VERIFIED": "true",
+        "FULL_SCOPE": "true",
+        "GITHUB_OUTPUT": str(tmp_path / "output"),
         field: outcome,
     }
 

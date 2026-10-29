@@ -69,6 +69,7 @@ body:
         that triggers revisiting the issue. Plans for business-logic changes must estimate added
         plus deleted hand-written production-code lines, excluding tests, documentation and generated files.
         Split any scope exceeding 1,000 into smaller PRs and linked sub-issues with explicit dependencies,
+        unless the owner previously approved a bounded exception for a demonstrated indivisible change,
         preserving each PR’s required tests, documentation, parity and verification.
     validations:
       required: false

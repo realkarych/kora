@@ -1,5 +1,8 @@
 # Pricing foundation implementation evidence
 
+Current verification classification follows the owner-approved [2026-10-29 audit amendment](approved-verification-audit-2026-10-29.md). The original numerical methods, measurements and failures below remain historical evidence; the amendment names the exact changed gates and preserved limits.
+
+
 Evidence collected on 2026-10-23 and 2026-10-24 for [issue #213](https://github.com/realkarych/kora/issues/213) and [PR #232](https://github.com/realkarych/kora/pull/232). This record distinguishes implemented component results from final revision-specific CI qualification, which remains in the PR verification record.
 
 ## Implemented boundaries

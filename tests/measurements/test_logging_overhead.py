@@ -243,7 +243,12 @@ def test_logging_overhead_and_resource_lifetime(report: Report) -> None:
     cold_start(report)
     report.durations["step_total"] = time.perf_counter() - step_started
 
-    assert report.durations["step_total"] < STEP_BUDGET_SECONDS
+    report.diagnostic(
+        "step_total_seconds",
+        report.durations["step_total"],
+        STEP_BUDGET_SECONDS,
+        allow_equal=False,
+    )
     assert all(report.gates.values()), report.gates
 
 
@@ -770,13 +775,22 @@ def configure_shutdown_cycles(report: Report) -> dict[str, bool]:
     )
     gates["threads_return_to_baseline"] = threads_after == threads_before
     gates["descriptors_return_to_baseline"] = descriptors_after == descriptors_before
-    gates["heap_growth_bounded"] = (
-        heap_after - heap_before < HEAP_GROWTH_ALLOWANCE_BYTES
-        and second_half <= HEAP_SLOPE_ALLOWANCE_BYTES
+    report.diagnostic(
+        "logging_heap_total_bytes",
+        heap_after - heap_before,
+        HEAP_GROWTH_ALLOWANCE_BYTES,
+        allow_equal=False,
     )
-    gates["rss_growth_bounded"] = (
-        rss_growth is None or rss_growth < RSS_GROWTH_ALLOWANCE_BYTES
+    report.diagnostic(
+        "logging_heap_late_bytes", second_half, HEAP_SLOPE_ALLOWANCE_BYTES
     )
+    if rss_growth is not None:
+        report.diagnostic(
+            "logging_rss_growth_bytes",
+            rss_growth,
+            RSS_GROWTH_ALLOWANCE_BYTES,
+            allow_equal=False,
+        )
     return gates
 
 

@@ -29,6 +29,9 @@ NEEDED_JOBS = {
     "git-publication-measurements": "GIT_PUBLICATION",
 }
 SUCCESS = {
+    "SCOPE_RESULT": "success",
+    "SCOPE_VERIFIED": "true",
+    "FULL_SCOPE": "true",
     "SCAFFOLD_RESULT": "success",
     "IR_MATRIX_RESULT": "success",
     "RESOURCE_RESULT": "success",
@@ -129,16 +132,24 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
             for identity in selected_steps
             if identity not in {"required_measurements", "workflow_cancellation"}
         },
-        "WORKFLOW_CANCELLED": "${{ steps.workflow_cancellation.outcome != 'skipped' }}",
+        "WORKFLOW_CANCELLED": (
+            "${{ cancelled() || steps.workflow_cancellation.outcome != 'skipped' }}"
+        ),
+        "SCOPE_RESULT": "${{ needs.change-scope.result }}",
+        "SCOPE_VERIFIED": "${{ needs.change-scope.outputs.verified }}",
+        "FULL_SCOPE": "${{ needs.change-scope.outputs.full }}",
     }
 
     assert job["name"] == "CEL evaluator lifetime"
-    assert job["needs"] == list(NEEDED_JOBS)
+    assert job["needs"] == ["change-scope", *NEEDED_JOBS]
     assert job["if"] == "${{ always() }}"
     assert gate["if"] == "${{ always() }}"
     assert table(gate["env"]) == expected
     assert set(expected) == set(SUCCESS)
-    assert selected_steps["workflow_cancellation"]["if"] == "${{ cancelled() }}"
+    assert (
+        selected_steps["workflow_cancellation"]["if"]
+        == "${{ needs.change-scope.outputs.full != 'false' && (cancelled()) }}"
+    )
     assert selected_steps["workflow_cancellation"]["run"] == "exit 0"
     assert action_name(selected_steps["ir_download"]["uses"]) == (
         "actions/download-artifact"

@@ -15,7 +15,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  change-scope:
+    name: Classify verification scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
+      verified: ${{ steps.scope.outputs.verified }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Classify with approved base instructions
+        id: scope
+        env:
+          KORA_BASE_REVISION: ${{ github.event.pull_request.base.sha }}
+          KORA_HEAD_REVISION: ${{ github.event.pull_request.head.sha }}
+          KORA_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          KORA_SCOPE_PROGRAM="$(mktemp)"
+          if test "$KORA_EVENT_NAME" = pull_request && git show "$KORA_BASE_REVISION:scripts/ci/editorial_scope.py" > "$KORA_SCOPE_PROGRAM"; then
+            python3 "$KORA_SCOPE_PROGRAM"
+          else
+            printf 'full=true\n' >> "$GITHUB_OUTPUT"
+          fi
+          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+
   scaffold-tests:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
@@ -101,10 +130,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        if: ${{ matrix.lane != 'local-runtime' }}
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413  # v6.1.0
+        if: ${{ matrix.lane != 'local-runtime' }}
         with:
           package_json_file: web/package.json
           run_install: false
@@ -136,6 +167,7 @@ jobs:
           printf 'KORA_BUILD_CONSTRAINT_DIR=%s\n' "$KORA_BUILD_CONSTRAINT_DIR" >> "$GITHUB_ENV"
       - name: Install locked frontend dependencies
         id: frontend_dependencies
+        if: ${{ matrix.lane != 'local-runtime' }}
         run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         id: static_checks
@@ -175,13 +207,6 @@ jobs:
           if test "$KORA_SCAFFOLD_LANE" = local-runtime; then
             KORA_SCAFFOLD_SELECTION=(-m "not measurement")
           fi
-          if uv run --no-sync pytest --collect-only -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" > "$KORA_SCAFFOLD_DIRECTORY/selected.txt" 2> "$KORA_SCAFFOLD_DIRECTORY/selected.stderr"; then
-            printf '0\n' > "$KORA_SCAFFOLD_DIRECTORY/collection.exit"
-          else
-            KORA_EXIT="$?"
-            printf '%s\n' "$KORA_EXIT" > "$KORA_SCAFFOLD_DIRECTORY/collection.exit"
-            exit "$KORA_EXIT"
-          fi
           KORA_EXIT=0
           if test "$KORA_SCAFFOLD_LANE" != storage && test "$KORA_SCAFFOLD_LANE" != local-runtime; then
             KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
@@ -212,13 +237,6 @@ jobs:
           measurements=(tests/measurements tests/db tests/plugins --ignore=tests/plugins/storage --ignore=tests/plugins/runtime/local)
           integration=(tests/cli)
           other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)
-          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-full" "${general[@]}" > "$KORA_ORDINARY_OUTPUT/full.collection"
-          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.collection"
-          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.collection"
-          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.collection"
-          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.collection"
-          uv run --no-sync pytest --collect-only -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.collection"
-          uv run --no-sync python -m tests.support.ordinary_inventory "$KORA_ORDINARY_OUTPUT" > "$KORA_ORDINARY_OUTPUT/inventory.json"
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
@@ -227,7 +245,7 @@ jobs:
               uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
               pids+=("$!")
               names=(first second)
-              evidence=(full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json first.log second.log first.xml second.xml first.exit second.exit)
+              evidence=(first.log second.log first.xml second.xml first.exit second.exit)
               ;;
             remainder)
               uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
@@ -237,7 +255,7 @@ jobs:
               uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
               pids+=("$!")
               names=(measurements integration other)
-              evidence=(full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json measurements.log integration.log other.log measurements.xml integration.xml other.xml measurements.exit integration.exit other.exit)
+              evidence=(measurements.log integration.log other.log measurements.xml integration.xml other.xml measurements.exit integration.exit other.exit)
               ;;
             *) exit 1 ;;
           esac
@@ -267,7 +285,7 @@ jobs:
             else
               KORA_EXIT="$?"
             fi
-            for name in full.collection first.collection second.collection measurements.collection integration.collection other.collection inventory.json first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
+            for name in first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
               if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
                 cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
               fi
@@ -295,24 +313,6 @@ jobs:
         with:
           name: scaffold-tests-${{ matrix.os }}-${{ matrix.python }}-${{ matrix.lane }}
           path: ${{ env.KORA_SCAFFOLD_DIRECTORY }}
-          if-no-files-found: error
-      - name: Measure local runtime lock contention
-        id: diagnostics
-        if: ${{ matrix.lane == 'local-runtime' && !cancelled() }}
-        continue-on-error: true
-        env:
-          KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/local-runtime-diagnostics"
-          KORA_MEASUREMENT_OUTPUT="$RUNNER_TEMP/local-runtime-diagnostics/lock-contention.json" \
-            uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        id: diagnostics_upload
-        if: ${{ matrix.lane == 'local-runtime' && !cancelled() }}
-        continue-on-error: true
-        with:
-          name: local-runtime-diagnostics-${{ matrix.os }}-${{ matrix.python }}
-          path: ${{ runner.temp }}/local-runtime-diagnostics
           if-no-files-found: error
       - name: Remove local runtime host fixtures
         id: teardown
@@ -377,30 +377,27 @@ jobs:
               test "$STATIC_OUTCOME" = skipped
               test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
-            storage|local-runtime)
+            storage)
               test "$FRONTEND_OUTCOME" = success
+              test "$STATIC_OUTCOME" = skipped
+              test "$DISTRIBUTIONS_OUTCOME" = skipped
+              ;;
+            local-runtime)
+              test "$FRONTEND_OUTCOME" = skipped
               test "$STATIC_OUTCOME" = skipped
               test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
             *) exit 1 ;;
           esac
 
-  scaffold:
-    name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
+  scaffold-evidence:
+    name: Scaffold evidence
     if: ${{ always() }}
-    needs: [scaffold-tests]
+    needs: [change-scope, scaffold-tests]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            python: 3.11.17
-          - os: ubuntu-24.04
-            python: 3.15.0
-          - os: macos-15
-            python: 3.11.17
+    outputs:
+      verified: ${{ steps.completion.outputs.verified }}
     defaults:
       run:
         shell: bash
@@ -408,9 +405,11 @@ jobs:
       PYTHONPATH: ${{ github.workspace }}/src
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
         with:
           version: 0.13.1
           python-version: 3.11.17
@@ -419,13 +418,16 @@ jobs:
           cache-suffix: scaffold-join
       - name: Install locked evidence dependencies
         id: dependencies
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
         run: uv sync --locked --no-build --all-extras --no-install-project
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
         id: evidence_download
         with:
           pattern: scaffold-tests-*
           path: scaffold-evidence
       - name: Verify twelve lanes and complete collection coverage
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
         id: verification
         env:
           KORA_SCAFFOLD_RUN: ${{ github.run_id }}
@@ -443,21 +445,109 @@ jobs:
         if: ${{ cancelled() }}
         run: exit 0
       - name: Require all test lanes and collection evidence
+        id: completion
         if: ${{ always() }}
         env:
+          SCOPE_RESULT: ${{ needs.change-scope.result }}
+          SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
+          FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
           LANES_RESULT: ${{ needs.scaffold-tests.result }}
           DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
           DOWNLOAD_OUTCOME: ${{ steps.evidence_download.outcome }}
           VERIFICATION_OUTCOME: ${{ steps.verification.outcome }}
           WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
         run: |
+          test "$SCOPE_RESULT" = success
+          test "$SCOPE_VERIFIED" = true
+          test "$WORKFLOW_CANCELLED" = false
+          if test "$FULL_SCOPE" = false; then
+            test "$LANES_RESULT" = skipped
+            test "$DEPENDENCIES_OUTCOME" = skipped
+            test "$DOWNLOAD_OUTCOME" = skipped
+            test "$VERIFICATION_OUTCOME" = skipped
+            printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test "$FULL_SCOPE" = true
           test "$LANES_RESULT" = success
           test "$DEPENDENCIES_OUTCOME" = success
           test "$DOWNLOAD_OUTCOME" = success
           test "$VERIFICATION_OUTCOME" = success
           test "$WORKFLOW_CANCELLED" = false
+          printf 'verified=true\n' >> "$GITHUB_OUTPUT"
+
+  scaffold:
+    name: Scaffold (${{ matrix.os }}, Python ${{ matrix.python }})
+    if: ${{ always() }}
+    needs: [scaffold-evidence]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: 3.11.17
+          - os: ubuntu-24.04
+            python: 3.15.0
+          - os: macos-15
+            python: 3.11.17
+    steps:
+      - name: Require verified scaffold evidence
+        env:
+          EVIDENCE_RESULT: ${{ needs.scaffold-evidence.result }}
+          EVIDENCE_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
+        run: |
+          test "$EVIDENCE_RESULT" = success
+          test "$EVIDENCE_VERIFIED" = true
+
+  local-runtime-diagnostics:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
+    name: Local runtime diagnostics (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: 3.11.17
+          - os: ubuntu-24.04
+            python: 3.15.0
+          - os: macos-15
+            python: 3.11.17
+    env:
+      PYTHONPATH: src
+      KORA_TEST_DATABASES: sqlite
+      KORA_MEASUREMENT_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          cache-suffix: local-runtime-diagnostics-${{ matrix.python }}
+      - run: uv sync --locked --no-build --extra postgres --extra cel --no-install-project
+      - name: Measure local runtime lock contention
+        env:
+          KORA_MEASUREMENT_OUTPUT: measurements/lock-contention.json
+        run: uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: ${{ always() }}
+        with:
+          name: local-runtime-diagnostics-${{ matrix.os }}-${{ matrix.python }}
+          path: measurements/lock-contention.json
+          if-no-files-found: error
 
   resource-measurements:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: Logging, metadata and provider measurements
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -621,6 +711,8 @@ jobs:
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
 
   provider-protocol-measurements:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: Provider and protocol measurements
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -734,6 +826,8 @@ jobs:
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
 
   pricing-measurements:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: Pricing database lifetime
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -906,6 +1000,8 @@ jobs:
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
 
   git-publication-measurements:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: Git publication measurements
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1000,6 +1096,8 @@ jobs:
           printf 'verified=true\n' >> "$GITHUB_OUTPUT"
 
   ir-measurements:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: IR model measurements (${{ matrix.run }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1071,6 +1169,8 @@ jobs:
           if-no-files-found: error
 
   cel-producer:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
     name: CEL lifetime and representative cost
     outputs:
       verified: ${{ steps.required_measurements.outputs.verified }}
@@ -1166,7 +1266,7 @@ jobs:
 
   cel-measurements:
     name: CEL evaluator lifetime
-    needs: [scaffold, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
+    needs: [change-scope, scaffold, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1180,6 +1280,7 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: 0.13.1
@@ -1187,50 +1288,53 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
           cache-suffix: cel-measurements
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Install locked wheel dependencies
         id: dependencies
         run: uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Record checked-out revision
         id: source_revision
         run: |
           mkdir -p measurements
           git rev-parse HEAD > measurements/cel-checkout-revision.txt
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         id: ir_download
-        if: ${{ always() && !cancelled() }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled()) }}
         with:
           pattern: ir-models-cost-measurement-${{ env.KORA_MEASUREMENT_REVISION }}-*
           path: measurements/ir-shards
           merge-multiple: false
       - name: Verify exact IR test, action, gate and sample union
         id: ir_inventory
-        if: ${{ always() && !cancelled() && steps.ir_download.outcome == 'success' }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled() && steps.ir_download.outcome == 'success') }}
         run: |
           uv run --no-sync python -m tests.measurements.ir_measurement_evidence \
             measurements/ir-shards "$KORA_MEASUREMENT_REVISION" \
             > measurements/ir-shard-union.json
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: ir_union_upload
-        if: ${{ always() && steps.ir_inventory.outcome != 'skipped' }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && steps.ir_inventory.outcome != 'skipped') }}
         with:
           name: ir-models-cost-union-${{ env.KORA_MEASUREMENT_REVISION }}
           path: measurements/ir-shard-union.json
           if-no-files-found: error
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         id: cel_lifetime_download
-        if: ${{ always() && !cancelled() }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled()) }}
         with:
           name: cel-evaluator-lifetime-measurement
           path: measurements/cel-lifetime
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
         id: cel_cost_download
-        if: ${{ always() && !cancelled() }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled()) }}
         with:
           name: cel-cost-regression-measurement
           path: measurements/cel-cost
       - name: Verify exact CEL evidence and both source receipts
         id: cel_inventory
-        if: ${{ always() && !cancelled() && steps.cel_lifetime_download.outcome == 'success' && steps.cel_cost_download.outcome == 'success' }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (always() && !cancelled() && steps.cel_lifetime_download.outcome == 'success' && steps.cel_cost_download.outcome == 'success') }}
         run: |
           test -d measurements/cel-lifetime
           test ! -L measurements/cel-lifetime
@@ -1250,7 +1354,7 @@ jobs:
           done
       - name: Record workflow cancellation
         id: workflow_cancellation
-        if: ${{ cancelled() }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (cancelled()) }}
         run: exit 0
       - name: Require every measurement and artifact
         id: required_measurements
@@ -1276,8 +1380,25 @@ jobs:
           CEL_LIFETIME_DOWNLOAD_OUTCOME: ${{ steps.cel_lifetime_download.outcome }}
           CEL_COST_DOWNLOAD_OUTCOME: ${{ steps.cel_cost_download.outcome }}
           CEL_INVENTORY_OUTCOME: ${{ steps.cel_inventory.outcome }}
-          WORKFLOW_CANCELLED: ${{ steps.workflow_cancellation.outcome != 'skipped' }}
+          WORKFLOW_CANCELLED: ${{ cancelled() || steps.workflow_cancellation.outcome != 'skipped' }}
+          SCOPE_RESULT: ${{ needs.change-scope.result }}
+          SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
+          FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
         run: |
+          test "$SCOPE_RESULT" = success
+          test "$SCOPE_VERIFIED" = true
+          test "$WORKFLOW_CANCELLED" = false
+          if test "$FULL_SCOPE" = false; then
+            test "$SCAFFOLD_RESULT" = success
+            test "$IR_MATRIX_RESULT" = skipped
+            test "$RESOURCE_RESULT" = skipped
+            test "$PROVIDER_PROTOCOL_RESULT" = skipped
+            test "$PRICING_RESULT" = skipped
+            test "$CEL_RESULT" = skipped
+            test "$GIT_PUBLICATION_RESULT" = skipped
+            exit 0
+          fi
+          test "$FULL_SCOPE" = true
           test "$SCAFFOLD_RESULT" = success
           test "$IR_MATRIX_RESULT" = success
           test "$RESOURCE_RESULT" = success
@@ -1300,6 +1421,7 @@ jobs:
           test "$GIT_PUBLICATION_VERIFIED" = true
           test "$WORKFLOW_CANCELLED" = false
 
+
   browser:
     name: Console browser checks
     runs-on: ubuntu-24.04
@@ -1314,36 +1436,65 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version-file: web/.node-version
           package-manager-cache: false
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
         with:
           package_json_file: web/package.json
           run_install: false
           cache: true
           cache_dependency_path: web/pnpm-lock.yaml
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Install pinned browser tools
         run: |
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
           pnpm --dir web exec playwright install --with-deps chromium
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Check and build browser sources
         run: |
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Run browser checks
         run: pnpm --dir web run test:browser
+        if: ${{ needs.change-scope.outputs.full != 'false' }}
+        id: verification
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: ${{ always() }}
+        if: ${{ needs.change-scope.outputs.full != 'false' && (always()) }}
         with:
           name: console-browser-checks
           path: measurements/browser/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Require browser verification or approved editorial scope
+        if: ${{ always() }}
+        env:
+          SCOPE_RESULT: ${{ needs.change-scope.result }}
+          SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
+          FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
+          BROWSER_RESULT: ${{ steps.verification.outcome }}
+          CANCELLED: ${{ cancelled() }}
+        run: |
+          test "$CANCELLED" = false
+          test "$SCOPE_RESULT" = success
+          test "$SCOPE_VERIFIED" = true
+          if test "$FULL_SCOPE" = false; then
+            test "$BROWSER_RESULT" = skipped
+          else
+            test "$FULL_SCOPE" = true
+            test "$BROWSER_RESULT" = success
+          fi
+    needs:
+      - change-scope
+    if: ${{ always() }}
 
   markdown:
     name: Markdown lint

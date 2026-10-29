@@ -26,11 +26,14 @@ BROWSER_COMMANDS = [
 def test_browser_setup_preserves_authenticated_installation_and_hard_checks() -> None:
     job = table(table(workflow_document()["jobs"])["browser"])
     entries = step_list(job)
-    publication = entries[-1]
+    publication = entries[-2]
     upload = table(publication["with"])
 
     commands = [
-        line for step in entries if "run" in step for line in command_lines(step["run"])
+        line
+        for step in entries[:-1]
+        if "run" in step
+        for line in command_lines(step["run"])
     ]
 
     assert job["name"] == "Console browser checks"
@@ -40,10 +43,17 @@ def test_browser_setup_preserves_authenticated_installation_and_hard_checks() ->
     assert "continue-on-error" not in job
     assert table(table(job["defaults"])["run"])["shell"] == "bash"
     assert all("continue-on-error" not in step for step in entries)
-    assert [step for step in entries if "if" in step] == [publication]
+    assert entries[-1]["if"] == "${{ always() }}"
+    assert all(
+        step["if"] == "${{ needs.change-scope.outputs.full != 'false' }}"
+        for step in entries[:-2]
+    )
     assert commands == BROWSER_COMMANDS
     assert action_name(publication["uses"]) == "actions/upload-artifact"
-    assert publication["if"] == "${{ always() }}"
+    assert (
+        publication["if"]
+        == "${{ needs.change-scope.outputs.full != 'false' && (always()) }}"
+    )
     assert upload["if-no-files-found"] == "error"
     assert set(upload) <= {"name", "path", "if-no-files-found", "retention-days"}
     assert str(upload["path"]).rstrip("/") == EVIDENCE_DIRECTORY

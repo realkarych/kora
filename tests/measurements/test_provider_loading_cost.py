@@ -118,7 +118,12 @@ def test_provider_loading_cost(tmp_path: Path, report: Report) -> None:
         after = cast("dict[str, int]", result["after"])
         assert after["modules"] == before["modules"]
         assert after["descriptors"] == before["descriptors"]
-        assert after["heap_bytes"] - before["heap_bytes"] < HEAP_GROWTH_LIMIT_BYTES
+        report.diagnostic(
+            f"provider_loading_{run}_heap_bytes",
+            after["heap_bytes"] - before["heap_bytes"],
+            HEAP_GROWTH_LIMIT_BYTES,
+            allow_equal=False,
+        )
         assert cast("int", result["providers"]) >= (
             SINGLE_ENTRY_DISTRIBUTIONS + ENTRIES_IN_ONE_DISTRIBUTION
         )

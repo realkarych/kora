@@ -6,6 +6,7 @@ import gc
 import hashlib
 import inspect
 import json
+import math
 import os
 import shutil
 import signal
@@ -2122,6 +2123,10 @@ class PricingEvidence:
                 "complete": self.complete,
                 "request_removed": self.request_removed,
                 "pricing_workload_total": self.workload_seconds,
+                "pricing_workload_reference_seconds": 256.0,
+                "pricing_workload_reference_exceeded": None
+                if self.workload_seconds is None
+                else self.workload_seconds >= 256.0,
                 "manifest_publication_seconds": self.manifest_publication_seconds,
                 "failures": self.failures,
                 "processes": self.processes,
@@ -2731,7 +2736,11 @@ def register_pricing_ownership(
     write_pricing_bytes(path, owner.model_dump_json().encode(), REQUEST_LIMIT)
 
 
-def pricing_command_run(directory: Path, argv: list[str]) -> int:
+def pricing_command_run(
+    directory: Path, argv: list[str], *, cleanup_seconds: float = 60.0
+) -> int:
+    if not math.isfinite(cleanup_seconds) or cleanup_seconds <= 0:
+        raise ValueError("cleanup deadline must be positive and finite")
     before = pricing_containers()
     owner_path = directory.with_name(directory.name + "-owner.json")
     owner_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2752,7 +2761,7 @@ def pricing_command_run(directory: Path, argv: list[str]) -> int:
         nonlocal interrupted, interrupt_deadline
         if interrupted is None:
             interrupted = signum
-            interrupt_deadline = time.monotonic() + 60.0
+            interrupt_deadline = time.monotonic() + cleanup_seconds
             if child is not None and child.poll() is None:
                 child.send_signal(signal.SIGINT)
 

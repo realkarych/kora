@@ -35,6 +35,7 @@ from tests.measurements.ir_measurement_evidence import (
     junit_nodes,
     schema_evidence,
     shard_evidence,
+    validation_evidence,
     verify_configuration_payloads,
     verify_report,
     verify_schema_payloads,
@@ -210,6 +211,11 @@ def rendered_report(inventory: Evidence) -> str:
         }
     )
     report.gates.update(dict.fromkeys(inventory.gates, True))
+    for gate in inventory.gates:
+        if gate.endswith("_memory_observed"):
+            field = f"{gate.removesuffix('_memory_observed')}_retained_bytes"
+            report.environment[field] = 0
+            report.diagnostic(field, 0, 65536, allow_equal=False)
     cases: dict[str, list[str]] = {"ordinary": [], "large": []}
     for case in expected_cost_cases():
         cases[case.group].append(case.name)
@@ -263,21 +269,63 @@ def rendered_report(inventory: Evidence) -> str:
                     f"{prefix}_parent_threads_after": 1,
                 }
             )
-        for traced in (True, False):
-            if any(
-                node.endswith(f"::test_vcs_ref_validation_lifetime[{run}-{traced}]")
-                for node in inventory.nodes
-            ):
+        for family, test, last, interval in (
+            ("diagnostic", "test_shared_diagnostic_resource_lifetime", 1000, 100),
+            ("vcs_ref", "test_vcs_ref_validation_lifetime", 500, 25),
+        ):
+            for traced in (True, False):
+                if not any(
+                    node.endswith(f"::{test}[{run}-{traced}]")
+                    for node in inventory.nodes
+                ):
+                    continue
                 mode = "traced" if traced else "untraced"
-                prefix = f"vcs_ref_{mode}_{run}"
+                prefix = f"{family}_{mode}_{run}"
+                lifecycle: dict[str, object] = {
+                    "traced": traced,
+                    "seconds": 0.1,
+                    "successes": 1,
+                    "refusals": 1,
+                    "retaining_paths": [],
+                    "fixtures": {},
+                    "python": sys.version.split()[0],
+                    "pydantic": "fixture",
+                    "pydantic_core": "fixture",
+                    "platform": sys.platform,
+                    "page_size": 4096,
+                    "pid": 1234,
+                    "revision": REVISION,
+                    "run": prefix,
+                    "points": [
+                        {
+                            "cycle": cycle,
+                            "heap": 100 if traced else None,
+                            "peak": 200 if traced else None,
+                            "tracer": 300 if traced else None,
+                            "rss": 1000,
+                            "high_water": 2000,
+                            "descriptors": 4,
+                            "threads": 1,
+                            "os_threads": 1,
+                        }
+                        for cycle in range(0, last + 1, interval)
+                    ],
+                }
                 report.environment.update(
                     {
-                        f"{prefix}_stdout": "{}",
+                        f"{prefix}_stdout": json.dumps(lifecycle),
                         f"{prefix}_stderr": "",
                         f"{prefix}_exit": 0,
-                        f"{prefix}_native_growth_review": "required",
                     }
                 )
+                if traced:
+                    for cycle in range(0, last + 1, interval):
+                        report.diagnostic(
+                            f"{prefix}_{cycle}_retained_bytes",
+                            0,
+                            65536,
+                            allow_equal=False,
+                        )
         if any(
             node.endswith(f"::test_vcs_ref_cold_public_import[{run}]")
             for node in inventory.nodes
@@ -667,12 +715,10 @@ def test_ir_report_refuses_invalid_accounting_child_metadata(
     ("identity", "field", "value"),
     [
         ("cost_traced_ordinary_all_0", "cycle", 334),
-        ("cost_traced_ordinary_all_0", "heap", 262245),
         ("cost_traced_ordinary_all_0", "rss", 0),
         ("cost_traced_ordinary_all_0", "threads", 2),
         ("cost_traced_ordinary_all_0", "descriptors", True),
         ("cost_traced_ordinary_all_0", "extra", 1),
-        ("cost_native_ordinary_all_0", "rss", 8389609),
         ("cost_native_ordinary_all_0", "heap", 100),
         ("cost_native_ordinary_all_0", "high_water", -1),
         ("cost_native_ordinary_all_0", "threads", 2),
@@ -1174,7 +1220,6 @@ def test_ir_report_refuses_wrong_configuration_inventory(
         ("configuration", "cycles", 251),
         ("configuration", "live_models", 1),
         ("configuration", "live_models", False),
-        ("configuration", "retained_bytes", 65536),
         ("configuration", "threads", 2),
         ("configuration", "descriptors", 5),
         ("configuration", "seconds", 0.2),
@@ -1251,7 +1296,7 @@ def test_ir_evidence_preserves_every_upstream_vcs_ref_identity() -> None:
         ),
     }
     expected_gates = (
-        {f"{action.name}_retained" for action in actions}
+        {f"{action.name}_memory_observed" for action in actions}
         | {
             f"vcs_ref_{mode}_{run}_lifecycle_assertions_passed"
             for run in range(3)
@@ -1619,3 +1664,192 @@ def test_memoized_expected_inventories_equal_a_fresh_computation() -> None:
     )
 
     assert memoized == fresh
+
+
+@pytest.mark.parametrize(
+    ("retained", "exceeded"),
+    [(-10, False), (65535, False), (65536, True), (70000, True)],
+)
+def test_configuration_retention_is_visible_without_overriding_resource_checks(
+    retained: int, exceeded: bool
+) -> None:
+    expected = configuration_evidence(1)
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    payload = configuration_payload()
+    checkpoints = cast(list[dict[str, object]], payload["checkpoints"])
+    checkpoints[0]["retained_bytes"] = retained
+    report.environment["config_lifetime_1"] = json.dumps(payload)
+    observations: list[dict[str, ExtraValue]] = []
+
+    verify_report(
+        report.model_dump_json(),
+        rendered_junit(expected),
+        REVISION,
+        expected,
+        memory_diagnostics=observations,
+    )
+
+    assert observations[0] == {
+        "component": "config_lifetime_1",
+        "cycle": 250,
+        "observed_bytes": retained,
+        "reference_bytes": 65536,
+        "exceeded": exceeded,
+    }
+    assert all(report.gates.values())
+
+
+@pytest.mark.parametrize(
+    ("identity", "field", "value", "reference", "exceeded"),
+    [
+        ("cost_traced_ordinary_all_0", "heap", 262244, 262144, False),
+        ("cost_traced_ordinary_all_0", "heap", 262245, 262144, True),
+        ("cost_native_ordinary_all_0", "rss", 8389608, 8388608, False),
+        ("cost_native_ordinary_all_0", "rss", 8389609, 8388608, True),
+    ],
+)
+def test_accounting_memory_exceedances_remain_visible_diagnostics(
+    shard_documents: tuple[str, ...],
+    identity: str,
+    field: str,
+    value: int,
+    reference: int,
+    exceeded: bool,
+) -> None:
+    expected = shard_evidence()[2]
+    report = MeasurementReport.model_validate_json(shard_documents[2])
+    child = cast(dict[str, object], json.loads(cast(str, report.environment[identity])))
+    environment = cast(dict[str, object], child["environment"])
+    points = cast(
+        list[dict[str, int]], json.loads(cast(str, environment["checkpoints"]))
+    )
+    baseline = points[0][field]
+    points[1][field] = value
+    environment["checkpoints"] = json.dumps(points)
+    replace_accounting_output(report, identity, json.dumps(child))
+    observations: list[dict[str, ExtraValue]] = []
+
+    verify_report(
+        report.model_dump_json(),
+        rendered_junit(expected),
+        REVISION,
+        expected,
+        memory_diagnostics=observations,
+    )
+
+    matching = [
+        entry
+        for entry in observations
+        if entry["component"] == identity and entry["cycle"] == points[1]["cycle"]
+    ]
+    assert matching == [
+        {
+            "component": identity,
+            "cycle": points[1]["cycle"],
+            "resource": field,
+            "observed_bytes": value - baseline,
+            "reference_bytes": reference,
+            "exceeded": exceeded,
+        }
+    ]
+
+
+@pytest.mark.parametrize("measured", [-10, 65535, 65536, 70000])
+def test_action_memory_observations_preserve_adverse_values(measured: int) -> None:
+    expected = validation_evidence(("dense_zeros_1mib",))
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    field = "dense_zeros_1mib_retained_bytes"
+    report.environment[field] = measured
+    report.environment[f"diagnostic_{field}_measured"] = measured
+    report.environment[f"diagnostic_{field}_exceeded"] = measured >= 65536
+    observations: list[dict[str, ExtraValue]] = []
+
+    verify_report(
+        report.model_dump_json(),
+        rendered_junit(expected),
+        REVISION,
+        expected,
+        memory_diagnostics=observations,
+    )
+
+    assert observations == [
+        {
+            "component": "dense_zeros_1mib",
+            "observed_bytes": measured,
+            "reference_bytes": 65536,
+            "exceeded": measured >= 65536,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "corruption", ["missing", "bool", "mismatch", "reference", "exceeded"]
+)
+def test_action_memory_observations_refuse_incomplete_or_inconsistent_data(
+    corruption: str,
+) -> None:
+    expected = validation_evidence(("dense_zeros_1mib",))
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    prefix = "diagnostic_dense_zeros_1mib_retained_bytes"
+    if corruption == "missing":
+        del report.environment[f"{prefix}_measured"]
+    elif corruption == "bool":
+        report.environment["dense_zeros_1mib_retained_bytes"] = True
+    elif corruption == "mismatch":
+        report.environment[f"{prefix}_measured"] = 1
+    elif corruption == "reference":
+        report.environment[f"{prefix}_reference"] = 65537
+    else:
+        report.environment[f"{prefix}_exceeded"] = True
+
+    with pytest.raises(ValueError, match="memory observation"):
+        verify_report(
+            report.model_dump_json(), rendered_junit(expected), REVISION, expected
+        )
+
+
+@pytest.mark.parametrize("family", ["diagnostic", "vcs_ref"])
+@pytest.mark.parametrize("retained", [-10, 65536, 70000])
+@pytest.mark.parametrize("missing", [False, True])
+def test_repeated_memory_observations_require_matching_raw_points(
+    family: str,
+    retained: int,
+    missing: bool,
+) -> None:
+    expected = accepted_evidence()
+    report = MeasurementReport.model_validate_json(rendered_report(expected))
+    name = f"{family}_traced_0"
+    raw = cast(
+        dict[str, object], json.loads(cast(str, report.environment[f"{name}_stdout"]))
+    )
+    points = cast(list[dict[str, object]], raw["points"])
+    cycle = cast(int, points[1]["cycle"])
+    points[1]["heap"] = 100 + retained
+    report.environment[f"{name}_stdout"] = json.dumps(raw)
+    prefix = f"diagnostic_{name}_{cycle}_retained_bytes"
+    report.environment[f"{prefix}_measured"] = retained
+    report.environment[f"{prefix}_exceeded"] = retained >= 65536
+    observations: list[dict[str, ExtraValue]] = []
+
+    if missing:
+        del report.environment[f"{prefix}_measured"]
+
+    if missing:
+        with pytest.raises(ValueError, match="memory observation"):
+            verify_report(
+                report.model_dump_json(), rendered_junit(expected), REVISION, expected
+            )
+    else:
+        verify_report(
+            report.model_dump_json(),
+            rendered_junit(expected),
+            REVISION,
+            expected,
+            memory_diagnostics=observations,
+        )
+
+        assert any(
+            item["component"] == f"{name}_{cycle}"
+            and item["observed_bytes"] == retained
+            for item in observations
+        )

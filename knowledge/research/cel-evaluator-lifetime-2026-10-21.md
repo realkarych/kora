@@ -1,5 +1,8 @@
 # CEL evaluator lifetime baseline
 
+Current verification classification follows the owner-approved [2026-10-29 audit amendment](approved-verification-audit-2026-10-29.md). The original numerical methods, measurements and failures below remain historical evidence; the amendment names the exact changed gates and preserved limits.
+
+
 Checked on 2026-10-21 for [issue #166](https://github.com/realkarych/kora/issues/166). This record covers evaluator infrastructure, not the author-expression cost and crash calibration of [issue #167](https://github.com/realkarych/kora/issues/167). The approved parent plan is [issue #160](https://github.com/realkarych/kora/issues/160).
 
 ## Ownership and workload

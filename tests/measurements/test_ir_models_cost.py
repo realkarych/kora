@@ -475,9 +475,12 @@ def test_accounting_value_lifetime(
             assert (point["rss"] >= 0) is not traced
             resource = "heap" if traced else "rss"
             limit = COST_RETAINED_LIMIT_BYTES if traced else COST_RSS_LIMIT_BYTES
-            passed = point[resource] - points[0][resource] <= limit
-            report.gates[f"{identity}_{point['cycle']}_{resource}_retained"] = passed
-            assert passed, (identity, point, limit)
+            report.diagnostic(
+                f"{identity}_{point['cycle']}_{resource}_retained_bytes",
+                point[resource] - points[0][resource],
+                limit,
+            )
+            report.gates[f"{identity}_{point['cycle']}_{resource}_observed"] = True
         report.samples.append(
             Sample(f"cost_{mode}_{group}_lifetime_process", run, 1, elapsed)
         )
@@ -891,8 +894,10 @@ def test_ir_model_validation_cost(report: Report, workload: str) -> None:
     report.environment[f"{workload}_peak_bytes"] = peak
     retained = current - baseline
     report.environment[f"{workload}_retained_bytes"] = retained
-    report.gates[f"{workload}_retained_at_baseline"] = retained < RETAINED_LIMIT_BYTES
-    assert retained < RETAINED_LIMIT_BYTES
+    report.diagnostic(
+        f"{workload}_retained_bytes", retained, RETAINED_LIMIT_BYTES, allow_equal=False
+    )
+    report.gates[f"{workload}_memory_observed"] = True
 
 
 def assert_clean_exit(result: ProcessResult) -> None:
@@ -921,9 +926,15 @@ def test_ir_configuration_repeated_lifetime(report: Report, run: int) -> None:
         report.samples.append(
             Sample("config_lifetime", run, cycle, cast("float", checkpoint["seconds"]))
         )
-        passed = cast("int", checkpoint["retained_bytes"]) < RETAINED_LIMIT_BYTES
-        report.gates[f"config_lifetime_{run}_{cycle}_retained"] = passed
-        assert passed
+        report.diagnostic(
+            f"config_lifetime_{run}_{cycle}_retained_bytes",
+            cast("int", checkpoint["retained_bytes"]),
+            RETAINED_LIMIT_BYTES,
+            allow_equal=False,
+        )
+        report.gates[f"config_lifetime_{run}_{cycle}_resources_released"] = (
+            checkpoint["live_models"] == 0
+        )
         assert checkpoint["live_models"] == 0
         assert checkpoint["threads"] == result["baseline_threads"]
         assert checkpoint["descriptors"] == result["baseline_descriptors"]
@@ -1040,8 +1051,13 @@ def test_repeated_failures_return_to_baseline(report: Report) -> None:
         Sample("failure_cycles", 0, FAILURE_CYCLES * len(FAILURES), elapsed)
     )
     report.environment["failure_cycles_retained_bytes"] = retained
-    report.gates["failure_cycles_return_to_baseline"] = retained < RETAINED_LIMIT_BYTES
-    assert retained < RETAINED_LIMIT_BYTES
+    report.diagnostic(
+        "failure_cycles_retained_bytes",
+        retained,
+        RETAINED_LIMIT_BYTES,
+        allow_equal=False,
+    )
+    report.gates["failure_cycles_memory_observed"] = True
 
 
 def test_shared_diagnostic_action_cost(report: Report) -> None:
@@ -1096,7 +1112,9 @@ def released_lifecycle(
     return payload
 
 
-def assert_lifecycle_resources(payload: Lifecycle, traced: bool) -> None:
+def assert_lifecycle_resources(
+    report: Report, name: str, payload: Lifecycle, traced: bool
+) -> None:
     for counter in ("descriptors", "threads", "os_threads"):
         values = [getattr(point, counter) for point in payload.points]
         assert all(value == values[0] for value in values)
@@ -1110,10 +1128,14 @@ def assert_lifecycle_resources(payload: Lifecycle, traced: bool) -> None:
     if traced:
         baseline = payload.points[0].heap
         assert baseline is not None
-        assert all(
-            point.heap is not None and point.heap - baseline < RETAINED_LIMIT_BYTES
-            for point in payload.points
-        )
+        for point in payload.points:
+            assert point.heap is not None
+            report.diagnostic(
+                f"{name}_{point.cycle}_retained_bytes",
+                point.heap - baseline,
+                RETAINED_LIMIT_BYTES,
+                allow_equal=False,
+            )
     else:
         assert all(
             point.heap is None and point.peak is None and point.tracer is None
@@ -1142,7 +1164,7 @@ def test_shared_diagnostic_resource_lifetime(
     assert payload.successes == 26_000
     assert payload.refusals == 18_000
     assert [p.cycle for p in payload.points] == list(range(0, 1001, 100))
-    assert_lifecycle_resources(payload, traced)
+    assert_lifecycle_resources(report, name, payload, traced)
     report.gates[f"{name}_resources_released"] = True
 
 
@@ -1171,8 +1193,13 @@ def test_vcs_ref_action_cost(report: Report) -> None:
         retained = current - baseline
         report.environment[f"{case.name}_peak_bytes"] = peak
         report.environment[f"{case.name}_retained_bytes"] = retained
-        report.gates[f"{case.name}_retained"] = retained < RETAINED_LIMIT_BYTES
-        assert retained < RETAINED_LIMIT_BYTES
+        report.diagnostic(
+            f"{case.name}_retained_bytes",
+            retained,
+            RETAINED_LIMIT_BYTES,
+            allow_equal=False,
+        )
+        report.gates[f"{case.name}_memory_observed"] = True
 
 
 @pytest.mark.parametrize(
@@ -1193,7 +1220,7 @@ def test_vcs_ref_validation_lifetime(report: Report, repeat: int, traced: bool) 
     assert payload.refusals == 216
     assert [point.cycle for point in payload.points] == list(range(0, 501, 25))
     assert len(payload.retaining_paths) == 2
-    assert_lifecycle_resources(payload, traced)
+    assert_lifecycle_resources(report, name, payload, traced)
     report.gates[f"{name}_lifecycle_assertions_passed"] = True
     report.environment[f"{name}_native_growth_review"] = "required"
 

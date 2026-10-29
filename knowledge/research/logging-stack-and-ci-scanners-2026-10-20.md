@@ -1,5 +1,8 @@
 # Logging stack and CI scanners
 
+Current verification classification follows the owner-approved [2026-10-29 audit amendment](approved-verification-audit-2026-10-29.md). The original numerical methods, measurements and failures below remain historical evidence; the amendment names the exact changed gates and preserved limits.
+
+
 Checked: 2026-10-20, for [issue #147](https://github.com/realkarych/kora/issues/147), against `master` at `0a8f4d4` with the package-layers branch of [#143](https://github.com/realkarych/kora/pull/143) merged. This record carries the versions, the selection evidence and the first local measurements of the logging bootstrap and the CI scanners. The contract is [structured component diagnostics](../specs/observability.md); the decisions are the owner's approval of the implementation plan on the issue. Nothing here is a decision.
 
 ## Runtime and development dependencies

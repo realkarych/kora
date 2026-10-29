@@ -1,5 +1,8 @@
 # VcsRef model boundary and verification dependencies
 
+Current verification classification follows the owner-approved [2026-10-29 audit amendment](approved-verification-audit-2026-10-29.md). The original numerical methods, measurements and failures below remain historical evidence; the amendment names the exact changed gates and preserved limits.
+
+
 Checked 2026-10-23 for [issue #209](https://github.com/realkarych/kora/issues/209). The [approved implementation plan and exact documentation wording](https://github.com/realkarych/kora/issues/209#issuecomment-6354475309) are [owner-approved](https://github.com/realkarych/kora/issues/209#issuecomment-6354560818). This record supplies implementation evidence, not publication authority or a new artifact revision.
 
 ## Independent schema validator

@@ -1,5 +1,7 @@
 # CEL cost regression and historical calibration evidence
 
+The owner-approved [verification audit amendment](approved-verification-audit-2026-10-29.md#numerical-observations) makes the compact 100 ms sample comparisons diagnostic. The ten-second child deadline, 240-second suite watchdog, exact results, work/admission bounds and resource checks remain blocking. Historical results below keep their original classifications.
+
 Preregistered on 2026-10-22 for [issue #167](https://github.com/realkarych/kora/issues/167), under the [original plan](https://github.com/realkarych/kora/issues/167#issuecomment-6346588560). On 2026-10-23 the project owner approved [lightweight validation with a 100 ms target](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696). The current protocol replaces full coefficient fitting, RSS-envelope and GIL calibration, native crash-threshold searches and the five-job collection. None of those removed checks passed. The failed default-bound pilot and qualified smaller-bound selection below remain historical evidence, with their original revisions and artifacts.
 
 ## Current compact regression protocol
@@ -21,9 +23,9 @@ The steps budget is 100,000,000,000,000 logical charge units, ten times the prev
 | `regex_empty` | The empty pattern over 4,094 `a` characters |
 | `large_rendering` | An exact 4,096-code-point source: a single-quoted string of 4,090 supplementary characters compared with the empty string |
 
-Expression checking and evaluator startup precede timing. Each interval includes binding, queueing, cache-miss compilation when applicable, native execution and result delivery; result assertions follow it. Every one of the forty raw intervals must be at most **100,000,000 ns (100 ms)**. This is an observed coarse regression target for these cases, not an interruption deadline or a calibrated bound for all admitted expressions. The logical memory budget is not a 16 MiB RSS envelope. No fitting, RSS/GIL calibration, forced GC, snapshots, artificial leaks or crash-threshold search is part of this protocol.
+Expression checking and evaluator startup precede timing. Each interval includes binding, queueing, cache-miss compilation when applicable, native execution and result delivery; result assertions follow it. Every one of the forty raw intervals records **100,000,000 ns (100 ms)** as a diagnostic reference with an explicit exceedance flag. This is an observed coarse regression target for these cases, not an interruption deadline or a calibrated bound for all admitted expressions. The logical memory budget is not a 16 MiB RSS envelope. No fitting, RSS/GIL calibration, forced GC, snapshots, artificial leaks or crash-threshold search is part of this protocol.
 
-The reference environment is GitHub-hosted Ubuntu 24.04 x86_64, CPython 3.11.17, uv 0.13.1 and the locked common-expression-language 0.10.0 wheel. The serial suite has a 240-second limit; each child retains the ten-second deadline and 256 KiB per-stream cap. The existing supervisor owns pipes and reaping on completion, failure, timeout and overflow. The unchanged ten-minute whole-CI budget remains mandatory.
+The reference environment is GitHub-hosted Ubuntu 24.04 x86_64, CPython 3.11.17, uv 0.13.1 and the locked common-expression-language 0.10.0 wheel. The serial suite has a 240-second limit; each child retains the ten-second deadline and 256 KiB per-stream cap. The existing supervisor owns pipes and reaping on completion, failure, timeout and overflow. Whole-CI feedback follows [AGENTS.md](../../AGENTS.md#development-verification); protective job/test/child/cleanup deadlines remain mandatory.
 
 Run the current suite on an otherwise idle machine:
 
