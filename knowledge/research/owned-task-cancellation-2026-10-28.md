@@ -111,3 +111,96 @@ the required evidence join failed. Completed-cycle observations and parent reapi
 do not establish interrupted-resource release, full command qualification or leak
 freedom. No safe production optimization is established by the retained timing
 data, and no failed qualification is rerun for a passing result.
+
+
+## UNKNOWN reports and test-owner disposal
+
+Checked on 2026-10-29 under the [bounded continuation plan](https://github.com/realkarych/kora/issues/311#issuecomment-6477742188).
+
+The final-source campaign [40728965629](https://github.com/realkarych/kora/actions/runs/40728965629)
+passed attempts 1 and 2 at `e8589978128deb77a3c9db8a3937bf38fd8904d8`,
+then stopped at attempt 3. This identifies the requested PR head; attempt 3 actually
+checked out merge revision `e1d9f364d78f5d7238f74729c0e7af0dddc4c0aa`,
+which also includes master `8d8b766`. Its macOS storage selection recorded two failures and
+197 passes in 726.21 seconds. The blocked-native test received and acknowledged
+feedback, then timed out during parent close. The broken-report test was still
+waiting for feedback acceptance. Their common twenty-second observer covers
+both the preceding installed cases and parent close. The retained evidence does
+not attribute either timeout to the native-volume detach defect or establish
+which phase consumed the budget.
+
+An independent source review identified a separate disposal defect. An UNKNOWN
+report may become ready while a cleanup effect is still settling. The test helper
+waited for the report and helper collection, then immediately asserted zero
+cleanup tasks. That assertion could mask the original test error and prevent the
+remaining resource disposal. It is not evidence of a successful clean report.
+
+`dispose_test_owner` now snapshots and joins the owner's finite recovery
+dependencies after helper settlement and the recorded report, inside the same
+five-second disposal timeout. The join does not cancel those dependencies or
+reinterpret their expected failed outcomes. Existing task, process, helper and
+descriptor assertions and remaining disposal remain unchanged. UNKNOWN remains
+UNKNOWN, and retained recovery evidence is not reclassified as closed.
+
+`test_disposal_joins_cleanup_effect_after_unknown_report` uses a real helper paused
+after its successful publication response. A bounded coroutine-frontier observation
+establishes that the parent effect awaits the helper's actual exit. The test
+expires the parent decision deadline, observes UNKNOWN, then kills, observes and
+collects the helper before disposal. Direct exit readiness resumes the test before
+the effect's aggregate waiter, making the pending-effect assertion independent of
+channel-EOF versus native-exit callback ordering. Two variants check ordinary
+disposal and identity preservation of an original failure.
+
+Only this new regression uses a fifteen-second cooperative input so its two
+five-second setup guards finish before automatic escalation. Its complete close
+budget is 18.1 seconds and is crossed by the forty-second injected advance.
+No existing test, product, observer or disposal deadline changes. Both variants
+failed the old cleanup-effect assertion, then passed after the join. The targeted
+helper/control/phase/recovery/no-suppression selection passed 66 cases; six installed
+storage cases and full Ruff check/format and strict Pyright also passed locally on
+macOS with CPython 3.11.17 and the locked dependencies. These local results do not
+replace required final-head Linux/macOS CI.
+
+The installed feedback coroutine now attaches bounded parent-state metadata to
+cancellation before its endpoint closes. Endpoint closure releases the native
+fixture's socket barrier, so later snapshots cannot establish its earlier blocked
+state. The note retains at most six real monotonic phase offsets and sixteen
+owner-task top frames, count-only inventories, and separately named injected
+clock values and absolute close deadlines. It collects no child content,
+capabilities, paths, arguments, environment, exception text or frame locals and
+adds no wait or output sink. The twenty-second observer and every existing closure
+assertion remain unchanged. The original timeout cause remains unresolved; this
+observation answers the phase-at-expiry question on recurrence rather than claiming
+the disposal repair fixes the timeout.
+
+Independent correctness, security and resource reviews inspected the actual
+three-file delta and returned no findings. A changed final source still needs its
+own ten complete successful CI executions; the two historical successes are not
+transferred. The separate CEL-policy campaign [40729411466](https://github.com/realkarych/kora/actions/runs/40729411466)
+passed five attempts for PR head `beaec8caa6cbf7368bacf6cde5153d0a2cdaddaf`,
+then failed attempt 6, whose actual merge checkout was
+`19ac0b909fad770c72b7f6131e5c45bc8e27c28e`, with cancelled macOS lanes and
+failed required joins. Its storage artifact
+retains partial progress without a completion code or JUnit; a particular failed
+case is not established. Neither failed campaign is rerun for green. All exact
+release qualification, populations, assertions and deadlines remain mandatory.
+
+
+## Integration with accepted process-observer changes
+
+The continuation integrates accepted master
+`e6c0730f1ebdd0e7d809e8f8a7780034cb0aba97`. The identity-reader conflict keeps
+both the bounded binary status reader and the accepted observer-namespace capture,
+procfs visibility checks and fork-owner guard. It preserves byte-valued dead-state
+checks and both the disappearing-status/reaping and non-dumpable-member regressions.
+The accepted typed-frame methods continue using the same timer cleanup helper and
+retain their cancellation and channel-closure behavior.
+
+Independent correctness, security and resource source reviews inspect this bounded
+integration separately from the unchanged disposal repair. Changed identity,
+private-file and helper producer inputs prevent complete-input reuse of historical
+fixture/listing qualification measurements. Fresh fixture and listing qualification,
+supported-platform listing repetitions and complete final-head CI remain required.
+The installed-command exact-release requirement retains its explicitly approved
+release-only placement for this repair. No deadline, measurement method or workload
+changes with this base integration.

@@ -241,6 +241,8 @@ async def test_storage_case_runner_waits_for_native_work(mode: str) -> None:
         "cleanup",
         "cancel",
         "task",
+        "collected",
+        "direct",
         "restore",
     ],
 )

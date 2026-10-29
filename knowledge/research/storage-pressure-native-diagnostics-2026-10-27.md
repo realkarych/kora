@@ -22,6 +22,8 @@ Raw stderr remains available in the existing private file, bounded by collection
 
 This is narrow native fixture-command evidence. It creates no permission to include backend exceptions, private paths, payloads or arbitrary exception state in production logs or public errors.
 
+The [holder-observation evidence path](storage-pressure-holder-observation-2026-10-28.md#evidence-path) replaces bytes assertion messages, whose pytest `-q` display elides about 240 characters, with bounded escaped strings so detach diagnostics and notes remain visible.
+
 ## Image ownership and recovery
 
 The macOS command is now:

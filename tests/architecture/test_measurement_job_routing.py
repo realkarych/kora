@@ -67,6 +67,8 @@ CANCELLATION = "workflow_cancellation"
 ROOT = Path(__file__).resolve().parents[2]
 COMMAND_ROUTED_MEASUREMENT = "tests/measurements/test_pricing_database_lifetime.py"
 STORAGE_WORKFLOW_MEASUREMENT = "tests/measurements/test_artifact_storage_lifetime.py"
+LANE_DIAGNOSTIC_MEASUREMENT = "tests/measurements/test_local_runtime_cost.py"
+LANE_DIAGNOSTIC_STEPS = frozenset({("scaffold-tests", "diagnostics")})
 MEASUREMENT_MODULE = re.compile(r"tests/measurements/test_[a-z0-9_]+\.py")
 PYTEST = ("uv", "run", "--no-sync", "pytest")
 MATRIX_ARGUMENTS = "${{matrix.pytest-arguments}}"
@@ -95,8 +97,14 @@ SCAFFOLD_PLATFORMS = (
     ("macos-15", "3.11.17", "sqlite"),
 )
 CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
+LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
+LOCAL_RUNTIME_DIAGNOSTICS = "${{ matrix.lane == 'local-runtime' && !cancelled() }}"
 LANE_STEP_CONDITIONS = {
     "static_checks": CONFORMANCE_ONLY,
+    "preparation": LOCAL_RUNTIME_ONLY,
+    "diagnostics": LOCAL_RUNTIME_DIAGNOSTICS,
+    "diagnostics_upload": LOCAL_RUNTIME_DIAGNOSTICS,
+    "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
     "evidence_upload": "${{ always() }}",
     "distributions": CONFORMANCE_ONLY,
     "workflow_cancellation": "${{ cancelled() }}",
@@ -126,13 +134,25 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
         )
     ]
 
-    commands = "\n".join(str(step.get("run", "")) for step in scaffold_steps)
+    commands = "\n".join(
+        str(step.get("run", ""))
+        for step in scaffold_steps
+        if step.get("id") != "diagnostics"
+    )
+    diagnostics = next(
+        step for step in scaffold_steps if step.get("id") == "diagnostics"
+    )
 
     assert {(row["os"], row["python"], row["databases"]) for row in rows} == set(
         SCAFFOLD_PLATFORMS
     )
     assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
     assert "-m measurement" not in commands
+    assert diagnostics["continue-on-error"] is True
+    assert str(diagnostics["run"]).count("-m measurement") == 1
+    assert MEASUREMENT_MODULE.findall(str(diagnostics["run"])) == [
+        LANE_DIAGNOSTIC_MEASUREMENT
+    ]
     assert "pricing_command" not in commands
     for required in (
         "uv lock --check",
@@ -628,6 +648,8 @@ def measurement_lines() -> list[MeasurementLine]:
             str(row.get("pytest-arguments", "")) for row in matrix_rows(job)
         )
         for step in step_list(job):
+            if (job_id, step.get("id")) in LANE_DIAGNOSTIC_STEPS:
+                continue
             for line in command_lines(step.get("run", "")):
                 if "pytest" in line and selects_measurements(line):
                     found.append((job_id, step, line, arguments))
@@ -726,7 +748,11 @@ def is_gated_measurement_step(job_id: str, step: dict[str, object]) -> bool:
 def test_original_resource_and_cel_commands_keep_their_artifacts() -> None:
     jobs = workflow_jobs()
     cel = steps(table(jobs["cel-producer"]))
-    routed_elsewhere = {COMMAND_ROUTED_MEASUREMENT, STORAGE_WORKFLOW_MEASUREMENT}
+    routed_elsewhere = {
+        COMMAND_ROUTED_MEASUREMENT,
+        STORAGE_WORKFLOW_MEASUREMENT,
+        LANE_DIAGNOSTIC_MEASUREMENT,
+    }
 
     lines = measurement_lines()
     routes = [
@@ -872,7 +898,10 @@ def test_scaffold_lanes_keep_fail_closed_settings_and_pinned_steps() -> None:
     assert "permissions" not in job
     assert document["permissions"] == {"contents": "read"}
     assert conditions == LANE_STEP_CONDITIONS
-    assert all("continue-on-error" not in step for step in job_steps)
+    assert [step_key(step) for step in job_steps if "continue-on-error" in step] == [
+        "diagnostics",
+        "diagnostics_upload",
+    ]
     checkout = job_steps[0]
     assert str(checkout["uses"]).startswith("actions/checkout@")
     assert table(checkout["with"]) == {"persist-credentials": False}
