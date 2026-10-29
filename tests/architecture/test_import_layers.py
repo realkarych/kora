@@ -8,8 +8,10 @@ from tests.support.ast_modules import (
     SourceModule,
     Violation,
     dotted_name,
+    expression_name,
+    import_source,
     is_within,
-    resolve_relative,
+    parse_module,
     source_modules,
     write_module,
 )
@@ -184,15 +186,6 @@ def local_bindings(tree: ast.Module) -> dict[str, str]:
     return bindings
 
 
-def expression_name(node: ast.expr, bindings: dict[str, str]) -> str | None:
-    if isinstance(node, ast.Name):
-        return bindings.get(node.id, node.id)
-    if isinstance(node, ast.Attribute):
-        owner = expression_name(node.value, bindings)
-        return None if owner is None else f"{owner}.{node.attr}"
-    return None
-
-
 def call_name(node: ast.Call, bindings: dict[str, str]) -> str | None:
     return expression_name(node.func, bindings)
 
@@ -232,7 +225,7 @@ def module_level_nodes(tree: ast.Module) -> Iterator[ast.AST]:
 def imported_modules(
     module: SourceModule, known: frozenset[str]
 ) -> Iterator[ImportedModule]:
-    tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+    tree = parse_module(module)
     bindings = local_bindings(tree)
     nodes = module_level_nodes(tree) if module.name == ROOT_PACKAGE else ast.walk(tree)
     for node in nodes:
@@ -240,9 +233,7 @@ def imported_modules(
             for alias in node.names:
                 yield ImportedModule(node.lineno, alias.name, dynamic=False)
         elif isinstance(node, ast.ImportFrom):
-            source = node.module or ""
-            if node.level > 0:
-                source = resolve_relative(module, node.level, source)
+            source = import_source(module, node)
             for alias in node.names:
                 candidate = f"{source}.{alias.name}"
                 target = candidate if candidate in known else source
@@ -281,7 +272,7 @@ def fake_import_violation(importer: str, target: str) -> str | None:
 def command_function_lines(module: SourceModule) -> frozenset[int]:
     if module.name != TESTING_COMMAND_ROOT:
         return frozenset()
-    tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+    tree = parse_module(module)
     lines: set[int] = set()
     for node in tree.body:
         if (
@@ -294,7 +285,7 @@ def command_function_lines(module: SourceModule) -> frozenset[int]:
 
 
 def root_dynamic_import_lines(module: SourceModule) -> Iterator[int]:
-    tree = ast.parse(module.path.read_text(encoding="utf-8"), filename=str(module.path))
+    tree = parse_module(module)
     bindings = local_bindings(tree)
     for node in ast.walk(tree):
         if (
