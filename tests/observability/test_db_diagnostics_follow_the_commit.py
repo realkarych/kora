@@ -17,8 +17,16 @@ from kora.observability import Level, LoggingSettings
 from tests.db.closing import narrow_database, until
 from tests.db.seed import Seeder, seed_predecessor
 from tests.db.test_pricing_migration import retained_index_progress, wait_for_index
-from tests.observability.conftest import Configure, Pipe
+from tests.observability.conftest import (
+    Configure,
+    Pipe,
+    configured_with_reader,
+    finished_output,
+)
 
+DB_DEBUG: LoggingSettings = LoggingSettings(
+    level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
+)
 DB_EVENTS: frozenset[str] = frozenset(
     {
         "db.migration.started",
@@ -50,21 +58,11 @@ def db_events(pipe: Pipe) -> list[str]:
     ]
 
 
-def finished_output(pipe: Pipe) -> str:
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
-    return "\n".join(pipe.reader.lines())
-
-
 @pytest.mark.asyncio
 async def test_a_refused_commit_records_failure_and_never_finished(
     configure: Configure, pipe: Pipe, empty_database_settings: DatabaseSettings
 ) -> None:
-    settings = LoggingSettings(
-        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-    )
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
     probe = Database(empty_database_settings)
     event.listen(probe.writer_engine.sync_engine, "commit", refuse_commit)
 
@@ -73,8 +71,7 @@ async def test_a_refused_commit_records_failure_and_never_finished(
             await connection.run_sync(lambda sync: None)
     await probe.close()
     report = await upgrade_database(empty_database_settings)
-    diagnostics.shutdown()
-    finished_output(pipe)
+    finished_output(diagnostics, pipe)
 
     assert report.steps == 2
     assert db_events(pipe) == [
@@ -88,16 +85,11 @@ async def test_a_refused_commit_records_failure_and_never_finished(
 async def test_a_refused_migration_commit_leaves_no_finished_record(
     configure: Configure, pipe: Pipe, empty_database_settings: DatabaseSettings
 ) -> None:
-    settings = LoggingSettings(
-        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-    )
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
 
     with pytest.raises(CommitRefused):
         await upgrade_refusing_commit(empty_database_settings)
-    diagnostics.shutdown()
-    finished_output(pipe)
+    finished_output(diagnostics, pipe)
 
     assert db_events(pipe) == [
         "db.migration.started",
@@ -131,11 +123,7 @@ async def faulting_unit(database: Database) -> None:
 async def test_body_faults_are_recorded_once_and_cancellations_never(
     configure: Configure, pipe: Pipe, database: Database
 ) -> None:
-    settings = LoggingSettings(
-        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-    )
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
     entered = asyncio.Event()
 
     with pytest.raises(BodyFault):
@@ -152,8 +140,7 @@ async def test_body_faults_are_recorded_once_and_cancellations_never(
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    diagnostics.shutdown()
-    finished_output(pipe)
+    finished_output(diagnostics, pipe)
 
     records = [
         record
@@ -169,11 +156,7 @@ async def test_body_faults_are_recorded_once_and_cancellations_never(
 async def test_close_after_the_deadline_is_recorded(
     configure: Configure, pipe: Pipe, database: Database
 ) -> None:
-    settings = LoggingSettings(
-        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-    )
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
     closing = narrow_database(database, pool_size=1)
     entered = asyncio.Event()
     release = asyncio.Event()
@@ -196,8 +179,7 @@ async def test_close_after_the_deadline_is_recorded(
     await closing.close(deadline_seconds=0.2)
     release.set()
     results = await asyncio.gather(holding, waiting, return_exceptions=True)
-    diagnostics.shutdown()
-    finished_output(pipe)
+    finished_output(diagnostics, pipe)
 
     records = [
         record
@@ -220,17 +202,12 @@ async def test_close_after_the_deadline_is_recorded(
 async def test_an_idle_close_records_no_timeout_even_with_a_zero_deadline(
     configure: Configure, pipe: Pipe, database: Database
 ) -> None:
-    settings = LoggingSettings(
-        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-    )
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
     closing = narrow_database(database)
     await write_one(closing)
 
     await closing.close(deadline_seconds=0)
-    diagnostics.shutdown()
-    finished_output(pipe)
+    finished_output(diagnostics, pipe)
 
     assert db_events(pipe) == []
 
@@ -239,11 +216,7 @@ async def test_an_idle_close_records_no_timeout_even_with_a_zero_deadline(
 async def test_a_close_past_its_deadline_keeps_each_unit_outcome_and_records_once(
     configure: Configure, pipe: Pipe, database: Database
 ) -> None:
-    settings = LoggingSettings(
-        level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-    )
-    diagnostics = configure(settings, pipe.write_end)
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
     closing = narrow_database(database)
     writer_entered = asyncio.Event()
     reader_entered = asyncio.Event()
@@ -273,8 +246,7 @@ async def test_a_close_past_its_deadline_keeps_each_unit_outcome_and_records_onc
     reading.cancel()
     release.set()
     results = await asyncio.gather(holding, reading, return_exceptions=True)
-    diagnostics.shutdown()
-    finished_output(pipe)
+    finished_output(diagnostics, pipe)
 
     records = [
         record
@@ -312,13 +284,7 @@ async def test_cancelled_pricing_upgrade_keeps_diagnostics_content_free(
                 await connection.run_sync(seed_predecessor)
         finally:
             await initial.close()
-    diagnostics = configure(
-        LoggingSettings(
-            level=Level.DEBUG, component_levels={DB_COMPONENT: Level.DEBUG}
-        ),
-        pipe.write_end,
-    )
-    pipe.reader.start()
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
     database = Database(empty_database_settings)
     opened: list[Database] = []
 
@@ -342,8 +308,7 @@ async def test_cancelled_pricing_upgrade_keeps_diagnostics_content_free(
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-        diagnostics.shutdown()
-        finished_output(pipe)
+        finished_output(diagnostics, pipe)
 
         assert set(db_events(pipe)) <= {"db.migration.started"}
         assert opened[0].units_in_flight() == 0

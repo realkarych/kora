@@ -89,6 +89,21 @@ def configure(clock: FakeClock) -> Iterator[Configure]:
     assert current_diagnostics() is None
 
 
+def configured_with_reader(
+    configure: Configure, pipe: Pipe, settings: LoggingSettings
+) -> ProcessDiagnostics:
+    diagnostics = configure(settings, pipe.write_end)
+    pipe.reader.start()
+    return diagnostics
+
+
+def finished_output(diagnostics: ProcessDiagnostics, pipe: Pipe) -> str:
+    diagnostics.shutdown()
+    pipe.close_write_end()
+    pipe.reader.wait_closed()
+    return "\n".join(pipe.reader.lines())
+
+
 def wait_until(
     condition: Callable[[], bool], deadline_seconds: float = WAIT_SECONDS
 ) -> None:
