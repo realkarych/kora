@@ -102,3 +102,23 @@ export async function verifyReleased(pids: number[], observe: typeof nativeResou
     await setImmediate()
   }
 }
+
+export async function admitResources(pids: number[], deadline: number, validate: () => void, accept: (resources: NativeResources) => void, observe: typeof nativeResources = nativeResources): Promise<void> {
+  let firstDenial: unknown
+  for (;;) {
+    try {
+      validate()
+      assert(performance.now() < deadline, 'Ownership admission deadline expired')
+      const resources = await observe(pids)
+      validate()
+      assert(performance.now() < deadline, 'Ownership admission deadline expired')
+      accept(resources)
+      return
+    } catch (error) {
+      if (process.platform !== 'linux' || !(error instanceof Error && 'code' in error && (error.code === 'EACCES' || error.code === 'EPERM'))) throw firstDenial ?? error
+      firstDenial ??= error
+      if (performance.now() >= deadline) throw firstDenial
+    }
+    await setImmediate()
+  }
+}
