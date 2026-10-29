@@ -27,6 +27,23 @@ The [diagnostic observations](storage-alias-preparation-diagnostics-2026-10-28.j
 
 The submission reductions match the omitted preparation writes. All four cycles reported zero disposable provider counters. Increased traced peaks remain visible. These single shared-host observations establish no speedup, native/RSS, retention or deadline-sufficiency guarantee. cProfile covers the event-loop thread and cannot attribute payload-thread write CPU. No further local attribution run is required for this bounded mechanism.
 
+## Candidate CI on 2026-10-29
+
+Candidate `fd7f7b9c759a75c739ad750c69a802717e7647e5` integrates accepted master `bd4aa7b`. [Ordinary CI 40739261826](https://github.com/realkarych/kora/actions/runs/40739261826) ended cancelled after the macOS conformance lane reached its unchanged ten-minute job limit. That lane retained empty stdout/stderr and no complete JUnit or inventory, so the interrupted case is unverified. Every other producer passed; required joins failed closed. Total workflow duration, including scheduling, was 52 minutes 54 seconds, exceeding the feedback target tracked by #271. These results remain non-passing, and no relationship to the separate upstream storage-case defect in #408 is established.
+
+## Complete candidate qualification on 2026-10-29
+
+[Storage run 40818023262](https://github.com/realkarych/kora/actions/runs/40818023262) passed all nine jobs at `fd7f7b9c759a75c739ad750c69a802717e7647e5`: six complete lifetime producers, both qualification producers and the required evidence union. Each lifetime producer recorded all 832 samples, exit zero, no timeout and no output overflow. Each supported platform's boundary, pressure, crash and diagnostic-failure selection passed 43 tests without errors, failures or skips. The union confirms six producers, two qualification inputs and matching source digest `fb0e2346ef8d58eb101fd14f1aa752f140aedc4faf72a0873471c9beaeb06c47`.
+
+| Platform | Cohort 0 complete seconds | Cohort 1 complete seconds | Cohort 2 complete seconds |
+| --- | --- | --- | --- |
+| macOS | 310.705895375 | 326.168874500 | 327.506415583 |
+| Linux | 257.450262023 | 284.984795179 | 309.084897889 |
+
+The original 480-second child and ten-minute job limits, all populations, instrumentation and assertions remain. Whole-workflow duration, including scheduling, was 13 minutes 46 seconds, missing the feedback target tracked by #271. The result establishes completion for this candidate; it is not a matched speedup study or a qualification of future changed producer inputs.
+
+The [union artifact](https://github.com/realkarych/kora/actions/runs/40818023262/artifacts/12873691850), ZIP SHA-256 `12c8bc45d37539775d43945326953a91654276a99cc4fbaefa284d9d34cec1d7`, all eight producer artifacts and complete logs are retained. The union preserves 1,548 diagnostic comparisons. Three exceed their references: macOS cohorts 0, 1 and 2 recorded source-error tracer late-excursion growth of 11,744, 15,584 and 15,648 bytes against a 7,168-byte reference. These tracer diagnostics are not failed owned-resource checks or demonstrated component leaks. No additional attribution campaign is justified by these observations alone; revisit if complete late-cycle samples demonstrate sustained growth or an owned-resource gate fails.
+
 ## Release limits
 
 [Run 40688568316](https://github.com/realkarych/kora/actions/runs/40688568316), source `2280336441810667d623af6c88aab92d73438a65`, remains failed: macOS cohort 0 completed 829 of 832 rows before its 480-second child deadline. Last completed zero counters do not establish interrupted-cycle or final cleanup. This is separate from the native detach failure in #302/#363.
