@@ -30,9 +30,9 @@ def run_foreign_keys(connection: Connection) -> tuple[str, ...]:
     )
 
 
-def seed_retention_predecessor(connection: Connection) -> RetentionPredecessor:
-    original = seed_predecessor(connection)
-    command.upgrade(alembic_config(connection), "0002")
+def seed_retention_rows(
+    connection: Connection, original: PredecessorHistory
+) -> RetentionPredecessor:
     run_table = Table("run", MetaData(), autoload_with=connection, resolve_fks=False)
     first: dict[str, object] = dict(
         connection.execute(select(run_table)).mappings().one()
@@ -68,14 +68,26 @@ def seed_retention_predecessor(connection: Connection) -> RetentionPredecessor:
     )
 
 
+async def seed_retention_predecessor(database: Database) -> RetentionPredecessor:
+    async with database.transaction() as connection:
+        original = await connection.run_sync(seed_predecessor)
+    async with database.migration_connection() as connection:
+        await connection.run_sync(
+            lambda sync: command.upgrade(alembic_config(sync), "0002")
+        )
+    async with database.transaction() as connection:
+        return await connection.run_sync(
+            lambda sync: seed_retention_rows(sync, original)
+        )
+
+
 @pytest.mark.asyncio
 async def test_retention_snapshot_migration_preserves_legacy_rows(
     empty_database_settings: DatabaseSettings,
 ) -> None:
     database = Database(empty_database_settings)
     try:
-        async with database.transaction() as connection:
-            before = await connection.run_sync(seed_retention_predecessor)
+        before = await seed_retention_predecessor(database)
         await database.close()
 
         report = await upgrade_database(empty_database_settings)
@@ -159,8 +171,8 @@ async def test_retention_snapshot_migration_recovers_compatible_schema(
 ) -> None:
     database = Database(empty_database_settings)
     try:
+        before = await seed_retention_predecessor(database)
         async with database.transaction() as connection:
-            before = await connection.run_sync(seed_retention_predecessor)
             if database.dialect is Dialect.POSTGRESQL:
                 await connection.exec_driver_sql(
                     "ALTER TABLE run ADD COLUMN retention_version INTEGER"
@@ -220,8 +232,8 @@ async def test_retention_snapshot_migration_refuses_incompatible_schema(
 ) -> None:
     database = Database(empty_database_settings)
     try:
+        before = await seed_retention_predecessor(database)
         async with database.transaction() as connection:
-            before = await connection.run_sync(seed_retention_predecessor)
             await connection.exec_driver_sql(
                 f"ALTER TABLE run ADD COLUMN retention_version {definition}"
             )
