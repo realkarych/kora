@@ -16,6 +16,8 @@ from tests.observability.conftest import (
     TEST_COMPONENT,
     Configure,
     Pipe,
+    configured_with_reader,
+    finished_output,
 )
 
 
@@ -23,9 +25,8 @@ from tests.observability.conftest import (
 async def test_concurrent_tasks_see_only_their_own_context(
     configure: Configure, pipe: Pipe
 ) -> None:
-    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, LoggingSettings())
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
     gate = asyncio.Event()
 
     async def work(run_id: str, attempt_id: str) -> None:
@@ -55,9 +56,8 @@ async def test_concurrent_tasks_see_only_their_own_context(
 async def test_thread_bridge_carries_the_copied_context(
     configure: Configure, pipe: Pipe
 ) -> None:
-    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, LoggingSettings())
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     with bound_scope(run_id="run-thread", lease_epoch=3):
         await asyncio.to_thread(log.emit, NOTE, text="from-thread")
@@ -101,9 +101,8 @@ async def test_context_resets_after_exit_exception_and_cancellation() -> None:
 def test_logger_bind_carries_validated_context(
     configure: Configure, pipe: Pipe
 ) -> None:
-    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, LoggingSettings())
     log = diagnostics.logger(TEST_COMPONENT).bind(namespace_id="default")
-    pipe.reader.start()
 
     log.emit(NOTE, text="bound")
     pipe.reader.wait_for_lines(1)
@@ -118,16 +117,13 @@ def test_logger_bind_carries_validated_context(
 def test_event_field_cannot_override_bound_context(
     configure: Configure, pipe: Pipe
 ) -> None:
-    diagnostics = configure(LoggingSettings(), pipe.write_end)
+    diagnostics = configured_with_reader(configure, pipe, LoggingSettings())
     log = diagnostics.logger(TEST_COMPONENT)
-    pipe.reader.start()
 
     with bound_scope(run_id="run-real"):
         log.emit(NOTE, **{"text": "forged", "run_id": "run-forged"})
         log.emit(LEVEL_EVENTS[Level.INFO], text="after")
-    diagnostics.shutdown()
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
+    finished_output(diagnostics, pipe)
 
     records = pipe.reader.records()
     events = [record["event"] for record in records]
