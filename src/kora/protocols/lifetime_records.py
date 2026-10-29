@@ -6,7 +6,7 @@ from pydantic import Field, StrictInt, StrictStr
 
 from kora.ir.scalars import Digest
 from kora.protocols.boundary import BoundaryModel
-from kora.protocols.identity import Identifier, Pid, ProcessIdentity
+from kora.protocols.identity_records import Identifier, Pid, ProcessIdentity
 
 InvocationId = Annotated[
     StrictStr, Field(pattern=re.compile(r"^[0-9a-f]{32}(?![\s\S])"))

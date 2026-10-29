@@ -110,6 +110,8 @@ def test_fixed_lifetime_helper_imports_no_cel_checker() -> None:
 
 def test_fixed_lifetime_helper_imports_no_parent_lifetime_or_launch_models() -> None:
     parent_modules = (
+        "kora.ir.json",
+        "kora.protocols.identity",
         "kora.protocols.lifetime",
         "kora.runner.processes",
         "kora.runner.gate",
@@ -173,6 +175,7 @@ def test_lifetime_public_records_share_protocol_identity_without_runtime_imports
 def test_lifetime_leaf_records_preserve_all_canonical_public_exports() -> None:
     source = (
         "from kora import conformance\n"
+        "from kora.protocols import identity as protocol_identity, identity_records\n"
         "from kora.protocols import lifetime, lifetime_records\n"
         "from kora.runner import identity, processes\n"
         "for name in ('InvocationId', 'ResourceId', 'OperationId', 'Revision', "
@@ -187,6 +190,11 @@ def test_lifetime_leaf_records_preserve_all_canonical_public_exports() -> None:
         "'LocalRuntimeRegistration', 'TemporaryTreeRegistration', "
         "'BorrowedServiceRegistration'):\n"
         "    assert getattr(conformance, name) is getattr(lifetime_records, name)\n"
+        "for name in ('Identifier', 'MAX_PID', 'MAX_COUNT', 'Pid', 'Count', "
+        "'ProcessIdentity'):\n"
+        "    assert getattr(protocol_identity, name) is "
+        "getattr(identity_records, name)\n"
+        "assert lifetime_records.ProcessIdentity is identity_records.ProcessIdentity\n"
         "assert processes.complete_identity is identity.complete_identity\n"
     )
 

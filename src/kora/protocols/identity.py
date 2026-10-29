@@ -8,24 +8,32 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     BeforeValidator,
-    Field,
     PlainSerializer,
-    StrictBool,
-    StrictInt,
     StringConstraints,
 )
 from pydantic_core import PydanticCustomError
 
 from kora.ir.json import JsonObjectField
 from kora.protocols.boundary import BoundaryModel
+from kora.protocols.identity_records import (
+    MAX_COUNT as MAX_COUNT,
+)
+from kora.protocols.identity_records import (
+    MAX_PID as MAX_PID,
+)
+from kora.protocols.identity_records import (
+    Count as Count,
+)
+from kora.protocols.identity_records import (
+    Identifier as Identifier,
+)
+from kora.protocols.identity_records import (
+    Pid as Pid,
+)
+from kora.protocols.identity_records import (
+    ProcessIdentity as ProcessIdentity,
+)
 
-Identifier = Annotated[
-    str, StringConstraints(strict=True, pattern=r"^[\x21-\x7e]{1,256}$")
-]
-MAX_PID: Final[int] = 2**31 - 1
-MAX_COUNT: Final[int] = 2**63 - 1
-Pid = Annotated[StrictInt, Field(ge=1, le=MAX_PID)]
-Count = Annotated[StrictInt, Field(ge=0, le=MAX_COUNT)]
 Sha256 = Annotated[str, StringConstraints(strict=True, pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -63,32 +71,6 @@ Instant = Annotated[
     AfterValidator(utc_instant),
     PlainSerializer(instant_wire, return_type=str, when_used="json"),
 ]
-
-
-class ProcessIdentity(BoundaryModel):
-    host_id: Identifier | None
-    boot_id: Identifier | None
-    pid_namespace: Identifier | None
-    pid: Pid
-    start_time: Count
-    leads_group: StrictBool
-
-    def identity_key(self) -> tuple[str | None, str | None, str | None, int, int]:
-        return (
-            self.host_id,
-            self.boot_id,
-            self.pid_namespace,
-            self.pid,
-            self.start_time,
-        )
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, ProcessIdentity):
-            return NotImplemented
-        return self.identity_key() == other.identity_key()
-
-    def __hash__(self) -> int:
-        return hash(self.identity_key())
 
 
 class ProcessIdentitySource(Protocol):

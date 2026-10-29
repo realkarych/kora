@@ -15,7 +15,7 @@ from pydantic import Field, StrictInt, TypeAdapter, ValidationError
 
 from kora.conformance.journal import JournalSnapshot
 from kora.protocols.boundary import BoundaryModel
-from kora.protocols.identity import ProcessIdentity
+from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.lifetime_records import InvocationId, LifetimeReason, Revision
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import (

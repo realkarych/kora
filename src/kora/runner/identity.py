@@ -7,7 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, cast
 
-from kora.protocols.identity import ProcessIdentity
+from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
 
 

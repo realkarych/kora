@@ -450,6 +450,7 @@ def test_pending_marks_are_enumerated() -> None:
 COUNTED_MODULES: frozenset[str] = frozenset(
     {
         "kora.protocols.identity",
+        "kora.protocols.identity_records",
         "kora.protocols.evidence",
         "kora.protocols.report",
         "kora.protocols.history",
