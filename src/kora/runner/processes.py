@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import select
 import signal
@@ -6,10 +7,11 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Final, Protocol, cast
+from typing import Final, Literal, Protocol, TypeAlias, cast
 
 from pydantic import TypeAdapter
 
@@ -32,6 +34,8 @@ from kora.runner.channels import (
 )
 from kora.runner.gate import ExecutionConfig, encode_deadline
 from kora.runner.identity import (
+    GroupObservation,
+    IdentityObservation,
     IdentityReader,
     IdentityState,
     NativeIdentityReader,
@@ -376,11 +380,29 @@ class RecoveryObservation:
         return self.condition is ProcessCondition.SETTLED
 
 
+_RecoveryDiagnosticScalar: TypeAlias = str | bool | int | None
+_RecoveryDiagnosticReason: TypeAlias = Literal[
+    "scope_or_disposed",
+    "leader_unknown",
+    "leader_identity_or_domain",
+    "group_not_present",
+    "live_leader_missing",
+    "member_not_present",
+    "registered_leader_changed",
+    "caught_process_error",
+    "listed_absent_unwaitable",
+    "omitted_unwaitable",
+    "collected_unwaitable",
+    "unresolved_unwaitable",
+]
+
+
 @dataclass(frozen=True)
 class _RecoveryPass:
     observation: RecoveryObservation
     waitable: bool = False
     refresh: bool = False
+    diagnostic: dict[str, _RecoveryDiagnosticScalar] | None = None
 
 
 class RecoveredProcess:
@@ -406,6 +428,144 @@ class RecoveredProcess:
 
     def readiness(self) -> tuple[asyncio.Future[None], ...]:
         return self.members.pending()
+
+    def _diagnose(
+        self,
+        result: _RecoveryPass,
+        reason: _RecoveryDiagnosticReason,
+        local_values: Mapping[str, object],
+        error: ProcessError | None = None,
+    ) -> _RecoveryPass:
+        if result.waitable or result.observation.settled:
+            return result
+        supplied_leader = local_values.get("leader")
+        leader = (
+            supplied_leader
+            if isinstance(supplied_leader, IdentityObservation)
+            else None
+        )
+        process = leader.process if leader is not None else None
+        supplied_group = local_values.get("group")
+        group = supplied_group if isinstance(supplied_group, GroupObservation) else None
+        previous = local_values.get("previous_count")
+        previous_count = (
+            previous
+            if isinstance(previous, int) and not isinstance(previous, bool)
+            else 0
+        )
+        current_count = len(self.members.entries)
+        pending_count = 0
+        unknown_count = 0
+        for _, anchor in self.members.entries.values():
+            pending_count += int(not anchor.next_change.done())
+            unknown_count += int(anchor.unknown)
+        group_count = len(group.members) if group is not None else 0
+        diagnostic: dict[str, _RecoveryDiagnosticScalar] = {
+            "reason": reason,
+            "condition": result.observation.condition.value,
+            "waitable": result.waitable,
+            "refresh": result.refresh,
+            "disposed": self.disposed,
+            "leader_state": leader.state.value if leader is not None else None,
+            "leader_dead": process.dead if process is not None else None,
+            "leader_identity_matches": (
+                process.identity == self.registration.process
+                if process is not None
+                else None
+            ),
+            "leader_domain_matches": (
+                matches_domain(process, self.registration)
+                if process is not None
+                else None
+            ),
+            "group_state": group.state.value if group is not None else None,
+            "group_count": min(group_count, 65536) if group is not None else None,
+            "group_leader_listed": (
+                any(pid == self.registration.process.pid for pid, _ in group.members)
+                if group is not None
+                else None
+            ),
+            "previous_watches": min(previous_count, 65536)
+            if previous is not None
+            else None,
+            "current_watches": min(current_count, 65536),
+            "pending_watches": min(pending_count, 65536),
+            "unknown_watches": min(unknown_count, 65536),
+            "counts_saturated": max(
+                previous_count, current_count, pending_count, unknown_count, group_count
+            )
+            > 65536,
+            "error_condition": error.condition.value if error is not None else None,
+            "error_origin_function": None,
+            "error_origin_line": None,
+            "error_origin_line_saturated": False,
+            "error_origin_truncated": False,
+            "error_origin_anchor_unknown": None,
+            "error_origin_read_state": None,
+            "error_origin_identity_matches": None,
+            "error_origin_domain_matches": None,
+        }
+        for name in ("collected", "incomplete", "refresh", "terminal", "omitted"):
+            value = local_values.get(name)
+            diagnostic["local_" + name] = value if isinstance(value, bool) else None
+        candidate = local_values.get("candidate")
+        if isinstance(candidate, ProcessSnapshot):
+            retained = self.members.entries.get(candidate.identity.pid)
+            diagnostic["member_is_leader"] = (
+                candidate.identity.pid == self.registration.process.pid
+            )
+            diagnostic["member_domain_matches"] = matches_domain(
+                candidate, self.registration
+            )
+            diagnostic["member_matches_retained"] = (
+                retained[0] == candidate.identity if retained is not None else None
+            )
+        cursor = error.__traceback__ if error is not None else None
+        for _ in range(8):
+            if cursor is None:
+                break
+            code = cursor.tb_frame.f_code
+            if code.co_filename == __file__ and code.co_name in (
+                "_observe",
+                "retain",
+                "validate",
+                "check_deadline",
+            ):
+                origin: Mapping[str, object] = cursor.tb_frame.f_locals
+                observed = origin.get("observed")
+                current = origin.get("current")
+                expected = origin.get("process")
+                origin_anchor = origin.get("anchor")
+                snapshot = current if isinstance(current, ProcessSnapshot) else expected
+                diagnostic["error_origin_function"] = code.co_name
+                diagnostic["error_origin_line"] = min(cursor.tb_lineno, 65535)
+                diagnostic["error_origin_line_saturated"] = cursor.tb_lineno > 65535
+                diagnostic["error_origin_anchor_unknown"] = (
+                    origin_anchor.unknown
+                    if isinstance(origin_anchor, ExitAnchor)
+                    else None
+                )
+                diagnostic["error_origin_read_state"] = (
+                    observed.state.value
+                    if isinstance(observed, IdentityObservation)
+                    else None
+                )
+                diagnostic["error_origin_identity_matches"] = (
+                    current.identity == expected.identity
+                    if isinstance(current, ProcessSnapshot)
+                    and isinstance(expected, ProcessSnapshot)
+                    else None
+                )
+                diagnostic["error_origin_domain_matches"] = (
+                    matches_domain(snapshot, self.registration)
+                    if isinstance(snapshot, ProcessSnapshot)
+                    else None
+                )
+            cursor = cursor.tb_next
+        diagnostic["error_origin_truncated"] = cursor is not None
+        return _RecoveryPass(
+            result.observation, result.waitable, result.refresh, diagnostic
+        )
 
     def _scope_matches(self) -> bool:
         registration = self.registration
@@ -435,19 +595,19 @@ class RecoveredProcess:
                 RecoveryObservation(ProcessCondition.SETTLED, (), (), True)
             )
         if self.disposed or not self._scope_matches():
-            return refused
+            return self._diagnose(refused, "scope_or_disposed", locals())
         previous_count = self.watcher_count
         try:
             self.members.check_deadline(deadline_ns)
             leader = self.identities.read(self.registration.process.pid)
             process = leader.process
             if leader.state is IdentityState.UNKNOWN:
-                return refused
+                return self._diagnose(refused, "leader_unknown", locals())
             if process is not None and (
                 process.identity != self.registration.process
                 or not matches_domain(process, self.registration)
             ):
-                return refused
+                return self._diagnose(refused, "leader_identity_or_domain", locals())
             collected = False
             if process is not None and not process.dead:
                 collected = not self.members.retain(
@@ -457,14 +617,14 @@ class RecoveredProcess:
                 self.registration.process_group_id, deadline_ns
             )
             if group.state is not IdentityState.PRESENT:
-                return refused
+                return self._diagnose(refused, "group_not_present", locals())
             if (
                 process is not None
                 and not process.dead
                 and not collected
                 and process.identity.pid not in {pid for pid, _ in group.members}
             ):
-                return refused
+                return self._diagnose(refused, "live_leader_missing", locals())
             omitted = self.members.omitted_pending(
                 {pid for pid, _ in group.members}, deadline_ns
             )
@@ -479,12 +639,14 @@ class RecoveredProcess:
                     refresh = True
                     continue
                 if member.state is not IdentityState.PRESENT or candidate is None:
-                    return refused
+                    return self._diagnose(refused, "member_not_present", locals())
                 if (
                     pid == self.registration.process.pid
                     and candidate.identity != self.registration.process
                 ):
-                    return refused
+                    return self._diagnose(
+                        refused, "registered_leader_changed", locals()
+                    )
                 self.members.validate(candidate, self.registration, deadline_ns)
                 if not candidate.dead:
                     if not self.members.retain(
@@ -513,14 +675,28 @@ class RecoveredProcess:
             )
             waitable = not terminal and (refresh or bool(self.members.pending()))
             if incomplete:
-                return _RecoveryPass(unknown, waitable, refresh)
+                result = _RecoveryPass(unknown, waitable, refresh)
+                if waitable:
+                    return result
+                return self._diagnose(
+                    result,
+                    "listed_absent_unwaitable",
+                    locals(),
+                )
             if omitted:
-                return _RecoveryPass(
+                result = _RecoveryPass(
                     RecoveryObservation(
                         ProcessCondition.UNKNOWN, tuple(live), exits, False
                     ),
                     waitable,
                     refresh,
+                )
+                if waitable:
+                    return result
+                return self._diagnose(
+                    result,
+                    "omitted_unwaitable",
+                    locals(),
                 )
             if (
                 leader.state is IdentityState.ABSENT and not group.members
@@ -543,21 +719,36 @@ class RecoveredProcess:
                         RecoveryObservation(ProcessCondition.SETTLED, (), exits, True)
                     )
             if collected:
-                return _RecoveryPass(unknown, waitable, refresh)
+                result = _RecoveryPass(unknown, waitable, refresh)
+                if waitable:
+                    return result
+                return self._diagnose(
+                    result,
+                    "collected_unwaitable",
+                    locals(),
+                )
             condition = (
                 ProcessCondition.LIVE
                 if process is not None and not process.dead
                 else ProcessCondition.UNKNOWN
             )
-            return _RecoveryPass(
+            result = _RecoveryPass(
                 RecoveryObservation(condition, tuple(live), exits, False),
                 waitable,
                 refresh,
             )
-        except ProcessError:
+            if waitable:
+                return result
+            return self._diagnose(
+                result,
+                "unresolved_unwaitable",
+                locals(),
+            )
+        except ProcessError as error:
+            diagnosed = self._diagnose(refused, "caught_process_error", locals(), error)
             if previous_count == 0 or self.watcher_count > previous_count:
                 self.dispose_observation()
-            return refused
+            return diagnosed
 
     def signal(self, requested: signal.Signals, deadline_ns: int) -> SignalResult:
         if requested not in (signal.SIGTERM, signal.SIGKILL):
@@ -595,7 +786,22 @@ class RecoveredProcess:
             if observed.observation.settled:
                 return
             if not observed.waitable:
-                raise ProcessError(ProcessCondition.UNKNOWN)
+                error = ProcessError(ProcessCondition.UNKNOWN)
+                if observed.diagnostic is not None:
+                    remaining_ns = deadline_ns - completed_ns
+                    diagnostic = {
+                        **observed.diagnostic,
+                        "remaining_ns": min(
+                            max(remaining_ns, -9223372036854775808), 9223372036854775807
+                        ),
+                        "remaining_ns_saturated": not -9223372036854775808
+                        <= remaining_ns
+                        <= 9223372036854775807,
+                    }
+                    error.add_note(
+                        json.dumps(diagnostic, separators=(",", ":"), sort_keys=True)
+                    )
+                raise error
             if self._disposal is None:
                 self._disposal = asyncio.get_running_loop().create_future()
             if self.disposed:
