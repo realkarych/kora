@@ -133,7 +133,8 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
             if identity not in {"required_measurements", "workflow_cancellation"}
         },
         "WORKFLOW_CANCELLED": (
-            "${{ cancelled() || steps.workflow_cancellation.outcome != 'skipped' }}"
+            "${{ job.status == 'cancelled' || "
+            "steps.workflow_cancellation.outcome != 'skipped' }}"
         ),
         "SCOPE_RESULT": "${{ needs.change-scope.result }}",
         "SCOPE_VERIFIED": "${{ needs.change-scope.outputs.verified }}",

@@ -59,7 +59,7 @@ def findings(scanner: Path, root: Path, scope: str, output: Path) -> set[str]:
 
 
 def verify_histories(scanner: Path, temporary: Path) -> None:
-    token = "gh" + "p_" + "0123456789abcdefghijklmnopqrstuvwxyz"
+    token = "gh" + "p_" + "9wA6cR4uF8pN2kV5zM7bD3sQ1tJ0xH6gL4eY"
     root = repository(temporary / "long")
     base = commit(root, "base")
     for index in range(35):

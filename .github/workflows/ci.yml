@@ -1380,7 +1380,7 @@ jobs:
           CEL_LIFETIME_DOWNLOAD_OUTCOME: ${{ steps.cel_lifetime_download.outcome }}
           CEL_COST_DOWNLOAD_OUTCOME: ${{ steps.cel_cost_download.outcome }}
           CEL_INVENTORY_OUTCOME: ${{ steps.cel_inventory.outcome }}
-          WORKFLOW_CANCELLED: ${{ cancelled() || steps.workflow_cancellation.outcome != 'skipped' }}
+          WORKFLOW_CANCELLED: ${{ job.status == 'cancelled' || steps.workflow_cancellation.outcome != 'skipped' }}
           SCOPE_RESULT: ${{ needs.change-scope.result }}
           SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
@@ -1481,7 +1481,7 @@ jobs:
           SCOPE_VERIFIED: ${{ needs.change-scope.outputs.verified }}
           FULL_SCOPE: ${{ needs.change-scope.outputs.full }}
           BROWSER_RESULT: ${{ steps.verification.outcome }}
-          CANCELLED: ${{ cancelled() }}
+          CANCELLED: ${{ job.status == 'cancelled' }}
         run: |
           test "$CANCELLED" = false
           test "$SCOPE_RESULT" = success
