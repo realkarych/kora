@@ -2,6 +2,7 @@ import asyncio
 import os
 import socket
 import struct
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import TypeVar
 
@@ -9,6 +10,8 @@ from kora.protocols.time import Clock
 
 MAX_FRAME_BYTES: int = 65536
 MAX_RECORD_BYTES: int = 1048576
+MAX_TYPED_FRAME_BYTES: int = 1048576
+TYPED_HEADER: struct.Struct = struct.Struct("!IB")
 T = TypeVar("T")
 
 
@@ -155,6 +158,74 @@ class BoundedChannel:
             result.extend(chunk)
         return bytes(result)
 
+    async def _read_into(self, target: memoryview, deadline_ns: int) -> None:
+        offset = 0
+        while offset < len(target):
+            if self._closed:
+                raise ChannelError(ChannelFailure.CLOSED)
+            if self._clock.monotonic_ns() >= deadline_ns:
+                raise ChannelError(ChannelFailure.DEADLINE)
+            try:
+                received = self._endpoint.recv_into(target[offset:])
+            except BlockingIOError:
+                await self._wait(deadline_ns, writing=False)
+                continue
+            except (BrokenPipeError, ConnectionResetError) as error:
+                raise ChannelError(ChannelFailure.CLOSED) from error
+            if received == 0:
+                raise ChannelError(ChannelFailure.CLOSED)
+            offset += received
+
+    async def _read_typed_header(
+        self, deadline_ns: int, reservations: Mapping[int, int]
+    ) -> tuple[int, int]:
+        header = await self._read_exact(TYPED_HEADER.size, deadline_ns)
+        length = int.from_bytes(header[:4], "big")
+        kind = header[4]
+        reservation = reservations.get(kind)
+        if reservation is None:
+            raise ChannelError(ChannelFailure.MALFORMED)
+        if length > reservation:
+            raise ChannelError(ChannelFailure.CAPACITY)
+        return kind, length
+
+    async def read_typed_frame(
+        self, deadline_ns: int, reservations: Mapping[int, int]
+    ) -> tuple[int, bytes]:
+        if not all(0 <= cap <= MAX_TYPED_FRAME_BYTES for cap in reservations.values()):
+            raise ChannelError(ChannelFailure.CAPACITY)
+        if self._reading:
+            raise ChannelError(ChannelFailure.BUSY)
+        self._reading = True
+        try:
+            kind, length = await self._read_typed_header(deadline_ns, reservations)
+            return kind, await self._read_exact(length, deadline_ns)
+        except (ChannelError, asyncio.CancelledError):
+            self.close()
+            raise
+        finally:
+            self._reading = False
+
+    async def read_typed_frame_into(
+        self, deadline_ns: int, kind: int, target: memoryview
+    ) -> int:
+        if not 0 < len(target) <= MAX_TYPED_FRAME_BYTES:
+            raise ChannelError(ChannelFailure.CAPACITY)
+        if self._reading:
+            raise ChannelError(ChannelFailure.BUSY)
+        self._reading = True
+        try:
+            _, length = await self._read_typed_header(deadline_ns, {kind: len(target)})
+            if length == 0:
+                raise ChannelError(ChannelFailure.MALFORMED)
+            await self._read_into(target[:length], deadline_ns)
+            return length
+        except (ChannelError, asyncio.CancelledError):
+            self.close()
+            raise
+        finally:
+            self._reading = False
+
     async def expect_eof(self, deadline_ns: int) -> None:
         if self._reading:
             raise ChannelError(ChannelFailure.BUSY)
@@ -177,7 +248,7 @@ class BoundedChannel:
             self._reading = False
             self.close()
 
-    async def _write(self, value: bytes, deadline_ns: int) -> None:
+    async def _write(self, value: bytes | memoryview, deadline_ns: int) -> None:
         remaining = memoryview(value)
         while remaining:
             if self._closed:
@@ -228,6 +299,23 @@ class BoundedChannel:
         self._writing = True
         try:
             await self._write_frame(value, deadline_ns)
+        except (ChannelError, asyncio.CancelledError):
+            self.close()
+            raise
+        finally:
+            self._writing = False
+
+    async def write_typed_frame(
+        self, kind: int, value: bytes | memoryview, deadline_ns: int
+    ) -> None:
+        if len(value) > MAX_TYPED_FRAME_BYTES:
+            raise ChannelError(ChannelFailure.CAPACITY)
+        if self._writing:
+            raise ChannelError(ChannelFailure.BUSY)
+        self._writing = True
+        try:
+            await self._write(TYPED_HEADER.pack(len(value), kind), deadline_ns)
+            await self._write(value, deadline_ns)
         except (ChannelError, asyncio.CancelledError):
             self.close()
             raise
