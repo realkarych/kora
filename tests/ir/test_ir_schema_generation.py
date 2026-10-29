@@ -407,11 +407,15 @@ def test_ir_ignored_root_boundary_never_traverses_values() -> None:
 
 
 def test_ir_schema_measurement_inventory_preserves_all_actions() -> None:
-    from tests.measurements.ir_measurement_evidence import expected_evidence
+    from tests.measurements.ir_measurement_evidence import (
+        expected_evidence,
+        structured_output_evidence,
+    )
     from tests.measurements.ir_schema_workload import schema_fixture_manifest
     from tests.measurements.test_ir_models_cost import WORKLOADS
 
     expected = expected_evidence()
+    previous = expected.without(structured_output_evidence())
     manifest = cast(
         "dict[str, dict[str, object]]", json.loads(schema_fixture_manifest())
     )
@@ -431,6 +435,11 @@ def test_ir_schema_measurement_inventory_preserves_all_actions() -> None:
         len(expected.nodes),
         len(expected.gates),
         sum(expected.samples.values()),
+    ) == (366, 1271, 11054)
+    assert (
+        len(previous.nodes),
+        len(previous.gates),
+        sum(previous.samples.values()),
     ) == (359, 1227, 10668)
     for mode in ("validation", "serialization", "render_utf8"):
         assert manifest[mode]["definitions"] == 53
