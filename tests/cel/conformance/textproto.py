@@ -104,7 +104,7 @@ class Reader:
             self.skip_blank()
             if self.peek() == closing:
                 return Message(tuple(entries))
-            entries.extend(self.read_field())
+            entries.append(self.read_field())
             self.skip_blank()
             if self.peek() in (",", ";"):
                 self.position += 1
@@ -129,7 +129,7 @@ class Reader:
             self.position += 1
         return self.text[start : self.position]
 
-    def read_field(self) -> list[FieldEntry]:
+    def read_field(self) -> FieldEntry:
         name = self.read_name()
         self.skip_blank()
         has_colon = self.peek() == ":"
@@ -137,12 +137,10 @@ class Reader:
             self.position += 1
             self.skip_blank()
         if self.peek() in ("{", "<"):
-            return [FieldEntry(name, self.read_message())]
+            return FieldEntry(name, self.read_message())
         if not has_colon:
             raise self.error("expected ':' before a scalar value")
-        if self.peek() == "[":
-            return [FieldEntry(name, value) for value in self.read_list()]
-        return [FieldEntry(name, self.read_scalar())]
+        return FieldEntry(name, self.read_scalar())
 
     def read_message(self) -> Message:
         opening = self.peek()
@@ -151,24 +149,6 @@ class Reader:
         message = self.read_fields(closing)
         self.expect(closing)
         return message
-
-    def read_list(self) -> list[FieldValue]:
-        self.position += 1
-        values: list[FieldValue] = []
-        self.skip_blank()
-        while self.peek() != "]":
-            if self.peek() in ("{", "<"):
-                values.append(self.read_message())
-            else:
-                values.append(self.read_scalar())
-            self.skip_blank()
-            if self.peek() == ",":
-                self.position += 1
-                self.skip_blank()
-            elif self.peek() != "]":
-                raise self.error("expected ',' or ']'")
-        self.position += 1
-        return values
 
     def read_scalar(self) -> Scalar:
         self.skip_blank()

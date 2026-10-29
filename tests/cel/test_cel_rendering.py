@@ -15,8 +15,7 @@ from kora.cel.limits import MAX_CODE_POINTS, MAX_RENDERING_DEPTH
 from kora.cel.parser import RENDERING_LIMITS, parse
 from kora.cel.render import canonical_rendering
 from kora.cel.types import INT
-from tests.cel.conformance.cases import read_cases, vendored_files
-from tests.cel.conformance.selection import rejection_for
+from tests.cel.conformance.selection import accepted_cases
 from tests.cel.generator import generated_expressions
 
 RENDERING_EXPANSION: int = 16
@@ -91,12 +90,7 @@ def bracket_depth(text: str) -> int:
 
 
 def conformance_corpus() -> list[str]:
-    expressions: list[str] = []
-    for path in vendored_files():
-        for case in read_cases(path.stem, path.read_text()).cases:
-            if rejection_for(case.file, case.section, case.name) is None:
-                expressions.append(case.expression)
-    return expressions
+    return [case.expression for case in accepted_cases()]
 
 
 def test_cel_canonical_rendering_matches_author_text() -> None:

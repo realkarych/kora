@@ -26,6 +26,7 @@ from tests.cel.conformance.cases import (
     PrimitiveType,
     StringValue,
     read_cases,
+    vendored_cases,
     vendored_files,
 )
 from tests.cel.conformance.deviations import DEVIATIONS
@@ -39,6 +40,7 @@ from tests.cel.conformance.selection import (
     KORA_REJECTIONS,
     Feature,
     Rejection,
+    accepted_cases,
     rejection_for,
 )
 from tests.cel.conformance.textproto import (
@@ -262,11 +264,7 @@ def feature_holds(rejection: Rejection, case: Case, outcome: Diagnostic) -> bool
 
 
 def test_cel_conformance_cases_parse() -> None:
-    cases = [
-        case
-        for path in vendored_files()
-        for case in read_cases(path.stem, path.read_text(encoding="utf-8")).cases
-    ]
+    cases = list(vendored_cases())
 
     outcomes = [(case, checked_syntax(case.expression)) for case in cases]
 
@@ -302,12 +300,7 @@ def test_cel_conformance_cases_parse() -> None:
 
 
 def test_cel_conformance_suite(cel_binding: Binding) -> None:
-    cases = [
-        case
-        for path in vendored_files()
-        for case in read_cases(path.stem, path.read_text(encoding="utf-8")).cases
-        if rejection_for(case.file, case.section, case.name) is None
-    ]
+    cases = list(accepted_cases())
 
     runs = {
         (case.file, case.section, case.name): run_case(cel_binding, case)

@@ -1,8 +1,10 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
 from kora.cel import Reason
+from tests.cel.conformance.cases import Case, vendored_cases
 
 
 class Feature(Enum):
@@ -238,3 +240,9 @@ def rejection_for(file: str, section: str, test: str) -> Rejection | None:
         if rejection.test is None or rejection.test == test:
             return rejection
     return None
+
+
+def accepted_cases() -> Iterator[Case]:
+    for case in vendored_cases():
+        if rejection_for(case.file, case.section, case.name) is None:
+            yield case

@@ -482,3 +482,8 @@ def read_cases(name: str, text: str) -> CaseFile:
 
 def vendored_files() -> Iterator[Path]:
     yield from sorted(TESTDATA.glob("*.textproto"))
+
+
+def vendored_cases() -> Iterator[Case]:
+    for path in vendored_files():
+        yield from read_cases(path.stem, path.read_text(encoding="utf-8")).cases
