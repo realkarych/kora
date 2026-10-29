@@ -29,9 +29,13 @@ from tests.plugins.storage.pressure_native import (
 REPOSITORY: Path = Path(__file__).resolve().parents[3]
 
 
-@pytest.mark.parametrize("repetitions", [1, 4096])
+@pytest.mark.parametrize(
+    ("repetitions", "persistence_name"),
+    [(1, "command-stdout.pending"), (4096, "command-stderr.pending")],
+    ids=("1", "4096"),
+)
 def test_closed_failed_command_does_not_block_pressure_recovery(
-    tmp_path: Path, repetitions: int
+    tmp_path: Path, repetitions: int, persistence_name: str
 ) -> None:
     from tests.plugins.storage.pressure_controller import create
 
@@ -40,17 +44,20 @@ def test_closed_failed_command_does_not_block_pressure_recovery(
     output.mkdir()
     fragment = b"fixture-command-error\xff\r\n\x1b"
     diagnostic = fragment * repetitions
+    private_fragment = b"private-native-output\x00\xff"
+    private_output = private_fragment * repetitions
     arguments = (
         sys.executable,
         "-I",
         "-c",
-        f"import os; os.write(2, {fragment!r} * {repetitions}); raise SystemExit(17)",
+        f"import os; os.write(1, {private_fragment!r} * {repetitions}); "
+        f"os.write(2, {fragment!r} * {repetitions}); raise SystemExit(17)",
     )
 
     with create(directory) as controller:
         with pytest.raises(PressureFailure, match="command_failed") as failure:
             controller.effect(arguments)
-        pending = directory / "command-stderr.pending"
+        pending = directory / persistence_name
         pending.symlink_to(directory / "absent")
         try:
             with pytest.raises(BaseExceptionGroup) as persistence:
@@ -62,12 +69,16 @@ def test_closed_failed_command_does_not_block_pressure_recovery(
 
     assert (directory / "command-stderr.txt").read_bytes() == diagnostic
     assert (output / "failed.command.stderr.txt").read_bytes() == diagnostic
+    assert failure.value.command_stdout == private_output
+    assert (directory / "command-stdout.txt").read_bytes() == private_output
+    assert (output / "failed.command.stdout.txt").read_bytes() == private_output
     assert controller.manifest.command_exit_status == 17
     assert not controller.manifest.command_inflight
     assert controller.manifest.resources_closed
     assert controller.report.failure == "command_failed"
     rendered = str(failure.value)
     assert "python" in rendered
+    assert "private-native-output" not in rendered
     assert "exit=17" in rendered
     assert "\\xff\\r\\n\\x1b" in rendered
     assert len(rendered.encode()) <= 16384
@@ -585,7 +596,7 @@ def test_failed_unmount_retains_ownership_until_the_blocker_closes(
                 assert failure.value.code == "command_failed"
                 if sys.platform == "darwin":
                     assert str(failure.value).startswith(
-                        "command_failed: command=hdiutil detach exit="
+                        "command_failed: command=diskutil eject exit="
                     )
                     notes = failure.value.__notes__
                     assert len(notes) == 1

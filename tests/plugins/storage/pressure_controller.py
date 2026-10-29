@@ -281,14 +281,16 @@ class PressureController:
             )
         except PressureFailure as error:
             self.report = self.report.model_copy(update={"failure": error.code})
-            if error.command_stderr is not None:
-                try:
+            try:
+                if error.command_stderr is not None:
                     save(self.directory / "command-stderr.txt", error.command_stderr)
-                except (OSError, PressureFailure) as persistence:
-                    raise BaseExceptionGroup(
-                        "native command and diagnostic persistence failed",
-                        [error, persistence],
-                    ) from None
+                if error.command_stdout is not None:
+                    save(self.directory / "command-stdout.txt", error.command_stdout)
+            except (OSError, PressureFailure) as persistence:
+                raise BaseExceptionGroup(
+                    "native command and diagnostic persistence failed",
+                    [error, persistence],
+                ) from None
             raise
 
     def command_started(self, token: ProcessToken) -> None:

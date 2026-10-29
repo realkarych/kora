@@ -69,6 +69,7 @@ NativeCommandLabel: TypeAlias = Literal[
     "hdiutil create",
     "hdiutil attach",
     "hdiutil detach",
+    "diskutil eject",
     "hdiutil info",
     "hdiutil imageinfo",
     "python",
@@ -83,12 +84,14 @@ NativeCommandLabel: TypeAlias = Literal[
 class PressureFailure(RuntimeError):
     code: str
     command_stderr: bytes | None
+    command_stdout: bytes | None
 
     def __init__(
         self,
         code: str,
         *,
         command_stderr: bytes | None = None,
+        command_stdout: bytes | None = None,
         command_label: NativeCommandLabel | None = None,
         command_status: int | None = None,
     ) -> None:
@@ -104,3 +107,4 @@ class PressureFailure(RuntimeError):
         super().__init__(message)
         self.code = code
         self.command_stderr = command_stderr
+        self.command_stdout = command_stdout

@@ -371,7 +371,7 @@ def detach(
             directory / "mounted", owned.volume, owned.entities, owner_device
         )
         try:
-            effect(("/usr/bin/hdiutil", "detach", owned.device))
+            effect(("/usr/sbin/diskutil", "eject", owned.device))
         except PressureFailure as failure:
             if failure.code != "command_failed":
                 raise
