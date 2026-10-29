@@ -5,7 +5,9 @@ from typing import Annotated, Final, Literal, Protocol, Self, cast
 
 from pydantic import (
     AfterValidator,
+    Discriminator,
     Field,
+    PlainValidator,
     StrictBool,
     StrictInt,
     StringConstraints,
@@ -21,10 +23,8 @@ from kora.ir.cost import Money, PricingStatus, Sum, UsageCoverage, consistent_pr
 from kora.ir.json import (
     JsonObject,
     JsonObjectField,
-    fits_utf8,
 )
 from kora.ir.scalars import ArtifactType, Digest, EnvName, SecretRef
-from kora.protocols.boundary import refusal_discriminator
 from kora.protocols.common import BoundaryModel, Pending, budgeted_object
 from kora.protocols.deadlines import ExecutionDeadline, is_duration, require
 from kora.protocols.evidence import (
@@ -53,6 +53,7 @@ from kora.protocols.secret_value import SecretTransfer
 from kora.protocols.vcs import (
     MAX_COMPONENT_BYTES,
     MAX_MAP_ENTRIES,
+    MAX_PATH_TEXT_BYTES,
     Argument,
     Binding,
     BindingRevision,
@@ -63,9 +64,9 @@ from kora.protocols.vcs import (
     PublishPlan,
     WorkspaceRef,
     WorkspaceTarget,
+    fits,
     is_bool,
     is_executor_set,
-    path_fits,
     presence_matches_mode,
 )
 
@@ -141,16 +142,25 @@ def transfer_name(value: str) -> str:
         value in {".", ".."}
         or "/" in value
         or not value.isprintable()
-        or not fits_utf8(value, MAX_COMPONENT_BYTES)
+        or not fits(value, MAX_COMPONENT_BYTES)
     ):
         raise runtime_refused()
     return value
 
 
 def resource_name(value: str) -> str:
-    if not path_fits(value):
+    if not fits(value, MAX_PATH_TEXT_BYTES) or any(
+        not fits(part, MAX_COMPONENT_BYTES) for part in value.split("/")
+    ):
         raise runtime_refused()
     return value
+
+
+def event_data(value: object) -> JsonObjectField:
+    parsed = budgeted_object(value, MAX_EVENT_DATA_BYTES)
+    if parsed is None:
+        raise runtime_refused()
+    return parsed
 
 
 TransferName = Annotated[
@@ -158,9 +168,7 @@ TransferName = Annotated[
 ]
 BoundedResourceName = Annotated[ResourceName, AfterValidator(resource_name)]
 EventData = Annotated[
-    JsonObjectField,
-    budgeted_object(MAX_EVENT_DATA_BYTES, runtime_refused),
-    WithJsonSchema({"type": "object"}),
+    JsonObjectField, PlainValidator(event_data), WithJsonSchema({"type": "object"})
 ]
 EnvMap = Annotated[dict[EnvName, Argument], Field(max_length=MAX_MAP_ENTRIES)]
 BoundedSecretRef = Annotated[SecretRef, Field(max_length=MAX_REFERENCE_BYTES)]
@@ -204,7 +212,11 @@ def checkout_kind(value: object) -> object:
 
 Checkout = Annotated[
     Annotated[CheckoutPlan, Tag("plan")] | Annotated[WorkspaceRef, Tag("workspace")],
-    refusal_discriminator(checkout_kind, runtime_refused),
+    Discriminator(
+        checkout_kind,
+        custom_error_type="runtime_value_invalid",
+        custom_error_message="the runtime value is invalid",
+    ),
 ]
 
 

@@ -2,6 +2,7 @@ from typing import Annotated, Final, Literal, Self
 
 from pydantic import (
     AfterValidator,
+    PlainValidator,
     StringConstraints,
     WithJsonSchema,
     model_validator,
@@ -9,7 +10,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from kora.ir import ErrorClass
-from kora.ir.json import JsonObjectField, fits_utf8
+from kora.ir.json import JsonObjectField
 from kora.protocols.common import BoundaryModel, budgeted_object
 from kora.protocols.evidence import ClosureEvidence, Code, TerminationReceipt
 from kora.protocols.identity import encoded_size
@@ -23,9 +24,22 @@ def report_refused() -> PydanticCustomError:
 
 
 def printable_message(value: str) -> str:
-    if not value.isprintable() or not fits_utf8(value, MAX_MESSAGE_BYTES):
+    if not value.isprintable():
+        raise report_refused()
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise report_refused() from None
+    if size > MAX_MESSAGE_BYTES:
         raise report_refused()
     return value
+
+
+def bounded_details(value: object) -> JsonObjectField:
+    parsed = budgeted_object(value, MAX_ERROR_BYTES)
+    if parsed is None:
+        raise report_refused()
+    return parsed
 
 
 Message = Annotated[
@@ -35,7 +49,7 @@ Message = Annotated[
 ]
 ErrorDetails = Annotated[
     JsonObjectField,
-    budgeted_object(MAX_ERROR_BYTES, report_refused),
+    PlainValidator(bounded_details),
     WithJsonSchema({"type": "object"}),
 ]
 LostReason = Literal["execution_gone", "checkpoint_missing", "result_unrecoverable"]

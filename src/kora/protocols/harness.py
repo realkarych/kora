@@ -2,11 +2,12 @@ import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Final, Literal, Protocol, Self, get_args
+from typing import Annotated, Final, Literal, Protocol, Self, cast, get_args
 
 from pydantic import (
     AfterValidator,
     ConfigDict,
+    Discriminator,
     Field,
     PlainValidator,
     StrictBool,
@@ -42,14 +43,12 @@ from kora.ir.json import (
     JsonObjectField,
     JsonShapeError,
     JsonValue,
-    fits_utf8,
     parse_value,
     spend_string,
 )
 from kora.ir.scalars import Digest
-from kora.protocols.boundary import refusal_discriminator
 from kora.protocols.common import BoundaryModel
-from kora.protocols.evidence import Code, record_kind
+from kora.protocols.errors import ERROR_CODE
 from kora.protocols.identity import Count, Identifier
 from kora.protocols.policy import RULE_ID, PolicyClient, PolicyReason
 from kora.protocols.vcs import WorkspaceTarget
@@ -76,9 +75,16 @@ def bounded_text(value: str) -> str:
 
 
 def bounded_prompt(value: str) -> str:
-    if len(value) > MAX_PROMPT_BYTES or not fits_utf8(value, MAX_PROMPT_BYTES):
+    if len(value) > MAX_PROMPT_BYTES or not text_fits(value, MAX_PROMPT_BYTES):
         raise refused()
     return value
+
+
+def text_fits(value: str, limit: int) -> bool:
+    try:
+        return len(value.encode("utf-8")) <= limit
+    except UnicodeEncodeError:
+        return False
 
 
 def bounded_value(value: object) -> JsonValue:
@@ -97,12 +103,13 @@ def session_file_name(value: str) -> str:
         or "/" in value
         or ".." in value
         or not value.isprintable()
-        or not fits_utf8(value, MAX_FILE_NAME_BYTES)
+        or not text_fits(value, MAX_FILE_NAME_BYTES)
     ):
         raise refused()
     return value
 
 
+Code = Annotated[str, StringConstraints(strict=True, pattern=f"^{ERROR_CODE.pattern}$")]
 RuleId = Annotated[str, StringConstraints(strict=True, pattern=f"^{RULE_ID.pattern}$")]
 BoundedText = Annotated[
     str, StringConstraints(strict=True), AfterValidator(bounded_text)
@@ -369,6 +376,12 @@ class ErrorEvent(EventFields):
     data: ErrorData
 
 
+def event_kind(value: object) -> object:
+    if isinstance(value, Mapping):
+        return cast("Mapping[object, object]", value).get("kind")
+    return getattr(value, "kind", None)
+
+
 NormalisedEvent = Annotated[
     Annotated[SessionStartedEvent, Tag("session_started")]
     | Annotated[TurnEvent, Tag("turn")]
@@ -380,7 +393,11 @@ NormalisedEvent = Annotated[
     | Annotated[ProviderRetryingEvent, Tag("provider_retrying")]
     | Annotated[ResultEvent, Tag("result")]
     | Annotated[ErrorEvent, Tag("error")],
-    refusal_discriminator(record_kind, refused),
+    Discriminator(
+        event_kind,
+        custom_error_type="harness_value_invalid",
+        custom_error_message="the harness value is invalid",
+    ),
 ]
 EVENT_ADAPTER: Final[TypeAdapter[NormalisedEvent]] = TypeAdapter(
     NormalisedEvent, config=ConfigDict(hide_input_in_errors=True)

@@ -13,7 +13,6 @@ from kora.ir.globs import (
     has_control_character,
     normalised_segments,
 )
-from kora.ir.json import utf8_length
 from kora.protocols.policy import ToolCallRequest
 
 MAX_PATH_CHARACTERS: Final[int] = 4096
@@ -81,6 +80,14 @@ def named_argument(request: ToolCallRequest) -> str:
     return value
 
 
+def encodable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def checked_text(path: str) -> str:
     if (
         not path
@@ -88,7 +95,7 @@ def checked_text(path: str) -> str:
         or path.startswith("~")
         or path != path.strip(TRIMMED)
         or has_control_character(path)
-        or utf8_length(path) is None
+        or not encodable(path)
     ):
         raise ArgumentInvalid
     return path
