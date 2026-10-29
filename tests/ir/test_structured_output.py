@@ -74,7 +74,10 @@ def test_structured_output_canonical_numbers(case: CanonicalCase) -> None:
     assert canonical_structured_output(StructuredOutput(value.value)) == expected
 
 
-@pytest.mark.parametrize(("name", "raw"), raw_refusals())
+@pytest.mark.parametrize(
+    ("name", "raw"),
+    [pytest.param(name, raw, id=name) for name, raw in raw_refusals()],
+)
 def test_structured_output_rejects_invalid_payload(name: str, raw: bytes) -> None:
     expected = (
         "SO001"
@@ -217,7 +220,16 @@ def test_structured_output_detached_ownership() -> None:
 
 
 @pytest.mark.parametrize(
-    "raw", [None, 1, b"1.00", b"[", b'"\\ud800"', b" " * 1_048_577]
+    "raw",
+    [None, 1, b"1.00", b"[", b'"\\ud800"', b" " * 1_048_577],
+    ids=[
+        "missing",
+        "wrong-type",
+        "noncanonical",
+        "malformed",
+        "surrogate",
+        "oversized",
+    ],
 )
 @pytest.mark.parametrize(
     "export",
@@ -339,7 +351,10 @@ def test_structured_output_safe_diagnostics(
 
 @pytest.mark.parametrize(
     ("payload", "code"),
-    [(b"!" * (MAX_JSON_BYTES + 1), "SO001"), (b"!", "SO002")],
+    [
+        pytest.param(b"!" * (MAX_JSON_BYTES + 1), "SO001", id="oversized-malformed"),
+        pytest.param(b"!", "SO002", id="malformed"),
+    ],
 )
 def test_structured_output_raw_size_precedes_decoding(
     payload: bytes, code: str
