@@ -5,6 +5,18 @@ from pydantic import Field, StrictBool, StrictInt, StrictStr
 from kora.protocols.common import BoundaryModel
 
 
+def child_diagnostic(stderr: bytes, limit: int = 24576) -> str:
+    if limit < 16:
+        raise ValueError("diagnostic limit is too small")
+    escaped = "".join(
+        chr(value) if value == 10 or 32 <= value <= 126 else f"\\x{value:02x}"
+        for value in stderr[-limit:]
+    ).replace("::", ":\\x3a")
+    if len(stderr) > limit or len(escaped) > limit:
+        return "[truncated] " + escaped[-(limit - len("[truncated] ")) :]
+    return escaped
+
+
 class ProcessToken(BoundaryModel):
     pid: Annotated[StrictInt, Field(ge=1, le=2147483647)]
     identity: Annotated[StrictStr, Field(min_length=1, max_length=256)]

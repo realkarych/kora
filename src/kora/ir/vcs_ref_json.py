@@ -20,7 +20,9 @@ class JsonRefusal(Enum):
     DECODE = "decode"
 
 
-def lexical_depth_valid(payload: bytes) -> bool:
+def lexical_depth_valid(
+    payload: bytes | bytearray, max_depth: int = MAX_JSON_DEPTH
+) -> bool:
     depth = 0
     quoted = False
     escaped = False
@@ -36,7 +38,7 @@ def lexical_depth_valid(payload: bytes) -> bool:
             quoted = True
         elif character in (123, 91):
             depth += 1
-            if depth > MAX_JSON_DEPTH:
+            if depth > max_depth:
                 return False
         elif character in (125, 93):
             depth -= 1
@@ -73,10 +75,12 @@ def valid_scalars(value: object) -> bool:
     return True
 
 
-def decode_vcs_ref_json(payload: bytes) -> JsonValue | JsonRefusal:
-    if len(payload) > MAX_JSON_BYTES:
+def decode_strict_json(
+    payload: bytes | bytearray, max_bytes: int, max_depth: int
+) -> JsonValue | JsonRefusal:
+    if len(payload) > max_bytes:
         return JsonRefusal.SIZE
-    if not lexical_depth_valid(payload):
+    if not lexical_depth_valid(payload, max_depth):
         return JsonRefusal.DECODE
     try:
         value: object = json.loads(
@@ -89,6 +93,10 @@ def decode_vcs_ref_json(payload: bytes) -> JsonValue | JsonRefusal:
     if not valid_scalars(value):
         return JsonRefusal.DECODE
     return cast("JsonValue", value)
+
+
+def decode_vcs_ref_json(payload: bytes) -> JsonValue | JsonRefusal:
+    return decode_strict_json(payload, MAX_JSON_BYTES, MAX_JSON_DEPTH)
 
 
 def canonical_size(value: JsonValue, remaining: int = MAX_JSON_BYTES) -> int:

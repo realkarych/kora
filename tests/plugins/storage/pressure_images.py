@@ -11,10 +11,12 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from kora.plugins.storage.native import filesystem
+from tests.plugins.storage.pressure_holders import Binding, capture_binding
 from tests.plugins.storage.pressure_models import ImageStamp, PressureFailure
 from tests.plugins.storage.pressure_native import command
 
 Effect = Callable[[tuple[str, ...]], bytes]
+Observe = Callable[[Binding], str]
 
 
 class LoopDevice(BaseModel):
@@ -51,6 +53,7 @@ class Attachment:
     device: str
     volume: str | None
     mounted: bool
+    entities: tuple[str, ...] = ()
 
 
 def image_name() -> str:
@@ -243,7 +246,13 @@ def darwin_attachment(directory: Path) -> Attachment | None:
             or os.stat(directory / "mounted").st_dev != info.st_rdev
         ):
             raise PressureFailure("mount_identity")
-    return Attachment(roots[0], volume, bool(volumes))
+    entities = tuple(
+        item.device
+        for item in selected[0].entities
+        if item.device is not None
+        and re.fullmatch(re.escape(roots[0]) + r"(?:s[0-9]{1,4}){0,2}", item.device)
+    )
+    return Attachment(roots[0], volume, bool(volumes), entities)
 
 
 def discover(directory: Path, stamp: ImageStamp) -> Attachment | None:
@@ -347,12 +356,27 @@ def verify_mount(directory: Path, attachment: Attachment) -> str:
     return expected
 
 
-def detach(directory: Path, stamp: ImageStamp, effect: Effect) -> None:
+def detach(
+    directory: Path,
+    stamp: ImageStamp,
+    effect: Effect,
+    observe: Observe,
+    owner_device: int,
+) -> None:
     owned = discover(directory, stamp)
     if owned is None:
         return
     if sys.platform == "darwin":
-        effect(("/usr/bin/hdiutil", "detach", owned.device))
+        binding = capture_binding(
+            directory / "mounted", owned.volume, owned.entities, owner_device
+        )
+        try:
+            effect(("/usr/bin/hdiutil", "detach", owned.device))
+        except PressureFailure as failure:
+            if failure.code != "command_failed":
+                raise
+            failure.add_note(observe(binding))
+            raise
     else:
         if owned.mounted:
             effect(
