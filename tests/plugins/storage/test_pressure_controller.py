@@ -1,18 +1,25 @@
 import errno
 import os
 import plistlib
+import re
 import select
 import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from tests.measurements.storage_pressure_evidence import preserve_owner
-from tests.plugins.storage.pressure_models import PressureFailure, PressureReport
+from tests.plugins.storage.pressure_holders import ENTRY_NAMES, HolderObserver
+from tests.plugins.storage.pressure_models import (
+    PressureFailure,
+    PressureReport,
+    child_diagnostic,
+)
 from tests.plugins.storage.pressure_native import (
     collect_process,
     command,
@@ -128,7 +135,7 @@ def recover_owner(directory: Path) -> None:
             timeout=60,
             check=False,
         )
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, child_diagnostic(result.stderr)
 
 
 def close_controller(process: subprocess.Popen[bytes], directory: Path) -> None:
@@ -143,16 +150,16 @@ def close_controller(process: subprocess.Popen[bytes], directory: Path) -> None:
         recover_owner(directory)
 
 
-def controller_diagnostics(directory: Path) -> tuple[bytes | None, ...]:
-    result: list[bytes | None] = []
+def controller_diagnostics(directory: Path) -> str:
+    result: list[str] = []
     for name in ("report.json", "command-stderr.txt"):
         path = directory / name
         if path.exists():
             with path.open("rb") as source:
-                result.append(source.read(16384))
+                result.append(name + " " + child_diagnostic(source.read(16384), 8192))
         else:
-            result.append(None)
-    return tuple(result)
+            result.append(name + " absent")
+    return "\n".join(result)
 
 
 def run_controller(
@@ -376,10 +383,10 @@ def test_pressure_owner_closes_after_parent_interrupt(
     finally:
         close_controller(process, directory)
 
-    assert status != 0, error_output
-    assert report.provider_started, error_output
-    assert report.failure == reason
-    assert report.resources_closed
+    assert status != 0, child_diagnostic(error_output)
+    assert report.provider_started, child_diagnostic(error_output)
+    assert report.failure == reason, child_diagnostic(error_output)
+    assert report.resources_closed, child_diagnostic(error_output)
     assert not (directory / "mounted").exists()
 
 
@@ -435,8 +442,10 @@ def test_local_storage_enospc_recovers(tmp_path: Path) -> None:
 
     result, report = run_controller(directory, "enospc")
 
-    assert result.returncode == 0, (result.stderr, report)
-    assert report.provider_started, result.stderr
+    assert result.returncode == 0, (
+        child_diagnostic(result.stderr) + "\n" + report.model_dump_json()
+    )
+    assert report.provider_started, child_diagnostic(result.stderr)
     assert report.payload_enospc
     assert report.metadata_enospc
     assert report.payload_errno == errno.ENOSPC
@@ -460,9 +469,9 @@ def test_storage_pressure_controller_closes_on_child_failure(tmp_path: Path) -> 
     result, report = run_controller(directory, "child-failure")
 
     assert result.returncode != 0
-    assert report.provider_started, result.stderr
-    assert report.failure == "child_failure", result.stderr
-    assert report.resources_closed, result.stderr
+    assert report.provider_started, child_diagnostic(result.stderr)
+    assert report.failure == "child_failure", child_diagnostic(result.stderr)
+    assert report.resources_closed, child_diagnostic(result.stderr)
     assert not (directory / "mounted").exists()
 
 
@@ -493,7 +502,7 @@ def test_storage_pressure_controller_recovers_partial_acquisition(
         close_controller(process, directory)
 
     report = read_report(directory)
-    assert recovered.returncode == 0, recovered.stderr
+    assert recovered.returncode == 0, child_diagnostic(recovered.stderr)
     assert report.resources_closed
     assert os.stat(directory).st_mode & 0o777 == 0o700
 
@@ -524,18 +533,34 @@ def test_pressure_owner_reconciles_lost_attachment_response(tmp_path: Path) -> N
 
 def test_failed_unmount_retains_ownership_until_the_blocker_closes(
     tmp_path: Path,
+    record_testsuite_property: Callable[[str, str], None],
 ) -> None:
     from tests.plugins.storage.pressure_controller import create
+    from tests.plugins.storage.pressure_images import discover
 
-    with create(tmp_path / "busy-mount") as controller:
+    with create(
+        tmp_path / "busy-mount", observer=HolderObserver(budget_clock=lambda: 0)
+    ) as controller:
         try:
             controller.acquire("enospc")
+            stamp = controller.manifest.image_stamp
+            assert stamp is not None
+            attachment = discover(controller.directory, stamp)
+            assert attachment is not None
             blocker = subprocess.Popen(
                 [
                     sys.executable,
                     "-I",
                     "-c",
-                    "import sys; print('ready', flush=True); sys.stdin.buffer.read(1)",
+                    "import mmap,os,sys; held=open('holder','w+b'); "
+                    "held.write(b'x'); held.flush(); "
+                    "mapping=mmap.mmap(held.fileno(),1,access=mmap.ACCESS_READ); "
+                    "raw=os.open(sys.argv[1],os.O_RDONLY) if sys.argv[1]!='-' else -1; "
+                    "print('ready',flush=True); sys.stdin.buffer.read(1); "
+                    "mapping.close(); held.close(); os.close(raw) if raw>=0 else None",
+                    "/dev/r" + attachment.device[5:]
+                    if sys.platform == "darwin"
+                    else "-",
                 ],
                 cwd=controller.directory / "mounted",
                 stdin=subprocess.PIPE,
@@ -547,14 +572,131 @@ def test_failed_unmount_retains_ownership_until_the_blocker_closes(
                 readable, _, _ = select.select([blocker.stdout], [], [], 10)
                 assert readable
                 assert blocker.stdout.readline(64) == b"ready\n"
+                token = process_token(blocker.pid)
+                assert token is not None
 
-                with pytest.raises(PressureFailure, match="command_failed"):
+                with pytest.raises(PressureFailure, match="command_failed") as failure:
                     controller.cleanup()
                 retained = (
                     not controller.manifest.resources_closed
                     and (controller.directory / "pressure-manifest.json").exists()
                 )
                 mounted = os.path.ismount(controller.directory / "mounted")
+                assert failure.value.code == "command_failed"
+                if sys.platform == "darwin":
+                    assert str(failure.value).startswith(
+                        "command_failed: command=hdiutil detach exit="
+                    )
+                    notes = failure.value.__notes__
+                    assert len(notes) == 1
+                    note = notes[0]
+                    assert note.startswith("holder_observation v1 binding=unchanged"), (
+                        note
+                    )
+                    assert (
+                        "target=volume capture=mounted "
+                        "before=mounted after=mounted matching=on" in note
+                    ), note
+                    assert attachment.entities
+                    for entity in attachment.entities:
+                        for kind in ("block-", "raw-"):
+                            assert (
+                                f"target={kind}{entity[5:]} before=bound after=bound"
+                                in note
+                            ), note
+                    assert "errors layout=none" in note, note
+                    assert "identity_mismatch" not in note, note
+                    assert "truncated=none" in note, note
+                    counts = re.search(
+                        r"processes=([0-9]+) visited=([0-9]+)/([0-9]+) "
+                        r"same_uid_processes=([0-9]+) other_uid_processes=([0-9]+)",
+                        note,
+                    )
+                    assert counts is not None, note
+                    assert counts[1] == counts[2] == counts[3], note
+                    assert all(int(value) > 0 for value in counts.groups()), note
+                    candidate = next(
+                        line
+                        for line in note.splitlines()
+                        if line.startswith("candidate prefix=diskarbitrationd ")
+                    )
+                    assert "uid=0 " in candidate, note
+                    assert re.search(r"uniqueid=[1-9][0-9]* ", candidate), note
+                    assert "after_detach=no" in candidate, note
+                    entries = next(
+                        line
+                        for line in note.splitlines()
+                        if line.startswith("volume_entries=")
+                    )
+                    assert all(
+                        re.search(
+                            re.escape(name) + r"=(dir|file|link|other|absent)", entries
+                        )
+                        for name in ENTRY_NAMES
+                    ), note
+                    holder = next(
+                        line
+                        for line in note.splitlines()
+                        if line.startswith(f"holder pid={blocker.pid} ")
+                    )
+                    assert f"uniqueid={token.identity.split(':')[1]} " in holder, note
+                    assert f"uid={os.geteuid()} " in holder, note
+                    assert any(
+                        f"comm={Path(path).name[:16]} " in holder
+                        for path in (sys.executable, os.path.realpath(sys.executable))
+                    ), note
+                    assert all(
+                        value in holder
+                        for value in (
+                            "identity=stable",
+                            "role=fixture-descendant",
+                            "executable=fixture-python",
+                            "after_detach=no",
+                            "cwd/volume",
+                            "mapped/volume",
+                        )
+                    ), note
+                    assert re.search(r"fd/[0-9]+/REG/volume", holder), note
+                    assert re.search(
+                        r"fd/[0-9]+/CHR/raw-" + re.escape(attachment.device[5:]), holder
+                    ), note
+                    assert "errors=" not in holder, note
+                    assert all(
+                        "error." not in line
+                        and "denied" not in line
+                        and "absent" not in line
+                        for line in note.splitlines()
+                        if line.startswith("target=")
+                    ), note
+                    assert len(note.encode()) <= 6144
+                    assert "::" not in note
+                    assert all(
+                        character == "\n" or 32 <= ord(character) <= 126
+                        for character in note
+                    )
+                    status = re.search(r" exit=([0-9]+) ", str(failure.value))
+                    assert status is not None
+                    assert controller.manifest.command_exit_status == int(status[1])
+                    assert (
+                        controller.directory / "command-stderr.txt"
+                    ).read_bytes() == failure.value.command_stderr
+                    timing = next(
+                        line
+                        for line in note.splitlines()
+                        if line.startswith("elapsed_ms ")
+                    )
+                    stderr = failure.value.command_stderr or b""
+                    phase = (
+                        "unmount"
+                        if b"couldn't unmount" in stderr
+                        else "eject"
+                        if b"couldn't eject" in stderr
+                        else "other"
+                    )
+                    record_testsuite_property("pressure_holder_observation_ms", timing)
+                    record_testsuite_property("pressure_busy_detach_phase", phase)
+                else:
+                    assert not hasattr(failure.value, "__notes__")
             finally:
                 try:
                     blocker.communicate(b"c", timeout=10)

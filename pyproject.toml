@@ -179,13 +179,14 @@ addopts = [
     "-p",
     "kora.conformance.plugin",
     "-m",
-    "not measurement",
+    "not measurement and not host_fixture",
 ]
 filterwarnings = ["error"]
 empty_parameter_set_mark = "fail_at_collect"
 markers = [
     "measurement: serial performance and resource-lifetime measurement",
     "kora_conformance: a protocol conformance case of kora.conformance",
+    "host_fixture: needs paths from scripts/ci/prepare-local-runtime-fixtures.sh",
 ]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
