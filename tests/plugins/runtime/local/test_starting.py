@@ -1,7 +1,9 @@
 import asyncio
 import errno
+import json
 import os
 import shutil
+import signal
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import Path
@@ -11,19 +13,22 @@ from pydantic import TypeAdapter
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.plugins.runtime.local.runtime import STOP_MATCHES
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED, EXIT_REFUSED
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.evidence import EvidenceScope
-from kora.runner.registry import Fence, Running, Starting
+from kora.runner.registry import Fence, Retired, Running, Starting
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
     EXITING,
     NEVER_READY,
+    carriers,
     clock_awaited,
     driven,
+    exited_within,
+    lingering_start,
     open_spawning,
     reap_runners,
-    runner_argv,
     runner_pids,
     short_directory,
     starting_entry,
@@ -32,15 +37,20 @@ from tests.support.local_runners import (
     written,
     zombie_children,
 )
+from tests.support.local_runners import runner_argv as runner_vector
 from tests.support.local_runtime import (
     PATH_MARKER,
+    SteeredIdentityReader,
+    frozen,
     open_descriptors,
     prepared,
     private_directory,
     protocol_error,
     recorded,
+    restarted,
     runtime_context,
     state_root,
+    unreadable,
 )
 
 __all__ = ["kora_capture"]
@@ -138,9 +148,9 @@ async def fenced_runner_exits_without_registering(
     entry = starting_entry(sockets, NONCE, fence)
     try:
         await written(runtime, "attempt-1", entry, ctx)
-        fenced = await supervised(runner_argv(runtime, root, "attempt-1", NONCE))
+        fenced = await supervised(runner_vector(runtime, root, "attempt-1", NONCE))
         await written(runtime, "attempt-2", starting_entry(sockets, NONCE), ctx)
-        other = await supervised(runner_argv(runtime, root, "attempt-2", "b" * 32))
+        other = await supervised(runner_vector(runtime, root, "attempt-2", "b" * 32))
         kept = [await recorded(runtime, name) for name in ("attempt-1", "attempt-2")]
     finally:
         await runtime.close()
@@ -186,7 +196,9 @@ async def failed_registration_writes_nothing(
             for log in ("runner.log", "runner.crash"):
                 (attempt / log).touch(mode=0o600)
             fill(small)
-            outcome = await supervised(runner_argv(runtime, state, "attempt-1", NONCE))
+            outcome = await supervised(
+                runner_vector(runtime, state, "attempt-1", NONCE)
+            )
             kept = await recorded(runtime, "attempt-1")
             leftovers = sorted(os.listdir(state / "registry"))
         finally:
@@ -233,6 +245,195 @@ async def running_runner_is_not_retired_yet(
     assert spawn_outcomes(capture) == ["ready"]
 
 
+def sweep_records(capture: Capture, *secrets: str) -> list[tuple[str, int, int]]:
+    records = capture.finish()
+    for record in records:
+        text = json.dumps(record)
+        assert not any(secret in text for secret in secrets)
+    swept = [
+        record for record in records if record.get("event") == "runtime.local.retire"
+    ]
+    for record in swept:
+        expected = "INFO" if record.get("outcome") == "tombstoned" else "WARNING"
+        assert record.get("level") == expected
+    return [
+        (
+            str(record["outcome"]),
+            int(str(record["matched"])),
+            int(str(record["killed"])),
+        )
+        for record in swept
+    ]
+
+
+def decoys(argv: tuple[str, ...]) -> tuple[tuple[str, ...], ...]:
+    *head, attempt, domain, nonce = argv
+    return (
+        (*head, "attempt-other", domain, nonce),
+        (*head[:-1], nonce, attempt, domain, head[-1]),
+        (*argv, "extra"),
+        (*head, attempt, domain),
+    )
+
+
+async def late_nonce_match_is_stopped_before_the_tombstone(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    runtime, entry, argv, spawned = await lingering_start(root, sockets, ctx)
+    try:
+        with carriers(argv, *decoys(argv)) as (copy, *others):
+            for pid in (spawned, copy.pid):
+                os.kill(pid, signal.SIGSTOP)
+            receipts = await asyncio.gather(
+                runtime.retire("attempt-1", timedelta(seconds=10), ctx),
+                runtime.retire("attempt-1", timedelta(seconds=10), ctx),
+            )
+            tombstone = await recorded(runtime, "attempt-1")
+            copied = copy.wait(timeout=10)
+            survivors = [other.poll() for other in others]
+    finally:
+        await runtime.close()
+    assert isinstance(tombstone, Retired)
+    assert receipts == [tombstone.receipt, tombstone.receipt]
+    assert tombstone.receipt.scope is EvidenceScope.NO_RUNNER_STARTED
+    assert entry.fence is None
+    assert exited_within(spawned, 0)
+    assert copied == -signal.SIGKILL
+    assert survivors == [None, None, None, None]
+    swept = sweep_records(capture, entry.nonce, str(root))
+    assert {outcome for outcome, _, _ in swept} == {"tombstoned"}
+    assert sum(killed for _, _, killed in swept) >= 2
+
+
+async def unreadable_match_is_unconfirmed(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    reader = SteeredIdentityReader()
+    runtime, entry, _, spawned = await lingering_start(
+        root, sockets, ctx, identities=reader
+    )
+    try:
+        reader.steered[spawned] = unreadable
+        refused = await protocol_error(
+            runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+        )
+        fenced = await recorded(runtime, "attempt-1")
+        alive = not exited_within(spawned, 0)
+        reader.steered.clear()
+        receipt = await runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+    finally:
+        await runtime.close()
+    assert (refused.code, refused.retryable, refused.details) == (
+        "runner_stop_unconfirmed",
+        True,
+        {},
+    )
+    assert isinstance(fenced, Starting)
+    assert fenced.fence is not None
+    assert alive
+    assert receipt.retirement_id == fenced.fence.retirement_id
+    assert exited_within(spawned, 10)
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("match_unreadable", 1, 0),
+        ("tombstoned", 1, 1),
+    ]
+
+
+async def live_match_at_the_grace_is_unconfirmed(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    reader = SteeredIdentityReader()
+    runtime, entry, _, spawned = await lingering_start(
+        root, sockets, ctx, identities=reader
+    )
+    try:
+        immediate = await protocol_error(runtime.retire("attempt-1", timedelta(0), ctx))
+        untouched = not exited_within(spawned, 0)
+        fenced = await recorded(runtime, "attempt-1")
+        reader.steered[spawned] = frozen()
+        receipt = await runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+    finally:
+        await runtime.close()
+    assert (immediate.code, immediate.details) == ("runner_stop_unconfirmed", {})
+    assert untouched
+    assert isinstance(fenced, Starting)
+    assert fenced.fence is not None
+    assert receipt.retirement_id == fenced.fence.retirement_id
+    assert exited_within(spawned, 10)
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("survived_grace", 1, 0),
+        ("tombstoned", 1, 1),
+    ]
+
+
+async def changed_identity_is_not_signalled(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    reader = SteeredIdentityReader()
+    runtime, entry, _, spawned = await lingering_start(
+        root, sockets, ctx, identities=reader
+    )
+    try:
+        reader.steered[spawned] = restarted
+        receipt = await runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+        alive = not exited_within(spawned, 0)
+    finally:
+        await runtime.close()
+    assert receipt.scope is EvidenceScope.NO_RUNNER_STARTED
+    assert alive
+    assert sweep_records(capture, entry.nonce, str(root)) == [("tombstoned", 1, 0)]
+
+
+async def incomplete_listing_is_unconfirmed(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    runtime, entry, _, spawned = await lingering_start(
+        root, sockets, ctx, sweep_scan_entries=1
+    )
+    try:
+        refused = await protocol_error(
+            runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+        )
+        fenced = await recorded(runtime, "attempt-1")
+    finally:
+        await runtime.close()
+    assert (refused.code, refused.details) == ("runner_stop_unconfirmed", {})
+    assert isinstance(fenced, Starting)
+    assert fenced.fence is not None
+    assert not exited_within(spawned, 0)
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("listing_incomplete", 0, 0)
+    ]
+
+
+async def too_many_matches_are_unconfirmed(
+    root: Path, sockets: Path, capture: Capture
+) -> None:
+    ctx = runtime_context(capture)
+    runtime, entry, argv, spawned = await lingering_start(root, sockets, ctx)
+    try:
+        with carriers(*(argv,) * STOP_MATCHES) as copies:
+            refused = await protocol_error(
+                runtime.retire("attempt-1", timedelta(seconds=10), ctx)
+            )
+            untouched = [copy.poll() for copy in copies]
+        fenced = await recorded(runtime, "attempt-1")
+    finally:
+        await runtime.close()
+    assert refused.code == "runner_stop_unconfirmed"
+    assert untouched == [None] * STOP_MATCHES
+    assert not exited_within(spawned, 0)
+    assert isinstance(fenced, Starting)
+    assert sweep_records(capture, entry.nonce, str(root)) == [
+        ("too_many_matches", STOP_MATCHES + 1, 0)
+    ]
+
+
 async def cancelled_submits_leave_nothing(
     root: Path, sockets: Path, capture: Capture
 ) -> None:
@@ -266,6 +467,14 @@ LEGS: dict[str, Callable[[Path, Path, Capture], Awaitable[None]]] = {
     ),
     "running_runner_is_not_retired_yet": running_runner_is_not_retired_yet,
     "cancelled_submits_leave_nothing": cancelled_submits_leave_nothing,
+    "late_nonce_match_is_stopped_before_the_tombstone": (
+        late_nonce_match_is_stopped_before_the_tombstone
+    ),
+    "unreadable_match_is_unconfirmed": unreadable_match_is_unconfirmed,
+    "live_match_at_the_grace_is_unconfirmed": live_match_at_the_grace_is_unconfirmed,
+    "changed_identity_is_not_signalled": changed_identity_is_not_signalled,
+    "incomplete_listing_is_unconfirmed": incomplete_listing_is_unconfirmed,
+    "too_many_matches_are_unconfirmed": too_many_matches_are_unconfirmed,
 }
 PREPARED_LEGS: dict[str, Callable[[Path, Path, Capture], Awaitable[None]]] = {
     "failed_registration_writes_nothing": failed_registration_writes_nothing,

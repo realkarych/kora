@@ -21,6 +21,7 @@ from kora.ir.json import JsonObject
 from kora.plugins.runtime.local.runtime import LocalRuntime, LocalRuntimeConfiguration
 from kora.plugins.runtime.local.spawn import runner_command, runner_environment
 from kora.protocols.common import ProtocolContext
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import Workload
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
@@ -32,6 +33,7 @@ from kora.runner.registry import (
     Submitter,
     Transition,
 )
+from kora.runner.registry import runner_argv as registry_argv
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.protocols.runtime_documents import workload
 from tests.support.local_runtime import Identifiers
@@ -60,6 +62,7 @@ async def open_spawning(
     identities: IdentityReader | None = None,
     new_identifier: Callable[[], str] | None = None,
     home: Callable[[], Path] = Path.home,
+    sweep_scan_entries: int = 65536,
 ) -> LocalRuntime:
     return await LocalRuntime.open(
         LocalRuntimeConfiguration(state_root=str(root)),
@@ -69,6 +72,7 @@ async def open_spawning(
         runner=runner,
         socket_directory=sockets,
         home=home,
+        sweep_scan_entries=sweep_scan_entries,
     )
 
 
@@ -155,8 +159,57 @@ LINGERING: Final[tuple[str, ...]] = (
     sys.executable,
     "-I",
     "-c",
-    "import os, signal\nos.closerange(3, 4)\nwhile True:\n    signal.pause()",
+    "\n".join(
+        [
+            "import os, signal, sys",
+            "if sys.platform == 'linux':",
+            "    import ctypes",
+            "    ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)",
+            "os.closerange(3, 4)",
+            "while True:",
+            "    signal.pause()",
+        ]
+    ),
 )
+
+
+@contextmanager
+def carriers(*vectors: Sequence[str]) -> Generator[list[subprocess.Popen[bytes]]]:
+    started: list[subprocess.Popen[bytes]] = []
+    try:
+        for vector in vectors:
+            started.append(subprocess.Popen(list(vector)))
+        yield started
+    finally:
+        for process in started:
+            process.kill()
+            process.wait(timeout=LISTING_TIMEOUT_SECONDS)
+
+
+async def lingering_start(
+    root: Path,
+    sockets: Path,
+    ctx: ProtocolContext,
+    identities: IdentityReader | None = None,
+    sweep_scan_entries: int = 65536,
+) -> tuple[LocalRuntime, Starting, tuple[str, ...], int]:
+    runtime = await open_spawning(
+        root,
+        ctx,
+        sockets,
+        runner=LINGERING,
+        identities=identities,
+        sweep_scan_entries=sweep_scan_entries,
+    )
+    with pytest.raises(KoraProtocolError, match="runner_starting"):
+        await runtime.submit(submitted(runtime, "attempt-1"), ctx)
+    key = runtime.registry.key("attempt-1")
+    entry = await runtime.entry(key)
+    assert isinstance(entry, Starting)
+    argv = registry_argv(entry.runner_prefix, key, entry.nonce)
+    spawned = runner_pids(root)
+    assert len(spawned) == 1
+    return runtime, entry, argv, spawned[0]
 
 
 def zombie_children() -> tuple[int, ...]:
@@ -182,7 +235,11 @@ def own_identity() -> ProcessIdentity:
 
 
 def starting_entry(
-    sockets: Path, nonce: str, fence: Fence | None = None, dispatcher: str = "d-1"
+    sockets: Path,
+    nonce: str,
+    fence: Fence | None = None,
+    dispatcher: str = "d-1",
+    prefix: tuple[str, ...] = (sys.executable, "/"),
 ) -> Starting:
     return Starting(
         state="starting",
@@ -193,6 +250,7 @@ def starting_entry(
         nonce=nonce,
         started_at=datetime(2026, 10, 29, tzinfo=UTC),
         socket_directory=str(sockets),
+        runner_prefix=prefix,
         fence=fence,
     )
 

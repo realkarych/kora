@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from kora.conformance.io_helper import KernelChildReaper
 from kora.conformance.lifetime import LifetimeError, RecoveryAttempts
 from kora.protocols.lifetime import (
     CleanupOutcome,
@@ -26,11 +27,15 @@ from tests.conformance.lifetime_support import (
     installed_launcher,
     journal_file,
     limits,
+    reap_watched,
     recovery_progress,
     retained_invocation,
     retained_journal,
     settle_recovery_attempts,
     stall_barrier,
+)
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
+    DeferredReaper,
 )
 from tests.support.event_loop import turn
 
@@ -195,14 +200,20 @@ async def test_recovery_construction_refusal_releases_exact_admission(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reaping", ["kernel", "deferred"])
 async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
-    tmp_path: Path,
+    tmp_path: Path, reaping: str
 ) -> None:
     reference = retained_invocation(tmp_path, "tree")
     path = journal_file(tmp_path, reference.invocation_id)
+    deferred = DeferredReaper(refusals=0)
     with ExitStack() as resources:
         barrier = stall_barrier(resources, tmp_path)
-        launcher = barrier.launcher(phase="after", pause_at=2)
+        launcher = barrier.launcher(
+            phase="after",
+            pause_at=2,
+            reaper=deferred if reaping == "deferred" else KernelChildReaper(),
+        )
         clock = ControlledLifetimeClock()
         attempts = RecoveryAttempts()
         try:
@@ -225,6 +236,7 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             owner = attempt.owner
             assert owner is not None
             helper = owner.mutations.helpers[-1]
+            deferred.hold(helper.process.pid)
             writer = resources.enter_context(
                 await barrier.entered(deadline, SystemClock())
             )
@@ -285,12 +297,16 @@ async def test_completed_unknown_recovery_retains_helper_until_positive_exit(
             actual_clock = SystemClock()
             deadline = actual_clock.monotonic_ns() + 5_000_000_000
             await helper.anchor.wait(deadline, actual_clock)
+            if reaping == "deferred":
+                await reap_watched(deferred, helper.process.pid)
+                deferred.complete(helper.process.pid)
             while attempts.context is not None:
                 assert actual_clock.monotonic_ns() < deadline
                 await turn()
 
             assert helper.closed
             assert helper.process.returncode == 0
+            assert (helper.process.pid in deferred.deferred) is (reaping == "deferred")
             assert owner.mutations.claim is None
             assert owner.mutations.inventory().directory_descriptors == 0
             assert not attempt.dependencies

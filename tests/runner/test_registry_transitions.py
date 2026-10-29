@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
@@ -12,6 +13,9 @@ from kora.protocols.evidence import (
 from kora.protocols.identity import ProcessIdentity
 from kora.runner.identity import mount_hides_processes
 from kora.runner.registry import (
+    HEAD_LIMIT,
+    PREFIX_ARGUMENTS,
+    PREFIX_BYTES,
     AttemptKey,
     Completed,
     Entry,
@@ -30,6 +34,8 @@ from kora.runner.registry import (
     retire_cell,
     status_cell,
     submit_cell,
+    tombstone_cell,
+    with_entry,
 )
 
 MOMENT = datetime(2026, 10, 27, 12, 0, tzinfo=UTC)
@@ -82,6 +88,7 @@ STATES: dict[str, Entry | None] = {
         nonce="e" * 32,
         started_at=MOMENT,
         socket_directory="/run/kora",
+        runner_prefix=("/usr/bin/python3", "/state"),
         fence=None,
         deadline=DEADLINE,
         gate_closed=False,
@@ -306,12 +313,8 @@ def test_submit_cells(
     [
         ("none", "none", "attempt_not_submitted", ("retired", None)),
         ("unsubmitted", "none", "attempt_not_submitted", ("retired", None)),
-        (
-            "starting",
-            "runner_starting",
-            "runner_starting",
-            (None, "retirement_unavailable"),
-        ),
+        ("starting", "runner_starting", "runner_starting", ("starting", None)),
+        ("fenced", "runner_starting", "runner_starting", (None, None)),
         ("running", "handle", "runner_unreachable", (None, "retirement_unavailable")),
         ("completed", "handle", "complete", (None, "retirement_unavailable")),
         ("released_completed", "handle", "complete", (None, "attempt_retired")),
@@ -322,11 +325,11 @@ def test_submit_cells(
 def test_read_and_retire_cells(
     state: str, lookup: str, status: str, retire: tuple[str | None, str | None]
 ) -> None:
-    entry = STATES[state]
+    entry = fenced() if state == "fenced" else STATES[state]
 
     looked = looked_up(entry)
     observed = observed_status(entry)
-    retired = retire_cell(entry, KEY, "retirement-1", MOMENT)
+    retired = retire_cell(entry, KEY, "retirement-2", MOMENT)
 
     assert looked == lookup
     assert observed == status
@@ -335,6 +338,66 @@ def test_read_and_retire_cells(
         assert retired.entry.receipt.scope is EvidenceScope.NO_RUNNER_STARTED
         assert retired.entry.phase == "failed"
         assert retired.entry.receipt.evidence_ref == f"registry:{KEY.name}"
+    if isinstance(retired.entry, Starting):
+        assert isinstance(entry, Starting)
+        assert retired.entry == entry.model_copy(
+            update={"fence": Fence(retirement_id="retirement-2", fenced_at=MOMENT)}
+        )
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("fenced", ("retired", None)),
+        ("other_fence", (None, "retirement_unavailable")),
+        ("starting", (None, "retirement_unavailable")),
+        ("running", (None, "retirement_unavailable")),
+        ("retired", (None, None)),
+    ],
+)
+def test_tombstone_cell_needs_the_same_fence(
+    state: str, expected: tuple[str | None, str | None]
+) -> None:
+    other = Fence(retirement_id="retirement-9", fenced_at=MOMENT)
+    entries = {
+        "fenced": fenced(),
+        "other_fence": starting().model_copy(update={"fence": other}),
+    }
+    entry = entries.get(state, STATES.get(state))
+
+    tombstoned = tombstone_cell(entry, KEY, FENCE, MOMENT)
+
+    assert outcome(tombstoned) == expected
+    if isinstance(tombstoned.entry, Retired):
+        assert tombstoned.entry.receipt.retirement_id == FENCE.retirement_id
+        assert tombstoned.entry.receipt.scope is EvidenceScope.NO_RUNNER_STARTED
+        assert tombstoned.entry.phase == "failed"
+
+
+def test_fenced_starting_entry_still_refuses_submit_as_starting() -> None:
+    submitted = submit_cell(fenced(), DIGEST, DEADLINE, False, starting)
+
+    assert outcome(submitted) == (None, "runner_starting")
+
+
+@pytest.mark.parametrize(
+    "prefix", [("/usr/bin/python3", "x"), ("/usr/bin/python3", "-c\0x", "/state")]
+)
+def test_runner_prefix_must_end_in_an_absolute_root(prefix: tuple[str, ...]) -> None:
+    document = {**starting().model_dump(), "runner_prefix": prefix}
+
+    with pytest.raises(ValidationError, match="runner prefix"):
+        Starting.model_validate(document)
+
+
+def test_maximal_starting_entry_fits_the_head_bound() -> None:
+    argument = "/" + "x" * (PREFIX_BYTES // PREFIX_ARGUMENTS - 2)
+    prefix = (argument,) * PREFIX_ARGUMENTS
+    entry = Starting.model_validate({**fenced().model_dump(), "runner_prefix": prefix})
+
+    head = with_entry(AttemptKey("d" * 256, "a" * 256), entry)
+
+    assert len(head) <= HEAD_LIMIT
 
 
 def fenced() -> Starting:

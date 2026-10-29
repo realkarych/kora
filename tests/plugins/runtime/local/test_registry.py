@@ -119,6 +119,7 @@ def started_entries(domain: str) -> dict[str, Entry]:
             nonce="e" * 32,
             started_at=MOMENT,
             socket_directory="/run/user/1000/kora",
+            runner_prefix=("/usr/bin/python3", "/state"),
             fence=None,
         ),
         "running": Running(
@@ -206,7 +207,11 @@ async def started_states_refuse_until_runner_retirement(
 ) -> None:
     runtime = await opened(state_root(tmp_path), capture)
     ctx = runtime_context(capture)
-    entries = started_entries(runtime.execution_domain_id)
+    entries = {
+        state: entry
+        for state, entry in started_entries(runtime.execution_domain_id).items()
+        if state != "starting"
+    }
     outcomes: dict[str, tuple[object, ...]] = {}
     current: dict[str, Entry | None] = {}
     try:
@@ -220,7 +225,6 @@ async def started_states_refuse_until_runner_retirement(
     unavailable = "retirement_unavailable"
     assert current == entries
     assert outcomes == {
-        "starting": (unavailable, "runner_starting", "runner_starting"),
         "running": (unavailable, "returned", "runner_unreachable"),
         "completed": (unavailable, "returned", "returned"),
         "retiring": (unavailable, "returned", "runner_unreachable"),

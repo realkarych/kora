@@ -57,7 +57,7 @@ LOCAL_RUNTIME_CONTRACTS = (
 
 def required_host_fixtures(operating_system: str) -> frozenset[str]:
     ownership = ["foreign_owner", "foreign_ancestor"]
-    platform = ["other_uid_member"]
+    platform = ["other_uid_member", "setuid_carrier_is_not_owned"]
     if operating_system == "ubuntu-24.04":
         ownership.append("network_filesystem")
         platform.append("child_namespace_member")

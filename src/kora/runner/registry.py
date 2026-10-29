@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Annotated, Final, Literal, Self, TypeVar, cast
 
 from pydantic import (
+    AfterValidator,
     Discriminator,
     Field,
     StrictBool,
@@ -46,6 +47,8 @@ from kora.runner.filesystem import (
 from kora.runner.identity import IdentityReader
 
 HEAD_LIMIT: Final[int] = 65536
+PREFIX_ARGUMENTS: Final[int] = 64
+PREFIX_BYTES: Final[int] = 16384
 SOCKET_PATH_LENGTH: Final[int] = 103
 SOCKET_NAME_LENGTH: Final[int] = 16
 READINESS_DESCRIPTOR: Final[int] = 3
@@ -75,12 +78,31 @@ SocketPath = Annotated[
     str, StringConstraints(strict=True, min_length=1, max_length=SOCKET_PATH_LENGTH)
 ]
 
+
+def bounded_prefix(prefix: tuple[str, ...]) -> tuple[str, ...]:
+    encoded = sum(len(os.fsencode(argument)) + 1 for argument in prefix)
+    if (
+        encoded > PREFIX_BYTES
+        or not os.path.isabs(prefix[-1])
+        or any("\0" in argument for argument in prefix)
+    ):
+        raise ValueError("the runner prefix is not a bounded command and root")
+    return prefix
+
+
+RunnerPrefix = Annotated[
+    tuple[Annotated[str, StringConstraints(strict=True, min_length=1)], ...],
+    Field(min_length=1, max_length=PREFIX_ARGUMENTS),
+    AfterValidator(bounded_prefix),
+]
+
 MESSAGES: Final[dict[str, str]] = {
     "registry_busy": "the attempt registry lock was not acquired within its deadline",
     "registry_unavailable": "the attempt registry could not be written",
     "runtime_closed": "the local runtime is closed",
     "lineage_unavailable": "the execution-domain registry lineage is unavailable",
     "retirement_unavailable": "retirement of a started runner is not available yet",
+    "runner_stop_unconfirmed": "a runner of the attempt was not confirmed stopped",
     "runner_starting": "the attempt runner has not registered yet",
     "runner_unreachable": "the attempt runner cannot be observed yet",
     "attempt_not_submitted": "the attempt has no submitted handle",
@@ -94,6 +116,7 @@ RETRYABLE: Final[frozenset[str]] = frozenset(
         "registry_unavailable",
         "lineage_unavailable",
         "retirement_unavailable",
+        "runner_stop_unconfirmed",
         "runner_starting",
         "runner_unreachable",
     }
@@ -140,6 +163,7 @@ class Starting(BoundaryModel):
     nonce: Nonce
     started_at: Instant
     socket_directory: SocketPath
+    runner_prefix: RunnerPrefix
     fence: Fence | None
 
 
@@ -233,6 +257,12 @@ class AttemptKey:
             host_hint=None,
             data=JsonObjectField({"format": HANDLE_FORMAT}),
         )
+
+
+def runner_argv(
+    prefix: tuple[str, ...], key: AttemptKey, nonce: str
+) -> tuple[str, ...]:
+    return (*prefix, key.attempt_id, key.execution_domain_id, nonce)
 
 
 @dataclass(frozen=True)
@@ -341,8 +371,31 @@ def retire_cell(
         return Transition()
     if entry is not None and released(entry):
         return Transition(refusal="attempt_retired")
+    if isinstance(entry, Starting):
+        if entry.fence is not None:
+            return Transition()
+        fence = Fence(retirement_id=retirement_id, fenced_at=stopped_at)
+        return Transition(
+            Starting.model_validate({**entry.model_dump(), "fence": fence})
+        )
     if entry is not None and not isinstance(entry, Unsubmitted):
         return Transition(refusal="retirement_unavailable")
+    return Transition(no_runner_started(key, retirement_id, stopped_at))
+
+
+def tombstone_cell(
+    entry: Entry | None, key: AttemptKey, fence: Fence, stopped_at: datetime
+) -> Transition:
+    if isinstance(entry, Retired):
+        return Transition()
+    if not isinstance(entry, Starting) or entry.fence != fence:
+        return Transition(refusal="retirement_unavailable")
+    return Transition(no_runner_started(key, fence.retirement_id, stopped_at))
+
+
+def no_runner_started(
+    key: AttemptKey, retirement_id: str, stopped_at: datetime
+) -> Retired:
     receipt = TerminationReceipt(
         kind="termination",
         attempt_id=key.attempt_id,
@@ -352,7 +405,7 @@ def retire_cell(
         evidence_ref=f"registry:{key.name}",
         scope=EvidenceScope.NO_RUNNER_STARTED,
     )
-    tombstone = Retired(
+    return Retired(
         state="retired",
         runner=None,
         receipt=receipt,
@@ -360,7 +413,6 @@ def retire_cell(
         normal_completion=None,
         released_at=None,
     )
-    return Transition(tombstone)
 
 
 def synchronize(descriptor: int) -> None:

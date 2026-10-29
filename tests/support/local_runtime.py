@@ -95,6 +95,68 @@ class ConstructedIdentityReader:
         return GroupObservation(IdentityState.UNKNOWN)
 
 
+Steering = Callable[[IdentityObservation, int], IdentityObservation]
+
+
+class SteeredIdentityReader:
+    def __init__(self) -> None:
+        self.native = NativeIdentityReader()
+        self.steered: dict[int, Steering] = {}
+        self.reads: dict[int, int] = {}
+
+    def read(self, pid: int) -> IdentityObservation:
+        observation = self.native.read(pid)
+        steering = self.steered.get(pid)
+        if steering is None:
+            return observation
+        self.reads[pid] = self.reads.get(pid, 0) + 1
+        return steering(observation, self.reads[pid])
+
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        return self.native.group(process_group_id, deadline_ns)
+
+
+def unreadable(observation: IdentityObservation, count: int) -> IdentityObservation:
+    return IdentityObservation(IdentityState.UNKNOWN)
+
+
+def restarted(observation: IdentityObservation, count: int) -> IdentityObservation:
+    process = observation.process
+    if count < 2 or process is None:
+        return observation
+    identity = process.identity.model_copy(
+        update={"start_time": process.identity.start_time + 1}
+    )
+    return IdentityObservation(
+        observation.state,
+        ProcessSnapshot(
+            identity, process.process_group_id, process.session_id, process.dead
+        ),
+    )
+
+
+def frozen() -> Steering:
+    first: list[IdentityObservation] = []
+
+    def steer(observation: IdentityObservation, count: int) -> IdentityObservation:
+        if not first:
+            first.append(observation)
+        return first[0]
+
+    return steer
+
+
+def gated_steering(entered: threading.Event, release: threading.Event) -> Steering:
+    def steer(observation: IdentityObservation, count: int) -> IdentityObservation:
+        entered.set()
+        assert release.wait(READY_DEADLINE_SECONDS)
+        return observation
+
+    return steer
+
+
 def runtime_context(
     capture: Capture,
     clock: Clock | None = None,

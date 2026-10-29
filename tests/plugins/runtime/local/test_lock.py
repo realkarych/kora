@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,8 @@ from tests.support.local_runners import (
     NEVER_READY,
     clock_awaited,
     driven,
+    exited_within,
+    lingering_start,
     open_spawning,
     reap_runners,
     runner_argv,
@@ -51,7 +54,9 @@ from tests.support.local_runtime import (
     READY_DEADLINE_SECONDS,
     ConstructedIdentityReader,
     GatedIdentifiers,
+    SteeredIdentityReader,
     fill_boot_log,
+    gated_steering,
     open_descriptors,
     open_runtime,
     protocol_error,
@@ -437,6 +442,99 @@ async def late_registration_is_released(root: Path, capture: Capture) -> None:
     assert_no_runner(root)
 
 
+GRACE = timedelta(seconds=10)
+
+
+def assert_sweeps_released(runtime: LocalRuntime) -> None:
+    assert runtime.executor.jobs == set()
+    assert runtime.sweeps.jobs == set()
+
+
+async def starting_retire_is_released(root: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    with short_directory() as base:
+        runtime, _, _, _ = await lingering_start(root, base / "sockets", ctx)
+        try:
+            receipt = await runtime.retire("attempt-1", GRACE, ctx)
+        finally:
+            await runtime.close()
+    assert receipt.retirement_id
+    assert_sweeps_released(runtime)
+    assert runner_pids(root) == ()
+
+
+async def unconfirmed_retire_is_released(root: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    reader = SteeredIdentityReader()
+    with short_directory() as base:
+        runtime, _, _, _ = await lingering_start(root, base / "sockets", ctx, reader)
+        try:
+            refused = await protocol_error(
+                runtime.retire("attempt-1", timedelta(0), ctx)
+            )
+        finally:
+            await runtime.close()
+    assert refused.code == "runner_stop_unconfirmed"
+    assert_sweeps_released(runtime)
+    assert_no_runner(root)
+
+
+async def cancelled_retire_is_released(root: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    reader = SteeredIdentityReader()
+    entered = threading.Event()
+    release = threading.Event()
+    with short_directory() as base:
+        runtime, _, _, spawned = await lingering_start(
+            root, base / "sockets", ctx, reader
+        )
+        try:
+            reader.steered[spawned] = gated_steering(entered, release)
+            retiring = asyncio.ensure_future(runtime.retire("attempt-1", GRACE, ctx))
+            assert await asyncio.to_thread(entered.wait, READY_DEADLINE_SECONDS)
+            retiring.cancel()
+            release.set()
+            outcomes = await asyncio.gather(retiring, return_exceptions=True)
+            reader.steered.clear()
+            receipt = await runtime.retire("attempt-1", GRACE, ctx)
+        finally:
+            release.set()
+            await runtime.close()
+    assert isinstance(outcomes[0], asyncio.CancelledError)
+    assert receipt.retirement_id
+    assert_sweeps_released(runtime)
+    assert runner_pids(root) == ()
+
+
+async def close_during_sweep_is_released(root: Path, capture: Capture) -> None:
+    ctx = runtime_context(capture)
+    reader = SteeredIdentityReader()
+    entered = threading.Event()
+    release = threading.Event()
+    with short_directory() as base:
+        runtime, _, _, spawned = await lingering_start(
+            root, base / "sockets", ctx, reader
+        )
+        try:
+            reader.steered[spawned] = gated_steering(entered, release)
+            retiring = asyncio.ensure_future(
+                protocol_error(runtime.retire("attempt-1", GRACE, ctx))
+            )
+            assert await asyncio.to_thread(entered.wait, READY_DEADLINE_SECONDS)
+            closing = asyncio.ensure_future(runtime.close())
+            release.set()
+            refused = await retiring
+            await closing
+            untouched = not exited_within(spawned, 0)
+        finally:
+            release.set()
+            await runtime.close()
+    assert refused.code == "runtime_closed"
+    assert untouched
+    assert_sweeps_released(runtime)
+    assert_no_runner(root)
+
+
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "spawned_runner_is_released": spawned_runner_is_released,
     "readiness_timeout_is_released": readiness_timeout_is_released,
@@ -444,6 +542,10 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "unsettled_launcher_is_retried": unsettled_launcher_is_retried,
     "unwatched_launcher_is_killed_and_reaped": unwatched_launcher_is_killed_and_reaped,
     "late_registration_is_released": late_registration_is_released,
+    "starting_retire_is_released": starting_retire_is_released,
+    "unconfirmed_retire_is_released": unconfirmed_retire_is_released,
+    "cancelled_retire_is_released": cancelled_retire_is_released,
+    "close_during_sweep_is_released": close_during_sweep_is_released,
     "close_refuses_a_spawn_after_its_transition": (
         close_refuses_a_spawn_after_its_transition
     ),

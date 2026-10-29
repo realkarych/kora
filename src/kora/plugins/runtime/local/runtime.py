@@ -2,10 +2,13 @@ import asyncio
 import os
 import re
 import secrets
+import signal
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import StrEnum
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Final
 
@@ -24,29 +27,34 @@ from kora.plugins.runtime.local.spawn import (
     spawn_runner,
 )
 from kora.protocols.common import BoundaryModel, ProtocolContext
-from kora.protocols.deadlines import ExecutionDeadline
+from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
 from kora.protocols.runtime import RuntimeCapabilities, RuntimeStatus, Workload
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget, printable_path
+from kora.runner.channels import ChannelError
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_local_directory,
 )
 from kora.runner.identity import (
+    SCAN_NS,
+    ArgumentMatch,
     IdentityReader,
     IdentityState,
     NativeIdentityReader,
 )
+from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
     COMPONENT,
     RUNTIME_NAME,
     Applied,
     AttemptKey,
     Entry,
+    Fence,
     Registry,
     Retired,
     Starting,
@@ -59,11 +67,16 @@ from kora.runner.registry import (
     open_domain,
     refusal,
     retire_cell,
+    runner_argv,
     status_cell,
     submit_cell,
+    tombstone_cell,
 )
 
 STATE_ROOT_LENGTH: Final[int] = 4052
+STOP_MATCHES: Final[int] = 8
+SWEEP_WORKERS: Final[int] = 1
+SWEEP_ADMITTED: Final[int] = 4
 ATTEMPT: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,256}")
 REJECTIONS: Final[dict[str, str]] = {
     "state_root_unsafe": "the local state root is missing or unsafe",
@@ -84,6 +97,21 @@ SPAWNED: Final[EventSpec] = CATALOG.register(
         Level.INFO,
         "a local attempt runner was spawned",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.FLOAT},
+    )
+)
+
+SWEPT: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.retire",
+        COMPONENT,
+        Level.INFO,
+        "a local attempt's unregistered runners were swept",
+        {
+            "outcome": FieldKind.STRING,
+            "matched": FieldKind.INTEGER,
+            "killed": FieldKind.INTEGER,
+            "waited_ms": FieldKind.FLOAT,
+        },
     )
 )
 
@@ -195,6 +223,74 @@ def random_identifier() -> str:
     return secrets.token_hex(16)
 
 
+class SweepOutcome(StrEnum):
+    TOMBSTONED = "tombstoned"
+    LISTING_INCOMPLETE = "listing_incomplete"
+    MATCH_UNREADABLE = "match_unreadable"
+    SIGNAL_UNKNOWN = "signal_unknown"
+    TOO_MANY_MATCHES = "too_many_matches"
+    SURVIVED_GRACE = "survived_grace"
+
+
+class SweepRefused(Exception):
+    def __init__(self, outcome: SweepOutcome) -> None:
+        self.outcome = outcome
+        super().__init__(outcome.value)
+
+
+@dataclass
+class Sweep:
+    started_ns: int
+    matched: int = 0
+    killed: int = 0
+
+
+def readable(observation: IdentityState) -> None:
+    if observation is IdentityState.UNKNOWN:
+        raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
+
+
+def verified(
+    identities: IdentityReader,
+    scanner: NativeIdentityReader,
+    pid: int,
+    argv: tuple[str, ...],
+) -> ProcessIdentity | None:
+    before = identities.read(pid)
+    readable(before.state)
+    if before.process is None or before.process.dead:
+        return None
+    carried = scanner.carries(pid, argv)
+    if carried is ArgumentMatch.UNKNOWN:
+        raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
+    after = identities.read(pid)
+    readable(after.state)
+    if (
+        carried is not ArgumentMatch.EQUAL
+        or after.process is None
+        or after.process.dead
+        or after.process.identity != before.process.identity
+    ):
+        return None
+    return before.process.identity
+
+
+def vanished(identities: IdentityReader, pid: int) -> None:
+    observation = identities.read(pid)
+    readable(observation.state)
+    if observation.process is not None and not observation.process.dead:
+        raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
+
+
+def stopped(identities: IdentityReader, matches: tuple[ProcessIdentity, ...]) -> None:
+    for identity in matches:
+        observation = identities.read(identity.pid)
+        readable(observation.state)
+        process = observation.process
+        if process is not None and not process.dead and process.identity == identity:
+            raise SweepRefused(SweepOutcome.SURVIVED_GRACE)
+
+
 @dataclass(frozen=True)
 class RunnerLaunch:
     command: tuple[str, ...]
@@ -203,14 +299,8 @@ class RunnerLaunch:
     identity: ProcessIdentity
     clock: Clock
 
-    def argv(self, root: Path, key: AttemptKey, nonce: str) -> tuple[str, ...]:
-        return (
-            *self.command,
-            str(root),
-            key.attempt_id,
-            key.execution_domain_id,
-            nonce,
-        )
+    def prefix(self, root: Path) -> tuple[str, ...]:
+        return (*self.command, str(root))
 
 
 class LocalRuntime:
@@ -226,10 +316,21 @@ class LocalRuntime:
         executor: TransitionExecutor,
         new_identifier: Callable[[], str],
         launch: "RunnerLaunch",
+        identities: IdentityReader,
+        scanner: NativeIdentityReader,
     ) -> None:
         self.execution_domain_id = registry.execution_domain_id
         self.registry = registry
         self.executor = executor
+        self.sweeps = TransitionExecutor(SWEEP_WORKERS, SWEEP_ADMITTED)
+        self._identities = identities
+        self._scanner = scanner
+        self._sweeping = 0
+        self._swept = asyncio.Event()
+        self._swept.set()
+        self._stopping: asyncio.Future[None] = (
+            asyncio.get_running_loop().create_future()
+        )
         self.launchers = Launchers()
         self._root_path = root_path
         self._root = root
@@ -249,6 +350,7 @@ class LocalRuntime:
         home: Callable[[], Path] = Path.home,
         runner: Sequence[str] | None = None,
         socket_directory: Path | None = None,
+        sweep_scan_entries: int = 65536,
     ) -> "LocalRuntime":
         executor = TransitionExecutor()
         try:
@@ -256,6 +358,11 @@ class LocalRuntime:
                 identities
                 if identities is not None
                 else await executor.run(NativeIdentityReader)
+            )
+            scanner = await executor.run(
+                lambda: NativeIdentityReader(
+                    clock=ctx.clock, max_scan_entries=sweep_scan_entries
+                )
             )
             lineage = await executor.run(lambda: lineage_of(reader))
             identity = await executor.run(lambda: own_identity(reader))
@@ -289,7 +396,9 @@ class LocalRuntime:
             await executor.close()
             raise
         registry = Registry(directory, domain.execution_domain_id, new_identifier)
-        return cls(path, root, registry, executor, new_identifier, launch)
+        return cls(
+            path, root, registry, executor, new_identifier, launch, reader, scanner
+        )
 
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities(
@@ -393,6 +502,7 @@ class LocalRuntime:
             nonce=nonce,
             started_at=ctx.clock.now(),
             socket_directory=str(launch.socket_directory),
+            runner_prefix=launch.prefix(self._root_path),
             fence=None,
         )
         overdue = expired(workload.deadline, ctx.clock.now())
@@ -405,7 +515,7 @@ class LocalRuntime:
             "submit",
         )
         if applied.transition.entry is starting:
-            await self.spawn(launch.argv(self._root_path, key, nonce), ctx)
+            await self.spawn(runner_argv(starting.runner_prefix, key, nonce), ctx)
         return key.handle()
 
     async def spawn(self, argv: tuple[str, ...], ctx: ProtocolContext) -> None:
@@ -443,14 +553,166 @@ class LocalRuntime:
             ctx,
             "retire",
         )
-        head = applied.head
-        if head is None or not isinstance(head.entry, Retired):
+        entry = None if applied.head is None else applied.head.entry
+        if isinstance(entry, Starting) and entry.fence is not None:
+            entry = await self.retire_starting(key, entry, entry.fence, grace, ctx)
+        if not isinstance(entry, Retired):
             raise refusal("lineage_unavailable")
-        return head.entry.receipt
+        return entry.receipt
+
+    async def retire_starting(
+        self,
+        key: AttemptKey,
+        entry: Starting,
+        fence: Fence,
+        grace: timedelta,
+        ctx: ProtocolContext,
+    ) -> Entry | None:
+        if self.sweeps.closed:
+            raise refusal("runtime_closed")
+        if self._sweeping >= SWEEP_ADMITTED:
+            raise refusal("registry_busy")
+        self._sweeping += 1
+        self._swept.clear()
+        try:
+            return await self.sweep_and_tombstone(key, entry, fence, grace, ctx)
+        finally:
+            self._sweeping -= 1
+            if not self._sweeping:
+                self._swept.set()
+
+    async def sweep_and_tombstone(
+        self,
+        key: AttemptKey,
+        entry: Starting,
+        fence: Fence,
+        grace: timedelta,
+        ctx: ProtocolContext,
+    ) -> Entry | None:
+        sweep = Sweep(ctx.clock.monotonic_ns())
+        argv = runner_argv(entry.runner_prefix, key, entry.nonce)
+        deadline_ns = sweep.started_ns + max(0, duration_ns(grace))
+        try:
+            await self.stop_carriers(argv, sweep, deadline_ns, ctx)
+        except SweepRefused as refused:
+            if self._stopping.done():
+                raise refusal("runtime_closed") from None
+            self.report(refused.outcome, sweep, ctx)
+            raise refusal("runner_stop_unconfirmed") from None
+        applied = await self.transition(
+            key,
+            lambda current: tombstone_cell(current, key, fence, ctx.clock.now()),
+            ctx,
+            "retire",
+        )
+        self.report(SweepOutcome.TOMBSTONED, sweep, ctx)
+        return None if applied.head is None else applied.head.entry
+
+    def report(self, outcome: SweepOutcome, sweep: Sweep, ctx: ProtocolContext) -> None:
+        level = Level.INFO if outcome is SweepOutcome.TOMBSTONED else Level.WARNING
+        waited = (ctx.clock.monotonic_ns() - sweep.started_ns) / 1_000_000
+        ctx.logger.emit_at(
+            level,
+            SWEPT,
+            outcome=outcome.value,
+            matched=sweep.matched,
+            killed=sweep.killed,
+            waited_ms=waited,
+        )
+
+    async def stop_carriers(
+        self,
+        argv: tuple[str, ...],
+        sweep: Sweep,
+        deadline_ns: int,
+        ctx: ProtocolContext,
+    ) -> None:
+        scanner = self._scanner
+        scan_deadline = sweep.started_ns + SCAN_NS
+        listed = await self.sweeps.run(
+            lambda: scanner.processes_carrying(argv, scan_deadline)
+        )
+        if listed is None:
+            raise SweepRefused(SweepOutcome.LISTING_INCOMPLETE)
+        sweep.matched = len(listed)
+        if len(listed) > STOP_MATCHES:
+            raise SweepRefused(SweepOutcome.TOO_MANY_MATCHES)
+        anchors: list[ExitAnchor] = []
+        try:
+            pinned = await self.pin(listed, argv, anchors, scan_deadline, ctx)
+            if pinned and ctx.clock.monotonic_ns() >= deadline_ns:
+                raise SweepRefused(SweepOutcome.SURVIVED_GRACE)
+            if self._stopping.done():
+                raise refusal("runtime_closed")
+            for anchor, _ in pinned:
+                result = anchor.signal(signal.SIGKILL)
+                if result is SignalResult.UNKNOWN:
+                    raise SweepRefused(SweepOutcome.SIGNAL_UNKNOWN)
+                sweep.killed += result is SignalResult.SENT
+            await self.confirm(pinned, deadline_ns, ctx)
+        finally:
+            for anchor in anchors:
+                anchor.close()
+
+    async def pin(
+        self,
+        listed: tuple[int, ...],
+        argv: tuple[str, ...],
+        anchors: list[ExitAnchor],
+        scan_deadline: int,
+        ctx: ProtocolContext,
+    ) -> list[tuple[ExitAnchor, ProcessIdentity]]:
+        identities = self._identities
+        scanner = self._scanner
+        pinned: list[tuple[ExitAnchor, ProcessIdentity]] = []
+        for pid in listed:
+            if ctx.clock.monotonic_ns() >= scan_deadline:
+                raise SweepRefused(SweepOutcome.LISTING_INCOMPLETE)
+            anchor = ExitAnchor(pid, direct_child=False)
+            anchors.append(anchor)
+            if anchor.unknown:
+                await self.sweeps.run(partial(vanished, identities, pid))
+                continue
+            identity = await self.sweeps.run(
+                partial(verified, identities, scanner, pid, argv)
+            )
+            if identity is not None and anchor.readiness.done():
+                raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
+            if identity is not None:
+                pinned.append((anchor, identity))
+        return pinned
+
+    async def confirm(
+        self,
+        pinned: list[tuple[ExitAnchor, ProcessIdentity]],
+        deadline_ns: int,
+        ctx: ProtocolContext,
+    ) -> None:
+        while not self._stopping.done():
+            pending = tuple(
+                anchor.readiness for anchor, _ in pinned if not anchor.readiness.done()
+            )
+            if not pending:
+                break
+            try:
+                await wait_member_change(
+                    (*pending, self._stopping), deadline_ns, ctx.clock
+                )
+            except ChannelError:
+                break
+        if self._stopping.done():
+            raise refusal("runtime_closed")
+        identities = self._identities
+        unconfirmed = tuple(
+            identity for anchor, identity in pinned if not anchor.exited
+        )
+        await self.sweeps.run(lambda: stopped(identities, unconfirmed))
 
     async def close(self) -> None:
         if self._closing is None:
             self.executor.closed = True
+            self.sweeps.closed = True
+            self._stopping.set_result(None)
             self._closing = asyncio.create_task(self._release())
         await asyncio.shield(self._closing)
 
@@ -459,5 +721,7 @@ class LocalRuntime:
             await self.launchers.drain(self._launch.clock)
         finally:
             await self.executor.close()
+            await self._swept.wait()
+            await self.sweeps.close()
             self.registry.directory.close()
             self._root.close()

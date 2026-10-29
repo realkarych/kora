@@ -268,6 +268,18 @@ class MutationOwner:
                     raise
         finally:
             self.pending -= 1
+            if self.changed is not None:
+                self.changed.set()
+
+    def reap_exited(self) -> tuple[asyncio.Future[None], ...]:
+        if self.pending:
+            return ()
+        changes = tuple(
+            helper.reap_change()
+            for helper in self.helpers
+            if not helper.closed and helper.anchor.exited and not helper.anchor.unknown
+        )
+        return tuple(change for change in changes if change is not None)
 
     def prune(self) -> None:
         self.helpers = [

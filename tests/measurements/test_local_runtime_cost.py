@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import os
 import platform
@@ -18,6 +19,7 @@ from kora.conformance.common import kora_capture
 from kora.ir.json import parse_json_object
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.protocols.common import ProtocolContext
+from kora.protocols.errors import KoraProtocolError
 from kora.runner.registry import Registry, bind_workspace
 from tests.measurements.harness import OUTPUT_VARIABLE, REVISION_VARIABLE
 from tests.support.local_runners import (
@@ -47,6 +49,8 @@ LARGE_REGISTRY = 10000
 CONCURRENCY = 10
 SPAWN_REPEATS = 10
 RETENTION_CYCLES = 20
+RETENTION_INTERVAL = 5
+SWEEP_GRACE = timedelta(seconds=10)
 
 
 def summary(values: list[float]) -> dict[str, float]:
@@ -169,6 +173,17 @@ async def test_local_runtime_lock_contention(
             stopped_wait = time.perf_counter() - stopped_started
     finally:
         await runtime.close()
+    with short_directory() as base:
+        sweeps = await swept_under_contention(
+            state_root(private_directory(tmp_path, "sweeps")), base, ctx
+        )
+    descriptor_delta = open_descriptors() - descriptors
+    swept = [
+        float(str(record["waited_ms"])) / 1000
+        for record in kora_capture.finish()
+        if record.get("event") == "runtime.local.retire"
+        and record.get("outcome") == "tombstoned"
+    ]
 
     report = {
         "workload": "local-runtime-lock-contention",
@@ -190,10 +205,78 @@ async def test_local_runtime_lock_contention(
         "loop_lag_during_contended_retires": summary(retire_lag or [0.0]),
         "stopped_holder_wait": summary([stopped_wait]),
         "stopped_holder_outcome": type(refused[0]).__name__,
-        "open_descriptor_delta": open_descriptors() - descriptors,
+        **sweeps,
+        "starting_retire_event_waited": summary(swept or [0.0]),
+        "open_descriptor_delta": descriptor_delta,
     }
     published(report)
     assert report["open_descriptor_delta"] == 0
+
+
+async def sweep_retire(
+    runtime: LocalRuntime, attempt: str, ctx: ProtocolContext
+) -> float | str:
+    started = time.perf_counter()
+    try:
+        await runtime.retire(attempt, SWEEP_GRACE, ctx)
+    except KoraProtocolError as error:
+        return error.code
+    return time.perf_counter() - started
+
+
+def processes(*selection: str) -> int:
+    listing = subprocess.run(
+        [PS, *selection, "-o", "pid="],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    return len(listing.stdout.splitlines())
+
+
+async def swept_under_contention(
+    root: Path, base: Path, ctx: ProtocolContext
+) -> dict[str, object]:
+    runtime = await open_spawning(root, ctx, base / "sockets", runner=LINGERING)
+    attempts = [f"swept-{index}" for index in range(CONCURRENCY)]
+    try:
+        for attempt in attempts:
+            await cycle(runtime, attempt, ctx)
+        host = processes("-A")
+        owned = processes("-U", str(os.getuid()))
+
+        async def sweeping() -> list[float]:
+            retiring = asyncio.gather(
+                *(sweep_retire(runtime, attempt, ctx) for attempt in attempts)
+            )
+            targets = [
+                await timed(bound(runtime, f"beside-{index}", ctx))
+                for index in range(CONCURRENCY)
+            ]
+            outcomes.extend(await retiring)
+            return targets
+
+        outcomes: list[float | str] = []
+        targets, lag = await with_lag(sweeping)
+        retried = [await sweep_retire(runtime, attempt, ctx) for attempt in attempts]
+    finally:
+        await runtime.close()
+        reap_runners(root)
+    completed = [value for value in outcomes if isinstance(value, float)]
+    return {
+        "starting_retire_completed": summary(completed or [0.0]),
+        "starting_retire_refusals": sorted(
+            str(value) for value in outcomes if isinstance(value, str)
+        ),
+        "starting_retire_retried_refusals": sorted(
+            str(value) for value in retried if isinstance(value, str)
+        ),
+        "workspace_target_during_sweeps_including_queue": summary(targets),
+        "loop_lag_during_sweeps": summary(lag or [0.0]),
+        "host_processes_during_sweeps": host,
+        "same_uid_processes_during_sweeps": owned,
+    }
 
 
 def published(report: Mapping[str, object]) -> None:
@@ -237,6 +320,23 @@ async def cycle(runtime: LocalRuntime, attempt: str, ctx: ProtocolContext) -> No
     assert refused.code == "runner_starting"
 
 
+async def retired_cycle(
+    runtime: LocalRuntime, attempt: str, ctx: ProtocolContext
+) -> None:
+    await cycle(runtime, attempt, ctx)
+    await runtime.retire(attempt, SWEEP_GRACE, ctx)
+
+
+def component_bytes(after: tracemalloc.Snapshot, before: tracemalloc.Snapshot) -> int:
+    return sum(
+        statistic.size_diff
+        for statistic in after.compare_to(before, "filename")
+        if "kora/plugins/runtime/local" in statistic.traceback[0].filename
+        or "kora/runner" in statistic.traceback[0].filename
+        or "kora/executor/launcher" in statistic.traceback[0].filename
+    )
+
+
 @pytest.mark.measurement
 @pytest.mark.asyncio
 async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -> None:
@@ -268,25 +368,27 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
         retention = await open_spawning(
             retention_root, ctx, base / "retention", runner=LINGERING
         )
+        trend: list[int] = []
         try:
             for index in range(WARM_UP):
-                await cycle(retention, f"warm-{index}", ctx)
+                await retired_cycle(retention, f"warm-{index}", ctx)
+            gc.collect()
             tracemalloc.start()
-            before = tracemalloc.take_snapshot()
+            snapshot = tracemalloc.take_snapshot()
+            first = snapshot
             for index in range(RETENTION_CYCLES):
-                await cycle(retention, f"cycle-{index}", ctx)
-            after = tracemalloc.take_snapshot()
+                await retired_cycle(retention, f"cycle-{index}", ctx)
+                if (index + 1) % RETENTION_INTERVAL == 0:
+                    gc.collect()
+                    taken = tracemalloc.take_snapshot()
+                    trend.append(component_bytes(taken, snapshot))
+                    snapshot = taken
+            total = component_bytes(snapshot, first)
             tracemalloc.stop()
+            lingering = len(runner_pids(retention_root))
         finally:
             await retention.close()
             reap_runners(retention_root)
-    component = [
-        statistic.size_diff
-        for statistic in after.compare_to(before, "filename")
-        if "kora/plugins/runtime/local" in statistic.traceback[0].filename
-        or "kora/runner" in statistic.traceback[0].filename
-        or "kora/executor/launcher" in statistic.traceback[0].filename
-    ]
 
     report = {
         "workload": "local-runtime-spawn",
@@ -301,7 +403,11 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
         "idle_runner_rss_kib": statistics.median(idle) if idle else 0.0,
         "idle_runners_observed": len(idle),
         "retention_cycles": RETENTION_CYCLES,
-        "retention_component_bytes": sum(component),
+        "retention_component_bytes": total,
+        "retention_interval_cycles": RETENTION_INTERVAL,
+        "retention_collected_before_each_snapshot": True,
+        "retention_component_bytes_per_interval": trend,
+        "retention_runners_left_before_cleanup": lingering,
         "breakdown_of_readiness_latency": "not measured",
         "open_descriptor_delta": open_descriptors() - descriptors,
     }

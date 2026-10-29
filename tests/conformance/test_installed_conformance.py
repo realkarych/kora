@@ -80,6 +80,40 @@ def test_command_waits_for_ready_execution_and_late_teardown(
     assert b"private-barrier-value" not in process.stdout + process.stderr
 
 
+def test_rejected_secrets_bundle_closes_when_helper_reaps_lag(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700)
+
+    process = subprocess.run(
+        [
+            str(installed_conformance.python),
+            "-I",
+            str(Path(__file__).with_name("command_reap_probe.py")),
+            str(home),
+        ],
+        env={"PATH": os.defpath},
+        cwd=installed_conformance.outside,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert process.returncode == 0, process.stderr
+    probe = json.loads(process.stdout)
+    report = CommandResult.model_validate_json(json.dumps(probe["result"]))
+    assert report.outcome is OriginalOutcome.FAILED
+    assert report.reason == "refused"
+    assert report.cleanup is not None
+    assert report.cleanup.state is CleanupOutcome.CLOSED
+    assert probe["deferred"] == probe["starts"] > 1
+    assert probe["held"] == 0
+    assert probe["retained_helpers"] == 0
+    assert not list(home.rglob("journal"))
+    assert b"private-reap-value" not in process.stdout + process.stderr
+
+
 @dataclass(frozen=True)
 class Outcome:
     result: ChildResult

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Final, TypedDict, Unpack
 
 from kora.conformance.controllers import duration_ns
-from kora.conformance.io_helper import InstalledIOHelperLauncher
+from kora.conformance.io_helper import ChildReaper, InstalledIOHelperLauncher
 from kora.conformance.journal import JournalSnapshot
 from kora.conformance.lifetime import ParentLifetime, RecoveryAttempts
 from kora.protocols.lifetime import (
@@ -28,6 +28,9 @@ from kora.runner.identity import NativeIdentityReader
 from kora.runner.processes import GatedProcess, RecoveredProcess, SignalResult
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
+from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
+    DeferredReaper,
+)
 from tests.support.event_loop import turn
 
 RECOVERY_PROBE: Final = Path(__file__).with_name("lifetime_recovery_probe.py")
@@ -173,6 +176,7 @@ class ProbeOptions(TypedDict, total=False):
     phase: str
     pause_at: int | tuple[int, ...] | None
     resist_term: bool
+    reaper: ChildReaper
 
 
 @dataclass(frozen=True)
@@ -277,3 +281,11 @@ async def settle_recovery_attempts(
         if attempt.task is not None:
             await asyncio.wait_for(asyncio.shield(attempt.task), 5)
         attempt.reconcile()
+
+
+async def reap_watched(reaper: DeferredReaper, pid: int) -> None:
+    clock = SystemClock()
+    deadline = clock.monotonic_ns() + 5_000_000_000
+    while (held := reaper.held.get(pid)) is None or not held.watches:
+        assert clock.monotonic_ns() < deadline
+        await turn()

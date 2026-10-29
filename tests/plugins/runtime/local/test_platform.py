@@ -4,6 +4,7 @@ import re
 import select
 import subprocess
 import sys
+import time
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -13,7 +14,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.runner.filesystem import DirectoryAnchor, rename_no_replace
-from kora.runner.identity import IdentityState, NativeIdentityReader
+from kora.runner.identity import ArgumentMatch, IdentityState, NativeIdentityReader
 from tests.support.local_runtime import (
     READY_DEADLINE_SECONDS,
     observer_namespace_text,
@@ -174,6 +175,54 @@ async def other_uid_member(tmp_path: Path, capture: Capture) -> None:
         assert members == [("unknown", "")]
 
 
+async def own_vector_is_not_swept(tmp_path: Path, capture: Capture) -> None:
+    reader = NativeIdentityReader()
+    own = tuple(sys.orig_argv)
+
+    carried = reader.carries(os.getpid(), own)
+    swept = reader.processes_carrying(own, time.monotonic_ns() + 10**9)
+
+    assert carried is ArgumentMatch.EQUAL
+    assert swept is not None
+    assert os.getpid() not in swept
+
+
+async def empty_leading_argument_is_not_shifted(
+    tmp_path: Path, capture: Capture
+) -> None:
+    code = "import os, signal\nos.write(1, b'r')\nsignal.pause()"
+    reader = NativeIdentityReader()
+    process = subprocess.Popen(
+        ["/bin/bash", "-c", 'exec -a "" "$0" -I -c "$1"', sys.executable, code],
+        env={"MARK": "1"},
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert process.stdout is not None
+        ready, _, _ = select.select([process.stdout], [], [], READY_DEADLINE_SECONDS)
+        assert ready
+        assert process.stdout.read(1) == b"r"
+        shifted = reader.carries(process.pid, ("-I", "-c", code, "MARK=1"))
+        exact = reader.carries(process.pid, ("", "-I", "-c", code))
+    finally:
+        process.kill()
+        process.wait(timeout=READY_DEADLINE_SECONDS)
+        if process.stdout is not None:
+            process.stdout.close()
+
+    assert shifted is ArgumentMatch.DIFFERENT
+    assert exact is ArgumentMatch.EQUAL
+
+
+async def setuid_carrier_is_not_owned(tmp_path: Path, capture: Capture) -> None:
+    helper = str(prepared("setuid-sleep"))
+
+    with executed(helper, "30") as process:
+        carried = NativeIdentityReader().carries(process.pid, (helper, "30"))
+
+    assert carried is ArgumentMatch.DIFFERENT
+
+
 async def child_namespace_member(tmp_path: Path, capture: Capture) -> None:
     prepared("user-namespaces")
     argv = [
@@ -198,9 +247,12 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "no_replace_rename": no_replace_rename,
     "identity_fields": identity_fields,
     "forked_reader_is_unknown": forked_reader_is_unknown,
+    "own_vector_is_not_swept": own_vector_is_not_swept,
+    "empty_leading_argument_is_not_shifted": empty_leading_argument_is_not_shifted,
 }
 PREPARED_LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "other_uid_member": other_uid_member,
+    "setuid_carrier_is_not_owned": setuid_carrier_is_not_owned,
     **(
         {"child_namespace_member": child_namespace_member}
         if sys.platform == "linux"

@@ -1434,14 +1434,7 @@ class ParentLifetime:
                 self.cleanup_effect = None
                 self.mutations.cleanup_task = None
                 self.mutations.cleanup_permit = None
-            for helper in self.mutations.helpers:
-                if (
-                    not self.mutations.pending
-                    and not helper.closed
-                    and helper.anchor.exited
-                    and not helper.anchor.unknown
-                ):
-                    helper.release()
+            reaping = self.mutations.reap_exited()
             self.mutations.prune()
             self._tighten_helper_constraints()
             self._signal_cleanup_helpers()
@@ -1501,6 +1494,7 @@ class ParentLifetime:
                 for helper in self.mutations.helpers
                 if not helper.closed and not helper.anchor.readiness.done()
             )
+            pending.update(reaping)
             try:
                 await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
             finally:
@@ -1693,10 +1687,7 @@ class RecoveryAttempt:
         root = owner.mutations.root
         if root is not None:
             self.registry.bind_root(self, root.identity)
-        if owner.mutations.pending == 0:
-            for helper in owner.mutations.helpers:
-                if not helper.closed:
-                    helper.release()
+        reaping = owner.mutations.reap_exited()
         if task.done() and owner.dispose_recovery_observers():
             consume_failure(task)
             for dependency in self.dependencies:
@@ -1706,6 +1697,7 @@ class RecoveryAttempt:
             return
         dependencies = (
             *owner.recovery_dependencies(),
+            *(cast(asyncio.Future[object], change) for change in reaping),
             cast(asyncio.Future[object], task),
         )
         for dependency in dependencies:

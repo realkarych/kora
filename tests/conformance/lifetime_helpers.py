@@ -11,9 +11,15 @@ from contextlib import AsyncExitStack, ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from kora.conformance.io_helper import InstalledIOHelperLauncher, IOHelper
+from kora.conformance.io_helper import (
+    ChildReaper,
+    InstalledIOHelperLauncher,
+    IOHelper,
+    KernelChildReaper,
+)
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock
+from kora.runner.channels import wait_future
 from kora.runner.identity import (
     IdentityObservation,
     IdentityState,
@@ -101,7 +107,25 @@ async def stop_child(
             await anchor.wait(cleanup(), clock)
     finally:
         anchor.close()
-        process.poll()
+        if process.poll() is None:
+            process.returncode = await reap_once_reapable(
+                KernelChildReaper(), process.pid, cleanup(), clock
+            )
+
+
+async def reap_once_reapable(
+    reaper: ChildReaper, pid: int, deadline: int, clock: Clock
+) -> int:
+    while (returncode := reaper.reap(pid)) is None:
+        watch = reaper.watch(pid)
+        try:
+            returncode = reaper.reap(pid)
+            if returncode is not None:
+                return returncode
+            await wait_future(watch.changed, deadline, clock)
+        finally:
+            watch.close()
+    return returncode
 
 
 async def stop_io_helper(helper: IOHelper, cleanup: CleanupDeadline) -> None:
@@ -266,7 +290,9 @@ class ProbeIOHelperLauncher:
         pause_at: int | tuple[int, ...] | None = None,
         resist_term: bool = False,
         process_group: int = 0,
+        reaper: ChildReaper | None = None,
     ) -> None:
+        self.reaper = reaper
         self.home = home
         self.observation_descriptor = observation_descriptor
         self.fifo_directory = fifo_directory
@@ -310,7 +336,7 @@ class ProbeIOHelperLauncher:
         selected = (self.pause_at,) if isinstance(self.pause_at, int) else self.pause_at
         if selected is not None and self.starts not in selected:
             return InstalledIOHelperLauncher(
-                home=self.home, state_home=self.home / "state"
+                home=self.home, state_home=self.home / "state", reaper=self.reaper
             ).start(descriptors, clock)
         parent, child = socket.socketpair()
         inherited = (child.fileno(), self.observation_descriptor, *descriptors)
@@ -346,7 +372,7 @@ class ProbeIOHelperLauncher:
             raise
         finally:
             child.close()
-        return IOHelper(process, parent, clock)
+        return IOHelper(process, parent, clock, self.reaper)
 
 
 async def stalled_lifetime_parent(
