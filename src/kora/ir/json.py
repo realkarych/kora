@@ -133,6 +133,18 @@ def utf8_extra(text: str) -> int:
     return len(text.encode("utf-8")) - len(text)
 
 
+def utf8_length(text: str) -> int | None:
+    try:
+        return len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        return None
+
+
+def fits_utf8(text: str, limit: int) -> bool:
+    length = utf8_length(text)
+    return length is not None and length <= limit
+
+
 def canonical_string(text: str) -> bytes | None:
     try:
         return encode_basestring(text).encode("utf-8")
@@ -161,8 +173,10 @@ def validate_json_object_field(value: object) -> JsonObjectField:
     return JsonObjectField(parsed)
 
 
-def parsed_or_none(value: object) -> JsonObject | None:
+def parsed_or_none(
+    value: object, max_bytes: int = MAX_CANONICAL_BYTES
+) -> JsonObject | None:
     try:
-        return parse_json_object(value)
+        return parse_json_object(value, max_bytes=max_bytes)
     except JsonShapeError:
         return None
