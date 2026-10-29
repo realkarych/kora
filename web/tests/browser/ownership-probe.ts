@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { createInterface } from 'node:readline'
+import { setImmediate } from 'node:timers/promises'
 import { checkCleanup, Ownership, scheduleClose } from './ownership.ts'
 import { nativeResources } from './resources.ts'
 import type { NativeResources } from './resources.ts'
@@ -30,6 +31,7 @@ try {
       const result = await nativeResources(roots)
       if (scenario === 'late-snapshot') {
         await new Promise<void>(resolve => { scheduleClose(deadline ?? 0, resolve) })
+        while (performance.now() < deadline) await setImmediate()
       }
       acquired = result
       return result

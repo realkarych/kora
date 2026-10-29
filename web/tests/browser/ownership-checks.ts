@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { setImmediate } from 'node:timers/promises'
 import { checkCleanup, Ownership, scheduleClose } from './ownership.ts'
 import type { Cleanup } from './ownership.ts'
 import { nativeResources } from './resources.ts'
@@ -12,7 +13,10 @@ export async function ownershipChecks(root: string): Promise<{ scenario: string,
       observe: async pids => {
         observedAt = performance.now()
         const resources = await nativeResources(pids)
-        if (scenario === 'late-snapshot') await new Promise<void>(resolve => { scheduleClose(observedAt + 5000, resolve) })
+        if (scenario === 'late-snapshot') {
+          await new Promise<void>(resolve => { scheduleClose(observedAt + 5000, resolve) })
+          while (performance.now() < observedAt + 5000) await setImmediate()
+        }
         return resources
       },
       schedule: (deadline, callback) => {
