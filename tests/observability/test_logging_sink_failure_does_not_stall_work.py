@@ -13,6 +13,7 @@ from tests.observability.conftest import (
     TEST_COMPONENT,
     Configure,
     Pipe,
+    finished_output,
     wait_until,
 )
 
@@ -91,9 +92,7 @@ def test_recovery_after_a_stopped_reader_reports_drops_once(
     pipe.reader.start()
     wait_until(lambda: diagnostics.snapshot().queue_records == 0)
     log.emit(NOTE, text="after-recovery")
-    diagnostics.shutdown()
-    pipe.close_write_end()
-    pipe.reader.wait_closed()
+    finished_output(diagnostics, pipe)
 
     records = pipe.reader.records()
     events = [record["event"] for record in records]
