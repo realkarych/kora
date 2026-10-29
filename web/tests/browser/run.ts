@@ -15,6 +15,7 @@ import { parseRunnerMode } from './runner-mode.ts'
 import { networkChecks } from './network.ts'
 import { ArtifactLimit } from './artifacts.ts'
 import { closeOwners } from './ownership.ts'
+import { ownershipChecks } from './ownership-checks.ts'
 import { artifactLimits } from './limits.ts'
 const mode = parseRunnerMode(process.argv.slice(2))
 const cancelProbe = process.env.KORA_BROWSER_CANCEL_PROBE === '1'
@@ -74,6 +75,7 @@ try {
   report.productionSmoke = await smoke(webRoot, 'production', output, readyForCancellation)
   report.developmentSmoke = await smoke(webRoot, 'development', output)
   report.failureChecks = await failureChecks(webRoot, output)
+  report.ownershipChecks = await ownershipChecks(webRoot)
   await runnerCancellation(output)
   await runnerCancellation(output, true)
   await runnerCancellation(output, false, true)
