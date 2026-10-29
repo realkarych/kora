@@ -1298,7 +1298,7 @@ async def pricing_failure_recovery(settings: DatabaseSettings, report: Report) -
                 )
         repaired = PricingMigrationWatch(report, kind, settings, "recovered")
         await repaired.prepare()
-        assert (await upgrade_database(settings, repaired.open)).steps == 1
+        assert (await upgrade_database(settings, repaired.open)).steps == 2
         await repaired.finish()
         await pricing_storage(database, report, "recovered")
         assert (await upgrade_database(settings)).steps == 0
@@ -1401,7 +1401,7 @@ async def pricing_interruption(settings: DatabaseSettings, report: Report) -> No
         await pricing_storage(database, report, "interrupted")
         watch = PricingMigrationWatch(report, kind, settings, "interruption_repair")
         await watch.prepare()
-        assert (await upgrade_database(settings, watch.open)).steps == 1
+        assert (await upgrade_database(settings, watch.open)).steps == 2
         await watch.finish()
         await pricing_storage(database, report, "interruption_repaired")
         await pricing_session_restored(database)
@@ -1432,7 +1432,7 @@ async def pricing_close_recovery(settings: DatabaseSettings, report: Report) -> 
         try:
             async with observer.read_transaction() as connection:
                 assert await connection.run_sync(current_revision) == "0001"
-            assert (await upgrade_database(settings)).steps == 1
+            assert (await upgrade_database(settings)).steps == 2
             await pricing_session_restored(observer)
         finally:
             await observer.close()
@@ -1456,7 +1456,7 @@ async def pricing_native_run(
         await database.close()
     watch = PricingMigrationWatch(report, kind, settings[0], "populated")
     await watch.prepare()
-    assert (await upgrade_database(settings[0], watch.open)).steps == 1
+    assert (await upgrade_database(settings[0], watch.open)).steps == 2
     await watch.finish()
     del watch
     database = Database(settings[0])
