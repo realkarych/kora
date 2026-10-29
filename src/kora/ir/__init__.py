@@ -55,6 +55,16 @@ if TYPE_CHECKING:
         RuntimeSection,
         SecretsSection,
     )
+    from kora.ir.structured_output import (
+        StructuredOutput,
+        StructuredOutputValidationError,
+        canonical_structured_output,
+        parse_structured_output,
+        parse_structured_output_json,
+        require_structured_output_revision,
+        structured_output_digest,
+        summarize_structured_output,
+    )
     from kora.ir.topology import (
         AgentNode,
         BranchNode,
@@ -81,6 +91,14 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "StructuredOutput",
+    "StructuredOutputValidationError",
+    "canonical_structured_output",
+    "parse_structured_output",
+    "parse_structured_output_json",
+    "require_structured_output_revision",
+    "structured_output_digest",
+    "summarize_structured_output",
     "PrincipalRef",
     "VcsRef",
     "GraphDocument",
@@ -254,6 +272,19 @@ def __getattr__(name: str) -> object:
         from kora.ir import trigger
 
         return getattr(trigger, name)
+    if name in {
+        "StructuredOutput",
+        "StructuredOutputValidationError",
+        "canonical_structured_output",
+        "parse_structured_output",
+        "parse_structured_output_json",
+        "require_structured_output_revision",
+        "structured_output_digest",
+        "summarize_structured_output",
+    }:
+        from kora.ir import structured_output
+
+        return getattr(structured_output, name)
     if name in {"VcsRef", "PrincipalRef"}:
         from kora.ir import vcs_ref
 
