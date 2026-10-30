@@ -40,26 +40,14 @@ def retry_fields(
         yield from authored_field(retry.predicate, (*prefix, "predicate"))
 
 
-def node_fields(node: Node) -> Iterator[SyntaxField]:
-    yield from retry_fields(node.retry)
-    if node.inputs is not MISSING:
-        for name, value in node.inputs.items():
-            yield from authored_field(
-                value.path, ("inputs", name, "path"), is_path=True
-            )
+def input_path_fields(node: Node) -> Iterator[SyntaxField]:
     if isinstance(node, AgentNode | CommandNode):
         yield from authored_field(
             node.config.workspace.from_ref,
             ("config", "workspace", "from_ref"),
             is_path=True,
         )
-    elif isinstance(node, BranchNode):
-        for index, case in enumerate(node.config.cases):
-            yield SyntaxField(case.when, ("config", "cases", index, "when"))
-            yield from authored_field(case.reason, ("config", "cases", index, "reason"))
-        yield from authored_field(node.config.else_reason, ("config", "else_reason"))
     elif isinstance(node, HumanInputNode):
-        yield from authored_field(node.config.approve_when, ("config", "approve_when"))
         yield from authored_field(
             node.config.context, ("config", "context"), is_path=True
         )
@@ -73,6 +61,25 @@ def node_fields(node: Node) -> Iterator[SyntaxField]:
                     yield SyntaxField(
                         value, ("config", "binds", "gate_digests", index), True
                     )
+
+
+def node_fields(node: Node) -> Iterator[SyntaxField]:
+    yield from retry_fields(node.retry)
+    if node.inputs is not MISSING:
+        for name, value in node.inputs.items():
+            yield from authored_field(
+                value.path, ("inputs", name, "path"), is_path=True
+            )
+    if isinstance(node, AgentNode | CommandNode):
+        yield from input_path_fields(node)
+    elif isinstance(node, BranchNode):
+        for index, case in enumerate(node.config.cases):
+            yield SyntaxField(case.when, ("config", "cases", index, "when"))
+            yield from authored_field(case.reason, ("config", "cases", index, "reason"))
+        yield from authored_field(node.config.else_reason, ("config", "else_reason"))
+    elif isinstance(node, HumanInputNode):
+        yield from authored_field(node.config.approve_when, ("config", "approve_when"))
+        yield from input_path_fields(node)
     elif isinstance(node, WaitEventNode):
         event = node.config.event
         if event is not MISSING:

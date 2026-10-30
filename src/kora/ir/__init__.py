@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     )
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
+    from kora.ir.input_paths import InputPathResult, validate_input_paths
     from kora.ir.node import ErrorClass, ToolPolicy
     from kora.ir.output_schemas import OutputSchemaResult, validate_output_schemas
     from kora.ir.runtime import (
@@ -131,6 +132,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "InputPathResult",
+    "validate_input_paths",
     "ExpressionSyntaxResult",
     "validate_expression_syntax",
     "EdgeTypeResult",
@@ -247,6 +250,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"InputPathResult", "validate_input_paths"}:
+        from kora.ir import input_paths
+
+        return getattr(input_paths, name)
     if name in {"ExpressionSyntaxResult", "validate_expression_syntax"}:
         from kora.ir import expression_syntax
 
