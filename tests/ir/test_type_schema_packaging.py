@@ -69,7 +69,7 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "from kora.ir import GraphDocument, validate_type_schemas",
             "from kora.ir import validate_inline_schemas, validate_output_schemas",
             "from kora.ir import validate_edge_types",
-            "from kora.ir import validate_expression_syntax",
+            "from kora.ir import validate_expression_syntax, validate_input_paths",
             "from pathlib import Path",
             f"assert Path(kora.__file__).is_relative_to({str(tmp_path)!r})",
             "document = GraphDocument.model_validate({",
@@ -80,7 +80,8 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "'params': {'$ref': 'urn:kora:artifact:StructuredOutput'},",
             "'nodes': {'gate': {'kind': 'human_input',",
             "'config': {'channel': 'cli', 'timeout': '0s',",
-            "'on_expiry': 'fail', 'form': {}, 'approve_when': 'true &&'},",
+            "'on_expiry': 'fail', 'form': {}, 'approve_when': 'true &&',",
+            "'binds': {'vcs_ref': 'inputs.missing'}},",
             "'outputs': {'response': {'type': 'StructuredOutput', 'schema': {}}}},",
             "'consumer': {'kind': 'timer', 'config': {'duration': '1s'},",
             "'inputs': {'data': {'type': 'StructuredOutput',",
@@ -98,6 +99,12 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "assert not syntax.syntax_valid and syntax.expressions_checked == 1",
             "assert syntax.diagnostics.errors[0].code == 'IR011'",
             "assert syntax.diagnostics.errors[0].offset == 7",
+            "paths = validate_input_paths(document)",
+            "assert not paths.input_paths_valid",
+            "assert paths.paths_checked == paths.bindings_checked == 1",
+            "assert paths.paths_unresolved == 0",
+            "assert paths.diagnostics.errors[0].code == 'IR005'",
+            "assert paths.diagnostics.errors[0].offset is None",
         ]
     )
 
