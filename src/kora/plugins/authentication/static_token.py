@@ -3,15 +3,10 @@ import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from pydantic import ValidationError
-from sqlalchemy import or_, select, update
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
-from sqlalchemy.exc import TimeoutError as DatabaseTimeout
 
-from kora.db.connection import Database, DatabaseClosedError, Dialect
-from kora.db.tables import api_token
 from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.protocols.authentication import (
@@ -24,6 +19,9 @@ from kora.protocols.common import ProtocolContext, is_identifier
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Instant, utc_instant
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
+
+if TYPE_CHECKING:
+    from kora.db.connection import Database
 
 REVOKED: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
 BEARER: Final[re.Pattern[str]] = re.compile(
@@ -65,7 +63,11 @@ class PostgresAdapter(Protocol):
     asyncpg: PostgresDriver
 
 
-def database_errors(database: Database) -> tuple[type[Exception], ...]:
+def database_errors(database: "Database") -> tuple[type[Exception], ...]:
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from kora.db.connection import DatabaseClosedError, Dialect
+
     errors: tuple[type[Exception], ...] = (
         SQLAlchemyError,
         OSError,
@@ -79,6 +81,11 @@ def database_errors(database: Database) -> tuple[type[Exception], ...]:
 
 
 def unavailable(error: Exception) -> bool:
+    from sqlalchemy.exc import DBAPIError
+    from sqlalchemy.exc import TimeoutError as DatabaseTimeout
+
+    from kora.db.connection import DatabaseClosedError
+
     if isinstance(error, OSError | DatabaseClosedError | DatabaseTimeout):
         return True
     if isinstance(error, DBAPIError):
@@ -134,7 +141,7 @@ def refuse(ctx: ProtocolContext, operation: str, code: str) -> KoraProtocolError
 class StaticTokenAuthenticator:
     name: str = "static_token"
 
-    def __init__(self, configuration: JsonObject, database: Database) -> None:
+    def __init__(self, configuration: JsonObject, database: "Database") -> None:
         if type(configuration) is not dict or configuration:
             raise KoraProtocolError(
                 "authentication_configuration_invalid",
@@ -152,6 +159,10 @@ class StaticTokenAuthenticator:
     async def authenticate(
         self, request: RequestInfo, ctx: ProtocolContext
     ) -> Principal:
+        from sqlalchemy import select
+
+        from kora.db.tables import api_token
+
         digest = credential_digest(request)
         if digest is None:
             raise refuse(ctx, "authenticate", "authentication_rejected")
@@ -199,6 +210,10 @@ class StaticTokenAuthenticator:
         return authority.principal
 
     async def revoke(self, token_id: str, ctx: ProtocolContext) -> None:
+        from sqlalchemy import or_, update
+
+        from kora.db.tables import api_token
+
         if type(token_id) is not str or not is_identifier(token_id):
             raise refuse(ctx, "revoke", "authentication_failed")
         failure: str | None = None
@@ -227,7 +242,7 @@ class StaticTokenAuthenticator:
 
 
 def create_provider(
-    configuration: JsonObject, database: Database
+    configuration: JsonObject, database: "Database"
 ) -> StaticTokenAuthenticator:
     return StaticTokenAuthenticator(configuration, database)
 

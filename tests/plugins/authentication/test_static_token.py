@@ -25,8 +25,27 @@ from tests.db.closing import ConnectionLedger
 from tests.db.seed import START, Seeder
 from tests.plugins.authentication.support import AuthorityClock, seed_case
 from tests.support.event_loop import turn
+from tests.support.observability import run_python
 
 __all__ = ["kora_capture"]
+
+
+def test_static_token_metadata_import_does_not_load_server_modules() -> None:
+    process = run_python(
+        [
+            "-I",
+            "-c",
+            "import sys; "
+            "from kora.plugins.authentication.static_token import provider_metadata; "
+            "assert provider_metadata().name == 'static_token'; "
+            "assert not any(name == 'kora.db' or "
+            "name.startswith(('kora.db.', 'sqlalchemy')) for name in sys.modules)",
+        ],
+        {},
+    )
+
+    assert process.code == 0, process.stderr
+    assert process.stdout == process.stderr == b""
 
 
 def assert_error(error: KoraProtocolError, code: str) -> None:
