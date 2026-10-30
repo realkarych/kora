@@ -66,6 +66,8 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
     program = "\n".join(
         [
             "import kora",
+            "import sys",
+            "from kora.ir import ToolPolicy, validate_tool_policies, export_ir",
             "from kora.ir import GraphDocument, validate_type_schemas",
             "from kora.ir import validate_inline_schemas, validate_output_schemas",
             "from kora.ir import validate_edge_types, validate_export_types",
@@ -199,6 +201,28 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "('graph', 'nodes', 'fan', 'config', 'over')",
             "assert fan_out.diagnostics.errors[1].path == "
             "('graph', 'nodes', 'fan', 'outputs', 'bad', 'type')",
+            "policies_document = GraphDocument.model_validate({",
+            "'ir_version': '1.0', 'type_contracts': {},",
+            "'graph': {'id': 'graph', 'namespace': 'example', 'nodes': {",
+            "'agent': {'kind': 'agent',",
+            "'outputs': {'session': {'type': 'AgentSession'}},",
+            "'config': {'harness': 'claude', 'prompt': '', 'workspace': {'repo': ''},",
+            "'tool_policy': {'allow': ['Bash(git *)', 'Structured*']}}}}},",
+            "'runtime': {'runtime': 'local', 'vcs': 'git'}})",
+            "assert validate_tool_policies(policies_document).tool_policies_valid",
+            "policy_data = export_ir(policies_document)",
+            "policy_data['graph']['nodes']['agent']['config']['tool_policy'] = "
+            "{'deny': ['StructuredOutput']}",
+            "policies = validate_tool_policies("
+            "GraphDocument.model_validate(policy_data))",
+            "assert not policies.tool_policies_valid",
+            "assert policies.policies_checked == policies.patterns_checked == 1",
+            "error, = policies.diagnostics.errors",
+            "assert error.code == 'IR013' and error.node == 'agent'",
+            "assert error.path[-2:] == ('deny', 0)",
+            "assert not any(name == 'kora.protocols' or "
+            "name.startswith('kora.plugins') "
+            "for name in sys.modules)",
         ]
     )
 

@@ -118,6 +118,7 @@ if TYPE_CHECKING:
         SubgraphInterfaceResult,
         validate_subgraph_interfaces,
     )
+    from kora.ir.tool_policies import ToolPolicyResult, validate_tool_policies
     from kora.ir.topology import (
         AgentNode,
         BranchNode,
@@ -275,6 +276,8 @@ __all__ = [
     "SourceLocation",
     "SubgraphNodeConfig",
     "ToolPolicy",
+    "ToolPolicyResult",
+    "validate_tool_policies",
     "Workspace",
 ]
 
@@ -410,6 +413,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import node
 
         return getattr(node, name)
+    if name in {"ToolPolicyResult", "validate_tool_policies"}:
+        from kora.ir import tool_policies
+
+        return getattr(tool_policies, name)
     if name in {
         "Concurrency",
         "RuntimeSection",
