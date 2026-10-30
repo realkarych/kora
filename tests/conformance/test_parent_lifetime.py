@@ -2,6 +2,7 @@ import asyncio
 import os
 import signal
 import sys
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from tests.conformance.lifetime_support import (
     limits,
     retained_invocation,
     retained_journal,
+    retained_live_invocation,
 )
 
 __all__ = ["limits"]
@@ -234,38 +236,62 @@ async def test_conformance_fixture_resources_are_released_after_dead_owner_recov
     tmp_path: Path,
     mode: str,
 ) -> None:
-    reference = retained_invocation(tmp_path, mode)
-    clock = ControlledLifetimeClock()
-    lifetime = ParentLifetime(
-        clock=clock,
-        limits=limits(),
-        recovery=reference,
-        launcher=installed_launcher(tmp_path),
-    )
+    async with AsyncExitStack() as owned:
+        retained = (
+            await owned.enter_async_context(retained_live_invocation(tmp_path, "live"))
+            if mode == "live"
+            else None
+        )
+        reference = (
+            retained.reference
+            if retained is not None
+            else retained_invocation(tmp_path, mode)
+        )
+        clock = ControlledLifetimeClock()
+        lifetime = ParentLifetime(
+            clock=clock,
+            limits=limits(),
+            recovery=reference,
+            launcher=installed_launcher(tmp_path),
+        )
 
-    observers: list[RecoveredProcess] = []
-    actual = SystemClock()
-    try:
-        await lifetime.ready()
-        observers = [
-            RecoveredProcess(record.entry.registration, actual, NativeIdentityReader())
-            for record in lifetime.records.values()
-            if isinstance(record.entry.registration, ProcessRegistration)
-        ]
+        observers: list[RecoveredProcess] = []
+        actual = SystemClock()
+        try:
+            await lifetime.ready()
+            observers = (
+                list(retained.processes)
+                if retained is not None
+                else [
+                    RecoveredProcess(
+                        record.entry.registration, actual, NativeIdentityReader()
+                    )
+                    for record in lifetime.records.values()
+                    if isinstance(record.entry.registration, ProcessRegistration)
+                ]
+            )
 
-        report = await close_recovered_test_owner(lifetime, clock, observers)
+            report = await close_recovered_test_owner(lifetime, clock, observers)
 
-        assert lifetime.generation == 2
-        assert report.state is CleanupOutcome.CLOSED
-        assert lifetime.inventory().helpers.claim_descriptors == 0
-        assert not tuple(tmp_path.rglob(reference.invocation_id))
-    finally:
-        deadline = actual.monotonic_ns() + 5_000_000_000
-        for observer in observers:
-            observer.signal(signal.SIGKILL, deadline)
-            await observer.settle(deadline)
-            observer.release(deadline)
-        await dispose_test_owner(lifetime, clock)
+            assert lifetime.generation == 2
+            assert report.state is CleanupOutcome.CLOSED
+            assert lifetime.inventory().helpers.claim_descriptors == 0
+            assert not tuple(tmp_path.rglob(reference.invocation_id))
+        finally:
+            deadline = (
+                retained.cleanup()
+                if retained is not None
+                else actual.monotonic_ns() + 5_000_000_000
+            )
+            try:
+                for observer in observers:
+                    observer.signal(signal.SIGKILL, deadline)
+                    await observer.settle(deadline)
+                    observer.release(deadline)
+            finally:
+                await dispose_test_owner(
+                    lifetime, clock, retained.cleanup if retained is not None else None
+                )
 
 
 @pytest.mark.asyncio

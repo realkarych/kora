@@ -12,9 +12,11 @@ from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import TracebackType
 
 import pytest
 
+from kora.conformance.bridge import finish_cleanup
 from kora.protocols.lifetime import ProcessRegistration
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
@@ -31,7 +33,11 @@ from kora.runner.processes import (
     RecoveredProcess,
     SignalResult,
 )
-from tests.conformance.lifetime_helpers import join_helper_operation
+from tests.conformance.lifetime_helpers import (
+    CleanupDeadline,
+    join_helper_operation,
+    turn,
+)
 from tests.conformance.lifetime_support import ControlledLifetimeClock
 
 
@@ -58,91 +64,109 @@ class ReapedDomain:
 
 
 @asynccontextmanager
-async def domain(mode: str) -> AsyncGenerator[ReapedDomain]:
-    if mode in ("held", "held_family"):
-        async with held_domain(mode) as fixture:
-            yield fixture
-        return
-    clock = SystemClock()
-    with tempfile.TemporaryDirectory(prefix="kr-", dir="/tmp") as directory:
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        address = str(Path(directory) / "s")
-        listener.bind(address)
-        listener.listen(2)
-        listener.setblocking(False)
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-I",
-                str(
-                    Path(__file__).resolve().parents[1]
-                    / "support/recovered_process_child.py"
-                ),
-                address,
-                mode,
-                "reaper",
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-        )
-        anchor = ExitAnchor(process.pid)
-        loop = asyncio.get_running_loop()
-        reaper, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
-        assert await asyncio.wait_for(loop.sock_recv(reaper, 64), 5) == b"reaper"
-        leader, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
-        pid = int(await asyncio.wait_for(loop.sock_recv(leader, 64), 5))
-        observed = NativeIdentityReader().read(pid)
-        assert observed.process is not None
-        registration = ProcessRegistration(
-            process=observed.process.identity,
-            process_group_id=observed.process.process_group_id,
-            session_id=observed.process.session_id,
-            acquisition_operation_id="a" * 32,
-        )
-        owned = ReapedDomain(leader, reaper, registration)
-        member_anchor = None
-        if mode == "family":
-            owned.member, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
-            owned.member_pid = int(
-                await asyncio.wait_for(loop.sock_recv(owned.member, 64), 5)
-            )
-            member_anchor = ExitAnchor(owned.member_pid, direct_child=False)
-        try:
-            yield owned
-        finally:
-            leader.close()
-            if owned.member is not None:
-                owned.member.close()
-            if member_anchor is not None:
-                await member_anchor.wait(clock.monotonic_ns() + 5_000_000_000, clock)
-                member_anchor.close()
-            if not owned.reaped:
-                await owned.reap()
-            reaper.close()
-            await anchor.wait(clock.monotonic_ns() + 5_000_000_000, clock)
-            process.wait()
-            anchor.close()
-            listener.close()
+async def domain(
+    mode: str,
+    *,
+    failure_phase: str | None = None,
+    entered: asyncio.Event | None = None,
+    started: list[subprocess.Popen[bytes]] | None = None,
+    registrations: list[ProcessRegistration] | None = None,
+    witnesses: list[bytes] | None = None,
+    cleanup_entered: asyncio.Event | None = None,
+    cleanup_release: asyncio.Event | None = None,
+) -> AsyncGenerator[ReapedDomain]:
+    async with held_domain(
+        mode,
+        failure_phase=failure_phase,
+        entered=entered,
+        started=started,
+        registrations=registrations,
+        witnesses=witnesses,
+        cleanup_entered=cleanup_entered,
+        cleanup_release=cleanup_release,
+    ) as fixture:
+        yield fixture
 
 
 async def finish_held_domain(
-    process: subprocess.Popen[bytes], anchor: ExitAnchor, handles: ExitStack
+    process: subprocess.Popen[bytes],
+    anchor: ExitAnchor,
+    handles: ExitStack,
+    cleanup: CleanupDeadline,
+    registrations: list[ProcessRegistration],
+    original: BaseException | None,
+    require_witness: bool,
+    witnesses: list[bytes] | None,
+    cleanup_entered: asyncio.Event | None,
+    cleanup_release: asyncio.Event | None,
 ) -> None:
-    clock = SystemClock()
-    deadline = clock.monotonic_ns() + 5_000_000_000
-    try:
-        handles.close()
-        await anchor.wait(deadline, clock)
-        assert process.wait() == 0
-    finally:
-        anchor.close()
-        process.poll()
+    clock = cleanup.clock
+
+    async def close() -> None:
+        deadline = cleanup()
+        try:
+            if cleanup_entered is not None:
+                cleanup_entered.set()
+            if cleanup_release is not None:
+                await asyncio.wait_for(
+                    cleanup_release.wait(),
+                    max(0, (deadline - clock.monotonic_ns()) / 1_000_000_000),
+                )
+        finally:
+            try:
+                handles.close()
+                await anchor.wait(deadline, clock)
+                assert process.wait() == 0
+                assert process.stdout is not None
+                witness = process.stdout.read(2)
+                if require_witness:
+                    assert witness == b"r"
+                if witnesses is not None:
+                    witnesses.append(witness)
+                for registration in registrations:
+                    observer = RecoveredProcess(
+                        registration, clock, NativeIdentityReader()
+                    )
+                    try:
+                        await observer.settle(deadline)
+                        observer.release(deadline)
+                    finally:
+                        observer.dispose_observation()
+            finally:
+                anchor.close()
+                process.poll()
+
+    await finish_cleanup(close, original)
 
 
 @asynccontextmanager
-async def held_domain(mode: str) -> AsyncGenerator[ReapedDomain]:
+async def held_domain(
+    mode: str,
+    *,
+    failure_phase: str | None = None,
+    entered: asyncio.Event | None = None,
+    started: list[subprocess.Popen[bytes]] | None = None,
+    registrations: list[ProcessRegistration] | None = None,
+    witnesses: list[bytes] | None = None,
+    cleanup_entered: asyncio.Event | None = None,
+    cleanup_release: asyncio.Event | None = None,
+) -> AsyncGenerator[ReapedDomain]:
+    clock = SystemClock()
+    cleanup = CleanupDeadline(clock, 5_000_000_000)
+    retained = [] if registrations is None else registrations
+
+    async def identity(peer: socket.socket, phase: str) -> int:
+        if failure_phase == phase and entered is not None:
+            entered.set()
+            waiting: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+            await waiting
+        return int(
+            await asyncio.wait_for(
+                asyncio.get_running_loop().sock_recv(peer, 64),
+                0 if failure_phase == phase else 5,
+            )
+        )
+
     with tempfile.TemporaryDirectory(prefix="kr-", dir="/tmp") as directory:
         async with AsyncExitStack() as owned:
             handles = ExitStack()
@@ -166,21 +190,48 @@ async def held_domain(mode: str) -> AsyncGenerator[ReapedDomain]:
                     mode,
                     "reaper",
                 ],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
+            if process.stdin is not None:
+                handles.callback(process.stdin.close)
+            if process.stdout is not None:
+                owned.callback(process.stdout.close)
+            if started is not None:
+                started.append(process)
             anchor = ExitAnchor(process.pid)
-            owned.push_async_callback(finish_held_domain, process, anchor, handles)
+
+            async def finish(
+                _kind: type[BaseException] | None,
+                original: BaseException | None,
+                _traceback: TracebackType | None,
+            ) -> None:
+                await finish_held_domain(
+                    process,
+                    anchor,
+                    handles,
+                    cleanup,
+                    retained,
+                    original,
+                    failure_phase in ("leader_recv", "member_recv") or mode != "family",
+                    witnesses,
+                    cleanup_entered,
+                    cleanup_release,
+                )
+
+            owned.push_async_exit(finish)
             loop = asyncio.get_running_loop()
-            reaper, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
+            reaper, _ = await asyncio.wait_for(
+                loop.sock_accept(listener), 0 if failure_phase == "accept" else 5
+            )
             handles.callback(reaper.close)
             assert await asyncio.wait_for(loop.sock_recv(reaper, 64), 5) == b"reaper"
             await loop.sock_sendall(reaper, b"s")
             leader, _ = await asyncio.wait_for(loop.sock_accept(listener), 5)
             handles.callback(leader.close)
-            pid = int(await asyncio.wait_for(loop.sock_recv(leader, 64), 5))
+            pid = await identity(leader, "leader_recv")
             observed = NativeIdentityReader().read(pid)
             assert observed.process is not None
             registration = ProcessRegistration(
@@ -189,16 +240,15 @@ async def held_domain(mode: str) -> AsyncGenerator[ReapedDomain]:
                 session_id=observed.process.session_id,
                 acquisition_operation_id="b" * 32,
             )
+            retained.append(registration)
             fixture = ReapedDomain(leader, reaper, registration)
-            if mode == "held_family":
+            if mode in ("family", "held_family"):
                 await loop.sock_sendall(leader, b"s")
                 fixture.member, _ = await asyncio.wait_for(
                     loop.sock_accept(listener), 5
                 )
                 handles.callback(fixture.member.close)
-                fixture.member_pid = int(
-                    await asyncio.wait_for(loop.sock_recv(fixture.member, 64), 5)
-                )
+                fixture.member_pid = await identity(fixture.member, "member_recv")
             yield fixture
 
 
@@ -1024,7 +1074,7 @@ async def test_recovered_leader_reaped_with_omitted_live_member_never_signals() 
         deadline = clock.monotonic_ns() + 5_000_000_000
         before = owner.observe(deadline)
         assert fixture.member_pid in {member.pid for member in before.live_members}
-        fixture.leader.close()
+        os.kill(fixture.registration.process.pid, signal.SIGKILL)
         await fixture.reap()
         source.omit = True
 
@@ -1103,3 +1153,137 @@ async def test_already_reaped_empty_group_recovers_with_stale_errno() -> None:
         assert observed.group_empty
         assert observed.observed_exits == ()
         assert owner.watcher_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["accept", "leader_recv", "member_recv"])
+async def test_recovered_domain_handshake_failure_releases_acquired_resources(
+    phase: str,
+) -> None:
+    gc.collect()
+    baseline = set(os.listdir("/dev/fd"))
+    started: list[subprocess.Popen[bytes]] = []
+    registrations: list[ProcessRegistration] = []
+    witnesses: list[bytes] = []
+
+    with pytest.raises(TimeoutError):
+        async with domain(
+            "family",
+            failure_phase=phase,
+            started=started,
+            registrations=registrations,
+            witnesses=witnesses,
+        ):
+            raise AssertionError("unexpected successful handshake")
+    gc.collect()
+
+    assert len(started) == 1
+    assert started[0].returncode == 0
+    assert witnesses == [b"" if phase == "accept" else b"r"]
+    reader = NativeIdentityReader()
+    assert reader.read(started[0].pid).state is IdentityState.ABSENT
+    for registration in registrations:
+        assert reader.read(registration.process.pid).state is IdentityState.ABSENT
+        group = reader.group(registration.process_group_id)
+        assert group.state is IdentityState.PRESENT
+        assert group.members == ()
+    assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+async def test_recovered_domain_handshake_cancellation_releases_resources() -> None:
+    gc.collect()
+    baseline = set(os.listdir("/dev/fd"))
+    started: list[subprocess.Popen[bytes]] = []
+    registrations: list[ProcessRegistration] = []
+    witnesses: list[bytes] = []
+    entered = asyncio.Event()
+
+    async def acquire() -> None:
+        async with domain(
+            "family",
+            failure_phase="member_recv",
+            entered=entered,
+            started=started,
+            registrations=registrations,
+            witnesses=witnesses,
+        ):
+            raise AssertionError("unexpected successful handshake")
+
+    task = asyncio.create_task(acquire())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        await join_helper_operation(task)
+    gc.collect()
+
+    assert len(started) == 1
+    assert started[0].returncode == 0
+    assert witnesses == [b"r"]
+    reader = NativeIdentityReader()
+    assert reader.read(started[0].pid).state is IdentityState.ABSENT
+    assert len(registrations) == 1
+    group = reader.group(registrations[0].process_group_id)
+    assert group.state is IdentityState.PRESENT
+    assert group.members == ()
+    assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+async def test_recovered_domain_repeated_cancellation_joins_owned_cleanup() -> None:
+    gc.collect()
+    baseline = set(os.listdir("/dev/fd"))
+    entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    started: list[subprocess.Popen[bytes]] = []
+    registrations: list[ProcessRegistration] = []
+    witnesses: list[bytes] = []
+
+    async def acquire() -> None:
+        async with domain(
+            "family",
+            failure_phase="member_recv",
+            entered=entered,
+            started=started,
+            registrations=registrations,
+            witnesses=witnesses,
+            cleanup_entered=cleanup_entered,
+            cleanup_release=cleanup_release,
+        ):
+            raise AssertionError("unexpected successful handshake")
+
+    task = asyncio.create_task(acquire())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel("original handshake")
+        await asyncio.wait_for(cleanup_entered.wait(), 5)
+        assert not task.done()
+        assert started[0].poll() is None
+        task.cancel("later teardown")
+        await turn()
+        assert not task.done()
+        task.cancel("last teardown")
+        await turn()
+        assert not task.done()
+        cleanup_release.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await task
+        assert cancelled.value.args == ("original handshake",)
+    finally:
+        cleanup_release.set()
+        await join_helper_operation(task)
+    gc.collect()
+
+    assert started[0].returncode == 0
+    assert witnesses == [b"r"]
+    reader = NativeIdentityReader()
+    assert reader.read(started[0].pid).state is IdentityState.ABSENT
+    assert len(registrations) == 1
+    group = reader.group(registrations[0].process_group_id)
+    assert group.state is IdentityState.PRESENT
+    assert group.members == ()
+    assert set(os.listdir("/dev/fd")) == baseline

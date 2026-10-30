@@ -17,8 +17,8 @@ The recovered-domain handshake fixture, live/pair probe handoff and journal cons
 remain pending in #368. Their shared fixture changes follow the production settlement repair
 in [#369](https://github.com/realkarych/kora/issues/369). Its dependency
 [#359](https://github.com/realkarych/kora/pull/359) was accepted on 2026-10-29. No production correction or caller
-polling-workaround removal is included in this slice. Already merged #365, #377 and
-#380 coverage remains.
+polling-workaround removal is included in this slice.
+Coverage from already merged #365, #377 and #380 remains.
 
 ## Resource ownership and failure evidence
 
@@ -188,3 +188,150 @@ their original execution revisions rather than becoming new full-suite results.
 The production runner, parent assertions, contracts, gates, platforms and dependencies
 are unchanged. There is no new execution or signal authority. The correction contains
 zero production lines and does not start the dependent #369 or shared #368 work.
+
+## Remaining recovered-process ownership on 2026-10-30
+
+The remaining [#368 plan](https://github.com/realkarych/kora/issues/368#issuecomment-6511183830)
+resumes from merged master `9731b17908e5bf71e44c1546cec8bdafffebd474` after
+[#450](https://github.com/realkarych/kora/pull/450) delivered recovered settlement.
+The [original plan](https://github.com/realkarych/kora/issues/368#issuecomment-6475685796)
+and [accepted split](https://github.com/realkarych/kora/issues/368#issuecomment-6494259231)
+retain the completed FIFO/task slice above. The
+[independent design assessment](https://github.com/realkarych/kora/issues/368#issuecomment-6510780007)
+covers the remaining private authority transfer and native acquisition boundaries.
+This change has zero handwritten production lines; its scope is nine existing Python
+test/support files and this record. No product contract, identity, signaling rule,
+dependency, supported platform, timeout or verification gate changes.
+
+### Ownership boundaries and retained behavior
+
+Live/pair probes publish one private typed record containing the invocation ID and
+all existing `ProcessRegistration` values, limited to two registrations and 64 KiB.
+The caller reads through cancellable native pipe readiness under one acquisition
+deadline. Complete identity, mode cardinality and unique process/acquisition identities
+are checked before every returned observer and its independent disposal/release
+callback are registered synchronously. Only then is the exact stdin acknowledgment
+written. The probe retains its real `ParentLifetime` until that acknowledgment.
+Rejected or partial records and a failed acknowledgment grant no signaling authority:
+caller cleanup closes stdin and joins probe-owned cleanup first. The probe checks
+actual process absence and empty groups before exiting after unacknowledged cleanup.
+Tree/gone output remains compatible; the live workload remains `signal.pause()`.
+
+The nine live/pair acquisition sites now obtain this authority before journal lookup
+or parsing: parent-exit and recovery-claim each have one, journal-recovery has five,
+and resume and parent-lifetime each have one. Existing sibling, semantic-corruption,
+inventory, expired-observation, capacity, claim and diagnostic assertions remain.
+Invalid-first-parse regressions in parent-exit, recovery-claim and journal-recovery
+write invalid bytes before the first `JournalSnapshot` parse and require exactly
+Pydantic `ValidationError`. Every independently reported domain is still closed;
+the invalid bytes remain evidence and never supply kill authority.
+
+The recovered-domain fixture reuses #369's staged controls and owned socket stack
+for legacy normal/resistant/family setup too. Listener ownership precedes bind/listen;
+direct child/anchor ownership precedes accept; accepted controls precede recv; family
+creation follows retained leader authority. Cleanup closes the complete control set
+before waiting for the reaper's retained children. This is composite control closure,
+not a claim that stdin EOF alone interrupts every synchronous child wait. Early
+identity-receive failure cannot supply a parent registration, so the direct reaper
+checks its collected child and freshly empty native group before emitting one fixed
+private stdout byte. The parent requires that witness in the early recv regressions.
+The intentional reaped-leader/live-member case uses controlled leader death only
+after member authority is retained, and emits no false empty-group witness.
+
+One lazy actual-clock `CleanupDeadline` covers native finalizers and sibling cleanup.
+FIFO setup keeps its separate original acquisition wait. Converted owner disposal
+uses the remaining actual cleanup budget while preserving its injected decision
+clock; unchanged callers retain their original defaults. Resume channel/anchor and
+parent-owner finalizers run even when an earlier observer signal or settlement fails.
+The existing bridge `finish_cleanup` owns a retained shielded task around the complete
+join/release stack and domain teardown. Repeated caller cancellation cannot abandon
+that task; bounded event controls exercise pre-acknowledgment join, post-acknowledgment
+release and domain cleanup, preserving the original cancellation and deadline.
+
+### Local verification and retained failures
+
+Local environment: macOS 27.2 arm64, CPython 3.11.17, uv 0.11.7 with locked existing
+dependencies. The tested base is the merge above; uncommitted snapshot hashes below
+identify actual inputs rather than implying checks ran on a later commit.
+
+| Input snapshot | Actual check and outcome |
+| --- | --- |
+| Initial authority-first patch SHA-256 `20e0d0896c9d1462d3af9831432ebda2d05aceaef40dfec747d2de2e1e20cbb0` | The six-file focused selection with `-x` failed after 61 passes in 10.64 s at `test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_recovery[drained-identity]`: its descriptor equality found one retained observer descriptor. This remains a failed execution. |
+| Local observer-disposal patch SHA-256 `23d05e6e7eabb9d8891d9806461a1ccdd34ced1f775301e93d5b77ee9d1d4044` | The five-consumer selection with `-x` passed 56 cases in 57.05 s after registering the returned observer's disposal in the inner scope before the first wait. The descriptor assertion was preserved. |
+| Shared teardown, native witness and actual-budget source patch SHA-256 `501e55e4f7cb1ac1f06b81380f5fb3d926623234270833fdf4bf8b5adc946b28` | The targeted changed-input selection below passed all 43 cases in 35.33 s. Earlier consumer/core passes remain intermediate evidence because relevant shared inputs changed. Full supported-platform qualification belongs to final-head CI, not these local checks. |
+
+The initial six-file command was:
+
+```sh
+uv run --no-sync pytest -q -x tests/conformance/test_recovered_process_lifetime.py tests/conformance/test_lifetime_parent_exit.py tests/conformance/test_lifetime_recovery_claim.py tests/conformance/test_lifetime_journal_recovery.py tests/conformance/test_lifetime_resume.py tests/conformance/test_parent_lifetime.py
+```
+
+The consumer repair command used the same selection without
+`test_recovered_process_lifetime.py`. Before/after process listings filtered to this
+checkout's recovery probe and native child paths contained no retained matching
+processes. These listings complement the in-test native process/group and direct-reap
+assertions; they do not replace them or establish a repository-wide process audit.
+Every new adverse case takes its descriptor baseline before acquisitions, performs
+post-cleanup garbage collection and checks exact equality under warnings-as-errors.
+
+Independent correctness, security and performance reviewers inspected the complete
+source patch above in separate read-only contexts and returned passing conclusions.
+Their reviewed inputs match the nine source hashes below; no native code, test or
+build was executed by the reviewers. Correctness covered original failure/cleanup
+ownership and sibling finalizers, security covered authority transfer and composite
+control closure, and performance covered bounded report retention, the original
+cleanup budget, native witnesses and repeated cancellation. The implementation
+coordinator records the actual reviewer provenance and returned conclusions with
+the change; this source review does not supply executable or CI evidence.
+
+The targeted command was:
+
+```sh
+uv run --no-sync pytest -q -x \
+  tests/conformance/test_recovered_process_lifetime.py::test_recovered_domain_handshake_failure_releases_acquired_resources \
+  tests/conformance/test_recovered_process_lifetime.py::test_recovered_domain_handshake_cancellation_releases_resources \
+  tests/conformance/test_recovered_process_lifetime.py::test_recovered_domain_repeated_cancellation_joins_owned_cleanup \
+  tests/conformance/test_recovered_process_lifetime.py::test_recovered_nonchild_signal_requires_live_leader_and_actual_reaper \
+  tests/conformance/test_recovered_process_lifetime.py::test_recovered_leader_reaped_with_omitted_live_member_never_signals \
+  tests/conformance/test_recovered_process_lifetime.py::test_recovered_settle_waits_for_reap_of_exited_leader \
+  tests/conformance/test_recovered_process_lifetime.py::test_recovered_late_member_refresh_is_independent_of_live_leader \
+  tests/conformance/test_lifetime_journal_recovery.py::test_live_probe_corrupt_journal_releases_acquired_processes \
+  tests/conformance/test_lifetime_parent_exit.py::test_live_probe_corrupt_journal_releases_acquired_processes \
+  tests/conformance/test_lifetime_recovery_claim.py::test_live_probe_corrupt_journal_releases_acquired_processes \
+  tests/conformance/test_lifetime_journal_recovery.py::test_live_probe_handoff_failure_releases_acquired_processes \
+  tests/conformance/test_lifetime_journal_recovery.py::test_live_probe_repeated_cancellation_joins_owned_cleanup \
+  tests/conformance/test_lifetime_journal_recovery.py::test_recovery_control_capacity_keeps_entire_older_inventory \
+  tests/conformance/test_lifetime_journal_recovery.py::test_close_report_never_restarts_expired_process_observation \
+  tests/conformance/test_lifetime_journal_recovery.py::test_recovery_close_preserves_complete_inventory \
+  tests/conformance/test_lifetime_resume.py::test_completed_unknown_resume_disposes_volatile_descriptors_after_gc \
+  tests/conformance/test_parent_lifetime.py::test_conformance_fixture_resources_are_released_after_dead_owner_recovery \
+  tests/conformance/test_lifetime_parent_exit.py::test_stalled_reopen_helper_does_not_prevent_parent_exit_and_later_recovery \
+  tests/conformance/test_lifetime_recovery_claim.py::test_recovery_claim_excludes_unpublished_and_crashed_parent_writers
+```
+
+| Full local check on the same source inputs | Actual result |
+| --- | --- |
+| `uv run --no-sync pytest -q tests/architecture` | 907 passed in 30.32 s. |
+| `uv run --no-sync ruff check --ignore-noqa .` | Passed. |
+| `uv run --no-sync ruff format --check .` | Passed; 690 Python files already formatted. |
+| `uv run --no-sync pyright` | Zero errors and warnings. |
+
+| Source path under `tests/` | Reviewed and locally tested SHA-256 |
+| --- | --- |
+| `conformance/lifetime_recovery_probe.py` | `d1801a9b2e4abb3a58d1114e4ee039f35d924ca62064a8e9c18ba368a838d7ed` |
+| `conformance/lifetime_support.py` | `fc1977b8288605a766ffcf9deb56e81831c6c3898173308b32f8ce7ee8de8035` |
+| `conformance/test_recovered_process_lifetime.py` | `7fa082ee45b958c6a549e14b1d84b9f0211a5a7b2fb69d3c11b7f8bf1db83523` |
+| `support/recovered_process_child.py` | `c0ab53c63bb7da4e82d0df282ae79fe07523e99a3855b4dd80dc0d245a5de14e` |
+| `conformance/test_lifetime_parent_exit.py` | `188c8985793b60deb00c5dbc1e71c7acdf224d5a0736e58ab839f554e4f1456d` |
+| `conformance/test_lifetime_recovery_claim.py` | `3784f65793b9067c120725c40e59a549a79d25b3f5597b94c1a221e16bc5a9bb` |
+| `conformance/test_lifetime_journal_recovery.py` | `6d99dd10ae8d06a2385d47751e8f93968f16595fbf06154b77e898ebe10b7a25` |
+| `conformance/test_lifetime_resume.py` | `785451e11cc92a05f2b7c9b75fe7024e1159e8779b616a1006d06fc96bab72c6` |
+| `conformance/test_parent_lifetime.py` | `50f4ccfc4091b5291cb41f5ba826505fa8239e631ef3a4011f469f310118ed5a` |
+
+The pull request closing [issue #368](https://github.com/realkarych/kora/issues/368)
+records the final committed revision, reviewer provenance, required CI links and
+supported-platform qualification. Local validation does not claim that final-head
+CI has already completed. One complete final-head CI qualifies the full nine-file
+integration; no repeated file/CI campaign or extra release qualification is introduced.
+Durations remain diagnostics, while actual closure, exact descriptors and hard
+deadlines remain gates.
