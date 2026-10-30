@@ -18,6 +18,7 @@ from pydantic import (
 from pydantic.config import JsonDict, JsonValue
 from pydantic_core import PydanticCustomError
 
+from kora.ir.approval_form import default_approval_form
 from kora.ir.data import IrJsonObjectField, IrJsonValueField
 from kora.ir.node import ErrorClass, ToolPolicy
 from kora.ir.record import IrRecord, extension_schema, require_array
@@ -294,17 +295,7 @@ class HumanInputConfig(IrRecord):
     channel: StrictStr
     form: IrJsonObjectField | MISSING = Field(
         default=MISSING,
-        json_schema_extra={
-            "default": {
-                "type": "object",
-                "properties": {
-                    "decision": {"type": "string", "enum": ["approve", "reject"]},
-                    "comments": {"type": "string"},
-                },
-                "required": ["decision"],
-                "additionalProperties": False,
-            }
-        },
+        json_schema_extra={"default": default_approval_form()},
     )
     timeout: Duration
     on_expiry: Literal["fail", "skip", "default_value"]

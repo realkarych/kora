@@ -67,7 +67,7 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
         [
             "import kora",
             "from kora.ir import GraphDocument, validate_type_schemas",
-            "from kora.ir import validate_inline_schemas",
+            "from kora.ir import validate_inline_schemas, validate_output_schemas",
             "from pathlib import Path",
             f"assert Path(kora.__file__).is_relative_to({str(tmp_path)!r})",
             "document = GraphDocument.model_validate({",
@@ -76,12 +76,17 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "('VcsRef', 'StructuredOutput', 'AgentSession', 'CommandResult')},",
             "'graph': {'id': 'graph', 'namespace': 'example',",
             "'params': {'$ref': 'urn:kora:artifact:StructuredOutput'},",
-            "'nodes': {'timer': {'kind': 'timer', 'config': {'duration': '1s'}}}},",
+            "'nodes': {'gate': {'kind': 'human_input',",
+            "'config': {'channel': 'cli', 'timeout': '0s',",
+            "'on_expiry': 'fail', 'form': {}},",
+            "'outputs': {'response': {'type': 'StructuredOutput', 'schema': {}}}}}},",
             "'runtime': {'runtime': 'local', 'vcs': 'git'}})",
             "result = validate_type_schemas(document)",
             "assert result.schemas_valid and result.contracts_checked == 4",
             "inline = validate_inline_schemas(document)",
             "assert inline.inline_schemas_valid and inline.references_checked == 1",
+            "outputs = validate_output_schemas(document)",
+            "assert outputs.output_schemas_valid and outputs.comparisons_checked == 1",
         ]
     )
 
