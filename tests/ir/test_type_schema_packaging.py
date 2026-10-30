@@ -69,6 +69,8 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "from kora.ir import GraphDocument, validate_type_schemas",
             "from kora.ir import validate_inline_schemas, validate_output_schemas",
             "from kora.ir import validate_edge_types, validate_export_types",
+            "from kora.ir import validate_subgraph_interfaces",
+            "from kora.ir import OutputDecl",
             "from kora.ir import validate_expression_syntax, validate_input_paths",
             "from pathlib import Path",
             f"assert Path(kora.__file__).is_relative_to({str(tmp_path)!r})",
@@ -144,6 +146,31 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "assert error.code == 'IR003' and error.node is error.offset is None",
             "assert error.path == "
             "('graph', 'subgraphs', 'body', 'outputs', 'bad', 'type')",
+            "interfaces_document = GraphDocument.model_validate({",
+            "'ir_version': '1.0',",
+            "'type_contracts': {'VcsRef': {'builtin_revision': '1'}},",
+            "'graph': {'id': 'graph', 'namespace': 'example', 'nodes': {",
+            "'call': {'kind': 'subgraph', 'config': {'body': 'body'},",
+            "'inputs': {'value': {'type': 'List[VcsRef]'}},",
+            "'outputs': {'value': {'type': 'List[List[VcsRef]]'}}}},",
+            "'subgraphs': {'body': {'nodes': {",
+            "'timer': {'kind': 'timer', 'config': {'duration': '0s'}}},",
+            "'inputs': {'value': {'type': 'List[VcsRef]'}},",
+            "'outputs': {'value': {'type': 'List[List[VcsRef]]',",
+            "'from': 'timer', 'output': 'missing'}}}}},",
+            "'runtime': {'runtime': 'local', 'vcs': 'git'}})",
+            "interfaces = validate_subgraph_interfaces(interfaces_document)",
+            "assert interfaces.interfaces_valid and interfaces.types_compared == 2",
+            "interfaces_document.graph.nodes['call'].outputs['value'] = "
+            "OutputDecl(type='VcsRef')",
+            "interfaces = validate_subgraph_interfaces(interfaces_document)",
+            "assert not interfaces.interfaces_valid",
+            "assert interfaces.types_compared == 2",
+            "assert interfaces.types_unresolved == 0",
+            "error, = interfaces.diagnostics.errors",
+            "assert error.code == 'IR003' and error.node == 'call'",
+            "assert error.path == "
+            "('graph', 'nodes', 'call', 'outputs', 'value', 'type')",
         ]
     )
 

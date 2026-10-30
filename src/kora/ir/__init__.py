@@ -109,6 +109,10 @@ if TYPE_CHECKING:
         StructuredSchemaPreparationRefusal,
     )
     from kora.ir.structured_schema_preparation import prepare_structured_schema_input
+    from kora.ir.subgraph_interfaces import (
+        SubgraphInterfaceResult,
+        validate_subgraph_interfaces,
+    )
     from kora.ir.topology import (
         AgentNode,
         BranchNode,
@@ -145,6 +149,8 @@ __all__ = [
     "StructuredSchemaPreparationRefusal",
     "PreparedStructuredSchemaInput",
     "prepare_structured_schema_input",
+    "SubgraphInterfaceResult",
+    "validate_subgraph_interfaces",
     "ExportTypeResult",
     "validate_export_types",
     "InputPathResult",
@@ -278,6 +284,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import structured_schema_preparation
 
         return structured_schema_preparation.prepare_structured_schema_input
+    if name in {"SubgraphInterfaceResult", "validate_subgraph_interfaces"}:
+        from kora.ir import subgraph_interfaces
+
+        return getattr(subgraph_interfaces, name)
     if name in {"ExportTypeResult", "validate_export_types"}:
         from kora.ir import export_types
 
