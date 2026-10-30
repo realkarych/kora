@@ -2,7 +2,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from kora.ir.contracts import BuiltinTypeContract, TypeContract
-from kora.ir.type_declarations import PUBLISHED_BUILTINS
+from kora.ir.type_declarations import PUBLISHED_BUILTINS, parse_type_shape
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,16 @@ class TypeAncestry:
         if child is None or ancestor is None:
             return None
         return ancestor[0] <= child[0] < ancestor[1]
+
+    def accepts_type(self, produced: str, expected: str) -> bool | None:
+        child = parse_type_shape(produced)
+        ancestor = parse_type_shape(expected)
+        if child is None or ancestor is None:
+            return None
+        compatible = self.accepts(child.base, ancestor.base)
+        if compatible is None:
+            return None
+        return compatible and child.list_depth == ancestor.list_depth
 
 
 def index_type_ancestry(contracts: dict[str, TypeContract]) -> TypeAncestry:

@@ -10,7 +10,6 @@ from kora.ir.document import GraphDocument
 from kora.ir.graph_links import COMPONENT, outputs, safe_source
 from kora.ir.topology import GraphBody, Node
 from kora.ir.type_ancestry import TypeAncestry, index_type_ancestry
-from kora.ir.type_declarations import parse_type_shape
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 COMPLETED: EventSpec = CATALOG.register(
@@ -86,17 +85,12 @@ class EdgeTypeChecks:
         if declaration is None:
             self.unresolved += 1
             return
-        produced = parse_type_shape(declaration.type)
-        expected = parse_type_shape(value.type)
-        if produced is None or expected is None:
-            self.unresolved += 1
-            return
-        compatible = self.ancestry.accepts(produced.base, expected.base)
+        compatible = self.ancestry.accepts_type(declaration.type, value.type)
         if compatible is None:
             self.unresolved += 1
             return
         self.checked += 1
-        if not compatible or produced.list_depth != expected.list_depth:
+        if not compatible:
             self.collector.add(
                 Diagnostic(
                     code="IR003",

@@ -1,5 +1,7 @@
 # Threat model
 
+Subgraph-export type amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #497](https://github.com/realkarych/kora/issues/497); wording pending line-by-line owner review.
+
 List-edge type amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #495](https://github.com/realkarych/kora/issues/495); evidence wording pending line-by-line owner review. Existing controls and authority are unchanged.
 
 Node-local input path amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #491](https://github.com/realkarych/kora/issues/491); wording pending line-by-line owner review.
@@ -111,6 +113,8 @@ Expression/path syntax checking under #487 adds scoped TM-04/TM-06/TM-07/TM-10 e
 Node-local input path checking under #491 adds scoped TM-04/TM-06/TM-07/TM-10 evidence: workspace and approval references must select an input declared on their own node. Sibling, caller and body declarations grant no visibility. Syntax failures remain non-success without duplicate findings; fixed errors and count-only logging exclude authored path contents. The pass does not resolve values or grant approval/execution authority. [Methods and tests](../knowledge/research/input-path-validation-evidence-2026-10-30.md).
 
 Direct-edge type checking under #482 adds scoped TM-04/TM-06/TM-07/TM-10 evidence for saved nominal ancestry and authored connection metadata. It consults no schema resolver, provider or current alias and grants no execution authority. Valid-root reachability excludes unknown ancestry from comparisons; fixed consumer paths and safe source conversion keep type/schema/reference contents out of errors and count-only logs. Iterative per-call indexing avoids repeated parent walks, while collector bounds and success/refusal input/index/result release remain blocking. Timings and process-memory observations retain their diagnostic limits. [Methods and tests](../knowledge/research/direct-edge-type-validation-evidence-2026-10-30.md). The #495 list extension applies the same controls to equal-depth saved nominal covariance, with iterative spelling checks, prerequisite suppression and release checks for success, refusal, unknown ancestry and malformed spelling. It adds no list payload or aggregate execution authority and changes no numerical acceptance gate. [List methods and limits](../knowledge/research/list-edge-type-validation-evidence-2026-10-30.md).
+
+Subgraph-export type checking under #497 adds scoped TM-04/TM-06/TM-07/TM-10 evidence for body-local producer lookup and saved nominal ancestry. Unknown prerequisites remain unresolved; only established incompatibility produces a fixed body-owned finding. Safe source conversion, bounded copied diagnostics, count-only logging, once-per-definition traversal and exact temporary/input/result release preserve the existing controls. The pass grants no wrapper, payload or execution authority; aggregate-consumer gates remain active. Timing and process-memory observations are diagnostic. [Methods and tests](../knowledge/research/subgraph-export-type-validation-evidence-2026-10-30.md).
 
 ## Purpose, scope and status
 
