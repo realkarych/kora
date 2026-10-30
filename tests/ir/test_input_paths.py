@@ -160,6 +160,19 @@ def test_input_paths_do_not_duplicate_syntax_errors(
     assert [error.code for error in syntax.diagnostics.errors] == [syntax_code]
 
 
+@pytest.mark.parametrize("text", ["", "inputs.data.", "inputs.data" + ".x" * 32])
+def test_input_paths_refuse_syntax_only_unresolved_paths(text: str) -> None:
+    graph = binding_document(text)
+
+    result = validate_input_paths(graph)
+
+    assert result.diagnostics.valid
+    assert result.diagnostics.errors == ()
+    assert result.paths_checked == result.paths_unresolved == 1
+    assert result.bindings_checked == 0
+    assert not result.input_paths_valid
+
+
 def test_input_paths_keep_each_gate_digest_index() -> None:
     subject = binding_node()
     set_field(
