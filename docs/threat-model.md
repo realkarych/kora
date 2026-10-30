@@ -1,5 +1,7 @@
 # Threat model
 
+Graph-link validation amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #463](https://github.com/realkarych/kora/issues/463); the evidence wording below awaits line-by-line owner review. Existing controls and authority are unchanged.
+
 StructuredOutput model amendment dated 2026-10-30: the project owner approved the implementation plan and exact scoped evidence wording under [issue #446](https://github.com/realkarych/kora/issues/446#issuecomment-6508537813). Existing actors, trust assumptions and authority are unchanged.
 
 Local-runtime retirement amendment dated 2026-10-29 (the `local` row, TM-09 and the TM-05/TM-11 evidence row): [issue #430](https://github.com/realkarych/kora/issues/430), part 2b of #195, retires an attempt whose runner never registered by killing the processes that carry the runner's exact vector; [implementation plan](https://github.com/realkarych/kora/issues/430#issuecomment-6503668502) and its four decisions approved by the project owner on 2026-10-29; wording pending line-by-line owner review.
@@ -226,6 +228,8 @@ Bounded-read contracts for TM-07, TM-10 and TM-11 separate metadata from selecte
 The local conformance lifetime contract of [#231](https://github.com/realkarych/kora/issues/231) applies to TM-06/TM-07, TM-09, TM-10, TM-11 and TM-12. Its parent owns local acquisition and cleanup independently of pytest, binds effect and process identities before activation, rejects late acquisition after closure, and retains bounded private recovery records when closure is uncertain. Cleanup uses fixed local controllers, identity checks and anchored owned paths; it never treats borrowed services as owned or a callback/pytest exit as proof of whole-domain closure. Reports exclude configuration, exercise content, launch credentials and raw child output. These controls remain pending implementation under #215 and the local-runtime/testing-runner work items. They preserve the local runtime's cooperative same-user limitation under TM-05 and establish no cloud-resource or hostile-process containment guarantee.
 
 ## Verification and residual limitations
+
+The graph-link pass under [issue #463](https://github.com/realkarych/kora/issues/463) supplies scoped TM-04/TM-06/TM-07/TM-10 evidence: real-model tests cover reference isolation, cycles, safe diagnostics, bounded retained output and release of per-call references; logging tests cover content exclusion and unavailable sinks. It consumes a structurally validated graph snapshot without provider calls or execution authority. Raw-document admission, schema-error production and deployment enforcement remain pending. The [evidence record](../knowledge/research/graph-link-validation-evidence-2026-10-30.md) states the method and its limits.
 
 The following map names required evidence, not tests executed by writing this model. Product cases remain `pending implementation` at the recorded baseline. When a component lands, its corresponding implementation and revision-specific evidence must replace that status; if implemented but uncheckable, use `blocked`, not `pending implementation` or `passed`. Keep deployment conditions and residual limits even after tests pass.
 

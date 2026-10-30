@@ -67,8 +67,14 @@ if TYPE_CHECKING:
         SubgraphOutput,
         TargetConfig,
     )
+    from kora.ir.diagnostic_collection import (
+        DiagnosticCollection,
+        DiagnosticCollectionError,
+        DiagnosticCollector,
+    )
     from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
     from kora.ir.export import export_ir, render_ir_json
+    from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.node import ErrorClass, ToolPolicy
     from kora.ir.runtime import (
         Concurrency,
@@ -113,6 +119,11 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "DiagnosticCollection",
+    "DiagnosticCollectionError",
+    "DiagnosticCollector",
+    "GraphLinkResult",
+    "validate_graph_links",
     "AgentSession",
     "AgentSessionValidationError",
     "canonical_agent_session",
@@ -212,6 +223,18 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "DiagnosticCollection",
+        "DiagnosticCollectionError",
+        "DiagnosticCollector",
+    }:
+        from kora.ir import diagnostic_collection
+
+        return getattr(diagnostic_collection, name)
+    if name in {"GraphLinkResult", "validate_graph_links"}:
+        from kora.ir import graph_links
+
+        return getattr(graph_links, name)
     if name in {
         "CommandResource",
         "NetworkPolicy",
