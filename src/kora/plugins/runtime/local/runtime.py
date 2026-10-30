@@ -677,7 +677,8 @@ class LocalRuntime:
                 partial(verified, identities, scanner, pid, argv)
             )
             if identity is not None and anchor.readiness.done():
-                raise SweepRefused(SweepOutcome.MATCH_UNREADABLE)
+                await self.sweeps.run(partial(vanished, identities, pid))
+                continue
             if identity is not None:
                 pinned.append((anchor, identity))
         return pinned

@@ -4,7 +4,9 @@ import json
 import os
 import shutil
 import signal
+import threading
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,10 +15,12 @@ from pydantic import TypeAdapter
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
-from kora.plugins.runtime.local.runtime import STOP_MATCHES
+from kora.plugins.runtime.local.runtime import STOP_MATCHES, SweepRefused
 from kora.plugins.runtime.local.supervisor import EXIT_FAILED, EXIT_REFUSED
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.evidence import EvidenceScope
+from kora.runner.identity import IdentityObservation, IdentityState
+from kora.runner.processes import ExitAnchor
 from kora.runner.registry import Fence, Retired, Running, Starting
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
@@ -304,6 +308,98 @@ async def late_nonce_match_is_stopped_before_the_tombstone(
     swept = sweep_records(capture, entry.nonce, str(root))
     assert {outcome for outcome, _, _ in swept} == {"tombstoned"}
     assert sum(killed for _, _, killed in swept) >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "confirmation", ["dead", "absent", "unknown", "live", "reused"]
+)
+async def test_ready_exit_watch_requires_fresh_disappearance(
+    tmp_path: Path, kora_capture: Capture, confirmation: str
+) -> None:
+    descriptors = open_descriptors()
+    zombies = zombie_children()
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+    reader = SteeredIdentityReader()
+    entered = asyncio.Event()
+    resumed = threading.Event()
+    loop = asyncio.get_running_loop()
+    live: IdentityObservation | None = None
+
+    def held(observation: IdentityObservation, count: int) -> IdentityObservation:
+        nonlocal live
+        if count == 2:
+            assert observation.process is not None
+            assert not observation.process.dead
+            live = observation
+            loop.call_soon_threadsafe(entered.set)
+            if not resumed.wait(10):
+                raise TimeoutError("identity read was not resumed")
+        if count == 3:
+            if confirmation == "dead":
+                assert observation.state is IdentityState.ABSENT or (
+                    observation.process is not None and observation.process.dead
+                )
+                assert live is not None
+                assert live.process is not None
+                return replace(live, process=replace(live.process, dead=True))
+            if confirmation == "absent":
+                assert observation.state is IdentityState.ABSENT
+                assert observation.process is None
+            if confirmation == "unknown":
+                return unreadable(observation, count)
+            if confirmation in {"live", "reused"}:
+                assert live is not None
+                return live if confirmation == "live" else restarted(live, count)
+        return observation
+
+    anchors: list[ExitAnchor] = []
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets", identities=reader)
+        try:
+            with carriers(NEVER_READY) as (carrier,):
+                reader.steered[carrier.pid] = held
+                pinning = asyncio.create_task(
+                    runtime.pin(
+                        (carrier.pid,),
+                        NEVER_READY,
+                        anchors,
+                        ctx.clock.monotonic_ns() + SECOND_NS,
+                        ctx,
+                    )
+                )
+                try:
+                    await asyncio.wait_for(entered.wait(), 10)
+                    assert len(anchors) == 1
+                    carrier.kill()
+                    await asyncio.wait_for(asyncio.shield(anchors[0].readiness), 10)
+                    assert anchors[0].exited
+                    assert not anchors[0].unknown
+                    if confirmation == "absent":
+                        assert carrier.wait(timeout=10) == -signal.SIGKILL
+
+                    resumed.set()
+                    if confirmation in {"dead", "absent"}:
+                        pinned = await pinning
+                        assert pinned == []
+                    else:
+                        with pytest.raises(SweepRefused, match="match_unreadable"):
+                            await pinning
+
+                    assert reader.reads[carrier.pid] == 3
+                finally:
+                    resumed.set()
+                    if not pinning.done():
+                        pinning.cancel()
+                    await asyncio.gather(pinning, return_exceptions=True)
+        finally:
+            await runtime.close()
+            for anchor in anchors:
+                anchor.close()
+
+    assert open_descriptors() == descriptors
+    assert zombie_children() == zombies
 
 
 async def unreadable_match_is_unconfirmed(
