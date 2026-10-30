@@ -116,9 +116,15 @@ if TYPE_CHECKING:
         WebhookAuth,
         WebhookTrigger,
     )
+    from kora.ir.type_declarations import (
+        TypeDeclarationResult,
+        validate_type_declarations,
+    )
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "TypeDeclarationResult",
+    "validate_type_declarations",
     "DiagnosticCollection",
     "DiagnosticCollectionError",
     "DiagnosticCollector",
@@ -223,6 +229,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"TypeDeclarationResult", "validate_type_declarations"}:
+        from kora.ir import type_declarations
+
+        return getattr(type_declarations, name)
     if name in {
         "DiagnosticCollection",
         "DiagnosticCollectionError",

@@ -1,5 +1,7 @@
 # Threat model
 
+Type-declaration validation amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #468](https://github.com/realkarych/kora/issues/468); the evidence wording below awaits line-by-line owner review. Existing controls and authority are unchanged.
+
 Graph-link validation amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #463](https://github.com/realkarych/kora/issues/463); the evidence wording below awaits line-by-line owner review. Existing controls and authority are unchanged.
 
 StructuredOutput model amendment dated 2026-10-30: the project owner approved the implementation plan and exact scoped evidence wording under [issue #446](https://github.com/realkarych/kora/issues/446#issuecomment-6508537813). Existing actors, trust assumptions and authority are unchanged.
@@ -230,6 +232,8 @@ The local conformance lifetime contract of [#231](https://github.com/realkarych/
 ## Verification and residual limitations
 
 The graph-link pass under [issue #463](https://github.com/realkarych/kora/issues/463) supplies scoped TM-04/TM-06/TM-07/TM-10 evidence: real-model tests cover reference isolation, cycles, safe diagnostics, bounded retained output and release of per-call references; logging tests cover content exclusion and unavailable sinks. It consumes a structurally validated graph snapshot without provider calls or execution authority. Raw-document admission, schema-error production and deployment enforcement remain pending. The [evidence record](../knowledge/research/graph-link-validation-evidence-2026-10-30.md) states the method and its limits.
+
+The type-declaration pass under [issue #468](https://github.com/realkarych/kora/issues/468) adds scoped evidence for the same threats: missing declarations/parents, cycles and unsupported published revisions are diagnosed with fixed messages, bounded output and safe source/path fallback. Real-model and logging tests exercise deep/shared inputs, content exclusion, blocked/broken sinks and release of input, contract, source and result references. Recognition does not establish installed behavior support, schema/reference closure, edge compatibility or public admission. No provider, filesystem or network authority is acquired. The [evidence record](../knowledge/research/type-declaration-validation-evidence-2026-10-30.md) separates blocking checks from diagnostic timing and memory observations.
 
 The following map names required evidence, not tests executed by writing this model. Product cases remain `pending implementation` at the recorded baseline. When a component lands, its corresponding implementation and revision-specific evidence must replace that status; if implemented but uncheckable, use `blocked`, not `pending implementation` or `passed`. Keep deployment conditions and residual limits even after tests pass.
 
