@@ -38,6 +38,12 @@ An example finding, separate from any HTTP error envelope:
 
 The shared value has no HTTP status, request ID, retryability, authority or severity field. Runtime identifiers, request correlation and replay belong to enclosing contracts. A structurally valid diagnostic is not proof that an arbitrary producer's prose or metadata is safe.
 
+### StructuredOutput effective results
+
+[ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) reserves the following result contract for the future [common effective composition](artifacts/StructuredOutput.md#34-common-composition-and-resources); no current hook or public envelope changes. Results are `valid`, `invalid` or `refused`, and only `valid` supplies an owned value usable for effective extraction. `invalid` carries at most one fixed root `ContractViolation`. Reserve `SO006` with message `StructuredOutput value does not satisfy its effective schemas.` for a completed effective-schema mismatch, `path: []` and all optional metadata null. Existing `SO001`–`SO005` retain their meanings.
+
+`refused` carries one fixed reason: `unsupported_policy`, `unsupported_schema`, `preparation_exhausted` or `evaluation_exhausted`. Unsupported semantics or exhausted capacity proves no schema mismatch; refusal must propagate through boolean composition rather than becoming false. No rejected schema/value, authored property name, native error text, exception chain or descendant error list is constructed for these results. Internal programming errors propagate to the existing caller-owned unexpected-failure boundary. The policy identity and implementation remain unavailable until their stated prerequisites and named activation gates are met.
+
 ## 2. Safe construction and location fidelity
 
 Producers select messages and hints from reviewed fixed text. They never interpolate raw model input, configuration values, expression text, arbitrary keys, exception text, SDK messages, stack/locals, credentials or URLs. A recovery hint does not paste a command containing user values. The [observability content contract](observability.md#5-safe-content-and-trust-boundaries) applies at every level, including DEBUG; returned diagnostic bodies are not copied into operational logs.
