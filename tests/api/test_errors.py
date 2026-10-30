@@ -15,8 +15,8 @@ from kora.api.errors import (
     deployment_validation_error,
     error_metadata,
     internal_error,
+    lock_timeout_error,
     request_rejection,
-    retryable_conflict,
     unauthenticated_error,
     validation_failure,
     validation_result,
@@ -42,11 +42,14 @@ from kora.models.errors import (
 from kora.protocols.errors import KoraProtocolError
 
 REQUEST_ID = "req_saved_error_identity"
-POISON = "private_input_and_exception_content"
+POISON = "private_exception_prose_marker"
+INPUT_POISON = "private_rejected_input_marker"
+KEY_POISON = "private_authored_key_marker"
 
 
 class PoisonedRequest(BaseModel):
     value: int
+    mapping: dict[str, int]
 
     @field_validator("value")
     @classmethod
@@ -56,7 +59,9 @@ class PoisonedRequest(BaseModel):
 
 def poisoned_validation_error() -> ValidationError:
     try:
-        PoisonedRequest.model_validate({"value": 1, POISON: POISON})
+        PoisonedRequest.model_validate(
+            {"value": 1, "mapping": {KEY_POISON: INPUT_POISON}}
+        )
     except ValidationError as error:
         return error
     raise AssertionError("Expected a real validation error.")
@@ -164,11 +169,15 @@ def test_request_rejection_is_content_free(reason: RequestRejection) -> None:
 def test_real_validation_errors_never_expose_input_prose_keys_or_context() -> None:
     failure = poisoned_validation_error()
     assert POISON in str(failure.errors())
+    assert INPUT_POISON in str(failure.errors())
+    assert KEY_POISON in str(failure.errors())
 
     envelope = request_rejection(failure, request_id=REQUEST_ID)
     rendered = envelope.model_dump_json()
 
     assert POISON not in rendered
+    assert INPUT_POISON not in rendered
+    assert KEY_POISON not in rendered
     assert "ValueError" not in rendered
     assert "ctx" not in rendered
     assert envelope.error.code == ApiErrorCode.VALIDATION
@@ -301,8 +310,7 @@ def test_retry_exceptions_are_distinct() -> None:
     ordinary = internal_error(request_id=REQUEST_ID)
 
     audit_failure = credential_audit_commit_failure(request_id=REQUEST_ID)
-    lock_failure = retryable_conflict("lock_timeout", request_id=REQUEST_ID)
-    backlog_failure = retryable_conflict("run_backlog_full", request_id=REQUEST_ID)
+    lock_failure = lock_timeout_error(request_id=REQUEST_ID)
 
     assert ordinary.error.retryable is False
     assert audit_failure.error.retryable is True
@@ -311,7 +319,6 @@ def test_retry_exceptions_are_distinct() -> None:
     assert audit_failure.error.details == ordinary.error.details
     assert error_metadata(audit_failure).status == 500
     assert error_metadata(lock_failure).status == 409
-    assert error_metadata(backlog_failure).status == 409
 
 
 @pytest.mark.parametrize(

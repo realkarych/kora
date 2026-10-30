@@ -56,7 +56,7 @@ class EmptyDetails(WireRecord):
 
 
 class ConflictDetails(WireRecord):
-    reason: Literal["lock_timeout", "run_backlog_full"]
+    reason: Literal["lock_timeout"]
 
 
 class ValidationDetails(WireRecord):

@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Literal
 
 from pydantic import ValidationError
 
@@ -195,15 +194,13 @@ def validation_result(collection: DiagnosticCollection) -> ValidationResult:
     return ValidationResult.from_collection(collection)
 
 
-def retryable_conflict(
-    reason: Literal["lock_timeout", "run_backlog_full"], *, request_id: str
-) -> ApiErrorEnvelope:
+def lock_timeout_error(*, request_id: str) -> ApiErrorEnvelope:
     return ApiErrorEnvelope(
         error=ApiError(
             code=ApiErrorCode.CONFLICT,
             message=MESSAGES[ApiErrorCode.CONFLICT],
             retryable=True,
-            details=ConflictDetails(reason=reason),
+            details=ConflictDetails(reason="lock_timeout"),
             request_id=request_id,
         )
     )
