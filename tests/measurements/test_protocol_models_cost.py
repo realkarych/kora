@@ -68,6 +68,9 @@ from tests.measurements.runtime_workload import (
     maximal_workload,
     page_rows,
 )
+from tests.measurements.structured_output_artifact_type_workload import (
+    collect as collect_structured_output_artifact_type,
+)
 from tests.support.heap import recurring_lines, snapshot, top_growth
 from tests.support.observability import run_python
 
@@ -84,6 +87,10 @@ def test_command_result_artifact_type_provider_cost(report: Report) -> None:
 
 def test_agent_session_artifact_type_provider_cost(report: Report) -> None:
     collect_agent_session_artifact_type(report)
+
+
+def test_structured_output_artifact_type_provider_cost(report: Report) -> None:
+    collect_structured_output_artifact_type(report)
 
 
 INDEPENDENT_RUNS: int = 3
