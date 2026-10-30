@@ -417,6 +417,41 @@ def storage_cases() -> tuple[Case, ...]:
     )
 
 
+def artifact_type_cases() -> tuple[Case, ...]:
+    from kora.conformance.artifact_type import (
+        ArtifactTypeConformanceInputs,
+        check_artifact_type_accepts_declared_values,
+        check_artifact_type_digest_fields_are_stable,
+        check_artifact_type_invalid_extraction_is_refused,
+        check_artifact_type_rejects_declared_values,
+        check_artifact_type_summaries_are_detached,
+    )
+    from kora.protocols.artifact_type import ArtifactType
+
+    def simple(
+        name: str,
+        check: Callable[
+            [ArtifactType, ArtifactTypeConformanceInputs, ProtocolContext], None
+        ],
+    ) -> Case:
+        return Case(
+            name,
+            lambda i, c, x: check(
+                cast(ArtifactType, i.instance),
+                cast(ArtifactTypeConformanceInputs, i.exercises),
+                x,
+            ),
+        )
+
+    return (
+        simple("accepted", check_artifact_type_accepts_declared_values),
+        simple("rejected", check_artifact_type_rejects_declared_values),
+        simple("digest_fields", check_artifact_type_digest_fields_are_stable),
+        simple("summary", check_artifact_type_summaries_are_detached),
+        simple("invalid_extraction", check_artifact_type_invalid_extraction_is_refused),
+    )
+
+
 def selected_cases(protocol: ProtocolName) -> tuple[Case, ...]:
     builders = {
         ProtocolName.RUNTIME: lambda: (),
@@ -425,6 +460,7 @@ def selected_cases(protocol: ProtocolName) -> tuple[Case, ...]:
         ProtocolName.HARNESS: harness_cases,
         ProtocolName.VCS: vcs_cases,
         ProtocolName.ARTIFACT_STORAGE: storage_cases,
+        ProtocolName.ARTIFACT_TYPE: artifact_type_cases,
     }
     return (*common_cases(), *builders[protocol]())
 
@@ -433,6 +469,13 @@ class Executor:
     def __init__(self, protocol: ProtocolName) -> None:
         self.cases = selected_cases(protocol)
         self._completed: list[str] = []
+        self._capture_settings: LoggingSettings
+        if protocol is ProtocolName.ARTIFACT_TYPE:
+            from kora.conformance.artifact_type import artifact_type_capture_settings
+
+            self._capture_settings = artifact_type_capture_settings()
+        else:
+            self._capture_settings = LoggingSettings()
 
     @property
     def complete(self) -> bool:
@@ -446,7 +489,7 @@ class Executor:
         if self.complete or case is not self.cases[len(self._completed)]:
             fail("conformance case sequence is invalid")
         with captured(
-            CONFORMANCE_COMPONENT, LoggingSettings(), INSTANCE_ID, utc_now
+            CONFORMANCE_COMPONENT, self._capture_settings, INSTANCE_ID, utc_now
         ) as capture:
             result = case.check(invocation, capture, context_for(capture))
             if result is not None:

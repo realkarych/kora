@@ -454,3 +454,82 @@ def test_installed_conformance_owns_its_environment_and_wheel_copy(
     assert copy.read_bytes() == core_wheel.read_bytes()
     assert installed_conformance.python.is_relative_to(root)
     assert not core_wheel.is_relative_to(root)
+
+
+def test_installed_vcs_ref_artifact_type_conformance(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type", "vcs_ref", config, "fixtures_vcs_ref_artifact_type"
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert outcome.expected > 0
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        process,
+        b"private-repository-marker",
+        b"private-branch-marker",
+        b"private-path-marker",
+        b"private-diff-marker",
+        b"private-principal-marker",
+    )
+
+
+@pytest.mark.parametrize("selected", ["left", "right"])
+def test_installed_artifact_type_configuration_is_effective(
+    installed_conformance: InstalledTooling, tmp_path: Path, selected: str
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"selected": selected}))
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type", "configured", config, "fixtures_artifact_type"
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(process, b"private-left-marker", b"private-right-marker")
+
+
+def test_installed_artifact_type_rejects_ignored_configuration(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    data = tmp_path / "data.json"
+    config.write_text(json.dumps({"selected": "right"}))
+    data.write_text(json.dumps({"ignore_configuration": True}))
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type", "configured", config, "fixtures_artifact_type", data
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 1, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.FAILED
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(process, b"private-left-marker", b"private-right-marker")

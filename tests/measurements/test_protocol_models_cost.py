@@ -23,6 +23,7 @@ from kora.plugins.policy.allow_deny import (
 from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
 from kora.protocols.identity import GrantBinding
 from kora.protocols.secret_value import SecretScope
+from tests.measurements.artifact_type_workload import collect as collect_artifact_type
 from tests.measurements.harness import (
     Report,
     Sample,
@@ -65,6 +66,11 @@ from tests.support.heap import recurring_lines, snapshot, top_growth
 from tests.support.observability import run_python
 
 pytestmark = pytest.mark.measurement
+
+
+def test_artifact_type_provider_cost(report: Report) -> None:
+    collect_artifact_type(report)
+
 
 INDEPENDENT_RUNS: int = 3
 MEASURED: int = 30

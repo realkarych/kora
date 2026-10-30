@@ -1472,20 +1472,59 @@ Inventory is a keyset query over immutable byte-ordered keys. Only the ordered p
 ## 8. Artifact type (FR-4.1–4.3)
 
 ```python
-class ArtifactType(Protocol):
-    name: str                       # "VcsRef" or "namespace/Name"
-    parent: str | None
+@dataclass(frozen=True)
+class BuiltinArtifactTypeBinding:
+    name: str
     schema: JsonObject
-    def validate(self, payload: JsonValue) -> list[ContractViolation]: ...
-    def digest_fields(self, payload: JsonValue) -> list[str]: ...
-    def summary(self, payload: JsonValue) -> JsonValue: ...
+    parent: str | None
+    revision_descriptor: JsonObject
+
+@dataclass(frozen=True)
+class ArtifactTypeCapabilities:
+    pass
+
+class ArtifactType(Protocol):
+    name: str
+    parent: str | None
+    config_schema: JsonObject
+
+    @property
+    def schema(self) -> JsonObject: ...
+
+    def capabilities(self) -> ArtifactTypeCapabilities: ...
+    def validate(
+        self, payload: JsonValue, ctx: ProtocolContext
+    ) -> list[ContractViolation]: ...
+    def digest_fields(
+        self, payload: JsonValue, ctx: ProtocolContext
+    ) -> list[str]: ...
+    def summary(self, payload: JsonValue, ctx: ProtocolContext) -> JsonValue: ...
+
+class VcsRefArtifactType:
+    def __init__(
+        self, configuration: JsonObject, binding: BuiltinArtifactTypeBinding
+    ) -> None: ...
+
+def create_provider(
+    configuration: JsonObject, binding: BuiltinArtifactTypeBinding
+) -> VcsRefArtifactType: ...
 ```
+
+The installed provider name and the bound artifact name have separate roles. `artifact_type.vcs_ref` has metadata name `vcs_ref`; its checked instance has artifact name `VcsRef`. Its deployment configuration is the closed empty object, independently of its saved artifact schema. `ArtifactTypeCapabilities` is a frozen value with no flags. The three payload hooks are synchronous computation and receive the caller-bound context for diagnostics; none performs I/O or acquires an external resource.
+
+`BuiltinArtifactTypeBinding` is an operation-local constructor-input record of the artifact name, expanded saved schema, parent and complete immutable revision descriptor. Its frozen dataclass prevents field reassignment but does not freeze nested JSON containers. The VcsRef constructor validates those supplied values and retains its own detached checked schema/descriptor snapshot; its schema property returns a defensive view. Later mutation of input containers or returned views cannot change the instance. The binding is not the authoring `BuiltinTypeContract` declaration, a new persisted execution-contract format or authorization evidence. Before payload work the constructor requires `VcsRef`, null parent, the complete supported descriptor and strict parsed equality with the exact packaged revision-1 schema, ignoring only object member order. The descriptor's schema hash refers to the published file bytes; a matching claimed hash cannot replace checking the supplied schema. Trusted composition owns retrieval from the authorized saved graph-version contract. No current registry alias, network resolver or persisted executable is consulted.
+
+Compatibility admission precedes copying, serialization and general parsing of supplied schema/descriptor structures. Exact container/scalar types and cardinality are checked before key membership and values; traversal follows only the trusted fixed contract's keys and indexes. Cardinality mismatches do not enumerate the mismatched container, and unexpected deep values are not recursively explored. Bool/int and int/float substitutions, unknown keywords and changed annotations refuse. The fixed-shape descriptor preflight guards the existing revision helper before it can enumerate supplied keys. After exact equality, the provider retains only a snapshot of the verified fixed contract; rejected input is never copied or serialized. These fixed-revision checks introduce no general schema input quota.
+
+For VcsRef, `validate` returns an empty list or the existing single content-free `ContractViolation` from the model boundary. `digest_fields` and `summary` also validate their payload and refuse invalid values rather than returning extraction results. The provider uses non-retryable `artifact_type_binding_incompatible`, `artifact_type_configuration_invalid` and `artifact_type_payload_invalid` errors with fixed messages. Details contain only a fixed rule identifier or the existing fixed VcsRef violation code. No native exception text, submitted name, schema or payload content enters the error or its chaining. An ordinary returned validation violation is not an operational exception; unexpected failures retain caller-owned error reporting.
+
+The payload hooks accept admitted `JsonValue`. They do not decode raw bytes or recover token evidence discarded by an earlier decoder. Untrusted VcsRef raw ingress continues to use `parse_vcs_ref_json`; API canonical-wire validation and production authority checks remain separate. A model-backed provider pass does not establish those consumer guarantees.
 
 The [built-in revision catalogue](artifacts/README.md) publishes VcsRef revision 1: closed schema, `kora.vcs-ref-validation.v1`, complete-payload digest selection and identity summary. Its byte/depth/path and strict-decoding predicates supplement generic JSON Schema validation; shape validity does not establish publication provenance. Whole-payload selection is stored as `[""]`, the root JSON Pointer. Built-ins ship as immutable schema/behavior revisions, expanded into the deployed contract (ADR-0018). A bound `ArtifactType` instance takes schema/parent and exact behavior identities from the saved graph-version contract, not the current registry alias. Custom types are registered through the API (`PUT /artifact-types`) as schema, parent and declarative behavior descriptors, with an optional trusted installed entry-point binding for custom `summary`. Registry writes update the authoring alias, never any deployed closure. Registration checks JSON Schema draft 2020-12 and the supported closed-reference rules in [ir.md](ir.md) section 2.1; deployment uses embedded definitions, not replacement aliases.
 
 The generic `validation` identity is `kora.json-schema-2020-12.v1`; `kora.json-payload.v1` selects the whole canonical payload for digesting and returns the payload as the generic identity summary. A custom identity pins provider-declared semantics and the trusted installation's immutable implementation binding. It is not executable persisted data or an automatic package download. A reused identity with mismatched implementation metadata is incompatible; required semantics must be supported before the affected validation/execution operation. Compatible upgrades retain bindings required by active runs.
 
-[StructuredOutput revision 1](artifacts/StructuredOutput.md) admits a direct `JsonValue` under `kora.structured-output-validation.v1` and `kora.structured-json.v1`; its schema is in the saved effective contract, never a payload wrapper. It selects `[""]` and returns a detached identity summary, including available root null. `ContractViolation` is the shared content-free diagnostic record, not a native JSON Schema/Pydantic exception. The StructuredOutput behavior returns at most one fixed safe violation; arbitrary payload keys and schema-authored names cannot become diagnostic paths or messages. The generic signatures allow every JSON root while each bound contract enforces its own narrower domain; VcsRef remains object-only. This is a published protocol contract; executable ArtifactType/provider conformance activates with work item 8.
+[StructuredOutput revision 1](artifacts/StructuredOutput.md) admits a direct `JsonValue` under `kora.structured-output-validation.v1` and `kora.structured-json.v1`; its schema is in the saved effective contract, never a payload wrapper. It selects `[""]` and returns a detached identity summary, including available root null. `ContractViolation` is the shared content-free diagnostic record, not a native JSON Schema/Pydantic exception. The StructuredOutput behavior returns at most one fixed safe violation; arbitrary payload keys and schema-authored names cannot become diagnostic paths or messages. The generic signatures allow every JSON root while each bound contract enforces its own narrower domain; VcsRef remains object-only. The VcsRef implementation activates the common ArtifactType ABI and its VcsRef provider conformance under work item 8. StructuredOutput effective-schema evaluation and its provider conformance remain pending their implementing delivery.
 
 [AgentSession revision 1](artifacts/AgentSession.md) supplies a JsonValue logical validation/digest view while its primary stored bytes remain the opaque transcript. Its custom validation binds metadata, denial sample and immutable transcript descriptor; its full logical digest selection and fixed safe-metadata summary are distinct from physical transcript identity. Core constructs the frozen `kora.agent-session-view.v1` view before CEL path cutting, rather than projecting arbitrary logical-value fields. These are publication contracts, not an implemented provider, transfer envelope or permission to read a caller-selected storage ref. Derived `List[AgentSession]`, recursive lists and scheduler collect/export aggregate materialization/persistence and command/public-read delivery remain unavailable until work items 3/9/10, coordinated with 11/12 and actual transcript/sample owners 17/#216, approve and save the finite full-aggregate canonical-byte/depth/item-count/admission semantics and satisfy the [aggregate activation prerequisite](artifacts/AgentSession.md#derived-list-aggregate-activation). Admission precedes full allocation. Per-result, upload and CEL bounds are insufficient; no aggregate numerical default or campaign is introduced. Work items 2/3/4/8/9/10/11/12/15/17 and #216 must supply their named model, producer, replay, access and retention evidence before activation.
 
@@ -1706,7 +1745,35 @@ Each protocol ships `kora.conformance.<protocol>`, cases marked `kora_conformanc
 - **Approval channel**: request → read-only paginated marker lookup → `None` → response with identity → stale response reported with its observed SHA → cancel and notify idempotent, including `resolved`; response loss, late/multiple external ids and every desired-state row above. Terminal reconciliation never creates or rewrites approval audit status.
 - **Secrets**: resolution, missing-reference error shape, a reference outside the namespace's prefixes refused with the same content-free shape, `list_names` returning names only, redaction in a captured stream through `StreamMasker`.
 - **Artifact storage**: staged streaming, immutable source/prepared reads, create-only publication and exact creation attribution, retired-stage closure, bounded private/deletion capacity, acknowledged evidence compaction, content-addressed dedupe, cross-instance reads and deletion. The [storage cases](#artifact-storage-contracts-issue-229) preserve delete/get/exists and repeated-delete behavior and assign local/S3 activation separately.
-- **Artifact type**: validation errors carry JSON paths; `digest_fields` stable across key order.
+- **Artifact type**: common metadata/capability/error/context checks, validation errors with safe JSON paths, `digest_fields` stable across key order, detached results and invalid-extraction refusal. `kora.conformance.artifact_type` exposes the same fixture-driven checks to injected pytest and the installed command. Generic checks compare accepted/rejected values, digest selection and summary against the fixture's declared expectations; they do not prescribe VcsRef semantics. VcsRef-specific tests additionally require exact saved-binding compatibility, a fresh `[""]` and the complete identity summary. Installed fixtures retain the existing constructor adapter, exact selected implementation, configuration-effect case and parent-owned lifetime. This evidence activates no deployment, producer, upload, history or retention consumer.
+
+```python
+@dataclass(frozen=True)
+class ArtifactTypeConformanceCase:
+    payload: Callable[[], JsonValue]
+    equivalent_payload: Callable[[], JsonValue]
+    expected_digest_fields: tuple[str, ...]
+    expected_summary: Callable[[], JsonValue]
+
+@dataclass(frozen=True)
+class ArtifactTypeConformanceInputs:
+    accepted: tuple[ArtifactTypeConformanceCase, ...]
+    rejected: Callable[[str], JsonValue]
+    expected_violations: tuple[ContractViolation, ...]
+    failure: Callable[
+        [ArtifactType, JsonObject, ProtocolContext, str], Awaitable[object]
+    ]
+    configuration_effect: Callable[
+        [ArtifactType, JsonObject, ProtocolContext], Awaitable[None]
+    ]
+```
+
+Accepted cases are nonempty and construct fresh values; `equivalent_payload` preserves the JSON value while changing object member order where possible. Rejection constructs the fixture's invalid marked value and declares nonempty expected safe violations. Direct fixtures supply the ArtifactType provider, its `ArtifactTypeConformanceInputs` and its deployment configuration. Direct failure/logging wrappers call `failure(provider, configuration, context, marker)`; `test_artifact_type_configuration_is_effective` awaits `configuration_effect(provider, configuration, context)`. Installed dispatch uses those same call signatures in the existing common failure/logging/configuration cases. Both checks operate on the exact selected instance and actual configuration.
+
+The real VcsRef provider remains strictly configured by `{}`; its adapter binds `ConstructorArguments(args=(configuration, binding))`. A separate installed `artifact_type.configured` test implementation has constructor `ConfiguredArtifactType.__init__(self, configuration: JsonObject) -> None`, bound as `ConstructorArguments(args=(configuration,))`. It accepts exactly a nonempty `selected` setting, `left` or `right`, and validates a fixed object with distinct left/right strings. It returns the selected string as summary and `["/left"]` or `["/right"]` as digest selection. Its adapter declares the corresponding expectations and its async `configuration_effect(provider: ArtifactType, configuration: JsonObject, context: ProtocolContext) -> None` callback checks both results on the selected instance. Installed tests exercise both settings, preserving the existing nonempty/two-effective-settings obligation without weakening VcsRef configuration or introducing production custom-type activation.
+
+Ordinary ArtifactType outcomes remain DEBUG. Only this family's direct capture fixture and installed Executor case capture set `conformance` to DEBUG with the existing `LoggingSettings.component_levels`; common assertions, product event levels, global defaults and every other family's capture settings stay unchanged. The bound context logger uses the `conformance` component. Per-case records remain private capture observations and do not change installed parent-output assertions.
+
 - **Observability**: a slow exporter does not delay a run; drops are counted.
 - **Authentication**: scope enforcement per operation; revoked tokens are refused. Ordinary requests retain a per-credential cache of at most the [bounded run-read wait](api-and-agent-surface.md#bounded-run-read-wait-adr-0002) re-check interval when validation is not a bounded local read. For `requires_current_authority=True`, warm that ordinary cache, then commit revocation/expiry or remove platform/namespace/transcript rights behind an explicit barrier. No current-authority request may reuse stale rights. Expected invalidity raises `authentication_rejected`; inability to establish current authority raises `authentication_unavailable` with no anonymous result or cached fallback. Real API integration proves no new protected stream record or metric bytes are submitted. Ordinary bounded-read cache cases remain separately required.
 - **Sensor**: cooperative cancellation, declared serial dependency calls and bounded decoded results; `config_schema` rejects bad config with a path; `observe` is side-effect free when called twice; an `until` expression over the documented observation shape evaluates; `min_interval` is honoured by the scheduler.

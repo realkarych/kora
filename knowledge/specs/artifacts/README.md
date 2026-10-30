@@ -23,6 +23,8 @@ Each schema is draft 2020-12, with no parent. Its manifest's `schema_sha256` ide
 
 `require_vcs_ref_revision(object)` checks the complete closed published manifest, including schema hash, every behavior parameter, parent and digest selection. It is a fixed revision-1 compatibility boundary, performs no network lookup and supplies no deployment-closure authentication or generic artifact registry.
 
+The VcsRef artifact-type provider is installed as `artifact_type.vcs_ref`. It binds only the exact expanded revision-1 contract, using the packaged schema supplied by #473 and the complete existing revision checker. Its JsonValue validation, digest selection and summary delegate to the model boundary and use caller-bound diagnostics. Provider conformance proves that installed implementation's contract behavior; it does not authenticate a saved graph-version record, decode raw uploads, establish publication facts or activate production-time persistence and historical reads.
+
 Every payload refusal raises `VcsRefValidationError` carrying one shared `ContractViolation`. Codes `VCS001`–`VCS007` identify raw size, JSON decoding, closed shape, aggregate path bytes, semantic URL, canonical size and unsupported revision respectively. Messages are fixed; paths contain only known field names and array indexes. Submitted content, unknown keys and native decoder exceptions are excluded from the public error and its chaining. These values return to consumers without starting a logger or emitting payload diagnostics.
 
 ## 2. VcsRef publication facts

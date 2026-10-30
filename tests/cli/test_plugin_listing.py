@@ -16,6 +16,7 @@ from tests.support.provider_tooling import (
 DOCUMENTED_BUILTINS: frozenset[tuple[str, str]] = frozenset(
     {
         ("artifact_storage", "local"),
+        ("artifact_type", "vcs_ref"),
         ("policy", "allow_deny"),
         ("secrets", "env"),
         ("vcs", "git"),
