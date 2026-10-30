@@ -75,6 +75,10 @@ if TYPE_CHECKING:
     from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
     from kora.ir.edge_types import EdgeTypeResult, validate_edge_types
     from kora.ir.export import export_ir, render_ir_json
+    from kora.ir.expression_syntax import (
+        ExpressionSyntaxResult,
+        validate_expression_syntax,
+    )
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
     from kora.ir.node import ErrorClass, ToolPolicy
@@ -127,6 +131,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "ExpressionSyntaxResult",
+    "validate_expression_syntax",
     "EdgeTypeResult",
     "validate_edge_types",
     "OutputSchemaResult",
@@ -241,6 +247,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"ExpressionSyntaxResult", "validate_expression_syntax"}:
+        from kora.ir import expression_syntax
+
+        return getattr(expression_syntax, name)
     if name in {"EdgeTypeResult", "validate_edge_types"}:
         from kora.ir import edge_types
 
