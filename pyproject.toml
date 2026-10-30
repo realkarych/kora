@@ -35,6 +35,7 @@ kora-runner = "kora.plugins.runtime.local.supervisor:main"
 
 [project.entry-points."kora.provider"]
 "artifact_storage.local" = "kora.plugins.storage.local:provider_metadata"
+"artifact_type.command_result" = "kora.plugins.artifact_type.command_result:provider_metadata"
 "artifact_type.vcs_ref" = "kora.plugins.artifact_type.vcs_ref:provider_metadata"
 "policy.allow_deny" = "kora.plugins.policy.allow_deny:provider_metadata"
 "secrets.env" = "kora.plugins.secrets.env:provider_metadata"

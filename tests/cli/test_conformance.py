@@ -487,6 +487,37 @@ def test_installed_vcs_ref_artifact_type_conformance(
     )
 
 
+def test_installed_command_result_artifact_type_conformance(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type",
+            "command_result",
+            config,
+            "fixtures_command_result_artifact_type",
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert outcome.expected > 0
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        process,
+        b"private-command-result-marker",
+        b"cHJpdmF0ZS1jb21tYW5kLXJlc3VsdC1tYXJrZXI=",
+    )
+
+
 @pytest.mark.parametrize("selected", ["left", "right"])
 def test_installed_artifact_type_configuration_is_effective(
     installed_conformance: InstalledTooling, tmp_path: Path, selected: str

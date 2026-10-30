@@ -13,6 +13,7 @@ from kora.ir.vcs_ref import (
     summarize_vcs_ref,
 )
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
+from kora.plugins.artifact_type.binding import matches_fixed
 from kora.protocols.artifact_type import (
     ArtifactTypeCapabilities,
     BuiltinArtifactTypeBinding,
@@ -60,30 +61,6 @@ OUTCOME: Final[EventSpec] = CATALOG.register(
     )
 )
 Operation = Literal["validate", "digest_fields", "summary"]
-
-
-def matches_fixed(value: object, expected: JsonValue) -> bool:
-    if type(value) is not type(expected):
-        return False
-    if type(expected) is dict:
-        supplied = cast("dict[object, object]", value)
-        target = cast("JsonObject", expected)
-        if len(supplied) != len(target):
-            return False
-        if any(type(name) is not str for name in supplied):
-            return False
-        return all(
-            name in supplied and matches_fixed(supplied[name], item)
-            for name, item in target.items()
-        )
-    if type(expected) is list:
-        supplied_items = cast("list[object]", value)
-        target_items = cast("list[JsonValue]", expected)
-        return len(supplied_items) == len(target_items) and all(
-            matches_fixed(supplied_items[index], item)
-            for index, item in enumerate(target_items)
-        )
-    return value == expected
 
 
 def binding_error(rule: str) -> KoraProtocolError:
