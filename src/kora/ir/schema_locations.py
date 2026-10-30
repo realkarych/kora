@@ -164,15 +164,15 @@ class SavedReferences:
             "urn:kora:artifact:" + name.replace("/", ":"): root
             for name, root in roots.items()
         }
-        self.cache: dict[tuple[str, str], bool] = {}
+        self.cache: dict[tuple[int, str], bool] = {}
 
-    def resolves(self, name: str, reference: str) -> bool:
-        identity = (name, reference)
+    def resolves(self, root: JsonObject, reference: str) -> bool:
+        identity = (id(root), reference)
         known = self.cache.get(identity)
         if known is not None:
             return known
         base, _, fragment = reference.partition("#")
-        root = self.uris.get(base) if base else self.roots[name]
-        result = root is not None and pointer_resolves(root, fragment)
+        target = self.uris.get(base) if base else root
+        result = target is not None and pointer_resolves(target, fragment)
         self.cache[identity] = result
         return result

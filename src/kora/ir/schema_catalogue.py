@@ -1,6 +1,7 @@
 import json
 from importlib.resources import files
 
+from kora.ir.contracts import BuiltinTypeContract, TypeContract
 from kora.ir.data import validate_ir_json_object
 from kora.ir.json import JsonObject
 
@@ -19,3 +20,9 @@ def builtin_schema(name: str, revision: str) -> JsonObject | None:
     resource = files("kora.ir").joinpath("artifact_schemas", filename)
     value: object = json.loads(resource.read_text(encoding="utf-8"))
     return validate_ir_json_object(value)
+
+
+def contract_schema(name: str, contract: TypeContract) -> JsonObject | None:
+    if isinstance(contract, BuiltinTypeContract):
+        return builtin_schema(name, contract.builtin_revision)
+    return contract.schema_
