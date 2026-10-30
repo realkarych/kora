@@ -1,0 +1,62 @@
+name: Mutation audit
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Daily mutation audit of master
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Admit master and start the whole-job clock
+        id: clock
+        run: |
+          test "$GITHUB_REF" = refs/heads/master
+          printf 'started=%s\n' "$(date +%s)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked audit tooling
+        timeout-minutes: 1
+        run: |
+          uv sync --locked --group build --no-build --no-install-project
+          uv sync --locked --group mutation --group build --no-build-isolation
+      - name: Audit the frozen master revision
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KORA_AUDIT_STARTED: ${{ steps.clock.outputs.started }}
+        run: |
+          uv run --no-sync python -B -m scripts.ci.mutation_audit \
+            --source-revision "$GITHUB_SHA" --started "$KORA_AUDIT_STARTED"
+      - name: Publish audit artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: mutation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: mutation-report/
+          retention-days: 14
+          if-no-files-found: error
+      - name: Publish the declared scope and findings
+        if: ${{ always() }}
+        run: cat mutation-report/summary.md >> "$GITHUB_STEP_SUMMARY"

@@ -17,6 +17,10 @@ The coordinator and every descendant must not edit source, install dependencies,
 
 Collect actual child results and aggregate findings through the native review response. Include component/profile coverage and missing evidence where the host supports it; preserve the host's output format and severity range. Do not invent defects to force a coverage report or inflate severity. Missing internal trace visibility is a disclosed limitation; an explicitly failed dispatch or absent result remains blocked/unverified and cannot be relabeled passed. A generic clean response does not establish all specialist or executable checks. The implementation coordinator resolves findings and supplies any missing final-revision checks.
 
+## Daily master mutation findings
+
+Within the existing verification plan, inspect available applicable master-audit findings through [the contributor procedure](../../../docs/development.md#daily-master-mutation-audit). Preserve source/scope and executed/reused/inconclusive distinctions, check the contract, and search for existing work before proposing a regression or issue. This postmerge evidence adds no PR mutation campaign, required status, score threshold, stale-report hold or independent review stage. Ordinary tooling-fixture regressions remain ordinary tests.
+
 ## Determine scope
 
 Identify the requested behavior, acceptance criteria and approved base. Include commits since that base, staged/unstaged changes, relevant nonignored untracked files and both paths of renames/deletions. For a PR, bind the complete diff to its base/head. Tests, fixtures, generated code, dependencies and configuration inherit the components they affect; specification-only changes can change the same contracts.

@@ -49,6 +49,7 @@ WORKFLOW_TRIGGERS = {
     "gitleaks.yml": {"pull_request", "push", "schedule", "workflow_dispatch"},
     "osv-scanner.yml": {"pull_request", "push", "schedule"},
     "storage.yml": {"workflow_dispatch"},
+    "mutation.yml": {"schedule", "workflow_dispatch"},
 }
 ORDINARY_PULL_REQUEST_WORKFLOWS = (
     "ci.yml",
@@ -64,6 +65,7 @@ GATING_JOB_CONDITIONS = {
     "storage.yml:storage-evidence": "${{ always() }}",
 }
 JOB_PERMISSIONS = {
+    "mutation.yml:audit": {"contents": "read", "actions": "read"},
     "codeql.yml:analyze": {
         "contents": "read",
         "actions": "read",

@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import shutil
 import signal
 import sys
@@ -34,6 +35,7 @@ from scripts.ci.mutation_models import (
     digest,
     ordered,
     regular_bytes,
+    rotation_order,
 )
 from scripts.ci.mutation_process import (
     ClosureFailure,
@@ -265,12 +267,19 @@ def save(report: Report, output: Path) -> None:
         raise ValueError("oversized audit report")
     (output / "report.json").write_text(content, encoding="utf-8")
     counts = Counter(value.outcome for value in report.results.values())
+    executed = sum(
+        value.outcome != "pending" and not value.reused
+        for value in report.results.values()
+    )
     lines = [
         "# Mutation audit",
         "",
         f"Source: `{report.source_revision}`",
         f"Tooling: `{report.tooling_revision}`",
         f"Status: {report.status} ({report.reason})",
+        f"Continuation: {report.continuation}",
+        f"Reused: {sum(value.reused for value in report.results.values())}",
+        f"Executed: {executed}",
         "",
         "| Outcome | Count |",
         "|---|---:|",
@@ -326,12 +335,54 @@ def audit(
             )
         }
     )
-    command(
-        [git, "merge-base", "--is-ancestor", revision, "origin/master"],
-        source,
-        deadline,
-        stop,
-    )
+    event = os.environ.get("GITHUB_EVENT_NAME", "local")
+    if event != "local":
+        if (
+            event not in {"schedule", "workflow_dispatch"}
+            or os.environ.get("GITHUB_REF") != "refs/heads/master"
+            or os.environ.get("GITHUB_SHA") != revision
+            or command([git, "rev-parse", "HEAD"], source, deadline, stop)
+            .decode()
+            .strip()
+            != revision
+        ):
+            raise ValueError("mutation audit requires exact native master revision")
+        report = report.model_copy(
+            update={
+                "event": event,
+                "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                "attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+            }
+        )
+        variables = environment(ROOT)
+        for name in ("GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_TOKEN"):
+            variables[name] = os.environ[name]
+        remote = execute(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "scripts.ci.mutation_remote",
+            ],
+            ROOT,
+            min(deadline, time.monotonic() + 30),
+            stop,
+            variables=variables,
+            limit=MAX_FILE,
+        )
+        if remote.reason == "completed" and remote.code == 0:
+            if remote.output != b"null":
+                previous = Report.model_validate_json(remote.output)
+                report = report.model_copy(update={"continuation": "restored"})
+        else:
+            report = report.model_copy(update={"continuation": "unavailable"})
+    else:
+        command(
+            [git, "merge-base", "--is-ancestor", revision, "origin/master"],
+            source,
+            deadline,
+            stop,
+        )
     try:
         with workspace(output) as root:
             content = command(
@@ -467,7 +518,13 @@ def audit(
                         and value.mutation == values[key].mutation
                         and value.outcome in {"killed", "survived"}
                     ):
-                        values[key] = value
+                        values[key] = value.model_copy(update={"reused": True})
+            remaining = dict.fromkeys(
+                item.identity() for item in rotation_order(work, previous)
+            )
+            for key, value in values.items():
+                if value.outcome != "pending":
+                    remaining.pop(key, None)
             report = report.model_copy(
                 update={"results": values, "generation": generation}
             )
@@ -513,14 +570,7 @@ def audit(
                     input_digest=inputs[item.module_path],
                     tested_revision=revision,
                 )
-                cursor = (work.index(item) + 1) % len(work)
-                report = report.model_copy(
-                    update={
-                        "results": values,
-                        "cursor": cursor,
-                        "next_identity": work[cursor].identity(),
-                    }
-                )
+                remaining.pop(key, None)
             completed = all(
                 value.outcome in {"killed", "survived", "invalid"}
                 for value in values.values()
@@ -528,6 +578,8 @@ def audit(
             report = report.model_copy(
                 update={
                     "results": values,
+                    "rotation": tuple(remaining),
+                    "next_identity": next(iter(remaining), ""),
                     "status": "complete" if completed else "partial",
                     "reason": "finished"
                     if completed

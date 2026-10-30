@@ -64,6 +64,7 @@ class Result(Record):
     outcome: Outcome
     input_digest: str
     tested_revision: str
+    reused: bool = False
 
 
 class Report(Record):
@@ -72,6 +73,7 @@ class Report(Record):
     tooling_revision: str = Field(pattern=r"^[0-9a-f]{40}$")
     tooling_dirty: bool = False
     retained_workspace: bool = False
+    continuation: Literal["fresh", "restored", "unavailable"] = "fresh"
     run_id: int = 0
     attempt: int = 0
     event: str = "local"
@@ -79,6 +81,7 @@ class Report(Record):
     reason: str = "budget"
     cursor: int = Field(default=0, ge=0)
     next_identity: str = ""
+    rotation: tuple[str, ...] = Field(default=(), max_length=MAX_MUTANTS)
     generation: int = Field(default=0, ge=0)
     results: dict[str, Result] = Field(default_factory=dict, max_length=MAX_MUTANTS)
     seconds: float = 0
@@ -118,20 +121,32 @@ def digest(root: Path, scope: Scope) -> str:
     return result.hexdigest()
 
 
-def ordered(work: list[Mutation], previous: Report | None) -> list[Mutation]:
+def rotation_order(work: list[Mutation], previous: Report | None) -> list[Mutation]:
     if not work or previous is None:
         return work
     identities = [item.identity() for item in work]
+    if previous.rotation:
+        current = {item.identity(): item for item in work}
+        retained = dict.fromkeys(key for key in previous.rotation if key in current)
+        retained.update(dict.fromkeys(identities))
+        return [current[key] for key in retained]
     cursor = (
         identities.index(previous.next_identity)
         if previous.next_identity in identities
         else previous.cursor % len(work)
     )
-    rotated = work[cursor:] + work[:cursor]
+    return work[cursor:] + work[:cursor]
+
+
+def ordered(work: list[Mutation], previous: Report | None) -> list[Mutation]:
+    if not work or previous is None:
+        return work
+    rotated = rotation_order(work, previous)
     pending = [item for item in work if item.identity() not in previous.results]
     result: dict[str, Mutation] = {}
     for index in range(max(len(pending), len(rotated))):
-        for queue in (pending, rotated):
+        queues = (rotated, pending) if previous.generation % 2 else (pending, rotated)
+        for queue in queues:
             if index < len(queue):
                 item = queue[index]
                 result.setdefault(item.identity(), item)
