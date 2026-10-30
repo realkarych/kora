@@ -133,6 +133,42 @@ def test_structured_output_preparation_binds_original_saved_boolean_roots(
     assert result.accounting.references == 1
 
 
+@pytest.mark.parametrize("keyword", ["$ref", "$dynamicRef"])
+@pytest.mark.parametrize("fragment", ["", "#/$defs/leaf"], ids=["root", "fragment"])
+def test_preparation_refuses_raw_slash_urn_aliases_with_a_present_saved_target(
+    keyword: str, fragment: str
+) -> None:
+    target = contract({"$defs": {"leaf": False}}, "example/Target")
+    declared = contract({keyword: "urn:kora:artifact:example/Target" + fragment})
+    candidate = preparation_input({}, records=[builtin(), declared, target])
+
+    reason = refusal(candidate)
+
+    assert reason == "unsupported_schema"
+
+
+@pytest.mark.parametrize("keyword", ["$ref", "$dynamicRef"])
+def test_preparation_keeps_fragment_slashes_in_canonical_saved_urns(
+    keyword: str,
+) -> None:
+    target = contract({"$defs": {"a/b": False}}, "example/Target")
+    declared = contract({keyword: "urn:kora:artifact:example:Target#/$defs/a~1b"})
+    candidate = preparation_input({}, records=[builtin(), declared, target])
+
+    result = prepared(candidate)
+    normalized = cast("dict[str, object]", normalized_input(result))
+
+    assert normalized["reference_targets"] == [
+        {
+            "document": 1,
+            "path": [],
+            "keyword": keyword,
+            "target_document": 2,
+            "target_path": ["$defs", "a/b"],
+        }
+    ]
+
+
 def test_structured_output_preparation_keeps_equal_local_bases_distinct() -> None:
     schema: dict[str, object] = {
         "$defs": {"leaf": False},

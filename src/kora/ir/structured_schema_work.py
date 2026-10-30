@@ -187,3 +187,8 @@ def binary_lookup(
         else:
             high = middle
     return rows[low][1] if low < len(rows) and rows[low][0] == query else -1
+
+
+def copy_input_vector(values: list[int], meter: PreparationMeter) -> tuple[int, ...]:
+    meter.reserve(1 + len(values), entries=len(values))
+    return tuple(values)

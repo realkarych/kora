@@ -12,6 +12,12 @@ from tests.ir.structured_schema_cases import parameters
         pytest.param(
             "urn:kora:artifact:example:Target", "example/Target", [], id="saved-root"
         ),
+        pytest.param(
+            "urn:kora:artifact:example:Target#/$defs/a~1b",
+            "example/Target",
+            ["$defs", "a/b"],
+            id="saved-fragment-slashes",
+        ),
         pytest.param("#/$defs/a~1b~0c", None, ["$defs", "a/b~c"], id="tilde"),
         pytest.param(
             "#/$defs/a%7E1b", None, ["$defs", "a/b"], id="percent-before-tilde"
@@ -93,6 +99,8 @@ def test_schema_reference_decode_reserves_before_parsing(
         "#/a~2",
         "relative#",
         "https://example.invalid/#",
+        "urn:kora:artifact:example/Target",
+        "urn:kora:artifact:example/Target#/$defs/leaf",
     ],
     ids=[
         "anchor",
@@ -104,6 +112,8 @@ def test_schema_reference_decode_reserves_before_parsing(
         "tilde",
         "relative",
         "external",
+        "raw-slash-base",
+        "raw-slash-base-fragment",
     ],
 )
 def test_schema_reference_decoder_refuses_fixed_unsupported_grammar(

@@ -18,6 +18,7 @@ from kora.ir.structured_schema_work import (
     PreparationMeter,
     PreparationRefused,
     Reason,
+    copy_input_vector,
     merge_sort,
     refuse,
 )
@@ -322,7 +323,7 @@ class Preparation:
                     3,
                 )
             )
-        return self.arena.wrap_array(tuple(normalized), 2)
+        return self.arena.wrap_array(copy_input_vector(normalized, self.meter), 2)
 
     def roles(self, selected: str, inline: bool) -> tuple[int, int]:
         self.meter.reserve(1 + min(len(selected), 5))
@@ -418,7 +419,9 @@ class Preparation:
             if inline and self.meter.compare(selected, "StructuredOutput") == 0
             else declared
         )
-        return self.arena.wrap_array(tuple(constraints), 2), self.arena.scalar(checker)
+        return self.arena.wrap_array(
+            copy_input_vector(constraints, self.meter), 2
+        ), self.arena.scalar(checker)
 
     def prepare(self, value: object) -> PreparedStructuredSchemaInput:
         self.header(value)
@@ -433,7 +436,12 @@ class Preparation:
                 ("checker_document", checker),
                 ("constraint_documents", constraints),
                 ("declared_type", self.declared),
-                ("documents", self.arena.wrap_array(tuple(self.documents), 2)),
+                (
+                    "documents",
+                    self.arena.wrap_array(
+                        copy_input_vector(self.documents, self.meter), 2
+                    ),
+                ),
                 (
                     "execution_semantics",
                     self.execution,
@@ -443,7 +451,12 @@ class Preparation:
                     self.parameters,
                 ),
                 ("reference_targets", references),
-                ("type_contracts", self.arena.wrap_array(tuple(self.contracts), 2)),
+                (
+                    "type_contracts",
+                    self.arena.wrap_array(
+                        copy_input_vector(self.contracts, self.meter), 2
+                    ),
+                ),
             ),
             1,
         )

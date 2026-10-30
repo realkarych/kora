@@ -52,6 +52,8 @@ def decode_reference(
     pool = [""] * (length + 1)
     boundary = 0
     while boundary < length and reference[boundary] != "#":
+        if reference[boundary] == "/":
+            refuse()
         boundary += 1
     name: str | None = None
     if boundary:

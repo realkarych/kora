@@ -147,6 +147,7 @@ Let `C(s)` be native-string code-point length, `b(n)` signed native `int.bit_len
 |---|---|
 | Unicode/size scan | Charge `1+C(s)` before one scan. Reject surrogates. Quotes, backslash and short controls encode in 2 bytes, other U+0000–001F in 6, other scalars at their UTF-8 width, plus quotes |
 | Known byte/string result of upper bound `q` | Charge `1+q` work and `q` auxiliary bytes before copy/encoding/slice; emit incrementally without regex/count rescans |
+| Extra input-child vector copy | The first builder vector is input-owned. Before copying its `n` node-ID slots into a second immutable vector, reserve `1+n` work and `n` auxiliary entries. Apply this to the references, constraints, documents and contracts arrays; dropping the old vector does not refund the copy |
 | Exact string comparison | Charge `1+min(C(a),C(b))`; compare by code point |
 | Stable bottom-up merge sort | For `n` keys and `p=ceil(log2(max(1,n)))`, charge `1+2p*(n+sum C(keys))` and reserve table scratch before sorting. Each comparison removes an element, bounding its examined prefix by that removed key length per level |
 | Sorted-row binary lookup | Charge `1+ceil(log2(n+1))*(1+C(query)+max_key_length)`; empty lookup costs 1; reuse the stored index |

@@ -11,6 +11,11 @@ import kora.ir.structured_schema_locations as locations_module
 import kora.ir.structured_schema_preparation as preparation_module
 from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
 from kora.ir.structured_schema_preparation import prepare_structured_schema_input
+from kora.ir.structured_schema_work import (
+    PreparationMeter,
+    PreparationRefused,
+    copy_input_vector,
+)
 from tests.ir.structured_schema_cases import (
     HostileHeader,
     builtin,
@@ -24,6 +29,58 @@ from tests.ir.structured_schema_cases import (
     refusal,
 )
 from tests.support.observability import run_python
+
+
+@pytest.mark.parametrize("count", [0, 1, 3], ids=["empty", "singleton", "several"])
+def test_generated_input_vector_copy_has_exact_owned_index_reservations(
+    count: int,
+) -> None:
+    original = list(range(count))
+    expected = tuple(original)
+    meter = PreparationMeter()
+
+    copied = copy_input_vector(original, meter)
+    original.clear()
+
+    assert copied == expected
+    assert meter.work == 1 + count
+    assert meter.auxiliary_entries == count
+    assert meter.auxiliary_bytes == 0
+
+
+@pytest.mark.parametrize("dimension", ["work", "entries"])
+@pytest.mark.parametrize("delta", [0, 1], ids=["exact", "one-short"])
+def test_generated_input_vector_copy_reserves_before_exceeding_capacity(
+    dimension: str, delta: int
+) -> None:
+    original = [0, 1, 2]
+    meter = PreparationMeter(
+        work=parameters()["max_preparation_work"] - 4 + delta
+        if dimension == "work"
+        else 0,
+        auxiliary_entries=parameters()["max_auxiliary_entries"] - 3 + delta
+        if dimension == "entries"
+        else 0,
+    )
+    before = (meter.work, meter.auxiliary_bytes, meter.auxiliary_entries)
+
+    if delta:
+        with pytest.raises(PreparationRefused) as rejected:
+            copy_input_vector(original, meter)
+
+        assert rejected.value.reason == "preparation_exhausted"
+        assert (meter.work, meter.auxiliary_bytes, meter.auxiliary_entries) == before
+        assert original == [0, 1, 2]
+        return
+    copied = copy_input_vector(original, meter)
+
+    assert copied == (0, 1, 2)
+    assert (
+        meter.work if dimension == "work" else meter.auxiliary_entries
+    ) == parameters()[
+        "max_preparation_work" if dimension == "work" else "max_auxiliary_entries"
+    ]
+    assert original == [0, 1, 2]
 
 
 @pytest.mark.parametrize("delta", [-1, 0, 1], ids=["below", "at", "over"])
