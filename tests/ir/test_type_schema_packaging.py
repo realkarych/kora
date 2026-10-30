@@ -70,6 +70,7 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "from kora.ir import validate_inline_schemas, validate_output_schemas",
             "from kora.ir import validate_edge_types, validate_export_types",
             "from kora.ir import validate_subgraph_interfaces",
+            "from kora.ir import OutputDecl",
             "from kora.ir import validate_expression_syntax, validate_input_paths",
             "from pathlib import Path",
             f"assert Path(kora.__file__).is_relative_to({str(tmp_path)!r})",
@@ -160,7 +161,8 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "'runtime': {'runtime': 'local', 'vcs': 'git'}})",
             "interfaces = validate_subgraph_interfaces(interfaces_document)",
             "assert interfaces.interfaces_valid and interfaces.types_compared == 2",
-            "interfaces_document.graph.nodes['call'].outputs['value'].type = 'VcsRef'",
+            "interfaces_document.graph.nodes['call'].outputs['value'] = "
+            "OutputDecl(type='VcsRef')",
             "interfaces = validate_subgraph_interfaces(interfaces_document)",
             "assert not interfaces.interfaces_valid",
             "assert interfaces.types_compared == 2",
