@@ -234,9 +234,17 @@ jobs:
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
-          measurements=(tests/measurements tests/db tests/plugins --ignore=tests/plugins/storage --ignore=tests/plugins/runtime/local)
+          measurements=(
+            tests/measurements
+            tests/db
+            tests/plugins
+            --ignore=tests/plugins/storage
+            --ignore=tests/plugins/runtime/local
+            tests/ir/test_inline_schema_resources.py
+            tests/ir/test_type_schema_resources.py
+          )
           integration=(tests/cli)
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)

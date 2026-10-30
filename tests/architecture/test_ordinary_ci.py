@@ -16,6 +16,12 @@ from tests.support.workflows import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
+IR_RESOURCE_MODULES = frozenset(
+    {
+        "tests/ir/test_inline_schema_resources.py",
+        "tests/ir/test_type_schema_resources.py",
+    }
+)
 FIRST_MODULES = (
     "tests/conformance/test_conformance_cases_detect_broken_providers.py",
     "tests/conformance/test_lifetime_helper_phases.py",
@@ -247,6 +253,8 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
 
     assert result.returncode == 0, result.stderr
     assert tuple(arrays["first"]) == FIRST_MODULES
+    assert IR_RESOURCE_MODULES <= cohorts["measurements"]
+    assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert all(
         not argument.startswith("-") or argument.startswith("--ignore=")
         for values in arrays.values()
