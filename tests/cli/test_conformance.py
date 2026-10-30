@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 import pytest
 
 from kora.cli.conformance import CommandResult
+from kora.db.connection import DatabaseSettings
 from kora.ir.json import JsonObject
 from kora.protocols.lifetime import (
     CleanupOutcome,
@@ -58,6 +59,46 @@ def assert_closed(report: CommandResult) -> None:
 def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
     for marker in markers:
         assert marker not in process.stdout + process.stderr
+
+
+def test_installed_static_token_authentication_conformance(
+    installed_conformance: InstalledTooling,
+    tmp_path: Path,
+    database_settings: DatabaseSettings,
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    data = tmp_path / "fixture.json"
+    data.write_text(
+        json.dumps(
+            {
+                "database_url": database_settings.url.render_as_string(
+                    hide_password=False
+                )
+            }
+        )
+    )
+    home = private_home(tmp_path / "home")
+
+    result = installed_conformance.run(
+        *conformance_arguments(
+            "authentication", "static_token", config, "fixtures_authentication", data
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    report = CommandResult.model_validate_json(result.stdout)
+    assert result.code == 0, (result.stdout, result.stderr)
+    assert report.completed == report.expected == 11
+    assert report.outcome is OriginalOutcome.COMPLETE
+    assert_closed(report)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        result,
+        b"private-installed-authentication-credential",
+        b"private-installed-authentication-owner",
+        database_settings.url.render_as_string(hide_password=False).encode(),
+    )
 
 
 @pytest.mark.parametrize("valid", [True, False])

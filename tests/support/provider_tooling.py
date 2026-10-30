@@ -113,7 +113,9 @@ def locked_payload_wheel(
         archive.writestr(record_path, buffer.getvalue())
 
 
-def prepare_wheelhouse(output: Path, *, conformance: bool = False) -> None:
+def prepare_wheelhouse(
+    output: Path, *, conformance: bool = False, postgres: bool = False
+) -> None:
     configuration = ProjectManifest.model_validate(
         tomllib.loads((REPOSITORY / "pyproject.toml").read_text())
     )
@@ -124,6 +126,8 @@ def prepare_wheelhouse(output: Path, *, conformance: bool = False) -> None:
     requirements = list(configuration.project.dependencies)
     if conformance:
         requirements += configuration.project.optional_dependencies["conformance"]
+    if postgres:
+        requirements += configuration.project.optional_dependencies["postgres"]
     pending = [Requirement(value) for value in requirements]
     seen: dict[str, frozenset[str]] = {}
     while pending:
@@ -288,9 +292,20 @@ class InstalledTooling:
 
 
 def install_tooling(
-    root: Path, wheelhouse: Path, fixture_wheel: Path, *, conformance: bool = False
+    root: Path,
+    wheelhouse: Path,
+    fixture_wheel: Path,
+    *,
+    conformance: bool = False,
+    postgres: bool = False,
 ) -> InstalledTooling:
     python = create_virtual_environment(root / "installed")
+    extras = [
+        name
+        for name, selected in (("conformance", conformance), ("postgres", postgres))
+        if selected
+    ]
+    requirement = "kora[" + ",".join(extras) + "]" if extras else "kora"
     run_setup(
         [
             "uv",
@@ -302,7 +317,7 @@ def install_tooling(
             str(wheelhouse),
             "--python",
             str(python),
-            "kora[conformance]" if conformance else "kora",
+            requirement,
             str(fixture_wheel),
         ]
     )

@@ -49,7 +49,7 @@ def installed_conformance(core_wheel: Path) -> Generator[InstalledTooling]:
         root = Path(temporary).resolve()
         wheelhouse = root / "dependencies"
         wheelhouse.mkdir()
-        prepare_wheelhouse(wheelhouse, conformance=True)
+        prepare_wheelhouse(wheelhouse, conformance=True, postgres=True)
         copy_core_wheel(core_wheel, wheelhouse)
         fixture = build_fixture_wheel(
             root,
@@ -80,4 +80,6 @@ def installed_conformance(core_wheel: Path) -> Generator[InstalledTooling]:
             },
             {"socket": str(root)},
         )
-        yield install_tooling(root, wheelhouse, fixture, conformance=True)
+        yield install_tooling(
+            root, wheelhouse, fixture, conformance=True, postgres=True
+        )

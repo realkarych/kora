@@ -452,8 +452,52 @@ def artifact_type_cases() -> tuple[Case, ...]:
     )
 
 
+def authentication_cases() -> tuple[Case, ...]:
+    from kora.conformance.authentication import (
+        AuthenticationConformanceInputs,
+        check_authentication_preserves_principals,
+        check_authentication_refusals_are_uniform,
+        check_authentication_revalidates_current_authority,
+        check_authentication_revocation_is_permanent,
+        check_authentication_unavailability_grants_no_authority,
+        check_authentication_unexpected_failure_grants_no_authority,
+    )
+    from kora.protocols.authentication import Authenticator
+
+    def simple(
+        name: str,
+        check: Callable[
+            [Authenticator, AuthenticationConformanceInputs, ProtocolContext],
+            Awaitable[None],
+        ],
+    ) -> Case:
+        return Case(
+            name,
+            lambda i, c, x: check(
+                cast(Authenticator, i.instance),
+                cast(AuthenticationConformanceInputs, i.exercises),
+                x,
+            ),
+        )
+
+    return (
+        simple("principals", check_authentication_preserves_principals),
+        simple("refusals", check_authentication_refusals_are_uniform),
+        simple("current_authority", check_authentication_revalidates_current_authority),
+        simple("revocation", check_authentication_revocation_is_permanent),
+        simple(
+            "unexpected_failure",
+            check_authentication_unexpected_failure_grants_no_authority,
+        ),
+        simple(
+            "unavailability", check_authentication_unavailability_grants_no_authority
+        ),
+    )
+
+
 def selected_cases(protocol: ProtocolName) -> tuple[Case, ...]:
     builders = {
+        ProtocolName.AUTHENTICATION: authentication_cases,
         ProtocolName.RUNTIME: lambda: (),
         ProtocolName.SECRETS: secrets_cases,
         ProtocolName.POLICY: policy_cases,
@@ -470,7 +514,11 @@ class Executor:
         self.cases = selected_cases(protocol)
         self._completed: list[str] = []
         self._capture_settings: LoggingSettings
-        if protocol is ProtocolName.ARTIFACT_TYPE:
+        if protocol is ProtocolName.AUTHENTICATION:
+            from kora.conformance.authentication import authentication_capture_settings
+
+            self._capture_settings = authentication_capture_settings()
+        elif protocol is ProtocolName.ARTIFACT_TYPE:
             from kora.conformance.artifact_type import artifact_type_capture_settings
 
             self._capture_settings = artifact_type_capture_settings()

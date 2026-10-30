@@ -15,6 +15,7 @@ from tests.support.provider_tooling import (
 
 DOCUMENTED_BUILTINS: frozenset[tuple[str, str]] = frozenset(
     {
+        ("authentication", "static_token"),
         ("artifact_storage", "local"),
         ("artifact_type", "vcs_ref"),
         ("artifact_type", "command_result"),

@@ -7,6 +7,16 @@ class ConformanceFixtureMissing(LookupError):
 
 
 @pytest.fixture
+def kora_authentication_provider() -> object:
+    raise ConformanceFixtureMissing("kora_authentication_provider")
+
+
+@pytest.fixture
+def kora_authentication_inputs() -> object:
+    raise ConformanceFixtureMissing("kora_authentication_inputs")
+
+
+@pytest.fixture
 def kora_runtime_provider() -> object:
     raise ConformanceFixtureMissing("kora_runtime_provider")
 

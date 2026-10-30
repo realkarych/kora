@@ -1,0 +1,19 @@
+# Static-token authentication delivery
+
+Checked: 2026-10-30. Implementing issue: [#506](https://github.com/realkarych/kora/issues/506).
+
+The accepted authority comes from [ADR-0011](../../docs/decisions/0011-namespaces-and-personal-tokens.md), the [authentication contract](../specs/protocols.md#10-authentication-fr-124-nfr-44), the `api_token` row in [the data model](../specs/data-model.md#2-entities) and accepted #135/#141. Digest-only storage predates this implementation. The owner accepted the [permanent expiry-sentinel amendment](https://github.com/realkarych/kora/issues/506#issuecomment-6531702175), with [acceptance recorded](https://github.com/realkarych/kora/issues/506#issuecomment-6532244535).
+
+Revocation-time expiry alone can accept a revoked credential under a lagging or backward clock. The selected Unix-epoch sentinel is refused independently of time, retains rows and references, and needs no migration. It discards the prior expiry and does not record revocation time. Future issuance and management must preserve the reserved value. Ordinary natural expiry still depends on the trusted validation clock. No shared non-regressing clock is claimed.
+
+The provider receives a borrowed database, reads the unique digest index without a cache, releases its database unit before strict authority/expiry validation and owns no engine, task or credential cache. The composition root retains database shutdown. SHA-256 lookup preserves exact bearer bytes; credential entropy and issuance remain the issuer's responsibility. Safe errors contain no source exception chain, credential, stored authority or invalidity category.
+
+## Evidence boundaries
+
+`tests/plugins/authentication/` covers the real SQLite/PostgreSQL boundary: authority and expiry, committed permanent revoke under concurrent calls and backward/pre-epoch clocks, retained worker/idempotency references, real unavailable connections, malformed authority/schema failure, pending-checkout cancellation, borrowed database shutdown and content-free diagnostics. The blocked-sink case proves progress and database release while blocked, then releases its owned read end and observes the writer's actual exit. It does not claim that a permanently blocked operating-system write is forcibly cancelled.
+
+Shared authentication cases and deliberately broken injected implementations check exact authority and stale-authority detection. `test_installed_static_token_authentication_conformance` runs the selected installed factory and the same case functions through the existing owned command lifecycle on both databases. Its test environment installs the already-declared `postgres` extra; the provider adds no dependency. The implementation PR retains commands, source identities, actual independent review results and final-head CI links. Source review and successful provider tests are not API authorization or complete standalone evidence.
+
+The inspected daily master audit [41025696626](https://github.com/realkarych/kora/actions/runs/41025696626) used source `4cf962d6db69fdec13de102be31e7350330ff917`. Its report was partial due to budget, with only pricing/CEL-path scopes and no applicable authentication finding. It supplies no authentication mutation result and adds no PR mutation campaign.
+
+HTTP API009/API010/API011 conversion, namespace/object operations, final stream/metrics authority, browser sessions, standalone initialization and credential recovery retain their implementing owners in work items 11/12/17/20. This provider exposes none of those operations and introduces no additional permission model.

@@ -34,6 +34,7 @@ kora = "kora.__main__:main"
 kora-runner = "kora.plugins.runtime.local.supervisor:main"
 
 [project.entry-points."kora.provider"]
+"authentication.static_token" = "kora.plugins.authentication.static_token:provider_metadata"
 "artifact_storage.local" = "kora.plugins.storage.local:provider_metadata"
 "artifact_type.agent_session" = "kora.plugins.artifact_type.agent_session:provider_metadata"
 "artifact_type.command_result" = "kora.plugins.artifact_type.command_result:provider_metadata"
