@@ -131,6 +131,30 @@ def test_expression_syntax_preserves_scoped_boundary(kind: str) -> None:
     assert export_ir(graph) == before
 
 
+@pytest.mark.parametrize(
+    ("kind", "suffix"),
+    [
+        ("agent", ("config", "workspace", "from_ref")),
+        ("command", ("config", "workspace", "from_ref")),
+        ("human_input", ("config", "context")),
+        ("human_input", ("config", "binds", "vcs_ref")),
+        ("human_input", ("config", "binds", "gate_digests", 0)),
+    ],
+)
+def test_rooted_path_eligibility_remains_outside_syntax_validation(
+    kind: str, suffix: FieldPath
+) -> None:
+    graph = field_document(kind, suffix, "wrong_root.value")
+    before = export_ir(graph)
+
+    result = validate_expression_syntax(graph)
+
+    assert result.syntax_valid
+    assert result.paths_checked == 1
+    assert result.expressions_checked == 0
+    assert export_ir(graph) == before
+
+
 def test_disabled_infrastructure_retry_and_each_approval_binding_are_checked() -> None:
     value = document()
     set_field(
