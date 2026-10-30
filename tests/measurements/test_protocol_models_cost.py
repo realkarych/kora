@@ -23,6 +23,9 @@ from kora.plugins.policy.allow_deny import (
 from kora.plugins.policy.allow_deny.patterns import MAX_PATTERNS
 from kora.protocols.identity import GrantBinding
 from kora.protocols.secret_value import SecretScope
+from tests.measurements.agent_session_artifact_type_workload import (
+    collect as collect_agent_session_artifact_type,
+)
 from tests.measurements.artifact_type_workload import collect as collect_artifact_type
 from tests.measurements.command_result_artifact_type_workload import (
     collect as collect_command_result_artifact_type,
@@ -77,6 +80,10 @@ def test_artifact_type_provider_cost(report: Report) -> None:
 
 def test_command_result_artifact_type_provider_cost(report: Report) -> None:
     collect_command_result_artifact_type(report)
+
+
+def test_agent_session_artifact_type_provider_cost(report: Report) -> None:
+    collect_agent_session_artifact_type(report)
 
 
 INDEPENDENT_RUNS: int = 3

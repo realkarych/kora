@@ -18,6 +18,7 @@ DOCUMENTED_BUILTINS: frozenset[tuple[str, str]] = frozenset(
         ("artifact_storage", "local"),
         ("artifact_type", "vcs_ref"),
         ("artifact_type", "command_result"),
+        ("artifact_type", "agent_session"),
         ("policy", "allow_deny"),
         ("secrets", "env"),
         ("vcs", "git"),

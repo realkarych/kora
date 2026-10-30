@@ -487,6 +487,39 @@ def test_installed_vcs_ref_artifact_type_conformance(
     )
 
 
+def test_installed_agent_session_artifact_type_conformance(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    config = tmp_path / "config.json"
+    config.write_text("{}")
+    home = private_home(tmp_path / "home")
+
+    process = installed_conformance.run(
+        *conformance_arguments(
+            "artifact_type",
+            "agent_session",
+            config,
+            "fixtures_agent_session_artifact_type",
+        ),
+        environment={"HOME": str(home)},
+    )
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0, (process.stdout, process.stderr)
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected
+    assert outcome.expected > 0
+    assert_closed(outcome)
+    assert not list(home.rglob("journal"))
+    assert_undisclosed(
+        process,
+        b"private-agent-session-price-marker",
+        b"private-agent-session-usage-marker",
+        b"private-agent-session-coverage-marker",
+        b"private-agent-session-denial-marker",
+    )
+
+
 def test_installed_command_result_artifact_type_conformance(
     installed_conformance: InstalledTooling, tmp_path: Path
 ) -> None:
