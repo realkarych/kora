@@ -63,6 +63,34 @@ def test_cel_paths_obey_limits_and_never_reach_binding(
     assert diagnostic.reason is reason
 
 
+@pytest.mark.parametrize(
+    ("prefix", "separator", "excessive_step", "trailing"),
+    [
+        ("root" + ".field" * 32, "", ".overflow", ""),
+        ("root" + "[0]" * 32, "", "[0]", ""),
+        ("root['😀😀😀']" + ".field" * 31, "", "[0]", ""),
+        ("root" + ".field" * 32, "", ".overflow", ".later"),
+        ("root" + ".field" * 32, " \t// comment\n", ".overflow", ""),
+    ],
+    ids=["fields", "indexes", "unicode_code_points", "trailing_step", "trivia"],
+)
+def test_cel_paths_report_first_excessive_step(
+    prefix: str, separator: str, excessive_step: str, trailing: str
+) -> None:
+    source = prefix + separator + excessive_step + trailing
+    step_start = len(prefix + separator)
+    step_end = step_start + len(excessive_step)
+
+    accepted = check_path(prefix)
+    diagnostic = check_path(source)
+
+    assert isinstance(accepted, Path)
+    assert isinstance(diagnostic, Diagnostic)
+    assert diagnostic.code.value == "IR027"
+    assert diagnostic.reason is Reason.DEPTH
+    assert step_start <= diagnostic.offset < step_end
+
+
 PATH_PROCESS = """
 import sys
 from kora.cel import check_path, resolve
