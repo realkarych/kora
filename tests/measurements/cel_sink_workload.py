@@ -50,7 +50,13 @@ def fill(descriptor: int) -> int:
             return written
 
 
-def run(sink: str, level: str, exit_running: bool = False) -> str:
+def run(
+    sink: str,
+    level: str,
+    exit_running: bool = False,
+    *,
+    synchronize_cleanup: bool = False,
+) -> str:
     baseline_descriptors = open_descriptors()
     read_end, write_end = os.pipe()
     reader: CountingReader | None = None
@@ -97,6 +103,18 @@ def run(sink: str, level: str, exit_running: bool = False) -> str:
         top = tracemalloc.take_snapshot().compare_to(retained, "lineno")[:10]
         retaining_paths.extend(str(entry) for entry in top)
         tracemalloc.stop()
+        if synchronize_cleanup:
+            from tests.measurements.cel_sink_process import begin_cleanup
+
+            assert [point["cycle"] for point in points] == list(
+                range(SAMPLE_EVERY, CYCLES + 1, SAMPLE_EVERY)
+            )
+            assert not tracemalloc.is_tracing()
+            assert owner.worker.is_alive()
+            assert owner.snapshot().outstanding == 0
+            assert owner.snapshot().handles == 0
+            assert owner.snapshot().bytes == 0
+            begin_cleanup()
         evaluator = Evaluator(clock, owner)
         try:
             await evaluator.evaluate(failed, {}, {}, ErrorContext("when"))

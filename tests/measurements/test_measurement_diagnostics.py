@@ -1,7 +1,12 @@
 import pytest
 
+from tests.measurements.cel_sink_process import READY, SinkProcessResult
 from tests.measurements.harness import new_report
-from tests.measurements.test_cel_evaluator_lifetime import SinkPayload, sink_gates
+from tests.measurements.test_cel_evaluator_lifetime import (
+    SinkPayload,
+    sink_exit_gate,
+    sink_gates,
+)
 
 
 @pytest.mark.parametrize(
@@ -48,3 +53,45 @@ def test_slow_diagnostic_shutdown_preserves_writer_and_drain_failures() -> None:
     payload["stats"]["writer_alive_at_exit"] = True
     with pytest.raises(AssertionError, match="writer"):
         sink_gates(report, "fixture", payload, False)
+
+
+@pytest.mark.parametrize(
+    ("whole", "cleanup", "passed"),
+    [
+        (1.5, 0.01, True),
+        (1.5, 1.0, True),
+        (1.5, 1.000001, False),
+        (60.0, 0.01, True),
+        (60.000001, 0.01, False),
+    ],
+)
+def test_cel_sink_exit_gate_preserves_distinct_interval_boundaries(
+    whole: float, cleanup: float, passed: bool
+) -> None:
+    report = new_report()
+    result = SinkProcessResult(
+        0, 0, b"{}", b"", READY, whole, cleanup, False, False, False
+    )
+
+    if passed:
+        sink_exit_gate(report, "fixture", result)
+    else:
+        with pytest.raises(AssertionError, match="fixture_post_work_exit"):
+            sink_exit_gate(report, "fixture", result)
+
+    assert report.gates == {"fixture_post_work_exit": passed}
+    assert (
+        report.environment["diagnostic_fixture_complete_workload_exit_seconds_measured"]
+        == whole
+    )
+    assert (
+        report.environment[
+            "diagnostic_fixture_complete_workload_exit_seconds_reference"
+        ]
+        == 1.0
+    )
+    assert (
+        report.environment["diagnostic_fixture_complete_workload_exit_seconds_exceeded"]
+        is True
+    )
+    assert report.environment["fixture_post_work_seconds"] == cleanup

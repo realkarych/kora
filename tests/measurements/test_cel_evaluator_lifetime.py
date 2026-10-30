@@ -6,8 +6,15 @@ from typing import TypedDict
 
 import pytest
 
-from tests.cel_eval.children import ROOT, ChildResult, full_path, run_child
+from tests.cel_eval.children import (
+    CHILD_TIMEOUT_SECONDS,
+    ROOT,
+    ChildResult,
+    full_path,
+    run_child,
+)
 from tests.measurements.cel_native_pair import run_native
+from tests.measurements.cel_sink_process import READY, SinkProcessResult, run_sink_child
 from tests.measurements.harness import Report, Sample, new_report, write_report
 
 pytestmark = pytest.mark.measurement
@@ -127,6 +134,37 @@ def sink_gates(report: Report, name: str, payload: SinkPayload, blocked: bool) -
     gate(report, f"{name}_drained", stats["drained"] == (not blocked))
     if blocked:
         gate(report, f"{name}_pipe_full", stats["filled_pipe_bytes"] > 0)
+
+
+def sink_exit_gate(report: Report, name: str, result: SinkProcessResult) -> None:
+    report.environment.update(
+        {
+            f"{name}_stdout": result.stdout.decode(errors="replace"),
+            f"{name}_stderr": result.stderr.decode(errors="replace"),
+            f"{name}_readiness": result.readiness.decode(errors="replace"),
+            f"{name}_exit_code": result.code,
+            f"{name}_timed_out": result.timed_out,
+            f"{name}_overflow": result.overflow,
+            f"{name}_protocol_error": result.protocol_error,
+            f"{name}_post_work_seconds": result.post_work_seconds,
+        }
+    )
+    report.diagnostic(
+        f"{name}_complete_workload_exit_seconds", result.total_seconds, 1.0
+    )
+    gate(
+        report,
+        f"{name}_post_work_exit",
+        result.code == 0
+        and result.stderr == b""
+        and result.readiness == READY
+        and not result.timed_out
+        and not result.overflow
+        and not result.protocol_error
+        and result.total_seconds <= CHILD_TIMEOUT_SECONDS
+        and result.post_work_seconds is not None
+        and result.post_work_seconds <= 1.0,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -289,24 +327,21 @@ def test_cel_diagnostics_do_not_delay_exit(
 ) -> None:
     code = (
         "from tests.measurements.cel_sink_workload import run\n"
-        f"print(run({sink!r}, {level!r}))\n"
+        f"print(run({sink!r}, {level!r}, synchronize_cleanup=True))\n"
     )
-    started = time.perf_counter()
 
-    result = run_child(code, full_path(ROOT))
+    result = run_sink_child(code, full_path(ROOT))
 
-    assert result.code == 0, result.stderr
-    assert result.stderr == ""
-    payload: SinkPayload = json.loads(result.stdout)
-    elapsed = time.perf_counter() - started
     name = f"sink_{sink}_{level}_{repeat}"
+    sink_exit_gate(report, name, result)
+    payload: SinkPayload = json.loads(result.stdout)
     report.samples.append(
         Sample(
             f"sink_{sink}_{level}",
             repeat,
             200,
-            elapsed,
-            dict(payload["stats"]),
+            result.total_seconds,
+            {**payload["stats"], "post_work_exit_seconds": result.post_work_seconds},
         )
     )
     for point in payload["points"]:
@@ -318,7 +353,6 @@ def test_cel_diagnostics_do_not_delay_exit(
     report.environment[f"sink_{sink}_{level}_{repeat}_retainers"] = "\n".join(
         payload["retaining_paths"]
     )
-    gate(report, f"{name}_exit", elapsed <= 1.0)
     sink_gates(report, name, payload, sink == "blocked" and level != "CRITICAL")
     resource_gates(report, name, payload["points"], SINK_BUDGET)
     for point in payload["points"]:
