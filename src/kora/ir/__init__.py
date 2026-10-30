@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
     from kora.ir.export import export_ir, render_ir_json
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
+    from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
     from kora.ir.node import ErrorClass, ToolPolicy
     from kora.ir.runtime import (
         Concurrency,
@@ -124,6 +125,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "InlineSchemaResult",
+    "validate_inline_schemas",
     "TypeSchemaResult",
     "validate_type_schemas",
     "TypeDeclarationResult",
@@ -232,6 +235,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"InlineSchemaResult", "validate_inline_schemas"}:
+        from kora.ir import inline_schemas
+
+        return getattr(inline_schemas, name)
     if name in {"TypeSchemaResult", "validate_type_schemas"}:
         from kora.ir import type_schemas
 
