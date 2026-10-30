@@ -93,20 +93,27 @@ def test_graph_link_validation_releases_owned_references(invalid: bool) -> None:
         {"call": node("subgraph", config={"body": "body"})},
         {"body": {"nodes": {"timer": node(depends_on=["absent"] if invalid else [])}}},
     )
-    root_references = [weakref.ref(document), weakref.ref(document.graph)]
+    document_reference = weakref.ref(document)
+    graph_reference = weakref.ref(document.graph)
     node_references = [weakref.ref(value) for value in document.graph.nodes.values()]
     assert isinstance(document.graph.subgraphs, dict)
-    for body in document.graph.subgraphs.values():
-        root_references.append(weakref.ref(body))
-        node_references.extend(weakref.ref(value) for value in body.nodes.values())
-    del body
+    body_references = [weakref.ref(body) for body in document.graph.subgraphs.values()]
+    node_references.extend(
+        weakref.ref(value)
+        for body in document.graph.subgraphs.values()
+        for value in body.nodes.values()
+    )
 
     result = validate_graph_links(document)
     diagnostic_references = [weakref.ref(item) for item in result.diagnostics.errors]
     del document
     gc.collect()
-    graph_released = all(
-        reference() is None for reference in [*root_references, *node_references]
+    graph_released = (
+        document_reference() is None
+        and graph_reference() is None
+        and all(
+            reference() is None for reference in [*body_references, *node_references]
+        )
     )
     del result
     gc.collect()

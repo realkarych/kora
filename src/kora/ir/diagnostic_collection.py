@@ -26,18 +26,21 @@ def increment_count(value: int) -> int:
     return value + 1
 
 
+def copy_source(value: object) -> SourceLocation | None:
+    if value is None:
+        return None
+    if not isinstance(value, SourceLocation):
+        raise ValueError("Diagnostic fields are invalid.")
+    return SourceLocation(file=value.file, line=value.line)
+
+
 def copy_diagnostic(value: Diagnostic) -> Diagnostic:
     try:
-        location = value.location
-        if location is not None and not isinstance(location, SourceLocation):
-            raise ValueError("Diagnostic fields are invalid.")
         return Diagnostic(
             code=value.code,
             message=value.message,
             path=value.path,
-            location=None
-            if location is None
-            else SourceLocation(file=location.file, line=location.line),
+            location=copy_source(value.location),
             offset=value.offset,
             node=value.node,
             hint=value.hint,
