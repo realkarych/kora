@@ -500,7 +500,9 @@ def native_refusals() -> list[object]:
     ]
 
 
-@pytest.mark.parametrize("candidate", native_refusals())
+@pytest.mark.parametrize(
+    "candidate", native_refusals(), ids=lambda candidate: type(candidate).__name__
+)
 def test_structured_output_provider_matches_native_refusals(
     kora_capture: Capture, candidate: object
 ) -> None:
@@ -528,7 +530,9 @@ def test_structured_output_provider_bounds_native_input(
     assert result == [refused.value.violation]
 
 
-@pytest.mark.parametrize("candidate", native_refusals())
+@pytest.mark.parametrize(
+    "candidate", native_refusals(), ids=lambda candidate: type(candidate).__name__
+)
 def test_structured_output_provider_refuses_invalid_extraction(
     kora_capture: Capture, candidate: object
 ) -> None:
