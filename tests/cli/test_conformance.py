@@ -4,6 +4,7 @@ import os
 import signal
 import socket
 import stat
+import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -99,6 +100,32 @@ def test_installed_static_token_authentication_conformance(
         b"private-installed-authentication-owner",
         database_settings.url.render_as_string(hide_password=False).encode(),
     )
+
+
+def test_installed_injected_authentication_suite_needs_no_asyncio_pytest_plugin(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    process = subprocess.run(
+        [
+            str(installed_conformance.python),
+            "-I",
+            "-c",
+            "import importlib.util, pytest; "
+            "assert importlib.util.find_spec('pytest_asyncio') is None; "
+            "raise SystemExit(pytest.main(['--pyargs', "
+            "'kora_tooling_fixture.fixtures_injected_authentication', "
+            "'-q', '-c', '/dev/null', '--noconftest', '-p', 'no:cacheprovider']))",
+        ],
+        cwd=tmp_path,
+        env={"PATH": os.defpath, "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"},
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert process.returncode == 0, (process.stdout, process.stderr)
+    assert b"10 passed" in process.stdout
+    assert b"private-" not in process.stdout + process.stderr
 
 
 @pytest.mark.parametrize("valid", [True, False])

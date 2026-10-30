@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Awaitable, Callable, Generator
 from dataclasses import dataclass, replace
 
@@ -29,6 +30,7 @@ __all__ = [
     "kora_capture",
     "kora_exercise",
     "kora_provider",
+    "kora_authentication_runner",
     "test_authentication_preserves_principals",
     "test_authentication_refusals_are_uniform",
     "test_authentication_revalidates_current_authority",
@@ -67,6 +69,12 @@ class AuthenticationConformanceInputs:
 
 def authentication_capture_settings() -> LoggingSettings:
     return LoggingSettings(level=Level.DEBUG)
+
+
+@pytest.fixture
+def kora_authentication_runner() -> Generator[asyncio.Runner]:
+    with asyncio.Runner() as runner:
+        yield runner
 
 
 @pytest.fixture
@@ -164,12 +172,16 @@ async def check_authentication_revocation_is_permanent(
     inputs: AuthenticationConformanceInputs,
     ctx: ProtocolContext,
 ) -> None:
+    check(bool(inputs.rejected), "a baseline rejection is supplied")
+    baseline = await expect_refusal(provider, inputs.rejected[0], ctx)
     await expect_principal(provider, inputs.revocable, ctx)
 
     await provider.revoke(inputs.revocable.principal.token_id, ctx)
     await provider.revoke(inputs.revocable.principal.token_id, ctx)
 
-    await expect_refusal(provider, inputs.revocable.request, ctx)
+    revoked = await expect_refusal(provider, inputs.revocable.request, ctx)
+
+    check(revoked == baseline, "invalidity categories are indistinguishable")
 
 
 async def check_authentication_unavailability_grants_no_authority(
@@ -225,94 +237,110 @@ def kora_exercise(
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_failure_is_a_bounded_protocol_error(
+def test_failure_is_a_bounded_protocol_error(
+    kora_authentication_runner: asyncio.Runner,
     kora_exercise: Callable[[ProtocolContext, str], Awaitable[object]],
     kora_capture: Capture,
 ) -> None:
-    await check_failure_is_a_bounded_protocol_error(
-        kora_exercise, context_for(kora_capture), MARKER
+    kora_authentication_runner.run(
+        check_failure_is_a_bounded_protocol_error(
+            kora_exercise, context_for(kora_capture), MARKER
+        )
     )
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_provider_logs_through_its_context(
+def test_provider_logs_through_its_context(
+    kora_authentication_runner: asyncio.Runner,
     kora_exercise: Callable[[ProtocolContext, str], Awaitable[object]],
     kora_capture: Capture,
 ) -> None:
-    await check_provider_logs_through_its_context(
-        kora_exercise, kora_capture, context_for(kora_capture), MARKER
+    kora_authentication_runner.run(
+        check_provider_logs_through_its_context(
+            kora_exercise, kora_capture, context_for(kora_capture), MARKER
+        )
     )
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_authentication_unexpected_failure_grants_no_authority(
+def test_authentication_unexpected_failure_grants_no_authority(
+    kora_authentication_runner: asyncio.Runner,
     kora_provider: Authenticator,
     kora_authentication_inputs: AuthenticationConformanceInputs,
     kora_capture: Capture,
 ) -> None:
-    await check_authentication_unexpected_failure_grants_no_authority(
-        kora_provider, kora_authentication_inputs, context_for(kora_capture)
+    kora_authentication_runner.run(
+        check_authentication_unexpected_failure_grants_no_authority(
+            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+        )
     )
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_authentication_preserves_principals(
+def test_authentication_preserves_principals(
+    kora_authentication_runner: asyncio.Runner,
     kora_provider: Authenticator,
     kora_authentication_inputs: AuthenticationConformanceInputs,
     kora_capture: Capture,
 ) -> None:
-    await check_authentication_preserves_principals(
-        kora_provider, kora_authentication_inputs, context_for(kora_capture)
+    kora_authentication_runner.run(
+        check_authentication_preserves_principals(
+            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+        )
     )
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_authentication_refusals_are_uniform(
+def test_authentication_refusals_are_uniform(
+    kora_authentication_runner: asyncio.Runner,
     kora_provider: Authenticator,
     kora_authentication_inputs: AuthenticationConformanceInputs,
     kora_capture: Capture,
 ) -> None:
-    await check_authentication_refusals_are_uniform(
-        kora_provider, kora_authentication_inputs, context_for(kora_capture)
+    kora_authentication_runner.run(
+        check_authentication_refusals_are_uniform(
+            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+        )
     )
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_authentication_revalidates_current_authority(
+def test_authentication_revalidates_current_authority(
+    kora_authentication_runner: asyncio.Runner,
     kora_provider: Authenticator,
     kora_authentication_inputs: AuthenticationConformanceInputs,
     kora_capture: Capture,
 ) -> None:
-    await check_authentication_revalidates_current_authority(
-        kora_provider, kora_authentication_inputs, context_for(kora_capture)
+    kora_authentication_runner.run(
+        check_authentication_revalidates_current_authority(
+            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+        )
     )
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_authentication_revocation_is_permanent(
+def test_authentication_revocation_is_permanent(
+    kora_authentication_runner: asyncio.Runner,
     kora_provider: Authenticator,
     kora_authentication_inputs: AuthenticationConformanceInputs,
     kora_capture: Capture,
 ) -> None:
-    await check_authentication_revocation_is_permanent(
-        kora_provider, kora_authentication_inputs, context_for(kora_capture)
+    kora_authentication_runner.run(
+        check_authentication_revocation_is_permanent(
+            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+        )
     )
 
 
 @pytest.mark.kora_conformance
-@pytest.mark.asyncio
-async def test_authentication_unavailability_grants_no_authority(
+def test_authentication_unavailability_grants_no_authority(
+    kora_authentication_runner: asyncio.Runner,
     kora_provider: Authenticator,
     kora_authentication_inputs: AuthenticationConformanceInputs,
     kora_capture: Capture,
 ) -> None:
-    await check_authentication_unavailability_grants_no_authority(
-        kora_provider, kora_authentication_inputs, context_for(kora_capture)
+    kora_authentication_runner.run(
+        check_authentication_unavailability_grants_no_authority(
+            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+        )
     )

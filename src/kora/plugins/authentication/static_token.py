@@ -70,6 +70,7 @@ def database_errors(database: Database) -> tuple[type[Exception], ...]:
         SQLAlchemyError,
         OSError,
         DatabaseClosedError,
+        ValueError,
     )
     if database.dialect is Dialect.POSTGRESQL:
         adapter = cast("PostgresAdapter", database.writer_engine.dialect.loaded_dbapi)

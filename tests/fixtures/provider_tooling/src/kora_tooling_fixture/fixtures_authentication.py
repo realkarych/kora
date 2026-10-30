@@ -76,6 +76,9 @@ class Adapter:
             "sqlite+aiosqlite:///" + str(Path.cwd() / "authentication.db"),
         )
         assert isinstance(url, str)
+        return await self.open(url)
+
+    async def open(self, url: str) -> PreparedConformance:
         settings = parse_database_url(url)
         await upgrade_database(settings)
         database = Database(settings)

@@ -1,4 +1,6 @@
+import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,47 @@ from tests.plugins.authentication.support import seed_case
 from tests.support.observability import run_python
 
 __all__ = ["kora_capture"]
+
+
+@pytest.mark.asyncio
+async def test_authentication_diagnostics_preserve_concurrent_authorized_contexts(
+    database: Database, kora_capture: Capture
+) -> None:
+    cases = [
+        await seed_case(database, "first-context"),
+        await seed_case(database, "second-context"),
+    ]
+    provider = StaticTokenAuthenticator({}, database)
+    context = context_for(kora_capture)
+    contexts = [
+        replace(
+            context,
+            namespace_id=case.principal.namespaces[0].namespace_id,
+            logger=context.logger.bind(
+                namespace_id=case.principal.namespaces[0].namespace_id,
+                request_id="request-" + str(index),
+            ),
+        )
+        for index, case in enumerate(cases)
+    ]
+
+    results = await asyncio.gather(
+        *(
+            provider.authenticate(case.request, scoped)
+            for case, scoped in zip(cases, contexts, strict=True)
+        )
+    )
+    records = [
+        record
+        for record in kora_capture.finish()
+        if record["event"] == "authentication.static_token.outcome"
+    ]
+
+    assert results == [case.principal for case in cases]
+    assert {(record["request_id"], record["namespace_id"]) for record in records} == {
+        ("request-" + str(index), case.principal.namespaces[0].namespace_id)
+        for index, case in enumerate(cases)
+    }
 
 
 @pytest.mark.asyncio

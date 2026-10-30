@@ -1,8 +1,11 @@
+import asyncio
+from collections.abc import Iterator
+
 import pytest
-import pytest_asyncio
 
 from kora.conformance.authentication import (
     AuthenticationConformanceInputs,
+    kora_authentication_runner,
     kora_capture,
     kora_exercise,
     kora_provider,
@@ -17,7 +20,7 @@ from kora.conformance.authentication import (
     test_failure_is_a_bounded_protocol_error,
     test_provider_logs_through_its_context,
 )
-from kora.db.connection import Database
+from kora.db.connection import Database, DatabaseSettings
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from tests.plugins.authentication.support import fixture_inputs
 
@@ -25,6 +28,7 @@ __all__ = [
     "kora_capture",
     "kora_exercise",
     "kora_provider",
+    "kora_authentication_runner",
     "test_authentication_preserves_principals",
     "test_authentication_refusals_are_uniform",
     "test_authentication_revalidates_current_authority",
@@ -39,12 +43,25 @@ __all__ = [
 
 
 @pytest.fixture
-def kora_authentication_provider(database: Database) -> StaticTokenAuthenticator:
-    return StaticTokenAuthenticator({}, database)
+def kora_authentication_database(
+    database_settings: DatabaseSettings, kora_authentication_runner: asyncio.Runner
+) -> Iterator[Database]:
+    database = Database(database_settings)
+    try:
+        yield database
+    finally:
+        kora_authentication_runner.run(database.close())
 
 
-@pytest_asyncio.fixture
-async def kora_authentication_inputs(
-    database: Database,
+@pytest.fixture
+def kora_authentication_provider(
+    kora_authentication_database: Database,
+) -> StaticTokenAuthenticator:
+    return StaticTokenAuthenticator({}, kora_authentication_database)
+
+
+@pytest.fixture
+def kora_authentication_inputs(
+    kora_authentication_database: Database, kora_authentication_runner: asyncio.Runner
 ) -> AuthenticationConformanceInputs:
-    return await fixture_inputs(database)
+    return kora_authentication_runner.run(fixture_inputs(kora_authentication_database))

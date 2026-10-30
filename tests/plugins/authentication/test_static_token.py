@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import insert, select, text, update
+from sqlalchemy.exc import DBAPIError
 
 from kora.conformance.authentication import kora_capture
 from kora.conformance.capture import Capture
@@ -260,6 +261,61 @@ async def test_invalid_authority_and_schema_failure_are_safe_internal_errors(
     assert ledger.outstanding == 0
     assert "private-invalid-authority-marker" not in str(raised.value)
     assert "private-invalid-authority-marker" not in json.dumps(kora_capture.finish())
+
+
+@pytest.mark.asyncio
+async def test_raw_stored_json_and_timestamp_corruption_never_escape_authentication(
+    database: Database, kora_capture: Capture
+) -> None:
+    case = await seed_case(database, "raw-corruption")
+    provider = StaticTokenAuthenticator({}, database)
+    context = context_for(kora_capture)
+    ledger = ConnectionLedger(database)
+    marker = "private-raw-stored-content-marker"
+    statement = "UPDATE api_token SET namespaces = :value WHERE id = :id"
+    if database.dialect is Dialect.POSTGRESQL:
+        statement = (
+            "UPDATE api_token SET namespaces = to_jsonb(CAST(:value AS TEXT)) "
+            "WHERE id = :id"
+        )
+    async with database.transaction() as connection:
+        await connection.execute(
+            text(statement), {"value": marker, "id": case.principal.token_id}
+        )
+
+    with pytest.raises(KoraProtocolError) as json_refusal:
+        await provider.authenticate(case.request, context)
+
+    assert_error(json_refusal.value, "authentication_failed")
+    async with database.transaction() as connection:
+        await connection.execute(
+            update(api_token)
+            .where(api_token.c.id == case.principal.token_id)
+            .values(namespaces=case.principal.model_dump(mode="json")["namespaces"])
+        )
+    timestamp_statement = text(
+        "UPDATE api_token SET expires_at = :value WHERE id = :id"
+    )
+    if database.dialect is Dialect.POSTGRESQL:
+        with pytest.raises(DBAPIError):
+            async with database.transaction() as connection:
+                await connection.execute(
+                    timestamp_statement,
+                    {"value": marker, "id": case.principal.token_id},
+                )
+        assert await provider.authenticate(case.request, context) == case.principal
+    else:
+        async with database.transaction() as connection:
+            await connection.execute(
+                timestamp_statement, {"value": marker, "id": case.principal.token_id}
+            )
+        with pytest.raises(KoraProtocolError) as timestamp_refusal:
+            await provider.authenticate(case.request, context)
+        assert_error(timestamp_refusal.value, "authentication_failed")
+
+    assert ledger.outstanding == 0
+    assert marker not in str(json_refusal.value)
+    assert marker not in json.dumps(kora_capture.finish())
 
 
 @pytest.mark.asyncio
