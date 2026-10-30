@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         DiagnosticCollector,
     )
     from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
+    from kora.ir.edge_types import EdgeTypeResult, validate_edge_types
     from kora.ir.export import export_ir, render_ir_json
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
@@ -126,6 +127,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "EdgeTypeResult",
+    "validate_edge_types",
     "OutputSchemaResult",
     "validate_output_schemas",
     "InlineSchemaResult",
@@ -238,6 +241,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"EdgeTypeResult", "validate_edge_types"}:
+        from kora.ir import edge_types
+
+        return getattr(edge_types, name)
     if name in {"OutputSchemaResult", "validate_output_schemas"}:
         from kora.ir import output_schemas
 
