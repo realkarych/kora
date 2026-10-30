@@ -1,6 +1,7 @@
 import io
 import os
 import selectors
+import shutil
 import sys
 import tarfile
 import time
@@ -285,6 +286,10 @@ def test_relative_output_produces_absolute_child_paths(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("value", ["PRIVATE_AUDIT_MARKER", "a" * 40])
 def test_entrypoint_failures_are_content_free(tmp_path: Path, value: str) -> None:
+    uv = shutil.which("uv")
+    assert uv is not None
+    variables = environment(ROOT)
+    variables["PATH"] = str(Path(uv).parent) + os.pathsep + os.defpath
     arguments = [
         sys.executable,
         "-B",
@@ -296,11 +301,50 @@ def test_entrypoint_failures_are_content_free(tmp_path: Path, value: str) -> Non
         str(tmp_path),
     ]
 
-    result = execute(arguments, ROOT, time.monotonic() + 10, Stop())
+    result = execute(
+        arguments, ROOT, time.monotonic() + 10, Stop(), variables=variables
+    )
 
     assert result.code == 1
     assert b'"event":"mutation.audit.failed"' in result.output
     assert value.encode() not in result.output
+    assert b"Traceback" not in result.output
+
+
+def test_publication_failure_is_content_free(tmp_path: Path) -> None:
+    uv = shutil.which("uv")
+    git = shutil.which("git")
+    assert uv is not None
+    assert git is not None
+    variables = environment(ROOT)
+    variables["PATH"] = str(Path(uv).parent) + os.pathsep + os.defpath
+    source = (
+        execute(
+            [git, "rev-parse", "origin/master"], ROOT, time.monotonic() + 10, Stop()
+        )
+        .output.decode()
+        .strip()
+    )
+    blocked = tmp_path / "PRIVATE_REPORT_MARKER"
+    blocked.write_text("occupied")
+    arguments = [
+        sys.executable,
+        "-B",
+        "-m",
+        "scripts.ci.mutation_audit",
+        "--source-revision",
+        source,
+        "--output",
+        str(blocked),
+    ]
+
+    result = execute(
+        arguments, ROOT, time.monotonic() + 10, Stop(), variables=variables
+    )
+
+    assert result.code == 1
+    assert b'"event":"mutation.audit.failed"' in result.output
+    assert b"PRIVATE_REPORT_MARKER" not in result.output
     assert b"Traceback" not in result.output
 
 
