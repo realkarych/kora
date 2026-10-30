@@ -10,14 +10,15 @@ import time
 import tracemalloc
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
+from math import isfinite
 from pathlib import Path
 
 import pytest
 
-from kora.conformance.capture import Capture
+from kora.conformance.capture import Capture, CaptureOverflow, CaptureTimeout
 from kora.conformance.common import kora_capture
 from kora.ir.json import parse_json_object
-from kora.plugins.runtime.local.runtime import LocalRuntime
+from kora.plugins.runtime.local.runtime import LocalRuntime, SweepOutcome
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.runner.registry import Registry, bind_workspace
@@ -369,26 +370,77 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
             retention_root, ctx, base / "retention", runner=LINGERING
         )
         trend: list[int] = []
+        completed_retention_cycles = 0
         try:
-            for index in range(WARM_UP):
-                await retired_cycle(retention, f"warm-{index}", ctx)
-            gc.collect()
-            tracemalloc.start()
-            snapshot = tracemalloc.take_snapshot()
-            first = snapshot
-            for index in range(RETENTION_CYCLES):
-                await retired_cycle(retention, f"cycle-{index}", ctx)
-                if (index + 1) % RETENTION_INTERVAL == 0:
-                    gc.collect()
-                    taken = tracemalloc.take_snapshot()
-                    trend.append(component_bytes(taken, snapshot))
-                    snapshot = taken
-            total = component_bytes(snapshot, first)
-            tracemalloc.stop()
-            lingering = len(runner_pids(retention_root))
-        finally:
-            await retention.close()
-            reap_runners(retention_root)
+            try:
+                for index in range(WARM_UP):
+                    await retired_cycle(retention, f"warm-{index}", ctx)
+                gc.collect()
+                tracemalloc.start()
+                snapshot = tracemalloc.take_snapshot()
+                first = snapshot
+                for index in range(RETENTION_CYCLES):
+                    await retired_cycle(retention, f"cycle-{index}", ctx)
+                    completed_retention_cycles += 1
+                    if (index + 1) % RETENTION_INTERVAL == 0:
+                        gc.collect()
+                        taken = tracemalloc.take_snapshot()
+                        trend.append(component_bytes(taken, snapshot))
+                        snapshot = taken
+                total = component_bytes(snapshot, first)
+                tracemalloc.stop()
+                lingering = len(runner_pids(retention_root))
+            finally:
+                await retention.close()
+                reap_runners(retention_root)
+        except KoraProtocolError as error:
+            if error.code != "runner_stop_unconfirmed":
+                raise
+            try:
+                records = kora_capture.finish()
+            except (CaptureTimeout, CaptureOverflow, json.JSONDecodeError) as failure:
+                error.add_note("last observed runtime.local.retire: null (unverified)")
+                raise error from failure
+            observed = next(
+                (
+                    record
+                    for record in reversed(records)
+                    if record.get("event") == "runtime.local.retire"
+                ),
+                dict[str, object](),
+            )
+            outcome = observed.get("outcome")
+            matched = observed.get("matched")
+            killed = observed.get("killed")
+            waited_ms = observed.get("waited_ms")
+            last_observed: dict[str, object] | None = None
+            if (
+                isinstance(outcome, str)
+                and outcome in {item.value for item in SweepOutcome}
+                and type(matched) is int
+                and 0 <= matched <= 65536
+                and type(killed) is int
+                and 0 <= killed <= matched
+                and type(waited_ms) is float
+                and isfinite(waited_ms)
+                and waited_ms >= 0
+            ):
+                last_observed = {
+                    "outcome": outcome,
+                    "matched": matched,
+                    "killed": killed,
+                    "waited_ms": waited_ms,
+                }
+            error.add_note(
+                json.dumps(
+                    {
+                        "completed_retention_cycles": completed_retention_cycles,
+                        "last_observed_runtime.local.retire": last_observed,
+                    },
+                    sort_keys=True,
+                )
+            )
+            raise
 
     report = {
         "workload": "local-runtime-spawn",
