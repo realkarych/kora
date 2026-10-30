@@ -102,6 +102,10 @@ if TYPE_CHECKING:
         structured_output_digest,
         summarize_structured_output,
     )
+    from kora.ir.subgraph_interfaces import (
+        SubgraphInterfaceResult,
+        validate_subgraph_interfaces,
+    )
     from kora.ir.topology import (
         AgentNode,
         BranchNode,
@@ -133,6 +137,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "SubgraphInterfaceResult",
+    "validate_subgraph_interfaces",
     "ExportTypeResult",
     "validate_export_types",
     "InputPathResult",
@@ -253,6 +259,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"SubgraphInterfaceResult", "validate_subgraph_interfaces"}:
+        from kora.ir import subgraph_interfaces
+
+        return getattr(subgraph_interfaces, name)
     if name in {"ExportTypeResult", "validate_export_types"}:
         from kora.ir import export_types
 
