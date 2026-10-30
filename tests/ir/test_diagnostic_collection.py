@@ -265,6 +265,32 @@ def test_collection_refuses_forged_diagnostics_without_retained_exception(
     assert collector.finish() == DiagnosticCollection((), (), 0, 0)
 
 
+@pytest.mark.parametrize(
+    "forged",
+    [
+        Diagnostic(code="A", message="").model_copy(update={"location": "private"}),
+        Diagnostic(code="A", message="").model_copy(
+            update={"location": {"file": "private", "line": 1}}
+        ),
+        Diagnostic(code="A", message="").model_copy(
+            update={"location": SourceLocation.model_construct(file="private")}
+        ),
+        Diagnostic.model_construct(code="A"),
+    ],
+)
+def test_collection_refuses_malformed_metadata_without_exception_chain(
+    forged: Diagnostic,
+) -> None:
+    collector = DiagnosticCollector()
+
+    with pytest.raises(ValueError, match="^Diagnostic fields are invalid.$") as refused:
+        collector.add(forged)
+
+    assert refused.value.__cause__ is None
+    assert refused.value.__context__ is None
+    assert collector.finish() == DiagnosticCollection((), (), 0, 0)
+
+
 def test_collection_copies_nested_metadata_and_preserves_omitted_error_failure() -> (
     None
 ):

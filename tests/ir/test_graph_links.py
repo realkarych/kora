@@ -334,6 +334,29 @@ def test_graph_links_report_body_export_and_fanout_over_faults() -> None:
     }
 
 
+def test_missing_body_does_not_hide_independent_fanout_name_faults() -> None:
+    graph = model(
+        {
+            "call": node(
+                "fan_out",
+                config={"body": "absent", "over": "absent"},
+                outputs={
+                    "missing": {"type": "List[StructuredOutput]"},
+                    "unresolved": {"type": "List[StructuredOutput]", "collect": "x"},
+                },
+            )
+        }
+    )
+
+    result = validate_graph_links(graph)
+
+    assert findings(result) == {
+        ("IR002", ("graph", "nodes", "call", "config", "body")),
+        ("IR004", ("graph", "nodes", "call", "config", "over")),
+        ("IR004", ("graph", "nodes", "call", "outputs", "missing", "collect")),
+    }
+
+
 def branch(target: str, **fields: object) -> dict[str, object]:
     return node(
         "branch",

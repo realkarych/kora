@@ -29,6 +29,8 @@ def increment_count(value: int) -> int:
 def copy_diagnostic(value: Diagnostic) -> Diagnostic:
     try:
         location = value.location
+        if location is not None and not isinstance(location, SourceLocation):
+            raise ValueError("Diagnostic fields are invalid.")
         return Diagnostic(
             code=value.code,
             message=value.message,
@@ -40,7 +42,7 @@ def copy_diagnostic(value: Diagnostic) -> Diagnostic:
             node=value.node,
             hint=value.hint,
         )
-    except ValidationError:
+    except (AttributeError, ValidationError):
         pass
     raise ValueError("Diagnostic fields are invalid.")
 

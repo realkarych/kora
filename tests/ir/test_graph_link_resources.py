@@ -5,6 +5,8 @@ import tracemalloc
 import weakref
 from collections.abc import Callable
 
+import pytest
+
 from kora.ir import GraphDocument, validate_graph_links
 from tests.ir.graph_link_cases import chain, definition_chain, dense_faults, model, node
 from tests.measurements.harness import Sample, current_rss_bytes, new_report
@@ -85,18 +87,30 @@ def test_graph_link_resource_observations(
     record_testsuite_property("graph_link_resources", report.to_json())
 
 
-def test_graph_link_validation_releases_owned_references() -> None:
-    document = dense_faults(1)
-    document_reference = weakref.ref(document)
+@pytest.mark.parametrize("invalid", [False, True])
+def test_graph_link_validation_releases_owned_references(invalid: bool) -> None:
+    document = model(
+        {"call": node("subgraph", config={"body": "body"})},
+        {"body": {"nodes": {"timer": node(depends_on=["absent"] if invalid else [])}}},
+    )
+    root_references = [weakref.ref(document), weakref.ref(document.graph)]
+    node_references = [weakref.ref(value) for value in document.graph.nodes.values()]
+    assert isinstance(document.graph.subgraphs, dict)
+    for body in document.graph.subgraphs.values():
+        root_references.append(weakref.ref(body))
+        node_references.extend(weakref.ref(value) for value in body.nodes.values())
+    del body
 
     result = validate_graph_links(document)
     diagnostic_references = [weakref.ref(item) for item in result.diagnostics.errors]
     del document
     gc.collect()
-    document_released = document_reference() is None
+    graph_released = all(
+        reference() is None for reference in [*root_references, *node_references]
+    )
     del result
     gc.collect()
 
-    assert document_released
-    assert diagnostic_references
+    assert graph_released
+    assert bool(diagnostic_references) is invalid
     assert all(reference() is None for reference in diagnostic_references)

@@ -175,6 +175,14 @@ class Scope:
                     path + ("config", "over"),
                     name,
                 )
+            for output_name, output in outputs(node).items():
+                if output.collect is MISSING:
+                    self.error(
+                        "IR004",
+                        "The collected body output is not declared.",
+                        path + ("outputs", output_name, "collect"),
+                        name,
+                    )
         if body is None:
             self.error(
                 "IR002",
@@ -187,7 +195,7 @@ class Scope:
         declared = {} if body.outputs is MISSING else body.outputs
         for output_name, output in outputs(node).items():
             if isinstance(node, FanOutNode):
-                if output.collect is MISSING or output.collect not in declared:
+                if output.collect is not MISSING and output.collect not in declared:
                     self.error(
                         "IR004",
                         "The collected body output is not declared.",
