@@ -19,6 +19,10 @@ if TYPE_CHECKING:
         summarize_agent_session,
         verify_agent_session_transcript,
     )
+    from kora.ir.approval_defaults import (
+        ApprovalDefaultResult,
+        validate_approval_defaults,
+    )
     from kora.ir.command_result import (
         CommandResult,
         CommandResultValidationError,
@@ -145,6 +149,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "ApprovalDefaultResult",
+    "validate_approval_defaults",
     "StructuredSchemaPreparationInput",
     "StructuredSchemaPreparationAccounting",
     "StructuredSchemaPreparationRefusal",
@@ -274,6 +280,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"ApprovalDefaultResult", "validate_approval_defaults"}:
+        from kora.ir import approval_defaults
+
+        return getattr(approval_defaults, name)
     if name in {
         "StructuredSchemaPreparationInput",
         "StructuredSchemaPreparationAccounting",
