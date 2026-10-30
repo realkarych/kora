@@ -35,17 +35,29 @@ COMPLETED: EventSpec = CATALOG.register(
 )
 
 
-def base_type(value: str) -> str | None:
+@dataclass(frozen=True)
+class TypeShape:
+    base: str
+    list_depth: int
+
+
+def parse_type_shape(value: str) -> TypeShape | None:
     start = 0
     depth = 0
     while value.startswith("List[", start):
         start += 5
         depth += 1
     end = len(value)
+    unmatched = depth
     while end > start and value[end - 1] == "]":
         end -= 1
-        depth -= 1
-    return value[start:end] if depth == 0 else None
+        unmatched -= 1
+    return TypeShape(value[start:end], depth) if unmatched == 0 else None
+
+
+def base_type(value: str) -> str | None:
+    shape = parse_type_shape(value)
+    return None if shape is None else shape.base
 
 
 def contract_path(name: str, field: str | None = None) -> Path:

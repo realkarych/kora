@@ -19,14 +19,26 @@ def edge_nodes(
     }
 
 
-def edges(count: int, invalid: bool = False) -> GraphDocument:
+def nested_type(base: str, depth: int) -> str:
+    return "List[" * depth + base + "]" * depth
+
+
+def edges(count: int, invalid: bool = False, *, list_depth: int = 0) -> GraphDocument:
     return document_for(
         contracts={"example/A": custom(), "example/B": custom()},
         nodes={
-            "producer": node(outputs={"value": {"type": "example/A"}}),
+            "producer": node(
+                outputs={"value": {"type": nested_type("example/A", list_depth)}}
+            ),
             **{
                 f"n{index}": node(
-                    inputs={"value": reference("example/B" if invalid else "example/A")}
+                    inputs={
+                        "value": reference(
+                            nested_type(
+                                "example/B" if invalid else "example/A", list_depth
+                            )
+                        )
+                    }
                 )
                 for index in range(count)
             },
@@ -72,12 +84,19 @@ def siblings(count: int) -> GraphDocument:
     )
 
 
-def shared_body(count: int) -> GraphDocument:
+def shared_body(count: int, *, list_depth: int = 0) -> GraphDocument:
     return document_for(
         contracts={"example/A": custom()},
         nodes={
             f"n{index}": node("subgraph", config={"body": "body"})
             for index in range(count)
         },
-        bodies={"body": {"nodes": edge_nodes("example/A", "example/A")}},
+        bodies={
+            "body": {
+                "nodes": edge_nodes(
+                    nested_type("example/A", list_depth),
+                    nested_type("example/A", list_depth),
+                )
+            }
+        },
     )

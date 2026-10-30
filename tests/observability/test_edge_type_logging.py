@@ -2,7 +2,7 @@ import pytest
 
 from kora.ir import validate_edge_types
 from kora.observability import Level, LoggingSettings
-from tests.ir.edge_type_cases import edge_nodes, edges
+from tests.ir.edge_type_cases import edge_nodes, edges, nested_type
 from tests.ir.inline_schema_cases import document_for
 from tests.ir.type_declaration_cases import custom
 from tests.observability.conftest import (
@@ -15,8 +15,13 @@ from tests.observability.conftest import (
 
 
 @pytest.mark.parametrize("invalid", [False, True])
+@pytest.mark.parametrize("depth", [0, 2])
 def test_edge_type_logging_is_content_free(
-    configure: Configure, pipe: Pipe, capsys: pytest.CaptureFixture[str], invalid: bool
+    configure: Configure,
+    pipe: Pipe,
+    capsys: pytest.CaptureFixture[str],
+    invalid: bool,
+    depth: int,
 ) -> None:
     marker = "private_type_content"
     first = marker + "/A"
@@ -27,7 +32,9 @@ def test_edge_type_logging_is_content_free(
         "description": marker,
         "$ref": "https://example.invalid/" + marker,
     }
-    nodes = edge_nodes(first, second if invalid else first)
+    nodes = edge_nodes(
+        nested_type(first, depth), nested_type(second if invalid else first, depth)
+    )
     nodes["consumer"]["source"] = {"file": marker + ".py", "line": 1}
     document = document_for(contracts={first: contract, second: custom()}, nodes=nodes)
     diagnostics = configured_with_reader(
@@ -68,10 +75,11 @@ def test_edge_type_logging_is_content_free(
 
 
 @pytest.mark.parametrize("broken", [False, True])
+@pytest.mark.parametrize("depth", [0, 2])
 def test_edge_type_result_survives_unavailable_sink(
-    configure: Configure, pipe: Pipe, broken: bool
+    configure: Configure, pipe: Pipe, broken: bool, depth: int
 ) -> None:
-    document = edges(1, invalid=True)
+    document = edges(1, invalid=True, list_depth=depth)
     expected = validate_edge_types(document)
     settings = LoggingSettings(queue_records=64, queue_bytes=65_536)
     diagnostics = configure(settings, pipe.write_end)

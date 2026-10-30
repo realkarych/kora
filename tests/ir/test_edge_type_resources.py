@@ -12,6 +12,7 @@ from kora.ir import validate_edge_types
 from kora.ir.contracts import CustomTypeContract
 from kora.ir.edge_types import EdgeTypeChecks
 from kora.ir.type_ancestry import TypeAncestry
+from kora.ir.type_declarations import TypeShape
 from tests.ir.edge_type_cases import (
     ancestry_edges,
     edge_nodes,
@@ -36,6 +37,9 @@ def test_edge_type_resource_observations(
         "unknown_ancestry_1000": ancestry_edges(1000, 1000, invalid=True),
         "shared_body_1000": shared_body(1000),
         "faults_3000": edges(3000, invalid=True),
+        "lists_1000": edges(1000, list_depth=1),
+        "deep_lists_100": edges(100, list_depth=2000),
+        "list_faults_3000": edges(3000, invalid=True, list_depth=2),
     }
     expected_counts = {
         "edges_1": (2, 0, 1, 2, 2, 1, 0, 0),
@@ -46,6 +50,9 @@ def test_edge_type_resource_observations(
         "unknown_ancestry_1000": (1001, 0, 1000, 1000, 0, 0, 1000, 0),
         "shared_body_1000": (1002, 1, 1, 1, 1, 1, 0, 0),
         "faults_3000": (3001, 0, 3000, 2, 2, 3000, 0, 0),
+        "lists_1000": (1001, 0, 1000, 2, 2, 1000, 0, 0),
+        "deep_lists_100": (101, 0, 100, 2, 2, 100, 0, 0),
+        "list_faults_3000": (3001, 0, 3000, 2, 2, 3000, 0, 0),
     }
     report = new_report()
     if not report.revision:
@@ -103,9 +110,11 @@ def test_edge_type_resource_observations(
                     ),
                 )
             )
-            assert result.edge_types_valid is (name != "faults_3000")
+            assert result.edge_types_valid is (
+                name not in {"faults_3000", "list_faults_3000"}
+            )
             assert counts == expected_counts[name]
-            if name == "faults_3000":
+            if name in {"faults_3000", "list_faults_3000"}:
                 assert len(result.diagnostics.errors) == 1000
                 assert result.diagnostics.errors_omitted == 2000
             del result
@@ -125,13 +134,27 @@ def test_edge_type_resource_observations(
     finally:
         tracemalloc.stop()
 
-    assert len(report.samples) == 24
+    assert len(report.samples) == 33
     record_testsuite_property("edge_type_resources", report.to_json())
 
 
-@pytest.mark.parametrize("invalid", [False, True])
-def test_edge_type_validation_releases_inputs_index_and_results(invalid: bool) -> None:
-    nodes = edge_nodes("example/A", "example/B" if invalid else "example/A")
+@pytest.mark.parametrize(
+    ("produced", "expected", "invalid"),
+    [
+        ("example/A", "example/A", False),
+        ("example/A", "example/B", True),
+        ("List[example/A]", "List[example/A]", False),
+        ("List[example/A]", "List[example/B]", True),
+        ("List[example/Missing]", "example/A", False),
+        ("List[example/A]]", "List[example/A]", False),
+    ],
+)
+def test_edge_type_validation_releases_inputs_index_and_results(
+    produced: str,
+    expected: str,
+    invalid: bool,
+) -> None:
+    nodes = edge_nodes(produced, expected)
     nodes["consumer"]["source"] = {"file": "consumer.py", "line": 1}
     document = document_for(
         contracts={"example/A": custom(), "example/B": custom()},
@@ -171,7 +194,8 @@ def test_edge_type_validation_releases_inputs_index_and_results(invalid: bool) -
     gc.collect()
     inputs_released = all(reference() is None for reference in references)
     remaining_state = sum(
-        isinstance(value, TypeAncestry | EdgeTypeChecks) for value in gc.get_objects()
+        isinstance(value, TypeAncestry | EdgeTypeChecks | TypeShape)
+        for value in gc.get_objects()
     )
     result_reference = weakref.ref(result)
     del result
