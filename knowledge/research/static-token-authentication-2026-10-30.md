@@ -6,7 +6,7 @@ The accepted authority comes from [ADR-0011](../../docs/decisions/0011-namespace
 
 Revocation-time expiry alone can accept a revoked credential under a lagging or backward clock. The selected Unix-epoch sentinel is refused independently of time, retains rows and references, and needs no migration. It discards the prior expiry and does not record revocation time. Future issuance and management must preserve the reserved value. Ordinary natural expiry still depends on the trusted validation clock. No shared non-regressing clock is claimed.
 
-The provider receives a borrowed database, reads the unique digest index without a cache, releases its database unit before strict authority/expiry validation and owns no engine, task or credential cache. The composition root retains database shutdown. SHA-256 lookup preserves exact bearer bytes; credential entropy and issuance remain the issuer's responsibility. Safe errors contain no source exception chain, credential, stored authority or invalidity category.
+The provider receives a borrowed database, reuses the existing `TokenRow`/`token_by_digest` reader without a cache, releases its database unit before strict authority/expiry validation and owns no engine, task or credential cache. The composition root retains database shutdown. `kora.db.tokens` owns revocation SQL and raw-driver error classification, preserving the existing no-table-handle/no-driver import boundary outside the database package. The full architecture suite checks that boundary without a provider exception. SHA-256 lookup preserves exact bearer bytes; credential entropy and issuance remain the issuer's responsibility. Safe errors contain no source exception chain, credential, stored authority or invalidity category.
 
 ## Evidence boundaries
 

@@ -1,9 +1,6 @@
 import re
-import sqlite3
-from collections.abc import Mapping
-from datetime import UTC, datetime
 from hashlib import sha256
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final
 
 from pydantic import ValidationError
 
@@ -22,8 +19,8 @@ from kora.protocols.metadata import ProtocolName, ProviderMetadata
 
 if TYPE_CHECKING:
     from kora.db.connection import Database
+    from kora.db.reads import TokenRow
 
-REVOKED: Final[datetime] = datetime(1970, 1, 1, tzinfo=UTC)
 BEARER: Final[re.Pattern[str]] = re.compile(
     r"(?i:Bearer) +([A-Za-z0-9._~+/-]+=*)", re.ASCII
 )
@@ -38,72 +35,11 @@ OUTCOME: Final[EventSpec] = CATALOG.register(
         {"operation": FieldKind.STRING, "outcome": FieldKind.STRING},
     )
 )
-UNAVAILABLE_SQLITE: Final[frozenset[int]] = frozenset(
-    (
-        sqlite3.SQLITE_BUSY,
-        sqlite3.SQLITE_LOCKED,
-        sqlite3.SQLITE_IOERR,
-        sqlite3.SQLITE_FULL,
-        sqlite3.SQLITE_CANTOPEN,
-        sqlite3.SQLITE_PROTOCOL,
-    )
-)
 
 
 class StoredAuthority(BoundaryModel):
     principal: Principal
     expires_at: Instant | None
-
-
-class PostgresDriver(Protocol):
-    PostgresError: type[Exception]
-
-
-class PostgresAdapter(Protocol):
-    asyncpg: PostgresDriver
-
-
-def database_errors(database: "Database") -> tuple[type[Exception], ...]:
-    from sqlalchemy.exc import SQLAlchemyError
-
-    from kora.db.connection import DatabaseClosedError, Dialect
-
-    errors: tuple[type[Exception], ...] = (
-        SQLAlchemyError,
-        OSError,
-        DatabaseClosedError,
-        ValueError,
-    )
-    if database.dialect is Dialect.POSTGRESQL:
-        adapter = cast("PostgresAdapter", database.writer_engine.dialect.loaded_dbapi)
-        return (*errors, adapter.asyncpg.PostgresError)
-    return errors
-
-
-def unavailable(error: Exception) -> bool:
-    from sqlalchemy.exc import DBAPIError
-    from sqlalchemy.exc import TimeoutError as DatabaseTimeout
-
-    from kora.db.connection import DatabaseClosedError
-
-    if isinstance(error, OSError | DatabaseClosedError | DatabaseTimeout):
-        return True
-    if isinstance(error, DBAPIError):
-        if error.connection_invalidated:
-            return True
-        original = error.orig
-    else:
-        original = error
-    sqlite_code: object = getattr(original, "sqlite_errorcode", None)
-    sqlstate: object = getattr(original, "sqlstate", None)
-    return (
-        isinstance(sqlite_code, int) and sqlite_code & 255 in UNAVAILABLE_SQLITE
-    ) or (
-        isinstance(sqlstate, str)
-        and (
-            sqlstate.startswith(("08", "53")) or sqlstate in {"57P01", "57P02", "57P03"}
-        )
-    )
 
 
 def credential_digest(request: RequestInfo) -> str | None:
@@ -112,14 +48,20 @@ def credential_digest(request: RequestInfo) -> str | None:
     return None if match is None else sha256(match[1].encode("ascii")).hexdigest()
 
 
-def checked_authority(row: Mapping[str, object]) -> StoredAuthority | None:
+def checked_authority(row: "TokenRow") -> StoredAuthority | None:
     try:
         return StoredAuthority.model_validate(
             {
                 "principal": {
-                    key: value for key, value in row.items() if key != "expires_at"
+                    "token_id": row.id,
+                    "kind": row.kind,
+                    "owner": row.owner,
+                    "namespaces": row.namespaces,
+                    "approve": row.approve,
+                    "platform": row.platform,
+                    "runtime": row.runtime,
                 },
-                "expires_at": row["expires_at"],
+                "expires_at": row.expires_at,
             }
         )
     except ValidationError:
@@ -142,6 +84,8 @@ class StaticTokenAuthenticator:
     name: str = "static_token"
 
     def __init__(self, configuration: JsonObject, database: "Database") -> None:
+        from kora.db.tokens import authentication_errors
+
         if type(configuration) is not dict or configuration:
             raise KoraProtocolError(
                 "authentication_configuration_invalid",
@@ -151,7 +95,7 @@ class StaticTokenAuthenticator:
             )
         self.config_schema: JsonObject = dict(CONFIG_SCHEMA)
         self._database: Database = database
-        self._errors: tuple[type[Exception], ...] = database_errors(database)
+        self._errors: tuple[type[Exception], ...] = authentication_errors(database)
 
     def capabilities(self) -> AuthenticationCapabilities:
         return AuthenticationCapabilities()
@@ -159,39 +103,21 @@ class StaticTokenAuthenticator:
     async def authenticate(
         self, request: RequestInfo, ctx: ProtocolContext
     ) -> Principal:
-        from sqlalchemy import select
-
-        from kora.db.tables import api_token
+        from kora.db.reads import token_by_digest
+        from kora.db.tokens import REVOKED, authentication_unavailable
 
         digest = credential_digest(request)
         if digest is None:
             raise refuse(ctx, "authenticate", "authentication_rejected")
         failure: str | None = None
-        row: Mapping[str, object] | None = None
+        row: TokenRow | None = None
         try:
             async with self._database.read_transaction() as connection:
-                result = await connection.execute(
-                    select(
-                        api_token.c.id.label("token_id"),
-                        api_token.c.kind,
-                        api_token.c.owner,
-                        api_token.c.namespaces,
-                        api_token.c.approve,
-                        api_token.c.platform,
-                        api_token.c.runtime,
-                        api_token.c.expires_at,
-                    ).where(api_token.c.digest == digest)
-                )
-                selected = result.mappings().one_or_none()
-                row = (
-                    None
-                    if selected is None
-                    else {str(key): value for key, value in selected.items()}
-                )
+                row = await token_by_digest(connection, digest)
         except self._errors as error:
             failure = (
                 "authentication_unavailable"
-                if unavailable(error)
+                if authentication_unavailable(error)
                 else "authentication_failed"
             )
         if failure is not None:
@@ -210,30 +136,18 @@ class StaticTokenAuthenticator:
         return authority.principal
 
     async def revoke(self, token_id: str, ctx: ProtocolContext) -> None:
-        from sqlalchemy import or_, update
-
-        from kora.db.tables import api_token
+        from kora.db.tokens import authentication_unavailable, revoke_token
 
         if type(token_id) is not str or not is_identifier(token_id):
             raise refuse(ctx, "revoke", "authentication_failed")
         failure: str | None = None
         try:
             async with self._database.transaction() as connection:
-                await connection.execute(
-                    update(api_token)
-                    .where(
-                        api_token.c.id == token_id,
-                        or_(
-                            api_token.c.expires_at.is_(None),
-                            api_token.c.expires_at != REVOKED,
-                        ),
-                    )
-                    .values(expires_at=REVOKED)
-                )
+                await revoke_token(connection, token_id)
         except self._errors as error:
             failure = (
                 "authentication_unavailable"
-                if unavailable(error)
+                if authentication_unavailable(error)
                 else "authentication_failed"
             )
         if failure is not None:

@@ -16,7 +16,8 @@ from kora.conformance.capture import Capture
 from kora.conformance.common import context_for
 from kora.db.connection import SQLITE_READERS, Database, DatabaseSettings, Dialect
 from kora.db.tables import api_token, idempotency_record, worker
-from kora.plugins.authentication.static_token import REVOKED, StaticTokenAuthenticator
+from kora.db.tokens import REVOKED
+from kora.plugins.authentication.static_token import StaticTokenAuthenticator
 from kora.protocols.authentication import RequestInfo
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.loading import load_provider
