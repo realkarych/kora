@@ -283,8 +283,10 @@ class ProbeIOHelperLauncher:
         resist_term: bool = False,
         process_group: int = 0,
         reaper: ChildReaper | None = None,
+        helper_type: type[IOHelper] = IOHelper,
     ) -> None:
         self.reaper = reaper
+        self.helper_type = helper_type
         self.home = home
         self.observation_descriptor = observation_descriptor
         self.fifo_directory = fifo_directory
@@ -364,7 +366,7 @@ class ProbeIOHelperLauncher:
             raise
         finally:
             child.close()
-        return IOHelper(process, parent, clock, self.reaper)
+        return self.helper_type(process, parent, clock, self.reaper)
 
 
 async def stalled_lifetime_parent(

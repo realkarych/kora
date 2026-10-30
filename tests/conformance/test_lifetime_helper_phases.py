@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kora.conformance.io_helper import KernelChildReaper
+from kora.conformance.io_helper import IOHelper, KernelChildReaper
 from kora.conformance.lifetime import CleanupEffect, LifetimeError, ParentLifetime
 from kora.protocols.lifetime import (
     Acquisition,
@@ -19,6 +19,8 @@ from kora.protocols.lifetime import (
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
+from kora.runner.channels import ChannelError
+from kora.runner.identity import complete_identity
 from tests.conformance.lifetime_helpers import ProbeIOHelperLauncher
 from tests.conformance.lifetime_support import (
     ControlledLifetimeClock,
@@ -33,6 +35,52 @@ from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
     DeferredReaper,
 )
 from tests.support.event_loop import turn
+
+
+class TermObservedHelper(IOHelper):
+    term_requested: bool = False
+    term_returned: bool = False
+    term_accepted: bool = False
+
+    def signal(self, requested: signal.Signals, deadline_ns: int | None = None) -> bool:
+        if requested is signal.SIGTERM:
+            self.term_requested = True
+            self.term_returned = False
+            self.term_accepted = False
+        accepted = super().signal(requested, deadline_ns)
+        if requested is signal.SIGTERM:
+            self.term_returned = True
+            self.term_accepted = accepted
+        return accepted
+
+
+def term_phase_state(
+    owner: ParentLifetime, helper: TermObservedHelper
+) -> dict[str, bool | int | None]:
+    now = owner.clock.monotonic_ns()
+    origin = owner.mutations.origins.get(helper)
+    return {
+        "term_requested": helper.term_requested,
+        "term_returned": helper.term_returned,
+        "term_accepted": helper.term_accepted,
+        "initial_identity_complete": helper.identity is not None
+        and complete_identity(helper.identity),
+        "helper_closed": helper.closed,
+        "anchor_exited": helper.anchor.exited,
+        "anchor_unknown": helper.anchor.unknown,
+        "origin_present": origin is not None,
+        "origin_signalled": None if origin is None else origin.signalled,
+        "term_remaining_ns": None
+        if origin is None or origin.term is None
+        else origin.term - now,
+        "kill_remaining_ns": None
+        if origin is None or origin.kill is None
+        else origin.kill - now,
+        "final_remaining_ns": None
+        if origin is None or origin.final is None
+        else origin.final - now,
+        "cleanup_driver_tasks": owner.inventory().cleanup_driver_tasks,
+    }
 
 
 class QueueDeadlineLifetime(ParentLifetime):
@@ -79,6 +127,7 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
             pause_at=7 if "remove" in effect else 8 if effect == "publish" else 5,
             resist_term=True,
             reaper=deferred if variant != effect else KernelChildReaper(),
+            helper_type=TermObservedHelper,
         )
         owner = ParentLifetime(
             clock=clock,
@@ -115,6 +164,7 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                 None if effect in ("remove", "late_remove", "publish") else acquiring,
             )
             helper = owner.mutations.helpers[-1]
+            assert isinstance(helper, TermObservedHelper)
             deferred.hold(helper.process.pid)
             actual_clock = SystemClock()
             writer = resources.enter_context(
@@ -151,14 +201,17 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                     await asyncio.wait_for(asyncio.shield(acquiring), 5)
             else:
                 clock.advance(100_000_000)
-                assert (
-                    await read_probe(
+                try:
+                    acknowledgement = await read_probe(
                         barrier.reading,
                         actual_clock.monotonic_ns() + 5_000_000_000,
                         actual_clock,
                     )
-                    == b"t"
-                )
+                except ChannelError as failure:
+                    raise AssertionError(
+                        (failure.reason.value, term_phase_state(owner, helper))
+                    ) from failure
+                assert acknowledgement == b"t"
                 assert not helper.anchor.exited
                 clock.advance(100_000_000)
                 await asyncio.wait_for(

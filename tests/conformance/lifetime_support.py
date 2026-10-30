@@ -16,6 +16,7 @@ from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import (
     ChildReaper,
     InstalledIOHelperLauncher,
+    IOHelper,
     KernelChildReaper,
 )
 from kora.conformance.journal import JournalSnapshot
@@ -184,6 +185,7 @@ class ProbeOptions(TypedDict, total=False):
     pause_at: int | tuple[int, ...] | None
     resist_term: bool
     reaper: ChildReaper
+    helper_type: type[IOHelper]
 
 
 @dataclass(frozen=True)
