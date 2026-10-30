@@ -424,7 +424,7 @@ def test_source_archive_refuses_unsafe_members(tmp_path: Path, kind: str) -> Non
             info.linkname = "/outside"
         elif kind == "oversized":
             info.size = 8 * 1024 * 1024 + 1
-        archive.addfile(info)
+        archive.addfile(info, io.BytesIO(bytes(info.size)))
 
     with pytest.raises(ValueError, match="archive"):
         unpack(content.getvalue(), tmp_path)
