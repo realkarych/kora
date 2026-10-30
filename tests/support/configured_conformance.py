@@ -74,6 +74,9 @@ def installed_conformance(core_wheel: Path) -> Generator[InstalledTooling]:
                 "artifact_storage.configured": (
                     "kora_tooling_fixture.configured_storage:configured"
                 ),
+                "artifact_type.configured": (
+                    "kora_tooling_fixture.configured_artifact_type:configured"
+                ),
             },
             {"socket": str(root)},
         )
