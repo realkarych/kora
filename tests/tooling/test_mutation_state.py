@@ -1,9 +1,16 @@
 import io
+import os
+import shutil
+import sys
+import time
 import zipfile
+from pathlib import Path
 
 import pytest
 
+from scripts.ci.mutation_audit import ROOT
 from scripts.ci.mutation_models import Report
+from scripts.ci.mutation_process import Stop, environment, execute
 from scripts.ci.mutation_remote import NativeRun, validated_state
 
 REVISION = "a" * 40
@@ -159,3 +166,54 @@ def test_old_rotation_progresses_despite_continuous_new_sites() -> None:
 
     assert visited[1] == "old-a"
     assert visited[3] == "old-b"
+
+
+@pytest.mark.parametrize("changed", ["event", "ref", "event_sha", "checkout_sha"])
+def test_native_context_is_refused_before_preparation(
+    tmp_path: Path, changed: str
+) -> None:
+    git = shutil.which("git")
+    uv = shutil.which("uv")
+    assert git is not None
+    assert uv is not None
+    revision = (
+        execute([git, "rev-parse", "HEAD"], ROOT, time.monotonic() + 10, Stop())
+        .output.decode()
+        .strip()
+    )
+    variables = environment(ROOT)
+    variables.update(
+        {
+            "PATH": str(Path(uv).parent) + os.pathsep + os.defpath,
+            "GITHUB_EVENT_NAME": "schedule",
+            "GITHUB_REF": "refs/heads/master",
+            "GITHUB_SHA": revision,
+        }
+    )
+    if changed == "checkout_sha":
+        revision = "a" * 40
+        variables["GITHUB_SHA"] = revision
+    elif changed == "event_sha":
+        variables["GITHUB_SHA"] = "a" * 40
+    elif changed == "ref":
+        variables["GITHUB_REF"] = "refs/heads/topic"
+    else:
+        variables["GITHUB_EVENT_NAME"] = "pull_request"
+    program = (
+        "import time; from pathlib import Path; import pytest; "
+        "from scripts.ci.mutation_audit import ROOT, audit; "
+        "from scripts.ci.mutation_process import Stop\n"
+        "with pytest.raises(ValueError, match='requires exact native master'):\n"
+        f"    audit(ROOT, {revision!r}, Path({str(tmp_path)!r}), Stop(), time.time())\n"
+    )
+
+    refused = execute(
+        [sys.executable, "-B", "-c", program],
+        ROOT,
+        time.monotonic() + 10,
+        Stop(),
+        variables=variables,
+    )
+
+    assert refused.code == 0, refused.output.decode()
+    assert not list(tmp_path.iterdir())
