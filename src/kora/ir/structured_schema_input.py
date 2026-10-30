@@ -5,6 +5,7 @@ from typing import Literal, cast
 from kora.ir.structured_schema_work import (
     PARAMETERS,
     PreparationMeter,
+    Reason,
     merge_sort,
     refuse,
 )
@@ -196,7 +197,7 @@ class SchemaArena:
             refuse()
         return value
 
-    def lookup(self, index: int, query: str) -> int:
+    def member(self, index: int, query: str) -> tuple[int, int] | None:
         node = self.at(index)
         if node.kind != "object":
             refuse()
@@ -211,10 +212,32 @@ class SchemaArena:
             else:
                 high = middle
         return (
-            node.members[low][1]
+            node.members[low]
             if low < len(node.members)
             and self.nodes[node.members[low][0]].value == query
-            else -1
+            else None
+        )
+
+    def lookup(self, index: int, query: str) -> int:
+        member = self.member(index, query)
+        return -1 if member is None else member[1]
+
+    def wrap_array(self, children: tuple[int, ...], depth: int) -> int:
+        size = 2 + max(0, len(children) - 1)
+        self.capacity(1, size, depth)
+        return self.finish(
+            self.add(SchemaNode("array", size=size), depth), children=children
+        )
+
+    def wrap_object(self, members: tuple[tuple[str, int], ...], depth: int) -> int:
+        size = 2 + max(0, len(members) - 1) + len(members)
+        self.capacity(1 + len(members), size + 2 * len(members), depth)
+        index = self.add(SchemaNode("object", size=size), depth)
+        for position in range(1, len(members)):
+            if self.meter.compare(members[position - 1][0], members[position][0]) >= 0:
+                raise ValueError("generated schema members are not canonical")
+        return self.finish(
+            index, members=tuple((self.scalar(key), value) for key, value in members)
         )
 
     def freeze(self, root: int) -> FrozenSchemaArena:
@@ -336,3 +359,48 @@ def encode_arena(
         raise RuntimeError("schema preparation encoding invariant")
     meter.result(size)
     return bytes(output)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class StructuredSchemaPreparationInput:
+    declared_type: str
+    type_contracts: object
+    inline_schema: object
+    execution_semantics: str
+    checker_binding: str
+    preparation_parameters: object
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredSchemaPreparationRefusal:
+    reason: Reason
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredSchemaPreparationAccounting:
+    input_bytes: int
+    input_nodes: int
+    input_depth: int
+    documents: int
+    positions: int
+    references: int
+    work: int
+    auxiliary_bytes: int
+    auxiliary_entries: int
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class PreparedStructuredSchemaInput:
+    accounting: StructuredSchemaPreparationAccounting
+    _arena: tuple[SchemaNode, ...]
+    _root: int
+    _types: tuple[tuple[int, int], ...]
+    _positions: tuple[tuple[int, int, int, int, int], ...]
+    _node_positions: tuple[tuple[int, int], ...]
+    _references: tuple[tuple[int, int, int, int], ...]
+    _edges: tuple[tuple[int, int], ...]
+    _offsets: tuple[int, ...]
+    _targets: tuple[int, ...]
+
+    def __repr__(self) -> str:
+        return f"PreparedStructuredSchemaInput(accounting={self.accounting!r})"

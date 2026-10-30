@@ -101,6 +101,13 @@ if TYPE_CHECKING:
         structured_output_digest,
         summarize_structured_output,
     )
+    from kora.ir.structured_schema_input import (
+        PreparedStructuredSchemaInput,
+        StructuredSchemaPreparationAccounting,
+        StructuredSchemaPreparationInput,
+        StructuredSchemaPreparationRefusal,
+    )
+    from kora.ir.structured_schema_preparation import prepare_structured_schema_input
     from kora.ir.topology import (
         AgentNode,
         BranchNode,
@@ -132,6 +139,11 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "StructuredSchemaPreparationInput",
+    "StructuredSchemaPreparationAccounting",
+    "StructuredSchemaPreparationRefusal",
+    "PreparedStructuredSchemaInput",
+    "prepare_structured_schema_input",
     "InputPathResult",
     "validate_input_paths",
     "ExpressionSyntaxResult",
@@ -250,6 +262,19 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "StructuredSchemaPreparationInput",
+        "StructuredSchemaPreparationAccounting",
+        "StructuredSchemaPreparationRefusal",
+        "PreparedStructuredSchemaInput",
+    }:
+        from kora.ir import structured_schema_input
+
+        return getattr(structured_schema_input, name)
+    if name == "prepare_structured_schema_input":
+        from kora.ir import structured_schema_preparation
+
+        return structured_schema_preparation.prepare_structured_schema_input
     if name in {"InputPathResult", "validate_input_paths"}:
         from kora.ir import input_paths
 

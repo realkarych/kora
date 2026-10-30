@@ -1,5 +1,9 @@
 # Threat model
 
+The StructuredOutput preparation foundation under issue #138 covers operation-local normalized admission and detached original-schema ownership under TM-04/TM-10, fixed content-free preparation results and diagnostics under TM-06/TM-07, and closed original reference targets under TM-08/TM-11. Its ten preparation capacities and deterministic accounting bound supported preparation work and explicitly owned state; they are not a wall-time or Python heap/RSS guarantee. TM-12 evidence for exact numerical evaluation, safe engine adaptation, complete effective validation and real consumers remains pending those implementations. Preparation does not authenticate a saved record, authorize installed behavior, decide payload validity, publish the reserved execution policy or activate a consumer.
+
+StructuredOutput preparation-foundation amendment dated 2026-10-30: the project owner approved the explicit preparation-only prerequisite amendment and scoped implementation plan under issue #498 and the exact scoped evidence wording above. Existing actors, trust assumptions and runtime authority are unchanged.
+
 List-edge type amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #495](https://github.com/realkarych/kora/issues/495); evidence wording pending line-by-line owner review. Existing controls and authority are unchanged.
 
 Node-local input path amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #491](https://github.com/realkarych/kora/issues/491); wording pending line-by-line owner review.
