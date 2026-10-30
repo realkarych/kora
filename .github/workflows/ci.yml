@@ -1642,3 +1642,27 @@ jobs:
           cache-suffix: github-templates
       - run: uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/ISSUE_TEMPLATE/change.yml
       - run: uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml
+
+  mutation-tooling:
+    needs: [change-scope]
+    if: ${{ needs.change-scope.outputs.full != 'false' }}
+    name: Mutation tooling (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: 0.13.1
+          python-version: 3.11.17
+          cache-suffix: mutation-tooling-${{ matrix.os }}
+      - run: uv sync --locked --group build --no-build --no-install-project
+      - run: uv sync --locked --group mutation --group build --no-build-isolation
+      - run: uv pip install --python .venv/bin/python --no-deps --no-build-isolation --editable .
+      - run: uv run --no-sync python -B -m tests.tooling.native_probe

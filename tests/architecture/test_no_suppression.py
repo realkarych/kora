@@ -311,6 +311,7 @@ RUFF_TABLE: dict[str, object] = {
         "per-file-ignores": {
             "scripts/ci/secret_scan.py": ["S603"],
             "scripts/ci/editorial_scope.py": ["S603"],
+            "scripts/ci/mutation_process.py": ["S603"],
             "hatch_build.py": ["S603"],
             "src/kora/executor/launcher.py": ["S603"],
             "src/kora/plugins/vcs/git/decoder.py": ["S603"],

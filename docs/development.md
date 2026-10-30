@@ -60,9 +60,31 @@ The repository contains an importable typed Python package with the logging boot
 
 ## Tool setup
 
+Mutation-audit foundation amendment dated 2026-10-30: scope and implementation were approved under [issue #455](https://github.com/realkarych/kora/issues/455), with the local foundation split into [issue #456](https://github.com/realkarych/kora/issues/456). Exact wording remains subject to line-by-line owner review in the implementing PR.
+
 Local-storage implementation amendment dated 2026-10-23: the [#255 plan](https://github.com/realkarych/kora/issues/255#issuecomment-6371758782) was approved by the project owner. Exact wording approval must be recorded in the implementing PR before merge. The local provider owns mandatory Linux/macOS conformance, real filesystem-pressure recovery and resource evidence; private SQLite is separate from metadata-database test selection.
 
 Use Linux or macOS, Git, Bash, ripgrep and the pinned uv, Python, Node and pnpm toolchain. The default development interpreter is recorded in [`.python-version`](../.python-version); Node is recorded in [`web/.node-version`](../web/.node-version), pnpm in [`web/package.json`](../web/package.json), and Python tools in [`pyproject.toml`](../pyproject.toml) and [`uv.lock`](../uv.lock). The [dated research](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md) records exact versions and selection evidence.
+
+### Local mutation audit
+
+Install locked build backends before the optional source-built tooling:
+
+```sh
+uv sync --locked --group build --no-build --no-install-project
+uv sync --locked --group mutation --group build --no-build-isolation
+```
+
+From the tooling checkout, run:
+
+```sh
+uv run --no-sync python -B -m scripts.ci.mutation_audit \
+  --source-revision "$(git rev-parse origin/master)"
+```
+
+The executor audits a disposable copy of the recorded master revision. Source and tooling revisions are recorded separately; the primary checkout is not mutated. Initial scope is pricing arithmetic and CEL-path behavior. Reports in `mutation-report/` contain native inventory, baseline JUnit, normalized outcomes and pending work. The admission budget includes preparation and baseline time; an exhausted budget is a partial result. See the [scope, limits and evidence record](../knowledge/research/mutation-testing-2026-10-30.md).
+
+Ordinary CI verifies the tooling on small owned fixtures on Linux/macOS. Those regressions do not audit PR source or impose a mutation-score requirement. Daily master scheduling, trusted artifact continuation and agent triage activate under #455 after the local foundation.
 
 Install the pinned uv with its versioned installer, following the [official installation instructions](https://docs.astral.sh/uv/getting-started/installation/) to make it available in your shell:
 

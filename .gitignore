@@ -17,3 +17,4 @@ src/kora/api/static/
 *.db-wal
 *.db-shm
 .kora-data/
+/mutation-report/

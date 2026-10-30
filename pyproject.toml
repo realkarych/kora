@@ -131,6 +131,7 @@ select = [
 [tool.ruff.lint.per-file-ignores]
 "scripts/ci/secret_scan.py" = ["S603"]
 "scripts/ci/editorial_scope.py" = ["S603"]
+"scripts/ci/mutation_process.py" = ["S603"]
 "hatch_build.py" = ["S603"]
 "src/kora/executor/launcher.py" = ["S603"]
 "src/kora/plugins/vcs/git/decoder.py" = ["S603"]
@@ -199,6 +200,7 @@ asyncio_default_fixture_loop_scope = "function"
 build = [
     "editables==0.6",
     "hatchling==1.32.4",
+    "setuptools==84.2.1",
 ]
 dev = [
     "jsonschema==4.26.0",
@@ -209,4 +211,7 @@ dev = [
     "ruff==0.17.1",
     "testcontainers==4.15.0",
     "types-jsonschema==4.26.0.20261006",
+]
+mutation = [
+    "cosmic-ray==8.7.0",
 ]
