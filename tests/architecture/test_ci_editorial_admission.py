@@ -70,6 +70,7 @@ def test_editorial_statuses_require_verified_classification(
         "WORKFLOW_CANCELLED": "false",
         "CANCELLED": "false",
         "SCAFFOLD_RESULT": "success",
+        "SCAFFOLD_VERIFIED": "true",
         "GITHUB_OUTPUT": str(tmp_path / "output"),
         field: value,
     }
@@ -83,6 +84,55 @@ def test_editorial_statuses_require_verified_classification(
     )
 
     assert (result.returncode == 0) is passes
+    if job_id == "scaffold-evidence":
+        output = tmp_path / "output"
+        if passes:
+            assert output.read_text() == "verified=true\n"
+        else:
+            assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("SCAFFOLD_RESULT", "failure"),
+        ("SCAFFOLD_RESULT", "cancelled"),
+        ("SCAFFOLD_RESULT", "skipped"),
+        ("SCAFFOLD_RESULT", ""),
+        ("SCAFFOLD_RESULT", None),
+        ("SCAFFOLD_VERIFIED", "false"),
+        ("SCAFFOLD_VERIFIED", ""),
+        ("SCAFFOLD_VERIFIED", None),
+    ],
+)
+def test_editorial_cel_refuses_missing_or_unsuccessful_shared_proof(
+    field: str, value: str | None
+) -> None:
+    gate = step_list(table(workflow_jobs()["cel-measurements"]))[-1]
+    environment = {
+        **os.environ,
+        **dict.fromkeys(table(gate["env"]), "skipped"),
+        "SCOPE_RESULT": "success",
+        "SCOPE_VERIFIED": "true",
+        "FULL_SCOPE": "false",
+        "WORKFLOW_CANCELLED": "false",
+        "SCAFFOLD_RESULT": "success",
+        "SCAFFOLD_VERIFIED": "true",
+    }
+    if value is None:
+        del environment[field]
+    else:
+        environment[field] = value
+
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-c", str(gate["run"])],
+        env=environment,
+        check=False,
+        capture_output=True,
+        timeout=5,
+    )
+
+    assert result.returncode != 0
 
 
 def test_numerical_runtime_diagnostics_cannot_consume_required_lane_deadlines() -> None:

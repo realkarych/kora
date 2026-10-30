@@ -20,7 +20,7 @@ MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
 SCHEMA_RUN = f"{MEASUREMENT}::test_ir_schema_repeated_lifetime"
 NEEDED_JOBS = {
-    "scaffold": "SCAFFOLD",
+    "scaffold-evidence": "SCAFFOLD",
     "ir-measurements": "IR_MATRIX",
     "resource-measurements": "RESOURCE",
     "provider-protocol-measurements": "PROVIDER_PROTOCOL",
@@ -33,6 +33,7 @@ SUCCESS = {
     "SCOPE_VERIFIED": "true",
     "FULL_SCOPE": "true",
     "SCAFFOLD_RESULT": "success",
+    "SCAFFOLD_VERIFIED": "true",
     "IR_MATRIX_RESULT": "success",
     "RESOURCE_RESULT": "success",
     "RESOURCE_VERIFIED": "true",
@@ -167,11 +168,22 @@ def test_required_cel_job_and_gate_run_after_all_dependency_outcomes() -> None:
         if field != "WORKFLOW_CANCELLED"
         for outcome in ("failure", "cancelled", "skipped", "", "false")
     ]
-    + [("WORKFLOW_CANCELLED", "true"), ("WORKFLOW_CANCELLED", "")],
+    + [
+        ("WORKFLOW_CANCELLED", "true"),
+        ("WORKFLOW_CANCELLED", ""),
+        ("SCAFFOLD_RESULT", None),
+        ("SCAFFOLD_VERIFIED", None),
+    ],
 )
-def test_required_measurement_shell_gate_fails_closed(field: str, outcome: str) -> None:
+def test_required_measurement_shell_gate_fails_closed(
+    field: str, outcome: str | None
+) -> None:
     gate = steps(table(workflow_jobs()["cel-measurements"]))["required_measurements"]
-    environment = {**os.environ, **SUCCESS, field: outcome}
+    environment = {**os.environ, **SUCCESS}
+    if outcome is None:
+        del environment[field]
+    else:
+        environment[field] = outcome
 
     result = subprocess.run(
         ["/bin/bash", "-e", "-c", str(gate["run"])],

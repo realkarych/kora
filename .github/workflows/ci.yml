@@ -1277,7 +1277,7 @@ jobs:
 
   cel-measurements:
     name: CEL evaluator lifetime
-    needs: [change-scope, scaffold, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
+    needs: [change-scope, scaffold-evidence, ir-measurements, resource-measurements, provider-protocol-measurements, pricing-measurements, cel-producer, git-publication-measurements]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -1371,7 +1371,8 @@ jobs:
         id: required_measurements
         if: ${{ always() }}
         env:
-          SCAFFOLD_RESULT: ${{ needs.scaffold.result }}
+          SCAFFOLD_RESULT: ${{ needs.scaffold-evidence.result }}
+          SCAFFOLD_VERIFIED: ${{ needs.scaffold-evidence.outputs.verified }}
           IR_MATRIX_RESULT: ${{ needs.ir-measurements.result }}
           RESOURCE_RESULT: ${{ needs.resource-measurements.result }}
           RESOURCE_VERIFIED: ${{ needs.resource-measurements.outputs.verified }}
@@ -1401,6 +1402,7 @@ jobs:
           test "$WORKFLOW_CANCELLED" = false
           if test "$FULL_SCOPE" = false; then
             test "$SCAFFOLD_RESULT" = success
+            test "$SCAFFOLD_VERIFIED" = true
             test "$IR_MATRIX_RESULT" = skipped
             test "$RESOURCE_RESULT" = skipped
             test "$PROVIDER_PROTOCOL_RESULT" = skipped
@@ -1411,6 +1413,7 @@ jobs:
           fi
           test "$FULL_SCOPE" = true
           test "$SCAFFOLD_RESULT" = success
+          test "$SCAFFOLD_VERIFIED" = true
           test "$IR_MATRIX_RESULT" = success
           test "$RESOURCE_RESULT" = success
           test "$PROVIDER_PROTOCOL_RESULT" = success
