@@ -71,6 +71,7 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "from kora.ir import validate_edge_types, validate_export_types",
             "from kora.ir import validate_subgraph_interfaces",
             "from kora.ir import OutputDecl",
+            "from kora.ir import validate_fan_out_types",
             "from kora.ir import validate_expression_syntax, validate_input_paths",
             "from pathlib import Path",
             f"assert Path(kora.__file__).is_relative_to({str(tmp_path)!r})",
@@ -171,6 +172,33 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "assert error.code == 'IR003' and error.node == 'call'",
             "assert error.path == "
             "('graph', 'nodes', 'call', 'outputs', 'value', 'type')",
+            "fan_out_document = GraphDocument.model_validate({",
+            "'ir_version': '1.0',",
+            "'type_contracts': {'VcsRef': {'builtin_revision': '1'}},",
+            "'graph': {'id': 'graph', 'namespace': 'example', 'nodes': {",
+            "'fan': {'kind': 'fan_out',",
+            "'config': {'body': 'body', 'over': 'items', 'max_parallel': 2},",
+            "'inputs': {'items': {'type': 'VcsRef', 'from': '$params'}},",
+            "'outputs': {",
+            "'known': {'type': 'List[List[VcsRef]]', 'collect': 'value'},",
+            "'bad': {'type': 'List[VcsRef]', 'collect': 'value'}}}},",
+            "'subgraphs': {'body': {'nodes': {",
+            "'producer': {'kind': 'timer', 'config': {'duration': '0s'},",
+            "'outputs': {'value': {'type': 'List[VcsRef]'}}}},",
+            "'outputs': {'value': {'type': 'List[VcsRef]',",
+            "'from': 'producer', 'output': 'value'}}}}},",
+            "'runtime': {'runtime': 'local', 'vcs': 'git'}})",
+            "fan_out = validate_fan_out_types(fan_out_document)",
+            "assert not fan_out.fan_out_types_valid",
+            "assert fan_out.fan_outs_checked == fan_out.mapped_inputs_checked == 1",
+            "assert fan_out.collections_checked == fan_out.collections_compared == 2",
+            "assert fan_out.collections_unresolved == 0",
+            "assert fan_out.mapped_inputs_unresolved == 0",
+            "assert [e.code for e in fan_out.diagnostics.errors] == ['IR004', 'IR003']",
+            "assert fan_out.diagnostics.errors[0].path == "
+            "('graph', 'nodes', 'fan', 'config', 'over')",
+            "assert fan_out.diagnostics.errors[1].path == "
+            "('graph', 'nodes', 'fan', 'outputs', 'bad', 'type')",
         ]
     )
 

@@ -1,5 +1,7 @@
 # Development
 
+Fan-out declared-type amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #503](https://github.com/realkarych/kora/issues/503); wording pending line-by-line owner review.
+
 The owner-approved [verification audit amendment](../knowledge/research/approved-verification-audit-2026-10-29.md) defines current diagnostic comparisons, review reuse and CI admission. General contributor requirements follow [AGENTS.md](../AGENTS.md); historical observations below retain their original revisions and results.
 
 CI shared-proof scheduling amendment dated 2026-10-30: the project owner approved the [bounded plan and exact wording](https://github.com/realkarych/kora/issues/462#issuecomment-6519805169), with [approval recorded on 2026-10-30](https://github.com/realkarych/kora/issues/462#issuecomment-6519899751).
@@ -380,6 +382,8 @@ uv run --no-sync python -c 'from kora.ir.schema import render_ir_schema; print(r
 ```
 
 The required IR measurement also covers the complete document at 1, 100 and 1,000 materialized nodes, nested body composition, open JSON data, schema generation and refusal cleanup. It retains the existing workloads and resource-release gates, with revision-stamped samples and independent native-inclusive review. These are structural model and schema baselines; shared semantic validation, fan-out expansion and scheduling performance remain with their implementing components.
+
+The fan-out declaration pass has focused semantic, observability, exact-release and installed-wheel regressions under #503. `tests/ir/test_fan_out_type_resources.py` records whole-call timing and traced-memory observations for wide/deep/shared/unresolved inputs as diagnostics, while counters, bounded diagnostics and owned-reference release remain blocking. These tests do not qualify runtime expansion or aggregate materialization. [The evidence record](../knowledge/research/fan-out-type-validation-evidence-2026-10-30.md) names workloads, ownership and limitations; final-head CI supplies supported-platform coverage.
 
 ## Local artifact storage qualification
 

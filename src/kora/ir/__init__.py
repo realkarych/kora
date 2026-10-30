@@ -80,6 +80,7 @@ if TYPE_CHECKING:
         ExpressionSyntaxResult,
         validate_expression_syntax,
     )
+    from kora.ir.fan_out_types import FanOutTypeResult, validate_fan_out_types
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
     from kora.ir.input_paths import InputPathResult, validate_input_paths
@@ -151,6 +152,8 @@ __all__ = [
     "prepare_structured_schema_input",
     "SubgraphInterfaceResult",
     "validate_subgraph_interfaces",
+    "FanOutTypeResult",
+    "validate_fan_out_types",
     "ExportTypeResult",
     "validate_export_types",
     "InputPathResult",
@@ -288,6 +291,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import subgraph_interfaces
 
         return getattr(subgraph_interfaces, name)
+    if name in {"FanOutTypeResult", "validate_fan_out_types"}:
+        from kora.ir import fan_out_types
+
+        return getattr(fan_out_types, name)
     if name in {"ExportTypeResult", "validate_export_types"}:
         from kora.ir import export_types
 
