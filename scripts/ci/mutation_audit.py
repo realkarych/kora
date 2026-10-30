@@ -552,7 +552,7 @@ def audit(
     return report
 
 
-def run() -> int:
+def run(source: Path = ROOT) -> int:
     parser = Parser()
     parser.add_argument("--source-revision", required=True)
     parser.add_argument("--output", type=Path, default=Path("mutation-report"))
@@ -567,7 +567,7 @@ def run() -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, stop.receive)
     report = audit(
-        ROOT,
+        source,
         arguments.source_revision,
         arguments.output,
         stop,
@@ -591,9 +591,9 @@ def run() -> int:
     return int(report.status == "failed")
 
 
-def main() -> int:
+def main(source: Path = ROOT) -> int:
     try:
-        return run()
+        return run(source)
     except (OSError, ValueError, RuntimeError):
         sys.stderr.write(
             '{"event":"mutation.audit.failed","level":"ERROR",'

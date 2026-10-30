@@ -318,10 +318,28 @@ def test_publication_failure_is_content_free(tmp_path: Path) -> None:
     assert git is not None
     variables = environment(ROOT)
     variables["PATH"] = str(Path(uv).parent) + os.pathsep + os.defpath
+    repository = tmp_path / "source"
+    repository.mkdir()
+    for operation in (
+        ["init", "--initial-branch=master"],
+        [
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "fixture",
+        ],
+        ["update-ref", "refs/remotes/origin/master", "HEAD"],
+    ):
+        prepared = execute([git, *operation], repository, time.monotonic() + 10, Stop())
+        assert prepared.code == 0
     source = (
-        execute(
-            [git, "rev-parse", "origin/master"], ROOT, time.monotonic() + 10, Stop()
-        )
+        execute([git, "rev-parse", "HEAD"], repository, time.monotonic() + 10, Stop())
         .output.decode()
         .strip()
     )
@@ -330,8 +348,9 @@ def test_publication_failure_is_content_free(tmp_path: Path) -> None:
     arguments = [
         sys.executable,
         "-B",
-        "-m",
-        "scripts.ci.mutation_audit",
+        "-c",
+        "from pathlib import Path; from scripts.ci.mutation_audit import main; "
+        f"raise SystemExit(main(Path({str(repository)!r})))",
         "--source-revision",
         source,
         "--output",
