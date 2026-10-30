@@ -1,5 +1,7 @@
 # Threat model
 
+Type-schema validation amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #473](https://github.com/realkarych/kora/issues/473); evidence wording pending line-by-line owner review. Existing controls and authority are unchanged.
+
 Type-declaration validation amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #468](https://github.com/realkarych/kora/issues/468); the evidence wording below awaits line-by-line owner review. Existing controls and authority are unchanged.
 
 Graph-link validation amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #463](https://github.com/realkarych/kora/issues/463); the evidence wording below awaits line-by-line owner review. Existing controls and authority are unchanged.
@@ -83,6 +85,8 @@ Fake-contract amendment dated 2026-10-21 (the fake runtime/harness deployment ro
 First-slice boundary amendment dated 2026-10-23 (TM-01/02/03/05/06/07/09/10/11/12): scope and implementation plan approved under [#140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 
 Token separation amendment dated 2026-10-23: reviewed and accepted by the project owner under [issue #141](https://github.com/realkarych/kora/issues/141) on 2026-10-23.
+
+The saved-type-schema implementation under #473 supplies scoped TM-04/TM-06/TM-07/TM-10 evidence: all author references resolve by point lookup inside saved contracts, with no network or authored filesystem path; schema payloads and native messages stay outside diagnostics; deep malformed metadata and regex capacity refusal preserve safe independent findings. Fixed published built-ins are installed resources. Exact traversal counts, bounded diagnostic output and per-call ownership release are blocking tests. Input-size-dependent work, regex compiler resources and its entry-bounded cache have no new absolute time/byte guarantee; process-wide time/heap/RSS observations are diagnostic. This library pass does not activate API admission or execute payload validation. [Methods, named tests and residual limits](../knowledge/research/type-schema-validation-evidence-2026-10-30.md).
 
 ## Purpose, scope and status
 

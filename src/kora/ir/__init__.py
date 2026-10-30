@@ -120,9 +120,12 @@ if TYPE_CHECKING:
         TypeDeclarationResult,
         validate_type_declarations,
     )
+    from kora.ir.type_schemas import TypeSchemaResult, validate_type_schemas
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "TypeSchemaResult",
+    "validate_type_schemas",
     "TypeDeclarationResult",
     "validate_type_declarations",
     "DiagnosticCollection",
@@ -229,6 +232,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"TypeSchemaResult", "validate_type_schemas"}:
+        from kora.ir import type_schemas
+
+        return getattr(type_schemas, name)
     if name in {"TypeDeclarationResult", "validate_type_declarations"}:
         from kora.ir import type_declarations
 

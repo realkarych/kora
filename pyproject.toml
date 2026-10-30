@@ -13,7 +13,9 @@ license-files = ["LICENSE"]
 dependencies = [
     "aiosqlite==0.22.1",
     "alembic==1.20.0",
+    "jsonschema==4.26.0",
     "pydantic==2.14.1",
+    "referencing==0.37.0",
     "sqlalchemy[asyncio]==2.1.5",
     "structlog==26.1.0",
     "typer==0.27.3",
