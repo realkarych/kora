@@ -1,5 +1,7 @@
 # Threat model
 
+Direct-edge type amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #482](https://github.com/realkarych/kora/issues/482); evidence wording pending line-by-line owner review. Existing controls and authority are unchanged.
+
 Output-consistency amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #479](https://github.com/realkarych/kora/issues/479); evidence wording pending line-by-line owner review. Existing controls and authority are unchanged.
 
 Inline-schema validation amendment dated 2026-10-30: the project owner approved the scoped implementation plan under [issue #476](https://github.com/realkarych/kora/issues/476); evidence wording pending line-by-line owner review. Existing controls and authority are unchanged.
@@ -95,6 +97,8 @@ The saved-type-schema implementation under #473 supplies scoped TM-04/TM-06/TM-0
 Inline-schema validation under #476 extends this scoped TM-04/TM-06/TM-07/TM-10 evidence to authored graph fields. Each field owns its local root; root-identity cache keys cannot share answers between live roots, and only supplied saved contracts publish artifact URNs. Invalid source labels are omitted, schema keys are masked, and logs contain counts only. Exact traversal, bounded refusal and input/view/result release are blocking checks. Regex/input-dependent costs and diagnostic measurements retain the saved-schema limits. The pass supplies neither public admission nor approval or payload enforcement. [Methods and tests](../knowledge/research/inline-schema-validation-evidence-2026-10-30.md).
 
 Output consistency under #479 extends this scoped TM-04/TM-06/TM-07/TM-10 evidence to paired authored schemas and saved ancestry. Iterative comparison performs no reference retrieval, recursive error rendering or authored-content logging. Fixed owning paths, safe source filtering, collector bounds and unknown-ancestry isolation preserve the existing diagnostic boundary. Per-call ancestry memoization and lazy container traversal release their inputs after success and refusal. Exact work counters and release assertions are blocking; timing and process-memory observations remain diagnostic. The pass grants no runtime, approval, payload or public-admission authority. [Methods and tests](../knowledge/research/output-schema-consistency-evidence-2026-10-30.md).
+
+Direct-edge type checking under #482 adds scoped TM-04/TM-06/TM-07/TM-10 evidence for saved nominal ancestry and authored connection metadata. It consults no schema resolver, provider or current alias and grants no execution authority. Valid-root reachability excludes unknown ancestry from comparisons; fixed consumer paths and safe source conversion keep type/schema/reference contents out of errors and count-only logs. Iterative per-call indexing avoids repeated parent walks, while collector bounds and success/refusal input/index/result release remain blocking. Timings and process-memory observations retain their diagnostic limits. [Methods and tests](../knowledge/research/direct-edge-type-validation-evidence-2026-10-30.md).
 
 ## Purpose, scope and status
 
