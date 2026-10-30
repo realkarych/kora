@@ -192,6 +192,47 @@ def test_native_index_lookup_precharges_its_complete_binary_search(short: bool) 
 
 
 @pytest.mark.parametrize(
+    ("query", "expected_position"),
+    [("prefixx", 1), ("prefixy", -1)],
+    ids=["present", "missing"],
+)
+@pytest.mark.parametrize("short", [False, True], ids=["exact", "one-short"])
+def test_native_index_lookup_charges_longest_stored_key(
+    query: str, expected_position: int, short: bool
+) -> None:
+    mapping = controlled_borrowed_mapping(
+        ("prefix" + "x" * 31, "prefixx", "prefix", "z")
+    )
+    count = 4
+    maximum_key = 6 + 31
+    key_points = maximum_key + 7 + 6 + 1
+    passes = (count - 1).bit_length()
+    build_work = 7 + (1 + 3 * count) + (1 + 2 * passes * (count + key_points))
+    build_entries = 3 + 2 * count + 2 * count
+    lookup_work = 4 + 1 + (count.bit_length() + 1) * (1 + len(query) + maximum_key)
+    meter = remaining_meter("work", build_work + lookup_work - int(short))
+    before = counters(meter)
+    index = build_native_object_index(mapping, meter)
+    built = counters(meter)
+
+    if short:
+        with pytest.raises(EvaluationRefused) as rejected:
+            index.find(query, meter)
+
+        assert rejected.value.reason == "evaluation_exhausted"
+        assert index.maximum_key == maximum_key
+        assert built == (before[0] + build_work, 0, build_entries)
+        assert counters(meter) == (built[0] + 4, 0, build_entries)
+        return
+    position = index.find(query, meter)
+
+    assert position == expected_position
+    assert index.maximum_key == maximum_key
+    assert built == (before[0] + build_work, 0, build_entries)
+    assert counters(meter) == (PARAMETERS["max_evaluation_work"], 0, build_entries)
+
+
+@pytest.mark.parametrize(
     ("left", "right", "expected"),
     [
         ("", "", True),

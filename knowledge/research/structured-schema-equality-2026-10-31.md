@@ -75,3 +75,9 @@ The approved plan records the available daily master mutation audit, run `410256
 ## Tested input identity and integration
 
 Numerical/preparation/model sources and every pre-existing byte of the StructuredOutput specification are unchanged; only the internal-helper subsection is appended. Source SHA-256: cursors `97aa4adc1c79f63f84886407e30f1cdaa122bc2436a4de4e751e362acabaa9bb`, equality `9380ac1d2441df400804a17626bed293cf77eea3c21630bddef27dc6a7094cbf`. Source/test identities and raw JUnit are retained with the implementing PR evidence. The target-only fan-out declaration delivery changes no equality/numerical/arena/model input; its exports, specifications and human wording are preserved by nonoverlapping composition. No new human-document wording is needed for this helper.
+
+## Lookup acceptance completion
+
+Actual-source review identified one missing acceptance case: lookup tests used only equal-length stored keys. The bounded follow-up adds four found/missing and exact/one-short cases with key lengths 6, 7, 37 and 1, placing the longest key inside the canonical order. Expected work derives independently from the fixture maximum, and assertions freeze the stored maximum and paid prefix. The new cases passed in 0.02 s; the original 122 cases and all production source bytes remain unchanged. Their original matched-input evidence is retained separately, for 126 focused cases in total.
+
+Lookup-only Ruff and formatting passed. Four-file strict Pyright passed on the original inspected revision; the new test delta is locally unverified because a later tooling invocation created an incomplete local environment after temporary-link removal. Two local resolution attempts were stopped without changing dependencies or configuration. The complete final-head native strict check remains mandatory and cannot be replaced by this record. The malformed local environment is outside the committed change.
