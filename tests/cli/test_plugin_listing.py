@@ -123,7 +123,8 @@ def test_provider_listing_reports_failures(
             "-c",
             "import importlib.util; "
             "assert importlib.util.find_spec('pytest') is None; "
-            "assert importlib.util.find_spec('jsonschema') is None",
+            "assert importlib.util.find_spec('jsonschema') is not None; "
+            "assert importlib.util.find_spec('referencing') is not None",
         ],
         check=False,
         capture_output=True,
