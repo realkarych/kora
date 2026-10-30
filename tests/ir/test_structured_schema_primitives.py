@@ -1,5 +1,7 @@
+import gc
 import math
 import sys
+import weakref
 from collections import UserDict
 from collections.abc import Iterator
 from dataclasses import fields, is_dataclass
@@ -287,6 +289,44 @@ def test_schema_native_snapshot_refuses_without_authored_coercion(
     assert rejected.value.reason == "unsupported_schema"
 
 
+@pytest.mark.parametrize("entry", ["scalar", "snapshot"])
+@pytest.mark.parametrize("behavior", ["raise", "impersonate"])
+def test_schema_native_kind_checks_do_not_invoke_authored_metaclasses(
+    entry: str, behavior: str
+) -> None:
+    calls: list[str] = []
+    marker = "authored-metaclass-canary"
+
+    class AuthoredMeta(type):
+        def __eq__(cls, other: object) -> bool:
+            calls.append("equality")
+            if behavior == "raise":
+                raise AssertionError(marker)
+            return True
+
+    class Authored(metaclass=AuthoredMeta):
+        def __bool__(self) -> bool:
+            calls.append("truthiness")
+            raise AssertionError(marker)
+
+    value = Authored()
+    retained = weakref.ref(value)
+    arena = SchemaArena(PreparationMeter())
+    operation = arena.scalar if entry == "scalar" else arena.snapshot
+
+    with pytest.raises(PreparationRefused) as rejected:
+        operation(value)
+    reason = rejected.value.reason
+    del rejected
+    del value
+    gc.collect()
+
+    assert reason == "unsupported_schema"
+    assert calls == []
+    assert retained() is None
+    assert not arena.nodes
+
+
 @pytest.mark.parametrize("kind", ["array", "object"], ids=str)
 def test_schema_native_snapshot_rejects_active_ancestor_cycles(kind: str) -> None:
     array: list[object] = []
@@ -391,19 +431,21 @@ def test_schema_native_snapshot_checks_integer_bits_before_conversion(
 
 
 @pytest.mark.parametrize(
-    ("value", "text", "work", "byte_count"),
+    ("value", "text", "work", "byte_count", "entries"),
     [
-        pytest.param(0, "0", 4, 1, id="zero"),
-        pytest.param(1, "1", 27, 24, id="one"),
-        pytest.param(-1, "-1", 30, 26, id="negative-one"),
-        pytest.param(10**9, "1000000000", 49, 50, id="zero-low-chunk"),
-        pytest.param(-(10**9), "-1000000000", 52, 55, id="signed-zero-low-chunk"),
-        pytest.param(10**18, "1000000000000000000", 73, 80, id="two-zero-chunks"),
-        pytest.param(10**18 + 1, "1000000000000000001", 73, 80, id="zero-middle-chunk"),
+        pytest.param(0, "0", 4, 1, 0, id="zero"),
+        pytest.param(1, "1", 30, 24, 1, id="one"),
+        pytest.param(-1, "-1", 35, 26, 2, id="negative-one"),
+        pytest.param(10**9, "1000000000", 54, 50, 2, id="zero-low-chunk"),
+        pytest.param(-(10**9), "-1000000000", 60, 55, 3, id="signed-zero-low-chunk"),
+        pytest.param(10**18, "1000000000000000000", 80, 80, 3, id="two-zero-chunks"),
+        pytest.param(
+            10**18 + 1, "1000000000000000001", 80, 80, 3, id="zero-middle-chunk"
+        ),
     ],
 )
 def test_schema_integer_primitive_has_exact_signed_chunk_reservations(
-    value: int, text: str, work: int, byte_count: int
+    value: int, text: str, work: int, byte_count: int, entries: int
 ) -> None:
     meter = PreparationMeter()
 
@@ -412,7 +454,7 @@ def test_schema_integer_primitive_has_exact_signed_chunk_reservations(
     assert actual == text
     assert meter.work == work
     assert meter.auxiliary_bytes == byte_count
-    assert meter.auxiliary_entries == 0
+    assert meter.auxiliary_entries == entries
 
 
 @pytest.mark.parametrize("dimension", ["work", "bytes", "entries"])
@@ -444,7 +486,7 @@ def test_schema_integer_primitive_uses_shared_monotone_capacity(
     dimension: str, delta: int
 ) -> None:
     meter = PreparationMeter(
-        work=PARAMETERS["max_preparation_work"] - 49 + delta
+        work=PARAMETERS["max_preparation_work"] - 54 + delta
         if dimension == "work"
         else 0,
         auxiliary_bytes=PARAMETERS["max_auxiliary_bytes"] - 50 + delta
@@ -465,6 +507,45 @@ def test_schema_integer_primitive_uses_shared_monotone_capacity(
     assert result == "1000000000"
     assert (meter.work if dimension == "work" else meter.auxiliary_bytes) == PARAMETERS[
         "max_preparation_work" if dimension == "work" else "max_auxiliary_bytes"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "text", "work"),
+    [
+        pytest.param(10**18, "1000000000000000000", 80, id="multichunk"),
+        pytest.param(-(10**9), "-1000000000", 60, id="negative-sign"),
+    ],
+)
+@pytest.mark.parametrize("dimension", ["entries", "work"])
+@pytest.mark.parametrize("delta", [0, 1], ids=["exact", "one-short"])
+def test_schema_integer_chunk_and_sign_moves_reserve_before_exceeding_capacity(
+    value: int, text: str, work: int, dimension: str, delta: int
+) -> None:
+    meter = PreparationMeter(
+        work=PARAMETERS["max_preparation_work"] - work + delta
+        if dimension == "work"
+        else 0,
+        auxiliary_entries=PARAMETERS["max_auxiliary_entries"] - 3 + delta
+        if dimension == "entries"
+        else 0,
+    )
+
+    if delta:
+        with pytest.raises(PreparationRefused) as rejected:
+            meter.integer(value)
+
+        assert rejected.value.reason == "preparation_exhausted"
+        assert meter.work <= PARAMETERS["max_preparation_work"]
+        assert meter.auxiliary_entries <= PARAMETERS["max_auxiliary_entries"]
+        return
+    result = meter.integer(value)
+
+    assert result == text
+    assert (
+        meter.work if dimension == "work" else meter.auxiliary_entries
+    ) == PARAMETERS[
+        "max_preparation_work" if dimension == "work" else "max_auxiliary_entries"
     ]
 
 

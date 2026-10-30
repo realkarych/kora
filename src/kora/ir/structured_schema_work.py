@@ -110,12 +110,15 @@ class PreparationMeter:
             self.reserve(1 + 2 * max(1, (bits + 29) // 30), (bits + 7) // 8 + 4)
             value, remainder = divmod(value, 1000000000)
             self.reserve(10, 9)
+            self.reserve(entries=1)
             chunks.append(f"{remainder:09d}")
         self.result(9)
+        self.reserve(1 + len(chunks))
         chunks.reverse()
         chunks[0] = chunks[0].lstrip("0")
         self.result(len(chunks[0]) + 9 * (len(chunks) - 1) + int(negative))
         if negative:
+            self.reserve(1 + len(chunks), entries=1)
             chunks.insert(0, "-")
         return "".join(chunks)
 

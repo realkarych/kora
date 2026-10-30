@@ -74,7 +74,13 @@ class SchemaArena:
     def scalar(self, value: object) -> int:
         self.meter.reserve(2)
         kind = type(value)
-        if value is not None and kind not in (bool, int, float, str):
+        if (
+            value is not None
+            and kind is not bool
+            and kind is not int
+            and kind is not float
+            and kind is not str
+        ):
             refuse()
         self.capacity(1, 1, 0)
         scalar = cast("Scalar", value)
@@ -137,9 +143,9 @@ class SchemaArena:
     def _snapshot(self, value: object, depth: int, active: list[int]) -> int:
         self.meter.reserve(2)
         kind = type(value)
-        if value is None or kind in (bool, int, float, str):
+        if value is None or kind is bool or kind is int or kind is float or kind is str:
             return self.scalar(value)
-        if kind not in (list, dict):
+        if kind is not list and kind is not dict:
             refuse()
         self.meter.reserve(1 + len(active))
         if id(value) in active:
