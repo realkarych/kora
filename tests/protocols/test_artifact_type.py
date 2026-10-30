@@ -3,7 +3,7 @@ from typing import cast
 
 import pytest
 
-from kora.protocols.artifact_type import ArtifactTypeCapabilities
+from kora.protocols import ArtifactTypeCapabilities
 from tests.plugins.artifact_type.support import binding
 
 

@@ -1,4 +1,5 @@
 import subprocess
+from importlib.metadata import distribution
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,9 @@ def test_listing_diagnostic_loss_does_not_hold_command_exit(
     }
     fixture = build_fixture_wheel(tmp_path, entries, inventory=1096)
     installed = install_tooling(tmp_path, provider_tooling_wheelhouse, fixture)
+    expected_providers = len(entries) + len(
+        distribution("kora").entry_points.select(group="kora.provider")
+    )
 
     completed = subprocess.run(
         [str(installed.python), "-I", "-m", "kora_tooling_fixture.sink_probe", sink],
@@ -29,7 +33,7 @@ def test_listing_diagnostic_loss_does_not_hold_command_exit(
 
     assert completed.returncode == 0, completed.stderr
     payload = TypeAdapter(JsonObjectField).validate_json(completed.stdout)
-    assert payload["providers"] == 1100
+    assert payload["providers"] == expected_providers
     assert payload["failures"] == 0
     assert payload["released"] is True
     dropped = payload["dropped"]
