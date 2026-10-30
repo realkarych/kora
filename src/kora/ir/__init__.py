@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from kora.ir.document import GraphDocument, Provenance, inspect_ir_root
     from kora.ir.edge_types import EdgeTypeResult, validate_edge_types
     from kora.ir.export import export_ir, render_ir_json
+    from kora.ir.export_types import ExportTypeResult, validate_export_types
     from kora.ir.expression_syntax import (
         ExpressionSyntaxResult,
         validate_expression_syntax,
@@ -144,6 +145,8 @@ __all__ = [
     "StructuredSchemaPreparationRefusal",
     "PreparedStructuredSchemaInput",
     "prepare_structured_schema_input",
+    "ExportTypeResult",
+    "validate_export_types",
     "InputPathResult",
     "validate_input_paths",
     "ExpressionSyntaxResult",
@@ -275,6 +278,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import structured_schema_preparation
 
         return structured_schema_preparation.prepare_structured_schema_input
+    if name in {"ExportTypeResult", "validate_export_types"}:
+        from kora.ir import export_types
+
+        return getattr(export_types, name)
     if name in {"InputPathResult", "validate_input_paths"}:
         from kora.ir import input_paths
 
