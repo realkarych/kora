@@ -354,3 +354,34 @@ def test_structured_schema_numeric_records_release_after_success_and_refusal() -
     assert meter.auxiliary_entries > 0
     assert meter.auxiliary_bytes > 0
     assert meter.work < PARAMETERS["max_evaluation_work"]
+
+
+def test_structured_schema_internal_parse_state_releases_after_unexpected_error() -> (
+    None
+):
+    meter = EvaluationMeter()
+
+    def parse_malformed_internal_digits() -> DecimalNumber:
+        temporary = decimal_number(0.3, meter)
+        meter.parse_digits("3x")
+        return temporary
+
+    gc.collect()
+    original = {id(value) for value in gc.get_objects() if type(value) is DecimalNumber}
+
+    with pytest.raises(RuntimeError, match="^invalid numerical spelling$") as rejected:
+        parse_malformed_internal_digits()
+    gc.collect()
+    held_by_caller = {
+        id(value) for value in gc.get_objects() if type(value) is DecimalNumber
+    } - original
+    del rejected
+    gc.collect()
+    remaining = {
+        id(value) for value in gc.get_objects() if type(value) is DecimalNumber
+    }
+
+    assert len(held_by_caller) == 1
+    assert remaining == original
+    assert meter.auxiliary_entries == 3
+    assert meter.auxiliary_bytes == 50 + 2

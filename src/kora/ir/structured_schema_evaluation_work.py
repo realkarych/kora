@@ -113,11 +113,15 @@ class EvaluationMeter:
             refuse()
         if self.integer_zero(value):
             return 0
+        self.reserve(2)
         bits = value.bit_length()
         if exponent > (PARAMETERS["max_numeric_intermediate_bits"] - bits - 1) // 4:
             refuse("evaluation_exhausted")
-        for _ in range(exponent):
+        self.reserve()
+        while exponent:
             value = self.integer_multiply(value, 10)
+            self.reserve(2)
+            exponent -= 1
         return value
 
     def parse_digits(self, value: str | bytearray) -> int:

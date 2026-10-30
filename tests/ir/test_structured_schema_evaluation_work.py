@@ -105,7 +105,7 @@ def test_structured_schema_evaluation_reservations_are_inclusive_and_atomic(
         pytest.param("multiply", 10 << 30, 10, 5, id="multiplication"),
         pytest.param("divmod", (142, 6), 10, 3, id="quotient-and-remainder"),
         pytest.param("remainder", 6, 10, 3, id="remainder-full-reservation"),
-        pytest.param("scale", 300, 12, 3, id="two-decimal-steps"),
+        pytest.param("scale", 300, 5 + 2 * 2 + 5 + 5, 3, id="two-decimal-steps"),
         pytest.param("digits", 123, 10, 2, id="bounded-decimal-parse"),
         pytest.param("result", None, 4, 3, id="result-buffer"),
     ],
@@ -130,7 +130,7 @@ def test_structured_schema_integer_primitives_follow_the_normative_schedule(
         ("multiply", 10, 5),
         ("divmod", 10, 3),
         ("remainder", 10, 3),
-        ("scale", 12, 3),
+        ("scale", 5 + 2 * 2 + 5 + 5, 3),
         ("digits", 10, 2),
         ("result", 4, 3),
     ],
@@ -221,6 +221,48 @@ def test_structured_schema_zero_negation_reserves_no_magnitude() -> None:
     assert counters(meter) == (1, 0, 0)
 
 
+@pytest.mark.parametrize(
+    ("exponent", "expected", "work", "byte_count", "paid_before_refusal"),
+    [
+        pytest.param(0, 3, 5, 0, 4, id="nonzero-zero-step"),
+        pytest.param(2, 300, 5 + 2 * 2 + 5 + 5, 3, 17, id="nonzero-two-steps"),
+    ],
+)
+@pytest.mark.parametrize("short", [False, True], ids=["exact", "one-short"])
+def test_structured_schema_nonzero_scaling_reserves_guard_and_cursor_work(
+    exponent: int,
+    expected: int,
+    work: int,
+    byte_count: int,
+    paid_before_refusal: int,
+    short: bool,
+) -> None:
+    meter = remaining_meter("work", work - int(short))
+    before = counters(meter)
+
+    if short:
+        with pytest.raises(EvaluationRefused) as rejected:
+            meter.integer_scale(3, exponent)
+
+        assert rejected.value.reason == "evaluation_exhausted"
+        assert counters(meter) == (before[0] + paid_before_refusal, byte_count, 0)
+        return
+    result = meter.integer_scale(3, exponent)
+
+    assert result == expected
+    assert counters(meter) == (PARAMETERS["max_evaluation_work"], byte_count, 0)
+
+
+def test_structured_schema_scaling_retains_predicates_before_failed_bit_guard() -> None:
+    meter = remaining_meter("work", 2)
+
+    with pytest.raises(EvaluationRefused) as rejected:
+        meter.integer_scale(3, 0)
+
+    assert rejected.value.reason == "evaluation_exhausted"
+    assert counters(meter) == (PARAMETERS["max_evaluation_work"], 0, 0)
+
+
 def test_structured_schema_failed_reservation_precedes_native_division() -> None:
     meter = EvaluationMeter(work=PARAMETERS["max_evaluation_work"])
     before = counters(meter)
@@ -265,7 +307,7 @@ def test_structured_schema_numeric_shortcut_schedule() -> None:
     )
     assert zero == 0
     assert zero_step is number
-    assert counters(meter) == (before_zero[0] + 4, before_zero[1], before_zero[2])
+    assert counters(meter) == (before_zero[0] + 2 + 5, before_zero[1], before_zero[2])
 
 
 @pytest.mark.parametrize("dimension", ["work", "bytes", "entries"])
