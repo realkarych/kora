@@ -165,10 +165,8 @@ def dependency_unavailable(
     )
 
 
-def validation_failure(
-    failure: KoraProtocolError | DiagnosticCollectionError, *, request_id: str
-) -> ApiErrorEnvelope:
-    if type(failure) not in (KoraProtocolError, DiagnosticCollectionError):
+def validation_failure(failure: object, *, request_id: str) -> ApiErrorEnvelope:
+    if not isinstance(failure, KoraProtocolError | DiagnosticCollectionError):
         raise ValueError("A validation failure is required.")
     return internal_error(request_id=request_id)
 

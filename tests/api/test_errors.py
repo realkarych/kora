@@ -47,6 +47,14 @@ INPUT_POISON = "private_rejected_input_marker"
 KEY_POISON = "private_authored_key_marker"
 
 
+class ProviderFault(KoraProtocolError):
+    pass
+
+
+class CollectionFault(DiagnosticCollectionError):
+    pass
+
+
 class PoisonedRequest(BaseModel):
     value: int
     mapping: dict[str, int]
@@ -392,3 +400,42 @@ def test_nonretryable_codes_refuse_a_retryable_wire_value() -> None:
 
     with pytest.raises(ValidationError, match="cannot be retried"):
         ApiError.model_validate(body)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderFault("diagnostics_limit", POISON, True, {KEY_POISON: INPUT_POISON}),
+        CollectionFault(),
+    ],
+)
+def test_validation_failure_accepts_inherited_exception_families(
+    failure: KoraProtocolError | DiagnosticCollectionError,
+) -> None:
+    request_id = "req_inherited_failure"
+
+    envelope = validation_failure(failure, request_id=request_id)
+
+    assert envelope == internal_error(request_id=request_id)
+    assert envelope.error.retryable is False
+    assert envelope.error.request_id == request_id
+    assert POISON not in envelope.model_dump_json()
+    assert KEY_POISON not in envelope.model_dump_json()
+    assert INPUT_POISON not in envelope.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [None, RuntimeError(POISON), POISON, {"code": "diagnostics_limit"}],
+)
+def test_validation_failure_refuses_objects_outside_accepted_exception_families(
+    failure: object,
+) -> None:
+    with pytest.raises(
+        ValueError, match=r"^A validation failure is required\.$"
+    ) as caught:
+        validation_failure(failure, request_id=REQUEST_ID)
+
+    assert POISON not in str(caught.value)
+    assert KEY_POISON not in str(caught.value)
+    assert INPUT_POISON not in str(caught.value)
