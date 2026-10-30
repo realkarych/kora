@@ -562,17 +562,11 @@ async def test_live_probe_handoff_failure_releases_acquired_processes(
     baseline = set(os.listdir("/dev/fd"))
     entered = asyncio.Event()
     started: list[subprocess.Popen[bytes]] = []
-    diagnostics: list[str] = []
     observed: list[BaseException] = []
 
     async def acquire() -> None:
         async with retained_live_invocation(
-            tmp_path,
-            "pair",
-            phase=phase,
-            entered=entered,
-            started=started,
-            diagnostics=diagnostics,
+            tmp_path, "pair", phase=phase, entered=entered, started=started
         ):
             raise AssertionError("unexpected successful handoff")
 
@@ -601,7 +595,7 @@ async def test_live_probe_handoff_failure_releases_acquired_processes(
     gc.collect()
 
     assert len(started) == 1
-    assert started[0].returncode == 0, diagnostics
+    assert started[0].returncode == 0
     assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT
     assert set(os.listdir("/dev/fd")) == baseline
 
@@ -617,7 +611,6 @@ async def test_live_probe_repeated_cancellation_joins_owned_cleanup(
     cleanup_entered = asyncio.Event()
     cleanup_release = asyncio.Event()
     started: list[subprocess.Popen[bytes]] = []
-    diagnostics: list[str] = []
     observers: list[RecoveredProcess] = []
 
     async def acquire() -> None:
@@ -629,7 +622,6 @@ async def test_live_probe_repeated_cancellation_joins_owned_cleanup(
             started=started,
             cleanup_entered=cleanup_entered,
             cleanup_release=cleanup_release,
-            diagnostics=diagnostics,
         ) as acquired:
             observers.extend(acquired.processes)
             entered.set()
@@ -666,7 +658,7 @@ async def test_live_probe_repeated_cancellation_joins_owned_cleanup(
         await join_helper_operation(task)
     gc.collect()
 
-    assert started[0].returncode == 0, diagnostics
+    assert started[0].returncode == 0
     assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT
     assert_recovered_processes_absent(observers)
     assert set(os.listdir("/dev/fd")) == baseline

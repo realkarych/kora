@@ -335,3 +335,63 @@ CI has already completed. One complete final-head CI qualifies the full nine-fil
 integration; no repeated file/CI campaign or extra release qualification is introduced.
 Durations remain diagnostics, while actual closure, exact descriptors and hard
 deadlines remain gates.
+
+### Hosted handoff refusal and controlled decision time
+
+The first final-head [CI 40978969984](https://github.com/realkarych/kora/actions/runs/40978969984)
+failed on source `a58d42083f527c9933a06acc5b1f77b0c4e39f5c`: all three native
+conformance lanes observed a pre-acknowledgment probe exit of 1 instead of 0.
+Earlier local passes do not qualify that failure. The owner then authorized one
+diagnostic CI execution followed by one repair, with escalation on another failure.
+
+The single diagnostic [CI 41000517773](https://github.com/realkarych/kora/actions/runs/41000517773)
+used head `e60a623df8ae56924f0875ab30b4a29cab8a8365`; native tests checked its
+merge with master `b852b312489e44d97232adf2c73df74ea3434b35`. Each Linux 3.11,
+Linux 3.15 and macOS lane passed the first 230 cases, then failed the same six
+handoff cases and passed 468. Every failed case reported a completed ACK wait
+without an exception, followed by an owner-close assertion: the report was
+`unknown`, with three unresolved tree/process samples marked `effect_unsettled`.
+The subsequent native absence, group and retained-count assertions were not reached.
+This identifies the rejecting boundary, not physical resource closure or the exact
+underlying helper failure. The cleanup controller assigns that generic reason to
+still-open records when it finishes unsuccessfully.
+
+The diagnostic completed with 29 successful and nine failed jobs in 476 seconds.
+Its separate IR shard collection failure selected new AgentSession tests from the
+base workflow while checking out an older head without those tests. Integrating
+the current master reconciles those inputs without changing verification policy.
+The diagnostic and earlier failures remain failed. The temporary fixed 21-byte
+diagnostic channel, decoder and assertion messages are removed from the repair.
+
+The ownership fixture's real-time 0.1-second cooperative and escalation decisions
+also governed startup of real cleanup helpers. That couples this deterministic
+ownership test to host scheduling: `HelperOrigin.tighten` can stop a newly started
+cleanup helper after that decision interval. A particular physical helper kill was
+not established by the diagnostic. The repair reuses the existing
+`ControlledLifetimeClock`, moved unchanged from `lifetime_support.py` into
+`lifetime_recovery_probe.py` and re-exported for its existing consumers. Only live
+and pair probe owners receive it; tree and gone modes retain their default clock.
+On an unacknowledged handoff, `request_close` first seals admission, then the test
+advances the existing cooperative boundary once and holds decision time fixed.
+Real processes, helpers and native readiness still establish completion.
+
+The caller's actual 30-second report deadline and one lazy absolute five-second
+cleanup deadline remain unchanged. Closure still requires `CLOSED`, direct-child
+reaping, native process absence, empty groups, zero observation handles and exact
+post-GC descriptor equality. Original errors and repeated cancellation remain
+asserted. Clock advancement cannot establish any of those facts. Production
+controllers, timeouts, supported platforms and acceptance gates are unchanged.
+
+The two changed source inputs for this repair are:
+
+| Path under `tests/conformance/` | SHA-256 |
+| --- | --- |
+| `lifetime_recovery_probe.py` | `0c592320f27f884e730ff3ebad251d8e00e68641c779c7afaf0cd9906407932c` |
+| `lifetime_support.py` | `d42cd550e311bb792fa851a720673cc72286d9089b15b27ab0bfd05e60fbf874` |
+
+The other seven source hashes in the preceding table are unchanged. Qualifying
+independent conclusions carry only for their matching inputs; the clock and
+cleanup delta requires its own affected assessment. The pull request records the
+focused repair selection, actual results, reviewed input identity and mandatory
+complete final-head CI. Neither this record nor the earlier 43-case local pass
+claims execution of the repaired source or successful final qualification.

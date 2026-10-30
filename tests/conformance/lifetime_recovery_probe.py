@@ -1,13 +1,12 @@
 import asyncio
-import errno
 import os
 import sys
-from enum import IntEnum
 from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
+from kora.conformance.controllers import duration_ns
 from kora.conformance.io_helper import InstalledIOHelperLauncher
 from kora.conformance.lifetime import ParentLifetime
 from kora.protocols.boundary import BoundaryModel
@@ -15,123 +14,42 @@ from kora.protocols.lifetime import (
     CleanupOutcome,
     InvocationId,
     LifetimeLimits,
-    LifetimeReason,
     ProcessDomain,
     ProcessLaunch,
     ProcessRegistration,
     ReservationRequest,
     ResourceKind,
-    ResourceState,
     TemporaryTreeRequest,
     new_operation_id,
 )
 from kora.protocols.time import SystemClock
-from kora.runner.channels import (
-    ChannelError,
-    ChannelFailure,
-    DescriptorReadiness,
-    wait_future,
-)
+from kora.runner.channels import DescriptorReadiness, wait_future
 from kora.runner.identity import IdentityState, NativeIdentityReader, complete_identity
 
 
-class ProbeStage(IntEnum):
-    SETUP = 0
-    REPORT = 1
-    ACK_WAIT = 2
-    OWNER_CLOSE = 3
-    OWNER_ASSERT = 4
-    NATIVE_READ = 5
-    NATIVE_ASSERT = 6
-    GROUP_READ = 7
-    GROUP_STATE = 8
-    GROUP_EMPTY = 9
-    RETAINED_ASSERT = 10
-    COMPLETE = 11
+class ControlledLifetimeClock(SystemClock):
+    def __init__(self) -> None:
+        self.instant = super().monotonic_ns()
+        self.waiters: dict[asyncio.Future[None], int] = {}
 
+    def monotonic_ns(self) -> int:
+        return self.instant
 
-def probe_refusal(error: BaseException | None) -> int:
-    if error is None:
-        return 0
-    if isinstance(error, ChannelError):
-        return 1 + tuple(ChannelFailure).index(error.reason)
-    if isinstance(error, AssertionError):
-        return 6
-    if isinstance(error, asyncio.CancelledError):
-        return 7
-    if isinstance(error, OSError):
-        return {errno.EBADF: 8, errno.EAGAIN: 9, errno.EPERM: 10}.get(
-            error.errno or 0, 11
-        )
-    return 12
-
-
-def close_probe_diagnostic(descriptor: int) -> None:
-    try:
-        os.close(descriptor)
-    except OSError as failure:
-        if failure.errno not in (errno.EPIPE, errno.EAGAIN, errno.EINTR, errno.EBADF):
-            raise
-
-
-def emit_probe_diagnostic(descriptor: int | None, values: list[int]) -> None:
-    if descriptor is None:
-        return
-    try:
+    async def sleep_until(self, deadline_ns: int) -> None:
+        if self.instant >= deadline_ns:
+            return
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self.waiters[waiter] = deadline_ns
         try:
-            os.write(descriptor, bytes(values))
-        except OSError as failure:
-            if failure.errno not in (
-                errno.EPIPE,
-                errno.EAGAIN,
-                errno.EINTR,
-                errno.EBADF,
-            ):
-                raise
-    finally:
-        close_probe_diagnostic(descriptor)
+            await waiter
+        finally:
+            self.waiters.pop(waiter)
 
-
-def decode_probe_diagnostic(value: bytes) -> str:
-    refusals = (
-        "none",
-        "channel_closed",
-        "channel_deadline",
-        "channel_capacity",
-        "channel_malformed",
-        "channel_busy",
-        "assertion",
-        "cancelled",
-        "bad_fd",
-        "again",
-        "permission",
-        "other_os",
-        "unexpected",
-    )
-    kinds = ("none", "proc", "runtime", "tree", "borrowed")
-    states = ("none", *(item.value for item in ResourceState))
-    reasons = ("none", *(item.value for item in LifetimeReason))
-    native = ("none", *(item.value for item in IdentityState))
-    closure = ("none", "closed", "unknown")
-    if len(value) != 21 or value[0] != 1 or value[10] > 2:
-        return "probe_diagnostic_unavailable"
-    try:
-        samples = ",".join(
-            f"{kinds[value[index]]}/{states[value[index + 1]]}/"
-            f"{reasons[value[index + 2]]}"
-            for index in (12, 15, 18)
-            if value[index]
-        )
-        result = (
-            f"ack={ProbeStage(value[1]).name}/{refusals[value[2]]};"
-            f"end={ProbeStage(value[3]).name}/{refusals[value[4]]};"
-            f"close={closure[value[5]]}:{value[6]};"
-            f"samples={samples};pid={native[value[7]]};"
-            f"group={native[value[8]]}:{value[9]};item={value[10]};keep={value[11]}"
-        )
-    except (ValueError, IndexError):
-        return "probe_diagnostic_invalid"
-    return result[:256]
+    def advance(self, nanoseconds: int) -> None:
+        self.instant += nanoseconds
+        for waiter, deadline in tuple(self.waiters.items()):
+            if self.instant >= deadline and not waiter.done():
+                waiter.set_result(None)
 
 
 class RecoveryProbeReport(BoundaryModel):
@@ -167,12 +85,10 @@ async def acknowledgment(deadline: int) -> bytes:
         readiness.close()
 
 
-async def retain(
-    home: Path, mode: str, phase: str = "complete", diagnostic: int | None = None
-) -> None:
-    status = [0] * 21
-    status[0] = 1
+async def retain(home: Path, mode: str, phase: str = "complete") -> None:
+    clock = ControlledLifetimeClock() if mode in ("live", "pair") else None
     owner = ParentLifetime(
+        clock=clock,
         launcher=InstalledIOHelperLauncher(home=home, state_home=home / "state"),
         limits=LifetimeLimits(
             cooperative_seconds=0.1,
@@ -231,7 +147,6 @@ async def retain(
         if mode not in ("live", "pair"):
             os.write(1, owner.invocation_id.encode("ascii"))
             return
-        status[3] = ProbeStage.REPORT
         report = RecoveryProbeReport(
             invocation_id=owner.invocation_id,
             mode=mode,
@@ -248,55 +163,22 @@ async def retain(
         os.write(1, len(encoded).to_bytes(4, "big"))
         if phase != "before_report":
             os.write(1, encoded[: len(encoded) // 2] if phase == "partial" else encoded)
-        status[3] = ProbeStage.ACK_WAIT
         transferred = await acknowledgment(owner.deadline()) == b"a"
     finally:
-        original = sys.exception()
-        status[1] = status[3]
-        status[2] = probe_refusal(original)
-        try:
-            if not transferred:
-                status[3] = ProbeStage.OWNER_CLOSE
-                closed = await owner.close(None)
-                status[5] = 1 if closed.state is CleanupOutcome.CLOSED else 2
-                status[6] = min(255, closed.unresolved_count)
-                for index, sample in enumerate(closed.samples[:3]):
-                    status[12 + 3 * index] = 1 + tuple(ResourceKind).index(sample.kind)
-                    status[13 + 3 * index] = 1 + tuple(ResourceState).index(
-                        sample.state
-                    )
-                    status[14 + 3 * index] = 1 + tuple(LifetimeReason).index(
-                        sample.reason
-                    )
-                status[3] = ProbeStage.OWNER_ASSERT
-                assert closed.state is CleanupOutcome.CLOSED
-                reader = NativeIdentityReader()
-                for index, registration in enumerate(registrations):
-                    status[10] = index + 1
-                    status[3] = ProbeStage.NATIVE_READ
-                    observed = reader.read(registration.process.pid)
-                    status[7] = 1 + tuple(IdentityState).index(observed.state)
-                    status[3] = ProbeStage.NATIVE_ASSERT
-                    assert observed.state is IdentityState.ABSENT
-                    status[3] = ProbeStage.GROUP_READ
-                    group = reader.group(registration.process_group_id)
-                    status[8] = 1 + tuple(IdentityState).index(group.state)
-                    status[9] = min(255, len(group.members))
-                    status[3] = ProbeStage.GROUP_STATE
-                    assert group.state is IdentityState.PRESENT
-                    status[3] = ProbeStage.GROUP_EMPTY
-                    assert group.members == ()
-                status[3] = ProbeStage.RETAINED_ASSERT
-                retained = owner.inventory().retained_processes
-                status[11] = min(255, retained)
-                assert retained == 0
-                status[3] = ProbeStage.COMPLETE
-        finally:
-            cleanup_error = sys.exception()
-            status[4] = probe_refusal(
-                cleanup_error if cleanup_error is not original else None
-            )
-            emit_probe_diagnostic(diagnostic, status)
+        if not transferred:
+            assert clock is not None
+            closing = owner.request_close(None)
+            clock.advance(duration_ns(owner.limits.cooperative_seconds) + 1)
+            assert (await asyncio.shield(closing)).state is CleanupOutcome.CLOSED
+            reader = NativeIdentityReader()
+            for registration in registrations:
+                assert (
+                    reader.read(registration.process.pid).state is IdentityState.ABSENT
+                )
+                group = reader.group(registration.process_group_id)
+                assert group.state is IdentityState.PRESENT
+                assert group.members == ()
+            assert owner.inventory().retained_processes == 0
 
 
 if __name__ == "__main__":
@@ -305,6 +187,5 @@ if __name__ == "__main__":
             Path(sys.argv[1]),
             sys.argv[2],
             sys.argv[3] if len(sys.argv) > 3 else "complete",
-            int(sys.argv[4]) if len(sys.argv) > 4 else None,
         )
     )
