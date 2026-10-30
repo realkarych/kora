@@ -48,7 +48,11 @@ from tests.conformance.lifetime_helpers import (
     release_recovered,
     unwind_owned,
 )
-from tests.conformance.lifetime_recovery_probe import RecoveryProbeReport
+from tests.conformance.lifetime_recovery_probe import (
+    RecoveryProbeReport,
+    close_probe_diagnostic,
+    decode_probe_diagnostic,
+)
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.clock import ProbeClock
 from tests.fixtures.provider_tooling.src.kora_tooling_fixture.reaper import (
     DeferredReaper,
@@ -278,6 +282,7 @@ async def retained_live_invocation(
     started: list[subprocess.Popen[bytes]] | None = None,
     cleanup_entered: asyncio.Event | None = None,
     cleanup_release: asyncio.Event | None = None,
+    diagnostics: list[str] | None = None,
 ) -> AsyncGenerator[RetainedInvocation]:
     actual = SystemClock() if clock is None else clock
     closing = CleanupDeadline(actual, 5_000_000_000) if cleanup is None else cleanup
@@ -292,15 +297,28 @@ async def retained_live_invocation(
             await release_recovered(observer, closing, actual)
 
     with ExitStack() as handles:
+        inherited = handles.enter_context(ExitStack())
+        arguments = [sys.executable, "-I", str(RECOVERY_PROBE), str(home), mode, phase]
+        diagnostic_read: int | None = None
+        diagnostic_write: int | None = None
+        if diagnostics is not None:
+            diagnostic_read, diagnostic_write = os.pipe()
+            handles.callback(close_probe_diagnostic, diagnostic_read)
+            inherited.callback(close_probe_diagnostic, diagnostic_write)
+            os.set_blocking(diagnostic_read, False)
+            os.set_blocking(diagnostic_write, False)
+            arguments.append(str(diagnostic_write))
         process = subprocess.Popen(
-            [sys.executable, "-I", str(RECOVERY_PROBE), str(home), mode, phase],
+            arguments,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             close_fds=True,
             bufsize=0,
+            pass_fds=() if diagnostic_write is None else (diagnostic_write,),
         )
         handles.callback(process.poll)
+        inherited.close()
         if started is not None:
             started.append(process)
         if process.stdin is not None:
@@ -383,7 +401,26 @@ async def retained_live_invocation(
                             )
                             assert process.returncode == 0
                     finally:
-                        await unwind_owned(releases)
+                        try:
+                            if (
+                                diagnostics is not None
+                                and diagnostic_read is not None
+                                and process.returncode is not None
+                            ):
+                                try:
+                                    value = os.read(diagnostic_read, 22)
+                                except OSError as failure:
+                                    if failure.errno not in (
+                                        errno.EPIPE,
+                                        errno.EAGAIN,
+                                        errno.EINTR,
+                                        errno.EBADF,
+                                    ):
+                                        raise
+                                    value = b""
+                                diagnostics.append(decode_probe_diagnostic(value))
+                        finally:
+                            await unwind_owned(releases)
 
             await finish_cleanup(close, original)
 
