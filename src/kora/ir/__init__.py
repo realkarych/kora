@@ -19,6 +19,10 @@ if TYPE_CHECKING:
         summarize_agent_session,
         verify_agent_session_transcript,
     )
+    from kora.ir.approval_defaults import (
+        ApprovalDefaultResult,
+        validate_approval_defaults,
+    )
     from kora.ir.command_result import (
         CommandResult,
         CommandResultValidationError,
@@ -151,6 +155,8 @@ if TYPE_CHECKING:
 __all__ = [
     "FirstSliceConfigurationResult",
     "validate_first_slice_configuration",
+    "ApprovalDefaultResult",
+    "validate_approval_defaults",
     "StructuredSchemaPreparationInput",
     "StructuredSchemaPreparationAccounting",
     "StructuredSchemaPreparationRefusal",
@@ -284,6 +290,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import first_slice_configuration
 
         return getattr(first_slice_configuration, name)
+    if name in {"ApprovalDefaultResult", "validate_approval_defaults"}:
+        from kora.ir import approval_defaults
+
+        return getattr(approval_defaults, name)
     if name in {
         "StructuredSchemaPreparationInput",
         "StructuredSchemaPreparationAccounting",
