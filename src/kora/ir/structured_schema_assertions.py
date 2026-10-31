@@ -206,3 +206,43 @@ def enum_matches(
             return True
         meter.reserve()
         position += 1
+
+
+def _string_length_compare(
+    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> Literal[-1, 0, 1] | None:
+    kind = cursor_kind(instance, meter)
+    meter.reserve()
+    if kind != "string":
+        return None
+    argument_kind = cursor_kind(argument, meter)
+    meter.reserve()
+    if argument_kind != "number":
+        refuse()
+    text = cast("str", scalar_value(instance, meter))
+    bound = scalar_value(argument, meter)
+    meter.reserve()
+    count = len(text)
+    return numeric_compare(count, bound, meter)
+
+
+def min_length_matches(
+    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    result = _string_length_compare(instance, argument, meter)
+    meter.reserve()
+    if result is None:
+        return True
+    meter.reserve()
+    return result >= 0
+
+
+def max_length_matches(
+    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    result = _string_length_compare(instance, argument, meter)
+    meter.reserve()
+    if result is None:
+        return True
+    meter.reserve()
+    return result <= 0
