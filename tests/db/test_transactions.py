@@ -26,6 +26,7 @@ from kora.db.connection import (
 )
 from kora.db.tables import namespace
 from kora.observability import Level, LoggingSettings
+from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import (
     CLOSED_BEFORE_FINISHING,
     REFUSAL_DEADLINE_SECONDS,
@@ -497,6 +498,42 @@ def checkouts_of_a_queued_writer(database: Database) -> int:
     if database.dialect is Dialect.SQLITE:
         return 0
     return 1
+
+
+@pytest.mark.asyncio
+async def test_closed_migration_commit_rolls_back_before_releasing_its_lease(
+    database: Database,
+) -> None:
+    closing = narrow_database(database)
+    ledger = ConnectionLedger(closing)
+
+    async def refused_commit() -> None:
+        async with closing.migration_connection() as connection:
+            await Seeder(connection).namespace("refused-migration")
+            await closing.close(deadline_seconds=0)
+            if closing.dialect is Dialect.POSTGRESQL:
+                await connection.commit()
+
+    try:
+        with pytest.raises(DatabaseClosedError, match=CLOSED_BEFORE_FINISHING):
+            await refused_commit()
+        reopened = Database(database.settings)
+        try:
+            remaining_names = await names(reopened)
+            remaining_leases = await migration_lock_count(reopened)
+        finally:
+            await reopened.close()
+        companions = sqlite_companions(closing)
+
+        assert remaining_names == []
+        assert remaining_leases == 0
+        assert ledger.closed == ledger.opened
+        assert ledger.closed_while_checked_out == 0
+        assert ledger.outstanding == 0
+        assert closing.units_in_flight() == 0
+        assert companions == []
+    finally:
+        await closing.close()
 
 
 @pytest.mark.asyncio

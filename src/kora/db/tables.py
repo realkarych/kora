@@ -303,6 +303,7 @@ attempt: Table = Table(
     document("handle", nullable=True),
     Column("status", name(), nullable=False),
     Column("desired_state", name(), nullable=False),
+    Column("cancel_cause", name(), nullable=True),
     Column("record_version", Integer, nullable=False),
     document("input_bindings"),
     document("execution_request", nullable=True),
@@ -329,6 +330,11 @@ attempt: Table = Table(
     timestamp("finished_at", nullable=True),
     *audit_columns(),
     UniqueConstraint("node_instance_id", "number"),
+    CheckConstraint(
+        "cancel_cause IS NULL OR cancel_cause IN "
+        "('cancel', 'clear', 'supersede', 'timeout', 'stop')",
+        name="cancel_cause",
+    ),
     Index(
         "ix_attempt_lease_until",
         "lease_until",

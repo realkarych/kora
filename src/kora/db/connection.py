@@ -323,6 +323,8 @@ class Database:
                 await complete(self._release_migration(connection, previous_timeout))
 
     def _migration_commit(self, connection: Connection) -> None:
+        if self._lifecycle is Lifecycle.CLOSED:
+            connection.connection.rollback()
         self._refuse_when_closed()
 
     async def _lock_migration(self, connection: AsyncConnection) -> None:
