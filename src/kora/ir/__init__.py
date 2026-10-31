@@ -97,6 +97,7 @@ if TYPE_CHECKING:
         RuntimeSection,
         SecretsSection,
     )
+    from kora.ir.secret_aliases import SecretAliasResult, validate_secret_aliases
     from kora.ir.structured_output import (
         StructuredOutput,
         StructuredOutputValidationError,
@@ -157,6 +158,8 @@ __all__ = [
     "validate_sensor_trigger_expressions",
     "ApprovalDefaultResult",
     "validate_approval_defaults",
+    "SecretAliasResult",
+    "validate_secret_aliases",
     "StructuredSchemaPreparationInput",
     "StructuredSchemaPreparationAccounting",
     "StructuredSchemaPreparationRefusal",
@@ -294,6 +297,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import approval_defaults
 
         return getattr(approval_defaults, name)
+    if name in {"SecretAliasResult", "validate_secret_aliases"}:
+        from kora.ir import secret_aliases
+
+        return getattr(secret_aliases, name)
     if name in {
         "StructuredSchemaPreparationInput",
         "StructuredSchemaPreparationAccounting",

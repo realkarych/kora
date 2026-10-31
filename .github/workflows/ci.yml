@@ -1476,7 +1476,7 @@ jobs:
           test -f /etc/apt/apt-mirrors.txt
           printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
           pnpm --dir web install --frozen-lockfile
-          pnpm --dir web exec playwright install --with-deps chromium
+          pnpm --dir web exec playwright install --with-deps --only-shell chromium
         if: ${{ needs.change-scope.outputs.full != 'false' }}
       - name: Check and build browser sources
         run: |
