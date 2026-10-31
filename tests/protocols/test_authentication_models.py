@@ -1,15 +1,22 @@
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from typing import cast
 
 import pytest
 from pydantic import ValidationError
 
+from kora.conformance.authentication import kora_capture
+from kora.conformance.capture import Capture
+from kora.conformance.common import CONFORMANCE_COMPONENT
 from kora.protocols.authentication import (
     AuthenticationCapabilities,
+    AuthenticationContext,
     NamespaceGrant,
     Principal,
     RequestInfo,
 )
+from kora.protocols.time import SystemClock
+
+__all__ = ["kora_capture"]
 
 
 def document(kind: str = "user") -> dict[str, object]:
@@ -245,5 +252,24 @@ def test_authentication_capabilities_are_frozen_and_consistent() -> None:
     ],
 )
 def test_authentication_dataclasses_are_frozen(value: object, attribute: str) -> None:
+    require_frozen_attribute(value, attribute)
+
+
+def require_frozen_attribute(value: object, attribute: str) -> None:
     with pytest.raises(FrozenInstanceError):
         setattr(value, attribute, True)
+
+
+def test_authentication_context_is_frozen_and_has_only_borrowed_logger_and_clock(
+    kora_capture: Capture,
+) -> None:
+    logger = kora_capture.diagnostics.logger(CONFORMANCE_COMPONENT)
+    clock = SystemClock()
+
+    context = AuthenticationContext(logger=logger, clock=clock)
+
+    assert tuple(field.name for field in fields(context)) == ("logger", "clock")
+    assert context.logger is logger
+    assert context.clock is clock
+    assert not hasattr(context, "namespace_id")
+    require_frozen_attribute(context, "clock")

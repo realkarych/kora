@@ -7,9 +7,7 @@ from pathlib import Path
 from kora.db.connection import Database, parse_database_url
 from kora.observability import Level, LoggingSettings, configure_process
 from kora.plugins.authentication.static_token import COMPONENT, StaticTokenAuthenticator
-from kora.protocols.activity import NoActivity
-from kora.protocols.authentication import RequestInfo
-from kora.protocols.common import ProtocolContext
+from kora.protocols.authentication import AuthenticationContext, RequestInfo
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.time import SystemClock
 from tests.db.closing import ConnectionLedger, reached
@@ -33,18 +31,7 @@ def run(sink: str, configuration: Path) -> dict[str, object]:
         clock.now,
         write_end,
     )
-    context = ProtocolContext(
-        "authentication-sink",
-        None,
-        None,
-        diagnostics.logger(COMPONENT),
-        None,
-        None,
-        None,
-        None,
-        clock,
-        NoActivity(),
-    )
+    context = AuthenticationContext(diagnostics.logger(COMPONENT), clock)
     database = Database(parse_database_url(data))
     provider = StaticTokenAuthenticator({}, database)
     ledger = ConnectionLedger(database)

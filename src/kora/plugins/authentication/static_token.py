@@ -8,11 +8,12 @@ from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.protocols.authentication import (
     AuthenticationCapabilities,
+    AuthenticationContext,
     Principal,
     RequestInfo,
 )
 from kora.protocols.boundary import BoundaryModel
-from kora.protocols.common import ProtocolContext, is_identifier
+from kora.protocols.common import is_identifier
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Instant, utc_instant
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
@@ -68,7 +69,7 @@ def checked_authority(row: "TokenRow") -> StoredAuthority | None:
         return None
 
 
-def refuse(ctx: ProtocolContext, operation: str, code: str) -> KoraProtocolError:
+def refuse(ctx: AuthenticationContext, operation: str, code: str) -> KoraProtocolError:
     ctx.logger.emit(OUTCOME, operation=operation, outcome=code)
     messages = {
         "authentication_rejected": "Authentication is required.",
@@ -101,7 +102,7 @@ class StaticTokenAuthenticator:
         return AuthenticationCapabilities()
 
     async def authenticate(
-        self, request: RequestInfo, ctx: ProtocolContext
+        self, request: RequestInfo, ctx: AuthenticationContext
     ) -> Principal:
         from kora.db.reads import token_by_digest
         from kora.db.tokens import REVOKED, authentication_unavailable
@@ -135,7 +136,7 @@ class StaticTokenAuthenticator:
         ctx.logger.emit(OUTCOME, operation="authenticate", outcome="accepted")
         return authority.principal
 
-    async def revoke(self, token_id: str, ctx: ProtocolContext) -> None:
+    async def revoke(self, token_id: str, ctx: AuthenticationContext) -> None:
         from kora.db.tokens import authentication_unavailable, revoke_token
 
         if type(token_id) is not str or not is_identifier(token_id):

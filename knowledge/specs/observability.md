@@ -110,7 +110,7 @@ Rate-limit repeated incidents using bounded keys. First occurrence and recovery 
 | API to worker | Reconstruct scope from the authorized claim/saved execution metadata and current nonsecret epoch | Each HTTP exchange has its own request ID; run/attempt keys join exchanges |
 | Runtime launch / trusted child | Launcher supplies validated context and owns the child channel identity | Child creation and exit delimit scope; candidate fields cannot overwrite it |
 | Recovery/adoption | Use saved execution identity plus the current authorized recovery context | Current aliases and old request-local variables cannot redefine original scope |
-| Provider | Inject already bound `ProtocolContext.logger` | Provider does not reconfigure root output or fetch secrets for logging |
+| Provider | Inject the already bound caller context logger | Provider does not reconfigure root output or fetch secrets for logging |
 | Clients / browser | Preserve API transport and error IDs in safe diagnostic metadata | Do not modify the returned API JSON body or promote local correlation to authority |
 
 Concurrent operations must not leak context, including standalone coroutines and sync/async framework paths. Bind/reset context at actual boundaries; using context variables alone does not prove propagation across threads, HTTP or processes. Time and identity generation remain injectable for deterministic tests.
@@ -178,7 +178,7 @@ All rows inherit sections 1–6: safe fields, single failure owner, stderr or br
 
 ### All eleven provider protocols
 
-Every provider inherits the injected `ProtocolContext.logger` and the common conformance rules. Its first implementation issue assumes the row below; shared conformance covers bound context and failure ownership using installed implementations, with real core integration and protocol fakes where appropriate.
+Every provider inherits its injected caller-bound context logger and the common conformance rules. Authentication uses `AuthenticationContext.logger`; other protocols retain `ProtocolContext.logger`. Its first implementation issue assumes the row below; shared conformance covers bound context and failure ownership using installed implementations, with real core integration and protocol fakes where appropriate.
 
 | Protocol | Required diagnostic categories | Additional exclusions and evidence |
 |---|---|---|

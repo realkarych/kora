@@ -6,9 +6,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy import update
 
+from kora.conformance.authentication import authentication_context as context_for
 from kora.conformance.authentication import kora_capture
 from kora.conformance.capture import Capture
-from kora.conformance.common import context_for
 from kora.db.connection import Database, DatabaseSettings
 from kora.db.tables import api_token
 from kora.observability.catalog import LOGGING_COMPONENT
@@ -34,7 +34,6 @@ async def test_authentication_diagnostics_preserve_concurrent_authorized_context
     contexts = [
         replace(
             context,
-            namespace_id=case.principal.namespaces[0].namespace_id,
             logger=context.logger.bind(
                 namespace_id=case.principal.namespaces[0].namespace_id,
                 request_id="request-" + str(index),

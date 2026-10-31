@@ -1,5 +1,6 @@
 import pytest
 
+from kora.conformance.authentication import authentication_context as context_for
 from kora.conformance.authentication import (
     check_authentication_preserves_principals,
     check_authentication_revalidates_current_authority,
@@ -7,11 +8,9 @@ from kora.conformance.authentication import (
     kora_capture,
 )
 from kora.conformance.capture import Capture
-from kora.conformance.common import context_for
 from kora.db.connection import Database
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
-from kora.protocols.authentication import Principal, RequestInfo
-from kora.protocols.common import ProtocolContext
+from kora.protocols.authentication import AuthenticationContext, Principal, RequestInfo
 from kora.protocols.errors import KoraProtocolError
 from tests.plugins.authentication.support import fixture_inputs
 
@@ -25,7 +24,7 @@ class BrokenAuthenticator(StaticTokenAuthenticator):
         self.prior: Principal | None = None
 
     async def authenticate(
-        self, request: RequestInfo, ctx: ProtocolContext
+        self, request: RequestInfo, ctx: AuthenticationContext
     ) -> Principal:
         if self.stale:
             if self.prior is None:
@@ -40,12 +39,12 @@ class RevealingAuthenticator(StaticTokenAuthenticator):
         super().__init__({}, database)
         self.revoked = False
 
-    async def revoke(self, token_id: str, ctx: ProtocolContext) -> None:
+    async def revoke(self, token_id: str, ctx: AuthenticationContext) -> None:
         await super().revoke(token_id, ctx)
         self.revoked = True
 
     async def authenticate(
-        self, request: RequestInfo, ctx: ProtocolContext
+        self, request: RequestInfo, ctx: AuthenticationContext
     ) -> Principal:
         failure: KoraProtocolError | None = None
         try:

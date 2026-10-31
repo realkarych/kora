@@ -11,8 +11,12 @@ from kora.db.connection import Database
 from kora.db.tables import api_token
 from kora.ir.json import JsonObject
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
-from kora.protocols.authentication import Authenticator, Principal, RequestInfo
-from kora.protocols.common import ProtocolContext
+from kora.protocols.authentication import (
+    AuthenticationContext,
+    Authenticator,
+    Principal,
+    RequestInfo,
+)
 from kora.protocols.time import SystemClock
 from tests.db.seed import START, Seeder
 
@@ -97,13 +101,13 @@ async def fixture_inputs(database: Database) -> AuthenticationConformanceInputs:
     async def failure(
         provider: Authenticator,
         configuration: JsonObject,
-        ctx: ProtocolContext,
+        ctx: AuthenticationContext,
         marker: str,
     ) -> object:
         return await provider.authenticate(RequestInfo("Bearer " + marker), ctx)
 
     async def effect(
-        provider: Authenticator, configuration: JsonObject, ctx: ProtocolContext
+        provider: Authenticator, configuration: JsonObject, ctx: AuthenticationContext
     ) -> None:
         assert type(provider) is StaticTokenAuthenticator
         assert configuration == {}
