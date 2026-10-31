@@ -283,10 +283,22 @@ async def test_attempt_cancel_cause_upgrade_refusal_is_content_free(
     try:
         await seed_cause_predecessor(database)
         async with database.transaction() as connection:
-            await connection.exec_driver_sql(
-                "ALTER TABLE attempt ADD COLUMN cancel_cause "
-                f"VARCHAR(255) DEFAULT '{marker}'"
-            )
+            if database.dialect is Dialect.POSTGRESQL:
+                await connection.exec_driver_sql(
+                    "ALTER TABLE attempt ADD COLUMN cancel_cause "
+                    'VARCHAR(255) COLLATE "C"'
+                )
+                await connection.execute(update(attempt).values(cancel_cause=marker))
+                await connection.exec_driver_sql(
+                    "ALTER TABLE attempt ADD CONSTRAINT ck_attempt_cancel_cause "
+                    "CHECK (cancel_cause IS NULL OR cancel_cause IN "
+                    "('cancel', 'clear', 'supersede', 'timeout', 'stop')) NOT VALID"
+                )
+            else:
+                await connection.exec_driver_sql(
+                    "ALTER TABLE attempt ADD COLUMN cancel_cause "
+                    f"VARCHAR(255) DEFAULT '{marker}'"
+                )
         environment = {
             "KORA_DATABASE_URL": empty_database_settings.url.render_as_string(
                 hide_password=False
@@ -296,6 +308,11 @@ async def test_attempt_cancel_cause_upgrade_refusal_is_content_free(
         refused = await asyncio.to_thread(upgrade, environment)
         async with database.read_transaction() as connection:
             revision = await connection.run_sync(current_revision)
+            retained = (
+                (await connection.execute(select(attempt.c.cancel_cause).distinct()))
+                .scalars()
+                .all()
+            )
         locks = await migration_lock_count(database)
 
         assert refused.code == 70
@@ -304,6 +321,7 @@ async def test_attempt_cancel_cause_upgrade_refusal_is_content_free(
         assert events(refused).count("db.migration.failed") == 1
         assert "db.migration.finished" not in events(refused)
         assert revision == "0003"
+        assert retained == [marker]
         assert locks == 0
     finally:
         await database.close()
