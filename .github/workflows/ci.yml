@@ -243,8 +243,8 @@ jobs:
             tests/ir/test_inline_schema_resources.py
             tests/ir/test_type_schema_resources.py
           )
-          integration=(tests/cli)
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py)
+          integration=(tests/cli tests/architecture/test_ir_measurement_ci.py)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)

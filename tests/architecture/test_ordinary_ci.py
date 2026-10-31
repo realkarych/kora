@@ -255,6 +255,11 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert tuple(arrays["first"]) == FIRST_MODULES
     assert IR_RESOURCE_MODULES <= cohorts["measurements"]
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
+    assert tuple(arrays["integration"]) == (
+        "tests/cli",
+        "tests/architecture/test_ir_measurement_ci.py",
+    )
+    assert "tests/architecture/test_ir_measurement_ci.py" not in cohorts["other"]
     assert all(
         not argument.startswith("-") or argument.startswith("--ignore=")
         for values in arrays.values()
