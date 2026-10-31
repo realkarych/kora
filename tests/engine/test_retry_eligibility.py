@@ -276,21 +276,22 @@ def test_predicate_failure_requires_closed_error_kind() -> None:
 
 def test_retry_values_are_frozen() -> None:
     facts = retry_facts()
-    values: tuple[object, ...] = (
-        facts,
-        facts.policy,
-        NoPredicate(),
-        PredicatePending(),
-        PredicateResult(True),
-        PredicateFailure(ErrorKind.OVERFLOW),
-        NodeRetryDenied(ErrorClass.HARNESS_ERROR, "non_retryable"),
-        RetryPredicateRequired(ErrorClass.HARNESS_ERROR),
-        NodeRetryPolicyAllows(ErrorClass.HARNESS_ERROR),
-        RuntimeRetryPolicyRequired(ErrorClass.INFRASTRUCTURE),
+    values: tuple[tuple[str, object], ...] = (
+        ("failure_class", facts),
+        ("max_attempts", facts.policy),
+        ("unexpected", NoPredicate()),
+        ("unexpected", PredicatePending()),
+        ("value", PredicateResult(True)),
+        ("kind", PredicateFailure(ErrorKind.OVERFLOW)),
+        ("reason", NodeRetryDenied(ErrorClass.HARNESS_ERROR, "non_retryable")),
+        ("failure_class", RetryPredicateRequired(ErrorClass.HARNESS_ERROR)),
+        ("failure_class", NodeRetryPolicyAllows(ErrorClass.HARNESS_ERROR)),
+        ("failure_class", RuntimeRetryPolicyRequired(ErrorClass.INFRASTRUCTURE)),
     )
+    before = tuple(repr(value) for _, value in values)
 
-    for value in values:
+    for field, value in values:
         with pytest.raises(FrozenInstanceError):
-            setattr(value, "unexpected", True)
+            setattr(value, field, None)
 
-    assert all(not hasattr(value, "unexpected") for value in values)
+    assert tuple(repr(value) for _, value in values) == before
