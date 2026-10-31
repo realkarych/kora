@@ -151,6 +151,16 @@ Timestamp = Annotated[
 def preflight(value: object, budget: CanonicalBudget, depth: int = 0) -> None:
     if depth > 16:
         raise JsonShapeError("json_depth")
+    value_type = type(value)
+    if (
+        value is None
+        or value_type is str
+        or value_type is bool
+        or value_type is int
+        or value_type is float
+    ):
+        parse_value(value, 16, depth, budget)
+        return
     if isinstance(value, BaseModel):
         budget.spend(2 + max(len(type(value).model_fields) - 1, 0))
         for key in type(value).model_fields:

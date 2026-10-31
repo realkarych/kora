@@ -19,6 +19,10 @@ if TYPE_CHECKING:
         summarize_agent_session,
         verify_agent_session_transcript,
     )
+    from kora.ir.approval_defaults import (
+        ApprovalDefaultResult,
+        validate_approval_defaults,
+    )
     from kora.ir.command_result import (
         CommandResult,
         CommandResultValidationError,
@@ -81,6 +85,10 @@ if TYPE_CHECKING:
         validate_expression_syntax,
     )
     from kora.ir.fan_out_types import FanOutTypeResult, validate_fan_out_types
+    from kora.ir.first_slice_configuration import (
+        FirstSliceConfigurationResult,
+        validate_first_slice_configuration,
+    )
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
     from kora.ir.input_paths import InputPathResult, validate_input_paths
@@ -93,6 +101,7 @@ if TYPE_CHECKING:
         RuntimeSection,
         SecretsSection,
     )
+    from kora.ir.secret_aliases import SecretAliasResult, validate_secret_aliases
     from kora.ir.structured_output import (
         StructuredOutput,
         StructuredOutputValidationError,
@@ -114,6 +123,7 @@ if TYPE_CHECKING:
         SubgraphInterfaceResult,
         validate_subgraph_interfaces,
     )
+    from kora.ir.tool_policies import ToolPolicyResult, validate_tool_policies
     from kora.ir.topology import (
         AgentNode,
         BranchNode,
@@ -145,6 +155,12 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "FirstSliceConfigurationResult",
+    "validate_first_slice_configuration",
+    "ApprovalDefaultResult",
+    "validate_approval_defaults",
+    "SecretAliasResult",
+    "validate_secret_aliases",
     "StructuredSchemaPreparationInput",
     "StructuredSchemaPreparationAccounting",
     "StructuredSchemaPreparationRefusal",
@@ -269,11 +285,25 @@ __all__ = [
     "SourceLocation",
     "SubgraphNodeConfig",
     "ToolPolicy",
+    "ToolPolicyResult",
+    "validate_tool_policies",
     "Workspace",
 ]
 
 
 def __getattr__(name: str) -> object:
+    if name in {"FirstSliceConfigurationResult", "validate_first_slice_configuration"}:
+        from kora.ir import first_slice_configuration
+
+        return getattr(first_slice_configuration, name)
+    if name in {"ApprovalDefaultResult", "validate_approval_defaults"}:
+        from kora.ir import approval_defaults
+
+        return getattr(approval_defaults, name)
+    if name in {"SecretAliasResult", "validate_secret_aliases"}:
+        from kora.ir import secret_aliases
+
+        return getattr(secret_aliases, name)
     if name in {
         "StructuredSchemaPreparationInput",
         "StructuredSchemaPreparationAccounting",
@@ -400,6 +430,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import node
 
         return getattr(node, name)
+    if name in {"ToolPolicyResult", "validate_tool_policies"}:
+        from kora.ir import tool_policies
+
+        return getattr(tool_policies, name)
     if name in {
         "Concurrency",
         "RuntimeSection",
