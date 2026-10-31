@@ -32,6 +32,10 @@ A completed mismatch is distinct from unsupported semantics or exhausted capacit
 
 Preparation owns temporary snapshots and tables; the prepared-contract holder owns retained state. Each finite synchronous evaluation releases its frames, counters and temporary state on every exit. No process, thread, task, interrupt deadline, Python heap/RSS ceiling or latency guarantee is introduced. Future consumers must bound aggregate prepared-contract retention, concurrent calls and scheduling impact before activation. Derived lists and their aggregate admission remain separately unavailable.
 
+Private adapter implementation may be staged with the complete fixed 35-key dispatch table and a proper subset of implemented handler bodies. Unfinished slots raise a fresh fixed internal availability error and supply neither a completed schema decision nor a public refusal. Such a component is not an executable binding of the reserved policy. Publication remains blocked until all supported handlers, the complete adapter and common composition satisfy their existing activation gates.
+
+The concrete original-view, schema-frame, dispatch, error and cleanup schedule is specified in StructuredOutput section 3.3.4.1. Its reservation boundaries and surrounding primitive charges are part of the adopted interpretation. Keeping the same capacities or named bulk constants does not establish compatibility. This addition does not waive the rule that an acceptance-affecting change requires a new immutable identity or an explicitly supported immutable compatibility binding; an unavailable reserved identity is not a license to reinterpret it silently.
+
 ## Alternatives considered
 
 A core-owned evaluator process can contain non-cooperative schema work and preserve broader syntax. It additionally requires admission and queue limits, bounded transfer, portable enforced resource controls, cancellation and observed child exit/reap before releasing capacity. Those facilities are not implemented or selected here. A thread wait timeout and CEL pattern parsing do not supply them. Unrestricted stock schema evaluation inside provider hooks is rejected.
