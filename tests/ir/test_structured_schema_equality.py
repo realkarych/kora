@@ -1,5 +1,6 @@
 import gc
 import weakref
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Literal, cast
 
@@ -19,6 +20,7 @@ from kora.ir.structured_schema_cursors import (
     NativeCursor,
     NativeObjectIndex,
     arena_cursor,
+    build_native_object_index,
     native_cursor,
 )
 from kora.ir.structured_schema_equality import json_equal
@@ -393,11 +395,55 @@ def tracked_equality_owners() -> set[int]:
         frame_type,
         DecimalNumber,
     )
+    owner_type_ids = {id(kind) for kind in owner_types}
     return {
         id(value)
-        for value in gc.get_objects()
-        if any(type(value) is kind for kind in owner_types)
+        for value in cast("list[object]", gc.get_objects())
+        if id(type(value)) in owner_type_ids
     }
+
+
+def test_owner_inventory_preserves_exact_classes_without_callbacks() -> None:
+    calls: list[str] = []
+
+    class AuthoredMeta(type):
+        def __eq__(cls, other: object) -> bool:
+            calls.append("equality")
+            raise AssertionError("authored metaclass equality invoked")
+
+        def __hash__(cls) -> int:
+            calls.append("hash")
+            raise AssertionError("authored metaclass hashing invoked")
+
+    class AuthoredCursor(NativeCursor, metaclass=AuthoredMeta):
+        pass
+
+    class AuthoredObject(metaclass=AuthoredMeta):
+        pass
+
+    meter = EvaluationMeter()
+    native = native_cursor(None, meter)
+    literal = frozen_literal(None)
+    arena = arena_cursor(literal.nodes, literal.root, meter)
+    index = build_native_object_index({"a": False}, meter)
+    frame_type = cast(
+        "Callable[[NativeCursor, ArenaCursor], object]",
+        vars(structured_schema_equality)["_PairFrame"],
+    )
+    owners: tuple[object, ...] = (
+        native,
+        arena,
+        index,
+        frame_type(native, arena),
+        DecimalNumber(0, 0),
+    )
+    excluded: tuple[object, ...] = (AuthoredCursor(None), AuthoredObject())
+
+    inventory = tracked_equality_owners()
+
+    assert {id(owner) for owner in owners} <= inventory
+    assert not {id(value) for value in excluded}.intersection(inventory)
+    assert not calls
 
 
 def owned_comparison(outcome: str) -> bool:
