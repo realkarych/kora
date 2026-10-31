@@ -23,6 +23,13 @@ IR_RESOURCE_MODULES = frozenset(
         "tests/ir/test_type_schema_resources.py",
     }
 )
+IR_SCHEMA_MODULES = frozenset(
+    {
+        "tests/ir/test_structured_schema_assertions.py",
+        "tests/ir/test_structured_schema_collection_predicates.py",
+        "tests/ir/test_structured_schema_string_lengths.py",
+    }
+)
 FIRST_MODULES = (
     "tests/conformance/test_conformance_cases_detect_broken_providers.py",
     "tests/conformance/test_lifetime_helper_phases.py",
@@ -256,6 +263,8 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert tuple(arrays["first"]) == FIRST_MODULES
     assert IR_RESOURCE_MODULES <= cohorts["measurements"]
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
+    assert cohorts["integration"] == selected_files(["tests/cli"]) | IR_SCHEMA_MODULES
+    assert IR_SCHEMA_MODULES.isdisjoint(cohorts["other"])
     assert all(
         not argument.startswith("-") or argument.startswith("--ignore=")
         for values in arrays.values()
