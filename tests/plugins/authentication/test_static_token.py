@@ -11,14 +11,14 @@ import pytest
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.exc import DBAPIError
 
+from kora.conformance.authentication import authentication_context as context_for
 from kora.conformance.authentication import kora_capture
 from kora.conformance.capture import Capture
-from kora.conformance.common import context_for
 from kora.db.connection import SQLITE_READERS, Database, DatabaseSettings, Dialect
 from kora.db.tables import api_token, idempotency_record, worker
 from kora.db.tokens import REVOKED
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
-from kora.protocols.authentication import RequestInfo
+from kora.protocols.authentication import Principal, RequestInfo
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.loading import load_provider
 from kora.protocols.metadata import ProtocolName
@@ -477,3 +477,32 @@ def test_static_token_entry_point_and_configuration(
     assert metadata.config_schema == {"type": "object", "additionalProperties": False}
     with pytest.raises(KoraProtocolError, match="configuration_invalid"):
         metadata.implementation({"private": "private-configuration-marker"}, database)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current", [False, True])
+async def test_authentication_without_namespace_context_preserves_empty_grants(
+    database: Database, kora_capture: Capture, current: bool
+) -> None:
+    case = await seed_case(database, "no-grants")
+    async with database.transaction() as connection:
+        await connection.execute(
+            update(api_token)
+            .where(api_token.c.id == case.principal.token_id)
+            .values(namespaces=[])
+        )
+    expected = Principal.model_validate(
+        {**case.principal.model_dump(), "namespaces": []}
+    )
+    context = context_for(kora_capture)
+    provider = StaticTokenAuthenticator({}, database)
+    request = replace(case.request, requires_current_authority=current)
+
+    received = await provider.authenticate(request, context)
+    records = kora_capture.finish()
+
+    assert received == expected
+    assert received.namespaces == ()
+    assert not hasattr(context, "namespace_id")
+    assert all("namespace_id" not in record for record in records)
+    assert database.units_in_flight() == 0
