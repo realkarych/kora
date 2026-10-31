@@ -96,8 +96,17 @@ async def seed_cause_predecessor(
 
 
 class UpgradeStage:
-    def __init__(self, sqlite_after: bool = True) -> None:
+    def __init__(
+        self,
+        sqlite_after: bool = True,
+        column_name: str = "cancel_cause",
+        constraint_name: str = "ck_attempt_cancel_cause",
+    ) -> None:
         self.sqlite_after: bool = sqlite_after
+        self.column_name: str = column_name
+        self.validation: str = (
+            f"ALTER TABLE attempt VALIDATE CONSTRAINT {constraint_name}"
+        )
         self.entered: asyncio.Event = asyncio.Event()
         self.release: asyncio.Event = asyncio.Event()
         self.database: Database | None = None
@@ -126,12 +135,14 @@ class UpgradeStage:
         if (
             connection.dialect.name == "sqlite"
             and not self.sqlite_after
-            and statement.startswith("ALTER TABLE attempt ADD COLUMN cancel_cause")
+            and statement.startswith(
+                f"ALTER TABLE attempt ADD COLUMN {self.column_name}"
+            )
         ):
             self.entered.set()
             await_(self.release.wait())
             return
-        if connection.dialect.name != "postgresql" or statement != VALIDATE_CAUSE:
+        if connection.dialect.name != "postgresql" or statement != self.validation:
             return
         exclusive = int(
             connection.exec_driver_sql(
@@ -162,13 +173,17 @@ class UpgradeStage:
         if (
             self.sqlite_after
             and connection.dialect.name == "sqlite"
-            and statement.startswith("ALTER TABLE attempt ADD COLUMN cancel_cause")
+            and statement.startswith(
+                f"ALTER TABLE attempt ADD COLUMN {self.column_name}"
+            )
         ):
             self.entered.set()
             await_(self.release.wait())
 
 
-async def wait_for_validation(database: Database) -> None:
+async def wait_for_validation(
+    database: Database, statement: str = VALIDATE_CAUSE
+) -> None:
     async with asyncio.timeout(4):
         while True:
             async with database.read_transaction() as connection:
@@ -178,7 +193,7 @@ async def wait_for_validation(database: Database) -> None:
                         "current_database() AND query = :query "
                         "AND wait_event_type = 'Lock'"
                     ),
-                    {"query": VALIDATE_CAUSE},
+                    {"query": statement},
                 )
                 if waiting.scalar_one() == 1:
                     return
