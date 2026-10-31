@@ -1,6 +1,8 @@
 # IR measurement-CI cohort placement
 
-Date: 2026-10-31. Implementation owner: [issue #565](https://github.com/realkarych/kora/issues/565). The project owner approved the bounded placement plan and exact development-guide fragment on this date; [the approval, full proposal and actual independent design results](https://github.com/realkarych/kora/issues/527#issuecomment-6539509010) preserve their provenance.
+Date: 2026-10-31. Implementation owner: [issue #565](https://github.com/realkarych/kora/issues/565). The project owner explicitly approved the bounded placement plan and exact development-guide fragment at 2026-10-31T09:13:52.104Z; [the actual answer](https://github.com/realkarych/kora/issues/565#issuecomment-6549472653) and [full proposal and independent design results](https://github.com/realkarych/kora/issues/527#issuecomment-6539509010) preserve their provenance.
+
+The initial draft and its first technical checks preceded valid approval because an earlier approval for different CI changes was misapplied. Work then stopped until the subsequent explicit answer. This chronology does not establish retrospective pre-code compliance or change the original checks' revisions and times. Integration of accepted runtime host-fixture changes resolves a real development-guide conflict; its final revision receives separate executable evidence.
 
 ## Delivered assignment
 

@@ -9,6 +9,7 @@ import socket
 import sys
 import uuid
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from kora.observability import (
     LoggingSettings,
     configure_process,
 )
+from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, bound_socket
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
@@ -38,6 +40,7 @@ from kora.runner.identity import (
     NativeIdentityReader,
     complete_identity,
 )
+from kora.runner.peers import kernel_source
 from kora.runner.registry import (
     LOCK_DEADLINE_NS,
     LOCK_RETRY_NS,
@@ -60,7 +63,6 @@ EXIT_REFUSED: Final[int] = 3
 EXIT_FAILED: Final[int] = 1
 TOKEN: Final[re.Pattern[str]] = re.compile(r"[\x21-\x7e]{1,256}")
 NONCE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{32}")
-COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
 STARTED: Final[EventSpec] = CATALOG.register(
     EventSpec(
         "runtime.local.runner.started",
@@ -129,8 +131,8 @@ def harden() -> None:
                 raise OSError(failure, os.strerror(failure))
 
 
-def own_identity() -> ProcessIdentity:
-    observation = NativeIdentityReader().read(os.getpid())
+def own_identity(reader: NativeIdentityReader) -> ProcessIdentity:
+    observation = reader.read(os.getpid())
     process = observation.process
     if (
         observation.state is not IdentityState.PRESENT
@@ -207,33 +209,54 @@ def signal_ready() -> None:
 
 async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
     clock = SystemClock()
-    identity = own_identity()
-    root = open_local_directory(arguments.state_root)
-    domain = read_domain(root)
-    if domain is None or domain.execution_domain_id != arguments.execution_domain_id:
-        raise RunnerRefused("domain")
-    registry = Registry(
-        open_private_directory(root, "registry"),
-        arguments.execution_domain_id,
-        lambda: secrets.token_hex(16),
-    )
-    key = registry.key(arguments.attempt_id)
-    entry = registry.entry(key)
-    if not isinstance(entry, Starting) or entry.nonce != arguments.nonce or entry.fence:
-        raise RunnerRefused("fenced")
-    directory = open_local_directory(Path(entry.socket_directory))
-    name = key.name[:SOCKET_NAME_LENGTH]
-    path = socket_path(entry.socket_directory, name)
-    listener = bound_listener(directory, name)
-    try:
-        await register(registry, key, arguments.nonce, identity, path, clock)
-    except BaseException:
-        listener.close()
-        os.unlink(name, dir_fd=directory.descriptor)
-        raise
-    log.emit(REGISTERED)
-    signal_ready()
-    await asyncio.Event().wait()
+    reader = NativeIdentityReader()
+    identity = own_identity(reader)
+    with ExitStack() as resources:
+        root = open_local_directory(arguments.state_root)
+        resources.callback(root.close)
+        domain = read_domain(root)
+        if (
+            domain is None
+            or domain.execution_domain_id != arguments.execution_domain_id
+        ):
+            raise RunnerRefused("domain")
+        registry = Registry(
+            open_private_directory(root, "registry"),
+            arguments.execution_domain_id,
+            lambda: secrets.token_hex(16),
+        )
+        resources.callback(registry.directory.close)
+        key = registry.key(arguments.attempt_id)
+        entry = registry.entry(key)
+        if (
+            not isinstance(entry, Starting)
+            or entry.nonce != arguments.nonce
+            or entry.fence
+        ):
+            raise RunnerRefused("fenced")
+        directory = open_local_directory(Path(entry.socket_directory))
+        resources.callback(directory.close)
+        name = key.name[:SOCKET_NAME_LENGTH]
+        path = socket_path(entry.socket_directory, name)
+        listener = bound_listener(directory, name)
+        resources.callback(listener.close)
+        try:
+            bound = bound_socket(listener, directory, name)
+            await register(registry, key, arguments.nonce, identity, path, clock)
+        except BaseException:
+            listener.close()
+            os.unlink(name, dir_fd=directory.descriptor)
+            raise
+        log.emit(REGISTERED)
+        signal_ready()
+        socket_directory = Path(entry.socket_directory)
+        source = kernel_source(reader)
+        server = ControlServer(bound, socket_directory, name, clock, source, log)
+        try:
+            server.start()
+            await asyncio.Event().wait()
+        finally:
+            await server.close()
 
 
 def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:

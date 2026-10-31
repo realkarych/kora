@@ -677,7 +677,32 @@ async def capabilities_are_the_local_row(tmp_path: Path, capture: Capture) -> No
     assert capabilities.default_stall_after == timedelta(minutes=15)
 
 
+async def missing_socket_while_running_is_retryable(
+    tmp_path: Path, capture: Capture
+) -> None:
+    runtime = await opened(state_root(tmp_path), capture)
+    ctx = runtime_context(capture)
+    handle = runtime.registry.key("attempt-1").handle()
+    try:
+        with short_directory() as base:
+            running = started_entries(runtime.execution_domain_id)["running"]
+            missing = running.model_copy(update={"socket_path": str(base / "gone")})
+            write_entry(runtime, "attempt-1", missing)
+            refused = await protocol_error(runtime.status(handle, ctx))
+    finally:
+        await runtime.close()
+
+    assert code(refused) == ("runner_unreachable", True)
+    assert not any(
+        record.get("event") == "runtime.local.listener_refused"
+        for record in capture.finish()
+    )
+
+
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
+    "missing_socket_while_running_is_retryable": (
+        missing_socket_while_running_is_retryable
+    ),
     "no_entry_retires_without_runner": no_entry_retires_without_runner,
     "unsubmitted_retires_without_runner": unsubmitted_retires_without_runner,
     "started_states_refuse_until_runner_retirement": (
