@@ -246,3 +246,66 @@ def max_length_matches(
         return True
     meter.reserve()
     return result <= 0
+
+
+def _container_count_compare(
+    instance: NativeCursor,
+    argument: ArenaCursor,
+    required_kind: Literal["array", "object"],
+    meter: EvaluationMeter,
+) -> Literal[-1, 0, 1] | None:
+    kind = cursor_kind(instance, meter)
+    meter.reserve()
+    if kind != required_kind:
+        return None
+    argument_kind = cursor_kind(argument, meter)
+    meter.reserve()
+    if argument_kind != "number":
+        refuse()
+    bound = scalar_value(argument, meter)
+    count = container_count(instance, meter)
+    return numeric_compare(count, bound, meter)
+
+
+def min_items_matches(
+    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    result = _container_count_compare(instance, argument, "array", meter)
+    meter.reserve()
+    if result is None:
+        return True
+    meter.reserve()
+    return result >= 0
+
+
+def max_items_matches(
+    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    result = _container_count_compare(instance, argument, "array", meter)
+    meter.reserve()
+    if result is None:
+        return True
+    meter.reserve()
+    return result <= 0
+
+
+def min_properties_matches(
+    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    result = _container_count_compare(instance, argument, "object", meter)
+    meter.reserve()
+    if result is None:
+        return True
+    meter.reserve()
+    return result >= 0
+
+
+def max_properties_matches(
+    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    result = _container_count_compare(instance, argument, "object", meter)
+    meter.reserve()
+    if result is None:
+        return True
+    meter.reserve()
+    return result <= 0
