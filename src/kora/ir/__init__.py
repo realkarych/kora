@@ -127,6 +127,10 @@ if TYPE_CHECKING:
         SubgraphInterfaceResult,
         validate_subgraph_interfaces,
     )
+    from kora.ir.target_parameter_types import (
+        KnownTargetParameterTypeResult,
+        validate_known_target_parameter_types,
+    )
     from kora.ir.tool_policies import ToolPolicyResult, validate_tool_policies
     from kora.ir.topology import (
         AgentNode,
@@ -165,6 +169,8 @@ if TYPE_CHECKING:
 __all__ = [
     "SensorTriggerExpressionResult",
     "validate_sensor_trigger_expressions",
+    "KnownTargetParameterTypeResult",
+    "validate_known_target_parameter_types",
     "RootPreviousAttemptResult",
     "validate_root_previous_attempt_refs",
     "FirstSliceConfigurationResult",
@@ -308,6 +314,13 @@ def __getattr__(name: str) -> object:
         from kora.ir import trigger_expressions
 
         return getattr(trigger_expressions, name)
+    if name in {
+        "KnownTargetParameterTypeResult",
+        "validate_known_target_parameter_types",
+    }:
+        from kora.ir import target_parameter_types
+
+        return getattr(target_parameter_types, name)
     if name in {"RootPreviousAttemptResult", "validate_root_previous_attempt_refs"}:
         from kora.ir import root_previous_attempts
 
