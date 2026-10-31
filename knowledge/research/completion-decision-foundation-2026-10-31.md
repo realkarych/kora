@@ -10,7 +10,7 @@ The rules come from current [scheduler pass 8 and run finish](../specs/scheduler
 
 ## Checked facts and authority
 
-Report shape, authenticated report admission and complete original-domain closure are independent facts. The report projection contains only outcome, allowed worker failure class and explicit validation/retirement flags, without error prose, details, payloads or raw evidence. `NoRecordedReport` differs from unavailable report facts. Only authoritative operator attestation permits no-report lost/cancelled completion; missing history alone never becomes lost.
+Report shape, authenticated report admission and complete original-domain closure are independent facts. The report projection contains only outcome, allowed worker failure class and explicit validation/retirement flags, without error prose, details, payloads or raw evidence. `NoRecordedReport` differs from unavailable report facts. Only authoritative operator attestation permits no-report lost/cancelled completion from claimed, submitted or running; missing history alone never becomes lost. A finishing attempt already has an accepted immutable report, so finishing with `NoRecordedReport` is rejected at checked-facts construction before any outcome precedence. `ReportFactsUnavailable` continues to wait.
 
 `ClosureFacts` is a projection supplied by the future transaction after checking affirmative runtime quiescence, every recorded dispatcher and settled publication. A shape-valid `TerminalReport`, a receipt, an empty dispatcher page, runtime exit or lease age cannot construct that proof by themselves. The helper performs no evidence binding or history lookup. Missing closure or unchecked report facts wait, including before timeout/cancellation terminal recommendations.
 

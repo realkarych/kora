@@ -381,7 +381,7 @@ def test_accepted_lost_requires_retirement_and_complete_closure() -> None:
     assert decision == AttemptTerminalDecision("lost", ErrorClass.INFRASTRUCTURE, True)
 
 
-@pytest.mark.parametrize("status", ["claimed", "submitted", "running", "finishing"])
+@pytest.mark.parametrize("status", ["claimed", "submitted", "running"])
 @pytest.mark.parametrize("cancelled", [False, True])
 def test_attested_no_report_completion_keeps_cancellation_distinct_from_lost(
     status: AttemptStatus,
@@ -405,8 +405,44 @@ def test_attested_no_report_completion_keeps_cancellation_distinct_from_lost(
     )
 
 
-def test_absent_report_without_attestation_is_not_lost() -> None:
-    facts = replace(attempt_facts(), report=NoRecordedReport())
+def test_unattested_pre_report_attempt_is_not_lost() -> None:
+    facts = replace(attempt_facts(), status="running", report=NoRecordedReport())
+
+    decision = decide_attempt_completion(facts)
+
+    assert decision == NoCompletion()
+
+
+@pytest.mark.parametrize("attested", [False, True])
+@pytest.mark.parametrize("cause", [None, "cancel", "timeout"])
+def test_finishing_requires_recorded_report_before_outcome_precedence(
+    attested: bool,
+    cause: CancelCause | None,
+) -> None:
+    facts = replace(
+        attempt_facts(),
+        operator_attested_closure=attested,
+        desired_cancel=cause is not None,
+        cancel_cause=cause,
+        deadlines=CheckedDeadlineState(cause == "timeout", True),
+    )
+
+    with pytest.raises(ValueError, match="^completion facts are invalid$") as refused:
+        replace(facts, report=NoRecordedReport())
+
+    assert str(refused.value) == "completion facts are invalid"
+
+
+@pytest.mark.parametrize("status", ["finishing", "running"])
+def test_attested_unknown_report_still_waits(status: AttemptStatus) -> None:
+    facts = replace(
+        attempt_facts(),
+        status=status,
+        operator_attested_closure=True,
+        desired_cancel=True,
+        cancel_cause="cancel",
+        report=ReportFactsUnavailable(),
+    )
 
     decision = decide_attempt_completion(facts)
 

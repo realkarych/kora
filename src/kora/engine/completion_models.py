@@ -229,6 +229,9 @@ class AttemptCompletionFacts:
         require_instance(
             self.report, (ReportFactsUnavailable, NoRecordedReport, RecordedReportFacts)
         )
+        require_completion_fact(
+            self.status != "finishing" or not isinstance(self.report, NoRecordedReport)
+        )
         require_literal(self.outputs, OUTPUT_VERIFICATIONS)
         require_instance(
             self.deadlines,
