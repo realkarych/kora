@@ -14,7 +14,11 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.runner.filesystem import DirectoryAnchor, rename_no_replace
-from kora.runner.identity import ArgumentMatch, IdentityState, NativeIdentityReader
+from kora.runner.identity import (
+    ArgumentMatch,
+    IdentityState,
+    NativeIdentityReader,
+)
 from tests.support.local_runtime import (
     READY_DEADLINE_SECONDS,
     observer_namespace_text,
@@ -34,12 +38,18 @@ fcntl.fcntl(descriptor, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
 os.execv(sys.argv[2], sys.argv[2:])
 """
 FORKED_READ = """
-import os, sys
-from kora.runner.identity import NativeIdentityReader
+import os, sys, time
+from kora.runner.identity import NativeIdentityReader, ProcessScanFailure
 reader = NativeIdentityReader()
 child = os.fork()
 if child == 0:
     sys.stdout.write(reader.read(os.getpid()).state.value + "\\n")
+    deadline = time.monotonic_ns() + 10**9
+    result = reader.scan_processes_carrying(tuple(sys.orig_argv), deadline)
+    assert result is ProcessScanFailure.READER_PROCESS_CHANGED
+    sys.stdout.write(result.value + "\\n")
+    legacy = reader.processes_carrying(tuple(sys.orig_argv), deadline)
+    sys.stdout.write(str(legacy is None) + "\\n")
     sys.stdout.flush()
     os._exit(0)
 os.waitpid(child, 0)
@@ -103,7 +113,12 @@ async def forked_reader_is_unknown(tmp_path: Path, capture: Capture) -> None:
     )
 
     assert completed.returncode == 0
-    assert completed.stdout.decode().splitlines() == ["unknown", "present"]
+    assert completed.stdout.decode().splitlines() == [
+        "unknown",
+        "reader_process_changed",
+        "True",
+        "present",
+    ]
 
 
 @contextmanager
@@ -181,10 +196,13 @@ async def own_vector_is_not_swept(tmp_path: Path, capture: Capture) -> None:
 
     carried = reader.carries(os.getpid(), own)
     swept = reader.processes_carrying(own, time.monotonic_ns() + 10**9)
+    detailed = reader.scan_processes_carrying(own, time.monotonic_ns() + 10**9)
 
     assert carried is ArgumentMatch.EQUAL
     assert swept is not None
     assert os.getpid() not in swept
+    assert isinstance(detailed, tuple)
+    assert os.getpid() not in detailed
 
 
 async def empty_leading_argument_is_not_shifted(

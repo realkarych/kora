@@ -65,6 +65,13 @@ class ArgumentMatch(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProcessScanFailure(StrEnum):
+    READER_PROCESS_CHANGED = "reader_process_changed"
+    PID_LISTING_INCOMPLETE = "pid_listing_incomplete"
+    SCAN_DEADLINE = "scan_deadline"
+    OWNER_OR_ARGV_UNKNOWN = "owner_or_argv_unknown"
+
+
 class IdentityReader(Protocol):
     def read(self, pid: int) -> IdentityObservation: ...
 
@@ -489,25 +496,31 @@ class NativeIdentityReader:
     def processes_carrying(
         self, argv: tuple[str, ...], deadline_ns: int
     ) -> tuple[int, ...] | None:
+        result = self.scan_processes_carrying(argv, deadline_ns)
+        return None if isinstance(result, ProcessScanFailure) else result
+
+    def scan_processes_carrying(
+        self, argv: tuple[str, ...], deadline_ns: int
+    ) -> tuple[int, ...] | ProcessScanFailure:
         scan_deadline = min(deadline_ns, self._clock.monotonic_ns() + SCAN_NS)
         if os.getpid() != self._owner:
-            return None
+            return ProcessScanFailure.READER_PROCESS_CHANGED
         try:
             listed = self._listed_pids(PROC_RUID_ONLY, os.getuid(), scan_deadline)
         except OSError:
-            return None
+            return ProcessScanFailure.PID_LISTING_INCOMPLETE
         if listed is None:
-            return None
+            return ProcessScanFailure.PID_LISTING_INCOMPLETE
         expected = encoded_arguments(argv)
         found: list[int] = []
         for pid in listed:
             if self._clock.monotonic_ns() >= scan_deadline:
-                return None
+                return ProcessScanFailure.SCAN_DEADLINE
             if pid == self._owner:
                 continue
             match = self._carries(pid, expected)
             if match is ArgumentMatch.UNKNOWN:
-                return None
+                return ProcessScanFailure.OWNER_OR_ARGV_UNKNOWN
             if match is ArgumentMatch.EQUAL:
                 found.append(pid)
         return tuple(found)
