@@ -15,8 +15,12 @@ from kora.db.migrations import upgrade_database
 from kora.db.tables import api_token
 from kora.ir.json import JsonObject
 from kora.plugins.authentication.static_token import StaticTokenAuthenticator
-from kora.protocols.authentication import Authenticator, Principal, RequestInfo
-from kora.protocols.common import ProtocolContext
+from kora.protocols.authentication import (
+    AuthenticationContext,
+    Authenticator,
+    Principal,
+    RequestInfo,
+)
 from kora.protocols.lifetime import ConformanceLifetime
 
 NOW: datetime = datetime(2026, 10, 30, tzinfo=UTC)
@@ -117,14 +121,18 @@ class Adapter:
             async def failure(
                 provider: Authenticator,
                 configuration: JsonObject,
-                ctx: ProtocolContext,
+                ctx: AuthenticationContext,
                 marker: str,
             ) -> object:
+                assert type(ctx) is AuthenticationContext
                 return await provider.authenticate(RequestInfo("Bearer " + marker), ctx)
 
             async def effect(
-                provider: Authenticator, configuration: JsonObject, ctx: ProtocolContext
+                provider: Authenticator,
+                configuration: JsonObject,
+                ctx: AuthenticationContext,
             ) -> None:
+                assert type(ctx) is AuthenticationContext
                 assert type(provider) is StaticTokenAuthenticator
                 assert configuration == {}
                 assert await provider.authenticate(user.request, ctx) == user.principal

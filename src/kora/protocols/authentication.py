@@ -5,9 +5,10 @@ from pydantic import ConfigDict, StrictBool, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from kora.ir.json import JsonObject
+from kora.observability import ComponentLogger
 from kora.protocols.boundary import BoundaryModel
-from kora.protocols.common import ProtocolContext
 from kora.protocols.identity_records import Identifier
+from kora.protocols.time import Clock
 
 
 class NamespaceGrant(BoundaryModel):
@@ -70,6 +71,12 @@ class RequestInfo:
 
 
 @dataclass(frozen=True)
+class AuthenticationContext:
+    logger: ComponentLogger
+    clock: Clock
+
+
+@dataclass(frozen=True)
 class AuthenticationCapabilities:
     pass
 
@@ -81,7 +88,7 @@ class Authenticator(Protocol):
     def capabilities(self) -> AuthenticationCapabilities: ...
 
     async def authenticate(
-        self, request: RequestInfo, ctx: ProtocolContext
+        self, request: RequestInfo, ctx: AuthenticationContext
     ) -> Principal: ...
 
-    async def revoke(self, token_id: str, ctx: ProtocolContext) -> None: ...
+    async def revoke(self, token_id: str, ctx: AuthenticationContext) -> None: ...

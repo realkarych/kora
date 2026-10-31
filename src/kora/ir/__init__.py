@@ -94,6 +94,10 @@ if TYPE_CHECKING:
     from kora.ir.input_paths import InputPathResult, validate_input_paths
     from kora.ir.node import ErrorClass, ToolPolicy
     from kora.ir.output_schemas import OutputSchemaResult, validate_output_schemas
+    from kora.ir.root_previous_attempts import (
+        RootPreviousAttemptResult,
+        validate_root_previous_attempt_refs,
+    )
     from kora.ir.runtime import (
         Concurrency,
         ProviderRetry,
@@ -161,6 +165,8 @@ if TYPE_CHECKING:
 __all__ = [
     "SensorTriggerExpressionResult",
     "validate_sensor_trigger_expressions",
+    "RootPreviousAttemptResult",
+    "validate_root_previous_attempt_refs",
     "FirstSliceConfigurationResult",
     "validate_first_slice_configuration",
     "ApprovalDefaultResult",
@@ -302,6 +308,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import trigger_expressions
 
         return getattr(trigger_expressions, name)
+    if name in {"RootPreviousAttemptResult", "validate_root_previous_attempt_refs"}:
+        from kora.ir import root_previous_attempts
+
+        return getattr(root_previous_attempts, name)
     if name in {"FirstSliceConfigurationResult", "validate_first_slice_configuration"}:
         from kora.ir import first_slice_configuration
 

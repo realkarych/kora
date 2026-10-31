@@ -21,12 +21,19 @@ from kora.conformance.common import (
 )
 from kora.ir.json import JsonObject
 from kora.observability import Level, LoggingSettings
-from kora.protocols.authentication import Authenticator, Principal, RequestInfo
+from kora.protocols.authentication import (
+    AuthenticationContext,
+    Authenticator,
+    Principal,
+    RequestInfo,
+)
 from kora.protocols.common import ProtocolContext
+from kora.protocols.time import SystemClock
 
 __all__ = [
     "AuthenticationCase",
     "AuthenticationConformanceInputs",
+    "authentication_context",
     "kora_capture",
     "kora_exercise",
     "kora_provider",
@@ -60,11 +67,17 @@ class AuthenticationConformanceInputs:
     unexpected: RequestInfo
     make_unavailable: Callable[[], Awaitable[None]]
     failure: Callable[
-        [Authenticator, JsonObject, ProtocolContext, str], Awaitable[object]
+        [Authenticator, JsonObject, AuthenticationContext, str], Awaitable[object]
     ]
     configuration_effect: Callable[
-        [Authenticator, JsonObject, ProtocolContext], Awaitable[None]
+        [Authenticator, JsonObject, AuthenticationContext], Awaitable[None]
     ]
+
+
+def authentication_context(capture: Capture) -> AuthenticationContext:
+    return AuthenticationContext(
+        logger=capture.diagnostics.logger(CONFORMANCE_COMPONENT), clock=SystemClock()
+    )
 
 
 def authentication_capture_settings() -> LoggingSettings:
@@ -90,7 +103,7 @@ def current(request: RequestInfo) -> RequestInfo:
 
 
 async def expect_principal(
-    provider: Authenticator, case: AuthenticationCase, ctx: ProtocolContext
+    provider: Authenticator, case: AuthenticationCase, ctx: AuthenticationContext
 ) -> None:
     for request in (case.request, current(case.request)):
         received = await provider.authenticate(request, ctx)
@@ -104,7 +117,7 @@ async def expect_principal(
 async def expect_refusal(
     provider: Authenticator,
     request: RequestInfo,
-    ctx: ProtocolContext,
+    ctx: AuthenticationContext,
     unavailable: bool = False,
 ) -> str:
     code = "authentication_unavailable" if unavailable else "authentication_rejected"
@@ -131,7 +144,7 @@ async def expect_refusal(
 async def check_authentication_preserves_principals(
     provider: Authenticator,
     inputs: AuthenticationConformanceInputs,
-    ctx: ProtocolContext,
+    ctx: AuthenticationContext,
 ) -> None:
     check(bool(inputs.accepted), "accepted authentication cases are supplied")
     for case in inputs.accepted:
@@ -141,7 +154,7 @@ async def check_authentication_preserves_principals(
 async def check_authentication_refusals_are_uniform(
     provider: Authenticator,
     inputs: AuthenticationConformanceInputs,
-    ctx: ProtocolContext,
+    ctx: AuthenticationContext,
 ) -> None:
     check(bool(inputs.rejected), "rejected authentication cases are supplied")
     message: str | None = None
@@ -155,7 +168,7 @@ async def check_authentication_refusals_are_uniform(
 async def check_authentication_revalidates_current_authority(
     provider: Authenticator,
     inputs: AuthenticationConformanceInputs,
-    ctx: ProtocolContext,
+    ctx: AuthenticationContext,
 ) -> None:
     await expect_principal(provider, inputs.changing, ctx)
 
@@ -170,7 +183,7 @@ async def check_authentication_revalidates_current_authority(
 async def check_authentication_revocation_is_permanent(
     provider: Authenticator,
     inputs: AuthenticationConformanceInputs,
-    ctx: ProtocolContext,
+    ctx: AuthenticationContext,
 ) -> None:
     check(bool(inputs.rejected), "a baseline rejection is supplied")
     baseline = await expect_refusal(provider, inputs.rejected[0], ctx)
@@ -187,7 +200,7 @@ async def check_authentication_revocation_is_permanent(
 async def check_authentication_unavailability_grants_no_authority(
     provider: Authenticator,
     inputs: AuthenticationConformanceInputs,
-    ctx: ProtocolContext,
+    ctx: AuthenticationContext,
 ) -> None:
     case = inputs.accepted[0]
     await expect_principal(provider, case, ctx)
@@ -200,7 +213,7 @@ async def check_authentication_unavailability_grants_no_authority(
 async def check_authentication_unexpected_failure_grants_no_authority(
     provider: Authenticator,
     inputs: AuthenticationConformanceInputs,
-    ctx: ProtocolContext,
+    ctx: AuthenticationContext,
 ) -> None:
     for request in (inputs.unexpected, current(inputs.unexpected)):
         error = await await_protocol_error(provider.authenticate(request, ctx))
@@ -231,7 +244,10 @@ def kora_exercise(
     kora_provider: Authenticator,
 ) -> Callable[[ProtocolContext, str], Awaitable[object]]:
     async def failure(ctx: ProtocolContext, marker: str) -> object:
-        return await kora_provider.authenticate(RequestInfo("Bearer " + marker), ctx)
+        return await kora_provider.authenticate(
+            RequestInfo("Bearer " + marker),
+            AuthenticationContext(logger=ctx.logger, clock=ctx.clock),
+        )
 
     return failure
 
@@ -271,7 +287,9 @@ def test_authentication_unexpected_failure_grants_no_authority(
 ) -> None:
     kora_authentication_runner.run(
         check_authentication_unexpected_failure_grants_no_authority(
-            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+            kora_provider,
+            kora_authentication_inputs,
+            authentication_context(kora_capture),
         )
     )
 
@@ -285,7 +303,9 @@ def test_authentication_preserves_principals(
 ) -> None:
     kora_authentication_runner.run(
         check_authentication_preserves_principals(
-            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+            kora_provider,
+            kora_authentication_inputs,
+            authentication_context(kora_capture),
         )
     )
 
@@ -299,7 +319,9 @@ def test_authentication_refusals_are_uniform(
 ) -> None:
     kora_authentication_runner.run(
         check_authentication_refusals_are_uniform(
-            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+            kora_provider,
+            kora_authentication_inputs,
+            authentication_context(kora_capture),
         )
     )
 
@@ -313,7 +335,9 @@ def test_authentication_revalidates_current_authority(
 ) -> None:
     kora_authentication_runner.run(
         check_authentication_revalidates_current_authority(
-            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+            kora_provider,
+            kora_authentication_inputs,
+            authentication_context(kora_capture),
         )
     )
 
@@ -327,7 +351,9 @@ def test_authentication_revocation_is_permanent(
 ) -> None:
     kora_authentication_runner.run(
         check_authentication_revocation_is_permanent(
-            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+            kora_provider,
+            kora_authentication_inputs,
+            authentication_context(kora_capture),
         )
     )
 
@@ -341,6 +367,8 @@ def test_authentication_unavailability_grants_no_authority(
 ) -> None:
     kora_authentication_runner.run(
         check_authentication_unavailability_grants_no_authority(
-            kora_provider, kora_authentication_inputs, context_for(kora_capture)
+            kora_provider,
+            kora_authentication_inputs,
+            authentication_context(kora_capture),
         )
     )

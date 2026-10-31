@@ -59,7 +59,65 @@ async def logging_case(
     )
 
 
-def common_cases() -> tuple[Case, ...]:
+def authentication_failure(
+    invocation: PreparedInvocation, context: ProtocolContext, marker: str
+) -> Awaitable[object]:
+    from kora.conformance.authentication import AuthenticationConformanceInputs
+    from kora.protocols.authentication import AuthenticationContext, Authenticator
+
+    inputs = cast(AuthenticationConformanceInputs, invocation.exercises)
+    return inputs.failure(
+        cast(Authenticator, invocation.instance),
+        invocation.configuration,
+        AuthenticationContext(logger=context.logger, clock=context.clock),
+        marker,
+    )
+
+
+async def authentication_failure_case(
+    invocation: PreparedInvocation, capture: Capture, context: ProtocolContext
+) -> None:
+    await check_failure_is_a_bounded_protocol_error(
+        lambda ctx, marker: authentication_failure(invocation, ctx, marker),
+        context,
+        MARKER,
+    )
+
+
+async def authentication_logging_case(
+    invocation: PreparedInvocation, capture: Capture, context: ProtocolContext
+) -> None:
+    await check_provider_logs_through_its_context(
+        lambda ctx, marker: authentication_failure(invocation, ctx, marker),
+        capture,
+        context,
+        MARKER,
+    )
+
+
+def authentication_configuration_case(
+    invocation: PreparedInvocation, capture: Capture, context: ProtocolContext
+) -> Awaitable[None]:
+    from kora.conformance.authentication import AuthenticationConformanceInputs
+    from kora.protocols.authentication import AuthenticationContext, Authenticator
+
+    inputs = cast(AuthenticationConformanceInputs, invocation.exercises)
+    return inputs.configuration_effect(
+        cast(Authenticator, invocation.instance),
+        invocation.configuration,
+        AuthenticationContext(logger=context.logger, clock=context.clock),
+    )
+
+
+def common_cases(protocol: ProtocolName) -> tuple[Case, ...]:
+    authentication = protocol is ProtocolName.AUTHENTICATION
+    configuration_check: Check = (
+        authentication_configuration_case
+        if authentication
+        else lambda i, c, x: cast(
+            ConfigurationEffect, i.exercises.configuration_effect
+        )(i.instance, i.configuration, x)
+    )
     return (
         Case(
             "capabilities",
@@ -73,14 +131,13 @@ def common_cases() -> tuple[Case, ...]:
                 cast(ProviderProtocol, i.instance)
             ),
         ),
-        Case("failure", failure_case),
-        Case("logging", logging_case),
         Case(
-            "configuration",
-            lambda i, c, x: cast(ConfigurationEffect, i.exercises.configuration_effect)(
-                i.instance, i.configuration, x
-            ),
+            "failure", authentication_failure_case if authentication else failure_case
         ),
+        Case(
+            "logging", authentication_logging_case if authentication else logging_case
+        ),
+        Case("configuration", configuration_check),
     )
 
 
@@ -462,12 +519,12 @@ def authentication_cases() -> tuple[Case, ...]:
         check_authentication_unavailability_grants_no_authority,
         check_authentication_unexpected_failure_grants_no_authority,
     )
-    from kora.protocols.authentication import Authenticator
+    from kora.protocols.authentication import AuthenticationContext, Authenticator
 
     def simple(
         name: str,
         check: Callable[
-            [Authenticator, AuthenticationConformanceInputs, ProtocolContext],
+            [Authenticator, AuthenticationConformanceInputs, AuthenticationContext],
             Awaitable[None],
         ],
     ) -> Case:
@@ -476,7 +533,7 @@ def authentication_cases() -> tuple[Case, ...]:
             lambda i, c, x: check(
                 cast(Authenticator, i.instance),
                 cast(AuthenticationConformanceInputs, i.exercises),
-                x,
+                AuthenticationContext(logger=x.logger, clock=x.clock),
             ),
         )
 
@@ -506,7 +563,7 @@ def selected_cases(protocol: ProtocolName) -> tuple[Case, ...]:
         ProtocolName.ARTIFACT_STORAGE: storage_cases,
         ProtocolName.ARTIFACT_TYPE: artifact_type_cases,
     }
-    return (*common_cases(), *builders[protocol]())
+    return (*common_cases(protocol), *builders[protocol]())
 
 
 class Executor:
