@@ -85,6 +85,10 @@ if TYPE_CHECKING:
         validate_expression_syntax,
     )
     from kora.ir.fan_out_types import FanOutTypeResult, validate_fan_out_types
+    from kora.ir.first_slice_configuration import (
+        FirstSliceConfigurationResult,
+        validate_first_slice_configuration,
+    )
     from kora.ir.graph_links import GraphLinkResult, validate_graph_links
     from kora.ir.inline_schemas import InlineSchemaResult, validate_inline_schemas
     from kora.ir.input_paths import InputPathResult, validate_input_paths
@@ -119,6 +123,7 @@ if TYPE_CHECKING:
         SubgraphInterfaceResult,
         validate_subgraph_interfaces,
     )
+    from kora.ir.tool_policies import ToolPolicyResult, validate_tool_policies
     from kora.ir.topology import (
         AgentNode,
         BranchNode,
@@ -156,6 +161,8 @@ if TYPE_CHECKING:
 __all__ = [
     "SensorTriggerExpressionResult",
     "validate_sensor_trigger_expressions",
+    "FirstSliceConfigurationResult",
+    "validate_first_slice_configuration",
     "ApprovalDefaultResult",
     "validate_approval_defaults",
     "SecretAliasResult",
@@ -284,6 +291,8 @@ __all__ = [
     "SourceLocation",
     "SubgraphNodeConfig",
     "ToolPolicy",
+    "ToolPolicyResult",
+    "validate_tool_policies",
     "Workspace",
 ]
 
@@ -293,6 +302,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import trigger_expressions
 
         return getattr(trigger_expressions, name)
+    if name in {"FirstSliceConfigurationResult", "validate_first_slice_configuration"}:
+        from kora.ir import first_slice_configuration
+
+        return getattr(first_slice_configuration, name)
     if name in {"ApprovalDefaultResult", "validate_approval_defaults"}:
         from kora.ir import approval_defaults
 
@@ -427,6 +440,10 @@ def __getattr__(name: str) -> object:
         from kora.ir import node
 
         return getattr(node, name)
+    if name in {"ToolPolicyResult", "validate_tool_policies"}:
+        from kora.ir import tool_policies
+
+        return getattr(tool_policies, name)
     if name in {
         "Concurrency",
         "RuntimeSection",
