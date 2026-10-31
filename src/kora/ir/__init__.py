@@ -23,6 +23,10 @@ if TYPE_CHECKING:
         ApprovalDefaultResult,
         validate_approval_defaults,
     )
+    from kora.ir.approval_predicates import (
+        ApprovalResponsePredicateResult,
+        validate_approval_response_predicates,
+    )
     from kora.ir.command_result import (
         CommandResult,
         CommandResultValidationError,
@@ -165,6 +169,8 @@ __all__ = [
     "validate_first_slice_configuration",
     "ApprovalDefaultResult",
     "validate_approval_defaults",
+    "ApprovalResponsePredicateResult",
+    "validate_approval_response_predicates",
     "SecretAliasResult",
     "validate_secret_aliases",
     "StructuredSchemaPreparationInput",
@@ -310,6 +316,13 @@ def __getattr__(name: str) -> object:
         from kora.ir import approval_defaults
 
         return getattr(approval_defaults, name)
+    if name in {
+        "ApprovalResponsePredicateResult",
+        "validate_approval_response_predicates",
+    }:
+        from kora.ir import approval_predicates
+
+        return getattr(approval_predicates, name)
     if name in {"SecretAliasResult", "validate_secret_aliases"}:
         from kora.ir import secret_aliases
 
