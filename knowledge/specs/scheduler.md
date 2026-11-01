@@ -477,6 +477,8 @@ The decision is [ADR-0022](../../docs/decisions/0022-inherited-execution-deadlin
 
 ### Clock conversion and fault model
 
+The metadata adapter uses the [versioned binding in data-model section 16](data-model.md#163-complete-deadline-envelope-and-legacy-projection). Unrecorded, explicitly unlimited and complete values remain distinct. A scalar-only historical record never authorizes useful effects or supplies invented clock/scope/grace provenance. A future first executing-claim transaction stores the complete binding and matching legacy scalar atomically; the representation foundation does not implement that transaction or replace fresh ancestor checks.
+
 Persist UTC `D`, the determining concrete scope and the saved finite nonnegative `clock_uncertainty`; persist expiry/closed state, not cross-host monotonic timestamps. The uncertainty covers UTC error against the authority, conversion sampling and elapsed-time underestimation over the supported horizon. A supported installation states that bound; it is not a synchronization service or a bound on OS scheduling latency.
 
 For a paired local sample `(w0, m0)`, schedule interruption at `m0 + max(0, D - w0 - clock_uncertainty)` and escalation at `m0 + max(0, D + 30s - w0 - clock_uncertainty)`. A new sample may only shorten an installed threshold. UTC guards at useful-phase/authority boundaries also observe forward adjustment. A backward adjustment cannot extend a live monotonic timer or reopen latched expiry. Restart reconstructs thresholds from the same saved values; changed installation policy cannot weaken the original contract.
