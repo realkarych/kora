@@ -1,12 +1,18 @@
 import ast
 import asyncio
 import shutil
+from collections.abc import Callable
 from pathlib import Path
+from typing import Literal, TypeAlias, cast
 
 import pytest
+from alembic.autogenerate.api import AutogenContext, render_python_code
 from alembic.config import Config
+from alembic.operations.ops import CreateTableOp, UpgradeOps
+from alembic.runtime.environment import EnvironmentContext
+from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Connection, inspect, select, text
+from sqlalchemy import Column, Connection, MetaData, Table, inspect, select, text
 from sqlalchemy.exc import DBAPIError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
@@ -18,6 +24,7 @@ from kora.db.migrations import (
 )
 from kora.db.migrations import environment as environment_module
 from kora.db.tables import metadata
+from kora.db.types import OutcomePayloadText
 from tests.support.warning_filters import expression_index_warnings_ignored
 
 HEAD_REVISION: str = "0005"
@@ -139,3 +146,54 @@ def test_script_template_renders_without_comments(tmp_path: Path) -> None:
     assert ast.get_docstring(tree) is None
     assert "def upgrade() -> None:" in rendered
     assert "down_revision: str | None = '0005'" in rendered
+
+
+RenderItem: TypeAlias = Callable[[str, object, AutogenContext], str | Literal[False]]
+
+
+def render_outcome_probe(connection: Connection) -> tuple[str, frozenset[str]]:
+    config = environment_module.alembic_config(connection)
+    script = ScriptDirectory.from_config(config)
+    results: list[tuple[str, frozenset[str]]] = []
+
+    def inspect_rendering(
+        revision: object, migration_context: MigrationContext
+    ) -> tuple[()]:
+        configured: object = migration_context.opts["render_item"]
+        if not callable(configured):
+            raise TypeError("the migration renderer is unavailable")
+        renderer = cast(RenderItem, configured)
+        contexts: list[AutogenContext] = []
+
+        def observe_rendering(
+            type_: str, value: object, autogen: AutogenContext
+        ) -> str | Literal[False]:
+            contexts.append(autogen)
+            return renderer(type_, value, autogen)
+
+        table = Table(
+            "outcome_render_probe", MetaData(), Column("payload", OutcomePayloadText())
+        )
+        code = render_python_code(
+            UpgradeOps([CreateTableOp.from_table(table)]),
+            render_item=observe_rendering,
+            migration_context=MigrationContext.configure(connection),
+        )
+        imports = frozenset(item for context in contexts for item in context.imports)
+        results.append((code, imports))
+        return ()
+
+    with EnvironmentContext(config, script, fn=inspect_rendering):
+        script.run_env()
+    return results[0]
+
+
+@pytest.mark.asyncio
+async def test_generated_outcome_type_has_its_constructor_and_import(
+    database: Database,
+) -> None:
+    async with database.migration_connection() as connection:
+        rendered, imports = await connection.run_sync(render_outcome_probe)
+
+    assert "kora.db.types.OutcomePayloadText()" in rendered
+    assert "import kora.db.types" in imports

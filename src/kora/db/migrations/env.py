@@ -6,14 +6,25 @@ from sqlalchemy import Connection
 
 from kora.db.migrations.environment import CONNECTION_ATTRIBUTE, column_types_differ
 from kora.db.tables import metadata
-from kora.db.types import CollatedText, JsonDocument, UsdAmount, UtcTimestamp
+from kora.db.types import (
+    CollatedText,
+    JsonDocument,
+    OutcomePayloadText,
+    UsdAmount,
+    UtcTimestamp,
+)
 
 TYPES_MODULE: str = "kora.db.types"
 RENDERED_TYPES: tuple[
-    type[CollatedText], type[JsonDocument], type[UsdAmount], type[UtcTimestamp]
+    type[CollatedText],
+    type[JsonDocument],
+    type[OutcomePayloadText],
+    type[UsdAmount],
+    type[UtcTimestamp],
 ] = (
     CollatedText,
     JsonDocument,
+    OutcomePayloadText,
     UsdAmount,
     UtcTimestamp,
 )
