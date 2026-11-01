@@ -508,10 +508,13 @@ async def registry_without_domain_is_lineage_error(
 async def concurrent_first_open_shares_domain(tmp_path: Path, capture: Capture) -> None:
     root = state_root(tmp_path)
 
-    registries = await asyncio.gather(*(opened(root, capture) for _ in range(4)))
-    for registry in registries:
-        await registry.close()
+    outcomes = await asyncio.gather(
+        *(opened(root, capture) for _ in range(4)), return_exceptions=True
+    )
+    registries = [value for value in outcomes if isinstance(value, LocalRuntime)]
+    await asyncio.gather(*(registry.close() for registry in registries))
 
+    assert len(registries) == 4, outcomes
     assert len({registry.execution_domain_id for registry in registries}) == 1
     assert sorted(os.listdir(root)) == ["boot.lock", "domain.json", "registry"]
 

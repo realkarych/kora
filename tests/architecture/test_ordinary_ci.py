@@ -11,6 +11,7 @@ import pytest
 from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
 from tests.support.workflows import (
     command_lines,
+    step_list,
     steps,
     table,
     workflow_jobs,
@@ -21,6 +22,7 @@ IR_RESOURCE_MODULES = frozenset(
     {
         "tests/ir/test_inline_schema_resources.py",
         "tests/ir/test_type_schema_resources.py",
+        "tests/ir/test_output_schema_resources.py",
     }
 )
 IR_INTEGRATION_MODULES = frozenset(
@@ -264,17 +266,21 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert tuple(arrays["first"]) == FIRST_MODULES
     assert IR_RESOURCE_MODULES <= cohorts["measurements"]
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
-    assert (
-        cohorts["integration"]
-        == selected_files(["tests/cli", "tests/architecture/test_ir_measurement_ci.py"])
-        | IR_INTEGRATION_MODULES
-    )
+    assert cohorts["integration"] == selected_files(
+        ["tests/cli", "tests/architecture/test_ir_measurement_ci.py"]
+    ) | IR_INTEGRATION_MODULES | {"tests/plugins/artifact_type/test_agent_session.py"}
     assert IR_INTEGRATION_MODULES.isdisjoint(cohorts["other"])
     assert tuple(arrays["integration"]) == (
         "tests/cli",
         "tests/architecture/test_ir_measurement_ci.py",
         *sorted(IR_INTEGRATION_MODULES),
+        "tests/plugins/artifact_type/test_agent_session.py",
     )
+    assert (
+        "tests/plugins/artifact_type/test_agent_session.py"
+        not in cohorts["measurements"]
+    )
+    assert "tests/ir/test_output_schema_resources.py" not in cohorts["integration"]
     assert "tests/architecture/test_ir_measurement_ci.py" not in cohorts["other"]
     assert all(
         not argument.startswith("-") or argument.startswith("--ignore=")
@@ -560,3 +566,23 @@ def test_lane_completion_rejects_every_incomplete_outcome(
     )
 
     assert (result.returncode == 0) is passes
+
+
+def test_linux_unit_collisions_are_required_before_host_preparation() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+    ordered = step_list(job)
+
+    collision = steps(job)["unit_collisions"]
+    preparation = steps(job)["preparation"]
+
+    assert (
+        collision["if"]
+        == "${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}"
+    )
+    assert collision.get("continue-on-error", False) is False
+    assert ordered.index(collision) < ordered.index(preparation)
+    assert preparation["if"] == "${{ matrix.lane == 'local-runtime' }}"
+    assert command_lines(collision["run"]) == [
+        ("sudo", "bash", "scripts/ci/check-local-runtime-unit-collisions.sh", "root"),
+        ("bash", "scripts/ci/check-local-runtime-unit-collisions.sh", "user"),
+    ]
