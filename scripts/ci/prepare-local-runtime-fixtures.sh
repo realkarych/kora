@@ -24,6 +24,7 @@ prepare_common() {
 }
 
 prepare_linux() {
+  prepare_service_session
   install -o nobody -m 4755 "$(command -v sleep)" "$fixtures/setuid-sleep"
   mount -t tmpfs -o "size=16m,mode=0700,uid=$SUDO_UID,gid=$SUDO_GID" kora-small "$fixtures/small-filesystem"
   if sysctl -n "$sysctl_key" > "$fixtures/userns.previous" 2>/dev/null; then
@@ -43,6 +44,30 @@ prepare_linux() {
   install -d -o 0 -g 0 -m 0755 "$fixtures/nfs-mount"
   mount -t nfs -o vers=3,nolock,soft,timeo=50,retrans=2 "127.0.0.1:$fixtures/nfs-export" "$fixtures/nfs-mount"
   test "$(sudo -u "$SUDO_USER" stat -c %u "$fixtures/nfs-mount/state")" = "$SUDO_UID"
+}
+
+prepare_service_session() {
+  install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/service-session"
+  systemd-run --collect --unit=kora-local-runtime-session --uid="$SUDO_UID" \
+    --working-directory="$PWD" --property=PAMName=login \
+    --property=KillMode=mixed --property=PrivateTmp=no \
+    --property=RuntimeMaxSec=900s --property=TimeoutStopSec=5s \
+    -- "$PWD/.venv/bin/python" -m tests.support.service_session "$fixtures/service-session"
+  cat /proc/sys/kernel/random/boot_id > "$fixtures/service-session.boot"
+  local deadline pid group session
+  deadline=$((SECONDS + 10))
+  while test ! -S "$fixtures/service-session/control.sock"; do
+    test "$SECONDS" -lt "$deadline"
+    case "$(systemctl show --property=ActiveState --value kora-local-runtime-session.service)" in
+      active|activating) ;;
+      *) return 1 ;;
+    esac
+  done
+  pid="$(systemctl show --property=MainPID --value kora-local-runtime-session.service)"
+  group="$(awk -F: '$1 == "0" || $2 == "name=systemd" {print $3}' "/proc/$pid/cgroup" | sort -u)"
+  session="${group##*/}"
+  [[ "$session" =~ ^session-[0-9]+\.scope$ ]]
+  printf '%s\n' "$session" > "$fixtures/service-session.scope"
 }
 
 prepare_darwin_sleep() (
@@ -66,6 +91,16 @@ prepare_darwin() {
 }
 
 teardown_linux() {
+  if test -f "$fixtures/service-session.boot"; then
+    cmp "$fixtures/service-session.boot" /proc/sys/kernel/random/boot_id
+    if test -f "$fixtures/service-session.scope"; then
+      local session
+      session="$(cat "$fixtures/service-session.scope")"
+      [[ "$session" =~ ^session-[0-9]+\.scope$ ]]
+      stop_fixture_unit "$session"
+    fi
+    stop_fixture_unit kora-local-runtime-session.service
+  fi
   if test -f "$fixtures/userns.previous"; then
     sysctl -q -w "$sysctl_key=$(cat "$fixtures/userns.previous")"
   fi
@@ -76,6 +111,13 @@ teardown_linux() {
     systemctl stop nfs-kernel-server
   fi
   if mountpoint -q "$fixtures/small-filesystem"; then umount "$fixtures/small-filesystem"; fi
+}
+
+stop_fixture_unit() {
+  if systemctl stop -- "$1"; then
+    return
+  fi
+  test "$(systemctl show --property=LoadState --value -- "$1")" = not-found
 }
 
 teardown_darwin() {

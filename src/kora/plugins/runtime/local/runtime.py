@@ -15,9 +15,18 @@ from typing import Annotated, Final
 from pydantic import AfterValidator, Field, StrictStr
 
 from kora.executor.digests import object_digest
+from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.ir.json import JsonObject, parse_json_object
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.control import ListenerRefused, runner_status
+from kora.plugins.runtime.local.services import (
+    SERVICE_REFUSED,
+    ServiceProbe,
+    ServiceReport,
+    service_cgroup,
+    service_tools,
+    unmanaged_services,
+)
 from kora.plugins.runtime.local.spawn import (
     Launchers,
     Readiness,
@@ -44,6 +53,7 @@ from kora.runner.filesystem import (
 from kora.runner.identity import (
     SCAN_NS,
     ArgumentMatch,
+    IdentityObservation,
     IdentityReader,
     IdentityState,
     NativeIdentityReader,
@@ -319,6 +329,7 @@ class LocalRuntime:
     name: str = RUNTIME_NAME
     config_schema: JsonObject = CONFIG_SCHEMA
     execution_domain_id: str
+    service_report: ServiceReport | None
 
     def __init__(
         self,
@@ -333,6 +344,7 @@ class LocalRuntime:
         peers: PeerSource,
     ) -> None:
         self.execution_domain_id = registry.execution_domain_id
+        self.service_report = None
         self.registry = registry
         self.executor = executor
         self.sweeps = TransitionExecutor(SWEEP_WORKERS, SWEEP_ADMITTED)
@@ -367,6 +379,7 @@ class LocalRuntime:
         socket_directory: Path | None = None,
         sweep_scan_entries: int = 65536,
         peers: PeerSource | None = None,
+        service_launcher: StepLauncher | None = None,
     ) -> "LocalRuntime":
         executor = TransitionExecutor()
         try:
@@ -375,6 +388,37 @@ class LocalRuntime:
                 if identities is not None
                 else await executor.run(NativeIdentityReader)
             )
+
+            async def service_identity(pid: int) -> IdentityObservation:
+                return await executor.run(lambda: reader.read(pid))
+
+            report: ServiceReport | None = None
+            launch_env = await executor.run(lambda: launch_environment(home))
+            try:
+                cgroup = await executor.run(lambda: service_cgroup(sys.platform))
+                if cgroup is not None:
+                    tools = await executor.run(service_tools)
+                    service_home = Path(launch_env["HOME"])
+                    probe = ServiceProbe(
+                        service_launcher
+                        if service_launcher is not None
+                        else ProcessLauncher(),
+                        tools,
+                        os.getuid(),
+                        os.getpid(),
+                        service_home,
+                        service_identity,
+                    )
+                    report = await probe.inspect(cgroup)
+                elif sys.platform == "linux":
+                    report = unmanaged_services(os.getuid(), os.getpid())
+            except KoraProtocolError as error:
+                ctx.logger.emit(SERVICE_REFUSED, reason=error.details["reason"])
+                raise
+            if report is not None:
+                report.require_safe(ctx)
+                if socket_directory is None:
+                    socket_directory = report.socket_directory
             scanner = await executor.run(
                 lambda: NativeIdentityReader(
                     clock=ctx.clock, max_scan_entries=sweep_scan_entries
@@ -392,7 +436,7 @@ class LocalRuntime:
             )
             launch = RunnerLaunch(
                 command=tuple(runner_command() if runner is None else runner),
-                environment=await executor.run(lambda: launch_environment(home)),
+                environment=launch_env,
                 socket_directory=sockets,
                 identity=identity,
                 clock=ctx.clock,
@@ -417,7 +461,7 @@ class LocalRuntime:
             await executor.close()
             raise
         registry = Registry(directory, domain.execution_domain_id, new_identifier)
-        return cls(
+        runtime = cls(
             path,
             root,
             registry,
@@ -428,6 +472,8 @@ class LocalRuntime:
             scanner,
             source,
         )
+        runtime.service_report = report
+        return runtime
 
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities(

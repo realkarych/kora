@@ -204,8 +204,10 @@ jobs:
             fi
           fi
           KORA_SCAFFOLD_SELECTION=()
+          KORA_TEST_LAUNCH=()
           if test "$KORA_SCAFFOLD_LANE" = local-runtime; then
             KORA_SCAFFOLD_SELECTION=(-m "not measurement")
+            KORA_TEST_LAUNCH=(bash scripts/ci/run-local-runtime-tests.sh)
           fi
           KORA_EXIT=0
           if test "$KORA_SCAFFOLD_LANE" != storage && test "$KORA_SCAFFOLD_LANE" != local-runtime; then
@@ -305,7 +307,7 @@ jobs:
                 cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
               fi
             done
-          elif uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
+          elif "${KORA_TEST_LAUNCH[@]}" uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
             KORA_EXIT=0
           else
             KORA_EXIT="$?"
@@ -573,7 +575,7 @@ jobs:
           KORA_MEASUREMENT_OUTPUT: measurements/local-runtime-cost.json
         run: |
           mkdir -p measurements
-          uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
+          bash scripts/ci/run-local-runtime-tests.sh uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
         with:
