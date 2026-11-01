@@ -6,7 +6,7 @@ There are eleven protocols: the nine of the original requirements plus **sensor*
 
 ## 1. Common rules
 
-Trusted facts for installation-aware graph validation follow the [same-call ownership contract](validation-facts.md). Server composition selects the actual configured instances; harness and runtime owners supply complete native facts, and shared projection detaches them for one validation invocation. Provider registration metadata is not that selected-instance view. This decision adds no provider ABI, durable identity or execution permission; concrete production sources and normalization remain prerequisites under #549.
+Trusted facts for installation-aware graph validation follow the [same-call ownership contract](validation-facts.md). Server composition selects the actual configured instances; harness and runtime owners supply complete native facts, and shared projection detaches them for one validation invocation. Provider registration metadata is not that selected-instance view. The lifetime decision adds no durable identity or execution permission. The separately accepted [native reservation contract](validation-facts.md#6-native-candidate-environment-reservations) specifies a future Runtime accessor and name/prefix grammar under #617; production sources, receiver acquisition and normalization remain prerequisites under #549.
 
 - Every protocol has a `name` class attribute, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` (JSON Schema for its deployment configuration, validated at start-up and shown by `kora plugins list`), and conformance cases marked `kora_conformance` (section 13).
 - Implementations are discovered through **one entry-point group**, `kora.provider` (NFR-5.2, current contract [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) as amended 2026-10-21). An entry point is named `<protocol>.<name>` and returns a factory of validated `ProviderMetadata(protocol, name, implementation, config_schema, version)` whose protocol and name equal the entry-point name ([provider loading](#provider-loading-issue-150)); `kora plugins list` prints what is installed per protocol; names are then used in the IR (`runtime.runtime: docker`) or in the deployment config:
@@ -98,6 +98,8 @@ On deadline the caller rejects late evidence and initiates cancellation without 
 ## 2. Runtime (FR-8.1)
 
 [ADR-0017](../../docs/decisions/0017-execution-uncertainty-and-safe-replacement.md) defines execution uncertainty, durable retirement and dispatcher closure. [ADR-0016](../../docs/decisions/0016-trusted-execution-and-publication.md) separates the lifecycle supervisor from candidate execution and introduces late finalization. These interfaces are design contracts; no implementation or isolation experiment has run.
+
+Accepted addition, pending source/conformance activation under [#617](https://github.com/realkarych/kora/issues/617): `candidate_environment_reservations() -> tuple[str, ...] | None` supplies complete native candidate-environment reservations for the selected configured runtime, or explicit unavailability. The [native reservation contract](validation-facts.md#6-native-candidate-environment-reservations) defines spelling, completeness, effect-free receiver acquisition/invocation and agreement with actual candidate construction. An absent accessor is unavailable, never empty. This declaration does not activate the method in the source protocol or establish a working production validation path.
 
 ```python
 @dataclass(frozen=True)
@@ -698,6 +700,8 @@ This section bounds publication content and individual control frames; it does n
 ## 3. Harness adapter (FR-2.1, FR-3.3, FR-6.6, FR-9.1, DD-27)
 
 Reference adapters speak each harness's **programmatic interface** instead of parsing CLI output. MVP ships two (ADR-0004): `claude` uses the Claude Agent SDK for Python (which spawns the pinned `claude` binary and speaks to it over stdio) and `codex` speaks the `codex app-server` JSON-RPC protocol directly through a small kora client, because the Codex SDK exists only for TypeScript. "SDK event stream" in this document means the messages the Claude Agent SDK yields or the notifications the Codex app-server sends. **After MVP** an `acp` adapter speaks the Agent Client Protocol (JSON-RPC over stdio) to any ACP-capable agent (OpenCode, Pi, Gemini CLI and others), selected in the IR as `harness: acp:<agent>`; it implements this same protocol and passes the same conformance suite, so it arrives without a change to the graph format. Until it ships, `acp:<agent>` is a reserved harness name that validation rejects (`IR018`, [ir.md](ir.md) section 10). kora still enforces `max_events`, the soft budget and `stall_after` itself from the SDK event stream (NFR-8.2).
+
+The existing `reserved_env` declaration uses the [native reservation spelling and completeness contract](validation-facts.md#6-native-candidate-environment-reservations) accepted under #617. Case-sensitive literal matching preserves every case variant required by a native adapter, including Claude's all-letter-case proxy prohibition below. Real declarations, normalization and consuming validation remain pending; a fake's empty declaration supplies no production completeness evidence.
 
 ```python
 @dataclass(frozen=True)
