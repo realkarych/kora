@@ -1,6 +1,6 @@
 # kora architecture reference
 
-Status: non-normative reference, consolidated against the specifications and ADRs through ADR-0022 on 2026-10-17. The editorial consolidation is pending owner review in [issue #76](https://github.com/realkarych/kora/issues/76). These are planned components; diagrams and named conformance gates are not implementation evidence.
+Status: non-normative reference. The 2026-10-17 editorial consolidation was completed under [issue #76](https://github.com/realkarych/kora/issues/76), with later changes maintained alongside their governing contracts. Use the [task index](../README.md#which-file-to-load-for-which-task) and [roadmap](../../docs/roadmap.md#where-the-project-stands) for current contracts and implementation status; diagrams and named conformance gates are not implementation evidence.
 
 CEL cost-regression amendment dated 2026-10-23: the project owner approved lightweight validation and a 100 ms target under [issue #167](https://github.com/realkarych/kora/issues/167#issuecomment-6351849696); the corresponding human-facing documentation wording was reviewed line by line and approved by the project owner on 2026-10-23.
 
@@ -299,7 +299,7 @@ The inventory is maintained under [AGENTS.md](../../AGENTS.md#code). *Decided* e
 
 ## Open implementation questions
 
-These are unresolved aspects of the repository design at the consolidation baseline, inherited from [issue #48](https://github.com/realkarych/kora/issues/48); they do not assert that the issue itself is open. The rows raised under issue #124 name it. The [dated audit](../research/architecture-documentation-consolidation-2026-10-17.md) preserves their original sources. Established constraints below remain binding while these mechanics are specified.
+These are unresolved aspects of the repository design at the consolidation baseline, inherited from [issue #48](https://github.com/realkarych/kora/issues/48); they do not assert that the issue itself is open. The rows raised under issue #124 name it. The [original consolidation audit](https://github.com/realkarych/kora/blob/c407647ee16e4969e934479f1c3a6cb197dd3e95/knowledge/research/architecture-documentation-consolidation-2026-10-17.md) preserves their original sources. Established constraints below remain binding while these mechanics are specified.
 
 | Topic | Remaining question and established constraint |
 |---|---|
