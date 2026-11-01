@@ -195,7 +195,7 @@ Reference table for [ADR-0026](../../docs/decisions/0026-package-layers.md), whi
 | `runner` | `kora-runner` supervisor, including its registry, control channel and journal | `executor`, `protocols`, `ir`, `observability` |
 | `db` | SQLAlchemy tables, read functions, token-row revocation primitives and migrations; writes of the execution tables, `approval_request` and `artifact_version` are `engine` functions | `ir`, `observability` |
 | `cel_eval` | evaluation of checked expressions through the binding | `cel`, `ir`, `observability` |
-| `engine` | shared transition functions | `db`, `cel_eval`, `protocols`, `ir`, `observability` |
+| `engine` | shared transition functions, immutable execution records and manual-start replay | `db`, `cel_eval`, `protocols`, `ir`, `observability` |
 | `api` | FastAPI application | `engine`, `db`, `models`, `cel_eval`, `cel`, `protocols`, `ir`, `observability` |
 | `scheduler` | scheduling passes and tick | `engine`, `db`, `cel_eval`, `protocols`, `ir`, `observability` |
 | `worker` | claims, preparation and upload | `client`, `executor`, `models`, `protocols`, `ir`, `observability` |
