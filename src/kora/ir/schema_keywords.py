@@ -55,6 +55,17 @@ NUMBER_KEYWORDS: frozenset[str] = frozenset(
 BOOLEAN_KEYWORDS: frozenset[str] = frozenset(
     {"uniqueItems", "readOnly", "writeOnly", "deprecated"}
 )
+BATCHED_MAP_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "$defs",
+        "definitions",
+        "properties",
+        "dependentSchemas",
+        "dependencies",
+        "dependentRequired",
+        "$vocabulary",
+    }
+)
 SIMPLE_TYPES: frozenset[str] = frozenset(
     {"array", "boolean", "integer", "null", "number", "object", "string"}
 )
@@ -202,7 +213,7 @@ class KeywordValidation:
             prepared = keyword_value(keyword, value, field, self.fault)
             if prepared is MISSING:
                 continue
-            if isinstance(prepared, SafeObject):
+            if isinstance(prepared, SafeObject) and keyword not in BATCHED_MAP_KEYWORDS:
                 for name, item in prepared.items():
                     self.check_value(keyword, SafeObject({name: item}), field)
             else:

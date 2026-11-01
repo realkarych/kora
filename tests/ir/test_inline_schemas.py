@@ -218,6 +218,42 @@ def test_inline_schemas_visit_stored_body_once_without_call_expansion() -> None:
     assert result.inline_schemas_checked == result.schemas_checked == 1
 
 
+def test_inline_schema_map_and_regex_faults_preserve_order_and_inputs() -> None:
+    document = document_for(
+        {
+            "$defs": {"private-invalid": 1, "private-valid": True},
+            "patternProperties": {"(" * 1200: True, "[later": False},
+            "dependentRequired": {"private-required": ["private-name", "private-name"]},
+            "maxItems": -1,
+        },
+        source={"file": "graph.py", "line": 3},
+    )
+    before = export_ir(document)
+
+    result = validate_inline_schemas(document)
+
+    assert [error.path for error in result.diagnostics.errors] == [
+        ("graph", "params", "$defs", "<field>"),
+        ("graph", "params", "dependentRequired", "<field>", 1),
+        ("graph", "params", "maxItems"),
+        ("graph", "params", "patternProperties"),
+        ("graph", "params", "patternProperties"),
+    ]
+    assert result.diagnostics.errors_omitted == 0
+    assert result.inline_schemas_checked == 1
+    assert result.schemas_checked == 4
+    assert all(
+        error.node is None
+        and error.location is not None
+        and (error.location.file, error.location.line) == ("graph.py", 3)
+        for error in result.diagnostics.errors
+    )
+    assert "private-" not in json.dumps(
+        [error.model_dump(mode="json") for error in result.diagnostics.errors]
+    )
+    assert export_ir(document) == before
+
+
 def test_inline_schemas_bound_deep_independent_faults_and_mask_authored_names() -> None:
     marker = "private_schema_content"
     schema: JsonObject = {
