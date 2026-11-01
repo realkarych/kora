@@ -267,10 +267,11 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert IR_RESOURCE_MODULES <= cohorts["measurements"]
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(
-        ["tests/cli", "tests/architecture/test_ir_measurement_ci.py"]
+        ["tests/api", "tests/cli", "tests/architecture/test_ir_measurement_ci.py"]
     ) | IR_INTEGRATION_MODULES | {"tests/plugins/artifact_type/test_agent_session.py"}
     assert IR_INTEGRATION_MODULES.isdisjoint(cohorts["other"])
     assert tuple(arrays["integration"]) == (
+        "tests/api",
         "tests/cli",
         "tests/architecture/test_ir_measurement_ci.py",
         *sorted(IR_INTEGRATION_MODULES),
