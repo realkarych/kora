@@ -49,6 +49,12 @@ OUTCOME_PRESENCE_CHECK: str = (
 )
 
 
+DEADLINE_BINDING_CHECK: str = (
+    "deadline_binding IS NULL OR "
+    "substr(ltrim(CAST(deadline_binding AS TEXT), ' \t\r\n'), 1, 1) = '{'"
+)
+
+
 NON_TERMINAL_ATTEMPT_STATUSES: tuple[str, ...] = (
     "created",
     "claimed",
@@ -343,6 +349,11 @@ attempt: Table = Table(
     Column("harness_version", name(), nullable=True),
     timestamp("started_at", nullable=True),
     timestamp("deadline", nullable=True),
+    document("deadline_binding", nullable=True),
+    CheckConstraint(
+        DEADLINE_BINDING_CHECK,
+        name="deadline_binding_object",
+    ),
     timestamp("deadline_expired_at", nullable=True),
     timestamp("finished_at", nullable=True),
     *audit_columns(),
