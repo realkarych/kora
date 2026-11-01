@@ -415,7 +415,7 @@ class LocalRuntime:
             except KoraProtocolError as error:
                 ctx.logger.emit(SERVICE_REFUSED, reason=error.details["reason"])
                 raise
-            if report is not None:
+            if sys.platform == "linux":
                 report.require_safe(ctx)
                 if socket_directory is None:
                     socket_directory = report.socket_directory

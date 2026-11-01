@@ -35,7 +35,7 @@ cleanup() {
 
 trap cleanup EXIT
 environment=()
-for name in KORA_MEASUREMENT_OUTPUT KORA_MEASUREMENT_REVISION KORA_TEST_DATABASES; do
+for name in KORA_MEASUREMENT_OUTPUT KORA_MEASUREMENT_REVISION KORA_TEST_DATABASES UV_PYTHON; do
   if test -n "${!name:-}"; then
     environment+=("--setenv=$name=${!name}")
   fi
