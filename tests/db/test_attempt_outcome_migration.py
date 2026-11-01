@@ -97,8 +97,8 @@ async def test_outcome_migration_preserves_unrecorded_history(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0004",
-            "0005",
-            1,
+            "0006",
+            2,
         )
         assert after == before.history
         assert objects == before.schema_objects
@@ -255,8 +255,8 @@ async def test_outcome_migration_recovers_partial_schema(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0004",
-            "0005",
-            1,
+            "0006",
+            2,
         )
         assert differences == []
         assert stage.database is not None

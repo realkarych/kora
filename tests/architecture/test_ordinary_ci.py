@@ -25,11 +25,12 @@ IR_RESOURCE_MODULES = frozenset(
         "tests/ir/test_output_schema_resources.py",
     }
 )
-IR_SCHEMA_MODULES = frozenset(
+IR_INTEGRATION_MODULES = frozenset(
     {
         "tests/ir/test_structured_schema_assertions.py",
         "tests/ir/test_structured_schema_collection_predicates.py",
         "tests/ir/test_structured_schema_string_lengths.py",
+        "tests/ir/test_subgraph_interface_resources.py",
     }
 )
 FIRST_MODULES = (
@@ -59,8 +60,8 @@ COMPLETION_FIELDS = (
 WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
 WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
-    "conformance": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "remainder": WITHOUT_FIXTURES,
+    "conformance": {**WITHOUT_FIXTURES, "DISTRIBUTIONS_OUTCOME": "skipped"},
+    "remainder": {**WITHOUT_FIXTURES, "STATIC_OUTCOME": "skipped"},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": {**WITHOUT_BUILDS, "FRONTEND_OUTCOME": "skipped"},
 }
@@ -267,12 +268,12 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(
         ["tests/cli", "tests/architecture/test_ir_measurement_ci.py"]
-    ) | IR_SCHEMA_MODULES | {"tests/plugins/artifact_type/test_agent_session.py"}
-    assert IR_SCHEMA_MODULES.isdisjoint(cohorts["other"])
+    ) | IR_INTEGRATION_MODULES | {"tests/plugins/artifact_type/test_agent_session.py"}
+    assert IR_INTEGRATION_MODULES.isdisjoint(cohorts["other"])
     assert tuple(arrays["integration"]) == (
         "tests/cli",
         "tests/architecture/test_ir_measurement_ci.py",
-        *sorted(IR_SCHEMA_MODULES),
+        *sorted(IR_INTEGRATION_MODULES),
         "tests/plugins/artifact_type/test_agent_session.py",
     )
     assert (
