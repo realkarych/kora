@@ -23,6 +23,7 @@ from kora.runner.channels import BoundedChannel
 from kora.runner.processes import start_gated
 from tests.measurements.lifetime_measurement_support import NativeCounters
 from tests.measurements.listing_observation import assert_absent
+from tests.measurements.listing_population import assert_listing
 from tests.measurements.listing_workload import read_counter
 
 
@@ -141,8 +142,7 @@ async def measure_cold_child(
 
                 assert final is not None
                 assert final.phase == "final"
-                assert len(result.providers) == count
-                assert not result.failures
+                assert_listing(result, count, failure=False)
                 assert events == count
                 assert owner.returncode == 0
                 assert_absent(registration.process.pid, registration.process_group_id)

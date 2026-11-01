@@ -26,6 +26,7 @@ from tests.measurements.listing_observation import (
     ListingPoint,
     assert_absent,
 )
+from tests.measurements.listing_population import assert_listing
 
 WARMUP: tuple[str, ...] = ("success", "failure", "cancel", "shutdown") * 2 + (
     "success",
@@ -168,8 +169,7 @@ class Workload:
                 active.endpoint, b"r" if case == "success" else b"f"
             )
             result = await active.operation
-            assert len(result.providers) == self.count - (case == "failure")
-            assert len(result.failures) == (case == "failure")
+            assert_listing(result, self.count, failure=case == "failure")
             self.references.append(weakref.ref(result))
             self.observer.phase = "result"
             self.observer.record()
