@@ -180,6 +180,12 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
+      - name: Verify Linux unit collision ownership
+        id: unit_collisions
+        if: ${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}
+        run: |
+          sudo bash scripts/ci/check-local-runtime-unit-collisions.sh root
+          bash scripts/ci/check-local-runtime-unit-collisions.sh user
       - name: Prepare local runtime host fixtures
         id: preparation
         if: ${{ matrix.lane == 'local-runtime' }}

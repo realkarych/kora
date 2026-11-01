@@ -11,6 +11,7 @@ import pytest
 from tests.scaffold_evidence import COHORTS, SHARD_CHILDREN
 from tests.support.workflows import (
     command_lines,
+    step_list,
     steps,
     table,
     workflow_jobs,
@@ -564,3 +565,23 @@ def test_lane_completion_rejects_every_incomplete_outcome(
     )
 
     assert (result.returncode == 0) is passes
+
+
+def test_linux_unit_collisions_are_required_before_host_preparation() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+    ordered = step_list(job)
+
+    collision = steps(job)["unit_collisions"]
+    preparation = steps(job)["preparation"]
+
+    assert (
+        collision["if"]
+        == "${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}"
+    )
+    assert collision.get("continue-on-error", False) is False
+    assert ordered.index(collision) < ordered.index(preparation)
+    assert preparation["if"] == "${{ matrix.lane == 'local-runtime' }}"
+    assert command_lines(collision["run"]) == [
+        ("sudo", "bash", "scripts/ci/check-local-runtime-unit-collisions.sh", "root"),
+        ("bash", "scripts/ci/check-local-runtime-unit-collisions.sh", "user"),
+    ]

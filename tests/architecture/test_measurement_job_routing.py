@@ -102,6 +102,7 @@ REMAINDER_ONLY = "${{ matrix.lane == 'remainder' }}"
 LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
 FRONTEND_ONLY = "${{ matrix.lane != 'local-runtime' }}"
 LANE_STEP_CONDITIONS = {
+    "unit_collisions": "${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}",
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": FRONTEND_ONLY,
     "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": FRONTEND_ONLY,
     "static_checks": REMAINDER_ONLY,
