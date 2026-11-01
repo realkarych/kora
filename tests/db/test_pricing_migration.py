@@ -93,7 +93,7 @@ async def test_price_schema_upgrade_preserves_history(
             )
         retry = await upgrade_database(empty_database_settings)
 
-        assert report.to_revision == revision == "0004"
+        assert report.to_revision == revision == "0005"
         assert after == before
         assert differences == []
         assert retry.steps == 0
@@ -215,8 +215,8 @@ async def test_pricing_migration_refuses_altered_column_defaults(
                 )
             ).one()
 
-        assert recovered.to_revision == "0004"
-        assert recovered.steps == 3
+        assert recovered.to_revision == "0005"
+        assert recovered.steps == 4
         assert after == before
         assert tuple(amounts) == (None, None)
     finally:
@@ -296,8 +296,8 @@ async def test_pricing_migration_recovers_after_failure(
         recovered = await upgrade_database(empty_database_settings)
         again = await upgrade_database(empty_database_settings)
 
-        assert recovered.to_revision == "0004"
-        assert recovered.steps == 3
+        assert recovered.to_revision == "0005"
+        assert recovered.steps == 4
         assert again.steps == 0
     finally:
         await database.close()
@@ -384,7 +384,7 @@ async def test_pricing_migration_recovers_after_index_interruption(
                     with pytest.raises((DBAPIError, sqlite3.OperationalError)):
                         await task
             recovered = await upgrade_database(empty_database_settings)
-            assert recovered.to_revision == "0004"
+            assert recovered.to_revision == "0005"
         finally:
             await database.close()
         return
@@ -428,7 +428,7 @@ async def test_pricing_migration_recovers_after_index_interruption(
         assert revision == "0001"
         assert old_index is False
         assert locks == 0
-        assert recovered.to_revision == "0004"
+        assert recovered.to_revision == "0005"
         assert again.steps == 0
     finally:
         await database.close()
@@ -448,7 +448,7 @@ async def test_concurrent_pricing_upgrades_are_serialized(
             report for report in results if isinstance(report, MigrationReport)
         ]
         refused = [error for error in results if isinstance(error, BaseException)]
-        assert any(report.steps == 4 for report in completed)
+        assert any(report.steps == 5 for report in completed)
         assert all(
             isinstance(error, (DBAPIError, sqlite3.OperationalError))
             for error in refused
@@ -486,7 +486,7 @@ async def test_concurrent_pricing_upgrades_are_serialized(
         finished = await second
         again = await upgrade_database(empty_database_settings)
 
-        assert finished.to_revision == "0004"
+        assert finished.to_revision == "0005"
         assert again.steps == 0
     finally:
         await database.close()
