@@ -131,6 +131,10 @@ if TYPE_CHECKING:
         SubgraphInterfaceResult,
         validate_subgraph_interfaces,
     )
+    from kora.ir.target_parameter_types import (
+        KnownTargetParameterTypeResult,
+        validate_known_target_parameter_types,
+    )
     from kora.ir.tool_policies import ToolPolicyResult, validate_tool_policies
     from kora.ir.topology import (
         AgentNode,
@@ -155,6 +159,10 @@ if TYPE_CHECKING:
         WebhookAuth,
         WebhookTrigger,
     )
+    from kora.ir.trigger_expressions import (
+        SensorTriggerExpressionResult,
+        validate_sensor_trigger_expressions,
+    )
     from kora.ir.type_declarations import (
         TypeDeclarationResult,
         validate_type_declarations,
@@ -163,6 +171,10 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "SensorTriggerExpressionResult",
+    "validate_sensor_trigger_expressions",
+    "KnownTargetParameterTypeResult",
+    "validate_known_target_parameter_types",
     "RootPreviousAttemptResult",
     "validate_root_previous_attempt_refs",
     "FirstSliceConfigurationResult",
@@ -304,6 +316,17 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"SensorTriggerExpressionResult", "validate_sensor_trigger_expressions"}:
+        from kora.ir import trigger_expressions
+
+        return getattr(trigger_expressions, name)
+    if name in {
+        "KnownTargetParameterTypeResult",
+        "validate_known_target_parameter_types",
+    }:
+        from kora.ir import target_parameter_types
+
+        return getattr(target_parameter_types, name)
     if name in {"RootPreviousAttemptResult", "validate_root_previous_attempt_refs"}:
         from kora.ir import root_previous_attempts
 

@@ -171,7 +171,7 @@ jobs:
         run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         id: static_checks
-        if: ${{ matrix.lane == 'conformance' }}
+        if: ${{ matrix.lane == 'remainder' }}
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
@@ -211,6 +211,7 @@ jobs:
           if test "$KORA_SCAFFOLD_LANE" != storage && test "$KORA_SCAFFOLD_LANE" != local-runtime; then
             KORA_ORDINARY_OUTPUT="$(mktemp -d "$RUNNER_TEMP/kora-ordinary.XXXXXX")"
             export KORA_ORDINARY_OUTPUT
+            printf 'KORA_ORDINARY_OUTPUT=%s\n' "$KORA_ORDINARY_OUTPUT" >> "$GITHUB_ENV"
             if bash -e -o pipefail <<'KORA_ORDINARY_SCRIPT' > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
           read -r -a general <<< "$KORA_PYTEST_ARGUMENTS"
           case "$KORA_SCAFFOLD_LANE" in
@@ -243,24 +244,30 @@ jobs:
             tests/ir/test_inline_schema_resources.py
             tests/ir/test_type_schema_resources.py
           )
-          integration=(tests/cli)
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py)
+          integration=(
+            tests/cli
+            tests/architecture/test_ir_measurement_ci.py
+            tests/ir/test_structured_schema_assertions.py
+            tests/ir/test_structured_schema_collection_predicates.py
+            tests/ir/test_structured_schema_string_lengths.py
+          )
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/architecture/test_ir_measurement_ci.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
-              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
+              uv run --no-sync python -m tests.support.ordinary_pytest -v -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-first" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-first" --junitxml="$KORA_ORDINARY_OUTPUT/first.xml" "${first[@]}" > "$KORA_ORDINARY_OUTPUT/first.log" 2>&1 &
               pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
+              uv run --no-sync python -m tests.support.ordinary_pytest -v -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-second" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-second" --junitxml="$KORA_ORDINARY_OUTPUT/second.xml" "${second[@]}" > "$KORA_ORDINARY_OUTPUT/second.log" 2>&1 &
               pids+=("$!")
               names=(first second)
               evidence=(first.log second.log first.xml second.xml first.exit second.exit)
               ;;
             remainder)
-              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
+              uv run --no-sync python -m tests.support.ordinary_pytest -v -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-measurements" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-measurements" --junitxml="$KORA_ORDINARY_OUTPUT/measurements.xml" "${measurements[@]}" > "$KORA_ORDINARY_OUTPUT/measurements.log" 2>&1 &
               pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-integration" --junitxml="$KORA_ORDINARY_OUTPUT/integration.xml" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.log" 2>&1 &
+              uv run --no-sync python -m tests.support.ordinary_pytest -v -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-integration" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-integration" --junitxml="$KORA_ORDINARY_OUTPUT/integration.xml" "${integration[@]}" > "$KORA_ORDINARY_OUTPUT/integration.log" 2>&1 &
               pids+=("$!")
-              uv run --no-sync python -m tests.support.ordinary_pytest -q -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
+              uv run --no-sync python -m tests.support.ordinary_pytest -v -o cache_dir="$KORA_ORDINARY_OUTPUT/cache-other" --basetemp="$KORA_ORDINARY_OUTPUT/tmp-other" --junitxml="$KORA_ORDINARY_OUTPUT/other.xml" "${other[@]}" > "$KORA_ORDINARY_OUTPUT/other.log" 2>&1 &
               pids+=("$!")
               names=(measurements integration other)
               evidence=(measurements.log integration.log other.log measurements.xml integration.xml other.xml measurements.exit integration.exit other.exit)
@@ -315,6 +322,16 @@ jobs:
             '${{ matrix.os }}' '${{ matrix.python }}' '${{ matrix.databases }}' '${{ matrix.lane }}' \
             "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}"
           tail -c 2048 "$KORA_SCAFFOLD_DIRECTORY/tests.stdout"
+      - name: Preserve ordinary cohort evidence
+        id: cohort_evidence
+        if: ${{ always() && (matrix.lane == 'conformance' || matrix.lane == 'remainder') }}
+        run: |
+          test -n "${KORA_ORDINARY_OUTPUT:-}"
+          for name in first.log second.log measurements.log integration.log other.log first.xml second.xml measurements.xml integration.xml other.xml first.exit second.exit measurements.exit integration.exit other.exit; do
+            if test -f "$KORA_ORDINARY_OUTPUT/$name" && test ! -L "$KORA_ORDINARY_OUTPUT/$name"; then
+              cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
+            fi
+          done
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         id: evidence_upload
         if: ${{ always() }}
@@ -328,7 +345,7 @@ jobs:
         run: sudo scripts/ci/prepare-local-runtime-fixtures.sh teardown
       - name: Build isolated distributions offline
         id: distributions
-        if: ${{ matrix.lane == 'conformance' }}
+        if: ${{ matrix.lane == 'remainder' }}
         run: |
           KORA_BUILD_OFFLINE=1 uv build --offline \
             --python "$PWD/.venv/bin/python" \
@@ -377,13 +394,13 @@ jobs:
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
               test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = success
-              test "$DISTRIBUTIONS_OUTCOME" = success
+              test "$STATIC_OUTCOME" = skipped
+              test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
             remainder)
               test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
-              test "$DISTRIBUTIONS_OUTCOME" = skipped
+              test "$STATIC_OUTCOME" = success
+              test "$DISTRIBUTIONS_OUTCOME" = success
               ;;
             storage)
               test "$FRONTEND_OUTCOME" = success

@@ -17,6 +17,7 @@ from pydantic import AfterValidator, Field, StrictStr
 from kora.executor.digests import object_digest
 from kora.ir.json import JsonObject, parse_json_object
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
+from kora.plugins.runtime.local.control import ListenerRefused, runner_status
 from kora.plugins.runtime.local.spawn import (
     Launchers,
     Readiness,
@@ -47,6 +48,7 @@ from kora.runner.identity import (
     IdentityState,
     NativeIdentityReader,
 )
+from kora.runner.peers import PeerSource, kernel_source
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
     COMPONENT,
@@ -57,6 +59,7 @@ from kora.runner.registry import (
     Fence,
     Registry,
     Retired,
+    Running,
     Starting,
     Submitter,
     Transition,
@@ -112,6 +115,15 @@ SWEPT: Final[EventSpec] = CATALOG.register(
             "killed": FieldKind.INTEGER,
             "waited_ms": FieldKind.FLOAT,
         },
+    )
+)
+LISTENER_REFUSED: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.listener_refused",
+        COMPONENT,
+        Level.WARNING,
+        "a local attempt runner's listener failed attestation",
+        {"reason": FieldKind.STRING},
     )
 )
 
@@ -318,6 +330,7 @@ class LocalRuntime:
         launch: "RunnerLaunch",
         identities: IdentityReader,
         scanner: NativeIdentityReader,
+        peers: PeerSource,
     ) -> None:
         self.execution_domain_id = registry.execution_domain_id
         self.registry = registry
@@ -325,6 +338,8 @@ class LocalRuntime:
         self.sweeps = TransitionExecutor(SWEEP_WORKERS, SWEEP_ADMITTED)
         self._identities = identities
         self._scanner = scanner
+        self._peers = peers
+        self._observations: set[asyncio.Task[RuntimeStatus]] = set()
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -351,6 +366,7 @@ class LocalRuntime:
         runner: Sequence[str] | None = None,
         socket_directory: Path | None = None,
         sweep_scan_entries: int = 65536,
+        peers: PeerSource | None = None,
     ) -> "LocalRuntime":
         executor = TransitionExecutor()
         try:
@@ -363,6 +379,11 @@ class LocalRuntime:
                 lambda: NativeIdentityReader(
                     clock=ctx.clock, max_scan_entries=sweep_scan_entries
                 )
+            )
+            source = (
+                peers
+                if peers is not None
+                else await executor.run(lambda: kernel_source(reader))
             )
             lineage = await executor.run(lambda: lineage_of(reader))
             identity = await executor.run(lambda: own_identity(reader))
@@ -397,7 +418,15 @@ class LocalRuntime:
             raise
         registry = Registry(directory, domain.execution_domain_id, new_identifier)
         return cls(
-            path, root, registry, executor, new_identifier, launch, reader, scanner
+            path,
+            root,
+            registry,
+            executor,
+            new_identifier,
+            launch,
+            reader,
+            scanner,
+            source,
         )
 
     def capabilities(self) -> RuntimeCapabilities:
@@ -465,8 +494,43 @@ class LocalRuntime:
         return lookup_cell(await self.entry(key), key)
 
     async def status(self, handle: Handle, ctx: ProtocolContext) -> RuntimeStatus:
+        self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        task = asyncio.create_task(self._status(handle, ctx))
+        self._observations.add(task)
+        try:
+            return await task
+        finally:
+            self._observations.discard(task)
+
+    async def _status(self, handle: Handle, ctx: ProtocolContext) -> RuntimeStatus:
         key = self.key_of(handle, ctx)
-        return status_cell(await self.entry(key), ctx.clock.now())
+        entry = await self.entry(key)
+        if isinstance(entry, Running):
+            return await self.observed(entry, ctx)
+        return status_cell(entry, ctx.clock.now())
+
+    async def observed(self, entry: Running, ctx: ProtocolContext) -> RuntimeStatus:
+        try:
+            value = await runner_status(
+                entry.socket_path,
+                entry.runner,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+            )
+        except ListenerRefused as refused:
+            ctx.logger.emit(LISTENER_REFUSED, reason=refused.reason)
+            raise refusal("runner_unreachable") from None
+        except (ChannelError, OSError):
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code != "message_refused":
+                raise
+            raise refusal("runner_unreachable") from None
+        return value.status
 
     def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
         if workload.execution_domain_id != self.execution_domain_id:
@@ -711,6 +775,8 @@ class LocalRuntime:
 
     async def close(self) -> None:
         if self._closing is None:
+            for observation in self._observations:
+                observation.cancel()
             self.executor.closed = True
             self.sweeps.closed = True
             self._stopping.set_result(None)
@@ -719,6 +785,9 @@ class LocalRuntime:
 
     async def _release(self) -> None:
         try:
+            observations = tuple(self._observations)
+            if observations:
+                await asyncio.gather(*observations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)
         finally:
             await self.executor.close()

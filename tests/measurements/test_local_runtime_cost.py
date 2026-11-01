@@ -3,6 +3,7 @@ import gc
 import json
 import os
 import platform
+import socket
 import statistics
 import subprocess
 import sys
@@ -21,8 +22,19 @@ from kora.ir.json import parse_json_object
 from kora.plugins.runtime.local.runtime import LocalRuntime, SweepOutcome
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.identity_records import ProcessIdentity
+from kora.protocols.time import SystemClock
+from kora.runner.identity import NativeIdentityReader
+from kora.runner.peers import CredentialSource, DarwinSource, PeerSource, kernel_source
 from kora.runner.registry import Registry, bind_workspace
 from tests.measurements.harness import OUTPUT_VARIABLE, REVISION_VARIABLE
+from tests.support.local_peers import (
+    asked_status,
+    client,
+    identity_of,
+    judging_source,
+    served,
+)
 from tests.support.local_runners import (
     LINGERING,
     PS,
@@ -52,6 +64,9 @@ SPAWN_REPEATS = 10
 RETENTION_CYCLES = 20
 RETENTION_INTERVAL = 5
 SWEEP_GRACE = timedelta(seconds=10)
+ATTEST_CONNECTIONS = 100
+ATTEST_WARM_UP = 10
+ATTEST_CONCURRENCY = 8
 
 
 def summary(values: list[float]) -> dict[str, float]:
@@ -461,6 +476,164 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
         "retention_component_bytes_per_interval": trend,
         "retention_runners_left_before_cleanup": lingering,
         "breakdown_of_readiness_latency": "not measured",
+        "open_descriptor_delta": open_descriptors() - descriptors,
+    }
+    published(report)
+    assert report["open_descriptor_delta"] == 0
+
+
+class TimedSource:
+    def __init__(self, inner: PeerSource) -> None:
+        self._inner = inner
+        self.attested: list[float] = []
+
+    def stamp(self) -> int:
+        return self._inner.stamp()
+
+    def attest(self, endpoint: socket.socket, accepted: int | None) -> ProcessIdentity:
+        started = time.perf_counter()
+        try:
+            return self._inner.attest(endpoint, accepted)
+        finally:
+            self.attested.append(time.perf_counter() - started)
+
+
+class SplitSource:
+    def __init__(self, inner: CredentialSource | DarwinSource) -> None:
+        self._inner = inner
+        self.credentials: list[float] = []
+        self.judged: list[float] = []
+
+    def stamp(self) -> int:
+        return self._inner.stamp()
+
+    def attest(self, endpoint: socket.socket, accepted: int | None) -> ProcessIdentity:
+        started = time.perf_counter()
+        credentials = self._inner.credentials(endpoint)
+        read = time.perf_counter()
+        try:
+            return self._inner.judge(credentials, accepted)
+        finally:
+            self.credentials.append(read - started)
+            self.judged.append(time.perf_counter() - read)
+
+
+class UnattestedSource:
+    def __init__(self) -> None:
+        self._identity = identity_of(os.getpid())
+
+    def stamp(self) -> int:
+        return 0
+
+    def attest(self, endpoint: socket.socket, accepted: int | None) -> ProcessIdentity:
+        return self._identity
+
+
+async def status_round_trips(
+    path: str, clock: SystemClock, count: int, concurrency: int
+) -> list[float]:
+    async def one() -> float:
+        started = time.perf_counter()
+        channel = await client(path, clock)
+        try:
+            await asked_status(channel, clock)
+        finally:
+            channel.close()
+        return time.perf_counter() - started
+
+    durations: list[float] = []
+    for start in range(0, count, concurrency):
+        batch = min(concurrency, count - start)
+        durations.extend(await asyncio.gather(*(one() for _ in range(batch))))
+    return durations
+
+
+async def served_round_trips(
+    directory: Path, source: PeerSource, capture: Capture, concurrency: int
+) -> list[float]:
+    clock = SystemClock()
+    async with served(directory, clock, source, capture) as (_, path):
+        await status_round_trips(path, clock, ATTEST_WARM_UP, 1)
+        if isinstance(source, TimedSource):
+            source.attested.clear()
+        if isinstance(source, SplitSource):
+            source.credentials.clear()
+            source.judged.clear()
+        return await status_round_trips(path, clock, ATTEST_CONNECTIONS, concurrency)
+
+
+@pytest.mark.measurement
+@pytest.mark.asyncio
+async def test_local_runtime_attestation_cost(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    descriptors = open_descriptors()
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+    kernel = TimedSource(kernel_source(NativeIdentityReader()))
+    split = SplitSource(judging_source())
+    with short_directory() as base:
+        floor = await served_round_trips(
+            base / "floor", UnattestedSource(), kora_capture, 1
+        )
+        sequential = await served_round_trips(base / "kernel", kernel, kora_capture, 1)
+        sequential_attestation = list(kernel.attested)
+        concurrent = await served_round_trips(
+            base / "concurrent", kernel, kora_capture, ATTEST_CONCURRENCY
+        )
+        concurrent_attestation = list(kernel.attested)
+        await served_round_trips(base / "split", split, kora_capture, 1)
+        retention: list[int] = []
+        clock = SystemClock()
+        async with served(base / "retention", clock, kernel, kora_capture) as (
+            _,
+            path,
+        ):
+            await status_round_trips(path, clock, ATTEST_WARM_UP, 1)
+            gc.collect()
+            tracemalloc.start()
+            snapshot = tracemalloc.take_snapshot()
+            first = snapshot
+            for _ in range(RETENTION_CYCLES):
+                await status_round_trips(path, clock, RETENTION_INTERVAL, 1)
+                gc.collect()
+                taken = tracemalloc.take_snapshot()
+                retention.append(component_bytes(taken, snapshot))
+                snapshot = taken
+            retained = component_bytes(snapshot, first)
+            tracemalloc.stop()
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        try:
+            handle = await runtime.submit(submitted(runtime, "attempt-1"), ctx)
+            await runtime.status(handle, ctx)
+            per_call = [
+                await timed(runtime.status(handle, ctx))
+                for _ in range(ATTEST_CONNECTIONS)
+            ]
+        finally:
+            await runtime.close()
+            reap_runners(root)
+
+    report = {
+        "workload": "local-runtime-attestation",
+        "revision": os.environ.get(REVISION_VARIABLE, "local"),
+        "platform": f"{sys.platform}-{platform.machine()}",
+        "python": platform.python_version(),
+        "connections": ATTEST_CONNECTIONS,
+        "warm_up": ATTEST_WARM_UP,
+        "concurrency": ATTEST_CONCURRENCY,
+        "kernel_source": type(kernel_source(NativeIdentityReader())).__name__,
+        "status_round_trip_without_attestation": summary(floor),
+        "status_round_trip_sequential": summary(sequential),
+        "status_round_trip_concurrent": summary(concurrent),
+        "kernel_attestation_sequential": summary(sequential_attestation),
+        "kernel_attestation_concurrent": summary(concurrent_attestation),
+        "credential_read": summary(split.credentials),
+        "identity_reads_and_window": summary(split.judged),
+        "worker_status_per_call": summary(per_call),
+        "runner_retention_cycles": RETENTION_CYCLES * RETENTION_INTERVAL,
+        "runner_retention_component_bytes": retained,
+        "runner_retention_bytes_per_interval": retention,
         "open_descriptor_delta": open_descriptors() - descriptors,
     }
     published(report)

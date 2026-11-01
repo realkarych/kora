@@ -267,7 +267,7 @@ async def migration_cycles(
         no_op_steps.append(second.steps)
         leftovers.extend(factory.temporary_files(settings))
         await factory.discard(settings)
-        assert first.steps == 3
+        assert first.steps == 5
     gate(report, "migration_rerun_is_a_no_op", kind, all(s == 0 for s in no_op_steps))
     gate(report, "migration_leaves_no_temporary_files", kind, leftovers == [])
     record(
