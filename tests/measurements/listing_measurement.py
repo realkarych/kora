@@ -14,6 +14,14 @@ from pydantic import TypeAdapter
 from kora.ir.json import JsonObject, JsonObjectField, JsonValue
 from tests.measurements.lifetime_cohorts import Cohort, run_cohorts
 from tests.measurements.listing_cold import measure_cold_child
+from tests.measurements.listing_population import (
+    DATASET_COUNTS,
+    EXTERNAL_COUNTS,
+    declared_entries,
+    fixture_entries,
+    installed_entries,
+    verify_inventory,
+)
 from tests.measurements.listing_workload import SEQUENCE
 from tests.support.provider_tooling import (
     REPOSITORY,
@@ -61,27 +69,43 @@ def measure_listing(output: Path) -> None:
     datasets: list[JsonValue] = []
     total = 0
     try:
-        for count in (5, 256):
+        for external, count in zip(EXTERNAL_COUNTS, DATASET_COUNTS, strict=True):
+            record: JsonObject = {
+                "entries": count,
+                "fixture_entries": external,
+                "fixture_schema_bytes": external * 8192,
+                "declared_inventory": [
+                    entry.model_dump(mode="json")
+                    for entry in declared_entries(external)
+                ],
+                "observed_inventory": [],
+                "verified_inventory": [],
+                "inventory_verified": False,
+            }
+            datasets.append(record)
+            publish_listing(sidecar, datasets, output, started, deadline)
             dataset = folder / str(count)
             dataset.mkdir()
             control = Path(
                 tempfile.mkdtemp(prefix="kora-list-measure-", dir="/tmp")
             ).resolve()
             (dataset / "control-root.txt").write_text(str(control))
-            entries = {
-                f"policy.item_{index:03}": (
-                    f"kora_tooling_fixture.inventory:item_{index:03}"
-                )
-                for index in range(count - 5)
-            }
-            entries["policy.zz_controlled"] = (
-                "kora_tooling_fixture.measurement:controlled"
-            )
+            entries = fixture_entries(external)
             setup_started = time.monotonic()
             wheel = build_fixture_wheel(
-                dataset, entries, {"socket": str(control)}, inventory=count - 5
+                dataset, entries, {"socket": str(control)}, inventory=external - 1
             )
             python = install_measurement_fixture(dataset, wheel)
+            observed = installed_entries(python)
+            record["wheel_bytes"] = wheel.stat().st_size
+            record["wheel_sha256"] = hashlib.sha256(wheel.read_bytes()).hexdigest()
+            record["observed_inventory"] = [
+                entry.model_dump(mode="json") for entry in observed
+            ]
+            verify_inventory(external, observed)
+            record["verified_inventory"] = record["observed_inventory"]
+            record["inventory_verified"] = True
+            publish_listing(sidecar, datasets, output, started, deadline)
             cohorts: list[Cohort] = []
             for index in range(3):
                 parent = dataset / str(index)
@@ -121,17 +145,8 @@ def measure_listing(output: Path) -> None:
             )
             (dataset / "cold.json").write_text(json.dumps(cold, sort_keys=True))
             control.rmdir()
-            datasets.append(
-                {
-                    "entries": count,
-                    "fixture_entries": count - 4,
-                    "fixture_schema_bytes": (count - 4) * 8192,
-                    "wheel_bytes": wheel.stat().st_size,
-                    "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
-                    "setup_seconds": setup_seconds,
-                    "parents": [parent.model_dump(mode="json") for parent in parents],
-                }
-            )
+            record["setup_seconds"] = setup_seconds
+            record["parents"] = [parent.model_dump(mode="json") for parent in parents]
         sidecar["all_420_cycles"] = total == 420
         assert total == 420
         assert time.monotonic() < deadline
