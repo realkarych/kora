@@ -20,9 +20,10 @@ from kora.plugins.runtime.local.serving import (
 from kora.plugins.runtime.local.serving import rebound as bind_socket
 from kora.protocols.errors import KoraProtocolError
 from kora.runner.channels import BoundedChannel, ChannelError
+from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.peers import kernel_source
-from kora.runner.registry import READY, Running, Submitter
+from kora.runner.registry import READY, Registry, Running, Submitter
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_peers import (
     AlteredSource,
@@ -91,7 +92,7 @@ async def open_connections_are_released_on_close(root: Path, capture: Capture) -
         try:
             async with served(base / "sockets", clock, source, capture) as (_, path):
                 held = [await client(path, clock) for _ in range(HELD)]
-                await until(lambda: pending(clock) == HELD + 1)
+                await until(lambda: pending(clock) == 2 * HELD + 1)
         finally:
             for channel in held:
                 channel.close()
@@ -191,6 +192,7 @@ async def status_is_released(root: Path, capture: Capture, close_runtime: bool) 
                     deadline=None,
                     gate_closed=False,
                     request_digest="sha256:" + "1" * 64,
+                    workload_digest="sha256:" + "1" * 64,
                     submitter=Submitter(dispatcher_id="d-1", process=own),
                     runner=own,
                     socket_path=path,
@@ -246,6 +248,7 @@ async def close_during_rebind(root: Path, capture: Capture, cancel_close: bool) 
     with short_directory() as base:
         path, name = base / "sockets", "rebound"
         original = bind_socket(path, name)
+        registry = Registry(open_local_directory(path), "domain-1", lambda: "a" * 32)
         server = ControlServer(
             original,
             path,
@@ -253,6 +256,10 @@ async def close_during_rebind(root: Path, capture: Capture, cancel_close: bool) 
             clock,
             source,
             capture.diagnostics.logger(COMPONENT),
+            registry,
+            registry.key("attempt-1"),
+            identity_of(os.getpid()),
+            NativeIdentityReader(),
             binder=binder,
         )
         server.start()
@@ -299,6 +306,7 @@ async def close_during_rebind(root: Path, capture: Capture, cancel_close: bool) 
             if closing is not None:
                 await asyncio.gather(closing, return_exceptions=True)
             await server.close()
+            registry.directory.close()
 
 
 async def shutdown_releases_pending_rebind(root: Path, capture: Capture) -> None:
@@ -343,6 +351,7 @@ async def shutdown_at_status_connect(root: Path, capture: Capture) -> None:
                     deadline=None,
                     gate_closed=False,
                     request_digest="sha256:" + "1" * 64,
+                    workload_digest="sha256:" + "1" * 64,
                     submitter=Submitter(dispatcher_id="d-1", process=own),
                     runner=own,
                     socket_path=path,
@@ -404,6 +413,7 @@ async def cancelled_runtime_close_drains_attestation(
                     deadline=None,
                     gate_closed=False,
                     request_digest="sha256:" + "1" * 64,
+                    workload_digest="sha256:" + "1" * 64,
                     submitter=Submitter(dispatcher_id="d-1", process=own),
                     runner=own,
                     socket_path=path,

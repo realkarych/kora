@@ -141,7 +141,7 @@ async def closed_after_first_frame(
 async def other_operation_before_attach_is_closed(
     root: Path, sockets: Path, capture: Capture
 ) -> None:
-    attach = (FrameType.JSON, control_request("attach", "request-1"))
+    attach = (FrameType.JSON, control_request("heartbeat", "request-1"))
 
     await closed_after_first_frame(sockets, capture, attach)
 
@@ -183,7 +183,7 @@ async def ninth_unattached_connection_is_closed(
     async with served(sockets, clock, source, capture) as (server, path):
         held = [await client(path, clock) for _ in range(8)]
         try:
-            await until(lambda: pending(clock) == 9)
+            await until(lambda: pending(clock) == 17)
             ninth = await client(path, clock)
             await ninth.expect_eof(clock.monotonic_ns() + FAR_NS)
             held[0].close()

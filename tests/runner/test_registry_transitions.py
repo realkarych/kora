@@ -34,6 +34,7 @@ from kora.runner.registry import (
     retire_cell,
     status_cell,
     submit_cell,
+    takeover_cell,
     tombstone_cell,
     with_entry,
 )
@@ -84,6 +85,7 @@ STATES: dict[str, Entry | None] = {
     "starting": Starting(
         state="starting",
         request_digest=DIGEST,
+        workload_digest=DIGEST,
         submitter=SUBMITTER,
         nonce="e" * 32,
         started_at=MOMENT,
@@ -96,6 +98,7 @@ STATES: dict[str, Entry | None] = {
     "running": Running(
         state="running",
         request_digest=DIGEST,
+        workload_digest=DIGEST,
         submitter=SUBMITTER,
         runner=RUNNER,
         socket_path="/run/kora/socket",
@@ -237,7 +240,7 @@ def test_closed_gate_refuses_every_later_binding_and_submit(state: str) -> None:
     gated = bind_workspace(STATES[state], DEADLINE, True).entry
 
     later = bind_workspace(gated, DEADLINE, False)
-    submitted = submit_cell(gated, DIGEST, DEADLINE, False, starting)
+    submitted = submit_cell(gated, DIGEST, DIGEST, DEADLINE, False, starting)
 
     assert outcome(later) == (None, "deadline_expired")
     assert outcome(submitted) == (None, "deadline_expired")
@@ -264,7 +267,12 @@ def test_closed_gate_refuses_every_later_binding_and_submit(state: str) -> None:
             (None, "workload_conflict"),
             ("starting", "deadline_expired"),
         ),
-        ("running", (None, None), (None, "workload_conflict"), (None, None)),
+        (
+            "running",
+            (None, None),
+            (None, "workload_conflict"),
+            ("running", "deadline_expired"),
+        ),
         ("completed", (None, None), (None, "workload_conflict"), (None, None)),
         (
             "released_completed",
@@ -294,10 +302,10 @@ def test_submit_cells(
 ) -> None:
     entry = STATES[state]
 
-    equal = submit_cell(entry, DIGEST, DEADLINE, False, starting)
-    changed = submit_cell(entry, OTHER_DIGEST, DEADLINE, False, starting)
-    rebound = submit_cell(entry, DIGEST, None, False, starting)
-    expired = submit_cell(entry, DIGEST, DEADLINE, True, starting)
+    equal = submit_cell(entry, DIGEST, DIGEST, DEADLINE, False, starting)
+    changed = submit_cell(entry, OTHER_DIGEST, DIGEST, DEADLINE, False, starting)
+    rebound = submit_cell(entry, DIGEST, DIGEST, None, False, starting)
+    expired = submit_cell(entry, DIGEST, DIGEST, DEADLINE, True, starting)
 
     assert outcome(equal) == same
     assert outcome(changed) == other
@@ -375,7 +383,7 @@ def test_tombstone_cell_needs_the_same_fence(
 
 
 def test_fenced_starting_entry_still_refuses_submit_as_starting() -> None:
-    submitted = submit_cell(fenced(), DIGEST, DEADLINE, False, starting)
+    submitted = submit_cell(fenced(), DIGEST, DIGEST, DEADLINE, False, starting)
 
     assert outcome(submitted) == (None, "runner_starting")
 
@@ -478,3 +486,60 @@ def test_procfs_mount_of_another_type_hides_processes() -> None:
     observed = mount_hides_processes(table)
 
     assert observed
+
+
+@pytest.mark.parametrize(
+    "change", ["runner", "submitter", "gate", "digest", "expired", "equal"]
+)
+def test_takeover_checks_current_binding(change: str) -> None:
+    original = STATES["running"]
+    assert isinstance(original, Running)
+    successor = Submitter(dispatcher_id="successor", process=RUNNER)
+    current = original
+    if change == "runner":
+        current = original.model_copy(
+            update={"runner": RUNNER.model_copy(update={"start_time": 2})}
+        )
+    elif change == "submitter":
+        current = original.model_copy(update={"submitter": successor})
+    elif change == "gate":
+        current = original.model_copy(update={"gate_closed": True})
+    elif change == "digest":
+        current = original.model_copy(update={"workload_digest": OTHER_DIGEST})
+
+    transition = takeover_cell(current, original, successor, change == "expired")
+
+    if change == "equal":
+        assert isinstance(transition.entry, Running)
+        assert transition.entry.submitter == successor
+        assert transition.entry.workload_digest == original.workload_digest
+        assert transition.refusal is None
+    elif change in {"gate", "expired"}:
+        assert isinstance(transition.entry, Running)
+        assert transition.entry.gate_closed
+        assert transition.refusal == "deadline_expired"
+    else:
+        assert transition.entry is None
+        assert transition.refusal == "runner_unreachable"
+
+
+@pytest.mark.parametrize("state", ["starting", "running"])
+def test_submit_rejects_different_logical_workload(state: str) -> None:
+    entry = STATES[state]
+
+    transition = submit_cell(entry, DIGEST, OTHER_DIGEST, DEADLINE, False, starting)
+
+    assert transition.entry is None
+    assert transition.refusal == "workload_conflict"
+
+
+@pytest.mark.parametrize("state", ["starting", "running"])
+def test_old_head_without_workload_digest_cannot_be_reinterpreted(state: str) -> None:
+    entry = STATES[state]
+    assert isinstance(entry, Starting | Running)
+    document = entry.model_dump(mode="json", exclude={"workload_digest"})
+
+    with pytest.raises(ValidationError) as refused:
+        type(entry).model_validate(document)
+
+    assert [error["loc"] for error in refused.value.errors()] == [("workload_digest",)]

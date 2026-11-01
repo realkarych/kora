@@ -2,19 +2,22 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
+from functools import partial
 from typing import Annotated, Final, Literal, NamedTuple, TypeVar
 
 from pydantic import Field, StrictBool, StringConstraints, ValidationError
 
+from kora.executor.digests import object_digest
 from kora.ir.json import JsonObjectField
 from kora.ir.vcs_ref_json import JsonRefusal, canonical_bytes, decode_strict_json
 from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.identity import Count, Identifier, Sha256
-from kora.protocols.runtime import RuntimeStatus
+from kora.protocols.runtime import RuntimeStatus, Workload
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+from kora.runner.registry import TransitionExecutor
 
 PRE_ATTACH_BYTES: Final[int] = 8192
 SECTION_FRAME_BYTES: Final[int] = 65536
@@ -50,6 +53,14 @@ class EnvelopeEntry(NamedTuple):
 
 ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     "operation_unknown": EnvelopeEntry("the control operation is not known", False),
+    "workload_conflict": EnvelopeEntry(
+        "the request conflicts with the attempt's recorded binding", False
+    ),
+    "deadline_expired": EnvelopeEntry(
+        "the attempt's inherited deadline has expired", False
+    ),
+    "submitter_superseded": EnvelopeEntry("the recorded submitter has changed", True),
+    "workload_busy": EnvelopeEntry("a workload message is already admitted", True),
 }
 REFUSED_MESSAGE: Final[str] = "the control message was refused"
 RETRYABLE_REFUSALS: Final[frozenset[MessageRefusal]] = frozenset(
@@ -159,6 +170,65 @@ class ControlRequest(BoundaryModel):
     request_id: Identifier
 
 
+class AttachRequest(BoundaryModel):
+    op: Literal["attach"]
+    request_id: Identifier
+    dispatcher_id: Identifier
+
+
+class EmptyValue(BoundaryModel):
+    pass
+
+
+class DeliveryEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["attached", "accepted"]
+    value: EmptyValue
+
+
+def workload_digest(workload: Workload) -> str:
+    return object_digest(
+        workload.model_dump(
+            mode="json", exclude={"dispatcher_id", "dispatcher_process"}
+        )
+    )
+
+
+def delivery_error(code: str) -> KoraProtocolError:
+    message, retryable = ENVELOPE_ERRORS[code]
+    return KoraProtocolError(code, message, retryable, {})
+
+
+def delivery_envelope(
+    request_id: str, result: Literal["attached", "accepted"]
+) -> bytes:
+    return canonical_bytes(
+        DeliveryEnvelope(
+            request_id=request_id, result=result, value=EmptyValue()
+        ).model_dump(mode="json")
+    )
+
+
+def read_delivery(
+    payload: bytes, request_id: str, result: Literal["attached", "accepted"]
+) -> None:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(DeliveryEnvelope, payload)
+    if (
+        envelope is None
+        or envelope.request_id != request_id
+        or envelope.result != result
+    ):
+        raise message_refused(MessageRefusal.MALFORMED)
+
+
 class StatusValue(BoundaryModel):
     status: RuntimeStatus
     holds_workload: StrictBool
@@ -194,20 +264,28 @@ async def receive_section(
     declaration: SectionDeclaration,
     clock: Clock,
     message_deadline_ns: int,
+    *,
+    sink: bool = False,
 ) -> bytearray:
-    buffer = bytearray(declaration.length)
+    buffer = bytearray(
+        min(declaration.length, SECTION_FRAME_BYTES) if sink else declaration.length
+    )
     view = memoryview(buffer)
     digest = hashlib.sha256()
     offset = 0
     while offset < declaration.length:
         deadline_ns = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline_ns)
-        frame = view[offset : offset + SECTION_FRAME_BYTES]
+        frame = (
+            view[: min(SECTION_FRAME_BYTES, declaration.length - offset)]
+            if sink
+            else view[offset : offset + SECTION_FRAME_BYTES]
+        )
         size = await channel.read_typed_frame_into(deadline_ns, FrameType.BYTES, frame)
         digest.update(frame[:size])
         offset += size
     if digest.hexdigest() != declaration.sha256:
         raise message_refused(MessageRefusal.INTEGRITY)
-    return buffer
+    return bytearray() if sink else buffer
 
 
 async def receive_message(
@@ -236,13 +314,11 @@ async def receive_message(
     return SectionedMessage(header.request_id, tuple(sections))
 
 
-async def send_message(
-    channel: BoundedChannel,
+def message_header(
     operation: SectionedOperation,
     request_id: str,
     sections: Sequence[bytes],
-    clock: Clock,
-) -> None:
+) -> bytes:
     if len(sections) != len(operation.sections) or any(
         len(section) > spec.cap
         for section, spec in zip(sections, operation.sections, strict=True)
@@ -263,6 +339,20 @@ async def send_message(
     encoded = canonical_bytes(header.model_dump(mode="json"))
     if len(encoded) > operation.header_cap:
         raise message_refused(MessageRefusal.CAPACITY)
+    return encoded
+
+
+async def send_message(
+    channel: BoundedChannel,
+    operation: SectionedOperation,
+    request_id: str,
+    sections: Sequence[bytes],
+    clock: Clock,
+    *,
+    executor: TransitionExecutor | None = None,
+) -> None:
+    encode_header = partial(message_header, operation, request_id, sections)
+    encoded = encode_header() if executor is None else await executor.run(encode_header)
     message_deadline_ns = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
     await channel.write_typed_frame(
         FrameType.JSON,
@@ -330,10 +420,14 @@ def control_request(op: str, request_id: str) -> bytes:
     return canonical_bytes(request.model_dump(mode="json"))
 
 
-def read_request(payload: bytes) -> ControlRequest | None:
+def read_request(payload: bytes) -> ControlRequest | AttachRequest | None:
     if isinstance(decode_strict_json(payload, PRE_ATTACH_BYTES, 1), JsonRefusal):
         return None
-    return json_model(ControlRequest, payload)
+    attached = json_model(AttachRequest, payload)
+    if attached is not None:
+        return attached
+    request = json_model(ControlRequest, payload)
+    return None if request is not None and request.op == "attach" else request
 
 
 def status_envelope(request_id: str, value: StatusValue) -> bytes:

@@ -64,6 +64,7 @@ from tests.measurements.runtime_workload import (
     MAXIMAL,
     Action,
     chain_rows,
+    dense_workload,
     encoded,
     maximal_workload,
     page_rows,
@@ -554,7 +555,7 @@ def test_hash_chain_cost(report: Report, row: str) -> None:
 
 @pytest.mark.parametrize(
     ("mode", "shape"),
-    [("rss", "maximal"), ("traced", "maximal"), ("rss", "hostile")],
+    [("rss", "maximal"), ("traced", "maximal"), ("rss", "hostile"), ("rss", "dense")],
 )
 def test_local_codec_peak(
     report: Report, mode: str, shape: str, tmp_path: Path
@@ -562,7 +563,9 @@ def test_local_codec_peak(
     if shape == "hostile":
         payload = b"[" + b"{}," * HOSTILE_ITEMS + b"{}]"
     else:
-        document = json.loads(encoded(maximal_workload()))
+        document = json.loads(
+            encoded(dense_workload() if shape == "dense" else maximal_workload())
+        )
         tracemalloc.start()
         payload = canonical_bytes(document)
         report.environment["local_codec_canonical_encoding_traced_peak_bytes"] = (

@@ -18,7 +18,12 @@ from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.ir.json import JsonObject, parse_json_object
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
-from kora.plugins.runtime.local.control import ListenerRefused, runner_status
+from kora.plugins.runtime.local.channel import workload_digest
+from kora.plugins.runtime.local.control import (
+    ListenerRefused,
+    deliver_workload,
+    runner_status,
+)
 from kora.plugins.runtime.local.services import (
     SERVICE_REFUSED,
     ServiceProbe,
@@ -68,6 +73,7 @@ from kora.runner.registry import (
     AttemptKey,
     Entry,
     Fence,
+    LockOutcome,
     Registry,
     Retired,
     Running,
@@ -84,6 +90,7 @@ from kora.runner.registry import (
     runner_argv,
     status_cell,
     submit_cell,
+    takeover_cell,
     tombstone_cell,
 )
 
@@ -357,6 +364,7 @@ class LocalRuntime:
         self._scanner = scanner
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
+        self._deliveries: set[asyncio.Task[None]] = set()
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -599,8 +607,12 @@ class LocalRuntime:
         return digest
 
     async def submit(self, workload: Workload, ctx: ProtocolContext) -> Handle:
+        self.key(workload.attempt_id, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
         key = self.key(workload.attempt_id, ctx)
-        digest = self.checked_digest(workload, ctx)
+        digest = await self.executor.run(lambda: self.checked_digest(workload, ctx))
+        logical_digest = await self.executor.run(lambda: workload_digest(workload))
         launch = self._launch
         await self.executor.run(
             lambda: verified_socket_directory(launch.socket_directory)
@@ -611,6 +623,7 @@ class LocalRuntime:
             deadline=workload.deadline,
             gate_closed=False,
             request_digest=digest,
+            workload_digest=logical_digest,
             submitter=Submitter(
                 dispatcher_id=workload.dispatcher_id, process=launch.identity
             ),
@@ -620,18 +633,116 @@ class LocalRuntime:
             runner_prefix=launch.prefix(self._root_path),
             fence=None,
         )
-        overdue = expired(workload.deadline, ctx.clock.now())
         applied = await self.transition(
             key,
             lambda entry: submit_cell(
-                entry, digest, workload.deadline, overdue, lambda: starting
+                entry,
+                digest,
+                logical_digest,
+                workload.deadline,
+                expired(workload.deadline, ctx.clock.now()),
+                lambda: starting,
             ),
             ctx,
             "submit",
         )
         if applied.transition.entry is starting:
             await self.spawn(runner_argv(starting.runner_prefix, key, nonce), ctx)
+        entry = await self.entry(key)
+        if isinstance(entry, Running):
+            task = asyncio.create_task(self.deliver(key, entry, workload, ctx))
+            self._deliveries.add(task)
+            try:
+                await task
+            finally:
+                self._deliveries.discard(task)
         return key.handle()
+
+    def submitter_gone(self, submitter: Submitter) -> bool:
+        recorded = submitter.process
+        own = self._launch.identity
+        if any(
+            getattr(recorded, field) is None
+            or getattr(recorded, field) != getattr(own, field)
+            for field in ("host_id", "boot_id", "pid_namespace")
+        ):
+            raise refusal("runner_unreachable")
+        observation = self._identities.read(recorded.pid)
+        if observation.state is IdentityState.ABSENT:
+            return True
+        process = observation.process
+        if observation.state is not IdentityState.PRESENT or process is None:
+            raise refusal("runner_unreachable")
+        if any(
+            getattr(process.identity, field) != getattr(recorded, field)
+            for field in ("host_id", "boot_id", "pid_namespace")
+        ):
+            raise refusal("runner_unreachable")
+        return process.dead or process.identity.start_time != recorded.start_time
+
+    async def deliver(
+        self, key: AttemptKey, entry: Running, workload: Workload, ctx: ProtocolContext
+    ) -> None:
+        submitter = Submitter(
+            dispatcher_id=workload.dispatcher_id, process=self._launch.identity
+        )
+        for attempt in range(2):
+            await self.transition(
+                key,
+                lambda current: bind_workspace(
+                    current,
+                    workload.deadline,
+                    expired(workload.deadline, ctx.clock.now()),
+                ),
+                ctx,
+                "submit",
+            )
+            if entry.submitter == submitter:
+                break
+            if not await self.executor.run(
+                partial(self.submitter_gone, entry.submitter)
+            ):
+                return
+
+            def take_over(expected: Running = entry) -> Applied | LockOutcome:
+                return self.registry.try_transition(
+                    key,
+                    lambda current: takeover_cell(
+                        current,
+                        expected,
+                        submitter,
+                        expired(workload.deadline, ctx.clock.now()),
+                    ),
+                )
+
+            applied = await self.executor.locked(take_over, ctx, "submit")
+            if applied.transition.refusal is None:
+                break
+            if applied.transition.refusal != "runner_unreachable":
+                raise refusal(applied.transition.refusal)
+            fresh = await self.entry(key)
+            if attempt or not isinstance(fresh, Running):
+                raise refusal("runner_unreachable")
+            entry = fresh
+        try:
+            await deliver_workload(
+                entry.socket_path,
+                entry.runner,
+                workload,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+            )
+        except ListenerRefused as refused:
+            ctx.logger.emit(LISTENER_REFUSED, reason=refused.reason)
+            raise refusal("runner_unreachable") from None
+        except (ChannelError, OSError):
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code != "message_refused":
+                raise
+            raise refusal("runner_unreachable") from None
 
     async def spawn(self, argv: tuple[str, ...], ctx: ProtocolContext) -> None:
         started = ctx.clock.monotonic_ns()
@@ -836,6 +947,8 @@ class LocalRuntime:
 
     async def close(self) -> None:
         if self._closing is None:
+            for delivery in self._deliveries:
+                delivery.cancel()
             for observation in self._observations:
                 observation.cancel()
             self.executor.closed = True
@@ -847,6 +960,9 @@ class LocalRuntime:
     async def _release(self) -> None:
         try:
             observations = tuple(self._observations)
+            deliveries = tuple(self._deliveries)
+            if deliveries:
+                await asyncio.gather(*deliveries, return_exceptions=True)
             if observations:
                 await asyncio.gather(*observations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)

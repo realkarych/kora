@@ -1,5 +1,7 @@
 # Structured component diagnostics
 
+Workload-delivery amendment dated 2026-11-01, issue #611: existing counted `runtime.local.runner.auth_refused` adds fixed reasons `not_submitter` and `head_changed`; `exited` covers a dead recorded peer. New delivery refusals expose only allowlisted fixed error envelopes, never workload values, hashes, identities, pids or paths. The delivery/attach/deadline tests in `tests/plugins/runtime/local/test_delivery.py` and existing control logging tests own activation evidence. No per-frame INFO event, journal authority or new diagnostic sink is introduced.
+
 Local-runtime control-channel amendment dated 2026-10-30: the `runtime.local.runner.auth_refused`, `runtime.local.runner.socket_rechecked` and `runtime.local.listener_refused` events under [issue #315](https://github.com/realkarych/kora/issues/315), approved by the project owner with the [plan update](https://github.com/realkarych/kora/issues/315#issuecomment-6509767448) on 2026-10-30; wording pending line-by-line owner review.
 
 Local-runtime retirement amendment dated 2026-10-29: the `runtime.local.retire` event under [issue #430](https://github.com/realkarych/kora/issues/430), approved by the project owner with the [implementation plan](https://github.com/realkarych/kora/issues/430#issuecomment-6503668502) on 2026-10-29; wording pending line-by-line owner review.
