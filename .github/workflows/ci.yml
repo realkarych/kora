@@ -180,6 +180,12 @@ jobs:
           pnpm --dir web run typecheck
           pnpm --dir web run lint
           pnpm --dir web run build
+      - name: Verify Linux unit collision ownership
+        id: unit_collisions
+        if: ${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}
+        run: |
+          sudo bash scripts/ci/check-local-runtime-unit-collisions.sh root
+          bash scripts/ci/check-local-runtime-unit-collisions.sh user
       - name: Prepare local runtime host fixtures
         id: preparation
         if: ${{ matrix.lane == 'local-runtime' }}
@@ -204,8 +210,10 @@ jobs:
             fi
           fi
           KORA_SCAFFOLD_SELECTION=()
+          KORA_TEST_LAUNCH=()
           if test "$KORA_SCAFFOLD_LANE" = local-runtime; then
             KORA_SCAFFOLD_SELECTION=(-m "not measurement")
+            KORA_TEST_LAUNCH=(bash scripts/ci/run-local-runtime-tests.sh)
           fi
           KORA_EXIT=0
           if test "$KORA_SCAFFOLD_LANE" != storage && test "$KORA_SCAFFOLD_LANE" != local-runtime; then
@@ -241,6 +249,8 @@ jobs:
             tests/plugins
             --ignore=tests/plugins/storage
             --ignore=tests/plugins/runtime/local
+            --ignore=tests/plugins/artifact_type/test_agent_session.py
+            tests/ir/test_output_schema_resources.py
             tests/ir/test_inline_schema_resources.py
             tests/ir/test_type_schema_resources.py
           )
@@ -251,8 +261,9 @@ jobs:
             tests/ir/test_structured_schema_collection_predicates.py
             tests/ir/test_structured_schema_string_lengths.py
             tests/ir/test_subgraph_interface_resources.py
+            tests/plugins/artifact_type/test_agent_session.py
           )
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/ir/test_output_schema_resources.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
@@ -306,7 +317,7 @@ jobs:
                 cp "$KORA_ORDINARY_OUTPUT/$name" "$KORA_SCAFFOLD_DIRECTORY/$name"
               fi
             done
-          elif uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
+          elif "${KORA_TEST_LAUNCH[@]}" uv run --no-sync pytest -q "${KORA_SCAFFOLD_SELECTION[@]}" "${KORA_SCAFFOLD_ARGUMENTS[@]}" --junitxml="$KORA_SCAFFOLD_DIRECTORY/junit.xml" > "$KORA_SCAFFOLD_DIRECTORY/tests.stdout" 2> "$KORA_SCAFFOLD_DIRECTORY/tests.stderr"; then
             KORA_EXIT=0
           else
             KORA_EXIT="$?"
@@ -574,7 +585,7 @@ jobs:
           KORA_MEASUREMENT_OUTPUT: measurements/local-runtime-cost.json
         run: |
           mkdir -p measurements
-          uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
+          bash scripts/ci/run-local-runtime-tests.sh uv run --no-sync pytest -q -m measurement tests/measurements/test_local_runtime_cost.py
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: ${{ always() }}
         with:
