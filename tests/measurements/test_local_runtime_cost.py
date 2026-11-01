@@ -24,7 +24,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.time import SystemClock
-from kora.runner.identity import NativeIdentityReader
+from kora.runner.identity import NativeIdentityReader, ProcessScanFailure
 from kora.runner.peers import CredentialSource, DarwinSource, PeerSource, kernel_source
 from kora.runner.registry import Registry, bind_workspace
 from tests.measurements.harness import OUTPUT_VARIABLE, REVISION_VARIABLE
@@ -353,6 +353,49 @@ def component_bytes(after: tracemalloc.Snapshot, before: tracemalloc.Snapshot) -
     )
 
 
+def last_retirement_observation(
+    records: list[dict[str, object]],
+) -> dict[str, object] | None:
+    observed = next(
+        (
+            record
+            for record in reversed(records)
+            if record.get("event") == "runtime.local.retire"
+        ),
+        dict[str, object](),
+    )
+    outcome = observed.get("outcome")
+    matched = observed.get("matched")
+    killed = observed.get("killed")
+    waited_ms = observed.get("waited_ms")
+    scan_failure = observed.get("scan_failure")
+    if (
+        isinstance(outcome, str)
+        and outcome in {item.value for item in SweepOutcome}
+        and type(matched) is int
+        and 0 <= matched <= 65536
+        and type(killed) is int
+        and 0 <= killed <= matched
+        and type(waited_ms) is float
+        and isfinite(waited_ms)
+        and waited_ms >= 0
+    ):
+        return {
+            "outcome": outcome,
+            "matched": matched,
+            "killed": killed,
+            "waited_ms": waited_ms,
+            "scan_failure": (
+                scan_failure
+                if outcome == SweepOutcome.LISTING_INCOMPLETE.value
+                and type(scan_failure) is str
+                and scan_failure in {item.value for item in ProcessScanFailure}
+                else None
+            ),
+        }
+    return None
+
+
 @pytest.mark.measurement
 @pytest.mark.asyncio
 async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -> None:
@@ -416,36 +459,7 @@ async def test_local_runtime_spawn_cost(tmp_path: Path, kora_capture: Capture) -
             except (CaptureTimeout, CaptureOverflow, json.JSONDecodeError) as failure:
                 error.add_note("last observed runtime.local.retire: null (unverified)")
                 raise error from failure
-            observed = next(
-                (
-                    record
-                    for record in reversed(records)
-                    if record.get("event") == "runtime.local.retire"
-                ),
-                dict[str, object](),
-            )
-            outcome = observed.get("outcome")
-            matched = observed.get("matched")
-            killed = observed.get("killed")
-            waited_ms = observed.get("waited_ms")
-            last_observed: dict[str, object] | None = None
-            if (
-                isinstance(outcome, str)
-                and outcome in {item.value for item in SweepOutcome}
-                and type(matched) is int
-                and 0 <= matched <= 65536
-                and type(killed) is int
-                and 0 <= killed <= matched
-                and type(waited_ms) is float
-                and isfinite(waited_ms)
-                and waited_ms >= 0
-            ):
-                last_observed = {
-                    "outcome": outcome,
-                    "matched": matched,
-                    "killed": killed,
-                    "waited_ms": waited_ms,
-                }
+            last_observed = last_retirement_observation(records)
             error.add_note(
                 json.dumps(
                     {
