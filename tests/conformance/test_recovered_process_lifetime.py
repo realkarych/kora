@@ -25,6 +25,7 @@ from kora.runner.identity import (
     IdentityObservation,
     IdentityState,
     NativeIdentityReader,
+    ProcessSnapshot,
 )
 from kora.runner.processes import (
     ExitAnchor,
@@ -296,6 +297,83 @@ def assert_empty_domain(fixture: ReapedDomain) -> None:
     group = reader.group(fixture.registration.process_group_id)
     assert group.state is IdentityState.PRESENT
     assert group.members == ()
+
+
+class DelayedDeadLeader:
+    def __init__(self, snapshot: ProcessSnapshot) -> None:
+        self.native = NativeIdentityReader()
+        self.pid = snapshot.identity.pid
+        self.delayed: ProcessSnapshot | None = snapshot
+        self.deliveries = 0
+        self.absent_reads = 0
+        self.empty_groups = 0
+
+    def read(self, pid: int) -> IdentityObservation:
+        if pid == self.pid and self.delayed is not None:
+            snapshot = self.delayed
+            self.delayed = None
+            self.deliveries += 1
+            return IdentityObservation(IdentityState.PRESENT, snapshot)
+        result = self.native.read(pid)
+        if pid == self.pid and result.state is IdentityState.ABSENT:
+            self.absent_reads += 1
+        return result
+
+    def group(
+        self, process_group_id: int, deadline_ns: int | None = None
+    ) -> GroupObservation:
+        result = self.native.group(process_group_id, deadline_ns)
+        if result.state is IdentityState.PRESENT and not result.members:
+            self.empty_groups += 1
+        return result
+
+
+@pytest.mark.asyncio
+async def test_recovered_dead_leader_omitted_during_collection_is_revalidated() -> None:
+    clock = SettlementClock()
+    actual = SystemClock()
+    async with domain("held") as fixture:
+        gc.collect()
+        baseline = set(os.listdir("/dev/fd"))
+        async with AsyncExitStack() as owned:
+            native = NativeIdentityReader()
+            before = native.read(fixture.registration.process.pid)
+            assert before.state is IdentityState.PRESENT
+            assert before.process is not None
+            exited = ExitAnchor(fixture.registration.process.pid, direct_child=False)
+            owned.callback(exited.close)
+            os.kill(fixture.registration.process.pid, signal.SIGKILL)
+            await exited.wait(actual.monotonic_ns() + 5_000_000_000, actual)
+            if sys.platform == "linux":
+                dead = native.read(fixture.registration.process.pid)
+                assert dead.state is IdentityState.PRESENT
+                assert dead.process is not None
+                snapshot = dead.process
+            else:
+                snapshot = replace(before.process, dead=True)
+            assert snapshot.dead
+            assert snapshot.identity == fixture.registration.process
+            await release_reaper(fixture)
+            assert_empty_domain(fixture)
+            source = DelayedDeadLeader(snapshot)
+            owner = RecoveredProcess(fixture.registration, clock, source)
+            owned.callback(owner.dispose_observation)
+            deadline = clock.monotonic_ns() + 5_000_000_000
+
+            await owner.settle(deadline)
+            owner.release(deadline)
+
+            assert source.deliveries == 1
+            assert source.delayed is None
+            assert source.absent_reads >= 2
+            assert source.empty_groups >= 2
+            assert owner.closed
+            assert owner.watcher_count == 0
+            assert not clock.sleeps
+            assert not clock.waiters
+            assert_empty_domain(fixture)
+        gc.collect()
+        assert set(os.listdir("/dev/fd")) == baseline
 
 
 @pytest.mark.asyncio

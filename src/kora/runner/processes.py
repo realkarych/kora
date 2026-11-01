@@ -461,7 +461,6 @@ class RecoveredProcess:
             visible = {pid for pid, _ in group.members}
             if (
                 process is not None
-                and not process.dead
                 and not collected
                 and process.identity.pid not in visible
             ):
