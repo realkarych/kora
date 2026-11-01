@@ -72,3 +72,5 @@ Copy the skeleton below into `NNNN-short-title.md` with the next free number, fi
 [ADR-0026](0026-package-layers.md) places every shared component in a package by role under `src/kora` and fixes which package may import which. The server-free packages, such as the runner, the worker, the client and the DSL, never reach the server packages through static imports, and only the CEL evaluator imports the binding. A standard-library pytest test enforces this in CI. Layering is a packaging rule with defence in depth, not an isolation control.
 
 [ADR-0027](0027-bounded-effective-schema-validation.md) selects common core composition and a restricted in-process StructuredOutput schema-execution architecture. It preserves standalone provider hooks, records explicit unsupported schemas and the prerequisite for a complete immutable capacity/accounting policy, and leaves evaluator and consumer implementation to separate work. The project owner approved this record and its exact wording on 2026-10-30 under issue #138.
+
+[ADR-0028: Keep the Claude vendor SDK stack optional and separate from kora's HTTP client](0028-optional-claude-sdk-stack.md).
