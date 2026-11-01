@@ -10,7 +10,7 @@ from kora.db.connection import Database, DatabaseClosedError, Dialect, Lifecycle
 from kora.db.tables import namespace
 from kora.db.transactions import WRITER_LEASE, WriterTransactionError
 from kora.engine.locks import RUN_CLASS, LockError, Scope, ScopeKind, TransitionLocks
-from tests.db.closing import ConnectionLedger, until
+from tests.db.closing import ConnectionLedger
 from tests.db.seed import Seeder
 from tests.engine.lock_support import (
     DEADLINE,
@@ -326,6 +326,7 @@ async def test_partial_acquisition_failure_invalidates_context(
 async def test_shielded_unit_retains_locks_until_completion(database: Database) -> None:
     ready = asyncio.Event()
     release = asyncio.Event()
+    cancellation_turn = asyncio.Event()
     ledger = ConnectionLedger(database)
 
     async def unit(connection: AsyncConnection) -> None:
@@ -340,7 +341,8 @@ async def test_shielded_unit_retains_locks_until_completion(database: Database) 
     await asyncio.wait_for(ready.wait(), DEADLINE)
 
     task.cancel()
-    await until(lambda: task.cancelling() > 0)
+    asyncio.get_running_loop().call_soon(cancellation_turn.set)
+    await asyncio.wait_for(cancellation_turn.wait(), DEADLINE)
     still_owned = database.units_in_flight() == 1 and ledger.outstanding == 1
     returned_early = task.done()
     release.set()
