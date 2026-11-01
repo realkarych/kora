@@ -249,6 +249,7 @@ def starting_entry(
         deadline=None,
         gate_closed=False,
         request_digest="sha256:" + "1" * 64,
+        workload_digest="sha256:" + "1" * 64,
         submitter=Submitter(dispatcher_id=dispatcher, process=own_identity()),
         nonce=nonce,
         started_at=datetime(2026, 10, 29, tzinfo=UTC),

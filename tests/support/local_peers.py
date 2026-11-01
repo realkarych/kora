@@ -1,4 +1,5 @@
 import asyncio
+import os
 import socket
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from kora.plugins.runtime.local.serving import (
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel
+from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.peers import (
     CredentialSource,
@@ -34,6 +36,7 @@ from kora.runner.peers import (
     PeerCredentials,
     PeerSource,
 )
+from kora.runner.registry import Registry
 
 SOCKET_NAME: Final[str] = "control-socket"
 FAR_NS: Final[int] = 3600 * 1_000_000_000
@@ -137,12 +140,25 @@ async def served(
 ) -> AsyncGenerator[tuple[ControlServer, str]]:
     bound = rebound(directory, SOCKET_NAME)
     log = capture.diagnostics.logger(COMPONENT)
-    server = ControlServer(bound, directory, SOCKET_NAME, clock, source, log)
+    registry = Registry(open_local_directory(directory), "domain-1", lambda: "a" * 32)
+    server = ControlServer(
+        bound,
+        directory,
+        SOCKET_NAME,
+        clock,
+        source,
+        log,
+        registry,
+        registry.key("attempt-1"),
+        identity_of(os.getpid()),
+        NativeIdentityReader(),
+    )
     server.start()
     try:
         yield server, str(directory / SOCKET_NAME)
     finally:
         await server.close()
+        registry.directory.close()
 
 
 async def client(path: str, clock: Clock) -> BoundedChannel:

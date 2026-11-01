@@ -15,6 +15,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.ir.json import JsonObjectField
+from kora.plugins.runtime.local.channel import workload_digest
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
@@ -115,6 +116,7 @@ def started_entries(domain: str) -> dict[str, Entry]:
             deadline=None,
             gate_closed=False,
             request_digest=DIGEST,
+            workload_digest=DIGEST,
             submitter=Submitter(dispatcher_id="dispatcher-1", process=RUNNER),
             nonce="e" * 32,
             started_at=MOMENT,
@@ -127,6 +129,7 @@ def started_entries(domain: str) -> dict[str, Entry]:
             deadline=None,
             gate_closed=False,
             request_digest=DIGEST,
+            workload_digest=DIGEST,
             submitter=Submitter(dispatcher_id="dispatcher-1", process=RUNNER),
             runner=RUNNER,
             socket_path="/run/user/1000/kora/0123456789abcdef",
@@ -248,8 +251,19 @@ async def submit_cells_follow_the_entry(tmp_path: Path, capture: Capture) -> Non
         try:
             for state, entry in entries.items():
                 attempt = f"attempt-{state}"
-                write_entry(runtime, attempt, entry)
                 again = work.model_copy(update={"attempt_id": attempt})
+                assert again.dispatcher_process is not None
+                if isinstance(entry, Starting | Running):
+                    entry = entry.model_copy(
+                        update={
+                            "workload_digest": workload_digest(again),
+                            "submitter": Submitter(
+                                dispatcher_id="other-dispatcher",
+                                process=again.dispatcher_process,
+                            ),
+                        }
+                    )
+                write_entry(runtime, attempt, entry)
                 outcomes[state] = await outcome(runtime.submit(again, ctx))
         finally:
             await runtime.close()

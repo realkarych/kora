@@ -327,3 +327,18 @@ def chain_rows() -> dict[str, tuple[Action, int]]:
 def chain_action(seed: str, record: bytes, length: int) -> Action:
     records = [record] * length
     return lambda: extend(seed, records)
+
+
+def dense_workload() -> dict[str, object]:
+    dense: dict[str, object] = {"items": [{}] * ((MAX_CANONICAL_BYTES - 32) // 3)}
+    return {
+        **maximal_workload(),
+        "execution_request": dense,
+        "resolved_config": dense,
+        "limits": dense,
+        "session_spec": {
+            **widest_session_spec(),
+            "options": dense,
+            "price_table": dense,
+        },
+    }

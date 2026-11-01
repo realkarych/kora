@@ -251,7 +251,18 @@ async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
         signal_ready()
         socket_directory = Path(entry.socket_directory)
         source = kernel_source(reader)
-        server = ControlServer(bound, socket_directory, name, clock, source, log)
+        server = ControlServer(
+            bound,
+            socket_directory,
+            name,
+            clock,
+            source,
+            log,
+            registry,
+            key,
+            identity,
+            reader,
+        )
         try:
             server.start()
             await asyncio.Event().wait()

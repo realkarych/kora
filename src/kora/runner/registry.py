@@ -159,6 +159,7 @@ class Starting(BoundaryModel):
     deadline: ExecutionDeadline | None
     gate_closed: StrictBool
     request_digest: Digest
+    workload_digest: Digest
     submitter: Submitter
     nonce: Nonce
     started_at: Instant
@@ -172,6 +173,7 @@ class Running(BoundaryModel):
     deadline: ExecutionDeadline | None
     gate_closed: StrictBool
     request_digest: Digest
+    workload_digest: Digest
     submitter: Submitter
     runner: ProcessIdentity
     socket_path: SocketPath
@@ -301,6 +303,7 @@ def bind_workspace(
 def submit_cell(
     entry: Entry | None,
     request_digest: str,
+    workload_digest: str,
     deadline: ExecutionDeadline | None,
     expired: bool,
     starting: Callable[[], Starting],
@@ -317,13 +320,35 @@ def submit_cell(
         return Transition(refusal="deadline_expired")
     if not isinstance(entry, Unsubmitted) and entry.request_digest != request_digest:
         return Transition(refusal="workload_conflict")
-    if expired and isinstance(entry, Unsubmitted | Starting):
+    if (
+        isinstance(entry, Starting | Running)
+        and entry.workload_digest != workload_digest
+    ):
+        return Transition(refusal="workload_conflict")
+    if expired and isinstance(entry, Unsubmitted | Starting | Running):
         return Transition(closed_gate(entry), "deadline_expired")
     if isinstance(entry, Unsubmitted):
         return Transition(starting())
     if isinstance(entry, Starting):
         return Transition(refusal="runner_starting")
     return Transition()
+
+
+def takeover_cell(
+    entry: Entry | None, expected: Running, submitter: Submitter, expired: bool
+) -> Transition:
+    if (
+        not isinstance(entry, Running)
+        or entry.runner != expected.runner
+        or entry.submitter != expected.submitter
+        or entry.workload_digest != expected.workload_digest
+    ):
+        return Transition(refusal="runner_unreachable")
+    if entry.gate_closed or expired:
+        return Transition(closed_gate(entry), "deadline_expired")
+    return Transition(
+        Running.model_validate({**entry.model_dump(), "submitter": submitter})
+    )
 
 
 def register_cell(
@@ -336,6 +361,7 @@ def register_cell(
         deadline=entry.deadline,
         gate_closed=entry.gate_closed,
         request_digest=entry.request_digest,
+        workload_digest=entry.workload_digest,
         submitter=entry.submitter,
         runner=runner,
         socket_path=socket_path,

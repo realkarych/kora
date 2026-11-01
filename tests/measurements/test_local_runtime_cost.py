@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import hashlib
 import json
 import os
 import platform
@@ -11,6 +12,7 @@ import time
 import tracemalloc
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
+from functools import partial
 from math import isfinite
 from pathlib import Path
 
@@ -18,16 +20,20 @@ import pytest
 
 from kora.conformance.capture import Capture, CaptureOverflow, CaptureTimeout
 from kora.conformance.common import kora_capture
+from kora.executor.digests import object_digest
 from kora.ir.json import parse_json_object
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.runtime import LocalRuntime, SweepOutcome
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity_records import ProcessIdentity
+from kora.protocols.runtime import Workload
 from kora.protocols.time import SystemClock
 from kora.runner.identity import NativeIdentityReader, ProcessScanFailure
 from kora.runner.peers import CredentialSource, DarwinSource, PeerSource, kernel_source
-from kora.runner.registry import Registry, bind_workspace
+from kora.runner.registry import Registry, Running, bind_workspace
 from tests.measurements.harness import OUTPUT_VARIABLE, REVISION_VARIABLE
+from tests.measurements.runtime_workload import dense_workload, maximal_workload
 from tests.support.local_peers import (
     asked_status,
     client,
@@ -652,3 +658,84 @@ async def test_local_runtime_attestation_cost(
     }
     published(report)
     assert report["open_descriptor_delta"] == 0
+
+
+@pytest.mark.measurement
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["string-heavy", "dense"])
+async def test_local_runtime_workload_delivery_cost(
+    tmp_path: Path, kora_capture: Capture, shape: str
+) -> None:
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        try:
+            document = (
+                maximal_workload() if shape == "string-heavy" else dense_workload()
+            )
+            request = parse_json_object(document["execution_request"])
+            own = identity_of(os.getpid())
+            document.update(
+                attempt_id="delivery-cost",
+                execution_domain_id=runtime.execution_domain_id,
+                dispatcher_process=own.model_dump(mode="json"),
+                execution_request_digest=object_digest(request),
+            )
+            work = Workload.model_validate_json(json.dumps(document))
+            del document, request
+            started = time.perf_counter()
+            encoded = await runtime.executor.run(
+                lambda: canonical_bytes(work.model_dump(mode="json"))
+            )
+            encoding_seconds = time.perf_counter() - started
+            started = time.perf_counter()
+            await runtime.executor.run(partial(hashlib.sha256, encoded))
+            hashing_seconds = time.perf_counter() - started
+            payload_bytes = len(encoded)
+            del encoded
+
+            async def submitted_twice() -> list[float]:
+                return [
+                    await timed(runtime.submit(work, ctx)),
+                    await timed(runtime.submit(work, ctx)),
+                ]
+
+            deliveries, lag = await with_lag(submitted_twice)
+            entry = await runtime.entry(runtime.registry.key(work.attempt_id))
+            assert isinstance(entry, Running)
+            held_rss_kib = await asyncio.to_thread(resident_kib, entry.runner.pid)
+            channel = await client(entry.socket_path, ctx.clock)
+            try:
+                observed = await asked_status(channel, ctx.clock)
+            finally:
+                channel.close()
+            assert observed.holds_workload
+            report: dict[str, object] = {
+                "workload": f"workload-delivery-{shape}",
+                "revision": os.environ.get(REVISION_VARIABLE, "working-tree"),
+                "platform": platform.platform(),
+                "python": sys.version,
+                "payload_bytes": payload_bytes,
+                "standalone_encoding_seconds": encoding_seconds,
+                "standalone_hashing_seconds": hashing_seconds,
+                "first_submit_seconds": deliveries[0],
+                "repeat_submit_seconds": deliveries[1],
+                "worker_loop_lag": summary(lag or [0.0]),
+                "runner_held_rss_kib": held_rss_kib,
+                "method": (
+                    "One first delivery and byte-identical repeat through the real "
+                    "runtime "
+                    "and detached runner. Standalone encode/hash samples are separate "
+                    "operations; no stage subtraction or cross-process timing "
+                    "attribution. "
+                    "RSS includes interpreter and allocator retention, "
+                    "not only live workload. "
+                    "Diagnostic only; no numerical gate."
+                ),
+            }
+        finally:
+            await runtime.close()
+            reap_runners(root)
+    assert runner_pids(root) == ()
+    published(report)

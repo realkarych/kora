@@ -17,6 +17,7 @@ from kora.plugins.runtime.local.channel import (
     WORKLOAD_SECTION_BYTES,
     FrameType,
     MessageRefusal,
+    SectionDeclaration,
     SectionedHeader,
     SectionedOperation,
     SectionSpec,
@@ -26,10 +27,12 @@ from kora.plugins.runtime.local.channel import (
     error_envelope,
     message_refused,
     operation_unknown,
+    read_delivery,
     read_error_envelope,
     read_request,
     read_status,
     receive_message,
+    receive_section,
     send_message,
     status_envelope,
 )
@@ -599,3 +602,83 @@ async def test_status_error_response_is_raised_for_its_request() -> None:
 
     assert raised.value.code == "operation_unknown"
     assert refused.value.details == {"reason": MessageRefusal.MALFORMED.value}
+
+
+@pytest.mark.parametrize(
+    "change", ["request", "tag", "message", "retryable", "details", "code", "value"]
+)
+async def test_delivery_response_rejects_uncorrelated_or_unreviewed_content(
+    change: str,
+) -> None:
+    result: dict[str, object] = {
+        "request_id": "delivery",
+        "result": "accepted",
+        "value": {},
+    }
+    if change == "request":
+        result["request_id"] = "foreign"
+    elif change == "tag":
+        result["result"] = "attached"
+    elif change == "value":
+        result["value"] = {"extra": True}
+    else:
+        error: dict[str, object] = {
+            "code": "workload_busy",
+            "message": "a workload message is already admitted",
+            "retryable": True,
+            "details": {},
+        }
+        error[change] = {
+            "message": "private-payload",
+            "retryable": False,
+            "details": {"private": "payload"},
+            "code": "unknown",
+        }[change]
+        result = {"request_id": "delivery", "error": error}
+    payload = json.dumps(result).encode()
+
+    with pytest.raises(KoraProtocolError) as refused:
+        read_delivery(payload, "delivery", "accepted")
+
+    assert refused.value.code == "message_refused"
+    assert refused.value.details == {"reason": "malformed"}
+
+
+class InspectedDrainChannel(BoundedChannel):
+    def __init__(self, endpoint: socket.socket, clock: SystemClock) -> None:
+        super().__init__(endpoint, clock)
+        self.backing_sizes: list[int] = []
+
+    async def read_typed_frame_into(
+        self, deadline_ns: int, kind: int, target: memoryview
+    ) -> int:
+        backing = target.obj
+        assert isinstance(backing, bytearray)
+        self.backing_sizes.append(len(backing))
+        return await super().read_typed_frame_into(deadline_ns, kind, target)
+
+
+async def test_repeat_drain_uses_only_a_frame_sized_backing_buffer() -> None:
+    payload = b"a" * (3 * SECTION_FRAME_BYTES + 1)
+    declaration = SectionDeclaration(
+        name="workload", length=len(payload), sha256=hashlib.sha256(payload).hexdigest()
+    )
+    clock = SystemClock()
+    left, right = socket.socketpair()
+    right.setblocking(False)
+    receiver = InspectedDrainChannel(left, clock)
+    sending = asyncio.create_task(
+        send_raw(right, bytes_frames(payload, SECTION_FRAME_BYTES))
+    )
+    try:
+        result = await receive_section(
+            receiver, declaration, clock, far_deadline(), sink=True
+        )
+        await sending
+
+        assert result == bytearray()
+        assert receiver.backing_sizes == [SECTION_FRAME_BYTES] * 4
+    finally:
+        receiver.close()
+        right.close()
+        await asyncio.gather(sending, return_exceptions=True)
