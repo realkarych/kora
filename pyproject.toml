@@ -64,6 +64,10 @@ conformance = [
     "pytest==9.1.1",
     "referencing==0.37.0",
 ]
+claude = [
+    "claude-agent-sdk==0.2.168",
+    "mcp==2.3.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/kora"]
@@ -102,6 +106,9 @@ no-build-package = [
     "common-expression-language",
     "pydantic-core",
     "rpds-py",
+    "claude-agent-sdk",
+    "cryptography",
+    "cffi",
 ]
 constraint-dependencies = ["wcwidth==0.8.5"]
 
@@ -213,6 +220,7 @@ build = [
     "setuptools==84.2.1",
 ]
 dev = [
+    "claude-agent-sdk==0.2.168",
     "httpx==0.28.1",
     "jsonschema==4.26.0",
     "pyright==1.1.414",
