@@ -153,3 +153,8 @@ class TransitionLocks:
         self._require_current()
         if self._run_id != run_id or not frozenset(scopes).issubset(self._scopes or ()):
             raise LockError("the required transaction locks are not held")
+
+    def require_connection(self, connection: AsyncConnection) -> None:
+        self._require_current()
+        if self._lease.connection is not connection:
+            raise LockError("the write connection does not own the locks")
