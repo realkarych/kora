@@ -92,6 +92,136 @@ def test_type_schema_matches_real_metaschema(schema: JsonObject) -> None:
     assert all(error.code == "IR022" for error in result.diagnostics.errors)
 
 
+@pytest.mark.parametrize("count", [0, 32])
+@pytest.mark.parametrize(
+    ("keyword", "entry", "schema_positions"),
+    [
+        ("$defs", True, 1),
+        ("definitions", False, 1),
+        ("properties", True, 1),
+        ("dependentSchemas", False, 1),
+        ("dependencies", True, 1),
+        ("dependencies", ["private-required-name"], 0),
+        ("dependentRequired", ["private-required-name"], 0),
+        ("$vocabulary", False, 0),
+    ],
+)
+def test_type_schema_prepared_maps_match_real_metaschema(
+    keyword: str, entry: JsonValue, schema_positions: int, count: int
+) -> None:
+    schema: JsonObject = {
+        keyword: {
+            f"private-map-name-{index}": list(entry)
+            if isinstance(entry, list)
+            else entry
+            for index in range(count)
+        }
+    }
+    document = document_for(schema)
+    before = document.model_dump_json(by_alias=True)
+    Draft202012Validator.check_schema(
+        schema, format_checker=FormatChecker(formats=("regex",))
+    )
+
+    result = validate_type_schemas(document)
+
+    assert result.schemas_valid
+    assert result.schemas_checked == 1 + count * schema_positions
+    assert result.references_checked == 0
+    assert result.diagnostics.errors_omitted == 0
+    assert document.model_dump_json(by_alias=True) == before
+
+
+@pytest.mark.parametrize(
+    "keyword", ["$defs", "definitions", "properties", "dependentSchemas", "$vocabulary"]
+)
+def test_type_schema_map_preflight_preserves_independent_faults(keyword: str) -> None:
+    schema: JsonObject = {
+        keyword: {
+            "private-first-invalid": 1,
+            "private-valid": True,
+            "private-last-invalid": None,
+        },
+        "maxItems": -1,
+    }
+    document = document_for(schema)
+    before = document.model_dump_json(by_alias=True)
+    prefix = ("type_contracts", "example/Value", "schema")
+    expected_paths = [
+        (*prefix, keyword, "<field>"),
+        (*prefix, keyword, "<field>"),
+        (*prefix, "maxItems"),
+    ]
+    expected_paths.sort()
+    with pytest.raises(SchemaError):
+        Draft202012Validator.check_schema(
+            schema, format_checker=FormatChecker(formats=("regex",))
+        )
+
+    result = validate_type_schemas(document)
+
+    assert [error.path for error in result.diagnostics.errors] == expected_paths
+    assert result.diagnostics.errors_omitted == 0
+    assert result.schemas_checked == (1 if keyword == "$vocabulary" else 2)
+    assert "private-" not in rendered(result)
+    assert document.model_dump_json(by_alias=True) == before
+
+
+@pytest.mark.parametrize("keyword", ["dependencies", "dependentRequired"])
+def test_type_schema_dependency_map_faults_keep_array_order(keyword: str) -> None:
+    schema: JsonObject = {
+        keyword: {
+            "private-valid": ["private-required"],
+            "private-invalid-array": ["private-required", "private-required", 1],
+            "private-later-invalid": None,
+        },
+        "maxItems": -1,
+    }
+    document = document_for(schema)
+    before = document.model_dump_json(by_alias=True)
+    prefix = ("type_contracts", "example/Value", "schema")
+
+    result = validate_type_schemas(document)
+
+    assert [error.path for error in result.diagnostics.errors] == [
+        (*prefix, keyword, "<field>"),
+        (*prefix, keyword, "<field>", 1),
+        (*prefix, keyword, "<field>", 2),
+        (*prefix, "maxItems"),
+    ]
+    assert result.diagnostics.errors_omitted == 0
+    assert result.schemas_checked == 1
+    assert "private-" not in rendered(result)
+    assert document.model_dump_json(by_alias=True) == before
+
+
+def test_type_schema_map_fault_omissions_preserve_later_keywords() -> None:
+    document = document_for(
+        {
+            "properties": {f"private-{index}": 1 for index in range(1200)},
+            "maxItems": -1,
+        }
+    )
+
+    result = validate_type_schemas(document)
+
+    assert not result.schemas_valid
+    assert result.schemas_checked == 1
+    assert len(result.diagnostics.errors) == 1000
+    assert result.diagnostics.errors_omitted == 201
+    assert paths(result) == {
+        ("type_contracts", "example/Value", "schema", "properties", "<field>"),
+        ("type_contracts", "example/Value", "schema", "maxItems"),
+    }
+    assert result.diagnostics.errors[0].path == (
+        "type_contracts",
+        "example/Value",
+        "schema",
+        "maxItems",
+    )
+    assert "private-" not in rendered(result)
+
+
 @pytest.mark.parametrize(
     "keyword",
     sorted(SINGLE_SCHEMAS | NAMED_SCHEMAS | LISTED_SCHEMAS | {"dependencies"}),
@@ -312,6 +442,13 @@ def test_type_schema_regex_refusal_preserves_other_faults(pattern: str) -> None:
     result = validate_type_schemas(document)
 
     assert len(result.diagnostics.errors) == 4
+    prefix = ("type_contracts", "example/Value", "schema")
+    assert [error.path for error in result.diagnostics.errors] == [
+        (*prefix, "maxItems"),
+        (*prefix, "pattern"),
+        (*prefix, "patternProperties"),
+        (*prefix, "patternProperties"),
+    ]
     assert all(
         error.message == "The saved type schema or reference is invalid."
         for error in result.diagnostics.errors
