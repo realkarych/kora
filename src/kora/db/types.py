@@ -9,6 +9,7 @@ from sqlalchemy.dialects.postgresql import TIMESTAMP as POSTGRESQL_TIMESTAMP
 from sqlalchemy.types import JSON, DateTime, TypeDecorator, TypeEngine
 
 from kora.ir.cost import format_money, parse_money
+from kora.ir.text import fits_utf8
 
 JsonValue: TypeAlias = (
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"]
@@ -24,6 +25,7 @@ NULL_CHARACTER: str = "\u0000"
 IDENTIFIER_LENGTH: int = 26
 DIGEST_LENGTH: int = 64
 NAME_LENGTH: int = 255
+OUTCOME_PAYLOAD_MAX_BYTES: int = 17_408
 PATH_LENGTH: int = 2048
 USD_PRECISION: int = 24
 USD_SCALE: int = 10
@@ -169,6 +171,23 @@ class JsonDocument(TypeDecorator[JsonValue]):
         if isinstance(value, str) and dialect.name == SQLITE:
             return parse_json(value)
         return as_json_value(value)
+
+
+class OutcomePayloadText(TypeDecorator[str]):
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value: str | None, dialect: Dialect) -> str | None:
+        if value is not None and (
+            len(value) > OUTCOME_PAYLOAD_MAX_BYTES
+            or NULL_CHARACTER in value
+            or not fits_utf8(value, OUTCOME_PAYLOAD_MAX_BYTES)
+        ):
+            raise ValueRejected("the original outcome payload is invalid")
+        return value
+
+    def process_result_value(self, value: str | None, dialect: Dialect) -> str | None:
+        return self.process_bind_param(value, dialect)
 
 
 class UsdAmount(TypeDecorator[Decimal]):

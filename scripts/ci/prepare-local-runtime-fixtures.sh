@@ -20,11 +20,11 @@ prepare_common() {
   install -d -o nobody -m 0755 "$fixtures/foreign"
   install -d -o nobody -m 0755 "$fixtures/foreign-parent"
   install -d -o "$SUDO_UID" -g "$SUDO_GID" -m 0700 "$fixtures/foreign-parent/child"
-  install -o nobody -m 4755 "$(command -v sleep)" "$fixtures/setuid-sleep"
   install -d -o 0 -g 0 -m 0755 "$fixtures/small-filesystem"
 }
 
 prepare_linux() {
+  install -o nobody -m 4755 "$(command -v sleep)" "$fixtures/setuid-sleep"
   mount -t tmpfs -o "size=16m,mode=0700,uid=$SUDO_UID,gid=$SUDO_GID" kora-small "$fixtures/small-filesystem"
   if sysctl -n "$sysctl_key" > "$fixtures/userns.previous" 2>/dev/null; then
     sysctl -q -w "$sysctl_key=0"
@@ -45,7 +45,16 @@ prepare_linux() {
   test "$(sudo -u "$SUDO_USER" stat -c %u "$fixtures/nfs-mount/state")" = "$SUDO_UID"
 }
 
+prepare_darwin_sleep() (
+  local build
+  build="$(mktemp -d)"
+  trap 'rm -rf "$build"' EXIT
+  /usr/bin/cc -Wall -Wextra -Werror "$(dirname "$0")/setuid-sleep.c" -o "$build/sleep"
+  install -o nobody -m 4755 "$build/sleep" "$fixtures/setuid-sleep"
+)
+
 prepare_darwin() {
+  prepare_darwin_sleep
   local device
   device="$(hdiutil attach -nomount ram://32768 | awk '{print $1}')"
   test -n "$device"

@@ -63,6 +63,17 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
     for job in (execution, join):
         assert job["timeout-minutes"] == 10
         assert table(job["strategy"])["fail-fast"] is False
+    entries = [table(value) for value in cast(list[object], execution["steps"])]
+    for name, condition in (
+        (
+            "Install locked frontend dependencies",
+            "${{ matrix.lane != 'local-runtime' }}",
+        ),
+        ("Check Python and frontend sources", "${{ matrix.lane == 'remainder' }}"),
+        ("Build isolated distributions offline", "${{ matrix.lane == 'remainder' }}"),
+    ):
+        selected = next(step for step in entries if step.get("name") == name)
+        assert selected["if"] == condition
 
 
 def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:

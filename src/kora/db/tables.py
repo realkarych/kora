@@ -21,6 +21,7 @@ from kora.db.types import (
     NAME_LENGTH,
     PATH_LENGTH,
     JsonDocument,
+    OutcomePayloadText,
     UsdAmount,
     UtcTimestamp,
     collated_text,
@@ -35,6 +36,18 @@ NAMING_CONVENTION: dict[str, str] = {
 }
 
 metadata: MetaData = MetaData(naming_convention=NAMING_CONVENTION)
+
+OUTCOME_PRESENCE_CHECK: str = (
+    "(outcome IS NULL AND outcome_payload IS NULL "
+    "AND outcome_payload_state IS NULL) OR "
+    "(outcome IS NOT NULL AND outcome_payload_state IS NOT NULL AND "
+    "((outcome_payload_state = 'not_applicable' AND outcome_payload IS NULL) OR "
+    "(outcome_payload_state IN ('available', 'expiring') "
+    "AND outcome_payload IS NOT NULL) OR "
+    "(outcome_payload_state IN ('expired', 'missing') "
+    "AND outcome_payload IS NULL)))"
+)
+
 
 NON_TERMINAL_ATTEMPT_STATUSES: tuple[str, ...] = (
     "created",
@@ -303,6 +316,11 @@ attempt: Table = Table(
     document("handle", nullable=True),
     Column("status", name(), nullable=False),
     Column("desired_state", name(), nullable=False),
+    Column("cancel_cause", name(), nullable=True),
+    document("outcome", nullable=True),
+    Column("outcome_payload", OutcomePayloadText(), nullable=True),
+    Column("outcome_payload_state", name(), nullable=True),
+    CheckConstraint(OUTCOME_PRESENCE_CHECK, name="outcome_payload_presence"),
     Column("record_version", Integer, nullable=False),
     document("input_bindings"),
     document("execution_request", nullable=True),
@@ -329,6 +347,11 @@ attempt: Table = Table(
     timestamp("finished_at", nullable=True),
     *audit_columns(),
     UniqueConstraint("node_instance_id", "number"),
+    CheckConstraint(
+        "cancel_cause IS NULL OR cancel_cause IN "
+        "('cancel', 'clear', 'supersede', 'timeout', 'stop')",
+        name="cancel_cause",
+    ),
     Index(
         "ix_attempt_lease_until",
         "lease_until",
