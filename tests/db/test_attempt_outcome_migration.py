@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 from alembic import command
-from sqlalchemy import insert, inspect, select, update
+from sqlalchemy import insert, inspect, null, select, update
 from sqlalchemy.exc import StatementError
 
 from kora.db.connection import Database, DatabaseClosedError, DatabaseSettings, Dialect
@@ -125,8 +125,18 @@ async def test_original_outcome_body_roundtrips_and_expiry_keeps_identity(
     identifier = before.old_insert["id"]
     async with database.transaction() as connection:
         await connection.execute(
-            insert(before.attempt_table).values(**before.old_insert)
+            insert(before.attempt_table).values(
+                **{**before.old_insert, "outcome": null()}
+            )
         )
+        unrecorded = (
+            await connection.execute(
+                select(attempt.c.outcome.is_(None)).where(
+                    attempt.c.id == before.old_insert["id"]
+                )
+            )
+        ).scalar_one()
+        assert unrecorded
 
     async with database.transaction() as connection:
         await connection.execute(
@@ -289,8 +299,18 @@ async def test_outcome_storage_refuses_inconsistent_presence(
     record = prepared({})
     async with database.transaction() as connection:
         await connection.execute(
-            insert(before.attempt_table).values(**before.old_insert)
+            insert(before.attempt_table).values(
+                **{**before.old_insert, "outcome": null()}
+            )
         )
+        unrecorded = (
+            await connection.execute(
+                select(attempt.c.outcome.is_(None)).where(
+                    attempt.c.id == before.old_insert["id"]
+                )
+            )
+        ).scalar_one()
+        assert unrecorded
     identifier = before.old_insert["id"]
 
     with pytest.raises(StatementError):
