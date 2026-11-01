@@ -6,6 +6,8 @@ This is the section-by-section reference behind [human-facing documentation](../
 
 ## Current contracts by task
 
+For trusted configured harness/runtime facts supplied to validation, start with [same-call validation facts](specs/validation-facts.md): the accepted call lifetime and producer/consumer ownership, incomplete-result handling, separation from execution authority and remaining #549 implementation decisions.
+
 Use the entry section, follow its dependencies and read the governing decision before implementing. There is no need to preload historical research for an unrelated task.
 
 | Task | Entry sections and governing context |
