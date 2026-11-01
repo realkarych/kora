@@ -69,7 +69,7 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
             "Install locked frontend dependencies",
             "${{ matrix.lane != 'local-runtime' }}",
         ),
-        ("Check Python and frontend sources", "${{ matrix.lane == 'remainder' }}"),
+        ("Check Python and frontend sources", "${{ matrix.lane == 'conformance' }}"),
         ("Build isolated distributions offline", "${{ matrix.lane == 'remainder' }}"),
     ):
         selected = next(step for step in entries if step.get("name") == name)
