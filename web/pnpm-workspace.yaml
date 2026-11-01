@@ -1,2 +1,4 @@
 strictDepBuilds: true
 allowBuilds: {}
+overrides:
+  minimatch@10.2.6: 11.0.1
