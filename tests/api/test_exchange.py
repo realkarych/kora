@@ -128,6 +128,55 @@ async def test_api_ingress_does_not_consume_or_log_body(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("render", [RenderFormat.JSON, RenderFormat.TEXT])
+@pytest.mark.parametrize("level", [Level.DEBUG, Level.INFO])
+async def test_api_diagnostics_exclude_independent_ingress_values(
+    database: Database, render: RenderFormat, level: Level
+) -> None:
+    private_path = "/private-path-marker"
+    private_method = "private-method-marker"
+    markers = [
+        private_path,
+        private_method,
+        "private-query-marker",
+        "private-authorization-marker",
+        "private-cookie-marker",
+        "private-caller-identity-marker",
+    ]
+    headers = [
+        (b"Authorization", markers[3].encode()),
+        (b"Cookie", markers[4].encode()),
+        (b"X-Request-ID", markers[5].encode()),
+    ]
+    clock = AuthorityClock()
+    calls = [
+        HttpCall(private_path, method, headers, query=markers[2].encode())
+        for method in ["GET", private_method]
+    ]
+    with captured(
+        COMPONENT,
+        LoggingSettings(level=level, render_format=render),
+        "api-ingress",
+        clock.now,
+    ) as capture:
+        app = application(database, capture)
+
+        for call in calls:
+            await call.run(app)
+        capture.finish()
+
+        assert [call.status for call in calls] == [404, 501]
+        assert all(call.receives == 0 for call in calls)
+        assert capture.reader.data.count(b"api.request.completed") == (
+            2 if level == Level.DEBUG else 0
+        )
+        for marker in markers:
+            assert marker.encode() not in capture.reader.data
+            assert all(marker.encode() not in call.body for call in calls)
+    assert not capture.diagnostics.writer_is_alive()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["unexpected", "framework", "validation"])
 @pytest.mark.parametrize("render", [RenderFormat.JSON, RenderFormat.TEXT])
 async def test_api_framework_errors_are_content_free(

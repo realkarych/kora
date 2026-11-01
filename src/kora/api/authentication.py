@@ -24,10 +24,10 @@ async def schema_authorization(
     request: Request, authenticator: Authenticator, clock: Clock
 ) -> ApiErrorEnvelope | None:
     exchange = current_exchange()
-    headers = request.headers.getlist("authorization")
-    info = RequestInfo(
-        headers[0] if len(headers) == 1 else None, requires_current_authority=True
-    )
+    headers = [
+        value for name, value in request.headers.raw if name.lower() == b"authorization"
+    ]
+    info = RequestInfo(headers[0].decode("latin-1") if len(headers) == 1 else None)
     try:
         principal = await authenticator.authenticate(
             info, AuthenticationContext(exchange.logger, clock)

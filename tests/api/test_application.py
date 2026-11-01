@@ -102,6 +102,37 @@ async def test_unauthenticated_requests_return_api009(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", [b"authorization", b"Authorization", b"AUTHORIZATION"])
+@pytest.mark.parametrize("duplicate", [False, True])
+@pytest.mark.parametrize("method", ["GET", "POST"])
+async def test_authorization_header_names_are_case_insensitive(
+    database: Database,
+    api_capture: Capture,
+    name: bytes,
+    duplicate: bool,
+    method: str,
+) -> None:
+    case = await seed_case(database, "header-case")
+    headers = [(name, str(case.request.authorization).encode())]
+    if duplicate:
+        headers.append((b"Authorization", POISON.encode()))
+    call = HttpCall("/api/v1/openapi.json", method, headers)
+    app = application(database, api_capture)
+
+    await call.run(app)
+    response_headers = dict(call.messages[0]["headers"])
+
+    assert call.status == (401 if duplicate else 200 if method == "GET" else 405)
+    if duplicate:
+        body = ApiErrorEnvelope.model_validate_json(call.body)
+        assert body.error.code.value == "API009"
+        assert response_headers[b"www-authenticate"] == b"Bearer"
+        assert b"allow" not in response_headers
+    assert POISON.encode() not in call.body
+    assert call.receives == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["user", "service"])
 async def test_schema_requires_personal_principal_and_accepts_empty_grants(
     database: Database, api_capture: Capture, kind: str
