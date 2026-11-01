@@ -502,9 +502,24 @@ async def incomplete_listing_is_unconfirmed(
     assert isinstance(fenced, Starting)
     assert fenced.fence is not None
     assert not exited_within(spawned, 0)
+    recovered = await open_spawning(root, ctx, sockets)
+    try:
+        receipt = await recovered.retire("attempt-1", timedelta(seconds=10), ctx)
+    finally:
+        await recovered.close()
+    assert receipt.retirement_id == fenced.fence.retirement_id
+    assert exited_within(spawned, 10)
     assert sweep_records(capture, entry.nonce, str(root)) == [
-        ("listing_incomplete", 0, 0)
+        ("listing_incomplete", 0, 0),
+        ("tombstoned", 1, 1),
     ]
+    swept = [
+        record
+        for record in capture.finish()
+        if record.get("event") == "runtime.local.retire"
+    ]
+    assert swept[0]["scan_failure"] == "pid_listing_incomplete"
+    assert "scan_failure" not in swept[1]
 
 
 async def too_many_matches_are_unconfirmed(

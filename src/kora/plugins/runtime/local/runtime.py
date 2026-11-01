@@ -57,6 +57,7 @@ from kora.runner.identity import (
     IdentityReader,
     IdentityState,
     NativeIdentityReader,
+    ProcessScanFailure,
 )
 from kora.runner.peers import PeerSource, kernel_source
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
@@ -124,6 +125,7 @@ SWEPT: Final[EventSpec] = CATALOG.register(
             "matched": FieldKind.INTEGER,
             "killed": FieldKind.INTEGER,
             "waited_ms": FieldKind.FLOAT,
+            "scan_failure": FieldKind.STRING,
         },
     )
 )
@@ -255,8 +257,11 @@ class SweepOutcome(StrEnum):
 
 
 class SweepRefused(Exception):
-    def __init__(self, outcome: SweepOutcome) -> None:
+    def __init__(
+        self, outcome: SweepOutcome, scan_failure: ProcessScanFailure | None = None
+    ) -> None:
         self.outcome = outcome
+        self.scan_failure = scan_failure
         super().__init__(outcome.value)
 
 
@@ -707,7 +712,7 @@ class LocalRuntime:
         except SweepRefused as refused:
             if self._stopping.done():
                 raise refusal("runtime_closed") from None
-            self.report(refused.outcome, sweep, ctx)
+            self.report(refused.outcome, sweep, ctx, refused.scan_failure)
             raise refusal("runner_stop_unconfirmed") from None
         applied = await self.transition(
             key,
@@ -718,9 +723,18 @@ class LocalRuntime:
         self.report(SweepOutcome.TOMBSTONED, sweep, ctx)
         return None if applied.head is None else applied.head.entry
 
-    def report(self, outcome: SweepOutcome, sweep: Sweep, ctx: ProtocolContext) -> None:
+    def report(
+        self,
+        outcome: SweepOutcome,
+        sweep: Sweep,
+        ctx: ProtocolContext,
+        scan_failure: ProcessScanFailure | None = None,
+    ) -> None:
         level = Level.INFO if outcome is SweepOutcome.TOMBSTONED else Level.WARNING
         waited = (ctx.clock.monotonic_ns() - sweep.started_ns) / 1_000_000
+        scan_fields: dict[str, str] = {}
+        if outcome is SweepOutcome.LISTING_INCOMPLETE and scan_failure is not None:
+            scan_fields["scan_failure"] = scan_failure.value
         ctx.logger.emit_at(
             level,
             SWEPT,
@@ -728,6 +742,7 @@ class LocalRuntime:
             matched=sweep.matched,
             killed=sweep.killed,
             waited_ms=waited,
+            **scan_fields,
         )
 
     async def stop_carriers(
@@ -740,10 +755,10 @@ class LocalRuntime:
         scanner = self._scanner
         scan_deadline = sweep.started_ns + SCAN_NS
         listed = await self.sweeps.run(
-            lambda: scanner.processes_carrying(argv, scan_deadline)
+            lambda: scanner.scan_processes_carrying(argv, scan_deadline)
         )
-        if listed is None:
-            raise SweepRefused(SweepOutcome.LISTING_INCOMPLETE)
+        if isinstance(listed, ProcessScanFailure):
+            raise SweepRefused(SweepOutcome.LISTING_INCOMPLETE, listed)
         sweep.matched = len(listed)
         if len(listed) > STOP_MATCHES:
             raise SweepRefused(SweepOutcome.TOO_MANY_MATCHES)
