@@ -10,15 +10,21 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Final
-
-from pydantic import AfterValidator, Field, StrictStr
+from typing import Final
 
 from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
-from kora.ir.json import JsonObject, parse_json_object
+from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import workload_digest
+from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
+from kora.plugins.runtime.local.configuration import (
+    STATE_ROOT_LENGTH as STATE_ROOT_LENGTH,
+)
+from kora.plugins.runtime.local.configuration import (
+    LocalRuntimeConfiguration as LocalRuntimeConfiguration,
+)
+from kora.plugins.runtime.local.configuration import StateRoot as StateRoot
 from kora.plugins.runtime.local.control import (
     ListenerRefused,
     deliver_workload,
@@ -41,14 +47,14 @@ from kora.plugins.runtime.local.spawn import (
     runner_environment,
     spawn_runner,
 )
-from kora.protocols.common import BoundaryModel, ProtocolContext
+from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
 from kora.protocols.runtime import RuntimeCapabilities, RuntimeStatus, Workload
 from kora.protocols.time import Clock
-from kora.protocols.vcs import WorkspaceTarget, printable_path
+from kora.protocols.vcs import WorkspaceTarget
 from kora.runner.channels import ChannelError
 from kora.runner.filesystem import (
     DirectoryAnchor,
@@ -94,7 +100,6 @@ from kora.runner.registry import (
     tombstone_cell,
 )
 
-STATE_ROOT_LENGTH: Final[int] = 4052
 STOP_MATCHES: Final[int] = 8
 SWEEP_WORKERS: Final[int] = 1
 SWEEP_ADMITTED: Final[int] = 4
@@ -144,21 +149,6 @@ LISTENER_REFUSED: Final[EventSpec] = CATALOG.register(
         "a local attempt runner's listener failed attestation",
         {"reason": FieldKind.STRING},
     )
-)
-
-StateRoot = Annotated[
-    StrictStr,
-    Field(min_length=1, max_length=STATE_ROOT_LENGTH),
-    AfterValidator(printable_path),
-]
-
-
-class LocalRuntimeConfiguration(BoundaryModel):
-    state_root: StateRoot | None
-
-
-CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
-    LocalRuntimeConfiguration.model_json_schema()
 )
 
 
@@ -345,6 +335,7 @@ class LocalRuntime:
 
     def __init__(
         self,
+        configuration: LocalRuntimeConfiguration,
         root_path: Path,
         root: DirectoryAnchor,
         registry: Registry,
@@ -355,6 +346,7 @@ class LocalRuntime:
         scanner: NativeIdentityReader,
         peers: PeerSource,
     ) -> None:
+        self._configuration: LocalRuntimeConfiguration = configuration
         self.execution_domain_id = registry.execution_domain_id
         self.service_report = None
         self.registry = registry
@@ -475,6 +467,7 @@ class LocalRuntime:
             raise
         registry = Registry(directory, domain.execution_domain_id, new_identifier)
         runtime = cls(
+            configuration,
             path,
             root,
             registry,
@@ -489,17 +482,7 @@ class LocalRuntime:
         return runtime
 
     def capabilities(self) -> RuntimeCapabilities:
-        return RuntimeCapabilities(
-            supports_resume=False,
-            portable_handles=False,
-            enforces_network_policy=False,
-            isolates_tool_secrets=False,
-            credential_proxy=False,
-            protected_execution=False,
-            plan_executors=frozenset({"runner", "worker_host"}),
-            max_concurrent=None,
-            default_stall_after=timedelta(minutes=15),
-        )
+        return self._configuration.capabilities()
 
     def key(self, attempt_id: str, ctx: ProtocolContext) -> AttemptKey:
         if not ATTEMPT.fullmatch(attempt_id) or ctx.attempt_id not in (
