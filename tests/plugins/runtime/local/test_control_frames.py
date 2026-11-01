@@ -20,18 +20,23 @@ from kora.plugins.runtime.local.channel import (
     SectionedHeader,
     SectionedOperation,
     SectionSpec,
+    StatusValue,
+    control_request,
     decode_section,
     error_envelope,
     message_refused,
     operation_unknown,
     read_error_envelope,
+    read_request,
+    read_status,
     receive_message,
     send_message,
+    status_envelope,
 )
 from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import Workload
+from kora.protocols.runtime import RuntimeStatus, Workload
 from kora.protocols.time import SystemClock
 from kora.runner.channels import (
     MAX_TYPED_FRAME_BYTES,
@@ -524,4 +529,73 @@ async def test_malformed_error_envelope_is_refused(payload: bytes) -> None:
     with pytest.raises(KoraProtocolError) as refused:
         read_error_envelope(payload)
 
+    assert refused.value.details == {"reason": MessageRefusal.MALFORMED.value}
+
+
+def observed_status() -> StatusValue:
+    status = RuntimeStatus(
+        state="starting",
+        exit_code=None,
+        phase="preparation",
+        observed_at=StepClock().now(),
+    )
+    return StatusValue(status=status, holds_workload=False)
+
+
+async def test_status_request_and_response_round_trip() -> None:
+    request = read_request(control_request("status", "request-1"))
+    value = observed_status()
+
+    decoded = read_status(status_envelope("request-1", value), "request-1")
+
+    assert request is not None
+    assert (request.op, request.request_id) == ("status", "request-1")
+    assert decoded == value
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"op":"status","request_id":"r","extra":1}',
+        b'{"op":"status","request_id":"r","request_id":"s"}',
+        b'{"op":"status","request_id":{"nested":1}}',
+        b"[]",
+    ],
+    ids=["extra-member", "duplicate-member", "nested", "not-an-object"],
+)
+async def test_malformed_request_is_refused(payload: bytes) -> None:
+    assert read_request(payload) is None
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        {"request_id": "other", "result": "status"},
+        {"request_id": "request-1", "result": "page"},
+        {"request_id": "request-1", "result": "status", "extra": 1},
+    ],
+    ids=["foreign-request-id", "mismatching-tag", "extra-member"],
+)
+async def test_mismatching_status_response_is_refused(
+    envelope: dict[str, object],
+) -> None:
+    value = json.loads(status_envelope("request-1", observed_status()))["value"]
+    payload = json.dumps({**envelope, "value": value}).encode()
+
+    with pytest.raises(KoraProtocolError) as refused:
+        read_status(payload, "request-1")
+
+    assert refused.value.details == {"reason": MessageRefusal.MALFORMED.value}
+
+
+async def test_status_error_response_is_raised_for_its_request() -> None:
+    answered = error_envelope("request-1", operation_unknown())
+    foreign = error_envelope("other", operation_unknown())
+
+    with pytest.raises(KoraProtocolError) as raised:
+        read_status(answered, "request-1")
+    with pytest.raises(KoraProtocolError) as refused:
+        read_status(foreign, "request-1")
+
+    assert raised.value.code == "operation_unknown"
     assert refused.value.details == {"reason": MessageRefusal.MALFORMED.value}

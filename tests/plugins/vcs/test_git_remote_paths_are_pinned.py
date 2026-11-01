@@ -10,7 +10,7 @@ from kora.executor.entry import Executor
 from kora.executor.failures import ExecutorError
 from kora.executor.launcher import ProcessLauncher
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
-from kora.plugins.vcs.git.remotes import RemoteRefused, remote_path
+from kora.plugins.vcs.local import RemoteRefused, remote_path
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.vcs import CheckoutRequest
 from tests.plugins.vcs.git_support import (

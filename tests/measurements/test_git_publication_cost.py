@@ -41,7 +41,7 @@ from kora.executor.protected import (
 from kora.ir.globs import PathGlob
 from kora.observability import LoggingSettings
 from kora.plugins.vcs.git.plans import TREE_HELPER
-from kora.plugins.vcs.git.remotes import RemoteRefused, remote_path
+from kora.plugins.vcs.local import RemoteRefused, remote_path
 from kora.protocols.deadlines import ExecutionDeadline
 from kora.protocols.vcs import PublicationInput, PublishPlan, PublishRequest
 from tests.measurements.harness import Report, Sample, report_lifecycle, settled_counts

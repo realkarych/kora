@@ -30,6 +30,23 @@ from kora.runner.registry import (
     TransitionExecutor,
     bind_workspace,
 )
+from tests.plugins.runtime.local.control_legs import (
+    cancelled_runtime_close_drains_attestation,
+    cancelled_shutdown_releases_pending_rebind,
+    cancelled_status_is_released,
+    cancelled_supervisor_releases_resources,
+    foreign_entry_is_left_in_place,
+    impostor_churn_is_released,
+    open_connections_are_released_on_close,
+    removed_socket_is_rebound,
+    renamed_directory_is_rebound,
+    replaced_socket_is_rebound,
+    runtime_close_releases_status,
+    shutdown_at_status_connect,
+    shutdown_during_expiration_cleanup,
+    shutdown_releases_pending_rebind,
+    unsafe_directory_is_refused,
+)
 from tests.plugins.runtime.local.frames_support import StepClock
 from tests.support.local_runners import (
     EXITING,
@@ -536,6 +553,15 @@ async def close_during_sweep_is_released(root: Path, capture: Capture) -> None:
 
 
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
+    "cancelled_supervisor_releases_resources": cancelled_supervisor_releases_resources,
+    "cancelled_runtime_close_drains_attestation": (
+        cancelled_runtime_close_drains_attestation
+    ),
+    "shutdown_at_status_connect": shutdown_at_status_connect,
+    "shutdown_releases_pending_rebind": shutdown_releases_pending_rebind,
+    "cancelled_shutdown_releases_pending_rebind": (
+        cancelled_shutdown_releases_pending_rebind
+    ),
     "spawned_runner_is_released": spawned_runner_is_released,
     "readiness_timeout_is_released": readiness_timeout_is_released,
     "cancelled_readiness_is_released": cancelled_readiness_is_released,
@@ -558,6 +584,16 @@ LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
     "close_drains_transitions": close_drains_transitions,
     "concurrent_close": concurrent_close,
     "retrying_caller_sees_close": retrying_caller_sees_close,
+    "impostor_churn_is_released": impostor_churn_is_released,
+    "open_connections_are_released_on_close": open_connections_are_released_on_close,
+    "removed_socket_is_rebound": removed_socket_is_rebound,
+    "renamed_directory_is_rebound": renamed_directory_is_rebound,
+    "unsafe_directory_is_refused": unsafe_directory_is_refused,
+    "runtime_close_releases_status": runtime_close_releases_status,
+    "shutdown_during_expiration_cleanup": shutdown_during_expiration_cleanup,
+    "replaced_socket_is_rebound": replaced_socket_is_rebound,
+    "foreign_entry_is_left_in_place": foreign_entry_is_left_in_place,
+    "cancelled_status_is_released": cancelled_status_is_released,
 }
 
 

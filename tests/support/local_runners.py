@@ -25,6 +25,7 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.runtime import Workload
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
+from kora.runner.peers import PeerSource
 from kora.runner.registry import (
     READINESS_DESCRIPTOR,
     Entry,
@@ -63,6 +64,7 @@ async def open_spawning(
     new_identifier: Callable[[], str] | None = None,
     home: Callable[[], Path] = Path.home,
     sweep_scan_entries: int = 65536,
+    peers: PeerSource | None = None,
 ) -> LocalRuntime:
     return await LocalRuntime.open(
         LocalRuntimeConfiguration(state_root=str(root)),
@@ -73,6 +75,7 @@ async def open_spawning(
         socket_directory=sockets,
         home=home,
         sweep_scan_entries=sweep_scan_entries,
+        peers=peers,
     )
 
 

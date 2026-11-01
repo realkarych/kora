@@ -155,6 +155,10 @@ if TYPE_CHECKING:
         WebhookAuth,
         WebhookTrigger,
     )
+    from kora.ir.trigger_expressions import (
+        SensorTriggerExpressionResult,
+        validate_sensor_trigger_expressions,
+    )
     from kora.ir.type_declarations import (
         TypeDeclarationResult,
         validate_type_declarations,
@@ -163,6 +167,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "SensorTriggerExpressionResult",
+    "validate_sensor_trigger_expressions",
     "KnownTargetParameterTypeResult",
     "validate_known_target_parameter_types",
     "RootPreviousAttemptResult",
@@ -304,6 +310,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"SensorTriggerExpressionResult", "validate_sensor_trigger_expressions"}:
+        from kora.ir import trigger_expressions
+
+        return getattr(trigger_expressions, name)
     if name in {
         "KnownTargetParameterTypeResult",
         "validate_known_target_parameter_types",

@@ -2,7 +2,7 @@ import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from typing import Annotated, Final, NamedTuple, TypeVar
+from typing import Annotated, Final, Literal, NamedTuple, TypeVar
 
 from pydantic import Field, StrictBool, StringConstraints, ValidationError
 
@@ -12,6 +12,7 @@ from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.identity import Count, Identifier, Sha256
+from kora.protocols.runtime import RuntimeStatus
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 
@@ -151,6 +152,22 @@ class ErrorBody(BoundaryModel):
 class ErrorEnvelope(BoundaryModel):
     request_id: Identifier
     error: ErrorBody
+
+
+class ControlRequest(BoundaryModel):
+    op: Identifier
+    request_id: Identifier
+
+
+class StatusValue(BoundaryModel):
+    status: RuntimeStatus
+    holds_workload: StrictBool
+
+
+class StatusEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["status"]
+    value: StatusValue
 
 
 def parse_header(payload: bytes, operation: SectionedOperation) -> SectionedHeader:
@@ -306,3 +323,34 @@ def read_error_envelope(payload: bytes) -> tuple[str, KoraProtocolError]:
     return envelope.request_id, KoraProtocolError(
         body.code, body.message, body.retryable, {}
     )
+
+
+def control_request(op: str, request_id: str) -> bytes:
+    request = ControlRequest(op=op, request_id=request_id)
+    return canonical_bytes(request.model_dump(mode="json"))
+
+
+def read_request(payload: bytes) -> ControlRequest | None:
+    if isinstance(decode_strict_json(payload, PRE_ATTACH_BYTES, 1), JsonRefusal):
+        return None
+    return json_model(ControlRequest, payload)
+
+
+def status_envelope(request_id: str, value: StatusValue) -> bytes:
+    envelope = StatusEnvelope(request_id=request_id, result="status", value=value)
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def read_status(payload: bytes, request_id: str) -> StatusValue:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(StatusEnvelope, payload)
+    if envelope is None or envelope.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value

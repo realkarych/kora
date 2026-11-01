@@ -14,10 +14,12 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.runner.filesystem import DirectoryAnchor, rename_no_replace
-from kora.runner.identity import (
-    ArgumentMatch,
-    IdentityState,
-    NativeIdentityReader,
+from kora.runner.identity import ArgumentMatch, IdentityState, NativeIdentityReader
+from tests.plugins.runtime.local.peer_legs import (
+    kernel_peer_selection,
+    peer_clock_window,
+    peer_exit_during_attestation,
+    peer_option_failure_never_downgrades,
 )
 from tests.support.local_runtime import (
     READY_DEADLINE_SECONDS,
@@ -262,6 +264,10 @@ async def child_namespace_member(tmp_path: Path, capture: Capture) -> None:
 
 
 LEGS: dict[str, Callable[[Path, Capture], Awaitable[None]]] = {
+    "kernel_peer_selection": kernel_peer_selection,
+    "peer_clock_window": peer_clock_window,
+    "peer_exit_during_attestation": peer_exit_during_attestation,
+    "peer_option_failure_never_downgrades": peer_option_failure_never_downgrades,
     "no_replace_rename": no_replace_rename,
     "identity_fields": identity_fields,
     "forked_reader_is_unknown": forked_reader_is_unknown,
