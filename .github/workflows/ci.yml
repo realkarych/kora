@@ -255,6 +255,7 @@ jobs:
             tests/ir/test_type_schema_resources.py
           )
           integration=(
+            tests/api
             tests/cli
             tests/architecture/test_ir_measurement_ci.py
             tests/ir/test_structured_schema_assertions.py
@@ -263,7 +264,7 @@ jobs:
             tests/ir/test_subgraph_interface_resources.py
             tests/plugins/artifact_type/test_agent_session.py
           )
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/ir/test_output_schema_resources.py)
+          other=(tests --ignore=tests/api --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/ir/test_output_schema_resources.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
