@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 from alembic import command
-from sqlalchemy import insert, inspect, null, select, update
+from sqlalchemy import insert, inspect, select, update
 from sqlalchemy.exc import StatementError
 
 from kora.db.connection import Database, DatabaseClosedError, DatabaseSettings, Dialect
@@ -21,6 +21,7 @@ from tests.db.cancel_cause_support import (
     attempt_schema_objects,
     capture_cause_predecessor,
     migration_lock_count,
+    seed_attempts,
     seed_cause_predecessor,
     wait_for_validation,
 )
@@ -118,22 +119,14 @@ async def test_outcome_migration_preserves_unrecorded_history(
 async def test_original_outcome_body_roundtrips_and_expiry_keeps_identity(
     database: Database,
 ) -> None:
-    before = await seed_outcome_predecessor(database)
+    identifier = (await seed_attempts(database))[0]
     record = prepared(
         {"\u0000": "private_marker\u0000", "literal": "\\u0000", "number": 1.0}
     )
-    identifier = before.old_insert["id"]
-    async with database.transaction() as connection:
-        await connection.execute(
-            insert(before.attempt_table).values(
-                **{**before.old_insert, "outcome": null()}
-            )
-        )
+    async with database.read_transaction() as connection:
         unrecorded = (
             await connection.execute(
-                select(attempt.c.outcome.is_(None)).where(
-                    attempt.c.id == before.old_insert["id"]
-                )
+                select(attempt.c.outcome.is_(None)).where(attempt.c.id == identifier)
             )
         ).scalar_one()
         assert unrecorded
@@ -295,23 +288,15 @@ async def test_outcome_migration_recovers_partial_schema(
 async def test_outcome_storage_refuses_inconsistent_presence(
     database: Database, has_receipt: bool, payload: str | None, state: str | None
 ) -> None:
-    before = await seed_outcome_predecessor(database)
+    identifier = (await seed_attempts(database))[0]
     record = prepared({})
-    async with database.transaction() as connection:
-        await connection.execute(
-            insert(before.attempt_table).values(
-                **{**before.old_insert, "outcome": null()}
-            )
-        )
+    async with database.read_transaction() as connection:
         unrecorded = (
             await connection.execute(
-                select(attempt.c.outcome.is_(None)).where(
-                    attempt.c.id == before.old_insert["id"]
-                )
+                select(attempt.c.outcome.is_(None)).where(attempt.c.id == identifier)
             )
         ).scalar_one()
         assert unrecorded
-    identifier = before.old_insert["id"]
 
     with pytest.raises(StatementError):
         async with database.transaction() as connection:
@@ -332,7 +317,7 @@ async def test_outcome_storage_refuses_inconsistent_presence(
             )
         ).scalar_one()
 
-    assert desired == before.old_insert["desired_state"]
+    assert desired == "run"
 
 
 @pytest.mark.asyncio
