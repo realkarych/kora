@@ -163,7 +163,15 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     )
     assert command_lines(diagnostics["run"]) == [
         ("mkdir", "-p", "measurements"),
-        (*PYTEST, "-q", "-m", "measurement", LANE_DIAGNOSTIC_MEASUREMENT),
+        (
+            "bash",
+            "scripts/ci/run-local-runtime-tests.sh",
+            *PYTEST,
+            "-q",
+            "-m",
+            "measurement",
+            LANE_DIAGNOSTIC_MEASUREMENT,
+        ),
     ]
     assert MEASUREMENT_MODULE.findall(str(diagnostics["run"])) == [
         LANE_DIAGNOSTIC_MEASUREMENT
