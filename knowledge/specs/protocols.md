@@ -6,6 +6,8 @@ There are eleven protocols: the nine of the original requirements plus **sensor*
 
 ## 1. Common rules
 
+Trusted facts for installation-aware graph validation follow the [same-call ownership contract](validation-facts.md). Server composition selects the actual configured instances; harness and runtime owners supply complete native facts, and shared projection detaches them for one validation invocation. Provider registration metadata is not that selected-instance view. This decision adds no provider ABI, durable identity or execution permission; concrete production sources and normalization remain prerequisites under #549.
+
 - Every protocol has a `name` class attribute, a `capabilities()` method returning a frozen dataclass of flags, a `config_schema` (JSON Schema for its deployment configuration, validated at start-up and shown by `kora plugins list`), and conformance cases marked `kora_conformance` (section 13).
 - Implementations are discovered through **one entry-point group**, `kora.provider` (NFR-5.2, current contract [ADR-0005](../../docs/decisions/0005-eleven-protocols-with-conformance-suites.md) as amended 2026-10-21). An entry point is named `<protocol>.<name>` and returns a factory of validated `ProviderMetadata(protocol, name, implementation, config_schema, version)` whose protocol and name equal the entry-point name ([provider loading](#provider-loading-issue-150)); `kora plugins list` prints what is installed per protocol; names are then used in the IR (`runtime.runtime: docker`) or in the deployment config:
 
