@@ -171,7 +171,7 @@ jobs:
         run: pnpm --dir web install --frozen-lockfile
       - name: Check Python and frontend sources
         id: static_checks
-        if: ${{ matrix.lane == 'remainder' }}
+        if: ${{ matrix.lane == 'conformance' }}
         run: |
           uv lock --check
           uv run --no-sync ruff format --check .
@@ -394,12 +394,12 @@ jobs:
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
               test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = skipped
+              test "$STATIC_OUTCOME" = success
               test "$DISTRIBUTIONS_OUTCOME" = skipped
               ;;
             remainder)
               test "$FRONTEND_OUTCOME" = success
-              test "$STATIC_OUTCOME" = success
+              test "$STATIC_OUTCOME" = skipped
               test "$DISTRIBUTIONS_OUTCOME" = success
               ;;
             storage)

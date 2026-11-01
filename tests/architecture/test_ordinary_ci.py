@@ -57,8 +57,8 @@ COMPLETION_FIELDS = (
 WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipped"}
 WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
-    "conformance": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "remainder": WITHOUT_FIXTURES,
+    "conformance": {**WITHOUT_FIXTURES, "DISTRIBUTIONS_OUTCOME": "skipped"},
+    "remainder": {**WITHOUT_FIXTURES, "STATIC_OUTCOME": "skipped"},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "local-runtime": {**WITHOUT_BUILDS, "FRONTEND_OUTCOME": "skipped"},
 }
