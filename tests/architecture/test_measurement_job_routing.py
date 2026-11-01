@@ -102,6 +102,7 @@ REMAINDER_ONLY = "${{ matrix.lane == 'remainder' }}"
 LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
 FRONTEND_ONLY = "${{ matrix.lane != 'local-runtime' }}"
 LANE_STEP_CONDITIONS = {
+    "unit_collisions": "${{ matrix.lane == 'local-runtime' && runner.os == 'Linux' }}",
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": FRONTEND_ONLY,
     "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": FRONTEND_ONLY,
     "static_checks": "${{ matrix.lane == 'conformance' }}",
@@ -163,7 +164,15 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     )
     assert command_lines(diagnostics["run"]) == [
         ("mkdir", "-p", "measurements"),
-        (*PYTEST, "-q", "-m", "measurement", LANE_DIAGNOSTIC_MEASUREMENT),
+        (
+            "bash",
+            "scripts/ci/run-local-runtime-tests.sh",
+            *PYTEST,
+            "-q",
+            "-m",
+            "measurement",
+            LANE_DIAGNOSTIC_MEASUREMENT,
+        ),
     ]
     assert MEASUREMENT_MODULE.findall(str(diagnostics["run"])) == [
         LANE_DIAGNOSTIC_MEASUREMENT
