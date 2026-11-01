@@ -23,11 +23,12 @@ IR_RESOURCE_MODULES = frozenset(
         "tests/ir/test_type_schema_resources.py",
     }
 )
-IR_SCHEMA_MODULES = frozenset(
+IR_INTEGRATION_MODULES = frozenset(
     {
         "tests/ir/test_structured_schema_assertions.py",
         "tests/ir/test_structured_schema_collection_predicates.py",
         "tests/ir/test_structured_schema_string_lengths.py",
+        "tests/ir/test_subgraph_interface_resources.py",
     }
 )
 FIRST_MODULES = (
@@ -266,13 +267,13 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert (
         cohorts["integration"]
         == selected_files(["tests/cli", "tests/architecture/test_ir_measurement_ci.py"])
-        | IR_SCHEMA_MODULES
+        | IR_INTEGRATION_MODULES
     )
-    assert IR_SCHEMA_MODULES.isdisjoint(cohorts["other"])
+    assert IR_INTEGRATION_MODULES.isdisjoint(cohorts["other"])
     assert tuple(arrays["integration"]) == (
         "tests/cli",
         "tests/architecture/test_ir_measurement_ci.py",
-        *sorted(IR_SCHEMA_MODULES),
+        *sorted(IR_INTEGRATION_MODULES),
     )
     assert "tests/architecture/test_ir_measurement_ci.py" not in cohorts["other"]
     assert all(
