@@ -250,8 +250,9 @@ jobs:
             tests/ir/test_structured_schema_assertions.py
             tests/ir/test_structured_schema_collection_predicates.py
             tests/ir/test_structured_schema_string_lengths.py
+            tests/ir/test_subgraph_interface_resources.py
           )
-          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/architecture/test_ir_measurement_ci.py)
+          other=(tests --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)
