@@ -82,6 +82,7 @@ from tests.support.local_runtime import (
     state_root,
     stopped_holder,
 )
+from tests.support.retirement_evidence import retirement_failure_note
 
 __all__ = ["kora_capture"]
 
@@ -471,10 +472,11 @@ async def starting_retire_is_released(root: Path, capture: Capture) -> None:
     ctx = runtime_context(capture)
     with short_directory() as base:
         runtime, _, _, _ = await lingering_start(root, base / "sockets", ctx)
-        try:
-            receipt = await runtime.retire("attempt-1", GRACE, ctx)
-        finally:
-            await runtime.close()
+        with retirement_failure_note(capture):
+            try:
+                receipt = await runtime.retire("attempt-1", GRACE, ctx)
+            finally:
+                await runtime.close()
     assert receipt.retirement_id
     assert_sweeps_released(runtime)
     assert runner_pids(root) == ()
