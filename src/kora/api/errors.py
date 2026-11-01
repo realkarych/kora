@@ -32,6 +32,8 @@ HTTP_STATUSES = MappingProxyType(
         ApiErrorCode.UNAUTHENTICATED: 401,
         ApiErrorCode.INTERNAL: 500,
         ApiErrorCode.UNAVAILABLE: 503,
+        ApiErrorCode.METHOD_NOT_ALLOWED: 405,
+        ApiErrorCode.METHOD_NOT_IMPLEMENTED: 501,
     }
 )
 MESSAGES = MappingProxyType(
@@ -49,6 +51,8 @@ MESSAGES = MappingProxyType(
         ApiErrorCode.UNAUTHENTICATED: "Authentication is required.",
         ApiErrorCode.INTERNAL: "Internal operation failure.",
         ApiErrorCode.UNAVAILABLE: "Required service is unavailable.",
+        ApiErrorCode.METHOD_NOT_ALLOWED: "Request method is not allowed.",
+        ApiErrorCode.METHOD_NOT_IMPLEMENTED: "Request method is not implemented.",
     }
 )
 
@@ -84,6 +88,8 @@ class ErrorMetadata:
 
 def error_metadata(envelope: ApiErrorEnvelope) -> ErrorMetadata:
     code = envelope.error.code
+    if code == ApiErrorCode.METHOD_NOT_ALLOWED:
+        raise ValueError("Method refusal metadata requires the active handler catalog.")
     return ErrorMetadata(
         status=HTTP_STATUSES[code],
         headers=(("WWW-Authenticate", "Bearer"),)

@@ -107,6 +107,8 @@ def test_every_error_code_has_one_status() -> None:
         "API009": 401,
         "API010": 500,
         "API011": 503,
+        "API012": 405,
+        "API013": 501,
     }
 
     actual = {code.value: status for code, status in HTTP_STATUSES.items()}
@@ -143,7 +145,12 @@ def test_unauthenticated_categories_have_uniform_api009(
     [
         code
         for code in ApiErrorCode
-        if code not in (ApiErrorCode.INTERNAL, ApiErrorCode.UNAVAILABLE)
+        if code
+        not in (
+            ApiErrorCode.INTERNAL,
+            ApiErrorCode.UNAVAILABLE,
+            ApiErrorCode.METHOD_NOT_ALLOWED,
+        )
     ],
 )
 def test_definitive_errors_are_nonretryable(code: ApiErrorCode) -> None:
@@ -160,6 +167,77 @@ def test_definitive_errors_are_nonretryable(code: ApiErrorCode) -> None:
         if code == ApiErrorCode.UNAUTHENTICATED
         else ()
     )
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        (ApiErrorCode.METHOD_NOT_ALLOWED, "Request method is not allowed."),
+        (ApiErrorCode.METHOD_NOT_IMPLEMENTED, "Request method is not implemented."),
+    ],
+)
+@pytest.mark.parametrize("request_id", [REQUEST_ID, "req_current_exchange"])
+def test_method_refusal_bodies_preserve_closed_fields_and_identity(
+    code: ApiErrorCode, message: str, request_id: str
+) -> None:
+    envelope = definitive_error(code, request_id=request_id)
+
+    body = envelope.model_dump_json()
+    replayed = ApiErrorEnvelope.model_validate_json(body)
+
+    assert json.loads(body) == {
+        "error": {
+            "code": code.value,
+            "message": message,
+            "location": None,
+            "retryable": False,
+            "details": {},
+            "request_id": request_id,
+        }
+    }
+    assert replayed.model_dump_json() == body
+    assert replayed.error.request_id == request_id
+
+
+def test_method_refusal_metadata_requires_trusted_active_catalog() -> None:
+    envelope = definitive_error(ApiErrorCode.METHOD_NOT_ALLOWED, request_id=REQUEST_ID)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^Method refusal metadata requires the active handler catalog\.$",
+    ):
+        error_metadata(envelope)
+
+    assert envelope.error.retryable is False
+    assert HTTP_STATUSES[envelope.error.code] == 405
+
+
+@pytest.mark.parametrize(
+    "code", [ApiErrorCode.METHOD_NOT_ALLOWED, ApiErrorCode.METHOD_NOT_IMPLEMENTED]
+)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("message", POISON),
+        ("details", {POISON: POISON}),
+        ("details", {"reason": "lock_timeout"}),
+        (
+            "details",
+            {"errors": [], "warnings": [], "errors_omitted": 0, "warnings_omitted": 0},
+        ),
+        ("location", POISON),
+        ("retryable", True),
+        (POISON, POISON),
+    ],
+)
+def test_method_refusals_reject_untrusted_fields(
+    code: ApiErrorCode, field: str, value: object
+) -> None:
+    body = definitive_error(code, request_id=REQUEST_ID).model_dump(mode="json")
+    body["error"][field] = value
+
+    with pytest.raises(ValidationError):
+        ApiErrorEnvelope.model_validate(body)
 
 
 @pytest.mark.parametrize("reason", list(RequestRejection))
