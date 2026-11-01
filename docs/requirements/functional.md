@@ -1,5 +1,7 @@
 # kora — Functional Requirements
 
+HTTP HEAD amendment dated 2026-11-01: the project owner selected the method-refusal contract and shared HEAD rules under [issue #538](https://github.com/realkarych/kora/issues/538#issuecomment-6562969401); wording pending line-by-line owner review.
+
 AgentSession revision-1 amendment dated 2026-10-29: the project owner approved the complete amended contract plan and exact wording in this document under [issue #433](https://github.com/realkarych/kora/issues/433#issuecomment-6507248049).
 
 CommandResult revision-1 amendment dated 2026-10-29: the project owner approved the complete contract plan and exact wording in this document under [issue #432](https://github.com/realkarych/kora/issues/432#issuecomment-6506488944).
@@ -48,7 +50,7 @@ MCP-count amendment dated 2026-10-23 (FR-0.1): the sixteen-tool full inventory a
 - **FR-0.1 [MVP]** kora exposes its own **MCP server** (as a `kora mcp` stdio process and as an HTTP MCP endpoint on the API server) with curated, task-shaped tools (an authoring server and an operating server, sixteen tools in the complete inventory; the first slice exposes ten stdio tools under [ADR-0002](../decisions/0002-ai-first-api-and-thin-clients.md); tools that start work return its outcome at once, and waiting for a run is a bounded option of reading it; skills stay files in each harness's own format and are not duplicated over MCP) that together cover every operation available through the CLI and HTTP API: authoring help (DSL reference, presets catalogue), `compile`, `validate` (structured errors with source locations), `deploy`, `trigger` with parameters, list and inspect runs, nodes, attempts, logs, artifacts and cost, `approve`/`reject` with typed input, `retry`, `cancel`, manage presets and namespaces. The MCP server acts with the user's token and has exactly the user's permissions.
 - **FR-0.2 [MVP]** kora ships **skills** for the supported harnesses (Claude Code skill, Codex equivalent) that teach an agent how to author, validate, deploy and operate graphs through the MCP server, including the artifact and error schemas.
 - **FR-0.3 [MVP]** Parity is enforced structurally: the HTTP API is the only implementation of operations; CLI, MCP tools, skills and the web frontend are thin clients of it (the frontend through a TypeScript client generated from OpenAPI). A coverage test verifies that every API operation is reachable through the CLI and through at least one MCP tool; a capability added to one surface without the others fails the release checklist.
-- **FR-0.4 [MVP]** All errors (compile, validate, API, runtime) are structured objects with a stable code, a message, and a location (file:line for DSL, YAML path for IR, ids for runtime), consumable by agents without parsing prose.
+- **FR-0.4 [MVP]** All errors (compile, validate, API, runtime) are structured objects with a stable code, a message, and a location (file:line for DSL, YAML path for IR, ids for runtime), consumable by agents without parsing prose. HTTP HEAD responses carry no body; their error status and permitted headers follow the [API error contract](../../knowledge/specs/api-and-agent-surface.md#structured-errors-fr-04).
 
 ## 1. Graph definition
 

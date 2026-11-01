@@ -40,6 +40,8 @@ class ApiErrorCode(StrEnum):
     UNAUTHENTICATED = "API009"
     INTERNAL = "API010"
     UNAVAILABLE = "API011"
+    METHOD_NOT_ALLOWED = "API012"
+    METHOD_NOT_IMPLEMENTED = "API013"
 
 
 class WireRecord(BaseModel):
@@ -147,6 +149,8 @@ class ApiError(WireRecord):
             ApiErrorCode.UNAUTHENTICATED: "Authentication is required.",
             ApiErrorCode.INTERNAL: "Internal operation failure.",
             ApiErrorCode.UNAVAILABLE: "Required service is unavailable.",
+            ApiErrorCode.METHOD_NOT_ALLOWED: "Request method is not allowed.",
+            ApiErrorCode.METHOD_NOT_IMPLEMENTED: "Request method is not implemented.",
         }
         fixed = fixed_messages.get(self.code)
         if fixed is not None and self.message != fixed:

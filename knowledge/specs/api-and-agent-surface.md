@@ -28,11 +28,11 @@ Code families: `IRnnn` (IR validation), `DSLnnn` (compile), `APInnn` (request er
 
 ### Error codes and statuses
 
-Every API error uses the existing structured envelope. For the API codes in this revision, outer `location` is always null; individual validation locations belong to the shared diagnostics in `details`. `request_id` follows the existing response/replay correlation contract. The table is exhaustive for this revision; reasons never change the status.
+Every API error is represented by the existing structured envelope. HTTP HEAD sends the status and permitted headers without the envelope body or hidden error-body framing metadata, as specified below. For the API codes in this revision, outer `location` is always null; individual validation locations belong to the shared diagnostics in `details`. `request_id` follows the existing response/replay correlation contract. The table is exhaustive for this revision; reasons never change the status.
 
 | Code | HTTP status | Meaning | Retryability |
 |---|---|---|---|
-| `API001` | 404 | Object absent from the authorized namespace | false |
+| `API001` | 404 | Object absent from the authorized namespace, or no active API handler matches the request path | false |
 | `API002` | 409 | Conflicting state or refused precondition | operation-specific; false unless the existing contract explicitly permits retry |
 | `API003` | 422 | Invalid request, document or result evidence | false |
 | `API004` | 409 | Idempotency key reused for a different semantic request | false |
@@ -43,12 +43,49 @@ Every API error uses the existing structured envelope. For the API codes in this
 | `API009` | 401 | Missing or invalid ordinary API credential | false |
 | `API010` | 500 | Internal failure or bounded validation that could not complete | false, except the existing credential-issuance audit-commit failure described below |
 | `API011` | 503 | Recognized transient dependency failure | true only for a read, a known pre-effect refusal or an explicit operation-specific safe retry contract |
+| `API012` | 405 | An active API path does not support an origin-recognized method after applicable authentication/principal checks | false |
+| `API013` | 501 | The origin does not recognize or implement the valid method token after applicable protected-path authentication/principal checks | false |
 
 API009 covers missing, malformed, unknown, expired and revoked bearer values and cookie-only requests to bearer-only routes. Its body is identical across these categories except the exchange's request ID: message `Authentication is required.`, location null, retryable false, details {}. Its `WWW-Authenticate` header is exactly `Bearer`, without validity or token-specific detail. API005 remains the sole forbidden code. Expected invalid-credential refusals cannot be converted into API010; unavailable authentication dependencies cannot be disguised as a bad credential or produce an anonymous principal. Webhook authentication retains API007 and its trigger-bound protocol.
 
 API010 uses the fixed message `Internal operation failure.` and empty details; raw exception text is never a response. The credential-issuance audit-event commit failure is its sole retryability exception: API010/500 with retryable true, including an unclassified or nontransient insert failure. The issued value is withheld and discarded; a retry rechecks current authority and reacquires rather than replaying a secret. Late-holder staleness remains API008. This preserves the existing operation contract without activating a remote issuer in the first slice. API011 uses `Required service is unavailable.` and a closed, operation-defined safe reason when needed. A dependency exception alone does not prove that a mutation had no effect. Unknown commit or external-effect outcome has retryable false unless the existing operation contract supplies a safe recovery/replay path. Credential issuance retains its explicit current-authorization/reacquisition behavior and never replays a cached secret. API010/API011 failure responses do not finalize or overwrite an idempotency result. A proven pre-effect transient refusal leaves no accepted outcome or cached failure, and the caller retries with the same key under current authorization. After an uncertain commit, the route first recovers any durable accepted receipt or idempotency result and preserves its exact saved body/request ID; a failure cannot delete or replace it or authorize duplicate effects. Reads have no mutation idempotency record. The credential route remains outside response caching altogether. Existing definitive operation refusals retain their specified caching rules.
 
 A lock acquisition timeout rolls back the complete unit and returns API002, retryable true, reason `lock_timeout`; the refusal is not stored as an idempotent response. Existing API002 reasons, including `run_backlog_full`, retain their documented retryability and never become HTTP 429. Worker result/evidence refusal codes remain as specified by their operation contracts.
+
+### HTTP method and unmatched-path refusals (issue #538)
+
+The owner selected the distinct 405/501 policy under [issue #538](https://github.com/realkarych/kora/issues/538#issuecomment-6562969401). The case-sensitive origin-recognized method domain is exactly `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS`, `TRACE` and `CONNECT`. This domain grants no handler authority. A recognized method unavailable at a matched active path uses API012/405. Every other syntactically valid method token, including extension tokens and lowercase spellings, uses API013/501, including on an unmatched path. Do not fold a method into GET or infer support from the complete future API specification.
+
+API012 uses fixed message `Request method is not allowed.`; API013 uses `Request method is not implemented.` Both have outer location null, retryable false and empty details. They preserve the supplied request identity and accept no arbitrary reason, path, method, exception prose or reflected header. API012 requires `Allow`, generated only from the trusted active method records matching the actual router's path semantics. API013 has no `Allow`. The two initial successful handlers owned by [#541](https://github.com/realkarych/kora/issues/541) are `GET /healthz` and `GET /api/v1/openapi.json`; their method-refusal `Allow` is exactly `GET`. This contract does not register either handler.
+
+HEAD is a delivery exception for every error status: send no body, no hidden JSON `Content-Length` and no application `Transfer-Encoding` metadata. Preserve the status and permitted headers, including the current `X-Request-ID` and applicable `WWW-Authenticate` or trusted `Allow`. Do not copy framing from a generic JSON response or framework exception, fabricate a client body or claim that a body request ID was delivered. The internal safe error and diagnostic retain their code and current request identity. HEAD is not an implicit successful helper route.
+
+The initial dispatch matrix is exhaustive for these two active-path contracts. “Other recognized method” means any member of the domain above except GET. Every body-bearing refusal uses its fixed structured envelope; HEAD always follows the no-body/framing rule.
+
+| Active path match | Method and authentication state | Response | Additional safe headers |
+|---|---|---|---|
+| `/healthz` | GET, any optional credentials including malformed or cookie-only | 200, exactly `{"status":"ok"}` | none |
+| `/healthz` | Other recognized method, any optional credentials | API012/405 | `Allow: GET` |
+| `/healthz` | Unimplemented method, any optional credentials | API013/501 | none |
+| `/api/v1/openapi.json` | GET, current personal principal including empty namespace grants | 200, installation OpenAPI document | none |
+| `/api/v1/openapi.json` | Any valid method, missing/malformed/unknown/expired/revoked/cookie-only/duplicate credentials | API009/401 | `WWW-Authenticate: Bearer`, no Allow |
+| `/api/v1/openapi.json` | Any valid method, valid service principal | API005/403 | no Allow |
+| `/api/v1/openapi.json` | Other recognized method, current personal principal including empty grants | API012/405 | `Allow: GET` |
+| `/api/v1/openapi.json` | Unimplemented method, current personal principal including empty grants | API013/501 | no Allow |
+| `/api/v1/openapi.json` | Any valid method, recognized authentication dependency unavailable | API011/503 | no Allow |
+| `/api/v1/openapi.json` | Any valid method, unexpected or failed authentication provider outcome | API010/500 | no Allow |
+| No active path, including trailing-slash/docs/root-schema/deferred aliases | Recognized method, any optional credentials | API001/404 | no Allow or WWW-Authenticate |
+| No active path | Unimplemented method, any optional credentials | API013/501 | no Allow or WWW-Authenticate |
+
+Every API-handled exchange carries exactly one fresh server-generated `X-Request-ID`. On the protected active path, current authentication and principal-kind checks precede both method refusals. No malformed-request body parsing, namespace inference, scoped-object lookup or operation admission occurs before those checks. The anonymous health path ignores optional credentials without authentication-provider/database work. An unmatched path invokes no authenticator and performs no namespace/object lookup, token/grant selection or disclosure of deferred handlers. API001 retains fixed message `Object not found.`, null location, false retryability and empty details. Ordinary matched namespace routes keep their existing authorization and object-absence semantics.
+
+The protected path's 401 versus an unknown path's 404 for recognized methods, or 501 for unimplemented methods, reveals active protected-handler presence and the fixed method-recognition policy. This accepted installation-surface disclosure grants no namespace/object knowledge or authority. Valid wrong principal kind remains API005 rather than method information. No TRACE echo, CONNECT tunnel, CORS preflight, method override, slash alias, automatic redirect, HEAD/OPTIONS helper, cache policy or extra error-code header is introduced. HTTP syntax/framing rejected before an API-handled exchange is outside application envelope/correlation promises; do not fabricate an exchange identity for it.
+
+For an unavailable authentication dependency, GET is a read. A refused unsupported method may use retryable API011 only with proof that no operation was admitted and only read-only authentication occurred. An exception's retryable flag alone supplies no such proof. A future mutation without this proof keeps retryable false or first recovers its authoritative outcome under its existing contract. This does not change credential issuance or mutation replay.
+
+The closed error models and producers implement API012/API013 bodies and status mappings. Until the real trusted active-catalog adapter exists, API012 metadata access fails explicitly rather than returning 405 without Allow or guessing a catalog. API013 metadata contains no Allow. No request classifier, successful route, dependency or new header-authority type is supplied by this producer slice.
+
+Actual request execution remains pending #541: `test_method_refusal_uses_trusted_allow`, `test_protected_schema_wrong_method_authenticates_first`, `test_head_refusals_have_no_body_or_json_framing`, `test_unimplemented_methods_use_the_selected_origin_policy` and `test_unknown_path_is_content_free_without_scoped_lookup`. That owner also proves exact registered-handler/OpenAPI inventories, absence of implicit helpers/mounts and catalog drift, real both-database authentication categories and provider failures, all HEAD 401/403/404/405/500/503 cases, poisoned ingress/framework values and current request/error/log identity. Producer tests do not establish wire delivery, authentication or header execution.
 
 ### Validation envelopes
 
