@@ -98,18 +98,22 @@ SCAFFOLD_PLATFORMS = (
     ("ubuntu-24.04", "3.15.0", "sqlite,postgresql"),
     ("macos-15", "3.11.17", "sqlite"),
 )
-CONFORMANCE_ONLY = "${{ matrix.lane == 'conformance' }}"
+REMAINDER_ONLY = "${{ matrix.lane == 'remainder' }}"
 LOCAL_RUNTIME_ONLY = "${{ matrix.lane == 'local-runtime' }}"
 FRONTEND_ONLY = "${{ matrix.lane != 'local-runtime' }}"
 LANE_STEP_CONDITIONS = {
     "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020": FRONTEND_ONLY,
     "pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413": FRONTEND_ONLY,
-    "static_checks": CONFORMANCE_ONLY,
+    "static_checks": REMAINDER_ONLY,
     "preparation": LOCAL_RUNTIME_ONLY,
     "frontend_dependencies": "${{ matrix.lane != 'local-runtime' }}",
     "teardown": "${{ always() && matrix.lane == 'local-runtime' }}",
+    "cohort_evidence": (
+        "${{ always() && (matrix.lane == 'conformance' "
+        "|| matrix.lane == 'remainder') }}"
+    ),
     "evidence_upload": "${{ always() }}",
-    "distributions": CONFORMANCE_ONLY,
+    "distributions": REMAINDER_ONLY,
     "workflow_cancellation": "${{ cancelled() }}",
     "Require complete lane execution": "${{ always() }}",
 }
@@ -151,7 +155,7 @@ def test_measurements_are_independent_of_complete_platform_checks() -> None:
     assert {(row["os"], row["python"], row["databases"]) for row in rows} == set(
         SCAFFOLD_PLATFORMS
     )
-    assert "uv run --no-sync python -m tests.support.ordinary_pytest -q" in commands
+    assert "uv run --no-sync python -m tests.support.ordinary_pytest -v" in commands
     assert "-m measurement" not in commands
     assert table(jobs["local-runtime-diagnostics"])["continue-on-error"] is True
     assert "local-runtime-diagnostics" not in cast(
