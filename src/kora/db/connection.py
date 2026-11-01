@@ -19,6 +19,7 @@ from sqlalchemy.pool import AsyncAdaptedQueuePool, StaticPool
 from sqlalchemy.pool.base import ConnectionPoolEntry
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
+from kora.db.transactions import managed_writer
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import ComponentLogger, current_diagnostics
 
@@ -190,6 +191,7 @@ def keep_migration_connection_on_cancellation(context: ExceptionContext) -> None
 def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
     engine = create_async_engine(
         settings.url,
+        isolation_level="READ COMMITTED",
         pool_size=settings.pool_size,
         max_overflow=settings.max_overflow,
         pool_timeout=settings.pool_timeout_seconds,
@@ -301,7 +303,8 @@ class Database:
     @asynccontextmanager
     async def transaction(self) -> AsyncGenerator[AsyncConnection, None]:
         async with self._lease(transactional=True) as connection:
-            yield connection
+            with managed_writer(connection):
+                yield connection
 
     @asynccontextmanager
     async def migration_connection(self) -> AsyncGenerator[AsyncConnection, None]:
