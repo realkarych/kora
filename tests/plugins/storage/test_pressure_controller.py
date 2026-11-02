@@ -25,6 +25,7 @@ from tests.plugins.storage.pressure_native import (
     command,
     process_token,
 )
+from tests.plugins.storage.recovery_summary import raise_recovery_failure
 
 REPOSITORY: Path = Path(__file__).resolve().parents[3]
 
@@ -146,7 +147,8 @@ def recover_owner(directory: Path) -> None:
             timeout=60,
             check=False,
         )
-        assert result.returncode == 0, child_diagnostic(result.stderr)
+        if result.returncode != 0:
+            raise_recovery_failure(directory, result.stderr)
 
 
 def close_controller(process: subprocess.Popen[bytes], directory: Path) -> None:
