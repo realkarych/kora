@@ -141,7 +141,9 @@ RunnerCause = Literal[
 ]
 HarnessDenialCode = Literal["harness_rule", "policy_error", "policy_timeout"]
 HARNESS_DENIAL_CODES: Final[frozenset[str]] = frozenset(get_args(HarnessDenialCode))
-CallKind = Literal["shell", "file_edit", "mcp_tool", "subagent", "hosted_tool"]
+CallKind = Literal[
+    "shell", "file_edit", "mcp_tool", "subagent", "hosted_tool", "other_tool"
+]
 
 
 class HarnessValueRefused(ValueError):
