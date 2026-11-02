@@ -5,7 +5,7 @@ import stat
 from pathlib import Path
 from typing import Literal, NoReturn, TypeAlias, TypeVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 from tests.plugins.storage.pressure_models import (
     PressureManifest,
@@ -31,6 +31,26 @@ MANIFEST_FIELDS = (
 )
 REPORT_FIELDS = ("provider_started", "cleanup_completed", "report_resources_closed")
 PRESENCE_FIELDS = ("controller", "child", "command", "image_stamp")
+
+
+def explicit_version(value: object) -> Literal[1]:
+    if type(value) is not int or value != 1:
+        raise ValueError("invalid record version")
+    return 1
+
+
+class RecordedManifest(PressureManifest):
+    @field_validator("version", mode="before")
+    @classmethod
+    def validate_version(cls, value: object) -> Literal[1]:
+        return explicit_version(value)
+
+
+class RecordedReport(PressureReport):
+    @field_validator("version", mode="before")
+    @classmethod
+    def validate_version(cls, value: object) -> Literal[1]:
+        return explicit_version(value)
 
 
 class InspectionFailure(RuntimeError):
@@ -217,10 +237,10 @@ def inspect_directory(directory: Path) -> dict[str, Scalar]:
         before = os.fstat(descriptor)
         result = initial_summary("unavailable")
         result["manifest_state"], manifest = read_record(
-            descriptor, "pressure-manifest.json", PressureManifest
+            descriptor, "pressure-manifest.json", RecordedManifest
         )
         result["report_state"], report = read_record(
-            descriptor, "report.json", PressureReport
+            descriptor, "report.json", RecordedReport
         )
         if manifest is not None:
             result.update(project_manifest(manifest))

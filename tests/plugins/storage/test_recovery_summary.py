@@ -163,6 +163,22 @@ def test_persisted_fields_remain_distinct_from_defaults(
     )
 
 
+@pytest.mark.parametrize("version", [True, 1.0, "1", 0])
+def test_record_version_is_not_coerced(tmp_path: Path, version: JsonValue) -> None:
+    record = manifest() | {"version": version, "resources_closed": True}
+    report: dict[str, JsonValue] = {"version": version, "resources_closed": True}
+    (tmp_path / "pressure-manifest.json").write_text(json.dumps(record))
+    (tmp_path / "report.json").write_text(json.dumps(report))
+
+    result = decoded(tmp_path)
+
+    assert result["manifest_state"] == "invalid"
+    assert result["report_state"] == "invalid"
+    assert result["manifest_version"] == "unknown"
+    assert result["recorded_manifest_resources_closed"] == "unknown"
+    assert result["recorded_report_resources_closed"] == "unknown"
+
+
 @pytest.mark.parametrize(
     "name",
     [
