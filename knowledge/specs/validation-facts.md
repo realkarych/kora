@@ -8,6 +8,8 @@ The project owner approved provider-owned validated immutable configuration as a
 
 The project owner approved the public disposition of otherwise-unreported incomplete or inconsistent required facts on 2026-11-02 under [#628](https://github.com/realkarych/kora/issues/628). Section 7 records API010/API011 ownership and precedence without activating validation, deployment or execution.
 
+The project owner accepted mandatory policy-coverage validation in trusted-repository mode on 2026-11-02 under [#630](https://github.com/realkarych/kora/issues/630). Section 8 records the ADR-0009 clarification, preserving the trusted-code bypass residual and first-slice refusal without activating the validator.
+
 ## 1. Scope and lifetime
 
 One validation invocation receives a detached immutable view of the facts from its selected configured harness and runtime instances. The view belongs to that invocation and the unchanged authored document being checked. It is not serialized, persisted, transferred between processes, cached across calls or reused for deployment/recovery authority. The #596 lifetime decision introduces no durable installation identity, database field, provider ABI member or public operation; section 6 separately specifies a future native accessor.
@@ -48,7 +50,7 @@ The saved execution contract in [data-model section 11.1](data-model.md#111-grap
 
 ## 5. Activation and remaining decisions
 
-[#549](https://github.com/realkarych/kora/issues/549) continues to own the concrete producer/consumer prerequisites: exact selection/default resolution and receiver acquisition, complete runtime-owned environment inventory, real harness declarations and normalization under section 6, trusted policy required-kind/subagent classification, the `trust_repo_config` wording disposition, the exact immutable input/result records, and integration of section 7's accepted failure disposition. The earlier issue proposal's detailed DTOs are not approved by these bounded decisions.
+[#549](https://github.com/realkarych/kora/issues/549) continues to own the concrete producer/consumer prerequisites: exact selection/default resolution and receiver acquisition, complete runtime-owned environment inventory, real harness declarations and normalization under section 6, trusted policy required-kind/subagent classification, the exact immutable input/result records, and integration of section 7's accepted failure disposition. The earlier issue proposal's detailed DTOs are not approved by these bounded decisions.
 
 Executable activation requires a real production source for every consumed fact and an approved implementation plan for its consumers. Provider registration metadata, testing/conformance composition and a fake harness's empty facts do not establish this prerequisite. No empty producer, fake-only inventory or unused checker skeleton is introduced to satisfy it.
 
@@ -118,3 +120,11 @@ This disposition carries no provider names, values, policy contents, graph fragm
 | Commit outcome is uncertain | Recover any durable result under the existing operation contract; an exception does not prove absence of effects |
 
 Work items 3/11 and #549 own executable composition of this decision; #593 owns new-start integration. Their real activation tests must cover the cases above, current authorization refusals, cancellation and absence of new writes after a proved pre-effect refusal. Deployment/start writer cases run on both metadata databases. This design provides no passing runtime evidence and adds no verification gate or numerical method.
+
+## 8. Repository trust and mandatory policy coverage
+
+Under [ADR-0009](../../docs/decisions/0009-target-repository-trust-boundary.md), `trust_repo_config: true` does not waive comparison of required tool-policy call kinds against the selected configured harness's complete native declared coverage. An established uncovered namespace requirement remains `IR019`, an established uncovered node-only requirement remains `IR028`, and malformed policy remains `IR013`. Otherwise-unreported missing or inconsistent required facts retain section 7's operation-failure disposition and precedence; a trust flag cannot make those facts complete.
+
+Where repository trust is supported, `allow_trust_repo_config` still controls permission to accept the existing residual: repository code can alter hook inputs, disable hooks or change harness settings. Passing coverage validation does not remove that residual, guarantee namespace denies or establish containment. First-slice installations continue to refuse `trust_repo_config: true`, including when the namespace permits it. Actual hook enforcement and real-interface conformance retain their harness/runner owners and acceptance requirements.
+
+This decision resolves only the earlier trusted-mode coverage exception. Complete native declarations, required-kind and orthogonal subagent classification, current namespace policy, configured selection, detached records and executable composition remain prerequisites under #549. It introduces no classifier, provider API, public operation or execution authority.

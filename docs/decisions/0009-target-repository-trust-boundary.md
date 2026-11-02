@@ -10,6 +10,7 @@
 
 - First-slice amendment dated 2026-10-23: scope and implementation plan approved under [issue #140](https://github.com/realkarych/kora/issues/140); wording reviewed line by line and [approved by the project owner](https://github.com/realkarych/kora/pull/220#issuecomment-6361959908) on 2026-10-23.
 - Indirection list amendment dated 2026-10-24: the closed indirection list gains the forms the readiness review of [issue #233](https://github.com/realkarych/kora/issues/233#issuecomment-6381575724) found re-running an argument; wording pending line-by-line owner review.
+- Tool-policy coverage amendment: the project owner reviewed and accepted the wording under [issue #549](https://github.com/realkarych/kora/issues/549) on 2026-11-02. Trusting repository configuration does not waive mandatory coverage validation or remove its existing bypass residual.
 
 ## Context
 
@@ -74,7 +75,7 @@ An ACL-enforced broker that issues scoped, short-lived credentials to an agent o
 - Gate files must be declared; an undeclared gate file is editable by the agent.
 - Digest verification runs at gate time, so an edit that slipped past the tool policy costs the attempt; after MVP, an ACP agent that cannot exclude project configuration is refused under the same fail-closed rule.
 - Cedar and OPA evaluators can replace `allow_deny` as plugins without a change to the intermediate representation.
-- A policy pattern on a call kind the harness cannot intercept is rejected at validation, except under `trust_repo_config: true`, where the repository's configuration can act around the policy (amended 2026-10-19); the coverage an adapter declares is verified against the harness's real interface before the adapter ships, and the Codex managed-hook flow through the app-server is confirmed with a real binary in the first vertical slice.
+- A policy pattern requiring a call kind outside the selected harness's declared coverage is rejected at validation: `IR019` for namespace policy and `IR028` for node-only policy. `trust_repo_config: true` does not waive this check. Where trusted repository configuration is supported and permitted by the namespace, its code can still act around the policy as described above; passing coverage validation does not remove that residual or guarantee namespace denies. First-slice installations continue to refuse `trust_repo_config: true`. The coverage an adapter declares is verified against the harness's real interface before the adapter ships, and the Codex managed-hook flow through the app-server is confirmed with a real binary in the first vertical slice.
 - On Codex every tool call spawns the hook process once; the cost is bounded by the session's `max_events`.
 
 ## Where it is applied
