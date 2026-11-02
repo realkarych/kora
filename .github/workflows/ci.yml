@@ -227,6 +227,8 @@ jobs:
             *) exit 1 ;;
           esac
           first=(
+            tests/architecture/test_ir_measurement_ci.py
+            tests/architecture/test_no_suppression.py
             tests/conformance/test_conformance_cases_detect_broken_providers.py
             tests/conformance/test_lifetime_helper_phases.py
             tests/conformance/test_lifetime_measurement_cohorts.py
@@ -238,6 +240,8 @@ jobs:
             tests/conformance/test_local_process_lifetime.py
             tests/conformance/test_parent_lifetime.py
             tests/conformance/test_recovered_process_lifetime.py
+            tests/ir/test_structured_schema_assertions.py
+            tests/measurements/test_ir_measurement_evidence.py
           )
           second=(tests/conformance --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py)
           for path in "${first[@]}"; do
@@ -245,6 +249,7 @@ jobs:
           done
           measurements=(
             tests/measurements
+            --ignore=tests/measurements/test_ir_measurement_evidence.py
             tests/db
             tests/plugins
             --ignore=tests/plugins/storage
@@ -257,14 +262,12 @@ jobs:
           integration=(
             tests/api
             tests/cli
-            tests/architecture/test_ir_measurement_ci.py
-            tests/ir/test_structured_schema_assertions.py
             tests/ir/test_structured_schema_collection_predicates.py
             tests/ir/test_structured_schema_string_lengths.py
             tests/ir/test_subgraph_interface_resources.py
             tests/plugins/artifact_type/test_agent_session.py
           )
-          other=(tests --ignore=tests/api --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/ir/test_output_schema_resources.py)
+          other=(tests --ignore=tests/api --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/architecture/test_no_suppression.py --ignore=tests/ir/test_output_schema_resources.py)
           pids=()
           case "$KORA_SCAFFOLD_LANE" in
             conformance)

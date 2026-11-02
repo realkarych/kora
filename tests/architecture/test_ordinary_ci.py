@@ -27,13 +27,14 @@ IR_RESOURCE_MODULES = frozenset(
 )
 IR_INTEGRATION_MODULES = frozenset(
     {
-        "tests/ir/test_structured_schema_assertions.py",
         "tests/ir/test_structured_schema_collection_predicates.py",
         "tests/ir/test_structured_schema_string_lengths.py",
         "tests/ir/test_subgraph_interface_resources.py",
     }
 )
 FIRST_MODULES = (
+    "tests/architecture/test_ir_measurement_ci.py",
+    "tests/architecture/test_no_suppression.py",
     "tests/conformance/test_conformance_cases_detect_broken_providers.py",
     "tests/conformance/test_lifetime_helper_phases.py",
     "tests/conformance/test_lifetime_measurement_cohorts.py",
@@ -45,6 +46,8 @@ FIRST_MODULES = (
     "tests/conformance/test_local_process_lifetime.py",
     "tests/conformance/test_parent_lifetime.py",
     "tests/conformance/test_recovered_process_lifetime.py",
+    "tests/ir/test_structured_schema_assertions.py",
+    "tests/measurements/test_ir_measurement_evidence.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -267,13 +270,12 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
     assert IR_RESOURCE_MODULES <= cohorts["measurements"]
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(
-        ["tests/api", "tests/cli", "tests/architecture/test_ir_measurement_ci.py"]
+        ["tests/api", "tests/cli"]
     ) | IR_INTEGRATION_MODULES | {"tests/plugins/artifact_type/test_agent_session.py"}
     assert IR_INTEGRATION_MODULES.isdisjoint(cohorts["other"])
     assert tuple(arrays["integration"]) == (
         "tests/api",
         "tests/cli",
-        "tests/architecture/test_ir_measurement_ci.py",
         *sorted(IR_INTEGRATION_MODULES),
         "tests/plugins/artifact_type/test_agent_session.py",
     )
