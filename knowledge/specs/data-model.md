@@ -418,6 +418,38 @@ The required graph-version `execution_contract.retry_policies` maps each executa
 
 Run creation, admission, attempt creation, request sealing and recovery read these saved policies, never current namespace, runtime/binding, standalone or installation defaults. A request includes its node's saved policies and graph-contract identity; sealing verifies equality with that graph version. This is independent of the separately snapshotted namespace `execution_policy`. An existing version without the required map cannot execute unless an explicitly supported, semantically versioned compatibility mapping supplies its original meaning; absence never authorizes inference from current defaults. Refuse new effects before allocation or execution while preserving existing closure obligations.
 
+#### Saved output binding inventory
+
+The project owner accepted this outer association on 2026-11-04 under [#684](https://github.com/realkarych/kora/issues/684). Every future complete `execution_contract` contains `outputs`, an array with exactly one entry per output declaration in the canonical pinned IR. This section binds declarations to their complete effective contracts; it does not define or replace those contracts' separately supported meanings.
+
+Each entry contains exactly these members in order:
+
+| Member | Saved value |
+|---|---|
+| `path` | The exact declaration identity as an array of string segments, using one of the three shapes below. |
+| `contract` | The complete immutable effective contract by value under its supported leaf or composition format. |
+| `contract_digest` | The existing SHA-256 of the complete compact ASCII canonical `contract` value, without a newline or self-digest, as 64 lowercase hexadecimal characters. The outer entry is excluded from this leaf digest. |
+
+The complete inventory covers these declaration paths:
+
+- Root node output: `["graph", "nodes", NODE, "outputs", OUTPUT]`.
+- Stored-body node output: `["graph", "subgraphs", BODY, "nodes", NODE, "outputs", OUTPUT]`.
+- Stored-body export: `["graph", "subgraphs", BODY, "outputs", OUTPUT]`.
+
+Inspect every stored body, including unused bodies, once without expanding invocations. A nested wrapper refers to the shared registry; it creates no additional declaration path. Empty output maps contribute no entries. Canonical IR already requires implicit role outputs; the server never synthesizes missing declarations to complete this section. Existing IR validity and first-slice restrictions retain their own owners.
+
+Preserve each name as its exact canonical logical string. Segments are neither dotted-name encodings, execution instance IDs nor host paths. Entries are sorted by the compact ASCII canonical rendering of `path`. Paths cannot repeat, and the saved path set must equal the complete pinned declaration inventory. Authored map ordering remains part of the pinned IR independently of this derived array order.
+
+An output cannot disappear because its body is unused, its node may be skipped, its policy is unavailable or its composition is unsupported. Null, partial and placeholder contracts cannot complete an entry. Missing or unsupported interpretation makes the complete section unavailable for new effects; it is not proof that the graph itself is invalid. Existing API010/API011 disposition, historical reads, accepted/skipped replay and closure obligations remain unchanged. Missing historical sections receive no current-default repair or inferred backfill.
+
+The existing effective-contract digest scope is unchanged. Equal native contract values at different outputs may have equal digests; exchanging indistinguishable values at already-correct paths changes no saved interpretation. Different or missing associations must fail exact inventory and expected-source comparison even when each supplied leaf has a matching recomputed digest. The complete ordered section, including paths and leaf digests, participates in `execution_contract_digest` and `deployment_digest` normally. No new domain digest, physical format, execution-semantics identity or migration is introduced.
+
+The checking reader verifies exact inventory, member shape/order, digest shape/value, supported contract format and agreement with the corresponding declaration and pinned IR. The trusted namespace/object/version read boundary still selects the intended saved graph. Expected derivation may share producer logic; the returned interpretation remains the saved value. Caller-selected paths, hashes and claims of complete validation establish neither source provenance nor publication or execution authority.
+
+Body exports retain their declared interface; an internal producer's narrower type never substitutes for it. ReviewBundle, native inline/custom forms, lists, exports, wrappers and collections require their own complete supported composition before an inventory containing them can be constructed or consumed. This outer format supplies none of those meanings or aggregate activation gates. An initial constructor may accept a complete inventory whose declarations all use supported direct leaf formats; it cannot report partial graph success by dropping wider declarations.
+
+The full constructor/reader must admit complete IR/types, all inventory paths and sort keys, repeated by-value contracts and digests, retained state and bounded scratch before growth. Its plan accounts for repeated graph/source checking and preparation, count, work, frequency and concurrency outside metadata transactions and locks. A per-leaf allowance is not an aggregate allowance; an input-byte cap alone does not bound repeated full-graph passes. [#593](https://github.com/realkarych/kora/issues/593) owns the aggregate algorithm, explicit caller budgets, both-database integration and actual release before checking. This format chooses no numerical server default, heap/RSS/time guarantee or additional campaign. [The decision and activation record](../research/graph-output-inventory-2026-11-04.md) separates the accepted association from those pending implementation and execution obligations.
+
 #### Saved type-closure section
 
 The project owner accepted this representation on 2026-11-03 under [#662](https://github.com/realkarych/kora/issues/662). Every future complete `execution_contract` contains `type_contracts`, an array sorted by canonical type name with exactly one record per authoritative IR type declaration, including unused declarations. This by-value section preserves built-in and custom definitions without consulting mutable namespace aliases. It changes neither `record_version = 1`, `kora.execution.v1`, the physical encoding nor existing domain digest algorithms.

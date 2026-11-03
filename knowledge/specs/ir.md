@@ -166,6 +166,8 @@ A **`ReviewBundle`** (DD-33) has two parts: `facts`, written by kora from its ow
 
 **Trigger rules** (FR-1.6 plus DD-1): `all_success` (default), `all_done`, `one_success`, `one_failed`, `none_failed`, `all_skipped`, and `none_failed_min_one_success` (borrowed from Archon: no upstream failed and at least one succeeded, so a node after an all-skipped branch stays skipped). The enum is closed in IR v1.
 
+The owner-approved [saved output binding inventory](data-model.md#saved-output-binding-inventory) associates every root-node output, stored-body node output and declared body export with its complete effective contract by value. Exact segmented declaration paths include unused bodies without expanding invocations; missing or unsupported members cannot be dropped from a successful section. This outer association neither supplies missing implicit roles nor replaces declared export interfaces, wider composition, installation validity or execution admission.
+
 ### 3.1 Fixed implicit outputs
 
 Each node kind below has one implicit output with a fixed role name and exact type. These entries are required in canonical IR, including directly submitted documents and nodes in nested subgraph bodies.
