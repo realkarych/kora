@@ -128,9 +128,19 @@ def target_path(root: JsonObject, fragment: str, budget: TextBudget) -> str:
 def reference_text(
     name: str, roots: dict[str, JsonObject], uris: dict[str, str], budget: TextBudget
 ) -> str:
+    return root_reference_text(roots[name], name, roots, uris, budget)
+
+
+def root_reference_text(
+    root: JsonObject,
+    name: str | None,
+    roots: dict[str, JsonObject],
+    uris: dict[str, str],
+    budget: TextBudget,
+) -> str:
     budget.reserve(2)
     records: list[tuple[str, str]] = []
-    for schema, location in schema_sites(roots[name]):
+    for schema, location in schema_sites(root):
         for keyword, value in schema.items():
             if keyword not in REFERENCE_KEYWORDS:
                 continue
@@ -142,10 +152,12 @@ def reference_text(
             source = path_text(child_path(location, keyword), budget)
             base, _, fragment = value.partition("#")
             target = uris.get(base) if base else name
-            if target is None:
+            if base and target is None:
                 raise GraphValueRejected(GraphValueFailure.INVALID)
             target_name = scalar_text(target, budget)
-            destination = target_path(roots[target], fragment, budget)
+            destination = target_path(
+                root if not base else roots[str(target)], fragment, budget
+            )
             text = (
                 '{"path":'
                 + source

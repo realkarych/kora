@@ -34,3 +34,7 @@ Future implementation must provide:
 The real constructor/reader and effective identities remain #593; the reserved evaluator and common composition retain #138/ADR-0027 ownership. Graph-wide binding/inventory, other output kinds, expression/projection/retry/resource sections, trusted provider facts and full deployment/start admission remain prerequisites. No partial record grants execution authority.
 
 Existing threat controls retain content/provenance, immutable replay and aggregate resource ownership. No new sink, credential or operational permission is added; actual activation diagnostics remain the implementing owner's obligation. Retained applicable mutation reports cover pricing/CEL and add no campaign or hold to this contract publication.
+
+## Direct implementation follow-up
+
+[#672](https://github.com/realkarych/kora/issues/672) implements the direct non-list source/closure constructor, checking reader, effective digest and real preparation composition, with per-call aggregate admission and physical-codec round-trip tests. [Its evidence record](graph-output-construction-2026-11-04.md) distinguishes those checks from the still-required whole-graph inventory, repeated-output admission, provider composition and execution. The publication-only claims above describe #669, not the later implementation.
