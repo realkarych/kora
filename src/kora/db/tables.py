@@ -147,6 +147,11 @@ graph_version: Table = Table(
     Column("ir_digest", digest(), nullable=False),
     Column("source_digest", digest(), nullable=False),
     document("execution_contract"),
+    Column("value_encoding_version", Integer),
+    CheckConstraint(
+        "value_encoding_version IS NULL OR value_encoding_version = 1",
+        name="value_encoding_version",
+    ),
     Column("execution_contract_digest", digest(), nullable=False),
     Column("deployment_digest", digest(), nullable=False),
     document("resolved_digests"),

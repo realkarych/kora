@@ -100,6 +100,7 @@ class GraphVersionRow:
     ir_digest: str
     source_digest: str
     execution_contract: JsonValue
+    value_encoding_version: int | None
     execution_contract_digest: str
     deployment_digest: str
     resolved_digests: JsonValue
