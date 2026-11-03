@@ -1,6 +1,6 @@
 # Gated-process reapability on Darwin
 
-Checked 2026-11-04. Implementing issue: [#436](https://github.com/realkarych/kora/issues/436). The working tree was based on `4e2ca8056388d955349e6513d5305f62f177b255`. The approved plan is the issue comment that selects the private readiness gate: keep `ExitAnchor` and ordinary identity reads, and make `GatedProcess.settle` for a Darwin direct child wait until a non-consuming zombie probe and a fresh domain observation both succeed. This record is local implementation evidence for that plan. It does not replace final-head Linux and macOS CI or independent review of the committed diff.
+Checked 2026-11-04. Implementing issue: [#436](https://github.com/realkarych/kora/issues/436). The commands below ran on the uncommitted sources based on `4e2ca8056388d955349e6513d5305f62f177b255`. That tree was then rebased, without a source conflict, onto `f88549f6c44f080856c47665971f72624723a9c8`. The approved plan is the issue comment that selects the private readiness gate: keep `ExitAnchor` and ordinary identity reads, and make `GatedProcess.settle` for a Darwin direct child wait until a non-consuming zombie probe and a fresh domain observation both succeed. This record is local implementation evidence for that plan. It does not replace final-head Linux and macOS CI or independent review of the committed diff.
 
 ## What was checked
 
@@ -8,7 +8,7 @@ The probe reuses `BsdInfo` and `proc_pidinfo(PROC_PIDTBSDINFO)` with argument 1.
 
 `GatedProcess.settle` arms one shared child-change watch before the probe when the child is not yet known to be a zombie. A not-ready child may wait only while the fresh domain observation is live or settled. A ready child still waits while the domain is live, or while an existing member watch can still change an incomplete domain observation. Success requires both a zombie and a fresh settled domain observation. Unknown, mismatched or failed probe and watch results, an unknown anchor, and a domain observation with nothing left to wait for refuse. `release` remains the only consuming wait. Linux composition passes no probe, so it keeps the existing `waitid` `WNOWAIT` path and does not open the extra watch.
 
-Hand-written production changes, counted as added plus deleted lines under `src/kora` and including the new `kora.runner.child_wait` module, total 455. Tests, the lifetime specification, the module map and this record are excluded. The compared base is `4e2ca8056388d955349e6513d5305f62f177b255`.
+Hand-written production changes, counted as added plus deleted lines under `src/kora` and including the new `kora.runner.child_wait` module, total 455 against merge base `f88549f6c44f080856c47665971f72624723a9c8`. Tests, the lifetime specification, the module map and this record are excluded.
 
 ## Commands and results
 
