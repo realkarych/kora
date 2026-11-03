@@ -156,3 +156,36 @@ The shared `CallKind` type gains the single additive `other_tool` literal; the m
 The shared validator remains the exclusive coverage-comparison owner. Native owners retain classification, normalization, completeness and real-interface evidence. The same-call projection retains configured-instance association and explicit incompleteness. No per-tool inventory ABI, dynamic discovery, provider factory, cache, dependency, new resource owner, classifier or admission path is introduced by this decision.
 
 Work items 3/11 and #549 own the executable classifier and composition; work item 15 owns native classification and complete interception evidence; #593 owns start integration. The [decision and implementation-scope record](../research/policy-coverage-requirements-2026-11-02.md) distinguishes this shared vocabulary from those pending consumers.
+
+## 10. Native Codex declarations
+
+The project owner approved this declaration boundary on 2026-11-04 under [#677](https://github.com/realkarych/kora/issues/677). It specializes the provider-owned configuration pattern from sections 1 and 5. The [dated evidence matrix](../research/codex-native-validation-facts-2026-11-04.md) records the observed and pending inputs.
+
+### Selected configuration and inspection
+
+Trusted server composition selects the exact provider-owned, validated immutable Codex configuration from trusted installation inputs and reviewed native definitions. Selection binds the intended binary pin, execution installation and platform, and reviewed launch and control profile. The platform is that of the selected execution installation. Provider registration metadata, authored graph fields, candidate inputs and ambient settings cannot establish or alter the binding.
+
+A profile bounds every allowed model, provider, mode, feature and override that can affect a declaration. A complete declaration covers every applicable branch of that profile. Reservations include every applicable reserved name or prefix across those branches. A kind enters the coverage set only if interception is established for that kind in every applicable branch that can exercise it. Section 9 governs disabled and unsupported tools. An unsupported or unverified branch cannot inherit completeness from a different selection. The pin and profile in this configuration describe the intended execution. The launch boundary independently verifies the actual binary and effective controls and refuses drift under its existing contracts.
+
+Receiver acquisition and both reads are synchronous and use only already-validated inputs and the provider's native definitions. They require no execution host or running event loop. They must neither start `app-server` or invoke `codex --version`, nor inspect the process environment, open files or sockets, read host or repository configuration, resolve secrets or allocate runtime resources.
+
+### Separate native results
+
+| Result | Semantic value | Completeness |
+| --- | --- | --- |
+| `reserved_env` | `tuple[str, ...] \| None` | A tuple contains the complete selected Codex reservation names and literal prefixes using section 6's grammar. |
+| `policy_coverage` | `frozenset[CallKind] \| None` | A set identifies the intercepted kinds for the complete selected profile under section 9. The completed native definition also supplies the operational adapter's `HarnessCapabilities.policy_coverage`. |
+
+Each result carries its own availability. `None` means unavailable or incomplete. An empty tuple or set represents a complete declaration with no members and requires the same evidence as a nonempty declaration. A missing, unsupported or mismatched profile yields no complete result for an affected field. These are semantic result shapes for the internal boundary. The exact receiver acquisition, callable signature and shared projection representation belong to their implementing plans. Resume and usage declarations retain their separate evidence requirements.
+
+The Codex provider shares the ownership definitions used by its configured environment and launch construction. Include applicable adapter-owned names and justified native controls, with each required case spelling. Keep runtime-owned controls in the runtime's declaration. Workload values, resolved secrets and forwarded adapter or credential values do not determine native reservation ownership. A reservation grants no authority to assign a name. Admitted harness credentials retain their insertion owner under DD-30, including `CODEX_API_KEY`.
+
+Launch must refuse workload `env` and `secret_env` names that match a reserved literal or prefix before revealing secret values or starting Codex. This includes forbidden controls that the adapter leaves unset. The [environment ownership contract](protocols.md#3-harness-adapter-fr-21-fr-33-fr-66-fr-91-dd-27) separately requires duplicate-owner refusal. Unresolved ownership or applicable native behavior keeps the reservation result incomplete.
+
+A complete coverage set supports conclusions about both present and absent kinds. Native tool classification and normalization remain separately required. Evidence of a particular covered or uncovered call in an incomplete profile cannot establish the complete declaration or supply an uncovered-kind finding under IR019 or IR028. Section 9 governs required kinds and coveredness; section 7 governs unresolved required facts and inconsistent bindings.
+
+### Projection and activation
+
+Server composition copies only the names or kinds into the immutable same-call view and binds each result to the invocation, namespace, agent site and exact configured selection. The projection preserves each result's availability and contains no credentials, environment values, raw configuration or provider objects. Sections 3, 4 and 7 govern consistency, execution authority and failure disposition.
+
+Work item 15 owns the real native source, shared launch-construction definitions and conformance for the selected version, platform and profile. The evidence matrix identifies the current complete Codex reservation and coverage declarations as unavailable. The real source and the launch definitions it relies on must land together. Work items 3 and 11 and [#549](https://github.com/realkarych/kora/issues/549) own configured selection and projection into validation. [#199](https://github.com/realkarych/kora/issues/199) owns session hosting, and [#593](https://github.com/realkarych/kora/issues/593) owns the saved contract and canonical start. This decision introduces no provider ABI member, public operation, persisted format or executable producer.
