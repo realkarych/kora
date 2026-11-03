@@ -451,6 +451,62 @@ The pure type-section constructor and checking reader are implemented under [#66
 
 The pure preparation adapter under [#667](https://github.com/realkarych/kora/issues/667), `engine.graph_schema_preparation`, checks the saved section, admits all candidate arguments under one explicit IR/type/candidate byte budget, selects preparation's exact type closure and calls the real preparer. It preserves boolean inline roots, original documents, explicit complete policy binding and every independent preparation refusal. The supplied candidate does not establish actual node selection or inline-source provenance; complete effective-output construction and activation retain those obligations. [Evidence and limits](../research/graph-schema-preparation-2026-11-04.md) distinguish this composition from a saved effective contract or executable evaluator.
 
+#### Saved StructuredOutput effective contract
+
+The project owner accepted this exact logical value and source-selection compatibility mapping on 2026-11-04 under [#669](https://github.com/realkarych/kora/issues/669). It describes one non-list effective contract whose saved ancestry reaches StructuredOutput revision 1. It is independent of the preparer's flat arena, document IDs, work counters and normalized UTF-8 accounting representation; none of that operation-owned state is persisted as this value. This section defines neither the complete graph-wide output inventory nor the outer graph/node/output binding. Those remain required whole-writer/reader obligations.
+
+The value contains exactly these members in order:
+
+| Member | Saved value |
+|---|---|
+| `execution_semantics` | `kora.execution.v1`. |
+| `declared_type` | The exact selected authoritative type name. |
+| `checker_binding` | `kora.structured-output-view.v1`. |
+| `type_contracts` | The eight-member records from the saved type-closure section, for this output's complete general type/reference closure, sorted by type name. |
+| `inline_schema` | Null, or exactly `{origin,source,schema,references}` in that order, as defined below. |
+| `checker` | One exact schema-root role reference. |
+| `constraints` | The ordered schema-root role references for the parent-to-declared chain, then inline once when present. |
+| `schema_validation` | Exactly `{policy,parameters}` with the existing `kora.structured-output-schema-policy.v1` and all thirteen literal parameters from [StructuredOutput section 3.1](artifacts/StructuredOutput.md#31-reserved-execution-policy-and-prepared-ownership). |
+
+A role reference is exactly `{kind: "type_schema", name: TYPE}` or `{kind: "inline_schema"}`, with the stated order. The checker is the inline root for exact built-in StructuredOutput with inline schema; otherwise it is the declared type root. Bare StructuredOutput without inline maps to `dyn`; named descendants retain their declared checker view while inline adds validation only. Reference-only dependencies and their parents do not become top-level constraints. Each referenced root exists exactly once, and equal schema bytes never merge original document identities or local bases.
+
+The general closure starts with the declared ancestry and applicable inline references, then follows required parents and all schema-position `$ref`, `$dynamicRef` and compatibility `$recursiveRef` targets, including unused definitions. Include each type once; preserve cycles as edges without expansion. Unrelated graph declarations are excluded. Each record is copied by value from the verified graph-wide type section, retaining its exact schema/source/descriptor/behavior and complete general references. This repeats selected definitions across outputs; a name pointing into mutable current state cannot replace them.
+
+The inline schema retains its exact canonical logical object. This graph-bound format does not widen authored object-root fields to Boolean roots; the existing preparation DTO's Boolean-root support is unchanged. Inline `references` use the exact `{path,target_type,target_path}` member order and typed segments from the type-closure format, sorted by canonical source-path text. Here only, null `target_type` denotes the same inline document; a string names an exact retained type. A type document cannot acquire an inline target through a fabricated URI. Original reference spelling, schema annotations, object order and distinct roots are preserved.
+
+Derived objects use their defined member order: source is `kind`, `path`, `location`; policy is `policy`, `parameters`; the parameters follow the existing specification order, ten preparation entries then the three evaluation entries. Authored schema and source-location object order retain the accepted canonical logical identity. Checking readers require these derived orders without rewriting saved values.
+
+##### Inline origin and direct producer selection
+
+For an authored inline schema, `origin` is `authored`. `source` is exactly `{kind: "inline_schema", path, location}`: the lossless original segmented IR field path and the owning node's complete authored source record, or null if absent. Preserve source extensions without inserted defaults. Source content grants no filesystem, diagnostic or execution authority. Actual writer/reader source selection must be proved from the pinned IR, never a caller's source assertion.
+
+For the one declared agent structured output, the owner-selected source table is:
+
+| `config.output_schema` | `outputs.<name>.schema` | Effective inline schema and retained source |
+|---|---|---|
+| Absent | Absent | None. |
+| Present | Absent | `config.output_schema`. |
+| Absent | Present | `outputs.<name>.schema`. |
+| Present | Present | Require existing structural JSON equality, ignoring object order, or `IR003`; retain the exact `config.output_schema` value, order and source. |
+
+Explicit `{}` counts as present. The declaration-only case is the first explicit compatibility definition for this previously unspecified source-selection case within the stated immutable semantics/binding. It is not an inferred current-default fallback. Publication records this chosen mapping; missing historical records alone permit no change to an already specified interpretation. Without a declared structured output, existing harness-only `output_schema` and ReviewBundle narrative behavior remain unchanged and confer no artifact authority. Future harness/worker composition must receive the selected effective producer schema before activation.
+
+Human-input responses use the exact effective form from [IR section 4.2](ir.md#42-human-input-node-config-fr-22-fr-7), retaining its equality rule against any authored response schema. For omitted `config.form`, `origin` is `approval_form_default` and the exact existing default form under `kora.execution.v1` is saved. Its source path identifies the owning node's logical effective `config.form` field even though omitted; location remains the node's authored source or null. This effective-field anchor does not claim authored form bytes. An explicitly authored identical form has `origin: authored`; an authored empty object remains authored under the existing form/predicate rules. The reader proves default origin from pinned omission and the supported immutable default, never current namespace/provider settings. No other derived/default origin is introduced.
+
+Wait-event uses `outputs.event.schema`; command `output_file` uses its declared non-list structured output schema. These rules cover direct agent, human_input, wait_event and command producers only. Subgraph wrapper/export inheritance, scheduler collections, fan-out, derived lists and other output kinds keep their separate source/composition and activation requirements. Generic declaration lookup does not establish those contracts.
+
+##### Identity, checking and activation
+
+The existing effective `contract_digest` is SHA-256 over this complete compact ASCII canonical logical value, without a newline or a digest member in its own input. Existing metadata columns store exactly 64 lowercase hexadecimal characters, without a `sha256:` prefix; their constraints do not change. A prefix required at an existing external `Digest` boundary is presentation only, never another hash input or stored value. The graph's execution-contract and deployment identities include the effective value and its binding normally; no second schema/preparation digest is introduced.
+
+Origin, source path/location/extensions and inert general dependencies participate in this identity. Authored and omitted/default forms intentionally have different effective digests even when their schemas match, and a source-only change can change the effective digest. This identifies the complete preserved contract, not merely equivalent validation behavior. A matching digest establishes consistency, not trusted publication or namespace/object/version selection.
+
+The real producer must validate authoritative source facts, supported exact type metadata, general references, role selection and complete policy, then invoke actual preparation through the accepted adapter. Preparation selects its narrower executable closure, excluding dependencies reachable only through inert recursive references, and independently rederives targets/roles and enforces every unsupported-schema, UTF-8, cycle and capacity refusal. General saved-reference metadata confers no executable assertions. Reserved policy evaluation remains unavailable until its existing implementation gates pass.
+
+The complete reader checks this saved value against pinned IR and trusted publication/output selection, compares real expected derivations under the supported immutable mapping and returns saved interpretation unchanged. Missing, unsupported or inconsistent values refuse new effects without backfill, historical reinterpretation or current-default repair. Existing history, accepted/skipped replay and recovery ordering remain unchanged. Complete graph validity, current native compatibility, authorization and execution admission remain separately required.
+
+The implementation must admit complete IR/type/inline/role/reference bytes, generated paths, indexes/sort scratch and repeated per-output copies before growth. Full composition also owns repeated checking/hashing/preparation, retained holders, frequency and concurrency after actual database read-unit release. Preparation's ceilings cannot bound general inert-only closure or aggregate graph state. This format chooses no public numerical budget, heap/RSS/latency guarantee, migration or dependency. [The decision and activation record](../research/effective-output-contract-2026-11-04.md) names real constructor/reader, persistence and source-substitution tests; none is implemented by this contract publication.
+
 #### Graph parameter interpretation
 
 The project owner accepted the following logical binding on 2026-11-03 under [issue #656](https://github.com/realkarych/kora/issues/656). Every future complete `execution_contract` must contain `parameters`, an object with exactly two members: `interpretation`, whose supported value is `kora.graph-parameters.v1`, and `schema`, the effective graph parameter schema as an object. This is an explicit immutable compatibility mapping within `kora.execution.v1`, not a new whole-engine semantics identity. It changes neither `record_version = 1` nor the IR format, existing built-in descriptors, plain CEL mapping or artifact compatibility bindings.
