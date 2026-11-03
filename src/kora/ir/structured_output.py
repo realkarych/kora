@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from typing import cast
 
+from kora.ir.data import detach_ir_data
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.structured_json import (
     StructuredOutputValidationError as StructuredOutputValidationError,
@@ -111,3 +112,7 @@ def same_descriptor(value: object, expected: JsonValue) -> bool:
 def require_structured_output_revision(descriptor: object) -> None:
     if not same_descriptor(descriptor, _DESCRIPTOR):
         refuse("SO005")
+
+
+def structured_output_revision_descriptor() -> JsonObject:
+    return cast(JsonObject, detach_ir_data(_DESCRIPTOR))

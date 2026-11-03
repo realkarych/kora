@@ -10,7 +10,11 @@ A shared deduplicated schema table would add document indirection and ownership 
 
 Original built-in schema hashes keep their published file-byte meaning. The canonical stored schema object retains the logical value; its reserialization does not replace a published file hash. Built-in metadata comes from trusted exact revision definitions, and custom schemas/parents/behavior from pinned canonical IR. A stored descriptor or behavior identity grants no arbitrary code-loading authority. Existing record, semantics, physical encoding and domain digest identities remain unchanged, and no new standalone digest is introduced.
 
-## Real implementation gaps and owners
+## Implementation follow-up
+
+The real type-section producer, lossless reference extractor and checking reader are implemented under [#664](https://github.com/realkarych/kora/issues/664), with their [source, capacity and verification record](graph-type-construction-2026-11-04.md). The paragraphs below preserve the original design obligations; the preparation adapter and complete execution contract remain pending. The implementation plan refined the initial 500-line estimate to at most 850 production additions/deletions, retaining the 1,000-line hard maximum.
+
+## Original implementation gaps and owners
 
 The general IR `SavedReferences.resolves` facility returns a boolean. General schema diagnostics redact named positions and may truncate deep paths. Their outputs cannot be copied into immutable edge identities. A future bounded lossless source/target producer must preserve the accepted general resolver rules, distinguish original document roots and schema positions from annotations, and preserve exact string keys versus integer array indices. Its actual code and admission method require a detailed implementation plan and independent review.
 
@@ -22,7 +26,7 @@ The later implementation targets at most 500 added plus deleted production lines
 
 ## Pending executable acceptance
 
-These are future implementation obligations, not tests supplied by this contract-only PR:
+These were future obligations in the contract-only change. Under #664 the inventory, reference, checking, capacity and persistence tests are executable; preparation adaptation remains pending:
 
 | Owner and named test | Required behavior |
 |---|---|

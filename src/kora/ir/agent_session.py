@@ -12,6 +12,7 @@ from kora.ir.agent_session_validation import (
 from kora.ir.agent_session_validation import (
     AgentSessionValidationError as AgentSessionValidationError,
 )
+from kora.ir.data import detach_ir_data
 from kora.ir.json import JsonObject
 from kora.ir.structured_json import encode_snapshot
 from kora.ir.structured_output import same_descriptor
@@ -154,3 +155,7 @@ _DESCRIPTOR: JsonObject = {
 def require_agent_session_revision(descriptor: object) -> None:
     if not same_descriptor(descriptor, _DESCRIPTOR):
         refuse("AS005")
+
+
+def agent_session_revision_descriptor() -> JsonObject:
+    return cast(JsonObject, detach_ir_data(_DESCRIPTOR))

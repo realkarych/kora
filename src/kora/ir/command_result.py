@@ -12,6 +12,7 @@ from kora.ir.command_result_validation import (
 from kora.ir.command_result_validation import (
     CommandResultValidationError as CommandResultValidationError,
 )
+from kora.ir.data import detach_ir_data
 from kora.ir.json import JsonObject
 from kora.ir.structured_json import encode_snapshot
 from kora.ir.structured_output import same_descriptor
@@ -122,3 +123,7 @@ _DESCRIPTOR: JsonObject = {
 def require_command_result_revision(descriptor: object) -> None:
     if not same_descriptor(descriptor, _DESCRIPTOR):
         refuse("CR005")
+
+
+def command_result_revision_descriptor() -> JsonObject:
+    return cast(JsonObject, detach_ir_data(_DESCRIPTOR))
