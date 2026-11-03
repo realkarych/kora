@@ -1,4 +1,5 @@
 import pytest
+from pydantic import MISSING
 
 from kora.ir import export_ir, validate_approval_response_predicates
 from kora.ir.json import JsonObject
@@ -208,3 +209,84 @@ def test_declared_approval_parameter_bounds_reach_cost_check(bounded: bool) -> N
     assert [error.code for error in result.diagnostics.errors] == (
         [] if bounded else ["IR027"]
     )
+
+
+@pytest.mark.parametrize("mode", ["omitted", "empty", "closed"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize(
+    ("predicate", "closed_valid", "empty_valid"),
+    [
+        ("params == {}", True, True),
+        ("params.anything", False, True),
+        ("params['anything']", False, True),
+        ("has(params.anything)", False, True),
+        ("params[response.key]", True, True),
+        ("[true].all(params, params)", False, False),
+        ("params", False, True),
+        ("false && params.anything", False, True),
+    ],
+)
+def test_omitted_approval_parameters_use_closed_empty_schema(
+    mode: str, nested: bool, predicate: str, closed_valid: bool, empty_valid: bool
+) -> None:
+    parameters: JsonObject | None = None
+    if mode == "empty":
+        parameters = {}
+    elif mode == "closed":
+        parameters = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+    form: JsonObject = {
+        "properties": {"key": {"type": "string"}},
+        "required": ["key"],
+    }
+    nodes = {"gate": gate(form, predicate)}
+    document = document_for(
+        params=parameters,
+        nodes={"root": node()} if nested else nodes,
+        bodies={"unused": {"nodes": nodes}} if nested else None,
+    )
+    before = export_ir(document)
+    valid = empty_valid if mode == "empty" else closed_valid
+    path = ("graph", "subgraphs", "unused") if nested else ("graph",)
+
+    result = validate_approval_response_predicates(document)
+
+    assert result.approval_predicates_complete
+    assert result.approval_predicates_valid is valid
+    assert result.predicates_seen == result.predicates_checked == 1
+    assert result.context_unresolved == result.schema_unresolved == 0
+    assert result.definitions_checked == int(nested)
+    assert len(result.diagnostics.errors) == int(not valid)
+    assert all(
+        error.code == "IR011"
+        and error.path == (*path, "nodes", "gate", "config", "approve_when")
+        for error in result.diagnostics.errors
+    )
+    assert (document.graph.params is MISSING) is (mode == "omitted")
+    assert export_ir(document) == before
+
+
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        "params == {} && inputs.ok",
+        "inputs.ok && params == {}",
+        "true ? params == {} : inputs.ok",
+        "[true].all(inputs, params == {})",
+    ],
+)
+def test_omitted_approval_parameters_do_not_complete_input_context(
+    predicate: str,
+) -> None:
+    document = document_for(nodes={"gate": gate(None, predicate)})
+
+    result = validate_approval_response_predicates(document)
+
+    assert result.predicates_seen == result.context_unresolved == 1
+    assert result.predicates_checked == result.schema_steps == 0
+    assert result.diagnostics.valid
+    assert not result.approval_predicates_complete
+    assert not result.approval_predicates_valid

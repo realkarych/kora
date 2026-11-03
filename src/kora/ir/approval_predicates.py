@@ -153,10 +153,13 @@ class ApprovalPredicateChecks:
 
     def parameter_context(self) -> Variable | None:
         if self.parameter_variable is MISSING:
-            if self.parameters is MISSING:
-                return None
+            parameters: JsonObject = (
+                {"type": "object", "properties": {}, "additionalProperties": False}
+                if self.parameters is MISSING
+                else self.parameters
+            )
             try:
-                self.parameter_variable = self.schemas.variable(self.parameters)
+                self.parameter_variable = self.schemas.variable(parameters)
             except SchemaError:
                 self.parameter_variable = None
         return self.parameter_variable
@@ -174,9 +177,7 @@ class ApprovalPredicateChecks:
         except DiagnosticError:
             self.syntax_unresolved += 1
             return
-        if "inputs" in required or (
-            "params" in required and self.parameters is MISSING
-        ):
+        if "inputs" in required:
             self.context_unresolved += 1
             return
         variables: dict[str, Variable] = {}

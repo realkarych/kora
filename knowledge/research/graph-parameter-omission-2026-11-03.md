@@ -1,6 +1,6 @@
-# Graph parameter omission: decision and pending activation
+# Graph parameter omission: decision and consumer activation
 
-Status: public-contract choice accepted by the project owner on 2026-11-03 under [issue #642](https://github.com/realkarych/kora/issues/642); consumer implementation remains pending. The [proposal](https://github.com/realkarych/kora/issues/552#issuecomment-6601656904) and [independent design review](https://github.com/realkarych/kora/issues/552#issuecomment-6601669353) record the alternatives and review evidence. The normative rules are in [IR](../specs/ir.md#graph-parameter-schema-omission), [API](../specs/api-and-agent-surface.md#admission-state-and-bounded-starts-adr-0020) and [DSL](../specs/dsl.md#1-surface).
+Status: public-contract choice accepted by the project owner on 2026-11-03 under [issue #642](https://github.com/realkarych/kora/issues/642); approval-checker consumption is implemented under [#644](https://github.com/realkarych/kora/issues/644); other consumers remain pending. The [proposal](https://github.com/realkarych/kora/issues/552#issuecomment-6601656904) and [independent design review](https://github.com/realkarych/kora/issues/552#issuecomment-6601669353) record the alternatives and review evidence. The normative rules are in [IR](../specs/ir.md#graph-parameter-schema-omission), [API](../specs/api-and-agent-surface.md#admission-state-and-bounded-starts-adr-0020) and [DSL](../specs/dsl.md#1-surface).
 
 ## Decision and consequences
 
@@ -18,20 +18,37 @@ Rerun overlays the original parameters key by key. Against a selected version wi
 
 ## Implementation and verification ownership
 
-The structural model preserves missing fields. Existing declared-parameter approval checking under #640 and target-parameter checking under #554 remain partial; they still report omitted parameter context as unresolved. This contract publication does not change their runtime behavior. #552 coordinates effective parameter contexts and full approval validation; #593 owns deployment and canonical-start integration. Compiler work item 3 owns emission of the explicit closed-empty schema for a graph function with no parameters.
+The structural model preserves missing fields. Approval checking under #640/#644 uses the effective omitted schema but remains partial because input contexts are unavailable. Target-parameter checking under #554 still leaves omitted parameter context unresolved. The original #642 contract publication changed no runtime behavior; #644 adds only the pure approval-checker consumer described below. #552 coordinates effective parameter contexts and full approval validation; #593 owns deployment and canonical-start integration. Compiler work item 3 owns emission of the explicit closed-empty schema for a graph function with no parameters.
 
 The following are pending consumer acceptance obligations, not passing tests or newly implemented checks:
 
 | Owner | Required regression at activation |
 |---|---|
-| IR context producer, #552 / work item 3 | Omitted schema maps to the exact closed-empty type; authored `{}` remains dynamic; root/stored contexts, literal/dynamic-key behavior, unchanged export/digest and independent incomplete inputs are covered. Target and other parameter consumers use the same meaning. |
+| IR context producer, #552 / work item 3 | The approval-only leg is implemented under #644 below. Full input-context composition, target and other parameter consumers still need the same effective meaning, unchanged authored export/identity and independent completeness checks. |
 | Compiler, work item 3 | A graph function without parameters emits the exact explicit closed-empty schema; ordinary annotated parameters retain their existing contract and deterministic output. |
 | API/engine, #593 | New starts accept empty params and refuse nonempty params with API003 before effects; explicit permissive schemas retain their meaning, with ordinary envelope/data/admission checks. Exercise PostgreSQL and SQLite. |
 | Rerun, #593 | A nonempty original run rerun against a latest/named omitted-schema version is refused, even with an empty override; the original run remains unchanged and a fresh empty trigger follows normal admission. Exercise both databases. |
 | Replay and current authority, #593 | Matching accepted/skipped receipts remain stable after deployment; changed same-key requests remain API004; current authorization and envelope rules precede replay. Original request hashing is preserved on both databases. |
 | Saved graph interpretation, #593 | Supported immutable semantics govern validation and execution; unavailable or missing saved interpretation refuses new effects without altering historical outcomes. Any new persisted format or compatibility decision needs its own reviewed plan. |
 
-No public operation, CLI/MCP mapping, database mutation, executable component or diagnostic event is added here. Their implementation changes retain parity and observability obligations. Existing threat assumptions cover authored input, disclosure, immutable history and honest completeness (TM-04/06/07/10/12 plus authorization/replay TM-01/02/11); no new actor, authority or containment guarantee requires a threat-model amendment. No resource algorithm or numerical method is changed, so this publication claims no performance result.
+The normative publication adds no public operation, CLI/MCP mapping, database mutation, executable component or diagnostic event. The #644 extension retains the existing pure checker and diagnostic event. Their implementation changes retain parity and observability obligations. Existing threat assumptions cover authored input, disclosure, immutable history and honest completeness (TM-04/06/07/10/12 plus authorization/replay TM-01/02/11); no new actor, authority or containment guarantee requires a threat-model amendment. No resource algorithm or numerical method is changed, so this publication claims no performance result.
+
+## Approval-checker consumer under #644
+
+`validate_approval_response_predicates` now removes only omission-based parameter deferral. Its existing lazy mapping creates the exact fixed closed-empty schema for `MISSING`, maps it through the plain `SchemaTypes` and caches the complete `Variable` in the existing invocation. Authored schemas, including `{}`, retain their existing behavior; no global mutable schema or new public helper is introduced. Input identifiers/binders anywhere still defer the whole expression, including dead branches, and parser/schema failures keep their owners.
+
+Parameter-only unknown reads and shadowing are complete typed refusals, with existing fixed `IR011` messages. Dynamic-key indexing can pass static checking without proving that evaluation will find a key. The result/event schemas are unchanged, and the result retains no document, schema, type, bound or syntax tree. Mapping and checker algorithms, per-predicate traversal and lifetime methods are unchanged; the fixed three-key schema supplies no new scale dimension or latency/RSS guarantee.
+
+| Boundary | Executable coverage |
+|---|---|
+| Omitted versus authored empty/closed-empty, root/stored scope and unchanged export | `test_omitted_approval_parameters_use_closed_empty_schema` |
+| Retained old context cases and mixed/dead input dependencies | `test_explicit_approval_classifies_required_context`, `test_omitted_approval_parameters_do_not_complete_input_context` |
+| Lazy mapping once per invocation | `test_omitted_approval_parameter_mapping_is_lazy_and_once` |
+| Exact release on success, typed refusal, response-schema failure after parameter mapping and input deferral | `test_approval_parameter_context_releases_bound_state`; existing owned-state regressions remain active |
+| Scalar diagnostics, private-key/literal exclusion, stdout and real blocked/broken sink shutdown | `test_explicit_approval_logging_excludes_content`, `test_explicit_approval_survives_unavailable_sink`, including omitted mode |
+| Installed core without evaluator import | `test_type_schema_validation_works_from_installed_core_only_wheel`, including omitted-schema cases |
+
+The [implementation issue](https://github.com/realkarych/kora/issues/644) and its PR retain actual independent correctness/security results, commands and final-revision CI evidence. TM-04/06/07/10/12 cover the changed interpretation, content exclusion, existing resource bounds and honest completeness; no new actor, authority or containment guarantee changes the threat model. This authored-document operation does not check saved execution-semantics compatibility or authorize public validation, start/rerun or approval execution. Those obligations remain with the owners above.
 
 ## Evidence limits
 

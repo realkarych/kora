@@ -96,41 +96,42 @@ def test_explicit_approval_effective_form(
 
 
 @pytest.mark.parametrize(
-    "predicate",
+    ("predicate", "complete"),
     [
-        "inputs.ok",
-        "params.ok",
-        "false && inputs.ok",
-        "true ? response.ok : params.ok",
-        "!inputs.ok",
-        "response[params.key]",
-        "[inputs.ok].size() == 1",
-        "{'value': params.ok}['value']",
-        "{inputs.key: true}['value']",
-        "has(inputs.ok)",
-        "response.text.contains(params.text)",
-        "[true].all(inputs, inputs)",
-        "[true].map(params, params)",
-        "[true].filter(inputs, inputs).size() > 0",
+        ("inputs.ok", False),
+        ("params.ok", True),
+        ("false && inputs.ok", False),
+        ("true ? response.ok : params.ok", True),
+        ("!inputs.ok", False),
+        ("response[params.key]", True),
+        ("[inputs.ok].size() == 1", False),
+        ("{'value': params.ok}['value']", True),
+        ("{inputs.key: true}['value']", False),
+        ("has(inputs.ok)", False),
+        ("response.text.contains(params.text)", True),
+        ("[true].all(inputs, inputs)", False),
+        ("[true].map(params, params)", True),
+        ("[true].filter(inputs, inputs).size() > 0", False),
     ],
 )
-def test_explicit_approval_context_is_incomplete(predicate: str) -> None:
+def test_explicit_approval_classifies_required_context(
+    predicate: str, complete: bool
+) -> None:
     document = document_for(nodes={"gate": gate({}, predicate)})
     before = export_ir(document)
 
     result = validate_approval_response_predicates(document)
 
-    assert result.diagnostics.valid
-    assert not result.approval_predicates_complete
+    assert result.diagnostics.valid is not complete
+    assert result.approval_predicates_complete is complete
     assert not result.approval_predicates_valid
-    assert result.predicates_seen == result.context_unresolved == 1
-    assert (
-        result.predicates_checked
-        == result.syntax_unresolved
-        == result.schema_unresolved
-        == 0
-    )
-    assert result.schema_steps == 0
+    assert result.predicates_seen == 1
+    assert result.context_unresolved == int(not complete)
+    assert result.predicates_checked == int(complete)
+    assert result.syntax_unresolved == result.schema_unresolved == 0
+    assert (result.schema_steps > 0) is complete
+    assert len(result.diagnostics.errors) == int(complete)
+    assert all(error.code == "IR011" for error in result.diagnostics.errors)
     assert export_ir(document) == before
 
 

@@ -15,19 +15,19 @@ from tests.observability.conftest import (
 
 
 @pytest.mark.parametrize("ending", ["valid", "invalid", "syntax", "context", "schema"])
-@pytest.mark.parametrize("parameters", [False, True])
+@pytest.mark.parametrize("parameters", ["response", "declared", "omitted"])
 def test_explicit_approval_logging_excludes_content(
     configure: Configure,
     pipe: Pipe,
     capsys: pytest.CaptureFixture[str],
     ending: str,
-    parameters: bool,
+    parameters: str,
 ) -> None:
     marker = "private_explicit_approval_content"
     form: JsonObject = decision_form({"enum": ["approve"]})
     form["description"] = marker
     form["$defs"] = {marker: {"const": marker}}
-    context = "params" if parameters else "response"
+    context = "response" if parameters == "response" else "params"
     predicate = {
         "valid": context + ".decision == 'approve'",
         "invalid": context + ".decision == '" + marker + "'",
@@ -35,10 +35,18 @@ def test_explicit_approval_logging_excludes_content(
         "context": "inputs." + marker,
         "schema": context + ".decision == 'approve'",
     }[ending]
+    if parameters == "omitted":
+        predicate = {
+            "valid": "params == {} && '" + marker + "' != ''",
+            "invalid": "params." + marker,
+            "syntax": "'" + marker + "' &&",
+            "context": "inputs." + marker,
+            "schema": "params == {}",
+        }[ending]
     if ending == "schema":
         form = {"$ref": "https://example.invalid/" + marker}
     document = document_for(
-        params=form if parameters else None,
+        params=form if parameters == "declared" else None,
         nodes={
             "gate": gate(form, predicate, source={"file": marker + ".py", "line": 1})
         },
@@ -76,13 +84,17 @@ def test_explicit_approval_logging_excludes_content(
 
 
 @pytest.mark.parametrize("broken", [False, True])
-@pytest.mark.parametrize("parameters", [False, True])
+@pytest.mark.parametrize("parameters", ["response", "declared", "omitted"])
 def test_explicit_approval_survives_unavailable_sink(
-    configure: Configure, pipe: Pipe, broken: bool, parameters: bool
+    configure: Configure, pipe: Pipe, broken: bool, parameters: str
 ) -> None:
+    declared: JsonObject = {
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
     document = document_for(
-        params={"properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
-        nodes={"gate": gate({}, "params.ok == 0" if parameters else "0")},
+        params=None if parameters == "omitted" else declared,
+        nodes={"gate": gate({}, "0" if parameters == "response" else "params.ok == 0")},
     )
     expected = validate_approval_response_predicates(document)
     settings = LoggingSettings(queue_records=64, queue_bytes=65_536)

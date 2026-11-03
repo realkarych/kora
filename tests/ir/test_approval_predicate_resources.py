@@ -52,7 +52,7 @@ def test_explicit_approval_deep_mapping_does_not_recurse_on_python_stack() -> No
 @pytest.mark.parametrize("ending", ["valid", "invalid", "schema", "syntax", "context"])
 @pytest.mark.parametrize("nested", [False, True])
 def test_explicit_approval_releases_owned_state(ending: str, nested: bool) -> None:
-    predicate = {"syntax": "true &&", "context": "params.ok"}.get(
+    predicate = {"syntax": "true &&", "context": "inputs.ok"}.get(
         ending, "response.decision == 'approve'"
     )
     document = shared_predicates(3, 100, predicate, ending == "invalid", nested)
@@ -166,7 +166,10 @@ def test_approval_parameter_deep_mapping_is_iterative() -> None:
 
 
 @pytest.mark.parametrize("ending", ["valid", "invalid", "schema", "context"])
-def test_approval_parameter_context_releases_bound_state(ending: str) -> None:
+@pytest.mark.parametrize("omitted", [False, True])
+def test_approval_parameter_context_releases_bound_state(
+    ending: str, omitted: bool
+) -> None:
     parameters: JsonObject = {
         "properties": {
             "values": {
@@ -187,9 +190,23 @@ def test_approval_parameter_context_releases_bound_state(ending: str) -> None:
         "schema": "params.values.all(value, value == 'ok')",
         "context": "inputs.ok && params.values.all(value, value == 'ok')",
     }[ending]
-    document = document_for(params=parameters, nodes={"gate": gate(None, predicate)})
-    assert document.graph.params is not MISSING
-    references = [weakref.ref(document), weakref.ref(document.graph.params)]
+    form: JsonObject | None = None
+    if omitted:
+        predicate = {
+            "valid": "params == {}",
+            "invalid": "params.missing",
+            "schema": "params == {}",
+            "context": "inputs.ok && params == {}",
+        }[ending]
+        if ending == "schema":
+            form = {"$ref": "urn:kora:artifact:missing"}
+    document = document_for(
+        params=None if omitted else parameters,
+        nodes={"gate": gate(form, predicate)},
+    )
+    references: list[Callable[[], object | None]] = [weakref.ref(document)]
+    if document.graph.params is not MISSING:
+        references.append(weakref.ref(document.graph.params))
     owned_types = (
         SchemaTypes
         | ApprovalPredicateChecks
@@ -212,3 +229,24 @@ def test_approval_parameter_context_releases_bound_state(ending: str) -> None:
     assert remaining == baseline
     assert result.approval_predicates_complete is (ending in {"valid", "invalid"})
     assert result.approval_predicates_valid is (ending == "valid")
+
+
+def test_omitted_approval_parameter_mapping_is_lazy_and_once() -> None:
+    predicate = "params == {}"
+    one = document_for(nodes={"gate": gate(None, predicate)})
+    many = document_for(
+        nodes={f"gate{index}": gate(None, predicate) for index in range(40)}
+    )
+    response_only = document_for(nodes={"gate": gate(None, "true")})
+
+    single = validate_approval_response_predicates(one)
+    repeated = validate_approval_response_predicates(many)
+    unused = validate_approval_response_predicates(response_only)
+
+    assert single.approval_predicates_valid
+    assert repeated.approval_predicates_valid
+    assert unused.approval_predicates_valid
+    assert repeated.predicates_seen == repeated.predicates_checked == 40
+    assert repeated.schema_steps == single.schema_steps
+    assert single.schema_steps > unused.schema_steps
+    assert repeated.checker_steps == single.checker_steps * 40
