@@ -26,7 +26,7 @@ The cleanup case stalls the hook after recording readiness. The driver verifies 
 Both documented commands exited 0 in the Linux amd64 container under Docker Desktop 29.9.2 and Buildx 0.38.1. The VM used an aarch64 LinuxKit 7.0.14 kernel on an Apple Silicon host and ran the amd64 image through emulation.
 
 | Case | Observation |
-|---|---|
+| --- | --- |
 | Allow | Exactly one matching Bash hook receipt. Codex finished the turn and a regular marker file existed. |
 | Deny | Exactly one matching Bash hook receipt for the same command and call ID. Codex returned `Command blocked by PreToolUse hook:` with the fixed hook reason for that call. The turn finished and the marker path was absent. |
 | Stalled hook | One matching hook was live when the driver deadline expired. The marker was absent. The fixture closed, the driver waited for app-server, and Docker confirmed container removal. |
