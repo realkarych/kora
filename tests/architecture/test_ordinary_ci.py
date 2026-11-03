@@ -49,6 +49,9 @@ FIRST_MODULES = (
     "tests/conformance/test_recovered_process_lifetime.py",
     "tests/ir/test_structured_schema_assertions.py",
     "tests/measurements/test_ir_measurement_evidence.py",
+    "tests/ir/test_input_path_resources.py",
+    "tests/ir/test_expression_syntax_resources.py",
+    "tests/ir/test_edge_type_resources.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -269,7 +272,13 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
 
     assert result.returncode == 0, result.stderr
     assert tuple(arrays["first"]) == FIRST_MODULES
-    assert IR_RESOURCE_MODULES <= cohorts["measurements"]
+    assert IR_RESOURCE_MODULES & cohorts["measurements"] == {
+        "tests/ir/test_type_schema_resources.py",
+        "tests/ir/test_output_schema_resources.py",
+    }
+    assert cohorts["second"] - selected_files(["tests/conformance"]) == {
+        "tests/ir/test_inline_schema_resources.py"
+    }
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(
         ["tests/api", "tests/cli"]
