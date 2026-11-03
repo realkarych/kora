@@ -60,6 +60,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import ChannelError, cancel_task
+from kora.runner.child_wait import ChildWatch, DirectChildProbe
 from kora.runner.filesystem import DirectoryAnchor, DirectoryIdentity, FilesystemError
 from kora.runner.gate import ExecutionConfig
 from kora.runner.identity import IdentityReader, IdentityState, NativeIdentityReader
@@ -205,6 +206,8 @@ class ParentLifetime:
         identities: IdentityReader | None = None,
         identity_source: Callable[[], str] = new_operation_id,
         launcher: IOHelperLauncher | None = None,
+        child_probe: DirectChildProbe | None = None,
+        child_watch: Callable[[int], ChildWatch] | None = None,
         recovery: CleanupReference | None = None,
         await_command_outcome: bool = False,
     ) -> None:
@@ -215,6 +218,8 @@ class ParentLifetime:
             if identities is not None
             else NativeIdentityReader(clock=self.clock)
         )
+        self._child_probe = child_probe
+        self._child_watch = child_watch
         observed = self.identities.read(os.getpid())
         if (
             observed.state is not IdentityState.PRESENT
@@ -794,6 +799,10 @@ class ParentLifetime:
                 self.clock,
                 self.identities,
                 max_members=record.member_capacity,
+                child_probe=self._child_probe,
+                child_watch=self._child_watch,
+                native_reap_wait=self._child_probe is None
+                and self._child_watch is None,
             )
             registration = await record.process.prepare()
         elif isinstance(request, TemporaryTreeRequest) and directory is not None:

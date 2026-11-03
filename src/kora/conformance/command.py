@@ -3,6 +3,7 @@ import os
 import socket
 import stat
 import sys
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -41,7 +42,9 @@ from kora.protocols.loading import (
 )
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, wait_future
+from kora.runner.child_wait import ChildWatch, DirectChildProbe
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
+from kora.runner.identity import IdentityReader
 from kora.runner.processes import GatedProcess, ProcessError
 
 
@@ -52,10 +55,18 @@ class ConformanceCommand:
         *,
         clock: Clock | None = None,
         launcher: IOHelperLauncher | None = None,
+        identities: IdentityReader | None = None,
+        child_probe: DirectChildProbe | None = None,
+        child_watch: Callable[[int], ChildWatch] | None = None,
     ) -> None:
         self.diagnostics = diagnostics
         self.owner = ParentLifetime(
-            clock=clock, launcher=launcher, await_command_outcome=True
+            clock=clock,
+            launcher=launcher,
+            identities=identities,
+            child_probe=child_probe,
+            child_watch=child_watch,
+            await_command_outcome=True,
         )
         self.startup: DirectoryAnchor | None = None
         self.process: GatedProcess | None = None
