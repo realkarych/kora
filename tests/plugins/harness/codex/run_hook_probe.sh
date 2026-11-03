@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key]' >&2
         exit 2
         ;;
 esac
@@ -118,11 +118,17 @@ trap 'exit 143' TERM
 
 mkdir "$reservation/cli-plugins"
 ln -s "$buildx" "$reservation/cli-plugins/docker-buildx"
-if [ "${1:-}" = "--check-write-stdin" ]; then
-    run_variant interactive --stdin-control
-    release_container
-    run_variant one-shot --stdin-one-shot
-else
-    run_variant default "$@"
-fi
+case "${1:-}" in
+    --check-write-stdin)
+        run_variant interactive --stdin-control
+        release_container
+        run_variant one-shot --stdin-one-shot
+        ;;
+    --check-provider-env-key)
+        run_variant default --provider-account
+        release_container
+        run_variant default --provider-env-key
+        ;;
+    *) run_variant default "$@" ;;
+esac
 cleanup 0
