@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -9,7 +10,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
 
-Case = Literal["allow", "deny", "stall"]
+Case = Literal["allow", "deny", "stall", "interactive"]
 
 CODEX = "/usr/local/bin/codex"
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -17,6 +18,15 @@ RECEIPTS = CONTROL / "receipts.jsonl"
 MARKER = "kora-probe.marker"
 COMMAND = f"touch {MARKER}"
 CALL_ID = "kora-hook-probe-call"
+STDIN_CALL_ID = "kora-hook-probe-stdin"
+STDIN_READY = "kora-stdin-ready"
+STDIN_WRITTEN = "kora-stdin-written"
+STDIN_COMMAND = (
+    f"printf '{STDIN_READY}\\n'; IFS= read -r token && "
+    'test "$token" = kora-stdin-token && '
+    f"printf '{STDIN_WRITTEN}\\n' > {MARKER} && cat {MARKER}"
+)
+SESSION_ID = re.compile(r"^Process running with session ID ([0-9]{1,10})$")
 DENIAL = (
     "Command blocked by PreToolUse hook: "
     f"kora managed hook probe denied the marker command. Command: {COMMAND}"
@@ -75,15 +85,70 @@ def sse(response_id: str, item: dict[str, object]) -> bytes:
     ).encode()
 
 
-TOOL_RESPONSE = sse(
-    "kora-probe-response-1",
-    {
-        "type": "function_call",
-        "call_id": CALL_ID,
-        "name": "exec_command",
-        "arguments": json.dumps({"cmd": COMMAND, "login": False}),
-    },
-)
+def command_response(command: str, interactive: bool = False) -> bytes:
+    arguments: dict[str, object] = {"cmd": command, "login": False}
+    if interactive:
+        arguments.update(tty=True, yield_time_ms=1_000)
+    return sse(
+        "kora-probe-response-1",
+        {
+            "type": "function_call",
+            "call_id": CALL_ID,
+            "name": "exec_command",
+            "arguments": json.dumps(arguments),
+        },
+    )
+
+
+def stdin_response(session_id: int) -> bytes:
+    return sse(
+        "kora-probe-stdin",
+        {
+            "type": "function_call",
+            "call_id": STDIN_CALL_ID,
+            "name": "write_stdin",
+            "arguments": json.dumps(
+                {"session_id": session_id, "chars": "kora-stdin-token\n"}
+            ),
+        },
+    )
+
+
+def tool_output(request: dict[str, object], call_id: str) -> str:
+    items = [
+        as_object(item)
+        for item in as_list(request.get("input"), "responses_input_missing")
+    ]
+    outputs = [
+        item.get("output")
+        for item in items
+        if item.get("type") == "function_call_output" and item.get("call_id") == call_id
+    ]
+    if len(outputs) != 1 or not isinstance(output := outputs[0], str):
+        raise ProbeFailure("missing_correlated_tool_output")
+    return output
+
+
+def interactive_session_id(request: dict[str, object]) -> int:
+    lines = tool_output(request, CALL_ID).splitlines()
+    require(STDIN_READY in lines, "interactive_command_not_ready")
+    matches = [match for line in lines if (match := SESSION_ID.fullmatch(line))]
+    require(len(matches) == 1, "missing_interactive_session_id")
+    session_id = int(matches[0][1])
+    require(0 < session_id < 2**31, "invalid_interactive_session_id")
+    return session_id
+
+
+def verify_one_shot_schema(command_tool: dict[str, object]) -> None:
+    parameters = as_object(command_tool.get("parameters"))
+    properties = as_object(parameters.get("properties"))
+    require(
+        "timeout_ms" in properties and not {"tty", "yield_time_ms"} & properties.keys(),
+        "one_shot_command_schema_missing",
+    )
+
+
+TOOL_RESPONSE = command_response(COMMAND)
 FINAL_RESPONSE = sse(
     "kora-probe-response-2",
     {
@@ -96,8 +161,12 @@ FINAL_RESPONSE = sse(
 
 
 class ResponsesFixture:
-    def __init__(self, case: Case) -> None:
+    def __init__(self, case: Case, one_shot: bool) -> None:
         self.case = case
+        self.one_shot = one_shot
+        self.request_limit = (
+            3 if case == "interactive" or (one_shot and case == "allow") else 2
+        )
         self.requests = 0
         self.failure: str | None = None
         self.clients: list[tuple[asyncio.StreamWriter, asyncio.Task[None]]] = []
@@ -105,7 +174,7 @@ class ResponsesFixture:
     def accept(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        if len(self.clients) >= 2:
+        if len(self.clients) >= self.request_limit:
             self.failure = "unexpected_responses_connection"
             writer.close()
             return
@@ -161,29 +230,44 @@ class ResponsesFixture:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
         if self.requests == 1:
-            tools = as_list(request.get("tools"), "responses_tools_missing")
+            tools = [
+                as_object(tool)
+                for tool in as_list(request.get("tools"), "responses_tools_missing")
+            ]
+            command_tools = [
+                tool for tool in tools if tool.get("name") == "exec_command"
+            ]
+            require(len(command_tools) == 1, "exec_command_advertisement_count")
+            names = [tool.get("name") for tool in tools]
+            if self.case == "interactive":
+                require("write_stdin" in names, "interactive_stdin_not_advertised")
+                return command_response(STDIN_COMMAND, interactive=True)
+            if self.one_shot:
+                require("write_stdin" not in names, "one_shot_stdin_advertised")
+                verify_one_shot_schema(command_tools[0])
+                if self.case == "allow":
+                    return stdin_response(1)
+            return TOOL_RESPONSE
+
+        require(self.requests <= self.request_limit, "unexpected_responses_request")
+        require(self.case != "stall", "stalled_hook_returned")
+        if self.case == "interactive":
+            if self.requests == 2:
+                return stdin_response(interactive_session_id(request))
             require(
-                any(as_object(tool).get("name") == "exec_command" for tool in tools),
-                "exec_command_not_advertised",
+                STDIN_WRITTEN in tool_output(request, STDIN_CALL_ID).splitlines(),
+                "stdin_did_not_complete_marker_write",
+            )
+            return FINAL_RESPONSE
+        if self.one_shot and self.case == "allow" and self.requests == 2:
+            require(
+                tool_output(request, STDIN_CALL_ID) == "unsupported call: write_stdin",
+                "one_shot_stdin_refusal_missing",
             )
             return TOOL_RESPONSE
 
-        require(self.requests == 2, "unexpected_responses_request")
-        require(self.case != "stall", "stalled_hook_returned")
-        items = [
-            as_object(item)
-            for item in as_list(request.get("input"), "responses_input_missing")
-        ]
-        outputs = [
-            item.get("output")
-            for item in items
-            if item.get("type") == "function_call_output"
-            and item.get("call_id") == CALL_ID
-        ]
-        if len(outputs) != 1 or not isinstance(output := outputs[0], str):
-            raise ProbeFailure("missing_correlated_tool_output")
         require(
-            (DENIAL in output) == (self.case == "deny"),
+            (DENIAL in tool_output(request, CALL_ID)) == (self.case == "deny"),
             "unexpected_hook_denial_result",
         )
         return FINAL_RESPONSE
@@ -305,7 +389,7 @@ stream_max_retries = 0
     }
 
 
-def hook_pid() -> int:
+def hook_pid(command: str = COMMAND) -> int:
     require(RECEIPTS.is_file(), "hook_receipt_missing")
     with RECEIPTS.open("rb") as file:
         raw = file.read(4097)
@@ -316,7 +400,7 @@ def hook_pid() -> int:
     pid = receipt.pop("pid", None)
     require(
         receipt
-        == {"event": "PreToolUse", "tool": "Bash", "call": CALL_ID, "command": COMMAND},
+        == {"event": "PreToolUse", "tool": "Bash", "call": CALL_ID, "command": command},
         "unexpected_hook_receipt",
     )
     if type(pid) is not int or pid <= 1:
@@ -414,7 +498,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                         raise outcome
 
 
-async def run_case(case: Case) -> None:
+async def run_case(case: Case, one_shot: bool = False) -> None:
     RECEIPTS.unlink(missing_ok=True)
     (CONTROL / "decision").write_text(case, encoding="utf-8")
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
@@ -422,19 +506,33 @@ async def run_case(case: Case) -> None:
         workspace = root / "workspace"
         workspace.mkdir()
         marker = workspace / MARKER
-        fixture = ResponsesFixture(case)
+        fixture = ResponsesFixture(case, one_shot)
         await drive(fixture, root, workspace)
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
         if case != "stall":
-            require(fixture.requests == 2, "unexpected_fixture_request_count")
-            hook_pid()
-        if case == "allow":
+            require(
+                fixture.requests == fixture.request_limit,
+                "unexpected_fixture_request_count",
+            )
+            hook_pid(STDIN_COMMAND if case == "interactive" else COMMAND)
+        if case in {"allow", "interactive"}:
             require(
                 marker.is_file() and not marker.is_symlink(), "allowed_marker_missing"
             )
         else:
             require(not os.path.lexists(marker), "blocked_marker_exists")
-    diagnostic("INFO", "probe.case_verified", case)
+        if case == "interactive":
+            with (CONTROL / "invocations").open("rb") as invocations:
+                require(
+                    invocations.read(2) == b"1", "interactive_hook_invocation_count"
+                )
+            with marker.open("rb") as contents:
+                expected = f"{STDIN_WRITTEN}\n".encode()
+                require(
+                    contents.read(len(expected) + 1) == expected,
+                    "interactive_marker_content",
+                )
+    diagnostic("INFO", "probe.case_verified", f"one_shot_{case}" if one_shot else case)
 
 
 async def run() -> None:
@@ -445,6 +543,11 @@ async def run() -> None:
     CONTROL.mkdir(mode=0o700)
     if sys.argv[1:] == ["--check-cleanup"]:
         await run_case("stall")
+    elif sys.argv[1:] == ["--stdin-control"]:
+        await run_case("interactive")
+    elif sys.argv[1:] == ["--stdin-one-shot"]:
+        await run_case("allow", one_shot=True)
+        await run_case("deny", one_shot=True)
     else:
         require(not sys.argv[1:], "unexpected_arguments")
         await run_case("allow")

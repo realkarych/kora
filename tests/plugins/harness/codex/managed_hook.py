@@ -10,6 +10,18 @@ MAX_INPUT_BYTES = 16_384
 
 
 def main() -> int:
+    decision = (CONTROL / "decision").read_text(encoding="utf-8")
+    expected_command = "touch kora-probe.marker"
+    if decision == "interactive":
+        with (CONTROL / "invocations").open("a", encoding="utf-8") as invocations:
+            invocations.write("1")
+        expected_command = (
+            "printf 'kora-stdin-ready\\n'; IFS= read -r token && "
+            'test "$token" = kora-stdin-token && '
+            "printf 'kora-stdin-written\\n' > kora-probe.marker && "
+            "cat kora-probe.marker"
+        )
+
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
         return 2
@@ -25,11 +37,10 @@ def main() -> int:
         event.get("hook_event_name") != "PreToolUse"
         or event.get("tool_name") != "Bash"
         or event.get("tool_use_id") != "kora-hook-probe-call"
-        or command != "touch kora-probe.marker"
+        or command != expected_command
     ):
         return 2
 
-    decision = (CONTROL / "decision").read_text(encoding="utf-8")
     with (CONTROL / "receipts.jsonl").open("a", encoding="utf-8") as receipts:
         receipts.write(
             json.dumps(
@@ -43,7 +54,7 @@ def main() -> int:
             )
             + "\n"
         )
-    if decision == "allow":
+    if decision in {"allow", "interactive"}:
         return 0
     if decision == "stall":
         signal.pause()
