@@ -1,0 +1,470 @@
+import asyncio
+import json
+import os
+import platform
+import signal
+import subprocess
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Literal, cast
+
+Case = Literal["allow", "deny", "stall"]
+
+CODEX = "/usr/local/bin/codex"
+CONTROL = Path("/var/lib/kora-hook-probe/control")
+RECEIPTS = CONTROL / "receipts.jsonl"
+MARKER = "kora-probe.marker"
+COMMAND = f"touch {MARKER}"
+CALL_ID = "kora-hook-probe-call"
+DENIAL = (
+    "Command blocked by PreToolUse hook: "
+    f"kora managed hook probe denied the marker command. Command: {COMMAND}"
+)
+TURN_SECONDS = 30
+CLEANUP_SECONDS = 5
+MAX_FRAME_BYTES = 131_072
+MAX_MESSAGES = 256
+
+
+class ProbeFailure(Exception):
+    pass
+
+
+def require(condition: bool, reason: str) -> None:
+    if not condition:
+        raise ProbeFailure(reason)
+
+
+def as_object(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ProbeFailure("expected_json_object")
+    return cast(dict[str, object], value)
+
+
+def as_list(value: object, reason: str) -> list[object]:
+    if not isinstance(value, list):
+        raise ProbeFailure(reason)
+    return cast(list[object], value)
+
+
+def parse_object(raw: bytes) -> dict[str, object]:
+    return as_object(json.loads(raw))
+
+
+def diagnostic(level: str, event: str, detail: str) -> None:
+    sys.stderr.write(
+        json.dumps({"level": level, "event": event, "detail": detail}) + "\n"
+    )
+
+
+def sse(response_id: str, item: dict[str, object]) -> bytes:
+    events = (
+        {"type": "response.created", "response": {"id": response_id}},
+        {"type": "response.output_item.done", "item": item},
+        {
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            },
+        },
+    )
+    return "".join(
+        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+    ).encode()
+
+
+TOOL_RESPONSE = sse(
+    "kora-probe-response-1",
+    {
+        "type": "function_call",
+        "call_id": CALL_ID,
+        "name": "exec_command",
+        "arguments": json.dumps({"cmd": COMMAND, "login": False}),
+    },
+)
+FINAL_RESPONSE = sse(
+    "kora-probe-response-2",
+    {
+        "type": "message",
+        "role": "assistant",
+        "id": "kora-probe-message",
+        "content": [{"type": "output_text", "text": "Probe turn finished."}],
+    },
+)
+
+
+class ResponsesFixture:
+    def __init__(self, case: Case) -> None:
+        self.case = case
+        self.requests = 0
+        self.failure: str | None = None
+        self.clients: list[tuple[asyncio.StreamWriter, asyncio.Task[None]]] = []
+
+    def accept(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        if len(self.clients) >= 2:
+            self.failure = "unexpected_responses_connection"
+            writer.close()
+            return
+        self.clients.append((writer, asyncio.create_task(self.handle(reader, writer))))
+
+    async def handle(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        try:
+            async with asyncio.timeout(TURN_SECONDS):
+                raw_headers = await reader.readuntil(b"\r\n\r\n")
+                request_line, *headers = raw_headers[:-4].split(b"\r\n")
+                require(
+                    request_line == b"POST /v1/responses HTTP/1.1",
+                    "unexpected_responses_route",
+                )
+                fields: dict[bytes, bytes] = {}
+                for header in headers:
+                    key, separator, value = header.partition(b":")
+                    require(separator == b":", "invalid_responses_header")
+                    fields[key.lower()] = value.strip()
+                require(
+                    b"authorization" not in fields and b"cookie" not in fields,
+                    "unexpected_responses_credentials",
+                )
+                size = int(fields.get(b"content-length", b"0"))
+                require(0 < size <= MAX_FRAME_BYTES, "invalid_responses_size")
+                request = parse_object(await reader.readexactly(size))
+                response = self.respond(request)
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    b"Connection: close\r\nContent-Length: "
+                    + str(len(response)).encode()
+                    + b"\r\n\r\n"
+                    + response
+                )
+                await writer.drain()
+        except ProbeFailure as error:
+            self.failure = str(error)
+        except TimeoutError:
+            self.failure = "responses_request_deadline"
+        except (
+            OSError,
+            ValueError,
+            asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
+        ):
+            self.failure = "invalid_responses_request"
+        finally:
+            writer.close()
+
+    def respond(self, request: dict[str, object]) -> bytes:
+        require(request.get("stream") is True, "responses_stream_not_requested")
+        self.requests += 1
+        if self.requests == 1:
+            tools = as_list(request.get("tools"), "responses_tools_missing")
+            require(
+                any(as_object(tool).get("name") == "exec_command" for tool in tools),
+                "exec_command_not_advertised",
+            )
+            return TOOL_RESPONSE
+
+        require(self.requests == 2, "unexpected_responses_request")
+        require(self.case != "stall", "stalled_hook_returned")
+        items = [
+            as_object(item)
+            for item in as_list(request.get("input"), "responses_input_missing")
+        ]
+        outputs = [
+            item.get("output")
+            for item in items
+            if item.get("type") == "function_call_output"
+            and item.get("call_id") == CALL_ID
+        ]
+        if len(outputs) != 1 or not isinstance(output := outputs[0], str):
+            raise ProbeFailure("missing_correlated_tool_output")
+        require(
+            (DENIAL in output) == (self.case == "deny"),
+            "unexpected_hook_denial_result",
+        )
+        return FINAL_RESPONSE
+
+    async def close(self, server: asyncio.Server) -> None:
+        server.close()
+        for writer, task in self.clients:
+            writer.close()
+            task.cancel()
+        if self.clients:
+            await asyncio.wait([task for _, task in self.clients])
+        for writer, task in self.clients:
+            if not task.cancelled():
+                task.result()
+            await writer.wait_closed()
+        await server.wait_closed()
+
+
+class Stdio:
+    def __init__(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+        self.messages = 0
+        self.terminal: dict[str, object] | None = None
+
+    async def send(self, message: dict[str, object]) -> None:
+        self.writer.write(json.dumps({"jsonrpc": "2.0", **message}).encode() + b"\n")
+        await self.writer.drain()
+
+    async def receive(self) -> dict[str, object]:
+        self.messages += 1
+        require(self.messages <= MAX_MESSAGES, "app_server_message_limit")
+        line = await self.reader.readline()
+        require(bool(line) and line.endswith(b"\n"), "app_server_stdio_closed")
+        message = parse_object(line)
+        if "method" in message and "id" in message:
+            raise ProbeFailure("unexpected_app_server_request")
+        if message.get("method") == "turn/completed":
+            require(self.terminal is None, "duplicate_turn_completion")
+            self.terminal = as_object(message.get("params"))
+        return message
+
+    async def call(
+        self, request_id: int, method: str, params: dict[str, object]
+    ) -> dict[str, object]:
+        await self.send({"id": request_id, "method": method, "params": params})
+        while True:
+            response = await self.receive()
+            if response.get("id") == request_id:
+                require("error" not in response, f"{method}_rejected")
+                return as_object(response.get("result"))
+
+    async def run_turn(self, workspace: Path) -> None:
+        await self.call(
+            1, "initialize", {"clientInfo": {"name": "kora-hook-probe", "version": "1"}}
+        )
+        await self.send({"method": "initialized"})
+        start = await self.call(2, "thread/start", {"cwd": str(workspace)})
+        thread_id = as_object(start.get("thread")).get("id")
+        require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
+        started = await self.call(
+            3,
+            "turn/start",
+            {
+                "threadId": thread_id,
+                "input": [{"type": "text", "text": "Run the probe marker command."}],
+            },
+        )
+        turn_id = as_object(started.get("turn")).get("id")
+        require(isinstance(turn_id, str) and bool(turn_id), "missing_turn_id")
+        while self.terminal is None:
+            await self.receive()
+        require(
+            self.terminal.get("threadId") == thread_id, "unexpected_terminal_thread"
+        )
+        turn = as_object(self.terminal.get("turn"))
+        require(turn.get("id") == turn_id, "unexpected_terminal_turn")
+        require(turn.get("status") == "completed", "turn_not_completed")
+
+
+def environment(root: Path, port: int) -> dict[str, str]:
+    home = root / "home"
+    codex_home = root / "codex"
+    home.mkdir()
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        f"""model = "gpt-5.5"
+model_provider = "kora_probe"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+web_search = "disabled"
+
+[analytics]
+enabled = false
+
+[features]
+hooks = true
+unified_exec = true
+
+[model_providers.kora_probe]
+name = "Kora loopback fixture"
+base_url = "http://127.0.0.1:{port}/v1"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
+""",
+        encoding="utf-8",
+    )
+    return {
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "SHELL": "/bin/bash",
+        "LANG": "C.UTF-8",
+    }
+
+
+def hook_pid() -> int:
+    require(RECEIPTS.is_file(), "hook_receipt_missing")
+    with RECEIPTS.open("rb") as file:
+        raw = file.read(4097)
+    require(len(raw) <= 4096, "hook_receipt_size_limit")
+    lines = raw.splitlines()
+    require(len(lines) == 1, "hook_receipt_count")
+    receipt = parse_object(lines[0])
+    pid = receipt.pop("pid", None)
+    require(
+        receipt
+        == {"event": "PreToolUse", "tool": "Bash", "call": CALL_ID, "command": COMMAND},
+        "unexpected_hook_receipt",
+    )
+    if type(pid) is not int or pid <= 1:
+        raise ProbeFailure("invalid_hook_pid")
+    return pid
+
+
+def verify_live_hook() -> None:
+    pid = hook_pid()
+    try:
+        state = (
+            Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rpartition(") ")[2]
+        )
+    except FileNotFoundError:
+        raise ProbeFailure("stalled_hook_exited_early") from None
+    require(state.startswith(("S ", "R ", "D ")), "stalled_hook_not_live")
+
+
+def signal_app_server(process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+    if process.returncode is None:
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+async def drain(reader: asyncio.StreamReader) -> None:
+    while await reader.read(16_384):
+        pass
+
+
+async def stop_app_server(process: asyncio.subprocess.Process) -> None:
+    assert process.stdin is not None
+    assert process.stdout is not None
+    process.stdin.close()
+    signal_app_server(process, signal.SIGTERM)
+    try:
+        async with asyncio.timeout(2):
+            await asyncio.gather(process.wait(), drain(process.stdout))
+    except TimeoutError:
+        signal_app_server(process, signal.SIGKILL)
+        await asyncio.gather(process.wait(), drain(process.stdout))
+
+
+async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
+    deadline = asyncio.get_running_loop().time() + TURN_SECONDS
+    async with asyncio.timeout_at(deadline):
+        server = await asyncio.start_server(
+            fixture.accept, "127.0.0.1", 0, limit=16_384
+        )
+    process: asyncio.subprocess.Process | None = None
+    try:
+        port = int(server.sockets[0].getsockname()[1])
+        async with asyncio.timeout_at(deadline):
+            process = await asyncio.create_subprocess_exec(
+                CODEX,
+                "app-server",
+                "--listen",
+                "stdio://",
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                limit=MAX_FRAME_BYTES,
+                start_new_session=True,
+                cwd=workspace,
+                env=environment(root, port),
+            )
+            assert process.stdin is not None
+            assert process.stdout is not None
+            await Stdio(process.stdout, process.stdin).run_turn(workspace)
+        require(fixture.case != "stall", "stalled_turn_completed")
+    except TimeoutError:
+        if fixture.case != "stall":
+            raise ProbeFailure(fixture.failure or "turn_deadline_expired") from None
+        require(
+            fixture.failure is None and fixture.requests == 1, "stalled_fixture_state"
+        )
+        verify_live_hook()
+    except ProbeFailure:
+        if fixture.failure is not None:
+            raise ProbeFailure(fixture.failure) from None
+        raise
+    finally:
+        async with asyncio.timeout(CLEANUP_SECONDS):
+            if process is None:
+                await fixture.close(server)
+            else:
+                outcomes = await asyncio.gather(
+                    stop_app_server(process),
+                    fixture.close(server),
+                    return_exceptions=True,
+                )
+                for outcome in outcomes:
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+
+
+async def run_case(case: Case) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text(case, encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        marker = workspace / MARKER
+        fixture = ResponsesFixture(case)
+        await drive(fixture, root, workspace)
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        if case != "stall":
+            require(fixture.requests == 2, "unexpected_fixture_request_count")
+            hook_pid()
+        if case == "allow":
+            require(
+                marker.is_file() and not marker.is_symlink(), "allowed_marker_missing"
+            )
+        else:
+            require(not os.path.lexists(marker), "blocked_marker_exists")
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run() -> None:
+    require(
+        sys.platform == "linux" and platform.machine() == "x86_64",
+        "unexpected_platform",
+    )
+    CONTROL.mkdir(mode=0o700)
+    if sys.argv[1:] == ["--check-cleanup"]:
+        await run_case("stall")
+    else:
+        require(not sys.argv[1:], "unexpected_arguments")
+        await run_case("allow")
+        await run_case("deny")
+
+
+def main() -> int:
+    try:
+        asyncio.run(run())
+    except ProbeFailure as error:
+        diagnostic("ERROR", "probe.case_failed", str(error))
+        return 1
+    except TimeoutError:
+        diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
+        return 1
+    except (OSError, ValueError, IndexError):
+        diagnostic("ERROR", "probe.case_failed", "invalid_fixture_io")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
