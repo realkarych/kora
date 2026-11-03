@@ -76,6 +76,8 @@ Work item 12 (artifact upload/storage/retention) owns an approved concrete mappi
 
 A concrete existing-route envelope and persisted capture-owner mapping remain outside this publication. They require another owner-approved plan for the API/metadata/worker/read/retention contracts and exact documentation before implementation. The approved publication-only scope leaves this consumer-owned mapping pending explicitly.
 
+The [exact native output format](../data-model.md#saved-exact-native-builtin-output-contract), accepted under #675, preserves the complete revision-1 native definition and ordinary declared-schema checker interpretation for the direct command `result` when its declaration omits `schema`. Its saved validation selector retains every native model/behavior obligation; it neither selects stock schema-only validation nor supplies capture provenance or delivery authority. Wider inline/custom/list/wrapper contracts, actual writer/reader and existing native consumer gates remain separate requirements. This format does not change the pending capture wire/owner prerequisite.
+
 ## 6. Publication checks and separate activation
 
 Two ordinary pytest publication checks are defined in `tests/ir/test_command_result_contract.py`: `test_command_result_contract_files_are_consistent` and `test_command_result_contract_vectors_are_immutable`. They use the existing Draft202012Validator with an explicit offline registry to check schema validity and structural fixtures, and pin schema/descriptor/vector bytes, fixture canonical bytes and SHA-256 declarations. They introduce no dependency or validation framework.

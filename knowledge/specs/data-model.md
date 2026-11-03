@@ -509,6 +509,46 @@ The implementation must admit complete IR/type/inline/role/reference bytes, gene
 
 The pure direct-output constructor and checking reader under [#672](https://github.com/realkarych/kora/issues/672), `engine.graph_output_sources` and `engine.graph_outputs`, derive this leaf from canonical pinned IR and the verified graph-wide types. They check actual source selection, preserve the general closure and exact roles, invoke real preparation and return immutable canonical text with its effective digest. Their explicit combined IR/type/selector/record byte allowance bounds each operation; it supplies no whole-graph work or memory guarantee. [Implementation evidence and limits](../research/graph-output-construction-2026-11-04.md) identify focused tests and physical-codec round trips after database read-unit release. Full graph inventory/publication, other output kinds, reserved evaluation and execution remain unavailable through this component.
 
+#### Saved exact native builtin output contract
+
+The project owner accepted this exact-case representation on 2026-11-04 under [#675](https://github.com/realkarych/kora/issues/675), for AgentSession, CommandResult and VcsRef revision 1 without an authored output-declaration schema. It is separate from the StructuredOutput effective value and its schema policy. This bounded case does not redefine IR validity: inline schemas, named custom descendants, lists and inherited/wrapper/export contracts require their own complete composition and cannot be silently dropped or interpreted as this case. Until supported, verification through this constructor is unavailable, distinct from an established graph error under the existing API010/API011 rules. This publication activates no public refusal or execution path.
+
+The native value contains exactly these seven members in order:
+
+| Member | Saved value |
+|---|---|
+| `execution_semantics` | `kora.execution.v1`. |
+| `declared_type` | Exactly `AgentSession`, `CommandResult` or `VcsRef`, with revision 1 in its saved type record. |
+| `type_contracts` | The existing eight-member type records by value for the selected original general parent/reference closure, sorted by name. Preserve exact schemas, descriptors, behaviors and original targets; no mutable alias supplies a definition. |
+| `inline_schema` | Null. Prove the selected declaration omitted `schema`; an authored empty object is not omission. |
+| `checker_binding` | `kora.agent-session-view.v1` for AgentSession; null for VcsRef/CommandResult, explicitly selecting their unchanged ordinary declared-schema checker interpretation under the saved execution semantics. |
+| `checker` | The exact native checker record below. |
+| `validation` | Exactly `{kind: "published_builtin", name: TYPE}` in that order, selecting the complete immutable native behavior/descriptor from `type_contracts`. |
+
+For VcsRef and CommandResult, `checker` is exactly `{kind: "declared_type", name: TYPE}`, referring to that saved schema root under existing ordinary CEL rules. For AgentSession it is exactly `{kind: "published_view", name: "AgentSession", policy: POLICY, schema: SCHEMA}`, in that order. POLICY is the complete original canonical logical value of published [AgentSession.cel-policy.json](artifacts/AgentSession.cel-policy.json), including identity, root, allowlists, exclusions and checker-schema hash. SCHEMA is the complete original canonical logical value of [AgentSession.cel.schema.json](artifacts/AgentSession.cel.schema.json). Preserve original object/array order; no regenerated broad schema or invented field selection replaces these values.
+
+The AgentSession descriptor's `cel_policy_sha256` and the policy's `cel_schema_sha256` must match the same trusted published file bytes used to obtain the saved values. Supplied hashes alone establish nothing. The checker schema owns its original root `urn:kora:artifact:AgentSession:cel:1`; its local references resolve there, never against the logical AgentSession type schema. This published checker is self-contained and introduces no cross-document closure format.
+
+Every member is mandatory, including explicit null. Null checker binding selects an existing interpretation; a missing field never defaults to it. Derived member and array order is normative, while published schema/policy objects preserve their original order. Unknown, missing, extra, reordered or inconsistent records refuse new effects. The value contains no prepared tables, payloads, observed session facts, current availability, provider configuration or executable code.
+
+##### Native source and validation ownership
+
+Actual construction and checking derive the selected role from pinned IR and trusted output identity: AgentSession is the agent's required `session`, CommandResult is the command's required `result`, and exact VcsRef is the optional direct agent publication output. Root and stored-body declarations can be represented; installation topology support remains separate. Generic declaration lookup cannot assign these values to a human response, command parsed-file output, scheduler collection or wrapper export. Full output inventory and graph/node/output binding remain whole-writer obligations.
+
+AgentSession keeps complete transcript-primary logical validation and its separate permanent flattened metadata checker view. Native validation checks the complete logical value and required cross-field rules; CEL reads only the published view and frozen projection paths. Denials, transcript content/descriptors and other excluded fields never become checker-visible because the full logical type schema is saved. Recording the view does not implement projection, transfer, trusted observation/pricing provenance or retention.
+
+VcsRef and CommandResult preserve their exact published model/behavior checks, identity and content retention. The validation selector does not mean stock schema-only validation or authorize arbitrary code loading. Actual supported installed bindings remain required before payload operations. Schema or record validity establishes neither publication/capture provenance, physical closure nor current authority.
+
+##### Native identity, checking and activation
+
+The effective `contract_digest` is SHA-256 over the complete compact ASCII canonical logical value, without a newline or self-digest, stored as 64 lowercase hexadecimal characters. AgentSession's policy and checker schema participate by value. No second digest, migration or new builtin revision is introduced. The graph execution-contract and deployment identities include the value and outer binding normally. Equal native values can occur at different outputs; their equality does not replace the whole graph's output inventory or source binding.
+
+Readers compare saved values against pinned IR, trusted publication and supported immutable native sources. Current aliases, defaults or missing-checker repair cannot backfill older records. New effects require complete supported values; authorized historical reads retain their saved results. A matching hash proves consistency, not provenance or permission.
+
+The installed package catalogue currently contains main artifact schemas, not AgentSession's published policy/checker files. Real implementation must include those exact files, verify package/source agreement and verify the same acquired bytes against their published identities before deriving a value. Its plan must bound raw acquisition, including mismatch/failure paths, decoding and hash buffers before growth; payload, CEL and StructuredOutput preparation limits cannot substitute for that source budget. No new external dependency is selected.
+
+Per-call and whole-consumer admission must cover original IR/types/selected identity, repeated native values, complete policy/checker data, generated records/indexes/sort keys and hash buffers, outside metadata transactions. Full consumers retain output-count, repeated-work, frequency/concurrency and retained-state obligations. This format chooses no numerical default, Python heap/RSS/time guarantee or measurement campaign. [The decision and activation record](../research/native-output-contract-2026-11-04.md) names package integrity, actual constructor/reader, saved-view/CEL, both-database release and native consumer tests. This contract publication implements none of them and cannot enable graph execution.
+
 #### Graph parameter interpretation
 
 The project owner accepted the following logical binding on 2026-11-03 under [issue #656](https://github.com/realkarych/kora/issues/656). Every future complete `execution_contract` must contain `parameters`, an object with exactly two members: `interpretation`, whose supported value is `kora.graph-parameters.v1`, and `schema`, the effective graph parameter schema as an object. This is an explicit immutable compatibility mapping within `kora.execution.v1`, not a new whole-engine semantics identity. It changes neither `record_version = 1` nor the IR format, existing built-in descriptors, plain CEL mapping or artifact compatibility bindings.
