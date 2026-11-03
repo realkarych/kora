@@ -65,15 +65,12 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
         assert table(job["strategy"])["fail-fast"] is False
     entries = [table(value) for value in cast(list[object], execution["steps"])]
     for name, condition in (
-        (
-            "Install locked frontend dependencies",
-            "${{ matrix.lane != 'local-runtime' }}",
-        ),
-        ("Check Python and frontend sources", "${{ matrix.lane == 'conformance' }}"),
+        ("Install locked frontend dependencies", None),
+        ("Check Python and frontend sources", "${{ matrix.lane == 'local-runtime' }}"),
         ("Build isolated distributions offline", "${{ matrix.lane == 'remainder' }}"),
     ):
         selected = next(step for step in entries if step.get("name") == name)
-        assert selected["if"] == condition
+        assert selected.get("if") == condition
 
 
 def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
@@ -97,7 +94,7 @@ def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
 
     assert table(node["with"])["node-version-file"] == "web/.node-version"
     assert table(pnpm["with"])["package_json_file"] == "web/package.json"
-    assert installation["if"] == "${{ matrix.lane != 'local-runtime' }}"
+    assert all("if" not in step for step in (node, pnpm, installation))
     assert command_lines(installation["run"]) == [
         ("pnpm", "--dir", "web", "install", "--frozen-lockfile")
     ]
@@ -105,6 +102,33 @@ def test_frontend_consumer_lanes_install_the_pinned_toolchain() -> None:
     assert entries.index(pnpm) < entries.index(installation)
     assert actions.count("actions/setup-node") == 1
     assert actions.count("pnpm/action-setup") == 1
+
+
+def test_source_checks_finish_before_host_fixture_acquisition() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+    entries = [table(value) for value in cast(list[object], job["steps"])]
+    by_id = {str(step["id"]): step for step in entries if "id" in step}
+    sources = by_id["static_checks"]
+
+    commands = command_lines(sources["run"])
+
+    assert commands == [
+        ("uv", "lock", "--check"),
+        ("uv", "run", "--no-sync", "ruff", "format", "--check", "."),
+        ("uv", "run", "--no-sync", "ruff", "check", "--ignore-noqa", "."),
+        ("uv", "run", "--no-sync", "pyright"),
+        ("pnpm", "--dir", "web", "run", "typecheck"),
+        ("pnpm", "--dir", "web", "run", "lint"),
+        ("pnpm", "--dir", "web", "run", "build"),
+    ]
+    assert sources["if"] == "${{ matrix.lane == 'local-runtime' }}"
+    assert (
+        entries.index(by_id["frontend_dependencies"])
+        < entries.index(sources)
+        < entries.index(by_id["unit_collisions"])
+        < entries.index(by_id["preparation"])
+        < entries.index(by_id["tests"])
+    )
 
 
 def is_existing_test_path(root: Path, token: str) -> bool:
