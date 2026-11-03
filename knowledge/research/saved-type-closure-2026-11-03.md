@@ -12,7 +12,7 @@ Original built-in schema hashes keep their published file-byte meaning. The cano
 
 ## Implementation follow-up
 
-The real type-section producer, lossless reference extractor and checking reader are implemented under [#664](https://github.com/realkarych/kora/issues/664), with their [source, capacity and verification record](graph-type-construction-2026-11-04.md). The paragraphs below preserve the original design obligations; the preparation adapter and complete execution contract remain pending. The implementation plan refined the initial 500-line estimate to at most 850 production additions/deletions, retaining the 1,000-line hard maximum.
+The real type-section producer, lossless reference extractor and checking reader are implemented under [#664](https://github.com/realkarych/kora/issues/664), with their [source, capacity and verification record](graph-type-construction-2026-11-04.md). The paragraphs below preserve the original design obligations; the preparation adapter is implemented under [#667](graph-schema-preparation-2026-11-04.md), while the complete execution contract remains pending. The implementation plan refined the initial 500-line estimate to at most 850 production additions/deletions, retaining the 1,000-line hard maximum.
 
 ## Original implementation gaps and owners
 
@@ -26,7 +26,7 @@ The later implementation targets at most 500 added plus deleted production lines
 
 ## Pending executable acceptance
 
-These were future obligations in the contract-only change. Under #664 the inventory, reference, checking, capacity and persistence tests are executable; preparation adaptation remains pending:
+These were future obligations in the contract-only change. Under #664 the inventory, reference, checking, capacity and persistence tests are executable; preparation adaptation is exercised under #667 through `test_graph_schema_preparation_selects_exact_closure` and its refusal/admission regressions:
 
 | Owner and named test | Required behavior |
 |---|---|
