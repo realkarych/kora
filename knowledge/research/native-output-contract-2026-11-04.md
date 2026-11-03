@@ -14,7 +14,7 @@ The original native validation schemas and AgentSession checker are distinct doc
 
 The complete value participates in the existing effective SHA-256 identity and graph/deployment identities. Published policy/schema object order and derived field order are preserved. There is no current-alias repair, historical backfill, new builtin revision, second digest, migration or numerical default. By-value definitions can repeat between outputs; the whole consumer owns their aggregate admission and source binding.
 
-The current package catalogue contains main artifact schemas, not the AgentSession checker/policy files. The actual source implementation must include exact published files and verify source/wheel agreement. Descriptor-to-policy and policy-to-checker hashes must verify the same trusted bytes used for parsing. Raw acquisition, mismatch/failure, decoding and hash buffers require explicit finite admission before growth; existing payload/CEL/preparation caps do not prove it. No external dependency is selected by this decision.
+At decision time, the package catalogue contained main artifact schemas, not the AgentSession checker/policy files. The actual source implementation must include exact published files and verify source/wheel agreement. Descriptor-to-policy and policy-to-checker hashes must verify the same trusted bytes used for parsing. Raw acquisition, mismatch/failure, decoding and hash buffers require explicit finite admission before growth; existing payload/CEL/preparation caps do not prove it. No external dependency is selected by this decision.
 
 ## Required implementation and activation checks
 
@@ -28,3 +28,7 @@ The current package catalogue contains main artifact schemas, not the AgentSessi
 Independent correctness/security/performance proposal review covered the final format and existing published sources. The accepted proposal SHA-256 is `3548fc5e52c5be4acff908de7e90f85c163f1b1bf53f64722b05298500a55caa`; issue review records identify inspected inputs and bounded clarifications. Owner approval and contract publication do not prove runtime checks. Actual-diff review and one complete final-head CI remain mandatory for publication; no unchanged CI rerun is authorized.
 
 Existing TM-04/TM-10, TM-06/TM-07 and TM-08/TM-11/TM-12 cover resource admission, content disclosure, immutable identity and trusted evidence. No sink, credential, privilege or operational permission is added. #593 retains complete graph construction, checking, publication/start and activation diagnostics; #138 and the native work-item owners retain payload/provider/projection composition. Retained pricing/CEL mutation findings add no campaign or new merge hold.
+
+## Implementation follow-up
+
+[#679](https://github.com/realkarych/kora/issues/679) implements the exact direct leaves and trusted packaged AgentSession sources; its [implementation record](native-output-construction-2026-11-04.md) identifies real builder/reader, saved-view CEL and both-database evidence and remaining activation limits. The publication above selected no numerical server default or complete-execution authority.
