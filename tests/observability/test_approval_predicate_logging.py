@@ -15,26 +15,33 @@ from tests.observability.conftest import (
 
 
 @pytest.mark.parametrize("ending", ["valid", "invalid", "syntax", "context", "schema"])
+@pytest.mark.parametrize("parameters", [False, True])
 def test_explicit_approval_logging_excludes_content(
-    configure: Configure, pipe: Pipe, capsys: pytest.CaptureFixture[str], ending: str
+    configure: Configure,
+    pipe: Pipe,
+    capsys: pytest.CaptureFixture[str],
+    ending: str,
+    parameters: bool,
 ) -> None:
     marker = "private_explicit_approval_content"
     form: JsonObject = decision_form({"enum": ["approve"]})
     form["description"] = marker
     form["$defs"] = {marker: {"const": marker}}
+    context = "params" if parameters else "response"
     predicate = {
-        "valid": "response.decision == 'approve'",
-        "invalid": "response.decision == '" + marker + "'",
+        "valid": context + ".decision == 'approve'",
+        "invalid": context + ".decision == '" + marker + "'",
         "syntax": "'" + marker + "' &&",
         "context": "inputs." + marker,
-        "schema": "true",
+        "schema": context + ".decision == 'approve'",
     }[ending]
     if ending == "schema":
         form = {"$ref": "https://example.invalid/" + marker}
     document = document_for(
+        params=form if parameters else None,
         nodes={
             "gate": gate(form, predicate, source={"file": marker + ".py", "line": 1})
-        }
+        },
     )
     diagnostics = configured_with_reader(
         configure, pipe, LoggingSettings(level=Level.DEBUG)
@@ -69,10 +76,14 @@ def test_explicit_approval_logging_excludes_content(
 
 
 @pytest.mark.parametrize("broken", [False, True])
+@pytest.mark.parametrize("parameters", [False, True])
 def test_explicit_approval_survives_unavailable_sink(
-    configure: Configure, pipe: Pipe, broken: bool
+    configure: Configure, pipe: Pipe, broken: bool, parameters: bool
 ) -> None:
-    document = document_for(nodes={"gate": gate({}, "0")})
+    document = document_for(
+        params={"properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
+        nodes={"gate": gate({}, "params.ok == 0" if parameters else "0")},
+    )
     expected = validate_approval_response_predicates(document)
     settings = LoggingSettings(queue_records=64, queue_bytes=65_536)
     diagnostics = configure(settings, pipe.write_end)

@@ -4,6 +4,7 @@ from itertools import chain
 from pydantic import MISSING
 
 from kora.cel import Environment, ResultKind, SchemaError, SchemaTypes, check_typed
+from kora.cel.cost import Variable
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
 from kora.cel.meter import Meter
@@ -90,8 +91,9 @@ class ApprovalResponsePredicateResult:
         return self.approval_predicates_complete and self.diagnostics.valid
 
 
-def requires_full_context(source: str, meter: Meter) -> bool:
+def required_context(source: str, meter: Meter) -> frozenset[str]:
     pending: list[Node] = [parse(source, meter=meter)]
+    required: set[str] = set()
     while pending:
         node = pending.pop()
         meter.tick()
@@ -99,10 +101,10 @@ def requires_full_context(source: str, meter: Meter) -> bool:
             continue
         if isinstance(node, Identifier):
             if node.name in {"inputs", "params"}:
-                return True
+                required.add(node.name)
         elif isinstance(node, Comprehension):
             if node.variable in {"inputs", "params"}:
-                return True
+                required.add(node.variable)
             pending.extend((node.range, *node.arguments))
         elif isinstance(node, Select | Unary):
             pending.append(node.operand)
@@ -124,17 +126,21 @@ def requires_full_context(source: str, meter: Meter) -> bool:
             pending.extend(
                 part for entry in node.entries for part in (entry.key, entry.value)
             )
-    return False
+    return frozenset(required)
 
 
 class ApprovalPredicateChecks:
-    def __init__(self, contracts: dict[str, TypeContract]) -> None:
+    def __init__(
+        self, contracts: dict[str, TypeContract], parameters: JsonObject | MISSING
+    ) -> None:
         roots = {
             "urn:kora:artifact:" + name.replace("/", ":"): root
             for name, contract in contracts.items()
             if (root := contract_schema(name, contract)) is not None
         }
         self.schemas: SchemaTypes = SchemaTypes(roots.get)
+        self.parameters: JsonObject | MISSING = parameters
+        self.parameter_variable: Variable | None | MISSING = MISSING
         self.meter: Meter = Meter()
         self.collector: DiagnosticCollector = DiagnosticCollector()
         self.default_form: JsonObject = default_approval_form()
@@ -145,6 +151,16 @@ class ApprovalPredicateChecks:
         self.context_unresolved: int = 0
         self.schema_unresolved: int = 0
 
+    def parameter_context(self) -> Variable | None:
+        if self.parameter_variable is MISSING:
+            if self.parameters is MISSING:
+                return None
+            try:
+                self.parameter_variable = self.schemas.variable(self.parameters)
+            except SchemaError:
+                self.parameter_variable = None
+        return self.parameter_variable
+
     def check(
         self, node: HumanInputNode, name: str, path: tuple[str | int, ...]
     ) -> None:
@@ -154,22 +170,31 @@ class ApprovalPredicateChecks:
             return
         self.seen += 1
         try:
-            deferred = requires_full_context(predicate, self.meter)
+            required = required_context(predicate, self.meter)
         except DiagnosticError:
             self.syntax_unresolved += 1
             return
-        if deferred:
+        if "inputs" in required or (
+            "params" in required and self.parameters is MISSING
+        ):
             self.context_unresolved += 1
             return
+        variables: dict[str, Variable] = {}
+        if "params" in required:
+            parameter = self.parameter_context()
+            if parameter is None:
+                self.schema_unresolved += 1
+                return
+            variables["params"] = parameter
         form = self.default_form if node.config.form is MISSING else node.config.form
         try:
-            response = self.schemas.variable(form)
+            variables["response"] = self.schemas.variable(form)
         except SchemaError:
             self.schema_unresolved += 1
             return
         self.checked += 1
         checked = check_typed(
-            predicate, Environment({"response": response}, ResultKind.BOOL), self.meter
+            predicate, Environment(variables, ResultKind.BOOL), self.meter
         )
         if isinstance(checked, CelDiagnostic):
             self.collector.add(
@@ -186,7 +211,7 @@ class ApprovalPredicateChecks:
 def validate_approval_response_predicates(
     document: GraphDocument,
 ) -> ApprovalResponsePredicateResult:
-    checks = ApprovalPredicateChecks(document.type_contracts)
+    checks = ApprovalPredicateChecks(document.type_contracts, document.graph.params)
     graph = document.graph
     definitions = {} if graph.subgraphs is MISSING else graph.subgraphs
     bodies = chain(

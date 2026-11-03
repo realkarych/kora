@@ -6,7 +6,7 @@ import pytest
 from pydantic import MISSING
 
 from kora.cel import CheckedExpression, Environment, SchemaTypes
-from kora.cel.cost import Variable
+from kora.cel.cost import ValueBound, Variable
 from kora.cel.tree import Node
 from kora.cel.types import Record
 from kora.ir import (
@@ -15,6 +15,7 @@ from kora.ir import (
     validate_approval_response_predicates,
 )
 from kora.ir.approval_predicates import ApprovalPredicateChecks
+from kora.ir.json import JsonObject
 from tests.ir.approval_default_cases import gate
 from tests.ir.approval_predicate_cases import shared_predicates
 from tests.ir.graph_link_cases import node
@@ -110,3 +111,104 @@ def test_explicit_approval_releases_owned_state(ending: str, nested: bool) -> No
     assert bool(diagnostic_references) is (ending == "invalid")
     assert all(reference() is None for reference in diagnostic_references)
     assert result_reference() is None
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_approval_parameter_mapping_is_once_per_invocation(invalid: bool) -> None:
+    parameters: JsonObject = {
+        "properties": {
+            f"field{index}": {
+                "type": "array",
+                "maxItems": 2,
+                "items": {"type": "string", "maxLength": 4},
+            }
+            for index in range(64)
+        },
+        "required": ["field0"],
+    }
+    if invalid:
+        properties = parameters["properties"]
+        assert isinstance(properties, dict)
+        properties["invalid"] = {"type": "string", "maxLength": True}
+    predicate = "params.field0.all(value, value == 'ok')"
+    one = document_for(params=parameters, nodes={"gate": gate(None, predicate)})
+    many = document_for(
+        params=parameters,
+        nodes={f"gate{index}": gate(None, predicate) for index in range(40)},
+    )
+
+    single = validate_approval_response_predicates(one)
+    repeated = validate_approval_response_predicates(many)
+
+    assert single.approval_predicates_valid is not invalid
+    assert repeated.approval_predicates_valid is not invalid
+    assert repeated.predicates_seen == 40
+    assert repeated.predicates_checked == (0 if invalid else 40)
+    assert repeated.schema_unresolved == (40 if invalid else 0)
+    assert repeated.schema_steps == single.schema_steps
+    assert repeated.checker_steps == single.checker_steps * 40
+
+
+def test_approval_parameter_deep_mapping_is_iterative() -> None:
+    parameters: JsonObject = {
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+    }
+    for _ in range(5000):
+        parameters = {"allOf": [parameters]}
+    document = document_for(params=parameters, nodes={"gate": gate(None, "params.ok")})
+
+    result = validate_approval_response_predicates(document)
+
+    assert result.approval_predicates_valid
+    assert result.schema_steps < 3 * 5000 + 50
+    assert result.predicates_checked == 1
+
+
+@pytest.mark.parametrize("ending", ["valid", "invalid", "schema", "context"])
+def test_approval_parameter_context_releases_bound_state(ending: str) -> None:
+    parameters: JsonObject = {
+        "properties": {
+            "values": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {"type": "string", "maxLength": 5},
+            }
+        },
+        "required": ["values"],
+    }
+    if ending == "schema":
+        properties = parameters["properties"]
+        assert isinstance(properties, dict)
+        properties["missing"] = {"$ref": "urn:kora:artifact:missing"}
+    predicate = {
+        "valid": "params.values.all(value, value == 'ok')",
+        "invalid": "params.values == 0",
+        "schema": "params.values.all(value, value == 'ok')",
+        "context": "inputs.ok && params.values.all(value, value == 'ok')",
+    }[ending]
+    document = document_for(params=parameters, nodes={"gate": gate(None, predicate)})
+    assert document.graph.params is not MISSING
+    references = [weakref.ref(document), weakref.ref(document.graph.params)]
+    owned_types = (
+        SchemaTypes
+        | ApprovalPredicateChecks
+        | CheckedExpression
+        | Record
+        | Environment
+        | Variable
+        | ValueBound
+        | Node
+    )
+    gc.collect()
+    baseline = sum(isinstance(value, owned_types) for value in gc.get_objects())
+
+    result = validate_approval_response_predicates(document)
+    del document
+    gc.collect()
+    remaining = sum(isinstance(value, owned_types) for value in gc.get_objects())
+
+    assert all(reference() is None for reference in references)
+    assert remaining == baseline
+    assert result.approval_predicates_complete is (ending in {"valid", "invalid"})
+    assert result.approval_predicates_valid is (ending == "valid")
