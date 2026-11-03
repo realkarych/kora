@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:kora:artifact:AgentSession:cel:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "harness",
+    "installed_version",
+    "session_id",
+    "billing_class",
+    "usage",
+    "usage_coverage",
+    "turns",
+    "duration_ms",
+    "stop_reason",
+    "provenance"
+  ],
+  "properties": {
+    "harness": {
+      "$ref": "#/$defs/identifier"
+    },
+    "installed_version": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/identifier"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/identifier"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "billing_class": {
+      "anyOf": [
+        {
+          "enum": [
+            "api_key",
+            "subscription",
+            "gateway",
+            "managed"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "usage": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/usage"
+      }
+    },
+    "usage_coverage": {
+      "$ref": "#/$defs/coverage"
+    },
+    "turns": {
+      "$ref": "#/$defs/token"
+    },
+    "duration_ms": {
+      "$ref": "#/$defs/count"
+    },
+    "stop_reason": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}(?![\\s\\S])"
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "worker_id",
+        "image_digest"
+      ],
+      "properties": {
+        "worker_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "image_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+(?![\\s\\S])"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[\\x21-\\x7e]+(?![\\s\\S])"
+    },
+    "cost_identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "The unchanged accepted cost Identifier predicate is an additional semantic check; structural validation alone is insufficient."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "token": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "money": {
+      "type": "string",
+      "maxLength": 25,
+      "pattern": "^(?:0|[1-9][0-9]{0,13})(?:\\.[0-9]{0,9}[1-9])?(?![\\s\\S])"
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "input_tokens",
+        "cached_input_tokens",
+        "cache_creation_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "known_token_fields",
+        "cache_creation_by_ttl",
+        "completeness",
+        "basis",
+        "billing_class",
+        "delta_of_session_totals",
+        "usd_estimate"
+      ],
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/cost_identifier"
+        },
+        "input_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "cached_input_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "cache_creation_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "output_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "reasoning_tokens": {
+          "$ref": "#/$defs/token"
+        },
+        "known_token_fields": {
+          "type": "array",
+          "maxItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "input_tokens",
+              "cached_input_tokens",
+              "cache_creation_tokens",
+              "output_tokens",
+              "reasoning_tokens"
+            ]
+          }
+        },
+        "cache_creation_by_ttl": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "5m",
+                "1h"
+              ],
+              "properties": {
+                "5m": {
+                  "$ref": "#/$defs/token"
+                },
+                "1h": {
+                  "$ref": "#/$defs/token"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "completeness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "harness_list",
+            "harness_managed",
+            "price_table",
+            "gateway"
+          ]
+        },
+        "billing_class": {
+          "enum": [
+            "api_key",
+            "subscription",
+            "gateway",
+            "managed"
+          ]
+        },
+        "delta_of_session_totals": {
+          "type": "boolean"
+        },
+        "usd_estimate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/money"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "completeness",
+        "attribution_gap",
+        "observation_gap"
+      ],
+      "properties": {
+        "completeness": {
+          "enum": [
+            "complete",
+            "partial",
+            "unavailable"
+          ]
+        },
+        "attribution_gap": {
+          "type": "boolean"
+        },
+        "observation_gap": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

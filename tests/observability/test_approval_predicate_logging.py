@@ -4,6 +4,7 @@ from kora.ir import validate_approval_response_predicates
 from kora.ir.json import JsonObject
 from kora.observability import Level, LoggingSettings
 from tests.ir.approval_default_cases import decision_form, gate
+from tests.ir.approval_input_cases import direct_document, producer, unavailable_inputs
 from tests.ir.inline_schema_cases import document_for
 from tests.observability.conftest import (
     Configure,
@@ -48,7 +49,12 @@ def test_explicit_approval_logging_excludes_content(
     document = document_for(
         params=form if parameters == "declared" else None,
         nodes={
-            "gate": gate(form, predicate, source={"file": marker + ".py", "line": 1})
+            "gate": gate(
+                form,
+                predicate,
+                source={"file": marker + ".py", "line": 1},
+                **({"inputs": unavailable_inputs()} if ending == "context" else {}),
+            )
         },
     )
     diagnostics = configured_with_reader(
@@ -84,7 +90,7 @@ def test_explicit_approval_logging_excludes_content(
 
 
 @pytest.mark.parametrize("broken", [False, True])
-@pytest.mark.parametrize("parameters", ["response", "declared", "omitted"])
+@pytest.mark.parametrize("parameters", ["response", "declared", "omitted", "inputs"])
 def test_explicit_approval_survives_unavailable_sink(
     configure: Configure, pipe: Pipe, broken: bool, parameters: str
 ) -> None:
@@ -96,6 +102,8 @@ def test_explicit_approval_survives_unavailable_sink(
         params=None if parameters == "omitted" else declared,
         nodes={"gate": gate({}, "0" if parameters == "response" else "params.ok == 0")},
     )
+    if parameters == "inputs":
+        document = direct_document("inputs.data.ok == 0", producer(schema=declared))
     expected = validate_approval_response_predicates(document)
     settings = LoggingSettings(queue_records=64, queue_bytes=65_536)
     diagnostics = configure(settings, pipe.write_end)
@@ -117,3 +125,42 @@ def test_explicit_approval_survives_unavailable_sink(
     assert snapshot.queue_bytes <= settings.queue_bytes
     assert drained
     assert not diagnostics.writer_is_alive()
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def test_direct_approval_input_logging_excludes_schema_and_expression_content(
+    configure: Configure,
+    pipe: Pipe,
+    capsys: pytest.CaptureFixture[str],
+    invalid: bool,
+) -> None:
+    marker = "private_input_schema_content"
+    schema: JsonObject = {
+        "properties": {marker: {"enum": [marker]}},
+        "required": [marker],
+    }
+    predicate = (
+        "inputs.data." + marker + " == '" + ("wrong" if invalid else marker) + "'"
+    )
+    document = direct_document(predicate, producer(schema=schema))
+    diagnostics = configured_with_reader(
+        configure, pipe, LoggingSettings(level=Level.DEBUG)
+    )
+
+    result = validate_approval_response_predicates(document)
+    output = finished_output(diagnostics, pipe)
+
+    records = [
+        record
+        for record in pipe.reader.records()
+        if record["event"] == "ir.approval_predicates.completed"
+    ]
+    assert len(records) == 1
+    assert records[0]["predicates_checked"] == 1
+    assert records[0]["nodes"] == 2
+    assert records[0]["errors"] == int(invalid)
+    assert records[0]["approval_predicates_complete"] is True
+    assert result.approval_predicates_valid is not invalid
+    assert marker not in output
+    assert all(marker not in error.message for error in result.diagnostics.errors)
+    assert capsys.readouterr().out == ""

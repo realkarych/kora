@@ -24,6 +24,7 @@ from kora.cel.tree import (
     Unary,
 )
 from kora.ir.approval_form import default_approval_form
+from kora.ir.approval_inputs import DirectInputContexts, InputFailure
 from kora.ir.contracts import TypeContract
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
@@ -31,7 +32,7 @@ from kora.ir.document import GraphDocument
 from kora.ir.graph_links import COMPONENT, safe_source
 from kora.ir.json import JsonObject
 from kora.ir.schema_catalogue import contract_schema
-from kora.ir.topology import HumanInputNode
+from kora.ir.topology import GraphBody, HumanInputNode
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 COMPLETED: EventSpec = CATALOG.register(
@@ -144,6 +145,9 @@ class ApprovalPredicateChecks:
         self.meter: Meter = Meter()
         self.collector: DiagnosticCollector = DiagnosticCollector()
         self.default_form: JsonObject = default_approval_form()
+        self.inputs: DirectInputContexts = DirectInputContexts(
+            self.schemas, contracts, roots, self.default_form
+        )
         self.human_inputs: int = 0
         self.seen: int = 0
         self.checked: int = 0
@@ -165,7 +169,11 @@ class ApprovalPredicateChecks:
         return self.parameter_variable
 
     def check(
-        self, node: HumanInputNode, name: str, path: tuple[str | int, ...]
+        self,
+        body: GraphBody,
+        node: HumanInputNode,
+        name: str,
+        path: tuple[str | int, ...],
     ) -> None:
         self.human_inputs += 1
         predicate = node.config.approve_when
@@ -177,10 +185,16 @@ class ApprovalPredicateChecks:
         except DiagnosticError:
             self.syntax_unresolved += 1
             return
-        if "inputs" in required:
-            self.context_unresolved += 1
-            return
         variables: dict[str, Variable] = {}
+        if "inputs" in required:
+            inputs = self.inputs.context(body, node)
+            if inputs is InputFailure.CONTEXT:
+                self.context_unresolved += 1
+                return
+            if inputs is InputFailure.SCHEMA:
+                self.schema_unresolved += 1
+                return
+            variables["inputs"] = inputs
         if "params" in required:
             parameter = self.parameter_context()
             if parameter is None:
@@ -195,7 +209,9 @@ class ApprovalPredicateChecks:
             return
         self.checked += 1
         checked = check_typed(
-            predicate, Environment(variables, ResultKind.BOOL), self.meter
+            predicate,
+            Environment(variables, ResultKind.BOOL, frozenset({"inputs"})),
+            self.meter,
         )
         if isinstance(checked, CelDiagnostic):
             self.collector.add(
@@ -224,7 +240,7 @@ def validate_approval_response_predicates(
         for name, node in body.nodes.items():
             nodes += 1
             if isinstance(node, HumanInputNode):
-                checks.check(node, name, (*path, "nodes", name))
+                checks.check(body, node, name, (*path, "nodes", name))
     result = ApprovalResponsePredicateResult(
         checks.collector.finish(),
         nodes,

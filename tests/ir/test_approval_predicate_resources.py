@@ -17,6 +17,7 @@ from kora.ir import (
 from kora.ir.approval_predicates import ApprovalPredicateChecks
 from kora.ir.json import JsonObject
 from tests.ir.approval_default_cases import gate
+from tests.ir.approval_input_cases import unavailable_inputs
 from tests.ir.approval_predicate_cases import shared_predicates
 from tests.ir.graph_link_cases import node
 from tests.ir.inline_schema_cases import document_for
@@ -55,7 +56,14 @@ def test_explicit_approval_releases_owned_state(ending: str, nested: bool) -> No
     predicate = {"syntax": "true &&", "context": "inputs.ok"}.get(
         ending, "response.decision == 'approve'"
     )
-    document = shared_predicates(3, 100, predicate, ending == "invalid", nested)
+    document = shared_predicates(
+        3,
+        100,
+        predicate,
+        ending == "invalid",
+        nested,
+        unresolved_inputs=ending == "context",
+    )
     if ending == "schema":
         gate_node = gate(
             {"$ref": "urn:kora:artifact:example:Missing"},
@@ -202,7 +210,13 @@ def test_approval_parameter_context_releases_bound_state(
             form = {"$ref": "urn:kora:artifact:missing"}
     document = document_for(
         params=None if omitted else parameters,
-        nodes={"gate": gate(form, predicate)},
+        nodes={
+            "gate": gate(
+                form,
+                predicate,
+                **({"inputs": unavailable_inputs()} if ending == "context" else {}),
+            )
+        },
     )
     references: list[Callable[[], object | None]] = [weakref.ref(document)]
     if document.graph.params is not MISSING:

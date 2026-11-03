@@ -1,0 +1,42 @@
+# Direct approval input checking
+
+Date: 2026-11-03. Implementing issue: [#646](https://github.com/realkarych/kora/issues/646), a bounded child of [#552](https://github.com/realkarych/kora/issues/552) within [#593](https://github.com/realkarych/kora/issues/593). Governing contracts: [IR sections 2.1, 7.1, 7.4 and 10](../specs/ir.md), ADR-0006/0018 and the published artifact views. This record describes static checker integration, not runtime approval or graph admission.
+
+## Delivered boundary
+
+The existing approval pass builds a closed input record from direct whole-output bindings to ordinary producers in the current graph/body. Producer output contracts supply types. Supported non-list outputs are exact published VcsRef, CommandResult, AgentSession and StructuredOutput revision 1, plus namespaced parent-null custom contracts without inline overrides. All supported types are ancestry roots, so matching producer/consumer names establishes the nominal prerequisite within this scope; this is not a replacement for general saved-ancestry assignability.
+
+AgentSession uses the byte-identical packaged frozen CEL schema, separate from its logical schema and reference root. StructuredOutput uses its accepted role-owned inline schema and structured-output view. Forms/parameters retain PLAIN mapping. The source module preserves complete Variable bounds, original local-reference bases, optional guards and selection-only inputs. No synthetic schema supplies an unavailable context.
+
+Unknown source/output/revision, differing endpoint types, inherited customs, lists, paths, reserved sources, wrappers/collections and unsupported inline combinations remain context-unresolved. Agent output schemas without config.output_schema remain unresolved. All binding prerequisites precede schema mapping; malformed mapped schemas remain schema-unresolved. A missing or empty inputs map is a real closed empty record, so unknown names and forbidden root use reach ordinary typed diagnostics. Independent predicates continue.
+
+Sources and producer-wide role decisions are cached within one invocation. Mapping success/failure is cached by schema-root/view identity, including shared malformed schemas across different producers; no exception or traceback is retained. Mapped types and nested bounds are shared rather than cloned. Each expression still prepares/checks its own environment, so schema reuse establishes no globally linear validation or wall-time guarantee.
+
+## Verification ownership
+
+| Boundary | Executable evidence | Limit |
+| --- | --- | --- |
+| Producer/schema/view and role choice | `test_approval_direct_inputs_use_producer_views`, `test_approval_direct_inputs_use_role_owned_structured_schema`, `test_approval_direct_inputs_keep_structured_null_distinct` | Static types, not payload validity or installed behavior support |
+| Node/body visibility and complete prerequisites | `test_approval_direct_inputs_are_node_and_body_scoped`, `test_approval_direct_inputs_keep_unavailable_prerequisites_incomplete`, `test_approval_direct_inputs_map_only_after_complete_prerequisites` | No forwarding, call-site or inherited-contract composition |
+| Optionality, empty declarations and source bounds | `test_approval_direct_inputs_preserve_optional_and_root_rules`, `test_approval_empty_inputs_are_closed`, `test_approval_direct_inputs_preserve_schema_roots_and_bounds`, `test_approval_direct_input_local_reference_roots_remain_separate`, `test_approval_direct_inputs_keep_recursive_saved_mapping` | Existing CEL policies and limits; no changed admission thresholds |
+| AgentSession disclosure | `test_approval_agent_session_inputs_use_frozen_metadata_view`, `test_approval_agent_session_permitted_subtrees_keep_static_view` | Fixed checker view only; runtime construction/cutting/persistence remain pending |
+| Repeated mapping and producer work | `test_approval_direct_inputs_reuse_shared_mapping_and_failures`, `test_approval_direct_inputs_cache_producer_roles_and_views`, `test_approval_direct_inputs_cache_role_schema_equality`, `test_approval_direct_inputs_skip_unused_schema_work` | One versus 1,000 consumers, 1,000-deep saved roots, counted cache/mapping work; no elapsed/RSS assertion |
+| Exact invocation ownership | `test_approval_direct_inputs_release_invocation_state` | Caller records and transient contexts/views/types/bounds are released while copied scalar result remains alive; covers valid, typed-invalid, syntax, context and partial-schema failure |
+| Diagnostics | `test_direct_approval_input_logging_excludes_schema_and_expression_content`, direct-input legs of `test_explicit_approval_survives_unavailable_sink` | Private schema/expression content excluded, existing real blocked/broken sink limits and actual shutdown retained |
+| Installed package identity | `test_type_schema_catalogue_is_published_unchanged_in_core_wheel`, `test_type_schema_validation_works_from_installed_core_only_wheel` | Frozen schema bytes and actual installed checking without native CEL import; no provider execution |
+
+The existing response/parameter regressions remain. Cases specifically protecting context incompleteness now declare a genuinely unavailable source; separate closed-empty cases protect the newly completed context. This preserves their behavioral distinctions instead of deleting old assertions.
+
+## Threat and resource assessment
+
+Existing TM-04 covers authored schemas/expressions and closed reference authority; TM-06/TM-07 cover content-free diagnostics and the AgentSession allowlist; TM-10 covers bounded checking and owned transient state; TM-11/TM-12 cover immutable packaged interpretation and evidence. No actor, credential, persistence, filesystem/network execution authority, runtime assumption or dependency changes. Schema resources are existing published data copied unchanged into the installed package, not downloaded at runtime. No threat-model policy amendment is needed.
+
+The synchronous invocation owns source caches, selected views, schema mappings and generated input records/bounds. Individual environments/ASTs/check results are expression-local. The result owns only copied bounded diagnostics and scalar counts. Tests use real schema/checker components and exact ownership observations, not mocks, process-wide heap thresholds or an additional qualification campaign. No asynchronous resource owner is introduced.
+
+Independent correctness, security and performance design reviews inspected master `c9efcf8a5a8ec8a1326777ed16fae37d58350187` and the [implementation plan](https://github.com/realkarych/kora/issues/646#issuecomment-6604132779). Actual source review, final focused/static checks and complete final-head CI remain required before merge; their revision-matched results belong in the PR.
+
+The latest available master mutation audit, [41622297131](https://github.com/realkarych/kora/actions/runs/41622297131), failed execution with zero executed/reused entries. The latest successful reporting run, [41297342266](https://github.com/realkarych/kora/actions/runs/41297342266), is partial at budget with 113 executed and zero reused entries. Both cover pricing/CEL paths, not this direct-input integration; no applicable finding or PR mutation gate is inferred.
+
+## Remaining activation
+
+#552 retains inherited checker compatibility, nested paths, reserved sources, forwarded/call-site contracts, wrapper/export/collection/list composition and full shared-validator integration. #549 retains real configured provider facts. #593 retains supported saved interpretation, immutable deployment and canonical acceptance. Native binding compilation, frozen projection construction/storage, AgentSession runtime view enforcement, payload/aggregate admission and public API/CLI/MCP activation remain with their existing owners. This partial pass does not close those capabilities or authorize execution.

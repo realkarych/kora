@@ -14,6 +14,7 @@ from kora.ir import (
 from kora.ir.diagnostic_collection import MAX_DIAGNOSTIC_BYTES, MAX_DIAGNOSTICS
 from kora.ir.json import JsonObject
 from tests.ir.approval_default_cases import decision_form, gate, saved_form
+from tests.ir.approval_input_cases import unavailable_inputs
 from tests.ir.graph_link_cases import node
 from tests.ir.inline_schema_cases import document_for
 
@@ -117,7 +118,9 @@ def test_explicit_approval_effective_form(
 def test_explicit_approval_classifies_required_context(
     predicate: str, complete: bool
 ) -> None:
-    document = document_for(nodes={"gate": gate({}, predicate)})
+    document = document_for(
+        nodes={"gate": gate({}, predicate, inputs=unavailable_inputs())}
+    )
     before = export_ir(document)
 
     result = validate_approval_response_predicates(document)
@@ -338,7 +341,7 @@ def test_explicit_approval_terminal_categories_and_stored_scope_partition() -> N
     document = document_for(
         nodes={
             "syntax": gate(missing, "inputs.ok &&"),
-            "context": gate(missing, "inputs.ok"),
+            "context": gate(missing, "inputs.ok", inputs=unavailable_inputs()),
             "schema": gate(missing, "true"),
             "invalid": gate({}, "0"),
             "valid": gate(None, "response.decision == 'approve'"),

@@ -1,6 +1,7 @@
 from kora.ir import GraphDocument
 from kora.ir.json import JsonObject
 from tests.ir.approval_default_cases import decision_form, gate, saved_form
+from tests.ir.approval_input_cases import unavailable_inputs
 from tests.ir.graph_link_cases import node
 from tests.ir.inline_schema_cases import document_for
 
@@ -11,6 +12,7 @@ def shared_predicates(
     predicate: str = "response.decision == 'approve'",
     invalid: bool = False,
     nested: bool = False,
+    unresolved_inputs: bool = False,
 ) -> GraphDocument:
     schema: JsonObject = decision_form(
         {"enum": ["reject"] if invalid else ["approve", "reject"]}
@@ -22,6 +24,7 @@ def shared_predicates(
             {"$ref": "urn:kora:artifact:example:Form"},
             predicate,
             source={"file": "node.py", "line": 1},
+            **({"inputs": unavailable_inputs()} if unresolved_inputs else {}),
         )
         for index in range(count)
     }

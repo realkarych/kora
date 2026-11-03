@@ -4,6 +4,7 @@ from pydantic import MISSING
 from kora.ir import export_ir, validate_approval_response_predicates
 from kora.ir.json import JsonObject
 from tests.ir.approval_default_cases import gate, saved_form
+from tests.ir.approval_input_cases import unavailable_inputs
 from tests.ir.graph_link_cases import node
 from tests.ir.inline_schema_cases import document_for
 
@@ -80,7 +81,7 @@ def test_declared_approval_parameters_do_not_complete_input_context(
 ) -> None:
     document = document_for(
         params={"properties": {"ok": {"type": "boolean"}}, "required": ["ok"]},
-        nodes={"gate": gate(None, predicate)},
+        nodes={"gate": gate(None, predicate, inputs=unavailable_inputs())},
     )
 
     result = validate_approval_response_predicates(document)
@@ -116,7 +117,7 @@ def test_declared_approval_parameter_schema_failure_is_scoped(
             "parameters": gate(None, "params.ok"),
             "response": gate(None, "response.decision == 'approve'"),
             "syntax": gate(None, "params.ok &&"),
-            "inputs": gate(None, "inputs.ok && params.ok"),
+            "inputs": gate(None, "inputs.ok && params.ok", inputs=unavailable_inputs()),
         },
     )
 
@@ -281,7 +282,9 @@ def test_omitted_approval_parameters_use_closed_empty_schema(
 def test_omitted_approval_parameters_do_not_complete_input_context(
     predicate: str,
 ) -> None:
-    document = document_for(nodes={"gate": gate(None, predicate)})
+    document = document_for(
+        nodes={"gate": gate(None, predicate, inputs=unavailable_inputs())}
+    )
 
     result = validate_approval_response_predicates(document)
 

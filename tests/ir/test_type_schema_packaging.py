@@ -15,7 +15,13 @@ REPOSITORY: Path = Path(__file__).resolve().parents[2]
 def test_type_schema_catalogue_is_published_unchanged_in_core_wheel(
     core_wheel: Path,
 ) -> None:
-    names = ("VcsRef", "StructuredOutput", "AgentSession", "CommandResult")
+    names = (
+        "VcsRef",
+        "StructuredOutput",
+        "AgentSession",
+        "CommandResult",
+        "AgentSession.cel",
+    )
 
     with ZipFile(core_wheel) as archive:
         packaged = {
@@ -77,6 +83,28 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "from kora.ir import validate_expression_syntax, validate_input_paths",
             "from kora.ir import validate_approval_response_predicates",
             "from pathlib import Path",
+            "direct = {'ir_version': '1.0',",
+            " 'type_contracts': {'AgentSession': {'builtin_revision': '1'}},",
+            " 'graph': {'id': 'g', 'namespace': 'example', 'nodes': {",
+            " 'agent': {'kind': 'agent',",
+            " 'outputs': {'session': {'type': 'AgentSession'}},",
+            " 'config': {'harness': 'claude', 'prompt': '',",
+            " 'workspace': {'repo': ''}}},",
+            " 'gate': {'kind': 'human_input',",
+            " 'inputs': {'session': {'type': 'AgentSession',",
+            " 'from': 'agent', 'output': 'session'}},",
+            " 'outputs': {'response': {'type': 'StructuredOutput'}},",
+            " 'config': {'channel': 'cli', 'timeout': '0s', 'on_expiry': 'fail',",
+            " 'approve_when': 'inputs.session.turns > 0'}}}},",
+            " 'runtime': {'runtime': 'local', 'vcs': 'git'}}",
+            "checked = validate_approval_response_predicates(",
+            "    GraphDocument.model_validate(direct))",
+            "assert checked.approval_predicates_valid",
+            "direct['graph']['nodes']['gate']['config']['approve_when'] = (",
+            "    'inputs.session.transcript')",
+            "checked = validate_approval_response_predicates(",
+            "    GraphDocument.model_validate(direct))",
+            "assert not checked.approval_predicates_valid",
             f"assert Path(kora.__file__).is_relative_to({str(tmp_path)!r})",
             "document = GraphDocument.model_validate({",
             "'ir_version': '1.0',",
@@ -127,7 +155,7 @@ def test_type_schema_validation_works_from_installed_core_only_wheel(
             "for predicate, complete, valid, errors in [",
             "    (\"response.decision == 'approve'\", True, True, 0),",
             "    ('params.ok', True, True, 0), ('params.ok == 1', True, False, 1),",
-            "    ('0', True, False, 1), ('inputs.ok', False, False, 0)]:",
+            "    ('0', True, False, 1), ('inputs.ok', True, False, 1)]:",
             "    approval_result = validate_approval_response_predicates(",
             "        approval(predicate))",
             "    assert approval_result.approval_predicates_complete is complete",
