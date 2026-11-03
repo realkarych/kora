@@ -20,6 +20,7 @@ from tests.plugins.storage.recovery_summary import (
     require_owned,
     require_unchanged,
 )
+from tests.plugins.storage.test_pressure_controller import assert_controller_phase
 
 MARKER = "private-record-payload"
 SUMMARY: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
@@ -78,6 +79,72 @@ def failure_with_cleanup(directory: Path, cleanup_fails: bool) -> None:
         )
         if cleanup_fails:
             raise_recovery_failure(directory, b"later refusal")
+
+
+def phase_failure_with_cleanup(
+    directory: Path, initial: dict[str, JsonValue], cleanup_fails: bool
+) -> None:
+    try:
+        assert_controller_phase(b"", b"provider_started\n", directory)
+    finally:
+        (directory / "pressure-manifest.json").write_text(
+            json.dumps(initial | {"command_exit_status": 0, "resources_closed": True})
+        )
+        (directory / "report.json").write_text(
+            json.dumps({"resources_closed": True, "failure": None})
+        )
+        if cleanup_fails:
+            raise_recovery_failure(directory, b"later refusal")
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_phase_failure_preserves_initial_summary_through_cleanup(
+    tmp_path: Path, cleanup_fails: bool
+) -> None:
+    initial = manifest() | {
+        "image_requested": True,
+        "attachment_requested": False,
+        "image_stamp": None,
+        "command_exit_status": 17,
+        "command_inflight": False,
+        "resources_closed": False,
+    }
+    manifest_path = tmp_path / "pressure-manifest.json"
+    report_path = tmp_path / "report.json"
+    manifest_path.write_text(json.dumps(initial))
+    report_path.write_text(
+        json.dumps({"failure": "command_failed", "resources_closed": False})
+    )
+    (tmp_path / "command-stdout.txt").write_text(MARKER)
+    before = frozenset(os.listdir("/dev/fd"))
+
+    with pytest.raises(AssertionError) as failure:
+        phase_failure_with_cleanup(tmp_path, initial, cleanup_fails)
+    first = failure.value.__context__ if cleanup_fails else failure.value
+    after = frozenset(os.listdir("/dev/fd"))
+
+    assert isinstance(first, AssertionError)
+    assert "report.json" in str(first)
+    assert "command_failed" in str(first)
+    assert len(first.__notes__) == 1
+    retained = first.__notes__[0]
+    result = SUMMARY.validate_json(retained)
+    assert result.keys() == KEYS
+    assert result["recorded_command_exit_status"] == 17
+    assert result["recorded_command_inflight"] is False
+    assert result["recorded_image_requested"] is True
+    assert result["recorded_attachment_requested"] is False
+    assert result["image_stamp_record_present"] is False
+    assert result["recorded_manifest_resources_closed"] is False
+    assert result["recorded_report_resources_closed"] is False
+    assert MARKER not in retained
+    assert str(tmp_path) not in retained
+    assert len(retained.encode()) <= OUTPUT_LIMIT
+    assert before == after
+    later = decoded(tmp_path)
+    assert later["recorded_command_exit_status"] == 0
+    assert later["recorded_manifest_resources_closed"] is True
+    assert later["recorded_report_resources_closed"] is True
 
 
 def test_summary_contains_only_approved_scalars(tmp_path: Path) -> None:

@@ -25,7 +25,10 @@ from tests.plugins.storage.pressure_native import (
     command,
     process_token,
 )
-from tests.plugins.storage.recovery_summary import raise_recovery_failure
+from tests.plugins.storage.recovery_summary import (
+    raise_recovery_failure,
+    recovery_summary,
+)
 
 REPOSITORY: Path = Path(__file__).resolve().parents[3]
 
@@ -173,6 +176,14 @@ def controller_diagnostics(directory: Path) -> str:
         else:
             result.append(name + " absent")
     return "\n".join(result)
+
+
+def assert_controller_phase(actual: bytes, expected: bytes, directory: Path) -> None:
+    try:
+        assert actual == expected, controller_diagnostics(directory)
+    except AssertionError as failure:
+        failure.add_note(recovery_summary(directory))
+        raise
 
 
 def run_controller(
@@ -346,7 +357,7 @@ def test_pressure_owner_recovers_legacy_source_directory(tmp_path: Path) -> None
 
     try:
         signal = next_signal(process)
-        assert signal == b"provider_started\n", controller_diagnostics(directory)
+        assert_controller_phase(signal, b"provider_started\n", directory)
         mounted = (directory / "mounted").stat()
         legacy = directory / "volume-root"
         legacy.mkdir(mode=0o700, exist_ok=True)
@@ -385,7 +396,7 @@ def test_pressure_owner_closes_after_parent_interrupt(
 
     try:
         phase = next_signal(process)
-        assert phase == b"provider_started\n", controller_diagnostics(directory)
+        assert_controller_phase(phase, b"provider_started\n", directory)
         if workload == "parent-eof":
             process.stdin.close()
         elif workload == "cancelled":
@@ -525,7 +536,7 @@ def test_pressure_owner_reconciles_lost_attachment_response(tmp_path: Path) -> N
     process = start_controller(directory, "lost-attachment-response")
     try:
         signal = next_signal(process)
-        assert signal == b"attachment_created\n", controller_diagnostics(directory)
+        assert_controller_phase(signal, b"attachment_created\n", directory)
         from tests.plugins.storage.pressure_controller import read_manifest
 
         saved = read_manifest(directory / "pressure-manifest.json")
@@ -768,7 +779,7 @@ def test_pressure_owner_recovers_interrupted_manifest_write(tmp_path: Path) -> N
     process = start_controller(directory, "pending-manifest-write")
     try:
         response = next_signal(process)
-        assert response == b"manifest_pending\n", controller_diagnostics(directory)
+        assert_controller_phase(response, b"manifest_pending\n", directory)
         pending = directory / "pressure-manifest.pending"
         assert pending.exists()
         process.kill()
