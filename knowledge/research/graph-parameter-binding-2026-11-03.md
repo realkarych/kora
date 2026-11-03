@@ -48,3 +48,7 @@ The latest master audit inspected during planning was failed run [41622297131](h
 ## Physical foundation under #658
 
 On 2026-11-03 the owner accepted [the explicit canonical JSON representation](https://github.com/realkarych/kora/issues/658#issuecomment-6613599009). [Its record](graph-value-storage-2026-11-03.md) describes the nullable physical discriminator, paired canonical text, bounded pure codec and additive non-downgradable migration. Canonical JSON, rather than every original Python code-point spelling, defines the saved logical value. Decoded-name collisions refuse before writes. This clarification changes no domain digest algorithm and never backfills a missing interpretation. The physical codec and SQL boundary tests do not complete the activation table above: the real complete-contract producer, supported-interpretation reader and start integration remain owned by #593.
+
+## Parameter-section implementation under #660
+
+The [section constructor and reader](graph-parameter-construction-2026-11-03.md) implement the accepted logical binding with bounded canonical extraction from pinned IR and exact saved-schema comparison. Real both-database tests exercise physical persistence and verification after namespace-scoped read resources close. This establishes only the parameter section; the complete writer/reader and start activation checks in the table above remain pending. No new binding, public numerical limit, provider authority or compatibility fallback is introduced.

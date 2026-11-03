@@ -101,7 +101,9 @@ def write_frame(value: object, budget: TextBudget) -> WriteFrame:
     return WriteFrame(id(value), iter(enumerate(sequence)), "]")
 
 
-def render_object(value: object, budget: TextBudget) -> str:
+def render_object(
+    value: object, budget: TextBudget, *, reject_aliases: bool = False
+) -> str:
     if type(value) is not dict:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     root = cast(dict[object, object], value)
@@ -113,7 +115,8 @@ def render_object(value: object, budget: TextBudget) -> str:
         entry = next(frame.entries, None)
         if entry is None:
             fragments.append(frame.ending)
-            active.remove(frame.identity)
+            if not reject_aliases:
+                active.remove(frame.identity)
             frames.pop()
             continue
         if not frame.first:
