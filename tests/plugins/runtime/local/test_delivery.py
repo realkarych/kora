@@ -1023,7 +1023,12 @@ async def test_control_channel_checks_attach_after_classification(
 
         finally:
             channel.close()
-    await until(lambda: bool(kora_capture.reader.records()))
+    await until(
+        lambda: any(
+            record.get("event") == "runtime.local.runner.auth_refused"
+            for record in kora_capture.reader.records()
+        )
+    )
     records = kora_capture.reader.records()
     events = [
         record
