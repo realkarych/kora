@@ -10,6 +10,7 @@ from enum import Enum
 from functools import partial
 
 from kora.cel import CheckedExpression
+from kora.cel.diagnostics import DiagnosticError
 from kora.cel.types import CelType
 from kora.cel_eval import (
     CEL_COMPONENT,
@@ -19,7 +20,7 @@ from kora.cel_eval import (
     EVALUATOR_STARTED,
     EVALUATOR_STOPPED,
 )
-from kora.cel_eval.binding import Binding, load_binding
+from kora.cel_eval.binding import Binding, PatternProbe, load_binding
 from kora.cel_eval.cache import DEFAULT_CACHE_CHARACTERS, DEFAULT_CACHE_ENTRIES
 from kora.cel_eval.convert import bind
 from kora.cel_eval.errors import (
@@ -31,13 +32,21 @@ from kora.cel_eval.errors import (
     raise_safe,
     refuse,
 )
-from kora.cel_eval.evaluate import Compilation, Machine, Prepared, Result, ResultType
+from kora.cel_eval.evaluate import (
+    Compilation,
+    Machine,
+    PatternCompilation,
+    Prepared,
+    Result,
+    ResultType,
+)
 from kora.observability import current_diagnostics
 
 STACK_BYTES: int = 1_048_576
 MAX_RENDERING: int = 65_536
 MAX_FIELD: int = 1_024
 MAX_EVENT_ID: int = 128
+FIXED_REPLY_BYTES: int = 1_024
 REAP_SECONDS: float = 0.05
 STACK_LOCK: threading.Lock = threading.Lock()
 
@@ -83,13 +92,18 @@ class ValidationWork:
     checked: CheckedExpression
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class _PatternValidationWork:
+    probe: PatternProbe
+
+
 @dataclass(frozen=True)
 class EvaluationWork:
     requests: tuple[Prepared | EvaluationError, ...]
 
 
-Work = ValidationWork | EvaluationWork
-Reply = Compilation | tuple[Result, ...] | UnavailableReason
+Work = ValidationWork | _PatternValidationWork | EvaluationWork
+Reply = Compilation | PatternCompilation | tuple[Result, ...] | UnavailableReason
 
 
 class Phase(Enum):
@@ -303,7 +317,7 @@ class EvaluationThread:
         if job.cancelled or job.future.cancelled() or handle.loop.is_closed():
             self._release(identifier)
             return
-        result_charge = 1024
+        result_charge = FIXED_REPLY_BYTES
         if isinstance(reply, tuple):
             result_charge += sum(
                 len(item) * 4
@@ -431,6 +445,8 @@ class EvaluationThread:
             work = job.work
         if isinstance(work, ValidationWork):
             reply: Reply = self.machine.validate(work.checked)
+        elif isinstance(work, _PatternValidationWork):
+            reply = self.machine.validate_pattern(work.probe)
         elif isinstance(work, EvaluationWork):
             reply = tuple(
                 request
@@ -529,6 +545,21 @@ class Evaluator:
         )
         if not isinstance(result, Compilation):
             raise_safe(RuntimeError("invalid validation reply"))
+        return result
+
+    async def validate_pattern(self, pattern: str) -> PatternCompilation:
+        self._loop()
+        try:
+            probe = PatternProbe(pattern)
+        except DiagnosticError:
+            return PatternCompilation.INCOMPLETE
+        del pattern
+        result = await self._reply(
+            _PatternValidationWork(probe),
+            max(FIXED_REPLY_BYTES, len(probe.rendering) * 4),
+        )
+        if not isinstance(result, PatternCompilation):
+            raise_safe(RuntimeError("invalid pattern validation reply"))
         return result
 
     async def evaluate(

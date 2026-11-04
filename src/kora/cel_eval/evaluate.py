@@ -6,7 +6,7 @@ from kora.cel import CheckedExpression
 from kora.cel.diagnostics import DiagnosticError
 from kora.cel.parser import RENDERING_LIMITS, parse
 from kora.cel.types import CelType
-from kora.cel_eval.binding import Binding, Program
+from kora.cel_eval.binding import Binding, PatternProbe, Program
 from kora.cel_eval.cache import (
     DEFAULT_CACHE_CHARACTERS,
     DEFAULT_CACHE_ENTRIES,
@@ -25,6 +25,19 @@ class ResultType(StrEnum):
 class Compilation:
     valid: bool
     fault: Fault | None = None
+
+
+class PatternCompilation(StrEnum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    INCOMPLETE = "incomplete"
+
+
+def is_pattern_refusal(error: RuntimeError) -> bool:
+    if type(error) is not RuntimeError or len(error.args) != 1:
+        return False
+    message: object = error.args[0]
+    return type(message) is str and message.startswith("Function 'matches' error: ")
 
 
 @dataclass(frozen=True)
@@ -105,6 +118,23 @@ class Machine:
             if isinstance(compiled, Fault)
             else Compilation(True)
         )
+
+    def validate_pattern(self, probe: PatternProbe) -> PatternCompilation:
+        try:
+            program = self.binding.compile_pattern_probe(probe)
+        except (ValueError, RuntimeError, self.binding.panic):
+            return PatternCompilation.INCOMPLETE
+        try:
+            result = self.binding.execute(program, {})
+        except RuntimeError as error:
+            if is_pattern_refusal(error):
+                return PatternCompilation.REJECTED
+            return PatternCompilation.INCOMPLETE
+        except (ValueError, self.binding.panic):
+            return PatternCompilation.INCOMPLETE
+        if type(result) is bool:
+            return PatternCompilation.ACCEPTED
+        return PatternCompilation.INCOMPLETE
 
     def evaluate(
         self,

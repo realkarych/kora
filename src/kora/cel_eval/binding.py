@@ -15,7 +15,13 @@ from types import ModuleType
 from typing import Protocol
 
 from kora.cel import CheckedExpression, JsonValue
+from kora.cel.diagnostics import Reason, fail
+from kora.cel.limits import MAX_CODE_POINTS
+from kora.cel.parser import RENDERING_LIMITS, parse
+from kora.cel.render import render_string
+from kora.cel.tree import Call, StringLiteral
 from kora.cel_eval import BINDING_LOADED, CEL_COMPONENT, CEL_LOGGER_NAME
+from kora.cel_eval.errors import raise_safe
 from kora.observability import current_diagnostics
 
 DISTRIBUTION: str = "common-expression-language"
@@ -61,6 +67,24 @@ class Program:
     rendering: str
 
 
+@dataclass(frozen=True, slots=True, repr=False, init=False)
+class PatternProbe:
+    rendering: str
+
+    def __init__(self, pattern: str) -> None:
+        if type(pattern) is not str:
+            raise fail(Reason.INVALID_PATTERN, 0)
+        if len(pattern) > MAX_CODE_POINTS:
+            raise fail(Reason.LENGTH, MAX_CODE_POINTS)
+        rendering = f'"".matches({render_string(pattern)})'
+        expected = Call(
+            "matches", StringLiteral("", 0), (StringLiteral(pattern, 0),), 0
+        )
+        if parse(rendering, RENDERING_LIMITS) != expected:
+            raise fail(Reason.RENDERING_MISMATCH, 0)
+        object.__setattr__(self, "rendering", rendering)
+
+
 @dataclass(frozen=True)
 class Binding:
     version: str
@@ -69,6 +93,11 @@ class Binding:
 
     def compile(self, checked: CheckedExpression) -> Program:
         return Program(self.native_compile(checked.rendering), checked.rendering)
+
+    def compile_pattern_probe(self, probe: PatternProbe) -> Program:
+        if type(probe) is not PatternProbe:
+            raise_safe(TypeError("native pattern compilation requires a checked probe"))
+        return Program(self.native_compile(probe.rendering), probe.rendering)
 
     def execute(self, program: Program, variables: Mapping[str, JsonValue]) -> object:
         return program.native.execute(dict(variables))
