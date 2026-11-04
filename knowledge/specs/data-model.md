@@ -444,7 +444,7 @@ The full section participates in `execution_contract_digest` and `deployment_dig
 
 Missing, inconsistent or unsupported bindings refuse new effects before allocation or execution. An explicitly supported compatibility mapping must recover the original meaning before any such record can authorize new effects. Historical reads, saved accepted/skipped replay results and closure/recovery obligations remain available under their existing contracts. A later enabled policy requires its own supported interpretation.
 
-[The decision record](../research/disabled-retry-contract-2026-11-04.md) describes the pending trusted resolver, constructor, checking reader and consumer gates.
+The pure `engine.graph_retry_policies` builder and checking reader under [#698](https://github.com/realkarych/kora/issues/698) derive the complete section from canonical structurally checked IR. They refuse authored enabling controls and verify exact saved values under one cumulative caller allowance. [Implementation evidence](../research/disabled-retry-contract-2026-11-04.md#bounded-section-construction-and-checking) covers value fidelity, repeated-policy admission and both databases. Trusted configuration resolution, complete static validation, graph-version publication and execution consumers retain their separate gates.
 
 #### Saved output binding inventory
 
