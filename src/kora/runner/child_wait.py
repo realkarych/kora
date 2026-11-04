@@ -8,7 +8,7 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import Protocol, cast
 
-from kora.protocols.lifetime import ProcessRegistration
+from kora.protocols.lifetime_records import ProcessRegistration
 from kora.runner.identity import (
     DARWIN_ZOMBIE,
     PROC_PIDTBSDINFO,
