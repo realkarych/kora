@@ -1,17 +1,19 @@
 import asyncio
 import json
 import traceback
+from pathlib import Path
 from typing import Literal
 
 import pytest
 
 from kora.plugins.harness.codex.app_server_rpc import Notification, RpcError, RpcFailure
+from kora.plugins.harness.codex.app_server_startup import StartupIdentity
 from kora.plugins.harness.codex.app_server_turn import (
     TurnError,
     TurnFailure,
     observe_app_server_turn,
 )
-from tests.plugins.harness.codex.probe import report_connection_failure
+from tests.plugins.harness.codex.probe import Stdio, report_connection_failure
 from tests.plugins.harness.codex.wire_fixture import TEST_SECONDS, future_deadline, wire
 
 THREAD = "selected-thread"
@@ -236,6 +238,23 @@ async def test_already_read_premature_completion_sends_no_turn_request() -> None
 
         assert caught.value.reason is TurnFailure.PREMATURE_COMPLETION
         assert remaining == b""
+
+
+@pytest.mark.asyncio
+async def test_fixture_refuses_a_completion_during_pre_turn_setup() -> None:
+    async with wire() as connection:
+        identity = StartupIdentity(
+            "0.166.0", "linux", Path("/codex"), "kora-probe", "0.1.0"
+        )
+        stdio = Stdio(connection.rpc, future_deadline(), identity)
+        setup = connection.start(stdio.call("thread/start", {}))
+        await connection.peer_reader.readline()
+
+        await connection.send(completed(), started())
+        with pytest.raises(TurnError) as caught:
+            await setup
+
+        assert caught.value.reason is TurnFailure.PREMATURE_COMPLETION
 
 
 @pytest.mark.parametrize("phase", ["buffered", "before-reply", "after-reply"])

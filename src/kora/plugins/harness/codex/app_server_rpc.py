@@ -238,7 +238,7 @@ class AppServerRpc:
         self._busy = False
         self._unusable = False
 
-    def _check_deadline(self, deadline: float) -> None:
+    def check_deadline(self, deadline: float) -> None:
         if self._clock() >= deadline:
             raise RpcError(RpcFailure.DEADLINE)
 
@@ -253,9 +253,9 @@ class AppServerRpc:
         timeout = asyncio.timeout_at(deadline)
         try:
             async with timeout:
-                self._check_deadline(deadline)
+                self.check_deadline(deadline)
                 yield
-                self._check_deadline(deadline)
+                self.check_deadline(deadline)
             completed = True
         except TimeoutError:
             if not timeout.expired():
@@ -275,7 +275,7 @@ class AppServerRpc:
         chunk = self._lookahead
         self._lookahead = b""
         while True:
-            self._check_deadline(deadline)
+            self.check_deadline(deadline)
             if not chunk:
                 allowance = self._max_frame_bytes - len(frame) + 1
                 try:
@@ -303,15 +303,15 @@ class AppServerRpc:
     async def _receive(self, deadline: float) -> Notification | Reply:
         self._require_observation_capacity()
         frame = await self._read_line(deadline)
-        self._check_deadline(deadline)
+        self.check_deadline(deadline)
         message = decode_message(frame)
-        self._check_deadline(deadline)
+        self.check_deadline(deadline)
         self._remaining_messages -= 1
         return message
 
     async def _send(self, message: dict[str, object], deadline: float) -> None:
         frame = encode_frame(message, self._max_frame_bytes)
-        self._check_deadline(deadline)
+        self.check_deadline(deadline)
         try:
             self._writer.write(frame)
             await self._writer.drain()

@@ -74,6 +74,11 @@ def terminal_observation(params: object, thread_id: str) -> TurnCompletion:
     return TurnCompletion(turn_id, status, error)
 
 
+def reject_premature_completion(notification: Notification) -> None:
+    if notification.method == TERMINAL_METHOD:
+        raise TurnError(TurnFailure.PREMATURE_COMPLETION)
+
+
 async def observe_app_server_turn(
     rpc: AppServerRpc,
     *,
@@ -88,8 +93,7 @@ async def observe_app_server_turn(
     turn_id: str | None = None
 
     def observe_buffered(notification: Notification) -> bool | None:
-        if notification.method == TERMINAL_METHOD:
-            raise TurnError(TurnFailure.PREMATURE_COMPLETION)
+        reject_premature_completion(notification)
         return observe(notification) if observe is not None else None
 
     def observe_pending(notification: Notification) -> bool | None:
@@ -104,16 +108,18 @@ async def observe_app_server_turn(
         completion = terminal
         return None
 
-    reply = await rpc.call(
-        "turn/start",
-        {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
-        deadline=deadline,
-        observe=observe_pending,
-        observe_before_send=observe_buffered,
+    turn_id = started_turn_id(
+        await rpc.call(
+            "turn/start",
+            {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+            deadline=deadline,
+            observe=observe_pending,
+            observe_before_send=observe_buffered,
+        )
     )
-    turn_id = started_turn_id(reply)
     if completion is not None and completion.turn_id != turn_id:
         raise TurnError(TurnFailure.IDENTITY_MISMATCH)
+    rpc.check_deadline(deadline)
     if completion is None and on_waiting is not None:
         on_waiting()
     while completion is None:

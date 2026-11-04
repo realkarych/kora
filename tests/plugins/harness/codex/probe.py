@@ -27,6 +27,7 @@ from kora.plugins.harness.codex.app_server_turn import (
     TurnCompletion,
     TurnError,
     observe_app_server_turn,
+    reject_premature_completion,
 )
 
 Case = Literal["allow", "deny", "stall", "interactive"]
@@ -558,7 +559,10 @@ class Stdio:
     async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
         return as_object(
             await self.rpc.call(
-                method, params, deadline=self.deadline, observe=lambda _notice: None
+                method,
+                params,
+                deadline=self.deadline,
+                observe=reject_premature_completion,
             )
         )
 
