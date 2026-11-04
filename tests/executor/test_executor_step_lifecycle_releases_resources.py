@@ -1,5 +1,6 @@
 import asyncio
 import os
+import signal
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -86,27 +87,33 @@ def test_executor_step_lifecycle_releases_resources(
     assert descriptors() == baseline
 
 
-def test_cancellation_reaps_the_child(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ignore_term", [False, True])
+def test_cancellation_reaps_the_child(tmp_path: Path, ignore_term: bool) -> None:
     baseline = descriptors()
     marker = tmp_path / "pid"
     code = (
-        f"import os, time\nopen({str(marker)!r}, 'w').write(str(os.getpid()))\n"
+        "import os, signal, time\n"
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if ignore_term else "")
+        + f"open({str(marker)!r}, 'w').write(str(os.getpid()))\n"
         "time.sleep(30)"
     )
 
-    async def cancelled() -> None:
+    async def cancelled() -> asyncio.CancelledError:
         task = asyncio.create_task(FAST.run(spec(code, 30_000_000_000, tmp_path)))
         deadline = time.monotonic() + 10
         while not (marker.exists() and marker.read_text()):
             assert time.monotonic() < deadline
             await asyncio.sleep(0.01)
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as raised:
             await task
+        return raised.value
 
-    asyncio.run(cancelled())
+    cancellation = asyncio.run(cancelled())
 
     pid = int(marker.read_text())
+    exit_code = -signal.SIGKILL if ignore_term else -signal.SIGTERM
+    assert cancellation.__notes__ == [f"executor child exit_code={exit_code}"]
     assert gone(pid)
     assert not_our_child(pid)
     assert descriptors() == baseline

@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from time import monotonic_ns
 from typing import Literal, Self
 
 from pydantic import Field, model_validator
@@ -85,7 +86,14 @@ async def acknowledgment(deadline: int) -> bytes:
         readiness.close()
 
 
+def report_stage(stage: str) -> None:
+    record = f"recovery_probe stage={stage} monotonic_ns={monotonic_ns()}\n".encode()
+    assert len(record) <= 128
+    assert os.write(2, record) == len(record)
+
+
 async def retain(home: Path, mode: str, phase: str = "complete") -> None:
+    report_stage("entered")
     clock = ControlledLifetimeClock() if mode in ("live", "pair") else None
     owner = ParentLifetime(
         clock=clock,
@@ -100,13 +108,17 @@ async def retain(home: Path, mode: str, phase: str = "complete") -> None:
     registrations: list[ProcessRegistration] = []
     transferred = mode not in ("live", "pair")
     try:
+        report_stage("tree_reserve")
         tree = await owner.reserve(
             ReservationRequest(
                 operation_id=new_operation_id(), kind=ResourceKind.TEMPORARY_TREE
             )
         )
+        report_stage("tree_acquire")
         await owner.acquire(tree.token, new_operation_id(), TemporaryTreeRequest())
+        report_stage("tree_acquired")
         for _ in range(0 if mode == "tree" else 2 if mode == "pair" else 1):
+            report_stage("process_reserve")
             process = await owner.reserve(
                 ReservationRequest(
                     operation_id=new_operation_id(),
@@ -114,6 +126,7 @@ async def retain(home: Path, mode: str, phase: str = "complete") -> None:
                     parent_resource_id=tree.token.resource_id,
                 )
             )
+            report_stage("process_acquire")
             acquisition = await owner.acquire(
                 process.token,
                 new_operation_id(),
@@ -135,6 +148,7 @@ async def retain(home: Path, mode: str, phase: str = "complete") -> None:
             )
             assert isinstance(acquisition.registration, ProcessRegistration)
             registrations.append(acquisition.registration)
+            report_stage("process_acquired")
             await owner.acknowledge(
                 process.token, acquisition.operation_id, acquisition.revision
             )
@@ -159,11 +173,14 @@ async def retain(home: Path, mode: str, phase: str = "complete") -> None:
                 .model_dump_json()
                 .encode()
             )
+        report_stage("report_ready")
         assert len(encoded) <= 65536
         os.write(1, len(encoded).to_bytes(4, "big"))
         if phase != "before_report":
             os.write(1, encoded[: len(encoded) // 2] if phase == "partial" else encoded)
+        report_stage("awaiting_ack")
         transferred = await acknowledgment(owner.deadline()) == b"a"
+        report_stage("ack_received")
     finally:
         if not transferred:
             assert clock is not None
