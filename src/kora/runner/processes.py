@@ -6,6 +6,7 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,6 +30,12 @@ from kora.runner.channels import (
     ChannelFailure,
     cancel_task,
     wait_future,
+)
+from kora.runner.child_wait import (
+    ChildWatch,
+    DirectChildProbe,
+    Readiness,
+    native_direct_child_wait,
 )
 from kora.runner.gate import ExecutionConfig, encode_deadline
 from kora.runner.identity import (
@@ -650,12 +657,21 @@ class GatedProcess:
         cwd_descriptor: int,
         *,
         max_members: int = 65536,
+        child_probe: DirectChildProbe | None = None,
+        child_watch: Callable[[int], ChildWatch] | None = None,
     ) -> None:
         self._launch = launch
         self._operation_id = operation_id
         self._deadline = deadline_ns
         self._clock = clock
         self._identities = identities
+        self._child_probe = child_probe
+        self._child_watch = child_watch
+        self._leader_watch: ChildWatch | None = None
+        self._watch_generation = 0
+        self._reap_waiters = 0
+        self._child_ready = False
+        self._release_wake: asyncio.Future[None] | None = None
         self._process: subprocess.Popen[bytes] | None = None
         self._anchor: ExitAnchor | None = None
         self._watches = MemberWatches(clock, identities, max_members)
@@ -990,6 +1006,12 @@ class GatedProcess:
 
     async def settle(self, deadline_ns: int) -> None:
         await self.wait_exit(deadline_ns)
+        if self._child_probe is None:
+            await self._settle_domain(deadline_ns)
+            return
+        await self._settle_reapable(deadline_ns)
+
+    async def _settle_domain(self, deadline_ns: int) -> None:
         while True:
             observation = self.observe(deadline_ns)
             if observation.settled:
@@ -1007,6 +1029,174 @@ class GatedProcess:
             if not pending or any(anchor.unknown for anchor in anchors):
                 raise ProcessError(ProcessCondition.UNKNOWN)
             await wait_member_change(pending, deadline_ns, self._clock)
+
+    def _deadline_reached(self, deadline_ns: int) -> bool:
+        return self._clock.monotonic_ns() >= deadline_ns
+
+    def _release_wait_future(self) -> asyncio.Future[None]:
+        if self._release_wake is None or self._release_wake.done():
+            self._release_wake = asyncio.get_running_loop().create_future()
+        return self._release_wake
+
+    def _wake_release(self) -> None:
+        wake = self._release_wake
+        if wake is not None and not wake.done():
+            wake.set_result(None)
+
+    def _close_leader_watch(self) -> None:
+        watch = self._leader_watch
+        self._leader_watch = None
+        self._watch_generation += 1
+        if watch is not None:
+            watch.close()
+
+    def _retire_completed_watch(self) -> None:
+        watch = self._leader_watch
+        if watch is not None and watch.changed.done():
+            self._close_leader_watch()
+
+    def _arm_leader_watch(self) -> None:
+        if self._child_ready or self._released or self._leader_watch is not None:
+            return
+        factory = self._child_watch
+        process = self._process
+        if factory is None or process is None:
+            raise ProcessError(ProcessCondition.UNKNOWN)
+        try:
+            watch = factory(process.pid)
+        except OSError as error:
+            raise ProcessError(ProcessCondition.UNKNOWN) from error
+        self._watch_generation += 1
+        self._leader_watch = watch
+
+    def _read_probe(self) -> Readiness:
+        probe = self._child_probe
+        registration = self._registration
+        process = self._process
+        if (
+            probe is None
+            or registration is None
+            or process is None
+            or not complete_identity(registration.process)
+        ):
+            return Readiness.UNKNOWN
+        if registration.process.pid != process.pid:
+            return Readiness.MISMATCH
+        try:
+            return probe.read(registration)
+        except OSError:
+            return Readiness.UNKNOWN
+
+    def _readiness_now(self) -> Readiness:
+        if self._child_ready:
+            return Readiness.READY
+        return self._read_probe()
+
+    def _domain_can_wait(self) -> bool:
+        anchors = [entry[1] for entry in self._watches.entries.values()]
+        pending = list(self._watches.pending())
+        anchor = self._anchor
+        if anchor is not None:
+            anchors.append(anchor)
+            if not anchor.exited and not anchor.readiness.done():
+                pending.append(anchor.readiness)
+        return bool(pending) and not any(item.unknown for item in anchors)
+
+    def _reap_wait_allowed(
+        self, readiness: Readiness, observation: ProcessObservation
+    ) -> bool:
+        anchor = self._anchor
+        if anchor is None or anchor.unknown:
+            return False
+        if (
+            readiness is Readiness.MISMATCH
+            or observation.condition is ProcessCondition.MISMATCH
+        ):
+            return False
+        if readiness is Readiness.NOT_READY:
+            return observation.condition in (
+                ProcessCondition.LIVE,
+                ProcessCondition.SETTLED,
+            )
+        if readiness is not Readiness.READY or observation.settled:
+            return False
+        if observation.condition is ProcessCondition.LIVE:
+            return True
+        return self._domain_can_wait()
+
+    def _refuse_reap_wait(
+        self, readiness: Readiness, observation: ProcessObservation
+    ) -> None:
+        if (
+            readiness is Readiness.MISMATCH
+            or observation.condition is ProcessCondition.MISMATCH
+        ):
+            raise ProcessError(ProcessCondition.MISMATCH)
+        raise ProcessError(ProcessCondition.UNKNOWN)
+
+    async def _wait_for_reap_hint(self, deadline_ns: int) -> None:
+        if self._deadline_reached(deadline_ns):
+            raise ChannelError(ChannelFailure.DEADLINE)
+        watched = self._leader_watch
+        generation = self._watch_generation
+        if (
+            watched is not None
+            and self._leader_watch is watched
+            and watched.changed.done()
+        ):
+            self._close_leader_watch()
+            return
+        pending: list[asyncio.Future[None]] = [self._release_wait_future()]
+        if watched is not None and not watched.changed.done():
+            pending.append(watched.changed)
+        pending.extend(self._watches.pending())
+        timeout = asyncio.create_task(self._clock.sleep_until(deadline_ns))
+        try:
+            await asyncio.wait((*pending, timeout), return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            await cancel_task(timeout)
+        if self._deadline_reached(deadline_ns):
+            raise ChannelError(ChannelFailure.DEADLINE)
+        if (
+            watched is not None
+            and self._leader_watch is watched
+            and self._watch_generation == generation
+            and watched.changed.done()
+        ):
+            self._close_leader_watch()
+
+    async def _settle_reapable(self, deadline_ns: int) -> None:
+        self._reap_waiters += 1
+        try:
+            while True:
+                if self._deadline_reached(deadline_ns):
+                    raise ChannelError(ChannelFailure.DEADLINE)
+                if self._released:
+                    return
+                if self._anchor is None or self._anchor.unknown:
+                    raise ProcessError(ProcessCondition.UNKNOWN)
+                if not self._child_ready:
+                    self._retire_completed_watch()
+                    self._arm_leader_watch()
+                readiness = self._readiness_now()
+                if readiness is Readiness.READY:
+                    self._child_ready = True
+                    self._close_leader_watch()
+                observation = self.observe(deadline_ns)
+                if self._deadline_reached(deadline_ns):
+                    raise ChannelError(ChannelFailure.DEADLINE)
+                if self._released:
+                    return
+                if self._child_ready and observation.settled:
+                    self._wake_release()
+                    return
+                if not self._reap_wait_allowed(readiness, observation):
+                    self._refuse_reap_wait(readiness, observation)
+                await self._wait_for_reap_hint(deadline_ns)
+        finally:
+            self._reap_waiters -= 1
+            if self._reap_waiters == 0 and not self._released:
+                self._close_leader_watch()
 
     def release(self, deadline_ns: int | None = None) -> int:
         if self._released:
@@ -1030,6 +1220,8 @@ class GatedProcess:
         for capture in self._captures:
             capture.close()
         self._released = True
+        self._close_leader_watch()
+        self._wake_release()
         return process.returncode
 
 
@@ -1042,6 +1234,9 @@ def start_gated(
     identities: IdentityReader | None = None,
     *,
     max_members: int = 65536,
+    child_probe: DirectChildProbe | None = None,
+    child_watch: Callable[[int], ChildWatch] | None = None,
+    native_reap_wait: bool = True,
 ) -> GatedProcess:
     validated_operation = TypeAdapter(OperationId).validate_python(operation_id)
     if (
@@ -1050,6 +1245,8 @@ def start_gated(
         or acquisition_deadline_ns < 0
     ):
         raise ValueError("acquisition deadline is a nonnegative integer instant")
+    if native_reap_wait and child_probe is None and child_watch is None:
+        child_probe, child_watch = native_direct_child_wait()
     owner = GatedProcess(
         launch,
         validated_operation,
@@ -1058,5 +1255,7 @@ def start_gated(
         identities if identities is not None else NativeIdentityReader(clock=clock),
         cwd_descriptor,
         max_members=max_members,
+        child_probe=child_probe,
+        child_watch=child_watch,
     )
     return owner

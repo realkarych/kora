@@ -14,6 +14,7 @@ from pydantic import (
 )
 from pydantic.config import ExtraValues
 
+from kora.ir.data import detach_ir_data
 from kora.ir.diagnostics import ContractViolation
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.vcs_ref_json import (
@@ -406,3 +407,7 @@ def same_revision_value(value: object, expected: JsonValue) -> bool:
 def require_vcs_ref_revision(descriptor: object) -> None:
     if not same_revision_value(descriptor, _DESCRIPTOR):
         refuse("VCS007")
+
+
+def vcs_ref_revision_descriptor() -> JsonObject:
+    return cast(JsonObject, detach_ir_data(_DESCRIPTOR))

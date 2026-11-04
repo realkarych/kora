@@ -1,0 +1,12 @@
+allow_managed_hooks_only = true
+
+[hooks]
+managed_dir = "/opt/kora-probe"
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/local/bin/python3 -I /opt/kora-probe/managed_hook.py"
+timeout = 60

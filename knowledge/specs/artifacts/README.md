@@ -33,6 +33,8 @@ The standalone StructuredOutput provider is installed as `artifact_type.structur
 
 Every payload refusal raises `VcsRefValidationError` carrying one shared `ContractViolation`. Codes `VCS001`–`VCS007` identify raw size, JSON decoding, closed shape, aggregate path bytes, semantic URL, canonical size and unsupported revision respectively. Messages are fixed; paths contain only known field names and array indexes. Submitted content, unknown keys and native decoder exceptions are excluded from the public error and its chaining. These values return to consumers without starting a logger or emitting payload diagnostics.
 
+The [exact native output format](../data-model.md#saved-exact-native-builtin-output-contract), accepted under #675, saves complete revision-1 definitions and exact checker interpretation for direct AgentSession, CommandResult and VcsRef roles without authored output schemas. VcsRef keeps its complete native validation and ordinary declared-schema checker; saved validity establishes no publication provenance or authorization. AgentSession retains its separately published restricted view. Wider effective compositions and actual package/construction/consumer evidence remain required; this format publication activates no provider or execution path.
+
 ## 2. VcsRef publication facts
 
 The closed object has required fields `repo`, `branch`, `commit`, `base_commit`, `changed_paths`, `diff_stat` and `pushed_by`. It has no extension map or mutable status field.

@@ -107,6 +107,7 @@ class BsdInfo(ctypes.Structure):
     ]
     status: int
     pid: int
+    parent_pid: int
     process_group_id: int
     start_seconds: int
     start_microseconds: int

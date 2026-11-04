@@ -1,0 +1,48 @@
+{
+  "identity": "kora.agent-session-view.v1",
+  "root": "metadata",
+  "whole_fields": [
+    "harness",
+    "installed_version",
+    "session_id",
+    "billing_class",
+    "turns",
+    "duration_ms",
+    "stop_reason",
+    "provenance"
+  ],
+  "usage_fields": [
+    "model",
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_creation_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "known_token_fields",
+    "cache_creation_by_ttl",
+    "completeness",
+    "basis",
+    "billing_class",
+    "delta_of_session_totals",
+    "usd_estimate"
+  ],
+  "usage_coverage_fields": [
+    "completeness",
+    "attribution_gap",
+    "observation_gap"
+  ],
+  "excluded": [
+    "denials",
+    "transcript",
+    "metadata.price_table_id",
+    "metadata.usage[*].reported_usd",
+    "metadata.usage[*].observation_id",
+    "metadata.usage[*].observation_sequence",
+    "metadata.usage[*].observed_at",
+    "metadata.usage_coverage.version",
+    "metadata.usage_coverage.observation_id",
+    "metadata.usage_coverage.observation_sequence",
+    "metadata.usage_coverage.observed_at"
+  ],
+  "cel_schema_sha256": "cb975c6cc14e8df4a1ff729eb2782d5fe118706ecb43d6a069b2871cb1e2e2fb"
+}

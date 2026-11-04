@@ -2,13 +2,11 @@ import array
 import asyncio
 import fcntl
 import os
-import select
 import signal
 import socket
 import stat
 import subprocess
 import sys
-from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated, Literal, Protocol
@@ -26,6 +24,8 @@ from kora.runner.channels import (
     DescriptorReadiness,
     wait_future,
 )
+from kora.runner.child_wait import ChildWatch as ChildWatch
+from kora.runner.child_wait import KernelChildWatch
 from kora.runner.filesystem import (
     DirectoryAnchor,
     DirectoryIdentity,
@@ -113,53 +113,10 @@ class HelperError(Exception):
         super().__init__(reason.value)
 
 
-class ChildWatch(Protocol):
-    @property
-    def changed(self) -> asyncio.Future[None]: ...
-
-    def close(self) -> None: ...
-
-
 class ChildReaper(Protocol):
     def reap(self, pid: int) -> int | None: ...
 
     def watch(self, pid: int) -> ChildWatch: ...
-
-
-class KernelChildWatch:
-    def __init__(self, pid: int) -> None:
-        self._loop = asyncio.get_running_loop()
-        self._descriptor, self._release = child_change_descriptor(pid)
-        self._changed: asyncio.Future[None] = self._loop.create_future()
-        try:
-            self._loop.add_reader(self._descriptor, self._notify)
-        except OSError:
-            self._release()
-            raise
-        self._reading = True
-        self._closed = False
-
-    @property
-    def changed(self) -> asyncio.Future[None]:
-        return self._changed
-
-    def _notify(self) -> None:
-        self._stop_reading()
-        if not self._changed.done():
-            self._changed.set_result(None)
-
-    def _stop_reading(self) -> None:
-        if self._reading:
-            self._loop.remove_reader(self._descriptor)
-            self._reading = False
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._stop_reading()
-        self._release()
-        self._changed.cancel()
 
 
 class KernelChildReaper:
@@ -169,29 +126,6 @@ class KernelChildReaper:
 
     def watch(self, pid: int) -> ChildWatch:
         return KernelChildWatch(pid)
-
-
-def child_change_descriptor(pid: int) -> tuple[int, Callable[[], None]]:
-    if sys.platform != "darwin":
-        descriptor = os.pidfd_open(pid)
-        return descriptor, lambda: os.close(descriptor)
-    queue = select.kqueue()
-    try:
-        queue.control(
-            [
-                select.kevent(
-                    signal.SIGCHLD,
-                    filter=select.KQ_FILTER_SIGNAL,
-                    flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
-                )
-            ],
-            0,
-            0,
-        )
-    except OSError:
-        queue.close()
-        raise
-    return queue.fileno(), queue.close
 
 
 class IOHelper:
