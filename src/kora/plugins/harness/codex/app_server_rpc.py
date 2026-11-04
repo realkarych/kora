@@ -26,6 +26,8 @@ class RpcFailure(StrEnum):
     INVALID_FRAME = "rpc_invalid_frame"
     INVALID_OUTBOUND = "rpc_invalid_outbound"
     UNEXPECTED_REPLY = "rpc_unexpected_reply"
+    REQUEST_ID = "rpc_request_id"
+    OBSERVER_REFUSED = "rpc_observer_refused"
     SERVER_REQUEST = "rpc_server_request"
     REMOTE_ERROR = "rpc_remote_error"
 
@@ -145,13 +147,13 @@ def admit_encoding(value: object, remaining: int, depth: int) -> int:
         size = len(repr(value))
     elif type(value) is str:
         size = len(value) + 2
-    elif isinstance(value, list):
+    elif type(value) is list:
         items = cast("list[object]", value)
         remaining -= 2 + max(len(items) - 1, 0)
         for item in items:
             remaining = admit_encoding(item, remaining, depth + 1)
         size = 0
-    elif isinstance(value, dict):
+    elif type(value) is dict:
         entries = cast("dict[object, object]", value)
         remaining -= 2 + len(entries) + max(len(entries) - 1, 0)
         for key, item in entries.items():
@@ -189,6 +191,7 @@ class AppServerRpc:
         writer: asyncio.StreamWriter,
         *,
         clock: Callable[[], float],
+        next_request_id: Callable[[], int],
         max_frame_bytes: int,
         max_messages: int,
     ) -> None:
@@ -200,7 +203,8 @@ class AppServerRpc:
         self._max_frame_bytes = max_frame_bytes
         self._remaining_messages = max_messages
         self._lookahead = b""
-        self._next_id = 1
+        self._next_request_id = next_request_id
+        self._used_request_ids: set[int] = set()
         self._busy = False
         self._unusable = False
 
@@ -216,16 +220,16 @@ class AppServerRpc:
             raise RpcError(RpcFailure.BUSY)
         self._busy = True
         completed = False
+        timeout = asyncio.timeout_at(deadline)
         try:
-            async with asyncio.timeout_at(deadline):
+            async with timeout:
                 self._check_deadline(deadline)
                 yield
                 self._check_deadline(deadline)
             completed = True
         except TimeoutError:
-            reason = RpcFailure.DEADLINE
-        except OSError:
-            reason = RpcFailure.DISCONNECTED
+            if not timeout.expired():
+                raise
         else:
             return
         finally:
@@ -233,7 +237,8 @@ class AppServerRpc:
             if not completed:
                 self._unusable = True
                 self._lookahead = b""
-        raise RpcError(reason)
+                self._used_request_ids.clear()
+        raise RpcError(RpcFailure.DEADLINE)
 
     async def _read_line(self, deadline: float) -> bytes:
         frame = bytearray()
@@ -243,7 +248,10 @@ class AppServerRpc:
             self._check_deadline(deadline)
             if not chunk:
                 allowance = self._max_frame_bytes - len(frame) + 1
-                chunk = await self._reader.read(min(READ_SIZE, allowance))
+                try:
+                    chunk = await self._reader.read(min(READ_SIZE, allowance))
+                except OSError:
+                    raise RpcError(RpcFailure.DISCONNECTED) from None
                 if not chunk:
                     raise RpcError(
                         RpcFailure.TRUNCATED if frame else RpcFailure.DISCONNECTED
@@ -258,9 +266,12 @@ class AppServerRpc:
                 raise RpcError(RpcFailure.FRAME_LIMIT)
             chunk = b""
 
-    async def _receive(self, deadline: float) -> Notification | Reply:
+    def _require_observation_capacity(self) -> None:
         if not self._remaining_messages:
             raise RpcError(RpcFailure.MESSAGE_LIMIT)
+
+    async def _receive(self, deadline: float) -> Notification | Reply:
+        self._require_observation_capacity()
         frame = await self._read_line(deadline)
         self._check_deadline(deadline)
         message = decode_message(frame)
@@ -271,8 +282,24 @@ class AppServerRpc:
     async def _send(self, message: dict[str, object], deadline: float) -> None:
         frame = encode_frame(message, self._max_frame_bytes)
         self._check_deadline(deadline)
-        self._writer.write(frame)
-        await self._writer.drain()
+        try:
+            self._writer.write(frame)
+            await self._writer.drain()
+        except OSError:
+            raise RpcError(RpcFailure.DISCONNECTED) from None
+
+    @staticmethod
+    def _notification(message: Notification | Reply) -> Notification:
+        if isinstance(message, Reply):
+            raise RpcError(RpcFailure.UNEXPECTED_REPLY)
+        return message
+
+    @staticmethod
+    def _dispatch(
+        message: Notification, observe: Callable[[Notification], bool | None]
+    ) -> None:
+        if observe(message) is False:
+            raise RpcError(RpcFailure.OBSERVER_REFUSED)
 
     async def call(
         self,
@@ -280,18 +307,24 @@ class AppServerRpc:
         params: dict[str, object],
         *,
         deadline: float,
-        observe: Callable[[Notification], None],
+        observe: Callable[[Notification], bool | None],
     ) -> object:
         async with self._operation(deadline):
-            request_id = self._next_id
-            if request_id > MAX_RPC_INTEGER:
-                raise RpcError(RpcFailure.UNUSABLE)
-            self._next_id += 1
+            while self._lookahead:
+                message_before_request = self._notification(
+                    await self._receive(deadline)
+                )
+                self._dispatch(message_before_request, observe)
+            self._require_observation_capacity()
+            request_id = self._next_request_id()
+            if not rpc_integer(request_id) or request_id in self._used_request_ids:
+                raise RpcError(RpcFailure.REQUEST_ID)
+            self._used_request_ids.add(request_id)
             await self._send(
                 {"id": request_id, "method": method, "params": params}, deadline
             )
             while isinstance(message := await self._receive(deadline), Notification):
-                observe(message)
+                self._dispatch(message, observe)
             if message.request_id != request_id:
                 raise RpcError(RpcFailure.UNEXPECTED_REPLY)
         if message.refused:
@@ -304,7 +337,4 @@ class AppServerRpc:
 
     async def receive(self, *, deadline: float) -> Notification:
         async with self._operation(deadline):
-            message = await self._receive(deadline)
-            if isinstance(message, Reply):
-                raise RpcError(RpcFailure.UNEXPECTED_REPLY)
-        return message
+            return self._notification(await self._receive(deadline))

@@ -5,6 +5,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from itertools import count
 from typing import TypeVar, cast
 
 import pytest
@@ -65,6 +66,7 @@ async def wire(
     frame_budget: int = FRAME_BUDGET,
     message_budget: int = 256,
     clock: Callable[[], float] | None = None,
+    request_id: Callable[[], int] | None = None,
 ) -> AsyncGenerator[Wire]:
     async with asyncio.timeout(TEST_SECONDS):
         local, remote = socket.socketpair()
@@ -80,6 +82,9 @@ async def wire(
                 reader,
                 writer,
                 clock=clock if clock is not None else asyncio.get_running_loop().time,
+                next_request_id=request_id
+                if request_id is not None
+                else count(1).__next__,
                 max_frame_bytes=frame_budget,
                 max_messages=message_budget,
             )
@@ -422,12 +427,14 @@ async def test_app_server_rpc_cancellation_releases_operation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_server_rpc_observer_failure_invalidates_pending_reply() -> None:
+async def test_app_server_rpc_observer_failure_invalidates_pending_reply(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     seen: list[Notification] = []
 
-    def refuse(notification: Notification) -> None:
+    def refuse(notification: Notification) -> bool:
         seen.append(notification)
-        raise ValueError("observer refusal")
+        return False
 
     async with wire() as connection:
         deadline = future_deadline()
@@ -436,14 +443,23 @@ async def test_app_server_rpc_observer_failure_invalidates_pending_reply() -> No
         )
         await connection.peer_reader.readline()
 
-        await connection.send(b'{"method":"event"}\n', b'{"id":1,"result":true}\n')
-        with pytest.raises(ValueError, match="observer refusal"):
+        payload = json.dumps({"method": "event", "params": PRIVATE_DATA}).encode()
+        await connection.send(payload + b"\n", b'{"id":1,"result":true}\n')
+        with pytest.raises(RpcError) as refused:
             await request
+        report_status = report_rpc_failure(refused.value)
+        captured = capsys.readouterr()
         with pytest.raises(RpcError) as caught:
             await connection.rpc.receive(deadline=deadline)
 
+        assert refused.value.reason is RpcFailure.OBSERVER_REFUSED
+        assert refused.value.args == ("rpc_observer_refused",)
+        assert refused.value.__context__ is None
+        assert PRIVATE_DATA not in captured.err
+        assert captured.out == ""
+        assert report_status == 1
         assert caught.value.reason is RpcFailure.UNUSABLE
-        assert seen == [Notification("event", None, None)]
+        assert seen == [Notification("event", PRIVATE_DATA, None)]
 
 
 @pytest.mark.asyncio
@@ -552,3 +568,97 @@ async def test_app_server_rpc_broken_write_is_disconnected() -> None:
         assert eof == b""
         assert caught.value.reason is RpcFailure.DISCONNECTED
         assert next_error.value.reason is RpcFailure.UNUSABLE
+
+
+@pytest.mark.asyncio
+async def test_app_server_rpc_rejects_future_reply_already_read() -> None:
+    async with wire() as connection:
+        deadline = future_deadline()
+        observed: list[Notification] = []
+        first = connection.start(
+            connection.rpc.call("first", {}, deadline=deadline, observe=observed.append)
+        )
+        await connection.peer_reader.readline()
+
+        await connection.send(
+            b'{"id":1,"result":true}\n{"method":"between"}\n{"id":2,"result":false}\n'
+        )
+        result = await first
+        with pytest.raises(RpcError) as caught:
+            await connection.rpc.call(
+                "second", {}, deadline=deadline, observe=observed.append
+            )
+        connection.writer.close()
+        sent = await connection.peer_reader.read()
+
+        assert result is True
+        assert caught.value.reason is RpcFailure.UNEXPECTED_REPLY
+        assert observed == [Notification("between", None, None)]
+        assert sent == b""
+
+
+@pytest.mark.asyncio
+async def test_app_server_rpc_does_not_send_after_observation_budget() -> None:
+    async with wire(message_budget=1) as connection:
+        deadline = future_deadline()
+        observed: list[Notification] = []
+        await connection.send(b'{"method":"last"}\n')
+        last = await connection.rpc.receive(deadline=deadline)
+
+        with pytest.raises(RpcError) as caught:
+            await connection.rpc.call(
+                "test", {}, deadline=deadline, observe=observed.append
+            )
+        connection.writer.close()
+        sent = await connection.peer_reader.read()
+
+        assert last == Notification("last", None, None)
+        assert caught.value.reason is RpcFailure.MESSAGE_LIMIT
+        assert observed == []
+        assert sent == b""
+
+
+@pytest.mark.asyncio
+async def test_app_server_rpc_rejects_reused_request_identifier() -> None:
+    async with wire(request_id=lambda: 7) as connection:
+        deadline = future_deadline()
+        observed: list[Notification] = []
+        first = connection.start(
+            connection.rpc.call("first", {}, deadline=deadline, observe=observed.append)
+        )
+        sent = await connection.peer_reader.readline()
+        await connection.send(b'{"id":7,"result":true}\n')
+
+        result = await first
+        with pytest.raises(RpcError) as caught:
+            await connection.rpc.call(
+                "second", {}, deadline=deadline, observe=observed.append
+            )
+        connection.writer.close()
+        rest = await connection.peer_reader.read()
+
+        assert sent == b'{"id":7,"method":"first","params":{}}\n'
+        assert result is True
+        assert caught.value.reason is RpcFailure.REQUEST_ID
+        assert rest == b""
+
+
+@pytest.mark.asyncio
+async def test_app_server_rpc_refuses_outbound_container_subclass() -> None:
+    class ContainerSubclass(dict[str, object]):
+        pass
+
+    async with wire() as connection:
+        deadline = future_deadline()
+        observed: list[Notification] = []
+        params = ContainerSubclass(item="value")
+
+        with pytest.raises(RpcError) as caught:
+            await connection.rpc.call(
+                "test", params, deadline=deadline, observe=observed.append
+            )
+        connection.writer.close()
+        sent = await connection.peer_reader.read()
+
+        assert caught.value.reason is RpcFailure.INVALID_OUTBOUND
+        assert sent == b""

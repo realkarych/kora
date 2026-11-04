@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -459,10 +460,14 @@ class Stdio:
         self.terminal: dict[str, object] | None = None
         self.waiting_terminal = asyncio.Event()
 
-    def record(self, message: Notification) -> None:
-        if message.method == "turn/completed":
-            require(self.terminal is None, "duplicate_turn_completion")
-            self.terminal = as_object(message.params)
+    def record(self, message: Notification) -> bool:
+        if message.method != "turn/completed":
+            return True
+        params = message.params
+        if self.terminal is not None or not isinstance(params, dict):
+            return False
+        self.terminal = cast("dict[str, object]", params)
+        return True
 
     async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
         return as_object(
@@ -550,7 +555,8 @@ class Stdio:
         require(isinstance(turn_id, str) and bool(turn_id), "missing_turn_id")
         while self.terminal is None:
             self.waiting_terminal.set()
-            self.record(await self.rpc.receive(deadline=self.deadline))
+            message = await self.rpc.receive(deadline=self.deadline)
+            require(self.record(message), "invalid_turn_completion")
         require(
             self.terminal.get("threadId") == thread_id, "unexpected_terminal_thread"
         )
@@ -807,6 +813,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 process.stdout,
                 process.stdin,
                 clock=asyncio.get_running_loop().time,
+                next_request_id=lambda: secrets.randbits(63),
                 max_frame_bytes=MAX_FRAME_BYTES,
                 max_messages=MAX_MESSAGES,
             )
