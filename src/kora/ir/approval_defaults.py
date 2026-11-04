@@ -3,7 +3,14 @@ from itertools import chain
 
 from pydantic import MISSING
 
-from kora.cel import Environment, ResultKind, SchemaError, SchemaTypes, check_typed
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    ResultKind,
+    SchemaError,
+    SchemaTypes,
+    check_typed,
+)
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.meter import Meter
 from kora.cel.types import Record, unwrap
@@ -75,16 +82,16 @@ class ApprovalDefaultChecks:
 
     def check(
         self, node: HumanInputNode, name: str, path: tuple[str | int, ...]
-    ) -> None:
+    ) -> CheckedExpression | None:
         self.human_inputs += 1
         if node.config.approve_when is not MISSING:
-            return
+            return None
         form = self.default_form if node.config.form is MISSING else node.config.form
         try:
             response = self.schemas.variable(form)
         except SchemaError:
             self.unresolved += 1
-            return
+            return None
         self.predicates += 1
         record = unwrap(response.type)
         if isinstance(record, Record) and "decision" in record.fields:
@@ -95,7 +102,7 @@ class ApprovalDefaultChecks:
                 self.checker_meter,
             )
             if not isinstance(checked, CelDiagnostic):
-                return
+                return checked
         self.collector.add(
             Diagnostic(
                 code="IR011",
@@ -105,6 +112,7 @@ class ApprovalDefaultChecks:
                 location=safe_source(node.source),
             )
         )
+        return None
 
 
 def validate_approval_defaults(document: GraphDocument) -> ApprovalDefaultResult:

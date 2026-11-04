@@ -3,7 +3,14 @@ from itertools import chain
 
 from pydantic import MISSING
 
-from kora.cel import Environment, ResultKind, SchemaError, SchemaTypes, check_typed
+from kora.cel import (
+    CheckedExpression,
+    Environment,
+    ResultKind,
+    SchemaError,
+    SchemaTypes,
+    check_typed,
+)
 from kora.cel.cost import Variable
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
@@ -174,39 +181,39 @@ class ApprovalPredicateChecks:
         node: HumanInputNode,
         name: str,
         path: tuple[str | int, ...],
-    ) -> None:
+    ) -> CheckedExpression | None:
         self.human_inputs += 1
         predicate = node.config.approve_when
         if predicate is MISSING:
-            return
+            return None
         self.seen += 1
         try:
             required = required_context(predicate, self.meter)
         except DiagnosticError:
             self.syntax_unresolved += 1
-            return
+            return None
         variables: dict[str, Variable] = {}
         if "inputs" in required:
             inputs = self.inputs.context(body, node)
             if inputs is InputFailure.CONTEXT:
                 self.context_unresolved += 1
-                return
+                return None
             if inputs is InputFailure.SCHEMA:
                 self.schema_unresolved += 1
-                return
+                return None
             variables["inputs"] = inputs
         if "params" in required:
             parameter = self.parameter_context()
             if parameter is None:
                 self.schema_unresolved += 1
-                return
+                return None
             variables["params"] = parameter
         form = self.default_form if node.config.form is MISSING else node.config.form
         try:
             variables["response"] = self.schemas.variable(form)
         except SchemaError:
             self.schema_unresolved += 1
-            return
+            return None
         self.checked += 1
         checked = check_typed(
             predicate,
@@ -223,6 +230,8 @@ class ApprovalPredicateChecks:
                     location=safe_source(node.source),
                 )
             )
+            return None
+        return checked
 
 
 def validate_approval_response_predicates(
