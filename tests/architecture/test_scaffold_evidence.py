@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from kora.ir.json import parse_json_object
 from tests.measurements.storage_evidence_common import EvidenceFailure
@@ -137,6 +138,20 @@ def test_scaffold_receipts_prove_complete_disjoint_execution(tmp_path: Path) -> 
 
     local = sum(len(local_nodes(system)) for system, _, _ in ENVIRONMENTS)
     assert result == {"environments": 3, "lanes": 12, "tests": 18 + local}
+
+
+@pytest.mark.parametrize("operating_system", ["macos-26", "ubuntu-24.04"])
+def test_scaffold_evidence_refuses_relabelled_macos_receipt(
+    tmp_path: Path, operating_system: str
+) -> None:
+    complete_evidence(tmp_path)
+    receipt = tmp_path / "scaffold-tests-macos-15-3.11.17-storage" / "receipt.json"
+    data = parse_json_object(json.loads(receipt.read_text()))
+    data["operating_system"] = operating_system
+    receipt.write_text(json.dumps(data))
+
+    with pytest.raises((ValidationError, EvidenceFailure)):
+        verify_scaffold(tmp_path, "123", "1", REVISION, REQUESTED)
 
 
 @pytest.mark.parametrize(

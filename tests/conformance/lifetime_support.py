@@ -46,6 +46,7 @@ from kora.runner.processes import (
 from tests.conformance.lifetime_helpers import (
     CleanupDeadline,
     ProbeIOHelperLauncher,
+    join_helper_operation,
     reap_once_reapable,
     release_recovered,
     unwind_owned,
@@ -245,6 +246,18 @@ async def read_handoff_bytes(
         if entered is not None:
             entered.set()
     return bytes(value)
+
+
+async def join_live_probe(
+    operation: asyncio.Task[object], evidence: Sequence[str]
+) -> None:
+    original = sys.exception()
+    try:
+        await join_helper_operation(operation)
+    finally:
+        if original is not None:
+            for note in evidence:
+                original.add_note(note)
 
 
 @asynccontextmanager

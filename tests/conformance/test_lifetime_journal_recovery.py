@@ -37,6 +37,7 @@ from tests.conformance.lifetime_support import (
     ControlledLifetimeClock,
     assert_recovered_processes_absent,
     dispose_test_owner,
+    join_live_probe,
     journal_file,
     limits,
     retained_live_invocation,
@@ -660,6 +661,7 @@ async def test_live_probe_repeated_cancellation_joins_owned_cleanup(
     cleanup_release = asyncio.Event()
     started: list[subprocess.Popen[bytes]] = []
     observers: list[RecoveredProcess] = []
+    evidence: list[str] = []
 
     async def acquire() -> None:
         async with retained_live_invocation(
@@ -670,6 +672,7 @@ async def test_live_probe_repeated_cancellation_joins_owned_cleanup(
             started=started,
             cleanup_entered=cleanup_entered,
             cleanup_release=cleanup_release,
+            evidence=evidence,
         ) as acquired:
             observers.extend(acquired.processes)
             entered.set()
@@ -703,10 +706,69 @@ async def test_live_probe_repeated_cancellation_joins_owned_cleanup(
         assert cancelled.value.args == ("original acquisition",)
     finally:
         cleanup_release.set()
-        await join_helper_operation(task)
+        await join_live_probe(task, evidence)
     gc.collect()
 
     assert started[0].returncode == 0
     assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT
+    assert_recovered_processes_absent(observers)
+    assert set(os.listdir("/dev/fd")) == baseline
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when", ["before_ack", "after_ack"])
+async def test_live_probe_readiness_timeout_retains_joined_diagnostics(
+    tmp_path: Path, when: str
+) -> None:
+    gc.collect()
+    baseline = set(os.listdir("/dev/fd"))
+    entered = asyncio.Event()
+    never_ready = asyncio.Event()
+    evidence: list[str] = []
+    started: list[subprocess.Popen[bytes]] = []
+    observers: list[RecoveredProcess] = []
+    original: list[BaseException] = []
+
+    async def acquire() -> None:
+        async with retained_live_invocation(
+            tmp_path,
+            "pair",
+            phase="cancel_before_ack" if when == "before_ack" else "complete",
+            entered=entered,
+            started=started,
+            evidence=evidence,
+        ) as acquired:
+            observers.extend(acquired.processes)
+            entered.set()
+            await never_ready.wait()
+
+    async def expire_readiness() -> None:
+        task = asyncio.create_task(acquire())
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            assert not evidence
+            await asyncio.wait_for(never_ready.wait(), 0)
+        finally:
+            error = sys.exception()
+            assert error is not None
+            original.append(error)
+            await join_live_probe(task, evidence)
+            assert task.cancelled()
+
+    with pytest.raises(TimeoutError) as failed:
+        await expire_readiness()
+    gc.collect()
+
+    assert failed.value is original[0]
+    assert len(evidence) == 1
+    assert failed.value.__notes__ == evidence
+    assert len(evidence[0].encode()) <= 8448
+    assert "returncode=0 stderr_truncated=False" in evidence[0]
+    assert "stage=report_ready" in evidence[0]
+    assert "stage=ack_received" in evidence[0]
+    assert len(started) == 1
+    assert started[0].returncode == 0
+    assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT
+    assert len(observers) == (0 if when == "before_ack" else 2)
     assert_recovered_processes_absent(observers)
     assert set(os.listdir("/dev/fd")) == baseline
