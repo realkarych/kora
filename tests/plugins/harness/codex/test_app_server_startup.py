@@ -140,7 +140,24 @@ async def test_app_server_startup_refuses_inconsistent_identity_without_followup
         assert followup == b""
 
 
-@pytest.mark.parametrize("incomplete", [{}, [], None], ids=["missing", "list", "null"])
+def response_without(field: str) -> dict[str, object]:
+    response = initialize_response("linux")
+    del response[field]
+    return response
+
+
+@pytest.mark.parametrize(
+    "incomplete",
+    [
+        pytest.param({}, id="empty-object"),
+        pytest.param([], id="list"),
+        pytest.param(None, id="null"),
+        pytest.param(response_without("userAgent"), id="missing-agent"),
+        pytest.param(response_without("platformFamily"), id="missing-family"),
+        pytest.param(response_without("platformOs"), id="missing-os"),
+        pytest.param(response_without("codexHome"), id="missing-home"),
+    ],
+)
 @pytest.mark.asyncio
 async def test_app_server_startup_refuses_missing_reply_shape(
     incomplete: object,
