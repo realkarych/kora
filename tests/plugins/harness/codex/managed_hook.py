@@ -3,10 +3,29 @@ import os
 import signal
 import sys
 from pathlib import Path
-from typing import cast
+
+from kora.plugins.harness.codex.pre_tool_use import (
+    HookInputFailure,
+    HookInputRefused,
+    decode_pre_tool_use,
+)
 
 CONTROL = Path("/var/lib/kora-hook-probe/control")
 MAX_INPUT_BYTES = 16_384
+PATCH = (
+    "*** Begin Patch\n"
+    "*** Add File: kora-probe.marker\n"
+    "+direct patch marker\n"
+    "*** End Patch\n"
+)
+INPUT_REFUSAL = "kora managed hook probe refused input"
+CAP_REFUSAL = "kora managed hook probe refused oversized input"
+PATCH_DENIAL = "kora managed hook probe denied the direct patch"
+
+
+def deny(reason: str) -> int:
+    sys.stderr.write(reason + "\n")
+    return 2
 
 
 def main() -> int:
@@ -14,7 +33,8 @@ def main() -> int:
     executor = decision in {"executor-allow", "executor-deny", "executor-stall"}
     nested_input = decision == "shell_controls" or executor
     expected_command = "touch kora-probe.marker"
-    if decision == "interactive" or nested_input:
+    patch = decision in {"patch-allow", "patch-deny"}
+    if decision in {"interactive", "decoder-refuse"} or nested_input or patch:
         with (CONTROL / "invocations").open("a", encoding="utf-8") as invocations:
             invocations.write("1")
     if decision == "interactive":
@@ -36,56 +56,61 @@ def main() -> int:
         origin = '"${KORA_PROBE_EXECUTOR_ORIGIN-}"'
         expected_command += f" && printf '%s\\n' {origin} >> kora-probe.marker"
 
-    raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
-    if len(raw) > MAX_INPUT_BYTES:
-        return 2
-    payload: object = json.loads(raw)
-    if not isinstance(payload, dict):
-        return 2
-    event = cast(dict[str, object], payload)
-    raw_input = event.get("tool_input")
-    if not isinstance(raw_input, dict):
-        return 2
-    command_input = cast(dict[str, object], raw_input)
-    command = command_input.get("command")
+    allowance = 1 if decision == "decoder-refuse" else MAX_INPUT_BYTES
+    try:
+        call = decode_pre_tool_use(
+            sys.stdin.buffer.read(allowance + 1), max_bytes=allowance
+        )
+    except HookInputRefused as error:
+        if error.reason is HookInputFailure.INPUT_TOO_LARGE:
+            return deny(CAP_REFUSAL)
+        return deny(INPUT_REFUSAL)
     if (
-        event.get("hook_event_name") != "PreToolUse"
-        or event.get("tool_name") != "Bash"
-        or event.get("tool_use_id") != "kora-hook-probe-call"
-        or command != expected_command
-        or (nested_input and command_input != {"command": expected_command})
+        call.tool != ("apply_patch" if patch else "Bash")
+        or call.tool_use_id != "kora-hook-probe-call"
+        or call.command != (PATCH if patch else expected_command)
     ):
-        return 2
+        return deny(INPUT_REFUSAL)
 
     receipt_input = (
-        {"tool_input": command_input} if nested_input else {"command": command}
+        {"tool_input": {"command": call.command}}
+        if nested_input
+        else {"command": call.command}
     )
     with (CONTROL / "receipts.jsonl").open("a", encoding="utf-8") as receipts:
         receipts.write(
             json.dumps(
                 {
-                    "event": event["hook_event_name"],
-                    "tool": event["tool_name"],
-                    "call": event["tool_use_id"],
+                    "event": "PreToolUse",
+                    "tool": call.tool,
+                    "call": call.tool_use_id,
                     **receipt_input,
                     "pid": os.getpid(),
                 }
             )
             + "\n"
         )
-    if decision in {"allow", "interactive", "shell_controls", "executor-allow"}:
+    if decision in {
+        "allow",
+        "interactive",
+        "shell_controls",
+        "executor-allow",
+        "patch-allow",
+    }:
         return 0
     if decision in {"stall", "executor-stall"}:
         signal.pause()
     if decision == "deny":
-        sys.stderr.write("kora managed hook probe denied the marker command\n")
+        return deny("kora managed hook probe denied the marker command")
     if decision == "executor-deny":
-        sys.stderr.write("kora managed hook probe denied the executor command\n")
-    return 2
+        return deny("kora managed hook probe denied the executor command")
+    if decision == "patch-deny":
+        return deny(PATCH_DENIAL)
+    return deny(INPUT_REFUSAL)
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (OSError, ValueError):
-        raise SystemExit(2) from None
+        raise SystemExit(deny(INPUT_REFUSAL)) from None
