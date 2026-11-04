@@ -18,6 +18,12 @@ from kora.plugins.harness.codex.app_server_rpc import (
     RpcError,
     RpcFailure,
 )
+from kora.plugins.harness.codex.app_server_startup import (
+    StartupError,
+    StartupFailure,
+    StartupIdentity,
+    initialize_app_server,
+)
 
 Case = Literal["allow", "deny", "stall", "interactive"]
 ProviderCase = Literal[
@@ -33,9 +39,15 @@ ExecutorCase = Literal[
     "executor-stall",
 ]
 ClientCase = Literal["client-complete", "client-exit"]
-ProbeCase = Case | ProviderCase | ShellCase | ExecutorCase | ClientCase
+StartupCase = Literal["startup-version", "startup-home"]
+ProbeCase = Case | ProviderCase | ShellCase | ExecutorCase | ClientCase | StartupCase
 
 CODEX = "/usr/local/bin/codex"
+CODEX_VERSION = "0.166.0"
+STARTUP_REFUSALS: dict[StartupCase, StartupFailure] = {
+    "startup-version": StartupFailure.VERSION_MISMATCH,
+    "startup-home": StartupFailure.HOME_MISMATCH,
+}
 PROVIDER_CASES = frozenset(
     {"implicit_account", "provider_key_present", "provider_key_absent"}
 )
@@ -252,7 +264,9 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
-        elif case == "executor-stall" or case in CLIENT_CASES:
+        elif (
+            case == "executor-stall" or case in CLIENT_CASES or case in STARTUP_REFUSALS
+        ):
             self.request_limit = 1
         else:
             self.request_limit = (
@@ -360,6 +374,7 @@ class ResponsesFixture:
     def respond(self, request: dict[str, object]) -> bytes:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
+        require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
         if self.case == "provider_key_present" or self.case in CLIENT_CASES:
             require(self.requests == 1, "unexpected_responses_request")
             return FINAL_RESPONSE
@@ -454,9 +469,12 @@ class ResponsesFixture:
 
 
 class Stdio:
-    def __init__(self, rpc: AppServerRpc, deadline: float) -> None:
+    def __init__(
+        self, rpc: AppServerRpc, deadline: float, identity: StartupIdentity
+    ) -> None:
         self.rpc = rpc
         self.deadline = deadline
+        self.identity = identity
         self.terminal: dict[str, object] | None = None
         self.waiting_terminal = asyncio.Event()
 
@@ -479,13 +497,12 @@ class Stdio:
     async def observe(
         self, workspace: Path, case: ProbeCase, executor_url: str | None = None
     ) -> None:
-        params: dict[str, object] = {
-            "clientInfo": {"name": "kora-hook-probe", "version": "1"}
-        }
-        if executor_url is not None:
-            params["capabilities"] = {"experimentalApi": True}
-        await self.call("initialize", params)
-        await self.rpc.notify("initialized", deadline=self.deadline)
+        await initialize_app_server(
+            self.rpc,
+            self.identity,
+            deadline=self.deadline,
+            experimental_api=executor_url is not None,
+        )
         if case == "implicit_account":
             account = await self.call("account/read", {"refreshToken": False})
             require(
@@ -771,6 +788,20 @@ async def observe_client_exit(
             killer.exception()
 
 
+def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
+    expected_home = prepared_home
+    if case == "startup-home":
+        expected_home = prepared_home.with_name("other-codex-home")
+        expected_home.mkdir()
+    return StartupIdentity(
+        version="0.0.0" if case == "startup-version" else CODEX_VERSION,
+        platform_os="linux",
+        codex_home=expected_home.resolve(strict=True),
+        client_name="kora-hook-probe",
+        client_version="1",
+    )
+
+
 async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     async with asyncio.timeout_at(deadline):
@@ -790,12 +821,15 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             fixture.case in PROVIDER_CASES
             or fixture.case in SHELL_ARGUMENTS
             or fixture.case in CLIENT_CASES
+            or fixture.case in STARTUP_REFUSALS
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
             if fixture.case in EXECUTOR_CASES:
                 executor = await start_executor(root / "executor", workspace)
                 executor_url = await read_executor_url(executor)
+            child_env = environment(root, port, fixture.case)
+            identity = startup_identity(fixture.case, Path(child_env["CODEX_HOME"]))
             process = await asyncio.create_subprocess_exec(
                 CODEX,
                 *args,
@@ -805,7 +839,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 limit=MAX_FRAME_BYTES,
                 start_new_session=True,
                 cwd=workspace,
-                env=environment(root, port, fixture.case),
+                env=child_env,
             )
             assert process.stdin is not None
             assert process.stdout is not None
@@ -817,7 +851,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 max_frame_bytes=MAX_FRAME_BYTES,
                 max_messages=MAX_MESSAGES,
             )
-            stdio = Stdio(rpc, deadline)
+            stdio = Stdio(rpc, deadline, identity)
             if fixture.case == "client-exit":
                 await observe_client_exit(process, fixture, stdio, workspace)
             else:
@@ -850,7 +884,9 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
         raise
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
-        if process is not None and fixture.case in PROVIDER_CASES:
+        if process is not None and (
+            fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
+        ):
             try:
                 async with asyncio.timeout_at(cleanup_deadline):
                     await stop_native_process(process)
@@ -922,6 +958,29 @@ async def run_provider_case(case: ProviderCase | ClientCase) -> None:
             not os.path.lexists(root / "codex" / "auth.json"),
             "provider_store_created",
         )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_startup_refusal(case: StartupCase) -> None:
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+        try:
+            await drive(fixture, root, workspace)
+        except StartupError as error:
+            require(
+                error.reason is STARTUP_REFUSALS[case], "unexpected_startup_refusal"
+            )
+            reason = error.reason
+        else:
+            raise ProbeFailure("startup_mismatch_accepted")
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        require(
+            fixture.connections == fixture.requests == 0, "unexpected_startup_traffic"
+        )
+    diagnostic("INFO", "probe.startup_refused", reason.value)
     diagnostic("INFO", "probe.case_verified", case)
 
 
@@ -1007,6 +1066,10 @@ async def run() -> None:
         await run_provider_case("client-complete")
     elif sys.argv[1:] == ["--client-exit"]:
         await run_provider_case("client-exit")
+    elif sys.argv[1:] == ["--startup-version"]:
+        await run_startup_refusal("startup-version")
+    elif sys.argv[1:] == ["--startup-home"]:
+        await run_startup_refusal("startup-home")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
     else:
@@ -1015,7 +1078,7 @@ async def run() -> None:
         await run_case("deny")
 
 
-def report_rpc_failure(error: RpcError) -> int:
+def report_connection_failure(error: RpcError | StartupError) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
 
@@ -1026,8 +1089,8 @@ def main() -> int:
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
-    except RpcError as error:
-        return report_rpc_failure(error)
+    except (RpcError, StartupError) as error:
+        return report_connection_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
         return 1

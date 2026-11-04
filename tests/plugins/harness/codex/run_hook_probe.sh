@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-app-server-rpc) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-app-server-rpc|1:--check-app-server-startup) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-app-server-rpc]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-app-server-rpc|--check-app-server-startup]' >&2
         exit 2
         ;;
 esac
@@ -91,7 +91,7 @@ run_variant() {
     shift
     image=$(
         tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py \
-            -C "$rpc_dir" app_server_rpc.py |
+            -C "$rpc_dir" app_server_rpc.py app_server_startup.py |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
     )
     case "$image" in
@@ -148,6 +148,13 @@ case "${1:-}" in
         run_variant default --client-complete
         release_container
         run_variant default --client-exit
+        ;;
+    --check-app-server-startup)
+        run_variant default --client-complete
+        release_container
+        run_variant default --startup-version
+        release_container
+        run_variant default --startup-home
         ;;
     *) run_variant default "$@" ;;
 esac
