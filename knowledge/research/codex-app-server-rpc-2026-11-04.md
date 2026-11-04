@@ -6,7 +6,7 @@ caller. The isolated fixture owns Codex, the model server and their cleanup.
 
 ## Inputs
 
-The tested source revision was `e063afae69f879981db162e3580f83eea35d6417`,
+The tested source revision was `e77c7ef1994d6981c3581a884f99396f44f1d475`,
 based on `c7e8a89a92227cee7c9fb04f828b043fec0362cb`. The existing
 [managed hook fixture](codex-managed-hook-probe-2026-11-04.md) pins Codex CLI
 `0.166.0` from upstream commit `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`.
@@ -51,19 +51,37 @@ diagnostic observations.
 
 | Argument to `run_hook_probe.sh` | Observed cases | Wall seconds |
 | --- | --- | ---: |
-| `--check-app-server-rpc` | Completed turn and disconnection | 6.36 |
-| No argument | Managed hook allow and deny | 7.65 |
+| `--check-app-server-rpc` | Completed turn and disconnection | 7.63 |
+| No argument | Managed hook allow and deny | 7.61 |
 | `--check-cleanup` | Stalled managed hook | 30.96 |
-| `--check-write-stdin` | Interactive control and one-shot allow/deny | 13.09 |
-| `--check-provider-env-key` | Implicit account state and custom-provider key present/absent | 7.93 |
-| `--check-shell-controls` | Default shell, login and alternate shell | 12.26 |
-| `--check-executor-shell` | Selected executor shell, login, deny and stalled hook | 67.01 |
+| `--check-write-stdin` | Interactive control and one-shot allow/deny | 12.88 |
+| `--check-provider-env-key` | Implicit account state and custom-provider key present/absent | 7.80 |
+| `--check-shell-controls` | Default shell, login and alternate shell | 11.94 |
+| `--check-executor-shell` | Selected executor shell, login, deny and stalled hook | 66.62 |
 
 The final Docker container inventory returned no probe container.
 
+## Decoder depth across Python versions
+
+The [first CI run](https://github.com/realkarych/kora/actions/runs/41800544126)
+failed one direct-wire test on Linux with Python 3.15.0. That interpreter
+accepted a frame nested 2,001 containers deep, while the earlier test had
+relied on the decoder's recursion failure. The transport now counts JSON
+containers before decoding and refuses a depth above 64, including the outer
+object. Brackets inside strings and escaped quotes do not count.
+
+An isolated Linux amd64 run with CPython 3.15.0 confirmed the original
+acceptance at depth 2,001. The revised source accepted depth 64 and rejected
+depths 65 and 2,001 as `rpc_invalid_frame`. The wire tests retain the original
+deep frame and exercise the exact boundary with structural characters inside
+a string. The Docker base for this comparison was
+`python:3.15.0-slim-bookworm` at digest
+`sha256:0e019bbdfb5d9874cb2389f1c2884b64aa2ac97c99960b5bc521cef978c0617d`.
+The complete native Codex campaign above was repeated on the revised source.
+
 ## Local transport checks
 
-The 38 direct-wire cases and 30 architecture cases passed on macOS arm64 with
+The 40 direct-wire cases and 30 architecture cases passed on macOS arm64 with
 Python 3.11.17. The direct-wire tests run through ordinary CI on Linux and macOS.
 Scoped Ruff format and lint, strict Pyright, shell syntax and whitespace checks
 passed.
