@@ -222,6 +222,23 @@ async def test_app_server_rpc_remote_refusal_is_safe_and_connection_reusable(
             RpcFailure.SERVER_REQUEST,
         ),
     ],
+    ids=[
+        "invalid-utf8",
+        "invalid-json",
+        "float-overflow",
+        "nan",
+        "long-integer",
+        "deep-json",
+        "bool-id",
+        "float-id",
+        "duplicate-id-member",
+        "ambiguous-reply",
+        "invalid-error-code",
+        "wrong-version",
+        "invalid-timestamp",
+        "wrong-id",
+        "server-request",
+    ],
 )
 @pytest.mark.asyncio
 async def test_app_server_rpc_refuses_invalid_frames(
@@ -252,6 +269,34 @@ async def test_app_server_rpc_refuses_invalid_frames(
         assert captured.out == ""
         assert report_status == 1
         assert next_error.value.reason is RpcFailure.UNUSABLE
+        assert observed == []
+
+
+@pytest.mark.parametrize("depth", [64, 65])
+@pytest.mark.asyncio
+async def test_app_server_rpc_json_depth_boundary(depth: int) -> None:
+    async with wire() as connection:
+        deadline = future_deadline()
+        observed: list[Notification] = []
+        text = "{[" * 128 + '\\"' + "]}" * 128
+        result: object = text
+        for _ in range(depth - 1):
+            result = [result]
+        frame = json.dumps({"id": 1, "result": result}).encode() + b"\n"
+        request = connection.start(
+            connection.rpc.call("test", {}, deadline=deadline, observe=observed.append)
+        )
+        await connection.peer_reader.readline()
+
+        await connection.send(frame)
+        if depth == 64:
+            received = await request
+            assert received == result
+        else:
+            with pytest.raises(RpcError) as caught:
+                await request
+            assert caught.value.reason is RpcFailure.INVALID_FRAME
+
         assert observed == []
 
 

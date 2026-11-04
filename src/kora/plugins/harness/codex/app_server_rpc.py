@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import re
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from typing import cast
 
 READ_SIZE = 8192
 MAX_ENCODING_DEPTH = 64
+MAX_DECODING_DEPTH = 64
+JSON_STRUCTURE = re.compile(rb'["\[\]{}\\]')
 MAX_ENCODING_INTEGER_BITS = 1024
 MAX_DECODING_INTEGER_DIGITS = 1024
 MIN_RPC_INTEGER: int = -(1 << 63)
@@ -74,7 +77,34 @@ def bounded_integer(text: str) -> int:
     return int(text)
 
 
+def admits_json_depth(frame: bytes) -> bool:
+    depth = 0
+    in_string = False
+    escaped_at = -1
+    for match in JSON_STRUCTURE.finditer(frame):
+        position = match.start()
+        if position == escaped_at:
+            continue
+        token = match[0]
+        if token == b'"':
+            in_string = not in_string
+        elif in_string:
+            if token == b"\\":
+                escaped_at = position + 1
+        elif token in (b"[", b"{"):
+            depth += 1
+            if depth > MAX_DECODING_DEPTH:
+                return False
+        elif token in (b"]", b"}"):
+            depth -= 1
+            if depth < 0:
+                return False
+    return True
+
+
 def decode_object(frame: bytes) -> dict[str, object] | None:
+    if not admits_json_depth(frame):
+        return None
     try:
         value: object = json.loads(
             frame.decode("utf-8"),
