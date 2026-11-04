@@ -29,7 +29,12 @@ from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import Evaluator
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import DiagnosticPath, from_cel, path_sequence
+from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
+from kora.ir.trigger_expressions import (
+    SensorTriggerExpressionResult,
+    checked_sensor_trigger_sites,
+)
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 COMPLETED: EventSpec = CATALOG.register(
@@ -252,3 +257,22 @@ async def validate_cel_patterns(
     finally:
         prepared.probes.clear()
         prepared.fields.clear()
+
+
+async def validate_sensor_trigger_patterns(
+    document: GraphDocument, evaluator: Evaluator, *, max_triggers: int, max_work: int
+) -> PatternCheck | SensorTriggerExpressionResult:
+    if type(max_triggers) is not int or max_triggers < 0:
+        return announce(IncompletePatternCheck.INVALID_INVENTORY)
+    inventory = checked_sensor_trigger_sites(document, max_triggers=max_triggers)
+    if inventory is None:
+        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
+    if isinstance(inventory, SensorTriggerExpressionResult):
+        return inventory
+    verification = validate_cel_patterns(
+        tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
+        evaluator,
+        max_work=max_work,
+    )
+    del document, inventory
+    return await verification

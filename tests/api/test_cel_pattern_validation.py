@@ -1,6 +1,7 @@
 import json
 
 from kora.api.cel_pattern_validation import COMPLETED
+from kora.ir.trigger_expressions import COMPLETED as TRIGGER_CHECK_COMPLETED
 from tests.api.cel_pattern_validation_scenarios import (
     PATH_MARKER,
     PATTERN_MARKER,
@@ -60,6 +61,37 @@ def test_cel_pattern_inventory_refuses_incomplete_or_oversized_inputs() -> None:
 
 def test_cel_pattern_inventory_cancels_and_releases_probe_work() -> None:
     scenario = "cancellation"
+
+    result = run_inventory_scenario(scenario)
+
+    assert_safe_output(result)
+    assert completion_statuses(result) == []
+
+
+def test_sensor_trigger_patterns_check_the_complete_admitted_typed_inventory() -> None:
+    scenario = "sensor_triggers"
+
+    result = run_inventory_scenario(scenario)
+
+    assert_safe_output(result)
+    assert "observation.name" not in result.stderr
+    assert completion_statuses(result) == [
+        "capacity_exhausted",
+        "invalid_inventory",
+        "capacity_exhausted",
+        "complete",
+        "complete",
+    ]
+    contextual_counts = [
+        record["triggers"]
+        for line in result.stderr.splitlines()
+        if (record := json.loads(line))["event"] == TRIGGER_CHECK_COMPLETED.name
+    ]
+    assert contextual_counts == [2, 2, 4, 2, 2, 1, 4]
+
+
+def test_sensor_pattern_cancellation_releases_document_and_checked_state() -> None:
+    scenario = "sensor_cancellation"
 
     result = run_inventory_scenario(scenario)
 

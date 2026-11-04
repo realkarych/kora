@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from pydantic import MISSING
 
-from kora.cel import Environment, ResultKind, Variable, check_typed
+from kora.cel import CheckedExpression, Environment, ResultKind, Variable, check_typed
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
 from kora.cel.meter import Meter
@@ -11,6 +11,7 @@ from kora.cel.types import DYN
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
 from kora.ir.document import GraphDocument
+from kora.ir.expression_fields import FieldPath
 from kora.ir.graph_links import COMPONENT, safe_source
 from kora.ir.trigger import SensorTrigger
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
@@ -51,8 +52,33 @@ class SensorTriggerExpressionResult:
         return self.diagnostics.valid and self.expressions_unresolved == 0
 
 
+@dataclass(frozen=True, slots=True, repr=False)
+class CheckedSensorTrigger:
+    path: FieldPath
+    checked: CheckedExpression
+
+
 def validate_sensor_trigger_expressions(
     document: GraphDocument,
+) -> SensorTriggerExpressionResult:
+    return _check_sensor_trigger_expressions(document, None)
+
+
+def checked_sensor_trigger_sites(
+    document: GraphDocument, *, max_triggers: int
+) -> tuple[CheckedSensorTrigger, ...] | SensorTriggerExpressionResult | None:
+    triggers = document.graph.triggers
+    if triggers is not MISSING and len(triggers) > max_triggers:
+        return None
+    sites: list[CheckedSensorTrigger] = []
+    result = _check_sensor_trigger_expressions(document, sites)
+    if not result.expressions_valid:
+        return result
+    return tuple(sites)
+
+
+def _check_sensor_trigger_expressions(
+    document: GraphDocument, sites: list[CheckedSensorTrigger] | None
 ) -> SensorTriggerExpressionResult:
     environment = Environment({"observation": Variable(DYN)}, ResultKind.BOOL)
     syntax_meter = Meter()
@@ -75,15 +101,18 @@ def validate_sensor_trigger_expressions(
             continue
         checked += 1
         outcome = check_typed(source, environment, checker_meter)
+        path: FieldPath = ("graph", "triggers", index, "poll", "until")
         if isinstance(outcome, CelDiagnostic):
             collector.add(
                 from_cel(
                     outcome,
-                    path=("graph", "triggers", index, "poll", "until"),
+                    path=path,
                     exact_expression_field=True,
                     location=safe_source(graph.source),
                 )
             )
+        elif sites is not None:
+            sites.append(CheckedSensorTrigger(path, outcome))
     result = SensorTriggerExpressionResult(
         collector.finish(),
         len(triggers),
