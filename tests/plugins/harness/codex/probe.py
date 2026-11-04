@@ -14,6 +14,7 @@ from typing import Literal, cast
 
 from kora.plugins.harness.codex.app_server_rpc import (
     AppServerRpc,
+    Notification,
     RpcError,
     RpcFailure,
 )
@@ -29,8 +30,16 @@ from kora.plugins.harness.codex.app_server_turn import (
     observe_app_server_turn,
     reject_premature_completion,
 )
+from kora.plugins.harness.codex.app_server_usage import (
+    TokenCounts,
+    TurnUsage,
+    UsageChange,
+    UsageError,
+    decode_usage,
+    reject_premature_usage,
+)
 
-Case = Literal["allow", "deny", "stall", "interactive"]
+Case = Literal["allow", "deny", "stall", "interactive", "usage"]
 ProviderCase = Literal[
     "implicit_account", "provider_key_present", "provider_key_absent"
 ]
@@ -190,7 +199,12 @@ def diagnostic(level: str, event: str, detail: str) -> None:
     )
 
 
-def sse(response_id: str, item: dict[str, object]) -> bytes:
+def sse(
+    response_id: str,
+    item: dict[str, object],
+    *,
+    usage: dict[str, object] | None = None,
+) -> bytes:
     events = (
         {"type": "response.created", "response": {"id": response_id}},
         {"type": "response.output_item.done", "item": item},
@@ -198,7 +212,9 @@ def sse(response_id: str, item: dict[str, object]) -> bytes:
             "type": "response.completed",
             "response": {
                 "id": response_id,
-                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "usage": usage
+                if usage is not None
+                else {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
             },
         },
     )
@@ -207,7 +223,9 @@ def sse(response_id: str, item: dict[str, object]) -> bytes:
     ).encode()
 
 
-def command_response(arguments: dict[str, object]) -> bytes:
+def command_response(
+    arguments: dict[str, object], *, usage: dict[str, object] | None = None
+) -> bytes:
     return sse(
         "kora-probe-response-1",
         {
@@ -216,6 +234,7 @@ def command_response(arguments: dict[str, object]) -> bytes:
             "name": "exec_command",
             "arguments": json.dumps(arguments),
         },
+        usage=usage,
     )
 
 
@@ -279,15 +298,35 @@ PATCH_RESPONSE = sse(
         "input": PATCH,
     },
 )
-FINAL_RESPONSE = sse(
-    "kora-probe-response-2",
-    {
-        "type": "message",
-        "role": "assistant",
-        "id": "kora-probe-message",
-        "content": [{"type": "output_text", "text": "Probe turn finished."}],
+FINAL_ITEM: dict[str, object] = {
+    "type": "message",
+    "role": "assistant",
+    "id": "kora-probe-message",
+    "content": [{"type": "output_text", "text": "Probe turn finished."}],
+}
+FINAL_RESPONSE = sse("kora-probe-response-2", FINAL_ITEM)
+USAGE_TOOL_RESPONSE = command_response(
+    {"cmd": COMMAND, "login": False},
+    usage={
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
+        "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 4},
+        "total_tokens": 110,
     },
 )
+USAGE_FINAL_RESPONSE = sse(
+    "kora-probe-response-2",
+    FINAL_ITEM,
+    usage={
+        "input_tokens": 60,
+        "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 10},
+        "output_tokens": 20,
+        "output_tokens_details": {"reasoning_tokens": 6},
+        "total_tokens": 80,
+    },
+)
+EXPECTED_USAGE = (TokenCounts(100, 20, 30, 10, 4), TokenCounts(160, 25, 40, 30, 10))
 
 
 class ResponsesFixture:
@@ -450,7 +489,7 @@ class ResponsesFixture:
                     EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
                 )
                 return command_response({"cmd": command, **SHELL_ARGUMENTS[self.case]})
-            return TOOL_RESPONSE
+            return USAGE_TOOL_RESPONSE if self.case == "usage" else TOOL_RESPONSE
 
         require(self.requests <= self.request_limit, "unexpected_responses_request")
         require(self.case not in STALLED_CASES, "stalled_hook_returned")
@@ -530,7 +569,7 @@ class ResponsesFixture:
                 (DENIAL in output) == (self.case == "deny"),
                 "unexpected_hook_denial_result",
             )
-        return FINAL_RESPONSE
+        return USAGE_FINAL_RESPONSE if self.case == "usage" else FINAL_RESPONSE
 
     async def close(self, server: asyncio.Server) -> None:
         server.close()
@@ -544,6 +583,42 @@ class ResponsesFixture:
                 task.result()
             await writer.wait_closed()
         await server.wait_closed()
+
+
+class UsageProbe:
+    def __init__(self, thread_id: str) -> None:
+        self.usage = TurnUsage(thread_id)
+        self.advances = 0
+
+    def observe(self, notification: Notification) -> None:
+        snapshot = decode_usage(notification)
+        if snapshot is None:
+            return
+        change = self.usage.accept(snapshot)
+        if change is UsageChange.DUPLICATE:
+            return
+        require(
+            change is UsageChange.ADVANCED and self.advances < len(EXPECTED_USAGE),
+            "unexpected_usage_transition",
+        )
+        require(
+            snapshot.counts == EXPECTED_USAGE[self.advances],
+            "unexpected_usage_cumulative_counts",
+        )
+        self.advances += 1
+
+    def verify(self, turn_id: str) -> None:
+        require(self.advances == len(EXPECTED_USAGE), "missing_usage_snapshot")
+        snapshot = self.usage.for_turn(turn_id)
+        if snapshot is None:
+            raise ProbeFailure("missing_usage_snapshot")
+        require(
+            self.usage.accept(snapshot) is UsageChange.DUPLICATE
+            and self.usage.for_turn(turn_id) == snapshot
+            and snapshot.counts.input_tokens == 95
+            and not self.usage.observation_gap,
+            "unexpected_usage_replay",
+        )
 
 
 class Stdio:
@@ -624,6 +699,7 @@ class Stdio:
             or case in SHELL_ARGUMENTS
             or case in CLIENT_CASES
             or case in HOOK_INPUT_CASES
+            or case == "usage"
         )
         if ephemeral:
             thread_params["ephemeral"] = True
@@ -638,11 +714,15 @@ class Stdio:
             require(thread.get("ephemeral") is True, "thread_not_ephemeral")
         thread_id = thread.get("id")
         require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
+        thread_id = cast("str", thread_id)
+        usage = UsageProbe(thread_id) if case == "usage" else None
         self.terminal = await observe_app_server_turn(
             self.rpc,
-            thread_id=cast("str", thread_id),
+            thread_id=thread_id,
             prompt=prompt,
             deadline=self.deadline,
+            observe=usage.observe if usage is not None else None,
+            observe_before_send=reject_premature_usage if usage is not None else None,
             on_waiting=self.waiting_terminal.set,
         )
         if case == "provider_key_absent":
@@ -655,6 +735,8 @@ class Stdio:
             )
         else:
             require(self.terminal.status == "completed", "turn_not_completed")
+        if usage is not None:
+            usage.verify(self.terminal.turn_id)
 
 
 def native_environment(root: Path) -> dict[str, str]:
@@ -978,7 +1060,9 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
 
 async def run_case(case: Case, one_shot: bool = False) -> None:
     RECEIPTS.unlink(missing_ok=True)
-    (CONTROL / "decision").write_text(case, encoding="utf-8")
+    (CONTROL / "decision").write_text(
+        "allow" if case == "usage" else case, encoding="utf-8"
+    )
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
         workspace = root / "workspace"
@@ -993,7 +1077,7 @@ async def run_case(case: Case, one_shot: bool = False) -> None:
                 "unexpected_fixture_request_count",
             )
             hook_pid(STDIN_COMMAND if case == "interactive" else COMMAND)
-        if case in {"allow", "interactive"}:
+        if case in {"allow", "interactive", "usage"}:
             require(
                 marker.is_file() and not marker.is_symlink(), "allowed_marker_missing"
             )
@@ -1174,6 +1258,8 @@ async def run() -> None:
         await run_provider_case("client-complete")
     elif sys.argv[1:] == ["--client-exit"]:
         await run_provider_case("client-exit")
+    elif sys.argv[1:] == ["--check-app-server-usage"]:
+        await run_case("usage")
     elif sys.argv[1:] == ["--startup-version"]:
         await run_startup_refusal("startup-version")
     elif sys.argv[1:] == ["--startup-home"]:
@@ -1192,7 +1278,9 @@ async def run() -> None:
         await run_case("deny")
 
 
-def report_connection_failure(error: RpcError | StartupError | TurnError) -> int:
+def report_connection_failure(
+    error: RpcError | StartupError | TurnError | UsageError,
+) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
 
@@ -1203,7 +1291,7 @@ def main() -> int:
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
-    except (RpcError, StartupError, TurnError) as error:
+    except (RpcError, StartupError, TurnError, UsageError) as error:
         return report_connection_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")

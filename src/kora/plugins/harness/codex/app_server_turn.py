@@ -86,6 +86,7 @@ async def observe_app_server_turn(
     prompt: str,
     deadline: float,
     observe: Callable[[Notification], bool | None] | None = None,
+    observe_before_send: Callable[[Notification], bool | None] | None = None,
     on_waiting: Callable[[], None] | None = None,
 ) -> TurnCompletion:
     identifier(thread_id, TurnFailure.INVALID_START)
@@ -94,7 +95,8 @@ async def observe_app_server_turn(
 
     def observe_buffered(notification: Notification) -> bool | None:
         reject_premature_completion(notification)
-        return observe(notification) if observe is not None else None
+        callback = observe if observe_before_send is None else observe_before_send
+        return callback(notification) if callback is not None else None
 
     def observe_pending(notification: Notification) -> bool | None:
         nonlocal completion
