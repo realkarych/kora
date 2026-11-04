@@ -940,3 +940,61 @@ def test_scaffold_join_keeps_the_required_names() -> None:
     ]
     assert "permissions" not in job
     assert "continue-on-error" not in job
+
+
+def test_ci_macos_jobs_queue_in_three_groups_without_replacing_pending_jobs() -> None:
+    document = workflow_document()
+    jobs = table(document["jobs"])
+    scaffold_job = table(jobs["scaffold-tests"])
+    diagnostics_job = table(jobs["local-runtime-diagnostics"])
+    scaffold = matrix_rows(scaffold_job)
+    diagnostics = matrix_rows(diagnostics_job)
+    mutation_strategy = table(table(jobs["mutation-tooling"])["strategy"])
+    groups = {
+        "scaffold-tests": (
+            "${{ matrix.os == 'macos-15' "
+            "&& format('kora-ci-{0}-{1}-macos-{2}', github.run_id, github.run_attempt, "
+            "(matrix.lane == 'storage' || matrix.lane == 'local-runtime') "
+            "&& 'resources' || matrix.lane) "
+            "|| format('kora-ci-{0}-{1}-scaffold-{2}-{3}-{4}', github.run_id, "
+            "github.run_attempt, matrix.os, matrix.python, matrix.lane) }}"
+        ),
+        "local-runtime-diagnostics": (
+            "${{ matrix.os == 'macos-15' "
+            "&& format('kora-ci-{0}-{1}-macos-remainder', "
+            "github.run_id, github.run_attempt) "
+            "|| format('kora-ci-{0}-{1}-diagnostics-{2}-{3}', github.run_id, "
+            "github.run_attempt, matrix.os, matrix.python) }}"
+        ),
+        "mutation-tooling": (
+            "${{ matrix.os == 'macos-15' "
+            "&& format('kora-ci-{0}-{1}-macos-conformance', "
+            "github.run_id, github.run_attempt) "
+            "|| format('kora-ci-{0}-{1}-mutation-{2}', github.run_id, "
+            "github.run_attempt, matrix.os) }}"
+        ),
+    }
+
+    queued = {job_id: table(table(jobs[job_id])["concurrency"]) for job_id in groups}
+
+    assert document["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.ref }}",
+        "cancel-in-progress": True,
+    }
+    assert table(table(scaffold_job["strategy"])["matrix"]).keys() == {"include"}
+    assert table(table(diagnostics_job["strategy"])["matrix"]).keys() == {"include"}
+    assert len(scaffold) == 12
+    assert {(row["os"], row["python"], row["lane"]) for row in scaffold} == {
+        (operating_system, python, lane)
+        for operating_system, python, _ in SCAFFOLD_PLATFORMS
+        for lane in ("conformance", "remainder", "storage", "local-runtime")
+    }
+    assert len(diagnostics) == 3
+    assert {(row["os"], row["python"]) for row in diagnostics} == {
+        (operating_system, python) for operating_system, python, _ in SCAFFOLD_PLATFORMS
+    }
+    assert mutation_strategy["matrix"] == {"os": ["ubuntu-24.04", "macos-15"]}
+    assert {
+        job_id: {**queue, "group": " ".join(str(queue["group"]).split())}
+        for job_id, queue in queued.items()
+    } == {job_id: {"group": group, "queue": "max"} for job_id, group in groups.items()}
