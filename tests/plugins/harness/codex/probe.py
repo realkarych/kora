@@ -14,7 +14,6 @@ from typing import Literal, cast
 
 from kora.plugins.harness.codex.app_server_rpc import (
     AppServerRpc,
-    Notification,
     RpcError,
     RpcFailure,
 )
@@ -23,6 +22,11 @@ from kora.plugins.harness.codex.app_server_startup import (
     StartupFailure,
     StartupIdentity,
     initialize_app_server,
+)
+from kora.plugins.harness.codex.app_server_turn import (
+    TurnCompletion,
+    TurnError,
+    observe_app_server_turn,
 )
 
 Case = Literal["allow", "deny", "stall", "interactive"]
@@ -548,22 +552,13 @@ class Stdio:
         self.rpc = rpc
         self.deadline = deadline
         self.identity = identity
-        self.terminal: dict[str, object] | None = None
+        self.terminal: TurnCompletion | None = None
         self.waiting_terminal = asyncio.Event()
-
-    def record(self, message: Notification) -> bool:
-        if message.method != "turn/completed":
-            return True
-        params = message.params
-        if self.terminal is not None or not isinstance(params, dict):
-            return False
-        self.terminal = cast("dict[str, object]", params)
-        return True
 
     async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
         return as_object(
             await self.rpc.call(
-                method, params, deadline=self.deadline, observe=self.record
+                method, params, deadline=self.deadline, observe=lambda _notice: None
             )
         )
 
@@ -639,32 +634,23 @@ class Stdio:
             require(thread.get("ephemeral") is True, "thread_not_ephemeral")
         thread_id = thread.get("id")
         require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
-        started = await self.call(
-            "turn/start",
-            {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt}],
-            },
+        self.terminal = await observe_app_server_turn(
+            self.rpc,
+            thread_id=cast("str", thread_id),
+            prompt=prompt,
+            deadline=self.deadline,
+            on_waiting=self.waiting_terminal.set,
         )
-        turn_id = as_object(started.get("turn")).get("id")
-        require(isinstance(turn_id, str) and bool(turn_id), "missing_turn_id")
-        while self.terminal is None:
-            self.waiting_terminal.set()
-            message = await self.rpc.receive(deadline=self.deadline)
-            require(self.record(message), "invalid_turn_completion")
-        require(
-            self.terminal.get("threadId") == thread_id, "unexpected_terminal_thread"
-        )
-        turn = as_object(self.terminal.get("turn"))
-        require(turn.get("id") == turn_id, "unexpected_terminal_turn")
         if case == "provider_key_absent":
-            require(turn.get("status") == "failed", "missing_provider_key_not_refused")
             require(
-                as_object(turn.get("error")).get("message") == MISSING_PROVIDER_KEY,
+                self.terminal.status == "failed", "missing_provider_key_not_refused"
+            )
+            require(
+                as_object(self.terminal.error).get("message") == MISSING_PROVIDER_KEY,
                 "unexpected_missing_provider_key_error",
             )
         else:
-            require(turn.get("status") == "completed", "turn_not_completed")
+            require(self.terminal.status == "completed", "turn_not_completed")
 
 
 def native_environment(root: Path) -> dict[str, str]:
@@ -1202,7 +1188,7 @@ async def run() -> None:
         await run_case("deny")
 
 
-def report_connection_failure(error: RpcError | StartupError) -> int:
+def report_connection_failure(error: RpcError | StartupError | TurnError) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
 
@@ -1213,7 +1199,7 @@ def main() -> int:
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
-    except (RpcError, StartupError) as error:
+    except (RpcError, StartupError, TurnError) as error:
         return report_connection_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")

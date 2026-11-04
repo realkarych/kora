@@ -338,13 +338,17 @@ class AppServerRpc:
         *,
         deadline: float,
         observe: Callable[[Notification], bool | None],
+        observe_before_send: Callable[[Notification], bool | None] | None = None,
     ) -> object:
         async with self._operation(deadline):
+            observe_buffered = (
+                observe if observe_before_send is None else observe_before_send
+            )
             while self._lookahead:
                 message_before_request = self._notification(
                     await self._receive(deadline)
                 )
-                self._dispatch(message_before_request, observe)
+                self._dispatch(message_before_request, observe_buffered)
             self._require_observation_capacity()
             request_id = self._next_request_id()
             if not rpc_integer(request_id) or request_id in self._used_request_ids:
@@ -365,6 +369,14 @@ class AppServerRpc:
         async with self._operation(deadline):
             await self._send({"method": method}, deadline)
 
-    async def receive(self, *, deadline: float) -> Notification:
+    async def receive(
+        self,
+        *,
+        deadline: float,
+        observe: Callable[[Notification], bool | None] | None = None,
+    ) -> Notification:
         async with self._operation(deadline):
-            return self._notification(await self._receive(deadline))
+            notification = self._notification(await self._receive(deadline))
+            if observe is not None:
+                self._dispatch(notification, observe)
+            return notification

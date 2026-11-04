@@ -1,0 +1,121 @@
+from collections.abc import Callable
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import Literal, cast
+
+from kora.plugins.harness.codex.app_server_rpc import AppServerRpc, Notification
+
+TerminalStatus = Literal["completed", "failed", "interrupted"]
+TERMINAL_METHOD = "turn/completed"
+
+
+class TurnFailure(StrEnum):
+    INVALID_START = "turn_invalid_start"
+    INVALID_COMPLETION = "turn_invalid_completion"
+    IDENTITY_MISMATCH = "turn_identity_mismatch"
+    PREMATURE_COMPLETION = "turn_premature_completion"
+    DUPLICATE_COMPLETION = "turn_duplicate_completion"
+
+
+class TurnError(Exception):
+    def __init__(self, reason: TurnFailure) -> None:
+        self.reason = reason
+        super().__init__(reason.value)
+
+
+@dataclass(frozen=True, repr=False)
+class TurnCompletion:
+    turn_id: str
+    status: TerminalStatus
+    error: dict[str, object] | None
+
+
+def object_fields(value: object, failure: TurnFailure) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise TurnError(failure)
+    return cast("dict[str, object]", value)
+
+
+def identifier(value: object, failure: TurnFailure) -> str:
+    if isinstance(value, str) and value:
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            pass
+        else:
+            return value
+    raise TurnError(failure)
+
+
+def started_turn_id(reply: object) -> str:
+    failure = TurnFailure.INVALID_START
+    turn = object_fields(object_fields(reply, failure).get("turn"), failure)
+    if turn.get("status") != "inProgress":
+        raise TurnError(failure)
+    return identifier(turn.get("id"), failure)
+
+
+def terminal_observation(params: object, thread_id: str) -> TurnCompletion:
+    failure = TurnFailure.INVALID_COMPLETION
+    fields = object_fields(params, failure)
+    reported_thread = identifier(fields.get("threadId"), failure)
+    turn = object_fields(fields.get("turn"), failure)
+    turn_id = identifier(turn.get("id"), failure)
+    status = turn.get("status")
+    if status not in ("completed", "failed", "interrupted"):
+        raise TurnError(failure)
+    if reported_thread != thread_id:
+        raise TurnError(TurnFailure.IDENTITY_MISMATCH)
+    error = turn.get("error")
+    if error is not None:
+        error = object_fields(error, failure)
+        if status == "completed" or not isinstance(error.get("message"), str):
+            raise TurnError(failure)
+    return TurnCompletion(turn_id, status, error)
+
+
+async def observe_app_server_turn(
+    rpc: AppServerRpc,
+    *,
+    thread_id: str,
+    prompt: str,
+    deadline: float,
+    observe: Callable[[Notification], bool | None] | None = None,
+    on_waiting: Callable[[], None] | None = None,
+) -> TurnCompletion:
+    identifier(thread_id, TurnFailure.INVALID_START)
+    completion: TurnCompletion | None = None
+    turn_id: str | None = None
+
+    def observe_buffered(notification: Notification) -> bool | None:
+        if notification.method == TERMINAL_METHOD:
+            raise TurnError(TurnFailure.PREMATURE_COMPLETION)
+        return observe(notification) if observe is not None else None
+
+    def observe_pending(notification: Notification) -> bool | None:
+        nonlocal completion
+        if notification.method != TERMINAL_METHOD:
+            return observe(notification) if observe is not None else None
+        if completion is not None:
+            raise TurnError(TurnFailure.DUPLICATE_COMPLETION)
+        terminal = terminal_observation(notification.params, thread_id)
+        if turn_id is not None and terminal.turn_id != turn_id:
+            raise TurnError(TurnFailure.IDENTITY_MISMATCH)
+        completion = terminal
+        return None
+
+    reply = await rpc.call(
+        "turn/start",
+        {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+        deadline=deadline,
+        observe=observe_pending,
+        observe_before_send=observe_buffered,
+    )
+    turn_id = started_turn_id(reply)
+    if completion is not None and completion.turn_id != turn_id:
+        raise TurnError(TurnFailure.IDENTITY_MISMATCH)
+    if completion is None and on_waiting is not None:
+        on_waiting()
+    while completion is None:
+        await rpc.receive(deadline=deadline, observe=observe_pending)
+    return completion
