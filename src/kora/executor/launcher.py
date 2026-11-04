@@ -355,10 +355,11 @@ class ProcessLauncher(StepLauncher):
         )
         try:
             return await self._supervise(child, spec.timeout_ns)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as error:
             try:
                 await child.terminate(self.kill_grace_ns)
-                child.reap()
+                reaped = child.reap()
+                error.add_note(f"executor child exit_code={reaped.exit_code}")
                 await child.wait_pipes(self.eof_bound_ns)
             finally:
                 child.kill_now()

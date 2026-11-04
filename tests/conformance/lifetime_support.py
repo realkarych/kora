@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import dataclass
 from io import FileIO
 from pathlib import Path
+from tempfile import TemporaryFile
 from typing import Final, TypedDict, Unpack
 
 from kora.conformance.bridge import finish_cleanup
@@ -258,6 +259,7 @@ async def retained_live_invocation(
     started: list[subprocess.Popen[bytes]] | None = None,
     cleanup_entered: asyncio.Event | None = None,
     cleanup_release: asyncio.Event | None = None,
+    evidence: list[str] | None = None,
 ) -> AsyncGenerator[RetainedInvocation]:
     actual = SystemClock() if clock is None else clock
     closing = CleanupDeadline(actual, 5_000_000_000) if cleanup is None else cleanup
@@ -272,11 +274,12 @@ async def retained_live_invocation(
             await release_recovered(observer, closing, actual)
 
     with ExitStack() as handles:
+        diagnostics = handles.enter_context(TemporaryFile())
         process = subprocess.Popen(
             [sys.executable, "-I", str(RECOVERY_PROBE), str(home), mode, phase],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=diagnostics,
             close_fds=True,
             bufsize=0,
         )
@@ -365,7 +368,28 @@ async def retained_live_invocation(
                     finally:
                         await unwind_owned(releases)
 
-            await finish_cleanup(close, original)
+            try:
+                await finish_cleanup(close, original)
+            finally:
+                failure = sys.exception()
+                try:
+                    diagnostics.seek(0)
+                    captured = diagnostics.read(8193)
+                    note = (
+                        f"recovery probe returncode={process.returncode} "
+                        f"stderr_truncated={len(captured) > 8192}\n"
+                        + captured[:8192].decode("utf-8", errors="replace")
+                    )
+                except OSError as error:
+                    if failure is None and original is None:
+                        raise
+                    note = f"recovery probe capture_unavailable errno={error.errno}"
+                if evidence is not None:
+                    evidence.append(note)
+                if failure is not None:
+                    failure.add_note(note)
+                if original is not None and original is not failure:
+                    original.add_note(note)
 
 
 def assert_recovered_processes_absent(processes: Sequence[RecoveredProcess]) -> None:

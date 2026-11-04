@@ -563,10 +563,16 @@ async def test_live_probe_handoff_failure_releases_acquired_processes(
     entered = asyncio.Event()
     started: list[subprocess.Popen[bytes]] = []
     observed: list[BaseException] = []
+    evidence: list[str] = []
 
     async def acquire() -> None:
         async with retained_live_invocation(
-            tmp_path, "pair", phase=phase, entered=entered, started=started
+            tmp_path,
+            "pair",
+            phase=phase,
+            entered=entered,
+            started=started,
+            evidence=evidence,
         ):
             raise AssertionError("unexpected successful handoff")
 
@@ -591,12 +597,54 @@ async def test_live_probe_handoff_failure_releases_acquired_processes(
                 await task
             observed.append(failed.value)
     finally:
-        await join_helper_operation(task, observed)
+        original = sys.exception()
+        try:
+            await join_helper_operation(task, observed)
+        finally:
+            if original is not None:
+                for note in evidence:
+                    original.add_note(note)
     gc.collect()
 
     assert len(started) == 1
     assert started[0].returncode == 0
     assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT
+    assert set(os.listdir("/dev/fd")) == baseline
+
+    assert len(evidence) == 1
+    assert "returncode=0 stderr_truncated=False" in evidence[0]
+    assert "stage=entered" in evidence[0]
+    assert "stage=report_ready" in evidence[0]
+    for error in observed:
+        assert any("recovery probe returncode=" in note for note in error.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_live_probe_consumer_timeout_retains_diagnostics(tmp_path: Path) -> None:
+    gc.collect()
+    baseline = set(os.listdir("/dev/fd"))
+    evidence: list[str] = []
+    never_ready = asyncio.Event()
+    processes: list[RecoveredProcess] = []
+
+    async def expired_consumer() -> None:
+        async with retained_live_invocation(
+            tmp_path, "pair", evidence=evidence
+        ) as acquired:
+            processes.extend(acquired.processes)
+            await asyncio.wait_for(never_ready.wait(), 0)
+
+    with pytest.raises(TimeoutError) as failed:
+        await expired_consumer()
+    gc.collect()
+
+    assert len(evidence) == 1
+    assert evidence[0] in failed.value.__notes__
+    assert "returncode=0 stderr_truncated=False" in evidence[0]
+    assert "stage=report_ready" in evidence[0]
+    assert "stage=ack_received" in evidence[0]
+    assert len(processes) == 2
+    assert_recovered_processes_absent(processes)
     assert set(os.listdir("/dev/fd")) == baseline
 
 

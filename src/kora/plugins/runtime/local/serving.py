@@ -118,8 +118,10 @@ class BoundSocket:
     entry: tuple[int, int]
 
     def close(self) -> None:
-        self.listener.close()
-        self.directory.close()
+        try:
+            self.listener.close()
+        finally:
+            self.directory.close()
 
 
 def socket_entry(directory: DirectoryAnchor, name: str) -> os.stat_result | None:
@@ -197,6 +199,7 @@ class ControlServer:
         binder: Callable[[Path, str], BoundSocket] = rebound,
         decoder: Callable[[bytearray], Workload] = decoded_workload,
     ) -> None:
+        bound.listener.setblocking(False)
         self._bound = bound
         self._path = path
         self._name = name

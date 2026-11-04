@@ -24,7 +24,12 @@ from kora.observability import (
     LoggingSettings,
     configure_process,
 )
-from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, bound_socket
+from kora.plugins.runtime.local.serving import (
+    COMPONENT,
+    BoundSocket,
+    ControlServer,
+    bound_socket,
+)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
@@ -207,10 +212,67 @@ def signal_ready() -> None:
         os.close(READINESS_DESCRIPTOR)
 
 
-async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
-    clock = SystemClock()
-    reader = NativeIdentityReader()
-    identity = own_identity(reader)
+@dataclass
+class PreparedRegistration:
+    registry: Registry
+    key: AttemptKey
+    entry: Starting
+    name: str
+    bound: BoundSocket | None
+    resources: ExitStack
+
+    @property
+    def path(self) -> str:
+        return socket_path(self.entry.socket_directory, self.name)
+
+    async def register(self, identity: ProcessIdentity, clock: Clock) -> None:
+        bound = self.bound
+        if bound is None:
+            raise RunnerRefused("ownership")
+        try:
+            await register(
+                self.registry, self.key, self.entry.nonce, identity, self.path, clock
+            )
+        except BaseException:
+            bound.listener.close()
+            os.unlink(self.name, dir_fd=bound.directory.descriptor)
+            raise
+
+    def server(
+        self,
+        clock: Clock,
+        reader: NativeIdentityReader,
+        identity: ProcessIdentity,
+        log: ComponentLogger,
+    ) -> ControlServer:
+        bound = self.bound
+        if bound is None:
+            raise RunnerRefused("ownership")
+        server = ControlServer(
+            bound,
+            Path(self.entry.socket_directory),
+            self.name,
+            clock,
+            kernel_source(reader),
+            log,
+            self.registry,
+            self.key,
+            identity,
+            reader,
+        )
+        self.bound = None
+        return server
+
+    def close(self) -> None:
+        bound, self.bound = self.bound, None
+        try:
+            if bound is not None:
+                bound.close()
+        finally:
+            self.resources.close()
+
+
+def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
     with ExitStack() as resources:
         root = open_local_directory(arguments.state_root)
         resources.callback(root.close)
@@ -234,40 +296,42 @@ async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
             or entry.fence
         ):
             raise RunnerRefused("fenced")
-        directory = open_local_directory(Path(entry.socket_directory))
-        resources.callback(directory.close)
         name = key.name[:SOCKET_NAME_LENGTH]
-        path = socket_path(entry.socket_directory, name)
-        listener = bound_listener(directory, name)
-        resources.callback(listener.close)
-        try:
-            bound = bound_socket(listener, directory, name)
-            await register(registry, key, arguments.nonce, identity, path, clock)
-        except BaseException:
-            listener.close()
-            os.unlink(name, dir_fd=directory.descriptor)
-            raise
+        with ExitStack() as binding:
+            directory = open_local_directory(Path(entry.socket_directory))
+            binding.callback(directory.close)
+            listener = bound_listener(directory, name)
+            binding.callback(listener.close)
+            try:
+                bound = bound_socket(listener, directory, name)
+            except BaseException:
+                listener.close()
+                os.unlink(name, dir_fd=directory.descriptor)
+                raise
+            prepared = PreparedRegistration(
+                registry, key, entry, name, bound, resources.pop_all()
+            )
+            binding.pop_all()
+            return prepared
+
+
+async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
+    clock = SystemClock()
+    reader = NativeIdentityReader()
+    identity = own_identity(reader)
+    prepared = prepare_registration(arguments)
+    try:
+        await prepared.register(identity, clock)
         log.emit(REGISTERED)
         signal_ready()
-        socket_directory = Path(entry.socket_directory)
-        source = kernel_source(reader)
-        server = ControlServer(
-            bound,
-            socket_directory,
-            name,
-            clock,
-            source,
-            log,
-            registry,
-            key,
-            identity,
-            reader,
-        )
+        server = prepared.server(clock, reader, identity, log)
         try:
             server.start()
             await asyncio.Event().wait()
         finally:
             await server.close()
+    finally:
+        prepared.close()
 
 
 def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:

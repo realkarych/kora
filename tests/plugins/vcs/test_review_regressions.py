@@ -34,6 +34,7 @@ from kora.protocols.vcs import (
     PublishPlan,
     PublishRequest,
 )
+from kora.runner.identity import NativeIdentityReader
 from tests.plugins.vcs.git_support import REPO, git, make_world, write
 from tests.plugins.vcs.launchers import is_push
 
@@ -61,7 +62,7 @@ def fake_git(root: Path) -> tuple[Path, Path]:
     pids = root / "pids"
     pids.mkdir()
     script = root / "fake-git"
-    script.write_text(f"#!/bin/sh\necho $$ > {pids}/$$\nexec sleep 30\n")
+    script.write_text(f"#!/bin/sh\necho $PPID > {pids}/$$\nexec sleep 30\n")
     script.chmod(0o755)
     return script, pids
 
@@ -113,18 +114,29 @@ def test_helper_git_children_end_with_the_step(
         stderr_limit=4096,
     )
 
-    async def interrupted() -> list[int]:
+    async def interrupted() -> tuple[list[int], bool, str]:
+        reader = NativeIdentityReader()
         task = asyncio.create_task(FAST.run(spec))
         children = await started_children(pids)
+        sampled = children[:16]
+        parents = [((pids / str(pid)).read_text()[:32]).strip() for pid in sampled]
+        before = [reader.read(pid) for pid in sampled]
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as raised:
             await task
-        return children
+        remaining = any(alive(pid) for pid in children)
+        after = [reader.read(pid) for pid in sampled]
+        evidence = (
+            f"children={len(children)} sampled={sampled!r} parents={parents!r} "
+            f"before={before!r} after={after!r} "
+            f"helper_notes={getattr(raised.value, '__notes__', [])!r}"
+        )
+        return children, remaining, evidence
 
-    children = asyncio.run(interrupted())
+    children, remaining, evidence = asyncio.run(interrupted())
 
     assert children
-    assert not any(alive(pid) for pid in children)
+    assert not remaining, evidence
 
 
 def test_remote_substitution_before_preparation_is_refused(
