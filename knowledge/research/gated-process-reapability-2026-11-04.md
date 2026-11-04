@@ -8,7 +8,7 @@ The probe reuses `BsdInfo` and `proc_pidinfo(PROC_PIDTBSDINFO)` with argument 1.
 
 `GatedProcess.settle` arms one shared child-change watch before the probe when the child is not yet known to be a zombie. A not-ready child may wait only while the fresh domain observation is live or settled. A ready child still waits while the domain is live, or while an existing member watch can still change an incomplete domain observation. Success requires both a zombie and a fresh settled domain observation. Unknown, mismatched or failed probe and watch results, an unknown anchor, and a domain observation with nothing left to wait for refuse. `release` remains the only consuming wait. Linux composition passes no probe, so it keeps the existing `waitid` `WNOWAIT` path and does not open the extra watch.
 
-Hand-written production changes, counted as added plus deleted lines under `src/kora` and including the new `kora.runner.child_wait` module, total 457 against merge base `6b9edf914e7097f10abb4efb713ebe7930124b86`. The direct-child probe imports `ProcessRegistration` from `kora.protocols.lifetime_records`, so importing the IO helper does not load the lifetime package. Tests, the lifetime specification, the module map and this record are excluded.
+Hand-written production changes, counted as added plus deleted lines under `src/kora` and including the new `kora.runner.child_wait` module, total 455 against merge base `6b9edf914e7097f10abb4efb713ebe7930124b86`. The direct-child probe imports `ProcessRegistration` from `kora.protocols.lifetime_records`, so importing the IO helper does not load the lifetime package. Tests, the lifetime specification, the module map and this record are excluded.
 
 ## Commands and results
 
