@@ -1,5 +1,9 @@
 import cProfile
 import hashlib
+import sys
+from collections.abc import Generator
+from contextlib import contextmanager
+from types import CodeType, FrameType
 from typing import cast
 
 import pytest
@@ -11,17 +15,18 @@ from kora.db.graph_value_json import (
     TextBudget,
     render_object,
 )
-from kora.engine import graph_native_outputs, graph_types
+from kora.engine import graph_types
 from kora.engine.graph_native_outputs import build_graph_native_output_contract
 from kora.engine.graph_native_sources import VIEW_BYTES
 from kora.engine.graph_output_inventory import (
     build_graph_output_inventory,
-    derive_inventory,
     read_graph_output_inventory,
 )
 from kora.engine.graph_output_values import GraphOutputContract
-from kora.engine.graph_outputs import build_graph_output_contract, derive_output
+from kora.engine.graph_outputs import build_graph_output_contract
+from kora.engine.graph_schema_preparation import prepare_graph_schema
 from kora.ir.json import JsonObject
+from kora.ir.output_schemas import validate_output_schemas
 from kora.ir.structured_schema_input import StructuredSchemaPreparationRefusal
 from tests.engine.graph_inventory_cases import (
     canonical_size,
@@ -42,60 +47,26 @@ def calls(profile: cProfile.Profile, name: str) -> int:
     )
 
 
-def display_count(count: int | None) -> str:
-    if count is None:
-        return "unavailable"
-    if count < -999999:
-        return "underflow"
-    if count > 999999:
-        return "overflow"
-    return str(count)
+@contextmanager
+def observe_calls(owners: tuple[CodeType, ...]) -> Generator[list[int]]:
+    if sys.getprofile() is not None:
+        raise RuntimeError("source-pass observer already active")
+    counts = [0] * len(owners)
 
+    def observe(frame: FrameType, event: str, argument: object) -> None:
+        if event != "call":
+            return
+        code = frame.f_code
+        for index, owner in enumerate(owners):
+            if code is owner:
+                counts[index] += 1
+                return
 
-def document_call_summary(profile: cProfile.Profile, observed: int) -> str:
-    owner = graph_types.read_document.__code__
-    callers = (
-        ("inventory", derive_inventory.__code__),
-        ("native", graph_native_outputs.derive_native_output.__code__),
-        ("structured", derive_output.__code__),
-        ("type_reader", graph_types.read_graph_type_contracts.__code__),
-    )
-    fields = ("owner", "owner_recursion", "same_name", "observed_edges", "other_edges")
-    counts: dict[str, int | None] = dict.fromkeys(fields)
-    counts["name_total"] = observed
-    for label, _ in callers:
-        counts[label] = counts[f"{label}_edges"] = None
-    stats = profile.getstats()
-    if stats:
-        counts["same_name"] = 0
-    for entry in stats:
-        if entry.code is owner:
-            counts["owner"] = (counts["owner"] or 0) + entry.callcount
-            counts["owner_recursion"] = (
-                counts["owner_recursion"] or 0
-            ) + entry.reccallcount
-        elif not isinstance(entry.code, str) and entry.code.co_name == "read_document":
-            counts["same_name"] = (counts["same_name"] or 0) + entry.callcount
-        label = next((name for name, code in callers if entry.code is code), "other")
-        if label != "other":
-            counts[label] = (counts[label] or 0) + entry.callcount
-        if entry.calls:
-            edges = sum(call.callcount for call in entry.calls if call.code is owner)
-            counts["observed_edges"] = (counts["observed_edges"] or 0) + edges
-            key = f"{label}_edges"
-            counts[key] = (counts[key] or 0) + edges
-    owner_calls, same_name, edges = (
-        counts[k] for k in ("owner", "same_name", "observed_edges")
-    )
-    counts["name_minus_attributed"] = (
-        None if owner_calls is None else observed - owner_calls - (same_name or 0)
-    )
-    counts["owner_minus_observed_edges"] = (
-        None if owner_calls is None or edges is None else owner_calls - edges
-    )
-    return " ".join(
-        f"{label}={display_count(count)}" for label, count in counts.items()
-    )
+    try:
+        sys.setprofile(observe)
+        yield counts
+    finally:
+        sys.setprofile(None)
 
 
 def test_complete_inventory_preserves_mixed_root_and_unused_body_leaves() -> None:
@@ -368,11 +339,15 @@ def test_inventory_exact_cumulative_budget_and_source_passes(kind: str) -> None:
         + paths
         + (VIEW_BYTES if kind == "agent" else 0)
     )
-    profile = cProfile.Profile()
-
-    actual = profile.runcall(
-        build_graph_output_inventory, *arguments, max_encoded_bytes=exact
+    owners = (
+        graph_types.read_document.__code__,
+        graph_types.read_graph_type_contracts.__code__,
+        validate_output_schemas.__code__,
+        prepare_graph_schema.__code__,
     )
+
+    with observe_calls(owners) as counts:
+        actual = build_graph_output_inventory(*arguments, max_encoded_bytes=exact)
     restored = read_graph_output_inventory(
         *arguments, saved, max_encoded_bytes=exact + len(text)
     )
@@ -389,11 +364,11 @@ def test_inventory_exact_cumulative_budget_and_source_passes(kind: str) -> None:
     assert (
         failure.value.reason is reader_failure.value.reason is GraphValueFailure.BUDGET
     )
-    observed = calls(profile, "read_document")
-    assert observed == 2 + 2 * native + 3, document_call_summary(profile, observed)
-    assert calls(profile, "read_graph_type_contracts") == 1 + native + 2
-    assert calls(profile, "validate_output_schemas") == 1 + native + 1
-    assert calls(profile, "prepare_graph_schema") == 1
+    document_reads, type_reads, output_passes, preparations = counts
+    assert document_reads == 2 + 2 * native + 3
+    assert type_reads == 1 + native + 2
+    assert output_passes == 1 + native + 1
+    assert preparations == 1
 
 
 @pytest.mark.parametrize("stage", ["saved", "first", "second"])
@@ -459,35 +434,39 @@ def test_inventory_capture_refuses_ambiguous_or_foreign_input(mode: str) -> None
     assert failure.value.reason is GraphValueFailure.INVALID
 
 
-def test_document_call_summary_distinguishes_same_named_code_and_callers() -> None:
-    arguments = inventory_arguments(output_document("agent"))
-    profile = cProfile.Profile()
+def test_observer_counts_exact_code_including_recursive_entries() -> None:
+    def visit(depth: int) -> int:
+        return 0 if depth == 0 else 1 + visit(depth - 1)
 
-    def read_document() -> None:
-        graph_types.read_graph_type_contracts(*arguments, max_encoded_bytes=LIMIT)
-        graph_types.read_document(arguments[0], TextBudget(LIMIT))
+    class Other:
+        @staticmethod
+        def visit(depth: int) -> int:
+            return depth
 
-    profile.runcall(read_document)
-    summary = document_call_summary(profile, calls(profile, "read_document"))
+    with observe_calls((visit.__code__,)) as counts:
+        result = visit(2) + visit(0) + Other.visit(1)
 
-    assert summary == (
-        "owner=2 owner_recursion=0 same_name=1 observed_edges=2 other_edges=1 "
-        "name_total=3 "
-        "inventory=unavailable inventory_edges=unavailable "
-        "native=unavailable native_edges=unavailable "
-        "structured=unavailable structured_edges=unavailable "
-        "type_reader=1 type_reader_edges=1 name_minus_attributed=0 "
-        "owner_minus_observed_edges=0"
-    )
+    assert result == 3
+    assert counts == [4]
+    assert sys.getprofile() is None
 
 
-def test_document_call_summary_bounds_output_without_profile_entries() -> None:
-    profile = cProfile.Profile()
+def test_observer_preserves_occupied_slot_and_clears_after_refusal() -> None:
+    arguments = inventory_arguments(output_document("command"))
+    owners = (graph_types.read_document.__code__,)
 
-    summary = document_call_summary(profile, 10**20)
+    with observe_calls(owners):
+        incumbent: object = sys.getprofile()
+        with (
+            pytest.raises(RuntimeError, match="source-pass observer already active"),
+            observe_calls(owners),
+        ):
+            pass
+        after_nested: object = sys.getprofile()
+    with pytest.raises(GraphValueRejected) as failure, observe_calls(owners):
+        build_graph_output_inventory(*arguments, max_encoded_bytes=1)
 
-    assert len(summary.encode("ascii")) <= 2048
-    assert "name_total=overflow" in summary
-    assert "owner=unavailable" in summary
-    assert "inventory_edges=unavailable" in summary
-    assert display_count(-(10**20)) == "underflow"
+    assert incumbent is not None
+    assert incumbent is after_nested
+    assert failure.value.reason is GraphValueFailure.BUDGET
+    assert sys.getprofile() is None
