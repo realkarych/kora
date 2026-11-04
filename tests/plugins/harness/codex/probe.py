@@ -11,6 +11,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
 
+from kora.plugins.harness.codex.app_server_rpc import (
+    AppServerRpc,
+    Notification,
+    RpcError,
+    RpcFailure,
+)
+
 Case = Literal["allow", "deny", "stall", "interactive"]
 ProviderCase = Literal[
     "implicit_account", "provider_key_present", "provider_key_absent"
@@ -24,12 +31,14 @@ ExecutorCase = Literal[
     "executor-deny",
     "executor-stall",
 ]
-ProbeCase = Case | ProviderCase | ShellCase | ExecutorCase
+ClientCase = Literal["client-complete", "client-exit"]
+ProbeCase = Case | ProviderCase | ShellCase | ExecutorCase | ClientCase
 
 CODEX = "/usr/local/bin/codex"
 PROVIDER_CASES = frozenset(
     {"implicit_account", "provider_key_present", "provider_key_absent"}
 )
+CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 SYNTHETIC_BEARER = "kora-probe-synthetic-value"
 MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -242,32 +251,41 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
-        elif case == "executor-stall":
+        elif case == "executor-stall" or case in CLIENT_CASES:
             self.request_limit = 1
         else:
             self.request_limit = (
                 3 if case == "interactive" or (one_shot and case == "allow") else 2
             )
+        self.request_admitted = asyncio.Event()
         self.connections: int = 0
         self.requests = 0
         self.failure: str | None = None
         self.clients: list[tuple[asyncio.StreamWriter, asyncio.Task[None]]] = []
 
     def accept(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        deadline: float,
     ) -> None:
         self.connections += 1
         if len(self.clients) >= self.request_limit:
             self.failure = "unexpected_responses_connection"
             writer.close()
             return
-        self.clients.append((writer, asyncio.create_task(self.handle(reader, writer))))
+        self.clients.append(
+            (writer, asyncio.create_task(self.handle(reader, writer, deadline)))
+        )
 
     async def handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        deadline: float,
     ) -> None:
         try:
-            async with asyncio.timeout(TURN_SECONDS):
+            async with asyncio.timeout_at(deadline):
                 raw_headers = await reader.readuntil(b"\r\n\r\n")
                 request_line, *headers = raw_headers[:-4].split(b"\r\n")
                 require(
@@ -279,6 +297,9 @@ class ResponsesFixture:
                 require(0 < size <= MAX_FRAME_BYTES, "invalid_responses_size")
                 request = parse_object(await reader.readexactly(size))
                 response = self.respond(request)
+                self.request_admitted.set()
+                if self.case == "client-exit":
+                    await asyncio.Future[None]()
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                     b"Connection: close\r\nContent-Length: "
@@ -338,7 +359,7 @@ class ResponsesFixture:
     def respond(self, request: dict[str, object]) -> bytes:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
-        if self.case == "provider_key_present":
+        if self.case == "provider_key_present" or self.case in CLIENT_CASES:
             require(self.requests == 1, "unexpected_responses_request")
             return FINAL_RESPONSE
         if self.requests == 1:
@@ -432,40 +453,23 @@ class ResponsesFixture:
 
 
 class Stdio:
-    def __init__(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        self.reader = reader
-        self.writer = writer
-        self.messages = 0
+    def __init__(self, rpc: AppServerRpc, deadline: float) -> None:
+        self.rpc = rpc
+        self.deadline = deadline
         self.terminal: dict[str, object] | None = None
+        self.waiting_terminal = asyncio.Event()
 
-    async def send(self, message: dict[str, object]) -> None:
-        self.writer.write(json.dumps({"jsonrpc": "2.0", **message}).encode() + b"\n")
-        await self.writer.drain()
-
-    async def receive(self) -> dict[str, object]:
-        self.messages += 1
-        require(self.messages <= MAX_MESSAGES, "app_server_message_limit")
-        line = await self.reader.readline()
-        require(bool(line) and line.endswith(b"\n"), "app_server_stdio_closed")
-        message = parse_object(line)
-        if "method" in message and "id" in message:
-            raise ProbeFailure("unexpected_app_server_request")
-        if message.get("method") == "turn/completed":
+    def record(self, message: Notification) -> None:
+        if message.method == "turn/completed":
             require(self.terminal is None, "duplicate_turn_completion")
-            self.terminal = as_object(message.get("params"))
-        return message
+            self.terminal = as_object(message.params)
 
-    async def call(
-        self, request_id: int, method: str, params: dict[str, object]
-    ) -> dict[str, object]:
-        await self.send({"id": request_id, "method": method, "params": params})
-        while True:
-            response = await self.receive()
-            if response.get("id") == request_id:
-                require("error" not in response, f"{method}_rejected")
-                return as_object(response.get("result"))
+    async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
+        return as_object(
+            await self.rpc.call(
+                method, params, deadline=self.deadline, observe=self.record
+            )
+        )
 
     async def observe(
         self, workspace: Path, case: ProbeCase, executor_url: str | None = None
@@ -475,10 +479,10 @@ class Stdio:
         }
         if executor_url is not None:
             params["capabilities"] = {"experimentalApi": True}
-        await self.call(1, "initialize", params)
-        await self.send({"method": "initialized"})
+        await self.call("initialize", params)
+        await self.rpc.notify("initialized", deadline=self.deadline)
         if case == "implicit_account":
-            account = await self.call(2, "account/read", {"refreshToken": False})
+            account = await self.call("account/read", {"refreshToken": False})
             require(
                 "account" in account
                 and account["account"] is None
@@ -492,7 +496,6 @@ class Stdio:
 
     async def register_executor(self, executor_url: str) -> None:
         await self.call(
-            4,
             "environment/add",
             {
                 "environmentId": EXECUTOR_ID,
@@ -500,9 +503,9 @@ class Stdio:
                 "authBearerToken": SYNTHETIC_EXECUTOR_BEARER,
             },
         )
-        local = await self.call(5, "environment/status", {"environmentId": "local"})
+        local = await self.call("environment/status", {"environmentId": "local"})
         require(local.get("status") == "unknown", "local_executor_available")
-        info = await self.call(6, "environment/info", {"environmentId": EXECUTOR_ID})
+        info = await self.call("environment/info", {"environmentId": EXECUTOR_ID})
         shell = as_object(info.get("shell"))
         path = shell.get("path")
         require(
@@ -522,22 +525,21 @@ class Stdio:
             thread_params["environments"] = [
                 {"environmentId": EXECUTOR_ID, "cwd": str(workspace)}
             ]
-        ephemeral = case in PROVIDER_CASES or case in SHELL_ARGUMENTS
+        ephemeral = (
+            case in PROVIDER_CASES or case in SHELL_ARGUMENTS or case in CLIENT_CASES
+        )
         if ephemeral:
             thread_params["ephemeral"] = True
         prompt = "Run the probe marker command."
-        if case in PROVIDER_CASES:
+        if case in PROVIDER_CASES or case in CLIENT_CASES:
             prompt = "Complete the fixture turn."
-        start = await self.call(2, "thread/start", thread_params)
+        start = await self.call("thread/start", thread_params)
         thread = as_object(start.get("thread"))
-        if case in PROVIDER_CASES:
-            require(thread.get("ephemeral") is True, "provider_thread_not_ephemeral")
-        elif case in SHELL_ARGUMENTS:
-            require(thread.get("ephemeral") is True, "shell_thread_not_ephemeral")
+        if ephemeral:
+            require(thread.get("ephemeral") is True, "thread_not_ephemeral")
         thread_id = thread.get("id")
         require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
         started = await self.call(
-            3,
             "turn/start",
             {
                 "threadId": thread_id,
@@ -547,7 +549,8 @@ class Stdio:
         turn_id = as_object(started.get("turn")).get("id")
         require(isinstance(turn_id, str) and bool(turn_id), "missing_turn_id")
         while self.terminal is None:
-            await self.receive()
+            self.waiting_terminal.set()
+            self.record(await self.rpc.receive(deadline=self.deadline))
         require(
             self.terminal.get("threadId") == thread_id, "unexpected_terminal_thread"
         )
@@ -710,8 +713,9 @@ async def drain(reader: asyncio.StreamReader) -> None:
 
 async def stop_native_process(process: asyncio.subprocess.Process) -> None:
     assert process.stdout is not None
-    if process.stdin is not None:
-        process.stdin.close()
+    writer = process.stdin
+    if writer is not None:
+        writer.close()
     signal_native_process(process, signal.SIGTERM)
     try:
         async with asyncio.timeout(2):
@@ -719,13 +723,56 @@ async def stop_native_process(process: asyncio.subprocess.Process) -> None:
     except TimeoutError:
         signal_native_process(process, signal.SIGKILL)
         await asyncio.gather(process.wait(), drain(process.stdout))
+    if writer is not None:
+        try:
+            await writer.wait_closed()
+        except (BrokenPipeError, ConnectionResetError):
+            require(writer.is_closing(), "native_stdin_not_closed")
+
+
+async def signal_after_request(
+    process: asyncio.subprocess.Process, fixture: ResponsesFixture, stdio: Stdio
+) -> None:
+    await fixture.request_admitted.wait()
+    await stdio.waiting_terminal.wait()
+    require(process.returncode is None, "client_child_exited_before_signal")
+    process.kill()
+
+
+async def observe_client_exit(
+    process: asyncio.subprocess.Process,
+    fixture: ResponsesFixture,
+    stdio: Stdio,
+    workspace: Path,
+) -> None:
+    killer = asyncio.create_task(signal_after_request(process, fixture, stdio))
+    try:
+        try:
+            await stdio.observe(workspace, fixture.case)
+        except RpcError as error:
+            require(error.reason is RpcFailure.DISCONNECTED, "client_exit_not_eof")
+            require(stdio.terminal is None, "client_exit_terminal_observed")
+        else:
+            raise ProbeFailure("client_exit_turn_completed")
+        require(killer.done(), "client_child_not_signalled")
+        killer.result()
+        require(await process.wait() == -signal.SIGKILL, "client_exit_status_mismatch")
+    finally:
+        if not killer.done():
+            killer.cancel()
+            await asyncio.wait((killer,))
+        if not killer.cancelled():
+            killer.exception()
 
 
 async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     async with asyncio.timeout_at(deadline):
         server = await asyncio.start_server(
-            fixture.accept, "127.0.0.1", 0, limit=16_384
+            lambda reader, writer: fixture.accept(reader, writer, deadline),
+            "127.0.0.1",
+            0,
+            limit=16_384,
         )
     process: asyncio.subprocess.Process | None = None
     executor: asyncio.subprocess.Process | None = None
@@ -733,7 +780,11 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     try:
         port = int(server.sockets[0].getsockname()[1])
         args = ["app-server", "--listen", "stdio://"]
-        if fixture.case in PROVIDER_CASES or fixture.case in SHELL_ARGUMENTS:
+        if (
+            fixture.case in PROVIDER_CASES
+            or fixture.case in SHELL_ARGUMENTS
+            or fixture.case in CLIENT_CASES
+        ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
             if fixture.case in EXECUTOR_CASES:
@@ -752,11 +803,22 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             )
             assert process.stdin is not None
             assert process.stdout is not None
-            await Stdio(process.stdout, process.stdin).observe(
-                workspace, fixture.case, executor_url
+            rpc = AppServerRpc(
+                process.stdout,
+                process.stdin,
+                clock=asyncio.get_running_loop().time,
+                max_frame_bytes=MAX_FRAME_BYTES,
+                max_messages=MAX_MESSAGES,
             )
+            stdio = Stdio(rpc, deadline)
+            if fixture.case == "client-exit":
+                await observe_client_exit(process, fixture, stdio, workspace)
+            else:
+                await stdio.observe(workspace, fixture.case, executor_url)
         require(fixture.case not in STALLED_CASES, "stalled_turn_completed")
-    except TimeoutError:
+    except (TimeoutError, RpcError) as error:
+        if isinstance(error, RpcError) and error.reason is not RpcFailure.DEADLINE:
+            raise
         if fixture.case not in STALLED_CASES:
             raise ProbeFailure(fixture.failure or "turn_deadline_expired") from None
         require(
@@ -837,7 +899,7 @@ async def run_case(case: Case, one_shot: bool = False) -> None:
     diagnostic("INFO", "probe.case_verified", f"one_shot_{case}" if one_shot else case)
 
 
-async def run_provider_case(case: ProviderCase) -> None:
+async def run_provider_case(case: ProviderCase | ClientCase) -> None:
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
         workspace = root / "workspace"
@@ -934,6 +996,10 @@ async def run() -> None:
     elif sys.argv[1:] == ["--provider-env-key"]:
         await run_provider_case("provider_key_present")
         await run_provider_case("provider_key_absent")
+    elif sys.argv[1:] == ["--client-complete"]:
+        await run_provider_case("client-complete")
+    elif sys.argv[1:] == ["--client-exit"]:
+        await run_provider_case("client-exit")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
     else:
@@ -942,12 +1008,19 @@ async def run() -> None:
         await run_case("deny")
 
 
+def report_rpc_failure(error: RpcError) -> int:
+    diagnostic("ERROR", "probe.case_failed", error.reason.value)
+    return 1
+
+
 def main() -> int:
     try:
         asyncio.run(run())
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
+    except RpcError as error:
+        return report_rpc_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
         return 1

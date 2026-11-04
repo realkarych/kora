@@ -2,14 +2,15 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-app-server-rpc) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-app-server-rpc]' >&2
         exit 2
         ;;
 esac
 
 probe_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+rpc_dir=$probe_dir/../../../../src/kora/plugins/harness/codex
 if [ -n "${DOCKER_HOST:-}" ] && [ -z "${DOCKER_CONTEXT:-}" ]; then
     endpoint=$DOCKER_HOST
 else
@@ -89,7 +90,8 @@ run_variant() {
     variant=$1
     shift
     image=$(
-        tar -C "$probe_dir" -cf - Dockerfile requirements.toml probe.py managed_hook.py |
+        tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py \
+            -C "$rpc_dir" app_server_rpc.py |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
     )
     case "$image" in
@@ -141,6 +143,11 @@ case "${1:-}" in
             run_variant shell-controls "--executor-$probe_case"
             release_container
         done
+        ;;
+    --check-app-server-rpc)
+        run_variant default --client-complete
+        release_container
+        run_variant default --client-exit
         ;;
     *) run_variant default "$@" ;;
 esac
