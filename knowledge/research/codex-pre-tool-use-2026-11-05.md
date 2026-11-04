@@ -44,13 +44,15 @@ follow-up output is correlated to the original call.
 | Direct patch deny | The hook ran once and its decoded receipt matched the same native call ID and patch. Codex returned the fixed hook refusal correlated to that call. The marker was absent. |
 | Decoder refusal | The Bash hook ran once. The deliberate one-byte cap refused the input before decoding, so there was no decoded receipt. Exit 2 with a fixed nonempty stderr reason produced the correlated native refusal and the marker was absent. |
 
-The native Bash envelope places the selected cwd at the top level for the
-built-in local executor. The selected remote executor can report the host
-context cwd there. The nested Bash and direct patch payloads carry the
-command text. In the pinned implementation, a controlled exit 2 sets the
-blocking state when the hook writes a nonempty stderr message.
+The pinned source places the selected cwd at the top level for the
+built-in local Bash executor. The selected remote executor can report
+the host context cwd there. The fixture admits the shape and discards
+the reported cwd. The nested Bash and direct patch payloads carry the
+command text. In the pinned implementation, a controlled exit 2 sets
+the blocking state when the hook writes a nonempty stderr message.
 [Pinned Bash input](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs#L336-L364),
-[pinned patch input](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/tools/handlers/apply_patch.rs#L464-L485),
+[pinned patch input](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/tools/handlers/apply_patch.rs#L370-L375),
+[pinned hook envelope](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/hooks/src/events/pre_tool_use.rs#L176-L195),
 [pinned hook exit handling](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/hooks/src/events/pre_tool_use.rs#L268-L283).
 
 The patch success assertion uses the native result header with the exit
