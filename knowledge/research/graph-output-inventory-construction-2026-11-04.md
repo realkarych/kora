@@ -40,6 +40,14 @@ V bounds only the separately published AgentSession policy/checker source acquis
 
 Focused local and final-head CI results, exact revisions and independent correctness/security/performance conclusions belong in the implementing PR. Linux/macOS, both databases, strict static checks, actual resource release and complete CI evidence remain mandatory. Applicable retained master mutation reports contained no output-inventory finding; absent or unrelated reports create no extra campaign or hold. The ten-minute whole-pipeline target remains diagnostic, with hard deadlines unchanged.
 
+### Source-pass failure attribution
+
+[CI 41748367461](https://github.com/realkarych/kora/actions/runs/41748367461/attempts/1) failed on Linux AMD64/Python 3.15.0 at head `4f2ebe5a20c262d4ae7e69273e8b701fc5b3b1fd`. The agent case reported eight events named `read_document` against the required seven. The source has seven direct invocations across the four known caller functions for that case. The retained result lacks code-object and caller attribution.
+
+The same revision passed the 37-case inventory module locally on macOS and Linux AMD64/Python 3.15.0. One bounded Linux AMD64 run of the native-output module followed by the inventory module passed 91 cases. Both Linux containers exited and were removed. These runs leave the CI discrepancy unresolved.
+
+The [approved extension](https://github.com/realkarych/kora/issues/690#issuecomment-6619813547) retains the exact count and observes existing profiler records on assertion failure. It reports fixed caller categories and exact-code counts, with explicit unavailable values and saturation for display. The summary is limited to 2 KiB and carries no code metadata or graph content. The owner authorized one complete CI execution on the reviewed diagnostic revision. The historical failure retains its verdict, and attribution must establish a blocking conclusion before merge.
+
 ## Remaining activation
 
 Full execution-contract assembly still needs other required sections and identities. Wider output composition, complete source acquisition, operational publication, caller concurrency/retention admission, native payload checking/projection, first-slice validation and actual graph starts remain required under #593 and their existing owners. Existing historical records receive no backfill or current-default repair. The helper adds no API/CLI/MCP operation, dependency, migration, layer allowance or CI change.
