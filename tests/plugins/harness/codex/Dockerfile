@@ -22,4 +22,15 @@ USER root
 RUN printf '\n[features]\nunified_exec = false\n' >> /etc/codex/requirements.toml
 USER 65532:65532
 
+FROM one-shot AS shell-controls
+USER root
+RUN sed -i '1i allow_login_shell = false' /etc/codex/requirements.toml && \
+    sed -i 's/matcher = "\^Bash\$"/matcher = ".*"/' /etc/codex/requirements.toml && \
+    grep -Fxq 'matcher = ".*"' /etc/codex/requirements.toml && \
+    test -x /bin/bash && test -x /bin/sh && \
+    test "$(readlink -f /bin/bash)" != "$(readlink -f /bin/sh)" && \
+    ! getent passwd 65532 && \
+    printf '%s\n' 'kora-probe:x:65532:65532::/var/lib/kora-hook-probe:/bin/bash' >> /etc/passwd
+USER 65532:65532
+
 FROM probe AS default

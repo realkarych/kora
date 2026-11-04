@@ -12,14 +12,23 @@ MAX_INPUT_BYTES = 16_384
 def main() -> int:
     decision = (CONTROL / "decision").read_text(encoding="utf-8")
     expected_command = "touch kora-probe.marker"
-    if decision == "interactive":
+    if decision in {"interactive", "shell_controls"}:
         with (CONTROL / "invocations").open("a", encoding="utf-8") as invocations:
             invocations.write("1")
+    if decision == "interactive":
         expected_command = (
             "printf 'kora-stdin-ready\\n'; IFS= read -r token && "
             'test "$token" = kora-stdin-token && '
             "printf 'kora-stdin-written\\n' > kora-probe.marker && "
             "cat kora-probe.marker"
+        )
+    if decision == "shell_controls":
+        expected_command = (
+            'shell_path=$(readlink -f -- "$0") && '
+            'mode=posix-sh && if [ -n "${BASH_VERSION-}" ]; then '
+            "mode=bash-non-login; if shopt -q login_shell; then mode=bash-login; fi; "
+            "fi && "
+            """printf '%s\\n' "$shell_path" "$mode" > kora-probe.marker"""
         )
 
     raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
@@ -29,18 +38,28 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 2
     event = cast(dict[str, object], payload)
-    command_input = event.get("tool_input")
-    if not isinstance(command_input, dict):
+    raw_input = event.get("tool_input")
+    if not isinstance(raw_input, dict):
         return 2
-    command = cast(dict[str, object], command_input).get("command")
+    command_input = cast(dict[str, object], raw_input)
+    command = command_input.get("command")
     if (
         event.get("hook_event_name") != "PreToolUse"
         or event.get("tool_name") != "Bash"
         or event.get("tool_use_id") != "kora-hook-probe-call"
         or command != expected_command
+        or (
+            decision == "shell_controls"
+            and command_input != {"command": expected_command}
+        )
     ):
         return 2
 
+    receipt_input = (
+        {"tool_input": command_input}
+        if decision == "shell_controls"
+        else {"command": command}
+    )
     with (CONTROL / "receipts.jsonl").open("a", encoding="utf-8") as receipts:
         receipts.write(
             json.dumps(
@@ -48,13 +67,13 @@ def main() -> int:
                     "event": event["hook_event_name"],
                     "tool": event["tool_name"],
                     "call": event["tool_use_id"],
-                    "command": command,
+                    **receipt_input,
                     "pid": os.getpid(),
                 }
             )
             + "\n"
         )
-    if decision in {"allow", "interactive"}:
+    if decision in {"allow", "interactive", "shell_controls"}:
         return 0
     if decision == "stall":
         signal.pause()

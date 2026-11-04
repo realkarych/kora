@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls]' >&2
         exit 2
         ;;
 esac
@@ -128,6 +128,13 @@ case "${1:-}" in
         run_variant default --provider-account
         release_container
         run_variant default --provider-env-key
+        ;;
+    --check-shell-controls)
+        run_variant shell-controls --shell-default
+        release_container
+        run_variant shell-controls --shell-login
+        release_container
+        run_variant shell-controls --shell-alternate
         ;;
     *) run_variant default "$@" ;;
 esac

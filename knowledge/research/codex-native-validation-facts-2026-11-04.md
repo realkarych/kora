@@ -31,3 +31,7 @@ The [named work-item contracts](../../docs/implementation-plan.md#7-named-contra
 As of this review, the complete native Codex `reserved_env` and `policy_coverage` results are both **unavailable**. The coverage observations and example variable names remain evidence for the future native owner. An empty declaration requires proof of completeness. Executable selection and projection remain under #549, with native launch construction and conformance under work item 15 and session hosting under [#199](https://github.com/realkarych/kora/issues/199).
 
 The design addresses tool-policy attribution, credential and environment ownership, and trust in fixture evidence under TM-03, TM-06 and TM-12. Launch-time integrity and current execution authority retain their existing checks. This record adds no runtime observation beyond the linked probes.
+
+## Subsequent shell control observation
+
+On 2026-11-04, [#688](https://github.com/realkarych/kora/issues/688) verified that the pinned managed one-shot configuration ran the default direct command in non-login Bash and refused an explicit login request after the hook allowed it. A model-supplied `/bin/sh` changed the direct command's interpreter while the Bash hook received the same nested input. The [shell controls record](codex-managed-shell-controls-probe-2026-11-04.md) gives the exact tested profile and observations. Production shell selection and restriction, native shell-snapshot startup and complete coverage retain their evidence obligations. Both complete Codex declarations remain unavailable.

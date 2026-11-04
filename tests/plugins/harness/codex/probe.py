@@ -14,7 +14,8 @@ Case = Literal["allow", "deny", "stall", "interactive"]
 ProviderCase = Literal[
     "implicit_account", "provider_key_present", "provider_key_absent"
 ]
-ProbeCase = Case | ProviderCase
+ShellCase = Literal["shell-default", "shell-login", "shell-alternate"]
+ProbeCase = Case | ProviderCase | ShellCase
 
 CODEX = "/usr/local/bin/codex"
 PROVIDER_CASES = frozenset(
@@ -35,6 +36,23 @@ STDIN_COMMAND = (
     'test "$token" = kora-stdin-token && '
     f"printf '{STDIN_WRITTEN}\\n' > {MARKER} && cat {MARKER}"
 )
+SHELL_COMMAND = (
+    'shell_path=$(readlink -f -- "$0") && '
+    'mode=posix-sh && if [ -n "${BASH_VERSION-}" ]; then '
+    "mode=bash-non-login; if shopt -q login_shell; then mode=bash-login; fi; fi && "
+    """printf '%s\\n' "$shell_path" "$mode" > kora-probe.marker"""
+)
+SHELL_ARGUMENTS: dict[ProbeCase, dict[str, object]] = {
+    "shell-default": {},
+    "shell-login": {"login": True},
+    "shell-alternate": {"shell": "/bin/sh"},
+}
+SHELL_FLAGS: dict[str, ShellCase] = {
+    "--shell-default": "shell-default",
+    "--shell-login": "shell-login",
+    "--shell-alternate": "shell-alternate",
+}
+LOGIN_DISABLED = "login shell is disabled by config; omit `login` or set it to false."
 SESSION_ID = re.compile(r"^Process running with session ID ([0-9]{1,10})$")
 DENIAL = (
     "Command blocked by PreToolUse hook: "
@@ -95,10 +113,7 @@ def sse(response_id: str, item: dict[str, object]) -> bytes:
     ).encode()
 
 
-def command_response(command: str, interactive: bool = False) -> bytes:
-    arguments: dict[str, object] = {"cmd": command, "login": False}
-    if interactive:
-        arguments.update(tty=True, yield_time_ms=1_000)
+def command_response(arguments: dict[str, object]) -> bytes:
     return sse(
         "kora-probe-response-1",
         {
@@ -158,7 +173,7 @@ def verify_one_shot_schema(command_tool: dict[str, object]) -> None:
     )
 
 
-TOOL_RESPONSE = command_response(COMMAND)
+TOOL_RESPONSE = command_response({"cmd": COMMAND, "login": False})
 FINAL_RESPONSE = sse(
     "kora-probe-response-2",
     {
@@ -286,12 +301,23 @@ class ResponsesFixture:
             names = [tool.get("name") for tool in tools]
             if self.case == "interactive":
                 require("write_stdin" in names, "interactive_stdin_not_advertised")
-                return command_response(STDIN_COMMAND, interactive=True)
+                return command_response(
+                    {
+                        "cmd": STDIN_COMMAND,
+                        "login": False,
+                        "tty": True,
+                        "yield_time_ms": 1_000,
+                    }
+                )
             if self.one_shot:
                 require("write_stdin" not in names, "one_shot_stdin_advertised")
                 verify_one_shot_schema(command_tools[0])
                 if self.case == "allow":
                     return stdin_response(1)
+            if self.case in SHELL_ARGUMENTS:
+                return command_response(
+                    {"cmd": SHELL_COMMAND, **SHELL_ARGUMENTS[self.case]}
+                )
             return TOOL_RESPONSE
 
         require(self.requests <= self.request_limit, "unexpected_responses_request")
@@ -311,10 +337,27 @@ class ResponsesFixture:
             )
             return TOOL_RESPONSE
 
-        require(
-            (DENIAL in tool_output(request, CALL_ID)) == (self.case == "deny"),
-            "unexpected_hook_denial_result",
-        )
+        output = tool_output(request, CALL_ID)
+        if self.case == "shell-login":
+            require(output == LOGIN_DISABLED, "native_login_refusal_missing")
+        elif self.case in SHELL_ARGUMENTS:
+            header, separator, _ = output.partition("\nOutput:\n")
+            status = [
+                line
+                for line in header.splitlines()
+                if line.startswith(
+                    ("Process exited with code ", "Process running with session ID ")
+                )
+            ]
+            require(
+                bool(separator) and status == ["Process exited with code 0"],
+                "shell_command_failed",
+            )
+        else:
+            require(
+                (DENIAL in output) == (self.case == "deny"),
+                "unexpected_hook_denial_result",
+            )
         return FINAL_RESPONSE
 
     async def close(self, server: asyncio.Server) -> None:
@@ -385,14 +428,18 @@ class Stdio:
 
     async def run_turn(self, workspace: Path, case: ProbeCase) -> None:
         thread_params: dict[str, object] = {"cwd": str(workspace)}
+        ephemeral = case in PROVIDER_CASES or case in SHELL_ARGUMENTS
+        if ephemeral:
+            thread_params["ephemeral"] = True
         prompt = "Run the probe marker command."
         if case in PROVIDER_CASES:
-            thread_params["ephemeral"] = True
             prompt = "Complete the fixture turn."
         start = await self.call(2, "thread/start", thread_params)
         thread = as_object(start.get("thread"))
         if case in PROVIDER_CASES:
             require(thread.get("ephemeral") is True, "provider_thread_not_ephemeral")
+        elif case in SHELL_ARGUMENTS:
+            require(thread.get("ephemeral") is True, "shell_thread_not_ephemeral")
         thread_id = thread.get("id")
         require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
         started = await self.call(
@@ -428,18 +475,20 @@ def environment(root: Path, port: int, case: ProbeCase) -> dict[str, str]:
     home.mkdir()
     codex_home.mkdir()
     provider = "openai" if case == "implicit_account" else "kora_probe"
-    account_settings = ""
+    case_settings = ""
     if case in PROVIDER_CASES:
-        account_settings = 'cli_auth_credentials_store = "file"\n'
+        case_settings = 'cli_auth_credentials_store = "file"\n'
         require(not os.path.lexists(codex_home / "auth.json"), "provider_store_exists")
     if case == "implicit_account":
-        account_settings += f'openai_base_url = "http://127.0.0.1:{port}/v1"\n'
+        case_settings += f'openai_base_url = "http://127.0.0.1:{port}/v1"\n'
+    if case in SHELL_ARGUMENTS:
+        case_settings = "allow_login_shell = true\n"
     config = f"""model = "gpt-5.5"
 model_provider = "{provider}"
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
 web_search = "disabled"
-{account_settings}
+{case_settings}
 [analytics]
 enabled = false
 
@@ -474,7 +523,7 @@ stream_max_retries = 0
     return child_env
 
 
-def hook_pid(command: str = COMMAND) -> int:
+def hook_pid(command: str = COMMAND, *, nested_input: bool = False) -> int:
     require(RECEIPTS.is_file(), "hook_receipt_missing")
     with RECEIPTS.open("rb") as file:
         raw = file.read(4097)
@@ -483,9 +532,12 @@ def hook_pid(command: str = COMMAND) -> int:
     require(len(lines) == 1, "hook_receipt_count")
     receipt = parse_object(lines[0])
     pid = receipt.pop("pid", None)
+    expected_input = (
+        {"tool_input": {"command": command}} if nested_input else {"command": command}
+    )
     require(
         receipt
-        == {"event": "PreToolUse", "tool": "Bash", "call": CALL_ID, "command": command},
+        == {"event": "PreToolUse", "tool": "Bash", "call": CALL_ID, **expected_input},
         "unexpected_hook_receipt",
     )
     if type(pid) is not int or pid <= 1:
@@ -540,7 +592,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     try:
         port = int(server.sockets[0].getsockname()[1])
         args = ["app-server", "--listen", "stdio://"]
-        if fixture.case in PROVIDER_CASES:
+        if fixture.case in PROVIDER_CASES or fixture.case in SHELL_ARGUMENTS:
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
             process = await asyncio.create_subprocess_exec(
@@ -649,6 +701,45 @@ async def run_provider_case(case: ProviderCase) -> None:
     diagnostic("INFO", "probe.case_verified", case)
 
 
+async def run_shell_case(case: ShellCase) -> None:
+    (CONTROL / "decision").write_text("shell_controls", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        marker = workspace / MARKER
+        fixture = ResponsesFixture(case, one_shot=True)
+        await drive(fixture, root, workspace)
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        require(
+            fixture.connections == fixture.requests == fixture.request_limit,
+            "unexpected_shell_request_count",
+        )
+        with (CONTROL / "invocations").open("rb") as invocations:
+            require(invocations.read(2) == b"1", "shell_hook_invocation_count")
+        hook_pid(SHELL_COMMAND, nested_input=True)
+        if case == "shell-login":
+            require(not os.path.lexists(marker), "login_command_marker_exists")
+        else:
+            bash = Path("/bin/bash").resolve(strict=True)
+            posix_sh = Path("/bin/sh").resolve(strict=True)
+            require(bash != posix_sh, "shell_executables_not_distinct")
+            expected = (
+                f"{posix_sh}\nposix-sh\n"
+                if case == "shell-alternate"
+                else f"{bash}\nbash-non-login\n"
+            ).encode()
+            require(
+                marker.is_file() and not marker.is_symlink(), "shell_marker_missing"
+            )
+            with marker.open("rb") as contents:
+                require(
+                    contents.read(len(expected) + 1) == expected,
+                    "unexpected_shell_marker",
+                )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
 async def run() -> None:
     require(
         sys.platform == "linux" and platform.machine() == "x86_64",
@@ -667,6 +758,8 @@ async def run() -> None:
     elif sys.argv[1:] == ["--provider-env-key"]:
         await run_provider_case("provider_key_present")
         await run_provider_case("provider_key_absent")
+    elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
+        await run_shell_case(SHELL_FLAGS[sys.argv[1]])
     else:
         require(not sys.argv[1:], "unexpected_arguments")
         await run_case("allow")
