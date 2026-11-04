@@ -21,6 +21,9 @@ from tests.support.workflows import (
 ROOT = Path(__file__).resolve().parents[2]
 IR_RESOURCE_MODULES = frozenset(
     {
+        "tests/ir/test_approval_predicate_resources.py",
+        "tests/ir/test_export_type_resources.py",
+        "tests/ir/test_fan_out_type_resources.py",
         "tests/ir/test_inline_schema_resources.py",
         "tests/ir/test_type_schema_resources.py",
         "tests/ir/test_output_schema_resources.py",
@@ -52,6 +55,7 @@ FIRST_MODULES = (
     "tests/ir/test_input_path_resources.py",
     "tests/ir/test_expression_syntax_resources.py",
     "tests/ir/test_edge_type_resources.py",
+    "tests/ir/test_approval_predicate_resources.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -277,7 +281,9 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         "tests/ir/test_output_schema_resources.py",
     }
     assert cohorts["second"] - selected_files(["tests/conformance"]) == {
-        "tests/ir/test_inline_schema_resources.py"
+        "tests/ir/test_inline_schema_resources.py",
+        "tests/ir/test_fan_out_type_resources.py",
+        "tests/ir/test_export_type_resources.py",
     }
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(
