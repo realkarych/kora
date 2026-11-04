@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -15,7 +16,15 @@ ProviderCase = Literal[
     "implicit_account", "provider_key_present", "provider_key_absent"
 ]
 ShellCase = Literal["shell-default", "shell-login", "shell-alternate"]
-ProbeCase = Case | ProviderCase | ShellCase
+ExecutorCase = Literal[
+    "executor-default",
+    "executor-bash",
+    "executor-sh",
+    "executor-login",
+    "executor-deny",
+    "executor-stall",
+]
+ProbeCase = Case | ProviderCase | ShellCase | ExecutorCase
 
 CODEX = "/usr/local/bin/codex"
 PROVIDER_CASES = frozenset(
@@ -42,17 +51,58 @@ SHELL_COMMAND = (
     "mode=bash-non-login; if shopt -q login_shell; then mode=bash-login; fi; fi && "
     """printf '%s\\n' "$shell_path" "$mode" > kora-probe.marker"""
 )
+EXECUTOR_COMMAND = SHELL_COMMAND + (
+    """ && printf '%s\\n' "${KORA_PROBE_EXECUTOR_ORIGIN-}" >> kora-probe.marker"""
+)
+EXECUTOR_ID = "kora-probe-executor"
+SYNTHETIC_EXECUTOR_BEARER = "kora-probe-synthetic-executor-value"
+EXECUTOR_ORIGIN = "kora-probe-executor-only"
+EXECUTOR_BASH_OVERRIDE = "/opt/kora-probe/missing/bash"
+EXECUTOR_LISTEN_URL = re.compile(rb"ws://127\.0\.0\.1:([1-9][0-9]{0,4})\n")
+EXECUTOR_SHELL_POLICY = """
+[shell_environment_policy]
+inherit = "all"
+include_only = ["HOME", "PATH", "SHELL", "LANG", "KORA_PROBE_EXECUTOR_ORIGIN"]
+"""
 SHELL_ARGUMENTS: dict[ProbeCase, dict[str, object]] = {
     "shell-default": {},
     "shell-login": {"login": True},
     "shell-alternate": {"shell": "/bin/sh"},
+    "executor-default": {},
+    "executor-bash": {"shell": EXECUTOR_BASH_OVERRIDE},
+    "executor-sh": {"shell": "/bin/sh"},
+    "executor-login": {"login": True},
+    "executor-deny": {},
+    "executor-stall": {},
 }
-SHELL_FLAGS: dict[str, ShellCase] = {
+SHELL_FLAGS: dict[str, ShellCase | ExecutorCase] = {
     "--shell-default": "shell-default",
     "--shell-login": "shell-login",
     "--shell-alternate": "shell-alternate",
+    "--executor-default": "executor-default",
+    "--executor-bash": "executor-bash",
+    "--executor-sh": "executor-sh",
+    "--executor-login": "executor-login",
+    "--executor-deny": "executor-deny",
+    "--executor-stall": "executor-stall",
 }
+EXECUTOR_CASES = frozenset(
+    {
+        "executor-default",
+        "executor-bash",
+        "executor-sh",
+        "executor-login",
+        "executor-deny",
+        "executor-stall",
+    }
+)
+STALLED_CASES = frozenset({"stall", "executor-stall"})
 LOGIN_DISABLED = "login shell is disabled by config; omit `login` or set it to false."
+SHELL_RESTRICTED = f"environment `{EXECUTOR_ID}` only supports `bash`"
+EXECUTOR_DENIAL = (
+    "Command blocked by PreToolUse hook: "
+    f"kora managed hook probe denied the executor command. Command: {EXECUTOR_COMMAND}"
+)
 SESSION_ID = re.compile(r"^Process running with session ID ([0-9]{1,10})$")
 DENIAL = (
     "Command blocked by PreToolUse hook: "
@@ -192,6 +242,8 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
+        elif case == "executor-stall":
+            self.request_limit = 1
         else:
             self.request_limit = (
                 3 if case == "interactive" or (one_shot and case == "allow") else 2
@@ -315,13 +367,14 @@ class ResponsesFixture:
                 if self.case == "allow":
                     return stdin_response(1)
             if self.case in SHELL_ARGUMENTS:
-                return command_response(
-                    {"cmd": SHELL_COMMAND, **SHELL_ARGUMENTS[self.case]}
+                command = (
+                    EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
                 )
+                return command_response({"cmd": command, **SHELL_ARGUMENTS[self.case]})
             return TOOL_RESPONSE
 
         require(self.requests <= self.request_limit, "unexpected_responses_request")
-        require(self.case != "stall", "stalled_hook_returned")
+        require(self.case not in STALLED_CASES, "stalled_hook_returned")
         if self.case == "interactive":
             if self.requests == 2:
                 return stdin_response(interactive_session_id(request))
@@ -338,8 +391,12 @@ class ResponsesFixture:
             return TOOL_RESPONSE
 
         output = tool_output(request, CALL_ID)
-        if self.case == "shell-login":
+        if self.case in {"shell-login", "executor-login"}:
             require(output == LOGIN_DISABLED, "native_login_refusal_missing")
+        elif self.case == "executor-sh":
+            require(output == SHELL_RESTRICTED, "native_shell_restriction_missing")
+        elif self.case == "executor-deny":
+            require(output == EXECUTOR_DENIAL, "executor_hook_denial_missing")
         elif self.case in SHELL_ARGUMENTS:
             header, separator, _ = output.partition("\nOutput:\n")
             status = [
@@ -410,10 +467,15 @@ class Stdio:
                 require("error" not in response, f"{method}_rejected")
                 return as_object(response.get("result"))
 
-    async def observe(self, workspace: Path, case: ProbeCase) -> None:
-        await self.call(
-            1, "initialize", {"clientInfo": {"name": "kora-hook-probe", "version": "1"}}
-        )
+    async def observe(
+        self, workspace: Path, case: ProbeCase, executor_url: str | None = None
+    ) -> None:
+        params: dict[str, object] = {
+            "clientInfo": {"name": "kora-hook-probe", "version": "1"}
+        }
+        if executor_url is not None:
+            params["capabilities"] = {"experimentalApi": True}
+        await self.call(1, "initialize", params)
         await self.send({"method": "initialized"})
         if case == "implicit_account":
             account = await self.call(2, "account/read", {"refreshToken": False})
@@ -424,10 +486,42 @@ class Stdio:
                 "unexpected_implicit_account_state",
             )
             return
-        await self.run_turn(workspace, case)
+        if executor_url is not None:
+            await self.register_executor(executor_url)
+        await self.run_turn(workspace, case, selected_executor=executor_url is not None)
 
-    async def run_turn(self, workspace: Path, case: ProbeCase) -> None:
+    async def register_executor(self, executor_url: str) -> None:
+        await self.call(
+            4,
+            "environment/add",
+            {
+                "environmentId": EXECUTOR_ID,
+                "execServerUrl": executor_url,
+                "authBearerToken": SYNTHETIC_EXECUTOR_BEARER,
+            },
+        )
+        local = await self.call(5, "environment/status", {"environmentId": "local"})
+        require(local.get("status") == "unknown", "local_executor_available")
+        info = await self.call(6, "environment/info", {"environmentId": EXECUTOR_ID})
+        shell = as_object(info.get("shell"))
+        path = shell.get("path")
+        require(
+            shell.get("name") == "bash"
+            and isinstance(path, str)
+            and Path(path).is_absolute()
+            and Path(path).resolve(strict=True)
+            == Path("/bin/bash").resolve(strict=True),
+            "executor_shell_mismatch",
+        )
+
+    async def run_turn(
+        self, workspace: Path, case: ProbeCase, *, selected_executor: bool
+    ) -> None:
         thread_params: dict[str, object] = {"cwd": str(workspace)}
+        if selected_executor:
+            thread_params["environments"] = [
+                {"environmentId": EXECUTOR_ID, "cwd": str(workspace)}
+            ]
         ephemeral = case in PROVIDER_CASES or case in SHELL_ARGUMENTS
         if ephemeral:
             thread_params["ephemeral"] = True
@@ -469,11 +563,23 @@ class Stdio:
             require(turn.get("status") == "completed", "turn_not_completed")
 
 
-def environment(root: Path, port: int, case: ProbeCase) -> dict[str, str]:
+def native_environment(root: Path) -> dict[str, str]:
     home = root / "home"
     codex_home = root / "codex"
-    home.mkdir()
+    home.mkdir(parents=True)
     codex_home.mkdir()
+    return {
+        "HOME": str(home),
+        "CODEX_HOME": str(codex_home),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "SHELL": "/bin/bash",
+        "LANG": "C.UTF-8",
+    }
+
+
+def environment(root: Path, port: int, case: ProbeCase) -> dict[str, str]:
+    child_env = native_environment(root)
+    codex_home = Path(child_env["CODEX_HOME"])
     provider = "openai" if case == "implicit_account" else "kora_probe"
     case_settings = ""
     if case in PROVIDER_CASES:
@@ -510,17 +616,49 @@ stream_max_retries = 0
 """
         if case in PROVIDER_CASES:
             config += 'env_key = "CODEX_API_KEY"\n'
+    if case in EXECUTOR_CASES:
+        config += EXECUTOR_SHELL_POLICY
+        child_env["CODEX_EXEC_SERVER_URL"] = "none"
     (codex_home / "config.toml").write_text(config, encoding="utf-8")
-    child_env = {
-        "HOME": str(home),
-        "CODEX_HOME": str(codex_home),
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "SHELL": "/bin/bash",
-        "LANG": "C.UTF-8",
-    }
     if case in {"implicit_account", "provider_key_present"}:
         child_env["CODEX_API_KEY"] = SYNTHETIC_BEARER
     return child_env
+
+
+async def start_executor(root: Path, workspace: Path) -> asyncio.subprocess.Process:
+    child_env = native_environment(root)
+    child_env["KORA_PROBE_EXECUTOR_ORIGIN"] = EXECUTOR_ORIGIN
+    config = 'web_search = "disabled"\n[analytics]\nenabled = false\n'
+    (Path(child_env["CODEX_HOME"]) / "config.toml").write_text(
+        config + EXECUTOR_SHELL_POLICY, encoding="utf-8"
+    )
+    return await asyncio.create_subprocess_exec(
+        CODEX,
+        "exec-server",
+        "--strict-config",
+        "--listen",
+        "ws://127.0.0.1:0",
+        "--ws-auth",
+        "capability-token",
+        "--ws-token-sha256",
+        hashlib.sha256(SYNTHETIC_EXECUTOR_BEARER.encode()).hexdigest(),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        limit=128,
+        start_new_session=True,
+        cwd=workspace,
+        env=child_env,
+    )
+
+
+async def read_executor_url(process: asyncio.subprocess.Process) -> str:
+    assert process.stdout is not None
+    line = await process.stdout.readline()
+    match = EXECUTOR_LISTEN_URL.fullmatch(line)
+    if match is None or int(match[1]) > 65_535:
+        raise ProbeFailure("invalid_executor_readiness")
+    return line[:-1].decode("ascii")
 
 
 def hook_pid(command: str = COMMAND, *, nested_input: bool = False) -> int:
@@ -545,8 +683,7 @@ def hook_pid(command: str = COMMAND, *, nested_input: bool = False) -> int:
     return pid
 
 
-def verify_live_hook() -> None:
-    pid = hook_pid()
+def verify_live_hook(pid: int) -> None:
     try:
         state = (
             Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rpartition(") ")[2]
@@ -556,7 +693,9 @@ def verify_live_hook() -> None:
     require(state.startswith(("S ", "R ", "D ")), "stalled_hook_not_live")
 
 
-def signal_app_server(process: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+def signal_native_process(
+    process: asyncio.subprocess.Process, sig: signal.Signals
+) -> None:
     if process.returncode is None:
         try:
             os.killpg(process.pid, sig)
@@ -569,16 +708,16 @@ async def drain(reader: asyncio.StreamReader) -> None:
         pass
 
 
-async def stop_app_server(process: asyncio.subprocess.Process) -> None:
-    assert process.stdin is not None
+async def stop_native_process(process: asyncio.subprocess.Process) -> None:
     assert process.stdout is not None
-    process.stdin.close()
-    signal_app_server(process, signal.SIGTERM)
+    if process.stdin is not None:
+        process.stdin.close()
+    signal_native_process(process, signal.SIGTERM)
     try:
         async with asyncio.timeout(2):
             await asyncio.gather(process.wait(), drain(process.stdout))
     except TimeoutError:
-        signal_app_server(process, signal.SIGKILL)
+        signal_native_process(process, signal.SIGKILL)
         await asyncio.gather(process.wait(), drain(process.stdout))
 
 
@@ -589,12 +728,17 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             fixture.accept, "127.0.0.1", 0, limit=16_384
         )
     process: asyncio.subprocess.Process | None = None
+    executor: asyncio.subprocess.Process | None = None
+    executor_url: str | None = None
     try:
         port = int(server.sockets[0].getsockname()[1])
         args = ["app-server", "--listen", "stdio://"]
         if fixture.case in PROVIDER_CASES or fixture.case in SHELL_ARGUMENTS:
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
+            if fixture.case in EXECUTOR_CASES:
+                executor = await start_executor(root / "executor", workspace)
+                executor_url = await read_executor_url(executor)
             process = await asyncio.create_subprocess_exec(
                 CODEX,
                 *args,
@@ -608,15 +752,29 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             )
             assert process.stdin is not None
             assert process.stdout is not None
-            await Stdio(process.stdout, process.stdin).observe(workspace, fixture.case)
-        require(fixture.case != "stall", "stalled_turn_completed")
+            await Stdio(process.stdout, process.stdin).observe(
+                workspace, fixture.case, executor_url
+            )
+        require(fixture.case not in STALLED_CASES, "stalled_turn_completed")
     except TimeoutError:
-        if fixture.case != "stall":
+        if fixture.case not in STALLED_CASES:
             raise ProbeFailure(fixture.failure or "turn_deadline_expired") from None
         require(
-            fixture.failure is None and fixture.requests == 1, "stalled_fixture_state"
+            fixture.failure is None and fixture.requests == 1,
+            "stalled_fixture_state",
         )
-        verify_live_hook()
+        if fixture.case == "executor-stall":
+            require(fixture.connections == 1, "unexpected_stalled_executor_connections")
+            require(
+                process is not None
+                and process.returncode is None
+                and executor is not None
+                and executor.returncode is None,
+                "stalled_native_process_exited",
+            )
+            verify_live_hook(verify_shell_hook(EXECUTOR_COMMAND))
+        else:
+            verify_live_hook(hook_pid())
     except ProbeFailure:
         if fixture.failure is not None:
             raise ProbeFailure(fixture.failure) from None
@@ -626,23 +784,20 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
         if process is not None and fixture.case in PROVIDER_CASES:
             try:
                 async with asyncio.timeout_at(cleanup_deadline):
-                    await stop_app_server(process)
+                    await stop_native_process(process)
             finally:
                 async with asyncio.timeout_at(cleanup_deadline):
                     await fixture.close(server)
         else:
             async with asyncio.timeout_at(cleanup_deadline):
-                if process is None:
-                    await fixture.close(server)
-                else:
-                    outcomes = await asyncio.gather(
-                        stop_app_server(process),
-                        fixture.close(server),
-                        return_exceptions=True,
-                    )
-                    for outcome in outcomes:
-                        if isinstance(outcome, BaseException):
-                            raise outcome
+                pending = [fixture.close(server)]
+                for child in (process, executor):
+                    if child is not None:
+                        pending.append(stop_native_process(child))
+                outcomes = await asyncio.gather(*pending, return_exceptions=True)
+                for outcome in outcomes:
+                    if isinstance(outcome, BaseException):
+                        raise outcome
 
 
 async def run_case(case: Case, one_shot: bool = False) -> None:
@@ -701,8 +856,22 @@ async def run_provider_case(case: ProviderCase) -> None:
     diagnostic("INFO", "probe.case_verified", case)
 
 
-async def run_shell_case(case: ShellCase) -> None:
-    (CONTROL / "decision").write_text("shell_controls", encoding="utf-8")
+def verify_shell_hook(command: str) -> int:
+    with (CONTROL / "invocations").open("rb") as invocations:
+        require(invocations.read(2) == b"1", "shell_hook_invocation_count")
+    return hook_pid(command, nested_input=True)
+
+
+async def run_shell_case(case: ShellCase | ExecutorCase) -> None:
+    selected = case in EXECUTOR_CASES
+    if case == "executor-bash":
+        require(not os.path.lexists(EXECUTOR_BASH_OVERRIDE), "shell_override_exists")
+    decision = "shell_controls"
+    if selected:
+        decision = (
+            case if case in {"executor-deny", "executor-stall"} else "executor-allow"
+        )
+    (CONTROL / "decision").write_text(decision, encoding="utf-8")
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
         workspace = root / "workspace"
@@ -715,11 +884,15 @@ async def run_shell_case(case: ShellCase) -> None:
             fixture.connections == fixture.requests == fixture.request_limit,
             "unexpected_shell_request_count",
         )
-        with (CONTROL / "invocations").open("rb") as invocations:
-            require(invocations.read(2) == b"1", "shell_hook_invocation_count")
-        hook_pid(SHELL_COMMAND, nested_input=True)
-        if case == "shell-login":
-            require(not os.path.lexists(marker), "login_command_marker_exists")
+        verify_shell_hook(EXECUTOR_COMMAND if selected else SHELL_COMMAND)
+        if case in {
+            "shell-login",
+            "executor-sh",
+            "executor-login",
+            "executor-deny",
+            "executor-stall",
+        }:
+            require(not os.path.lexists(marker), "refused_shell_command_marker_exists")
         else:
             bash = Path("/bin/bash").resolve(strict=True)
             posix_sh = Path("/bin/sh").resolve(strict=True)
@@ -728,13 +901,16 @@ async def run_shell_case(case: ShellCase) -> None:
                 f"{posix_sh}\nposix-sh\n"
                 if case == "shell-alternate"
                 else f"{bash}\nbash-non-login\n"
-            ).encode()
+            )
+            if selected:
+                expected += f"{EXECUTOR_ORIGIN}\n"
+            expected_bytes = expected.encode()
             require(
                 marker.is_file() and not marker.is_symlink(), "shell_marker_missing"
             )
             with marker.open("rb") as contents:
                 require(
-                    contents.read(len(expected) + 1) == expected,
+                    contents.read(len(expected_bytes) + 1) == expected_bytes,
                     "unexpected_shell_marker",
                 )
     diagnostic("INFO", "probe.case_verified", case)
