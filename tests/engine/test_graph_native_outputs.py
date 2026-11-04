@@ -27,6 +27,7 @@ from kora.engine.graph_native_outputs import (
 from kora.engine.graph_native_sources import VIEW_BYTES
 from kora.engine.graph_output_values import saved_array
 from kora.engine.graph_types import build_graph_type_contracts
+from kora.ir.agent_session_view import published_object
 from kora.ir.contracts import SCHEMA_DIALECT
 from kora.ir.json import JsonValue
 from tests.engine.graph_native_cases import (
@@ -238,13 +239,10 @@ def test_native_reader_admits_before_source_acquisition(stage: str) -> None:
             max_encoded_bytes=limit,
         )
 
-    names = {
-        entry.code.co_name
-        for entry in profile.getstats()
-        if not isinstance(entry.code, str)
-    }
+    stats = profile.getstats()
+    names = {entry.code.co_name for entry in stats if not isinstance(entry.code, str)}
     assert failure.value.reason is GraphValueFailure.BUDGET
-    assert "published_object" not in names
+    assert all(entry.code is not published_object.__code__ for entry in stats)
     if stage == "record":
         assert "derive_native_output" not in names
         assert "read_document" not in names

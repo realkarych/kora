@@ -37,6 +37,17 @@ COMPLETED: EventSpec = CATALOG.register(
 )
 
 
+def is_native_output_role(kind: str, output: str, type_name: str) -> bool:
+    if kind == "agent":
+        return (
+            type_name == "AgentSession"
+            and output == "session"
+            or type_name == "VcsRef"
+            and output != "session"
+        )
+    return kind == "command" and type_name == "CommandResult" and output == "result"
+
+
 class StructuredAncestry:
     def __init__(self, contracts: dict[str, TypeContract]) -> None:
         self.contracts = contracts

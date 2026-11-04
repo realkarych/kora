@@ -53,7 +53,17 @@ def test_approval_direct_inputs_use_producer_views(
     assert export_ir(document) == before
 
 
-@pytest.mark.parametrize("kind", ["agent", "command", "human_input", "wait_event"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "agent",
+        "agent_config",
+        "agent_declaration",
+        "command",
+        "human_input",
+        "wait_event",
+    ],
+)
 @pytest.mark.parametrize("valid", [False, True])
 def test_approval_direct_inputs_use_role_owned_structured_schema(
     kind: str, valid: bool
@@ -64,18 +74,23 @@ def test_approval_direct_inputs_use_role_owned_structured_schema(
     }
     source = producer(schema=schema)
     output = "value"
-    if kind == "agent":
+    if kind.startswith("agent"):
+        config: dict[str, object] = {
+            "harness": "claude",
+            "prompt": "",
+            "workspace": {"repo": ""},
+        }
+        if kind != "agent_declaration":
+            config["output_schema"] = schema
+        value: dict[str, object] = {"type": "StructuredOutput"}
+        if kind != "agent_config":
+            value["schema"] = schema
         source = node(
             "agent",
-            config={
-                "harness": "claude",
-                "prompt": "",
-                "workspace": {"repo": ""},
-                "output_schema": schema,
-            },
+            config=config,
             outputs={
                 "session": {"type": "AgentSession"},
-                "value": {"type": "StructuredOutput", "schema": schema},
+                "value": value,
             },
         )
     elif kind == "human_input":
@@ -198,10 +213,14 @@ def test_approval_empty_inputs_are_closed(predicate: str) -> None:
         "vcs_inline",
         "command_inline",
         "session_inline",
-        "agent_inline_only",
         "agent_conflict",
         "human_conflict",
         "agent_roles",
+        "session_wrong_role",
+        "vcs_wrong_role",
+        "custom_wrong_role",
+        "file_missing",
+        "file_multiple",
     ],
 )
 def test_approval_direct_inputs_keep_unavailable_prerequisites_incomplete(
@@ -238,6 +257,11 @@ def test_approval_direct_inputs_keep_unavailable_prerequisites_incomplete(
     elif case == "collect":
         source = node(
             "command",
+            config={
+                "cmd": ["true"],
+                "workspace": {"repo": ""},
+                "output_file": "value.json",
+            },
             outputs={
                 "result": {"type": "CommandResult"},
                 "value": {"type": "StructuredOutput", "collect": "value"},
@@ -266,6 +290,39 @@ def test_approval_direct_inputs_keep_unavailable_prerequisites_incomplete(
         source = producer(type_name, {})
         if type_name == "CommandResult":
             binding["output"] = "result"
+        if type_name == "AgentSession":
+            binding["output"] = "session"
+    elif case in {
+        "session_wrong_role",
+        "vcs_wrong_role",
+        "file_missing",
+        "file_multiple",
+    }:
+        type_name = {
+            "session_wrong_role": "AgentSession",
+            "vcs_wrong_role": "VcsRef",
+        }.get(case, "StructuredOutput")
+        binding["type"] = type_name
+        command_config: dict[str, object] = {"cmd": ["true"], "workspace": {"repo": ""}}
+        if case != "file_missing":
+            command_config["output_file"] = "value.json"
+        command_outputs: dict[str, object] = {
+            "result": {"type": "CommandResult"},
+            "value": {"type": type_name},
+        }
+        if case == "file_multiple":
+            command_outputs["second"] = {"type": "StructuredOutput"}
+        source = node("command", config=command_config, outputs=command_outputs)
+    elif case == "custom_wrong_role":
+        binding["type"] = "example/Custom"
+        contracts["example/Custom"] = saved_form({"type": "object"})
+        source = node(
+            "agent",
+            outputs={
+                "session": {"type": "AgentSession"},
+                "value": {"type": "example/Custom"},
+            },
+        )
     elif case == "human_conflict":
         source = human({"type": "boolean"}, {"type": "integer"})
         binding["output"] = "response"

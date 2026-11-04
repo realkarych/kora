@@ -19,26 +19,19 @@ from kora.engine.graph_output_values import (
 )
 from kora.engine.graph_types import read_document, read_graph_type_contracts
 from kora.ir.json import JsonObject
-from kora.ir.output_schemas import validate_output_schemas
+from kora.ir.output_schemas import is_native_output_role, validate_output_schemas
 
 
 def native_output_type(raw: JsonObject, path: list[str]) -> str:
     node = object_at(raw, path[:-2])
     declaration = object_at(raw, path)
     name = declaration["type"]
-    if "schema" in declaration or not isinstance(name, str):
-        raise GraphValueRejected(GraphValueFailure.VERSION)
-    if not (
-        node["kind"] == "agent"
-        and (
-            name == "AgentSession"
-            and path[-1] == "session"
-            or name == "VcsRef"
-            and path[-1] != "session"
-        )
-        or node["kind"] == "command"
-        and name == "CommandResult"
-        and path[-1] == "result"
+    kind = node["kind"]
+    if (
+        "schema" in declaration
+        or not isinstance(name, str)
+        or not isinstance(kind, str)
+        or not is_native_output_role(kind, path[-1], name)
     ):
         raise GraphValueRejected(GraphValueFailure.VERSION)
     return name

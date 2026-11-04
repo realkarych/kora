@@ -6,15 +6,16 @@ from zipfile import ZipFile
 
 import pytest
 
-from kora.db.graph_value_json import GraphValueRejected, TextBudget
-from kora.engine.graph_native_sources import (
+from kora.db.graph_value_json import TextBudget
+from kora.engine.graph_native_sources import agent_session_checker
+from kora.ir.agent_session import agent_session_revision_descriptor
+from kora.ir.agent_session_view import (
     POLICY_BYTES,
     SCHEMA_BYTES,
     VIEW_BYTES,
-    agent_session_checker,
+    AgentSessionViewUnavailable,
     published_object,
 )
-from kora.ir.agent_session import agent_session_revision_descriptor
 from tests.engine.graph_native_cases import native_arguments
 from tests.engine.graph_output_cases import child
 from tests.support.provider_tooling import (
@@ -47,7 +48,9 @@ def test_native_source_refusal_is_bounded_and_closes_handle(
             if mode == "short"
             else b"private" * 200000
             if mode == "large"
-            else b"x" + published[1:]
+            else published.replace(
+                b"kora.agent-session-view.v1", b"kora.agent-session-view.v2"
+            )
         )
     digest = hashlib.sha256(published).hexdigest()
     before = frozenset(os.listdir("/dev/fd"))
@@ -56,9 +59,9 @@ def test_native_source_refusal_is_bounded_and_closes_handle(
         result = published_object(resource, POLICY_BYTES, digest)
         assert result["identity"] == "kora.agent-session-view.v1"
     else:
-        with pytest.raises(GraphValueRejected) as failure:
+        with pytest.raises(AgentSessionViewUnavailable) as failure:
             published_object(resource, POLICY_BYTES, digest)
-        assert str(failure.value) == "invalid graph value representation"
+        assert str(failure.value) == "published AgentSession view unavailable"
         assert failure.value.__cause__ is None
         assert failure.value.__suppress_context__ or failure.value.__context__ is None
         if mode == "large":

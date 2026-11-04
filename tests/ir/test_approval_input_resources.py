@@ -115,7 +115,9 @@ def test_approval_direct_inputs_cache_producer_roles_and_views() -> None:
     assert checks.inputs.source_steps == source_steps
     assert checks.schemas.meter.steps == schema_steps
     assert len(checks.inputs.producers) == 1
-    assert len(checks.inputs.sources) == len(checks.inputs.variables) == 2
+    assert len(checks.inputs.sources) == 2
+    assert isinstance(checks.inputs.session_variable, Variable)
+    assert len(checks.inputs.variables) == 1
 
 
 def test_approval_direct_inputs_map_only_after_complete_prerequisites() -> None:

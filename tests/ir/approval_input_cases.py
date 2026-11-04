@@ -23,24 +23,25 @@ def unavailable_inputs() -> dict[str, object]:
 def producer(
     type_name: str = "StructuredOutput", schema: JsonObject | None = None
 ) -> dict[str, object]:
-    if type_name == "CommandResult":
+    output = {"type": type_name, **({} if schema is None else {"schema": schema})}
+    if type_name == "AgentSession":
+        return node("agent", outputs={"session": output})
+    if type_name == "VcsRef":
         return node(
-            "command",
-            outputs={
-                "result": {
-                    "type": type_name,
-                    **({} if schema is None else {"schema": schema}),
-                }
-            },
+            "agent", outputs={"session": {"type": "AgentSession"}, "value": output}
         )
+    if type_name == "CommandResult":
+        return node("command", outputs={"result": output})
     return node(
         "command",
+        config={
+            "cmd": ["true"],
+            "workspace": {"repo": ""},
+            "output_file": "value.json",
+        },
         outputs={
             "result": {"type": "CommandResult"},
-            "value": {
-                "type": type_name,
-                **({} if schema is None else {"schema": schema}),
-            },
+            "value": output,
         },
     )
 
@@ -56,6 +57,8 @@ def direct_document(
 ) -> GraphDocument:
     if type_name == "CommandResult" and output == "value":
         output = "result"
+    if type_name == "AgentSession" and output == "value":
+        output = "session"
     nodes = {
         "producer": producer() if source is None else source,
         "gate": gate(

@@ -1,7 +1,5 @@
-import json
 from dataclasses import dataclass, replace
 from enum import Enum
-from importlib.resources import files
 
 from pydantic import MISSING
 
@@ -9,11 +7,14 @@ from kora.cel import SchemaError, SchemaTypes
 from kora.cel.cost import DATA_BOUND, ValueBound, Variable
 from kora.cel.schema import SchemaView
 from kora.cel.types import Record, RecordField
+from kora.ir.agent_session_view import (
+    AgentSessionViewUnavailable,
+    read_agent_session_view,
+)
 from kora.ir.contracts import BuiltinTypeContract, TypeContract
-from kora.ir.data import validate_ir_json_object
 from kora.ir.declarations import InputRef, OutputDecl
 from kora.ir.json import JsonObject
-from kora.ir.output_schemas import StructuredAncestry
+from kora.ir.output_schemas import StructuredAncestry, is_native_output_role
 from kora.ir.schema_equality import compare_json
 from kora.ir.topology import (
     AgentNode,
@@ -27,6 +28,10 @@ from kora.ir.topology import (
 class InputFailure(Enum):
     CONTEXT = "context"
     SCHEMA = "schema"
+
+
+class PublishedInput(Enum):
+    AGENT_SESSION = "agent_session"
 
 
 @dataclass(frozen=True)
@@ -51,10 +56,10 @@ class DirectInputContexts:
         self.roots = roots
         self.default_form = default_form
         self.ancestry: StructuredAncestry = StructuredAncestry(contracts)
-        self.sources: dict[tuple[int, str, str], InputView | None] = {}
+        self.sources: dict[tuple[int, str, str], InputView | PublishedInput | None] = {}
         self.producers: dict[int, bool] = {}
         self.variables: dict[tuple[int, SchemaView], Variable | InputFailure] = {}
-        self.session_schema: JsonObject | None = None
+        self.session_variable: Variable | InputFailure | None = None
         self.source_steps: int = 0
 
     def agent_roles(self, node: AgentNode) -> bool:
@@ -91,27 +96,33 @@ class DirectInputContexts:
             schema = form
         elif isinstance(node, AgentNode):
             configured = node.config.output_schema
-            if configured is MISSING:
-                if schema is not MISSING:
+            if configured is not MISSING:
+                if not self.matching(configured, schema):
                     return None
-            elif not self.matching(configured, schema):
-                return None
-            else:
                 schema = configured
         if schema is MISSING:
             schema = self.roots["urn:kora:artifact:StructuredOutput"]
         return InputView(schema, SchemaView.STRUCTURED_OUTPUT)
 
-    def output_view(self, node: Producer, output: OutputDecl) -> InputView | None:
+    def output_view(
+        self, node: Producer, name: str, output: OutputDecl
+    ) -> InputView | PublishedInput | None:
         self.source_steps += 1
         contract = self.contracts.get(output.type)
         if contract is None:
             return None
         if isinstance(node, AgentNode) and not self.agent_roles(node):
             return None
+        if (
+            isinstance(node, CommandNode)
+            and name != "result"
+            and (node.config.output_file is MISSING or len(node.outputs) != 2)
+        ):
+            return None
         if not isinstance(contract, BuiltinTypeContract):
             if (
-                "/" in output.type
+                isinstance(node, CommandNode)
+                and "/" in output.type
                 and contract.parent is None
                 and output.schema_ is MISSING
             ):
@@ -121,21 +132,19 @@ class DirectInputContexts:
             return None
         if output.type == "StructuredOutput":
             return self.structured(node, output)
-        if output.schema_ is not MISSING:
+        if output.schema_ is not MISSING or not is_native_output_role(
+            node.kind, name, output.type
+        ):
             return None
         if output.type == "AgentSession":
-            if self.session_schema is None:
-                resource = files("kora.ir").joinpath(
-                    "artifact_schemas", "AgentSession.cel.schema.json"
-                )
-                value: object = json.loads(resource.read_text(encoding="utf-8"))
-                self.session_schema = validate_ir_json_object(value)
-            return InputView(self.session_schema)
+            return PublishedInput.AGENT_SESSION
         if output.type in {"VcsRef", "CommandResult"}:
             return InputView(self.roots["urn:kora:artifact:" + output.type])
         return None
 
-    def source(self, body: GraphBody, binding: InputRef) -> InputView | None:
+    def source(
+        self, body: GraphBody, binding: InputRef
+    ) -> InputView | PublishedInput | None:
         if (
             binding.from_ is MISSING
             or binding.output is MISSING
@@ -157,10 +166,18 @@ class DirectInputContexts:
             return None
         key = (id(body), binding.from_, binding.output)
         if key not in self.sources:
-            self.sources[key] = self.output_view(producer, output)
+            self.sources[key] = self.output_view(producer, binding.output, output)
         return self.sources[key]
 
-    def mapped(self, source: InputView) -> Variable | InputFailure:
+    def mapped(self, source: InputView | PublishedInput) -> Variable | InputFailure:
+        if source is PublishedInput.AGENT_SESSION:
+            if self.session_variable is None:
+                try:
+                    view = read_agent_session_view()
+                    self.session_variable = self.schemas.variable(view.schema)
+                except (AgentSessionViewUnavailable, SchemaError):
+                    self.session_variable = InputFailure.SCHEMA
+            return self.session_variable
         key = (id(source.schema), source.view)
         if key not in self.variables:
             try:
@@ -171,7 +188,7 @@ class DirectInputContexts:
 
     def context(self, body: GraphBody, node: HumanInputNode) -> Variable | InputFailure:
         inputs = {} if node.inputs is MISSING else node.inputs
-        sources: dict[str, InputView] = {}
+        sources: dict[str, InputView | PublishedInput] = {}
         for name, binding in inputs.items():
             source = self.source(body, binding)
             if source is None:

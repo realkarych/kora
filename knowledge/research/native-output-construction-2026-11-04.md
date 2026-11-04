@@ -18,6 +18,8 @@ Expected and saved record buffers have separate finite allowances under the same
 
 The call owns scoped file handles and private values only. It opens no database transaction or native process. Physical persistence tests close the actual read unit before checking and verify final connection closure. They store a partial leaf payload for codec fidelity, not a new complete outer graph format or execution authority.
 
+The #646 direct-input checker shares the pure `kora.ir.agent_session_view` acquisition. Both consumers use the exact native-role predicate in the IR output-schema layer. The engine retains its 7,029-byte precharge, ordered checker value and fixed refusal mapping. The partial static checker acquires the view only after all direct bindings resolve and caches one success or unavailable mapping for that invocation. Published source bytes, extents, digest chain and checker root keep their existing identities.
+
 ## Verification and activation limits
 
 Focused tests cover all exact root/body roles; separate structured-config isolation; wider representation refusal; rehashed field/type/view/policy/root/behavior/order substitutions; mandatory nulls; digest and exact/one-under input/source admission; and detached results. Actual file tests cover successful/missing/directory/truncated/oversized/corrupt sources and descriptor balance. Wheel checks prove byte agreement and actual installed-core-only construction/checking, including refusal after real installed-source corruption without a vendor SDK.
