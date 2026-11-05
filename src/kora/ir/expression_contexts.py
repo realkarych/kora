@@ -23,10 +23,14 @@ from kora.ir.approval_inputs import DirectInputContexts, InputFailure
 from kora.ir.contracts import TypeContract
 from kora.ir.json import JsonObject
 from kora.ir.schema_catalogue import contract_schema
-from kora.ir.topology import BranchNode, GraphBody, HumanInputNode, WaitEventNode
+from kora.ir.topology import GraphBody, NodeEnvelope
 
 
-def required_context(source: str, meter: Meter) -> frozenset[str]:
+def required_context(
+    source: str,
+    meter: Meter,
+    names: frozenset[str] = frozenset({"inputs", "params"}),
+) -> frozenset[str]:
     pending: list[Node] = [parse(source, meter=meter)]
     required: set[str] = set()
     while pending:
@@ -35,10 +39,10 @@ def required_context(source: str, meter: Meter) -> frozenset[str]:
         if isinstance(node, Literal):
             continue
         if isinstance(node, Identifier):
-            if node.name in {"inputs", "params"}:
+            if node.name in names:
                 required.add(node.name)
         elif isinstance(node, Comprehension):
-            if node.variable in {"inputs", "params"}:
+            if node.variable in names:
                 required.add(node.variable)
             pending.extend((node.range, *node.arguments))
         elif isinstance(node, Select | Unary):
@@ -98,10 +102,14 @@ class InputParameterContexts:
     def context(
         self,
         body: GraphBody,
-        node: HumanInputNode | BranchNode | WaitEventNode,
+        node: NodeEnvelope,
         source: str,
     ) -> dict[str, Variable] | InputFailure:
-        required = required_context(source, self.meter)
+        return self.variables(body, node, required_context(source, self.meter))
+
+    def variables(
+        self, body: GraphBody, node: NodeEnvelope, required: frozenset[str]
+    ) -> dict[str, Variable] | InputFailure:
         variables: dict[str, Variable] = {}
         if "inputs" in required:
             inputs = self.inputs.context(body, node)

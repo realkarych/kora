@@ -102,6 +102,10 @@ if TYPE_CHECKING:
     from kora.ir.input_paths import InputPathResult, validate_input_paths
     from kora.ir.node import ErrorClass, ToolPolicy
     from kora.ir.output_schemas import OutputSchemaResult, validate_output_schemas
+    from kora.ir.retry_expressions import (
+        RetryExpressionResult,
+        validate_retry_expressions,
+    )
     from kora.ir.root_previous_attempts import (
         RootPreviousAttemptResult,
         validate_root_previous_attempt_refs,
@@ -179,6 +183,8 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "RetryExpressionResult",
+    "validate_retry_expressions",
     "WaitExpressionResult",
     "validate_wait_expressions",
     "BranchExpressionResult",
@@ -328,6 +334,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"RetryExpressionResult", "validate_retry_expressions"}:
+        from kora.ir import retry_expressions
+
+        return getattr(retry_expressions, name)
     if name in {"WaitExpressionResult", "validate_wait_expressions"}:
         from kora.ir import wait_expressions
 

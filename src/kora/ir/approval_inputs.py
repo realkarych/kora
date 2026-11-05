@@ -22,6 +22,9 @@ from kora.ir.topology import (
     CommandNode,
     GraphBody,
     HumanInputNode,
+    Node,
+    NodeEnvelope,
+    TimerNode,
     WaitEventNode,
 )
 
@@ -187,9 +190,7 @@ class DirectInputContexts:
                 self.variables[key] = InputFailure.SCHEMA
         return self.variables[key]
 
-    def context(
-        self, body: GraphBody, node: HumanInputNode | BranchNode | WaitEventNode
-    ) -> Variable | InputFailure:
+    def context(self, body: GraphBody, node: NodeEnvelope) -> Variable | InputFailure:
         inputs = {} if node.inputs is MISSING else node.inputs
         sources: dict[str, InputView | PublishedInput] = {}
         for name, binding in inputs.items():
@@ -204,5 +205,32 @@ class DirectInputContexts:
             if isinstance(variable, InputFailure):
                 return variable
             fields[name] = RecordField(variable.type, inputs[name].optional is not True)
+            bounds[name] = variable.bound
+        return Variable(Record(fields, extra=None), replace(DATA_BOUND, fields=bounds))
+
+    def output_context(self, node: Node) -> Variable | InputFailure:
+        if isinstance(node, TimerNode | BranchNode):
+            if node.outputs is MISSING or not node.outputs:
+                return Variable(Record({}, extra=None))
+            return InputFailure.CONTEXT
+        if not isinstance(
+            node, AgentNode | CommandNode | HumanInputNode | WaitEventNode
+        ):
+            return InputFailure.CONTEXT
+        sources: dict[str, InputView | PublishedInput] = {}
+        for name, output in node.outputs.items():
+            if output.collect is not MISSING:
+                return InputFailure.CONTEXT
+            source = self.output_view(node, name, output)
+            if source is None:
+                return InputFailure.CONTEXT
+            sources[name] = source
+        fields: dict[str, RecordField] = {}
+        bounds: dict[str, ValueBound] = {}
+        for name, source in sources.items():
+            variable = self.mapped(source)
+            if isinstance(variable, InputFailure):
+                return variable
+            fields[name] = RecordField(variable.type, False)
             bounds[name] = variable.bound
         return Variable(Record(fields, extra=None), replace(DATA_BOUND, fields=bounds))
