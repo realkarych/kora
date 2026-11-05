@@ -44,6 +44,10 @@ def main() -> int:
             "printf 'kora-stdin-written\\n' > kora-probe.marker && "
             "cat kora-probe.marker"
         )
+    if decision == "interrupt":
+        expected_command = (
+            "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
+        )
     if nested_input:
         expected_command = (
             'shell_path=$(readlink -f -- "$0") && '
@@ -96,6 +100,7 @@ def main() -> int:
         "shell_controls",
         "executor-allow",
         "patch-allow",
+        "interrupt",
     }:
         return 0
     if decision in {"stall", "executor-stall"}:

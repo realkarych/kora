@@ -5,9 +5,12 @@ import os
 import platform
 import re
 import secrets
+import select
 import signal
+import socket
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
@@ -29,6 +32,8 @@ from kora.plugins.harness.codex.app_server_turn import (
     TurnError,
     observe_app_server_turn,
     reject_premature_completion,
+    started_turn_id,
+    terminal_observation,
 )
 from kora.plugins.harness.codex.app_server_usage import (
     TokenCounts,
@@ -55,6 +60,7 @@ ExecutorCase = Literal[
 ClientCase = Literal["client-complete", "client-exit"]
 StartupCase = Literal["startup-version", "startup-home"]
 HookInputCase = Literal["patch-allow", "patch-deny", "decoder-refuse"]
+InterruptCase = Literal["interrupt-model", "interrupt-command", "interrupt-kill"]
 ProbeCase = (
     Case
     | ProviderCase
@@ -63,6 +69,7 @@ ProbeCase = (
     | ClientCase
     | StartupCase
     | HookInputCase
+    | InterruptCase
 )
 
 CODEX = "/usr/local/bin/codex"
@@ -77,6 +84,8 @@ PROVIDER_CASES = frozenset(
 CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
+INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
+INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
 SYNTHETIC_BEARER = "kora-probe-synthetic-value"
 MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -315,6 +324,16 @@ USAGE_TOOL_RESPONSE = command_response(
         "total_tokens": 110,
     },
 )
+INTERRUPT_TOOL_RESPONSE = command_response(
+    {"cmd": INTERRUPT_COMMAND, "login": False, "timeout_ms": 60_000},
+    usage={
+        "input_tokens": 100,
+        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
+        "output_tokens": 10,
+        "output_tokens_details": {"reasoning_tokens": 4},
+        "total_tokens": 110,
+    },
+)
 USAGE_FINAL_RESPONSE = sse(
     "kora-probe-response-2",
     FINAL_ITEM,
@@ -336,6 +355,8 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
+        elif case in INTERRUPT_CASES:
+            self.request_limit = 1
         elif (
             case == "executor-stall" or case in CLIENT_CASES or case in STARTUP_REFUSALS
         ):
@@ -345,6 +366,8 @@ class ResponsesFixture:
                 3 if case == "interactive" or (one_shot and case == "allow") else 2
             )
         self.request_admitted = asyncio.Event()
+        self.stream_ready = asyncio.Event()
+        self.stream_closed = asyncio.Event()
         self.connections: int = 0
         self.requests = 0
         self.failure: str | None = None
@@ -387,6 +410,20 @@ class ResponsesFixture:
                 self.request_admitted.set()
                 if self.case == "client-exit":
                     await asyncio.Future[None]()
+                if self.case == "interrupt-model":
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                        b"Connection: close\r\n\r\n"
+                        b'data: {"type":"response.created","response":'
+                        b'{"id":"kora-probe-open-response"}}\n\n'
+                    )
+                    await writer.drain()
+                    self.stream_ready.set()
+                    require(
+                        await reader.read(1) == b"", "interrupted_stream_not_closed"
+                    )
+                    self.stream_closed.set()
+                    return
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
                     b"Connection: close\r\nContent-Length: "
@@ -469,6 +506,10 @@ class ResponsesFixture:
             ]
             require(len(command_tools) == 1, "exec_command_advertisement_count")
             names = [tool.get("name") for tool in tools]
+            if self.case in INTERRUPT_CASES:
+                require("write_stdin" not in names, "interrupt_stdin_advertised")
+                verify_one_shot_schema(command_tools[0])
+                return INTERRUPT_TOOL_RESPONSE
             if self.case == "interactive":
                 require("write_stdin" in names, "interactive_stdin_not_advertised")
                 return command_response(
@@ -738,6 +779,158 @@ class Stdio:
         if usage is not None:
             usage.verify(self.terminal.turn_id)
 
+    async def interrupt_turn(
+        self,
+        workspace: Path,
+        fixture: ResponsesFixture,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        await initialize_app_server(self.rpc, self.identity, deadline=self.deadline)
+        start = await self.call(
+            "thread/start", {"cwd": str(workspace), "ephemeral": True}
+        )
+        thread = as_object(start.get("thread"))
+        require(thread.get("ephemeral") is True, "interrupt_thread_not_ephemeral")
+        thread_id = thread.get("id")
+        require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
+        thread_id = cast("str", thread_id)
+        usage = TurnUsage(thread_id)
+        turn_id: str | None = None
+
+        def observe(notification: Notification) -> None:
+            if notification.method == "turn/completed":
+                require(self.terminal is None, "interrupt_duplicate_terminal")
+                self.terminal = terminal_observation(notification.params, thread_id)
+                require(
+                    turn_id is not None and self.terminal.turn_id == turn_id,
+                    "interrupt_terminal_identity_mismatch",
+                )
+            snapshot = decode_usage(notification)
+            if snapshot is not None:
+                require(
+                    snapshot.counts == EXPECTED_USAGE[0],
+                    "interrupt_unexpected_usage_counts",
+                )
+                usage.accept(snapshot)
+
+        def observe_before_interrupt(notification: Notification) -> None:
+            reject_premature_completion(notification)
+            observe(notification)
+
+        def observe_before_start(notification: Notification) -> None:
+            reject_premature_completion(notification)
+            reject_premature_usage(notification)
+
+        with ExitStack() as resources:
+            listener = resources.enter_context(socket.socket(socket.AF_UNIX))
+            listener.setblocking(False)
+            listener.bind(str(CONTROL / "interrupt.sock"))
+            listener.listen(1)
+            turn_id = started_turn_id(
+                await self.rpc.call(
+                    "turn/start",
+                    {
+                        "threadId": thread_id,
+                        "input": [{"type": "text", "text": "Run the fixture action."}],
+                    },
+                    deadline=self.deadline,
+                    observe=observe_before_interrupt,
+                    observe_before_send=observe_before_start,
+                )
+            )
+            child_fd: int | None = None
+            loop = asyncio.get_running_loop()
+            if fixture.case == "interrupt-model":
+                await fixture.stream_ready.wait()
+            else:
+                child, _ = await loop.sock_accept(listener)
+                resources.enter_context(child)
+                child.setblocking(False)
+                raw_pid = bytearray()
+                while not raw_pid.endswith(b"\n"):
+                    part = await loop.sock_recv(child, 16 - len(raw_pid))
+                    require(bool(part), "interrupt_child_pid_missing")
+                    raw_pid.extend(part)
+                    require(len(raw_pid) < 16, "interrupt_child_pid_limit")
+                require(
+                    re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw_pid) is not None,
+                    "interrupt_child_pid_invalid",
+                )
+                if sys.platform != "linux":
+                    raise ProbeFailure("interrupt_requires_linux")
+                child_fd = os.pidfd_open(int(raw_pid))
+                resources.callback(os.close, child_fd)
+                hook_pid(INTERRUPT_COMMAND)
+                while usage.for_turn(turn_id) is None:
+                    await self.rpc.receive(
+                        deadline=self.deadline, observe=observe_before_interrupt
+                    )
+                require(
+                    not select.select([child_fd], [], [], 0)[0],
+                    "interrupt_child_exited_early",
+                )
+            require(self.terminal is None, "interrupt_terminal_before_stop")
+            require(process.returncode is None, "interrupt_app_server_exited_early")
+            if fixture.case == "interrupt-kill":
+                process.kill()
+                try:
+                    while True:
+                        await self.rpc.receive(
+                            deadline=self.deadline, observe=observe_before_interrupt
+                        )
+                except RpcError as error:
+                    require(
+                        error.reason is RpcFailure.DISCONNECTED,
+                        "interrupt_kill_not_eof",
+                    )
+                require(
+                    await process.wait() == -signal.SIGKILL, "interrupt_kill_status"
+                )
+                require(self.terminal is None, "interrupt_kill_terminal_observed")
+            else:
+                reply = await self.rpc.call(
+                    "turn/interrupt",
+                    {"threadId": thread_id, "turnId": turn_id},
+                    deadline=self.deadline,
+                    observe=observe,
+                    observe_before_send=observe_before_interrupt,
+                )
+                require(reply == {}, "interrupt_reply_invalid")
+                while self.terminal is None:
+                    await self.rpc.receive(deadline=self.deadline, observe=observe)
+                require(
+                    self.terminal.status == "interrupted", "interrupt_status_invalid"
+                )
+                if child_fd is not None:
+                    await wait_pidfd_exit(child_fd)
+                else:
+                    await fixture.stream_closed.wait()
+                require(process.returncode is None, "interrupt_app_server_exited")
+            snapshot = usage.for_turn(turn_id)
+            require(
+                (snapshot is None)
+                if fixture.case == "interrupt-model"
+                else snapshot is not None and snapshot.counts == EXPECTED_USAGE[0],
+                "interrupt_usage_not_preserved",
+            )
+            require(not usage.observation_gap, "interrupt_usage_gap")
+            require(not os.path.lexists(workspace / MARKER), "interrupt_marker_exists")
+
+
+async def wait_pidfd_exit(descriptor: int) -> None:
+    loop = asyncio.get_running_loop()
+    exited: asyncio.Future[None] = loop.create_future()
+
+    def observe_exit() -> None:
+        if not exited.done():
+            exited.set_result(None)
+
+    loop.add_reader(descriptor, observe_exit)
+    try:
+        await exited
+    finally:
+        loop.remove_reader(descriptor)
+
 
 def native_environment(root: Path) -> dict[str, str]:
     home = root / "home"
@@ -975,6 +1168,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             or fixture.case in CLIENT_CASES
             or fixture.case in STARTUP_REFUSALS
             or fixture.case in HOOK_INPUT_CASES
+            or fixture.case in INTERRUPT_CASES
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
@@ -1005,7 +1199,9 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 max_messages=MAX_MESSAGES,
             )
             stdio = Stdio(rpc, deadline, identity)
-            if fixture.case == "client-exit":
+            if fixture.case in INTERRUPT_CASES:
+                await stdio.interrupt_turn(workspace, fixture, process)
+            elif fixture.case == "client-exit":
                 await observe_client_exit(process, fixture, stdio, workspace)
             else:
                 await stdio.observe(workspace, fixture.case, executor_url)
@@ -1095,6 +1291,27 @@ async def run_case(case: Case, one_shot: bool = False) -> None:
                     "interactive_marker_content",
                 )
     diagnostic("INFO", "probe.case_verified", f"one_shot_{case}" if one_shot else case)
+
+
+async def run_interrupt_case(case: InterruptCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("interrupt", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=True)
+
+        await drive(fixture, root, workspace)
+
+        require(fixture.failure is None, fixture.failure or "interrupt_fixture_failed")
+        require(fixture.requests == 1, "interrupt_request_count")
+        require(not os.path.lexists(workspace / MARKER), "interrupt_marker_exists")
+        require(
+            RECEIPTS.is_file() == (case != "interrupt-model"),
+            "interrupt_hook_receipt_state",
+        )
+    diagnostic("INFO", "probe.case_verified", case)
 
 
 async def run_hook_input_case(case: HookInputCase) -> None:
@@ -1260,6 +1477,12 @@ async def run() -> None:
         await run_provider_case("client-exit")
     elif sys.argv[1:] == ["--check-app-server-usage"]:
         await run_case("usage")
+    elif sys.argv[1:] == ["--interrupt-model"]:
+        await run_interrupt_case("interrupt-model")
+    elif sys.argv[1:] == ["--interrupt-command"]:
+        await run_interrupt_case("interrupt-command")
+    elif sys.argv[1:] == ["--interrupt-kill"]:
+        await run_interrupt_case("interrupt-kill")
     elif sys.argv[1:] == ["--startup-version"]:
         await run_startup_refusal("startup-version")
     elif sys.argv[1:] == ["--startup-home"]:

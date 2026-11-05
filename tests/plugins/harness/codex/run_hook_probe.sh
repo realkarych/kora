@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt]' >&2
         exit 2
         ;;
 esac
@@ -90,7 +90,7 @@ run_variant() {
     variant=$1
     shift
     image=$(
-        tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py \
+        tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py \
             -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_usage.py pre_tool_use.py |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
     )
@@ -148,6 +148,12 @@ case "${1:-}" in
         run_variant default --client-complete
         release_container
         run_variant default --client-exit
+        ;;
+    --check-app-server-interrupt)
+        for probe_case in model command kill; do
+            run_variant one-shot "--interrupt-$probe_case"
+            release_container
+        done
         ;;
     --check-app-server-startup)
         run_variant default --client-complete

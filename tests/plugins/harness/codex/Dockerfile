@@ -5,7 +5,7 @@ RUN tar -xzf /tmp/codex.tar.gz -C /tmp codex-x86_64-unknown-linux-musl && instal
 FROM python:3.11.17-slim-bookworm@sha256:8fb0b110b022c70cbe09d3ff1fb313654f31f9c814abb0d48180af56d906a199 AS probe
 COPY --from=upstream /usr/local/bin/codex /usr/local/bin/codex
 COPY requirements.toml /etc/codex/requirements.toml
-COPY probe.py managed_hook.py /opt/kora-probe/
+COPY probe.py managed_hook.py interrupt_child.py /opt/kora-probe/
 COPY app_server_rpc.py app_server_startup.py app_server_turn.py app_server_usage.py pre_tool_use.py /usr/local/lib/python3.11/site-packages/kora/plugins/harness/codex/
 RUN install -d -m 0700 -o 65532 -g 65532 /var/lib/kora-hook-probe
 USER 65532:65532
