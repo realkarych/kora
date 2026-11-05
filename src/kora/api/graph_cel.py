@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from functools import partial
 
@@ -12,7 +12,9 @@ from kora.api.cel_pattern_validation import (
 )
 from kora.api.cel_renderings import IncompleteRenderings, compile_rendering_sites
 from kora.api.exchange import COMPONENT
+from kora.api.graph_cel_facts import GraphCelFacts, stage_graph_cel_facts
 from kora.cel_eval.thread import Evaluator
+from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.ir.approval_compilation import (
     ApprovalPrerequisite,
     CheckedApprovalSite,
@@ -56,6 +58,7 @@ class GraphCelRefusal(StrEnum):
 class GraphCelChecks:
     compiled_fields: int
     diagnostics: DiagnosticCollection
+    facts: GraphCelFacts | None = field(default=None, repr=False)
 
 
 TypedRefusal = (
@@ -143,6 +146,7 @@ async def verify_graph_cel(
     max_triggers: int,
     max_rendering_characters: int,
     max_pattern_work: int,
+    max_facts_bytes: int | None = None,
 ) -> GraphCelResult:
     if (
         any(
@@ -151,6 +155,10 @@ async def verify_graph_cel(
         )
         or type(max_pattern_work) is not int
         or max_pattern_work <= 0
+        or (
+            max_facts_bytes is not None
+            and (type(max_facts_bytes) is not int or max_facts_bytes <= 0)
+        )
     ):
         return announce(GraphCelRefusal.INVALID_ALLOWANCE)
     inventory = checked_graph_sites(document, max_declarations, max_triggers)
@@ -160,17 +168,32 @@ async def verify_graph_cel(
     prepared = prepare_patterns(inventory, max_pattern_work)
     if isinstance(prepared, IncompletePatternCheck):
         return announce(prepared)
-    compilation = compile_rendering_sites(
-        inventory, evaluator, max_rendering_characters=max_rendering_characters
-    )
-    del inventory
+    staged = None
     try:
+        if max_facts_bytes is not None:
+            try:
+                staged = stage_graph_cel_facts(inventory, max_facts_bytes)
+            except GraphValueRejected as error:
+                if error.reason is not GraphValueFailure.BUDGET:
+                    raise
+                return announce(GraphCelRefusal.CAPACITY_EXHAUSTED)
+        compilation = compile_rendering_sites(
+            inventory, evaluator, max_rendering_characters=max_rendering_characters
+        )
+        del inventory
         compiled = await compilation
         if isinstance(compiled, IncompleteRenderings):
             return announce(compiled)
         checked = await validate_prepared_patterns(prepared, evaluator)
         if isinstance(checked, IncompletePatternCheck):
             return announce(checked)
-        return announce(GraphCelChecks(compiled.expressions, checked.diagnostics))
+        return announce(
+            GraphCelChecks(
+                compiled.expressions,
+                checked.diagnostics,
+                staged if checked.diagnostics.valid else None,
+            )
+        )
     finally:
+        staged = None
         prepared.clear()

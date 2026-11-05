@@ -1,22 +1,33 @@
 import asyncio
 import gc
+import json
 from collections.abc import Coroutine
+from dataclasses import asdict
+from typing import cast
 from weakref import ref
 
 import pytest
+from fastapi.encoders import jsonable_encoder
 
-from kora.api.cel_pattern_validation import IncompletePatternCheck, PreparedPatterns
+from kora.api.cel_pattern_validation import (
+    CheckedPatternSite,
+    IncompletePatternCheck,
+    PreparedPatterns,
+)
 from kora.api.cel_renderings import IncompleteRenderings, RenderingRefusal
 from kora.api.exchange import COMPONENT
 from kora.api.graph_cel import (
     GraphCelChecks,
     GraphCelRefusal,
     GraphCelResult,
+    checked_graph_sites,
     verify_graph_cel,
 )
+from kora.api.graph_cel_facts import GraphCelFacts
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
 from kora.cel_eval.thread import EvaluationThread, Evaluator
+from kora.db.graph_value_json import ObjectReader
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
@@ -134,6 +145,7 @@ def verify(
     triggers: int = 2,
     characters: int = WORK,
     pattern_work: int = WORK,
+    facts_bytes: int | None = None,
 ) -> Coroutine[None, None, GraphCelResult]:
     return verify_graph_cel(
         document,
@@ -142,6 +154,7 @@ def verify(
         max_triggers=triggers,
         max_rendering_characters=characters,
         max_pattern_work=pattern_work,
+        max_facts_bytes=facts_bytes,
     )
 
 
@@ -167,6 +180,7 @@ def check_mixed() -> None:
     assert isinstance(valid, GraphCelChecks)
     assert valid.compiled_fields == FIELDS
     assert valid.diagnostics.valid
+    assert valid.facts is None
     assert isinstance(invalid, GraphCelChecks)
     assert invalid.compiled_fields == FIELDS
     assert not invalid.diagnostics.valid
@@ -336,6 +350,130 @@ def pending_patterns() -> int:
     )
 
 
+def pending_facts() -> int:
+    gc.collect()
+    return sum(isinstance(value, GraphCelFacts) for value in gc.get_objects())
+
+
+def check_facts() -> None:
+    source = f'params.enabled && "a".matches("^{PATTERN_MARKER}")'
+    document = with_infrastructure(mixed_document(params=PARAMETER_SCHEMA), source)
+    rejected = with_infrastructure(
+        mixed_document(rejected=True, params=PARAMETER_SCHEMA),
+        source.replace("^", "(?ii)"),
+    )
+    single_site = document_for(
+        params=PARAMETER_SCHEMA,
+        contracts=BUILTINS,
+        nodes={
+            "gate": gate(predicate='response.decision == "approve" && params.enabled')
+        },
+    )
+    expected = checked_graph_sites(document, DECLARATIONS, 2)
+    owner = EvaluationThread(load_binding())
+
+    with asyncio.Runner() as runner:
+        loop = runner.get_loop()
+        evaluator = runner.run(open_evaluator(owner))
+        try:
+            captured = observe_deliveries(
+                loop,
+                loop.create_task(verify(document, evaluator, facts_bytes=WORK)),
+                owner,
+                FIELDS + 2,
+            )
+            invalid = observe_deliveries(
+                loop,
+                loop.create_task(verify(rejected, evaluator, facts_bytes=WORK)),
+                owner,
+                FIELDS + 2,
+            )
+            prefix = runner.run(verify(single_site, evaluator, facts_bytes=512))
+            assert_idle(owner, 1)
+        finally:
+            runner.run(evaluator.close())
+        refused = runner.run(verify(document, evaluator, facts_bytes=512))
+        invalid_budget = runner.run(verify(document, evaluator, facts_bytes=0))
+        empty = runner.run(verify(document_for(), evaluator, facts_bytes=512))
+
+    assert isinstance(captured, GraphCelChecks)
+    assert captured.facts is not None
+    assert captured.diagnostics.valid
+    assert captured.compiled_fields == FIELDS + 1
+    assert PATTERN_MARKER not in repr(captured)
+    with pytest.raises(TypeError, match="graph CEL facts require explicit access"):
+        asdict(captured)
+    with pytest.raises(TypeError, match="graph CEL facts require explicit access"):
+        jsonable_encoder(captured)
+    assert isinstance(invalid, GraphCelChecks)
+    assert not invalid.diagnostics.valid
+    assert invalid.facts is None
+    assert isinstance(prefix, GraphCelChecks)
+    assert prefix.compiled_fields == 1
+    assert prefix.facts is not None
+    prefix_fields = cast(
+        list[JsonObject], ObjectReader(prefix.facts.text).object()["fields"]
+    )
+    prefix_reads = cast(JsonObject, prefix_fields[0]["reads"])
+    assert list(prefix_reads) == ["params", "response"]
+    assert prefix_reads == {
+        "params": {"whole": [".enabled"], "presence": []},
+        "response": {"whole": [".decision"], "presence": []},
+    }
+    assert refused is GraphCelRefusal.CAPACITY_EXHAUSTED
+    assert invalid_budget is GraphCelRefusal.INVALID_ALLOWANCE
+    assert isinstance(empty, GraphCelChecks)
+    assert empty.facts is not None
+    assert (
+        empty.facts.text
+        == '{"interpretation":"kora.cel-expression-facts.v1","fields":[]}'
+    )
+    assert isinstance(expected, tuple)
+    verify_captured_facts(captured.facts, expected)
+    assert_settled(owner)
+
+
+def verify_captured_facts(
+    facts: GraphCelFacts, expected: tuple[CheckedPatternSite, ...]
+) -> None:
+    saved = ObjectReader(facts.text).object()
+    assert list(saved) == ["interpretation", "fields"]
+    assert saved["interpretation"] == "kora.cel-expression-facts.v1"
+    assert facts.text == json.dumps(saved, ensure_ascii=True, separators=(",", ":"))
+    entries = cast(list[JsonObject], saved["fields"])
+    by_path = {tuple(cast(list[str | int], entry["path"])): entry for entry in entries}
+    assert len(entries) == len(by_path) == len(expected)
+    assert list(by_path) == sorted(
+        by_path,
+        key=lambda path: json.dumps(path, ensure_ascii=True, separators=(",", ":")),
+    )
+    assert by_path[INFRASTRUCTURE_PATH]["reads"] == {
+        "params": {"whole": [".enabled"], "presence": []}
+    }
+    for site in expected:
+        entry = by_path[site.path]
+        checked = site.checked
+        assert list(entry) == ["path", "origin", "result", "rendering", "cost", "reads"]
+        assert entry["origin"] == ("authored" if site.authored else "approval_default")
+        assert entry["rendering"] == checked.rendering
+        assert entry["result"] == (
+            "string" if site.path[-1] in ("reason", "else_reason") else "bool"
+        )
+        cost = cast(JsonObject, entry["cost"])
+        assert list(cost) == ["steps", "memory", "compile_steps"]
+        assert cost == {
+            "steps": checked.estimate.steps,
+            "memory": checked.estimate.memory,
+            "compile_steps": checked.estimate.compile_steps,
+        }
+        reads = cast(dict[str, JsonObject], entry["reads"])
+        assert all(list(paths) == ["whole", "presence"] for paths in reads.values())
+        assert reads == {
+            name: {"whole": list(paths.whole), "presence": list(paths.presence)}
+            for name, paths in checked.projections.items()
+        }
+
+
 def check_lifetime() -> None:
     owner = EvaluationThread(load_binding())
     with asyncio.Runner() as runner:
@@ -349,7 +487,7 @@ def check_lifetime() -> None:
             runner.run(evaluator.close())
         document = mixed_document()
         document_ref = ref(document)
-        operation = verify(document, evaluator)
+        operation = verify(document, evaluator, facts_bytes=WORK)
         del document
         baseline = checked_expression_count()
         with pytest.raises(EvaluatorUnavailable) as unavailable:
@@ -357,6 +495,7 @@ def check_lifetime() -> None:
         assert document_ref() is None
         assert checked_expression_count() == baseline
         assert pending_patterns() == 0
+        assert pending_facts() == 0
 
     assert isinstance(reused, GraphCelChecks)
     assert reused.diagnostics.valid
@@ -374,7 +513,7 @@ def cancel_delivery(
     baseline = checked_expression_count()
     loop = runner.get_loop()
     owner = evaluator.owner
-    task = loop.create_task(verify(document, evaluator))
+    task = loop.create_task(verify(document, evaluator, facts_bytes=WORK))
     del document
 
     for _ in range(prior_deliveries):
@@ -386,6 +525,7 @@ def cancel_delivery(
     document_released = document_ref() is None
     trees_during_delivery = checked_expression_count() - baseline
     patterns_during_delivery = pending_patterns()
+    facts_during_delivery = pending_facts()
     assert task.cancel()
     with pytest.raises(asyncio.CancelledError) as cancelled:
         loop.run_until_complete(task)
@@ -394,9 +534,11 @@ def cancel_delivery(
     assert document_released
     assert trees_during_delivery == (0 if prior_deliveries else FIELDS + 1)
     assert patterns_during_delivery == 1
+    assert facts_during_delivery == 1
     assert cancelled.value.__context__ is None
     assert checked_expression_count() == baseline
     assert pending_patterns() == 0
+    assert pending_facts() == 0
     assert_idle(owner, 1)
 
 
@@ -405,6 +547,7 @@ def run(scenario: str) -> None:
         "mixed": check_mixed,
         "refusals": check_refusals,
         "infrastructure": check_infrastructure,
+        "facts": check_facts,
         "lifetime": check_lifetime,
     }
     diagnostics = configure_process(
