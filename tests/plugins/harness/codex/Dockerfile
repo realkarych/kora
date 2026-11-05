@@ -37,6 +37,12 @@ USER 65532:65532
 
 FROM probe AS default
 
+FROM shell-controls AS selected-hook-failures
+USER root
+RUN sed -i 's/^timeout = 60$/timeout = 5/' /etc/codex/requirements.toml && \
+    grep -Fxq 'timeout = 5' /etc/codex/requirements.toml
+USER 65532:65532
+
 FROM probe AS patch-hook
 USER root
 RUN sed -i 's/matcher = "\^Bash\$"/matcher = "^apply_patch$"/' /etc/codex/requirements.toml && grep -Fxq 'matcher = "^apply_patch$"' /etc/codex/requirements.toml

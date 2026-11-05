@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import socket
 import sys
 from pathlib import Path
 
@@ -10,8 +11,10 @@ from kora.plugins.harness.codex.pre_tool_use import (
     decode_pre_tool_use,
 )
 from tests.plugins.harness.codex.selected_launch import (
+    HOOK_TIMEOUT_SOCKET,
     SELECTED_COMMAND,
     SELECTED_DENIAL,
+    SELECTED_HOOK_CASES,
 )
 
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -32,10 +35,20 @@ def deny(reason: str) -> int:
     return 2
 
 
+def hold_for_native_timeout() -> None:
+    with socket.socket(socket.AF_UNIX) as barrier:
+        barrier.connect(str(CONTROL / HOOK_TIMEOUT_SOCKET))
+        barrier.sendall(b"1")
+        signal.pause()
+
+
 def main() -> int:
     decision = (CONTROL / "decision").read_text(encoding="utf-8")
     executor = decision in {"executor-allow", "executor-deny", "executor-stall"}
-    selected = decision in {"selected-allow", "selected-deny"}
+    selected = decision in SELECTED_HOOK_CASES or decision in {
+        "selected-allow",
+        "selected-deny",
+    }
     nested_input = decision == "shell_controls" or executor or selected
     expected_command = "touch kora-probe.marker"
     patch = decision in {"patch-allow", "patch-deny"}
@@ -122,8 +135,15 @@ def main() -> int:
         return deny("kora managed hook probe denied the marker command")
     if decision == "executor-deny":
         return deny("kora managed hook probe denied the executor command")
-    if decision == "selected-deny":
+    if decision in {"selected-deny", "selected-hook-deny"}:
         return deny(SELECTED_DENIAL)
+    if decision == "selected-hook-no-reason":
+        return 2
+    if decision == "selected-hook-exit-one":
+        return 1
+    if decision == "selected-hook-timeout":
+        hold_for_native_timeout()
+        return deny(INPUT_REFUSAL)
     if decision == "patch-deny":
         return deny(PATCH_DENIAL)
     return deny(INPUT_REFUSAL)

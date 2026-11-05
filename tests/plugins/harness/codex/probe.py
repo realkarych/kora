@@ -67,13 +67,16 @@ from kora.plugins.harness.codex.selected_startup import (
     prepare_selected_thread,
 )
 from tests.plugins.harness.codex.selected_launch import (
+    HOOK_TIMEOUT_SOCKET,
     PROJECT_DOC_CANARY,
     SELECTED_AUTH_CASES,
     SELECTED_COMMAND,
     SELECTED_DENIAL,
+    SELECTED_HOOK_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
     SELECTED_REFUSALS,
+    SelectedHookCase,
     SelectedLaunchCase,
     materialize_native_inputs,
     plant_checkout_canaries,
@@ -116,6 +119,18 @@ ProbeCase = (
     | MessageCase
     | OutputCase
 )
+
+SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, str, str]] = {
+    "selected-hook-deny": ("blocked", "feedback", SELECTED_DENIAL),
+    "selected-hook-no-reason": (
+        "failed",
+        "error",
+        "PreToolUse hook exited with code 2 "
+        "but did not write a blocking reason to stderr",
+    ),
+    "selected-hook-exit-one": ("failed", "error", "hook exited with code 1"),
+    "selected-hook-timeout": ("failed", "error", "hook timed out after 5s"),
+}
 
 CODEX = "/usr/local/bin/codex"
 MESSAGE_CASES = frozenset({"messages-plain", "messages-stream", "messages-kill"})
@@ -823,7 +838,7 @@ class ResponsesFixture:
             require(output == SHELL_RESTRICTED, "native_shell_restriction_missing")
         elif self.case == "executor-deny":
             require(output == EXECUTOR_DENIAL, "executor_hook_denial_missing")
-        elif self.case == "selected-deny":
+        elif self.case in {"selected-deny", "selected-hook-deny"}:
             require(
                 output
                 == (
@@ -833,7 +848,7 @@ class ResponsesFixture:
                 "selected_hook_denial_missing",
             )
         elif self.case in SHELL_ARGUMENTS or self.case in SELECTED_AUTH_CASES:
-            header, separator, _ = output.partition("\nOutput:\n")
+            header, separator, body = output.partition("\nOutput:\n")
             status = [
                 line
                 for line in header.splitlines()
@@ -845,6 +860,8 @@ class ResponsesFixture:
                 bool(separator) and status == ["Process exited with code 0"],
                 "shell_command_failed",
             )
+            if self.case in SELECTED_HOOK_CASES:
+                require(not body.strip(), "selected_fault_unexpected_command_output")
         else:
             require(
                 (DENIAL in output) == (self.case == "deny"),
@@ -1087,6 +1104,49 @@ class MessageProbe:
             and self.messages.for_turn(cast("str", identity)) is None,
             "partial_message_adopted",
         )
+
+
+class HookCompletionProbe:
+    def __init__(self, thread_id: str, case: SelectedHookCase) -> None:
+        self.thread_id: str = thread_id
+        self.case: SelectedHookCase = case
+        self.turn_id: str | None = None
+
+    def observe(self, notification: Notification) -> None:
+        if notification.method != "hook/completed":
+            return
+        params = as_object(notification.params)
+        turn_id = params.get("turnId")
+        require(
+            self.turn_id is None
+            and params.get("threadId") == self.thread_id
+            and isinstance(turn_id, str)
+            and 0 < len(turn_id) <= 256,
+            "selected_hook_completion_identity",
+        )
+        run = as_object(params.get("run"))
+        status, kind, reason = SELECTED_HOOK_OUTCOMES[self.case]
+        require(
+            run.get("eventName") == "preToolUse"
+            and run.get("handlerType") == "command"
+            and run.get("executionMode") == "sync"
+            and run.get("scope") == "turn"
+            and run.get("sourcePath") == "/opt/kora-probe"
+            and run.get("source") == "system"
+            and run.get("displayOrder") == 0,
+            "selected_hook_handler_identity",
+        )
+        require(run.get("status") == status, "selected_hook_completion_status")
+        require(
+            run.get("entries") == [{"kind": kind, "text": reason}],
+            "selected_hook_completion_entry",
+        )
+        self.turn_id = cast("str", turn_id)
+
+    def verify(self, turn_id: str) -> None:
+        require(self.turn_id == turn_id, "selected_hook_completion_turn")
+        status, _, _ = SELECTED_HOOK_OUTCOMES[self.case]
+        diagnostic("INFO", "probe.selected_hook_completion", f"{self.case}:{status}")
 
 
 class ErrorProbe:
@@ -1347,6 +1407,11 @@ class Stdio:
             if case in HOOK_INPUT_CASES or case in ("allow", "deny")
             else None
         )
+        hook = (
+            HookCompletionProbe(thread_id, case)
+            if case in SELECTED_HOOK_CASES
+            else None
+        )
 
         def observe(notification: Notification) -> None:
             if usage is not None:
@@ -1359,6 +1424,8 @@ class Stdio:
                 outputs.observe(notification)
             if tools is not None:
                 tools.observe(notification)
+            if hook is not None:
+                hook.observe(notification)
 
         def observe_before_send(notification: Notification) -> None:
             if usage is not None:
@@ -1369,6 +1436,11 @@ class Stdio:
                 reject_premature_message(notification)
             if outputs is not None:
                 reject_premature_message(notification)
+            if hook is not None:
+                require(
+                    notification.method != "hook/completed",
+                    "selected_hook_completion_before_turn",
+                )
 
         def observe_started(turn_id: str) -> None:
             if messages is not None:
@@ -1437,6 +1509,8 @@ class Stdio:
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
             )
+        if hook is not None:
+            hook.verify(self.terminal.turn_id)
         if outputs is not None:
             outputs.verify(self.terminal)
         if messages is not None:
@@ -1966,6 +2040,63 @@ def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
     )
 
 
+async def observe_hook_timeout(
+    stdio: Stdio,
+    workspace: Path,
+    endpoint: str,
+    bearer: str,
+    native_roles: tuple[asyncio.subprocess.Process, asyncio.subprocess.Process],
+) -> None:
+    if sys.platform != "linux":
+        raise ProbeFailure("selected_hook_timeout_requires_linux")
+    loop = asyncio.get_running_loop()
+    with ExitStack() as resources:
+        native_descriptors: list[int] = []
+        for role in native_roles:
+            descriptor = open_child_pidfd(role.pid)
+            resources.callback(os.close, descriptor)
+            native_descriptors.append(descriptor)
+        listener = resources.enter_context(socket.socket(socket.AF_UNIX))
+        listener.setblocking(False)
+        listener.bind(str(CONTROL / HOOK_TIMEOUT_SOCKET))
+        listener.listen(1)
+        observation = asyncio.create_task(
+            stdio.observe_selected(workspace, "selected-hook-timeout", endpoint, bearer)
+        )
+        try:
+            peer, _ = await loop.sock_accept(listener)
+            resources.enter_context(peer)
+            peer.setblocking(False)
+            require(
+                await loop.sock_recv(peer, 1) == b"1", "selected_hook_timeout_ready"
+            )
+            pid = verify_shell_hook(SELECTED_COMMAND)
+            credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+            require(
+                len(credentials) == 12
+                and int.from_bytes(credentials[:4], sys.byteorder, signed=True) == pid,
+                "selected_hook_timeout_peer",
+            )
+            descriptor = open_child_pidfd(pid)
+            resources.callback(os.close, descriptor)
+            require(
+                not select.select([descriptor], [], [], 0)[0],
+                "selected_hook_timeout_not_live",
+            )
+            await observation
+            await wait_pidfd_exit(descriptor)
+            require(
+                not await loop.sock_recv(peer, 1), "selected_hook_timeout_barrier_open"
+            )
+            require(
+                not select.select(native_descriptors, [], [], 0)[0],
+                "selected_native_role_exited_before_hook_settlement",
+            )
+        finally:
+            observation.cancel()
+            await asyncio.gather(observation, return_exceptions=True)
+
+
 async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     async with asyncio.timeout_at(deadline):
@@ -2045,9 +2176,20 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 await observe_client_exit(process, fixture, stdio, workspace)
             elif fixture.case in SELECTED_LAUNCH_CASES:
                 assert executor_url is not None
-                await stdio.observe_selected(
-                    workspace, fixture.case, executor_url, bearer
-                )
+                if fixture.case == "selected-hook-timeout":
+                    assert executor is not None
+                    await observe_hook_timeout(
+                        stdio, workspace, executor_url, bearer, (process, executor)
+                    )
+                    diagnostic(
+                        "INFO",
+                        "probe.selected_hook_timeout_exit_verified",
+                        fixture.case,
+                    )
+                else:
+                    await stdio.observe_selected(
+                        workspace, fixture.case, executor_url, bearer
+                    )
             else:
                 await stdio.observe(workspace, fixture.case, executor_url, bearer)
         require(fixture.case not in STALLED_CASES, "stalled_turn_completed")
@@ -2159,7 +2301,11 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             )
         else:
             verify_shell_hook(SELECTED_COMMAND)
-        if case in {"selected-allow", "selected-startup-ready"}:
+        executes = case in SELECTED_AUTH_CASES and case not in {
+            "selected-deny",
+            "selected-hook-deny",
+        }
+        if executes:
             bash = Path("/bin/bash").resolve(strict=True)
             expected = f"{bash}\n{role_homes(root / 'exec').home}\n".encode()
             require(
@@ -2173,6 +2319,11 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
                 )
         else:
             require(not os.path.lexists(marker), "refused_selected_marker_exists")
+        if case in SELECTED_HOOK_CASES:
+            effect = "executed" if executes else "blocked"
+            diagnostic(
+                "INFO", "probe.selected_hook_effect_verified", f"{case}:{effect}"
+            )
         if case == "selected-startup-ready":
             require(
                 workspace_remains_untrusted(

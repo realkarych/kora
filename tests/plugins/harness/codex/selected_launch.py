@@ -11,16 +11,34 @@ from kora.plugins.harness.codex.launch_configuration import (
     build_launch_inputs,
 )
 
-SelectedLaunchCase = Literal[
-    "selected-allow",
-    "selected-deny",
-    "selected-key-absent",
-    "selected-startup-ready",
-    "selected-startup-bearer",
-    "selected-startup-bash",
+SelectedHookCase = Literal[
+    "selected-hook-deny",
+    "selected-hook-no-reason",
+    "selected-hook-exit-one",
+    "selected-hook-timeout",
 ]
+SelectedLaunchCase = (
+    SelectedHookCase
+    | Literal[
+        "selected-allow",
+        "selected-deny",
+        "selected-key-absent",
+        "selected-startup-ready",
+        "selected-startup-bearer",
+        "selected-startup-bash",
+    ]
+)
+SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
+    {
+        "selected-hook-deny",
+        "selected-hook-no-reason",
+        "selected-hook-exit-one",
+        "selected-hook-timeout",
+    }
+)
 SELECTED_LAUNCH_CASES = frozenset(
     {
+        *SELECTED_HOOK_CASES,
         "selected-allow",
         "selected-deny",
         "selected-key-absent",
@@ -30,7 +48,7 @@ SELECTED_LAUNCH_CASES = frozenset(
     }
 )
 SELECTED_AUTH_CASES = frozenset(
-    {"selected-allow", "selected-deny", "selected-startup-ready"}
+    {*SELECTED_HOOK_CASES, "selected-allow", "selected-deny", "selected-startup-ready"}
 )
 SELECTED_REFUSALS = frozenset(
     {"selected-key-absent", "selected-startup-bearer", "selected-startup-bash"}
@@ -39,6 +57,7 @@ SELECTED_MODEL = "gpt-5.5"
 PROJECT_MODEL_CANARY = "kora-checkout-model-canary"
 PROJECT_DOC_CANARY = b"kora-checkout-instruction-canary"
 SELECTED_DENIAL = "kora managed hook probe denied the selected command"
+HOOK_TIMEOUT_SOCKET = "selected-hook-timeout.sock"
 SELECTED_COMMAND = (
     'test -z "${CODEX_API_KEY+x}" && '
     'test -n "${BASH_VERSION-}" && ! shopt -q login_shell && '
