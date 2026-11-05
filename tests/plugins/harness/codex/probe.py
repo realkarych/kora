@@ -856,15 +856,15 @@ class Stdio:
                     re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw_pid) is not None,
                     "interrupt_child_pid_invalid",
                 )
-                if sys.platform != "linux":
-                    raise ProbeFailure("interrupt_requires_linux")
-                child_fd = os.pidfd_open(int(raw_pid))
+                child_fd = open_child_pidfd(int(raw_pid))
                 resources.callback(os.close, child_fd)
                 hook_pid(INTERRUPT_COMMAND)
+                diagnostic("INFO", "probe.interrupt_barrier", "command_ready")
                 while usage.for_turn(turn_id) is None:
                     await self.rpc.receive(
                         deadline=self.deadline, observe=observe_before_interrupt
                     )
+                diagnostic("INFO", "probe.interrupt_barrier", "usage_ready")
                 require(
                     not select.select([child_fd], [], [], 0)[0],
                     "interrupt_child_exited_early",
@@ -915,6 +915,12 @@ class Stdio:
             )
             require(not usage.observation_gap, "interrupt_usage_gap")
             require(not os.path.lexists(workspace / MARKER), "interrupt_marker_exists")
+
+
+def open_child_pidfd(pid: int) -> int:
+    if sys.platform == "linux":
+        return os.pidfd_open(pid)
+    raise ProbeFailure("interrupt_requires_linux")
 
 
 async def wait_pidfd_exit(descriptor: int) -> None:
