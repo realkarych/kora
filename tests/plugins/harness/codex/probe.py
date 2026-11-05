@@ -1975,8 +1975,9 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
         if fixture.case in SELECTED_LAUNCH_CASES:
-            async with asyncio.timeout_at(cleanup_deadline):
-                await close_selected_launch(fixture, server, process, executor)
+            await close_selected_launch(
+                fixture, server, process, executor, cleanup_deadline
+            )
         elif process is not None and (
             fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
         ):
@@ -2003,21 +2004,25 @@ async def close_selected_launch(
     server: asyncio.Server,
     app: asyncio.subprocess.Process | None,
     executor: asyncio.subprocess.Process | None,
+    deadline: float,
 ) -> None:
     children = [child for child in (app, executor) if child is not None]
     try:
-        outcomes = await asyncio.gather(
-            *(stop_native_process(child) for child in children), return_exceptions=True
-        )
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException):
-                raise outcome
-        require(
-            all(child.returncode is not None for child in children),
-            "selected_native_children_not_reaped",
-        )
+        async with asyncio.timeout_at(deadline):
+            outcomes = await asyncio.gather(
+                *(stop_native_process(child) for child in children),
+                return_exceptions=True,
+            )
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+            require(
+                all(child.returncode is not None for child in children),
+                "selected_native_children_not_reaped",
+            )
     finally:
-        await fixture.close(server)
+        async with asyncio.timeout_at(deadline):
+            await fixture.close(server)
     if len(children) == 2:
         diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
 

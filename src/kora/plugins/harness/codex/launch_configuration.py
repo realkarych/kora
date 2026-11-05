@@ -43,6 +43,7 @@ class LaunchConfigurationFailure(StrEnum):
     INVALID_PROVIDER = "codex_launch_invalid_provider"
     INVALID_PLACEMENT = "codex_launch_invalid_placement"
     INVALID_EXECUTOR_DIGEST = "codex_launch_invalid_executor_digest"
+    INVALID_ENVIRONMENT_NAMES = "codex_launch_invalid_environment_names"
     ENVIRONMENT_CONFLICT = "codex_launch_environment_conflict"
 
 
@@ -180,6 +181,10 @@ def build_launch_inputs(
     app_env = app_homes.assignments(bash)
     exec_env = exec_homes.assignments(bash)
     app_env[BUILTIN_EXECUTOR] = "none"
+    if isinstance(workload_names, str) or isinstance(workload_secret_names, str):
+        raise LaunchConfigurationError(
+            LaunchConfigurationFailure.INVALID_ENVIRONMENT_NAMES
+        )
     owned = app_env.keys() | exec_env.keys() | {PROVIDER_KEY}
     if not owned.isdisjoint(workload_names) or not owned.isdisjoint(
         workload_secret_names
