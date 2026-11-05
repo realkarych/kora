@@ -35,6 +35,7 @@ from tests.conformance.lifetime_helpers import (
 )
 from tests.conformance.lifetime_support import (
     ControlledLifetimeClock,
+    HandoffProgress,
     assert_recovered_processes_absent,
     dispose_test_owner,
     join_live_probe,
@@ -66,7 +67,9 @@ async def reap_recovered(
 async def test_journal_recovery_reaps_siblings_after_a_cleanup_assertion(
     tmp_path: Path,
 ) -> None:
-    async with retained_live_invocation(tmp_path, "pair") as acquired:
+    handoff = HandoffProgress()
+
+    async with retained_live_invocation(tmp_path, "pair", handoff=handoff) as acquired:
         reference = acquired.reference
         path = next(tmp_path.rglob(reference.invocation_id)) / "journal"
         journal = JournalSnapshot.model_validate_json(path.read_bytes())
@@ -77,6 +80,7 @@ async def test_journal_recovery_reaps_siblings_after_a_cleanup_assertion(
             if isinstance(entry.registration, ProcessRegistration)
         ]
         processes = list(acquired.processes)
+        assert 4 < handoff.received_bytes <= 65_540
         anchors: list[ExitAnchor] = []
         exited: list[bool] = []
 
@@ -618,6 +622,41 @@ async def test_live_probe_handoff_failure_releases_acquired_processes(
     assert "stage=report_ready" in evidence[0]
     for error in observed:
         assert any("recovery probe returncode=" in note for note in error.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_pair_preparation_refusal_closes_every_native_handle_without_handoff(
+    tmp_path: Path,
+) -> None:
+    gc.collect()
+    baseline = set(os.listdir("/dev/fd"))
+    started: list[subprocess.Popen[bytes]] = []
+    evidence: list[str] = []
+    handoff = HandoffProgress()
+
+    with pytest.raises(ChannelError) as refused:
+        async with retained_live_invocation(
+            tmp_path,
+            "pair",
+            phase="acquire_refused",
+            started=started,
+            evidence=evidence,
+            handoff=handoff,
+        ):
+            raise AssertionError("unexpected successful handoff")
+    gc.collect()
+
+    assert refused.value.reason is ChannelFailure.CLOSED
+    assert handoff.received_bytes == 0
+    assert len(started) == 1
+    assert started[0].returncode == 0
+    assert NativeIdentityReader().read(started[0].pid).state is IdentityState.ABSENT
+    assert set(os.listdir("/dev/fd")) == baseline
+    assert len(evidence) == 1
+    assert "stage=process_acquired" in evidence[0]
+    assert "stage=pair_preparation_refused" in evidence[0]
+    assert "stage=report_ready" not in evidence[0]
+    assert "returncode=0 stderr_truncated=False" in evidence[0]
 
 
 @pytest.mark.asyncio

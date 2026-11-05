@@ -225,12 +225,18 @@ class RetainedInvocation:
     cleanup: CleanupDeadline
 
 
+@dataclass
+class HandoffProgress:
+    received_bytes: int = 0
+
+
 async def read_handoff_bytes(
     descriptor: int,
     size: int,
     deadline: int,
     clock: Clock,
     entered: asyncio.Event | None = None,
+    progress: HandoffProgress | None = None,
 ) -> bytes:
     value = bytearray()
     while len(value) < size:
@@ -242,6 +248,8 @@ async def read_handoff_bytes(
             readiness.close()
         if not chunk:
             raise ChannelError(ChannelFailure.CLOSED)
+        if progress is not None:
+            progress.received_bytes += len(chunk)
         value.extend(chunk)
         if entered is not None:
             entered.set()
@@ -273,6 +281,7 @@ async def retained_live_invocation(
     cleanup_entered: asyncio.Event | None = None,
     cleanup_release: asyncio.Event | None = None,
     evidence: list[str] | None = None,
+    handoff: HandoffProgress | None = None,
 ) -> AsyncGenerator[RetainedInvocation]:
     actual = SystemClock() if clock is None else clock
     closing = CleanupDeadline(actual, 5_000_000_000) if cleanup is None else cleanup
@@ -312,7 +321,10 @@ async def retained_live_invocation(
             os.set_blocking(descriptor, False)
             deadline = actual.monotonic_ns() + 30_000_000_000
             size = int.from_bytes(
-                await read_handoff_bytes(descriptor, 4, deadline, actual), "big"
+                await read_handoff_bytes(
+                    descriptor, 4, deadline, actual, progress=handoff
+                ),
+                "big",
             )
             if size > 65536:
                 raise ChannelError(ChannelFailure.CAPACITY)
@@ -324,6 +336,7 @@ async def retained_live_invocation(
                 deadline,
                 actual,
                 entered if phase == "partial" else None,
+                handoff,
             )
             report = RecoveryProbeReport.model_validate_json(encoded)
             assert report.mode == mode
