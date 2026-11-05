@@ -70,6 +70,15 @@ def branch_fields(node: BranchNode) -> Iterator[SyntaxField]:
     yield from authored_field(node.config.else_reason, ("config", "else_reason"))
 
 
+def wait_fields(node: WaitEventNode) -> Iterator[SyntaxField]:
+    event = node.config.event
+    if event is not MISSING:
+        yield from authored_field(event.match, ("config", "event", "match"))
+    poll = node.config.poll
+    if poll is not MISSING:
+        yield SyntaxField(poll.until, ("config", "poll", "until"))
+
+
 def node_fields(node: Node) -> Iterator[SyntaxField]:
     yield from retry_fields(node.retry)
     if node.inputs is not MISSING:
@@ -85,12 +94,7 @@ def node_fields(node: Node) -> Iterator[SyntaxField]:
         yield from authored_field(node.config.approve_when, ("config", "approve_when"))
         yield from input_path_fields(node)
     elif isinstance(node, WaitEventNode):
-        event = node.config.event
-        if event is not MISSING:
-            yield from authored_field(event.match, ("config", "event", "match"))
-        poll = node.config.poll
-        if poll is not MISSING:
-            yield SyntaxField(poll.until, ("config", "poll", "until"))
+        yield from wait_fields(node)
 
 
 def graph_fields(graph: Graph) -> Iterator[SyntaxField]:

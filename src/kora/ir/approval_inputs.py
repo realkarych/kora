@@ -188,7 +188,7 @@ class DirectInputContexts:
         return self.variables[key]
 
     def context(
-        self, body: GraphBody, node: HumanInputNode | BranchNode
+        self, body: GraphBody, node: HumanInputNode | BranchNode | WaitEventNode
     ) -> Variable | InputFailure:
         inputs = {} if node.inputs is MISSING else node.inputs
         sources: dict[str, InputView | PublishedInput] = {}

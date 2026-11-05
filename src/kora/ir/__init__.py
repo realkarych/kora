@@ -173,8 +173,14 @@ if TYPE_CHECKING:
     )
     from kora.ir.type_schemas import TypeSchemaResult, validate_type_schemas
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
+    from kora.ir.wait_expressions import (
+        WaitExpressionResult,
+        validate_wait_expressions,
+    )
 
 __all__ = [
+    "WaitExpressionResult",
+    "validate_wait_expressions",
     "BranchExpressionResult",
     "validate_branch_expressions",
     "SensorTriggerExpressionResult",
@@ -322,6 +328,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"WaitExpressionResult", "validate_wait_expressions"}:
+        from kora.ir import wait_expressions
+
+        return getattr(wait_expressions, name)
     if name in {"BranchExpressionResult", "validate_branch_expressions"}:
         from kora.ir import branch_expressions
 

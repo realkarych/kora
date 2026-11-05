@@ -37,6 +37,7 @@ from kora.ir.trigger_expressions import (
     SensorTriggerExpressionResult,
     checked_sensor_trigger_sites,
 )
+from kora.ir.wait_expressions import WaitExpressionResult, checked_wait_sites
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
 COMPLETED: EventSpec = CATALOG.register(
@@ -327,6 +328,29 @@ async def validate_branch_patterns(
     if inventory is None:
         return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
     if isinstance(inventory, BranchExpressionResult):
+        return inventory
+    verification = validate_cel_patterns(
+        tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
+        evaluator,
+        max_work=max_work,
+    )
+    del document, inventory
+    return await verification
+
+
+async def validate_wait_patterns(
+    document: GraphDocument,
+    evaluator: Evaluator,
+    *,
+    max_declarations: int,
+    max_work: int,
+) -> PatternCheck | WaitExpressionResult:
+    if type(max_declarations) is not int or max_declarations < 0:
+        return announce(IncompletePatternCheck.INVALID_INVENTORY)
+    inventory = checked_wait_sites(document, max_declarations=max_declarations)
+    if inventory is None:
+        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
+    if isinstance(inventory, WaitExpressionResult):
         return inventory
     verification = validate_cel_patterns(
         tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),

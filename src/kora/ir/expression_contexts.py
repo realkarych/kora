@@ -23,7 +23,7 @@ from kora.ir.approval_inputs import DirectInputContexts, InputFailure
 from kora.ir.contracts import TypeContract
 from kora.ir.json import JsonObject
 from kora.ir.schema_catalogue import contract_schema
-from kora.ir.topology import BranchNode, GraphBody, HumanInputNode
+from kora.ir.topology import BranchNode, GraphBody, HumanInputNode, WaitEventNode
 
 
 def required_context(source: str, meter: Meter) -> frozenset[str]:
@@ -98,7 +98,7 @@ class InputParameterContexts:
     def context(
         self,
         body: GraphBody,
-        node: HumanInputNode | BranchNode,
+        node: HumanInputNode | BranchNode | WaitEventNode,
         source: str,
     ) -> dict[str, Variable] | InputFailure:
         required = required_context(source, self.meter)
