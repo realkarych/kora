@@ -37,8 +37,9 @@ mutation. Refusal preserves the current value and remaining ID capacity.
 `accept()` returns provisional native observations; `for_turn()` checks the
 eventually acknowledged turn before returning selected evidence. Replacing the
 last value retains no old text history. There is no delta concatenation, queue,
-timer, task or connection owner. Retained payload is bounded by the ID allowance
-times 256 bytes plus the text allowance, with ordinary object overhead.
+timer, task or connection owner. Retained payload is
+`O(ID allowance × 256 + text allowance)`, including fixed bounded identities,
+with ordinary object overhead.
 
 The existing RPC frame/depth/message/deadline bounds remain active. Pre-send
 rejection covers relevant messages in already-read lookahead, including a
