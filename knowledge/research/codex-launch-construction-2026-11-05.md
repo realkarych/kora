@@ -26,8 +26,9 @@ sh tests/plugins/harness/codex/run_hook_probe.sh --check-selected-launch
 Each of the three cases uses a separate disposable container. The launcher
 constructs both role recipes once, creates their private homes, then starts
 exec-server with a digest in argv and registers its fresh synthetic bearer
-through app-server stdio. App-server verifies that the local executor is
-unavailable and selects the one native executor reporting the expected Bash.
+through app-server stdio. The driver checks that the local executor is
+unavailable and the registered executor reports the expected Bash, then
+selects only that environment through app-server.
 The fixture supplies a synthetic API key to the app-server environment only,
 or leaves it absent for the negative case. The two model replies for allow and
 deny contain the same fixed shell call and no secret value. The 30-second
