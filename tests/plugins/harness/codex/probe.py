@@ -22,6 +22,12 @@ from kora.plugins.harness.codex.app_server_errors import (
     decode_error_info,
     reject_premature_error,
 )
+from kora.plugins.harness.codex.app_server_messages import (
+    MessagePhase,
+    MessageRefused,
+    TurnMessages,
+    reject_premature_message,
+)
 from kora.plugins.harness.codex.app_server_rpc import (
     AppServerRpc,
     Notification,
@@ -67,6 +73,7 @@ StartupCase = Literal["startup-version", "startup-home"]
 HookInputCase = Literal["patch-allow", "patch-deny", "decoder-refuse"]
 InterruptCase = Literal["interrupt-model", "interrupt-command", "interrupt-kill"]
 ErrorCase = Literal["error-401", "error-429", "error-503"]
+MessageCase = Literal["messages-plain", "messages-stream", "messages-kill"]
 ProbeCase = (
     Case
     | ProviderCase
@@ -77,10 +84,18 @@ ProbeCase = (
     | HookInputCase
     | InterruptCase
     | ErrorCase
+    | MessageCase
 )
 
 CODEX = "/usr/local/bin/codex"
 CODEX_VERSION = "0.166.0"
+MESSAGE_CASES = frozenset({"messages-plain", "messages-stream", "messages-kill"})
+MESSAGE_TEXT = "kora-private-message-canary: незавершённый 🌲"
+MESSAGE_CONTENT: tuple[tuple[MessagePhase, str], ...] = (
+    ("commentary", "kora-private-message-canary: наблюдение 🌲"),
+    ("partial_answer", "kora-private-message-canary: часть 🌲"),
+    ("final_answer", "kora-private-message-canary: ответ 🌲"),
+)
 STARTUP_REFUSALS: dict[StartupCase, StartupFailure] = {
     "startup-version": StartupFailure.VERSION_MISMATCH,
     "startup-home": StartupFailure.HOME_MISMATCH,
@@ -246,6 +261,72 @@ def sse(
     ).encode()
 
 
+def message_response(*, complete: bool) -> bytes:
+    response_id = "kora-message-response"
+    events: list[dict[str, object]] = [
+        {"type": "response.created", "response": {"id": response_id}}
+    ]
+    content = MESSAGE_CONTENT if complete else (("final_answer", MESSAGE_TEXT),)
+    for index, (phase, text) in enumerate(content):
+        identity = f"kora-message-{index}"
+        events.extend(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": index,
+                    "item": {
+                        "type": "message",
+                        "id": identity,
+                        "role": "assistant",
+                        "phase": phase,
+                        "content": [],
+                    },
+                },
+                {
+                    "type": "response.content_part.added",
+                    "item_id": identity,
+                    "output_index": index,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": ""},
+                },
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": identity,
+                    "output_index": index,
+                    "content_index": 0,
+                    "delta": text,
+                },
+            ]
+        )
+        if complete:
+            events.append(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": index,
+                    "item": {
+                        "type": "message",
+                        "id": identity,
+                        "role": "assistant",
+                        "phase": phase,
+                        "content": [{"type": "output_text", "text": text}],
+                    },
+                }
+            )
+    if complete:
+        events.append(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                },
+            }
+        )
+    return "".join(
+        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+    ).encode()
+
+
 def command_response(
     arguments: dict[str, object], *, usage: dict[str, object] | None = None
 ) -> bytes:
@@ -378,7 +459,7 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
-        elif case in ERROR_CASES:
+        elif case in ERROR_CASES or case in MESSAGE_CASES:
             self.request_limit = 1
         elif case in INTERRUPT_CASES:
             self.request_limit = 1 if case == "interrupt-model" else 2
@@ -453,12 +534,16 @@ class ResponsesFixture:
                     )
                     await writer.drain()
                     return
-                if self.case == "interrupt-model":
+                if self.case == "interrupt-model" or self.case == "messages-kill":
+                    prelude = (
+                        message_response(complete=False)
+                        if self.case == "messages-kill"
+                        else b'data: {"type":"response.created","response":'
+                        b'{"id":"kora-probe-open-response"}}\n\n'
+                    )
                     writer.write(
                         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                        b"Connection: close\r\n\r\n"
-                        b'data: {"type":"response.created","response":'
-                        b'{"id":"kora-probe-open-response"}}\n\n'
+                        b"Connection: close\r\n\r\n" + prelude
                     )
                     await writer.drain()
                     self.stream_ready.set()
@@ -527,6 +612,13 @@ class ResponsesFixture:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
         require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
+        if self.case in MESSAGE_CASES:
+            require(self.requests == 1, "unexpected_message_request")
+            return (
+                message_response(complete=True)
+                if self.case == "messages-stream"
+                else FINAL_RESPONSE
+            )
         if (
             self.case == "provider_key_present"
             or self.case in CLIENT_CASES
@@ -681,6 +773,76 @@ class ResponsesFixture:
         await server.wait_closed()
 
 
+class MessageProbe:
+    def __init__(self, thread_id: str, case: ProbeCase) -> None:
+        self.thread_id = thread_id
+        self.case = case
+        self.messages = TurnMessages(thread_id, max_messages=4, max_text_bytes=4096)
+        self.acknowledged_turn: str | None = None
+        self.delta_turn: str | None = None
+        self.delta_seen = asyncio.Event()
+        self.expected: tuple[tuple[MessagePhase | None, str], ...] = (
+            MESSAGE_CONTENT
+            if case == "messages-stream"
+            else ((None, "Probe turn finished."),)
+        )
+
+    def started(self, turn_id: str) -> None:
+        self.messages.for_turn(turn_id)
+        self.acknowledged_turn = turn_id
+
+    def observe(self, notification: Notification) -> None:
+        if (
+            self.case == "messages-kill"
+            and notification.method == "item/agentMessage/delta"
+        ):
+            params = as_object(notification.params)
+            identity = params.get("turnId")
+            require(
+                params.get("threadId") == self.thread_id
+                and params.get("itemId") == "kora-message-0"
+                and params.get("delta") == MESSAGE_TEXT
+                and isinstance(identity, str)
+                and bool(identity),
+                "message_delta_invalid",
+            )
+            self.delta_turn = cast("str", identity)
+            self.delta_seen.set()
+        observation = self.messages.accept(notification)
+        if observation is not None:
+            require(self.case != "messages-kill", "partial_message_completed")
+            require(
+                self.messages.count <= len(self.expected), "message_count_unexpected"
+            )
+            phase, text = self.expected[self.messages.count - 1]
+            require(
+                observation.phase == phase and observation.text == text,
+                "message_content_mismatch",
+            )
+            if self.acknowledged_turn is not None:
+                self.messages.for_turn(self.acknowledged_turn)
+
+    def verify(self, terminal: TurnCompletion) -> None:
+        require(terminal.status == "completed", "message_turn_not_completed")
+        require(self.messages.count == len(self.expected), "message_count_missing")
+        require(
+            self.messages.for_turn(terminal.turn_id) is not None,
+            "message_completion_missing",
+        )
+
+    def verify_partial(self) -> None:
+        identity = self.acknowledged_turn
+        require(
+            identity is not None and self.delta_turn == identity,
+            "message_delta_turn_mismatch",
+        )
+        require(
+            self.messages.count == 0
+            and self.messages.for_turn(cast("str", identity)) is None,
+            "partial_message_adopted",
+        )
+
+
 class ErrorProbe:
     def __init__(self, thread_id: str, case: ErrorCase) -> None:
         self.errors: TurnErrors = TurnErrors(thread_id)
@@ -758,6 +920,7 @@ class Stdio:
         self.identity = identity
         self.terminal: TurnCompletion | None = None
         self.waiting_terminal = asyncio.Event()
+        self.messages: MessageProbe | None = None
 
     async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
         return as_object(
@@ -828,6 +991,7 @@ class Stdio:
             or case in CLIENT_CASES
             or case in HOOK_INPUT_CASES
             or case in ERROR_CASES
+            or case in MESSAGE_CASES
             or case == "usage"
         )
         if ephemeral:
@@ -835,7 +999,12 @@ class Stdio:
         prompt = "Run the probe marker command."
         if case in PATCH_CASES:
             prompt = "Apply the probe marker patch."
-        elif case in PROVIDER_CASES or case in CLIENT_CASES or case in ERROR_CASES:
+        elif (
+            case in PROVIDER_CASES
+            or case in CLIENT_CASES
+            or case in ERROR_CASES
+            or case in MESSAGE_CASES
+        ):
             prompt = "Complete the fixture turn."
         start = await self.call("thread/start", thread_params)
         thread = as_object(start.get("thread"))
@@ -846,18 +1015,24 @@ class Stdio:
         thread_id = cast("str", thread_id)
         usage = UsageProbe(thread_id) if case == "usage" else None
         errors = ErrorProbe(thread_id, case) if case in ERROR_CASES else None
+        messages = MessageProbe(thread_id, case) if case in MESSAGE_CASES else None
+        self.messages = messages
 
         def observe(notification: Notification) -> None:
             if usage is not None:
                 usage.observe(notification)
             if errors is not None:
                 errors.observe(notification)
+            if messages is not None:
+                messages.observe(notification)
 
         def observe_before_send(notification: Notification) -> None:
             if usage is not None:
                 reject_premature_usage(notification)
             if errors is not None:
                 reject_premature_error(notification)
+            if messages is not None:
+                reject_premature_message(notification)
 
         self.terminal = await observe_app_server_turn(
             self.rpc,
@@ -867,7 +1042,10 @@ class Stdio:
             observe=observe,
             observe_before_send=observe_before_send,
             on_waiting=self.waiting_terminal.set,
+            on_started=messages.started if messages is not None else None,
         )
+        if messages is not None:
+            messages.verify(self.terminal)
         if errors is not None:
             errors.verify(self.terminal)
         elif case == "provider_key_absent":
@@ -1234,6 +1412,11 @@ async def signal_after_request(
 ) -> None:
     await fixture.request_admitted.wait()
     await stdio.waiting_terminal.wait()
+    if fixture.case == "messages-kill":
+        require(stdio.messages is not None, "message_observer_missing")
+        messages = cast("MessageProbe", stdio.messages)
+        await messages.delta_seen.wait()
+        messages.verify_partial()
     require(process.returncode is None, "client_child_exited_before_signal")
     process.kill()
 
@@ -1256,6 +1439,10 @@ async def observe_client_exit(
         require(killer.done(), "client_child_not_signalled")
         killer.result()
         require(await process.wait() == -signal.SIGKILL, "client_exit_status_mismatch")
+        if fixture.case == "messages-kill":
+            require(stdio.messages is not None, "message_observer_missing")
+            cast("MessageProbe", stdio.messages).verify_partial()
+            await fixture.stream_closed.wait()
     finally:
         if not killer.done():
             killer.cancel()
@@ -1301,6 +1488,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             or fixture.case in HOOK_INPUT_CASES
             or fixture.case in INTERRUPT_CASES
             or fixture.case in ERROR_CASES
+            or fixture.case in MESSAGE_CASES
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
@@ -1333,7 +1521,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             stdio = Stdio(rpc, deadline, identity)
             if fixture.case in INTERRUPT_CASES:
                 await stdio.interrupt_turn(workspace, fixture, process)
-            elif fixture.case == "client-exit":
+            elif fixture.case == "client-exit" or fixture.case == "messages-kill":
                 await observe_client_exit(process, fixture, stdio, workspace)
             else:
                 await stdio.observe(workspace, fixture.case, executor_url)
@@ -1443,6 +1631,24 @@ async def run_interrupt_case(case: InterruptCase) -> None:
             RECEIPTS.is_file() == (case != "interrupt-model"),
             "interrupt_hook_receipt_state",
         )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_message_case(case: MessageCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("deny", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+
+        await drive(fixture, root, workspace)
+
+        require(fixture.failure is None, fixture.failure or "message_fixture_failed")
+        require(fixture.requests == fixture.connections == 1, "message_request_count")
+        require(not RECEIPTS.exists(), "message_hook_ran")
+        require(not os.path.lexists(workspace / MARKER), "message_marker_exists")
     diagnostic("INFO", "probe.case_verified", case)
 
 
@@ -1637,6 +1843,8 @@ async def run() -> None:
         await run_interrupt_case("interrupt-command")
     elif sys.argv[1:] == ["--interrupt-kill"]:
         await run_interrupt_case("interrupt-kill")
+    elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in MESSAGE_CASES:
+        await run_message_case(cast("MessageCase", sys.argv[1].removeprefix("--")))
     elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in ERROR_CASES:
         await run_error_case(cast("ErrorCase", sys.argv[1].removeprefix("--")))
     elif sys.argv[1:] == ["--startup-version"]:
@@ -1658,7 +1866,12 @@ async def run() -> None:
 
 
 def report_connection_failure(
-    error: RpcError | StartupError | TurnError | UsageError | NativeErrorRefused,
+    error: RpcError
+    | StartupError
+    | TurnError
+    | UsageError
+    | NativeErrorRefused
+    | MessageRefused,
 ) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
@@ -1670,7 +1883,14 @@ def main() -> int:
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
-    except (RpcError, StartupError, TurnError, UsageError, NativeErrorRefused) as error:
+    except (
+        RpcError,
+        StartupError,
+        TurnError,
+        UsageError,
+        NativeErrorRefused,
+        MessageRefused,
+    ) as error:
         return report_connection_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
