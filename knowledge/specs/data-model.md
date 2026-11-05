@@ -414,6 +414,32 @@ For previously unbound StructuredOutput revision-1 contracts, `kora.execution.v1
 
 [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) additionally requires the exact `schema_validation.policy` and complete `parameters` map in each affected future effective contract, alongside original document/source identities, ordered applicable constraints, exact reference targets and required behavior/checker bindings. Reference closure supplies targets, not extra top-level assertions; equal original bytes do not collapse local document bases. The existing deployment/effective-contract writer owns their canonical saving and inclusion in the effective-contract, execution-contract and deployment identities. Prepared execution views and normalized resource accounting are not a second saved schema digest or database format. The initial `kora.structured-output-schema-policy.v1` identity remains reserved/unavailable pending a concrete owner-approved accounting/parameter/charging specification. Missing or unsupported interpretation refuses new effects without current defaults; saved historical results remain readable. Acceptance-affecting policy/charging/engine changes require a new immutable identity or explicitly supported immutable compatibility binding. Actual writer, replay and retention activation remain with existing consumers and #216.
 
+#### Graph version digest inputs
+
+The project owner accepted these preimages on 2026-11-06 under [#805](https://github.com/realkarych/kora/issues/805). For the paired physical encoding, let I and C be the exact compact ASCII canonical object texts accepted by the codec for the compiled IR and execution contract. Each text preserves its saved object's member order. The complete producer owns normalization of resolved contract maps before encoding.
+
+| Field | Exact SHA-256 input |
+|---|---|
+| `ir_digest` | I |
+| `execution_contract_digest` | C |
+| `deployment_digest` | ASCII `{"ir":`, I, ASCII `,"execution_contract":`, C, ASCII `}` |
+
+Store all three digests as 64 lowercase hexadecimal characters. Hash exactly those input bytes, without a newline or outer database string quoting. Deployment deduplication applies within the authorized graph. The separate `source_digest` column retains its source owner. When the compiled IR includes `meta.source_digest`, that authored value participates through I. Declared resolved identities that belong to the execution contract participate through C.
+
+For the illustrative pair `{"m":"A","n":-0.0}` and `{"semantics":"kora.execution.v1"}`, the digests are:
+
+| Field | Expected hexadecimal value |
+|---|---|
+| `ir_digest` | `30d61e17510359a836fcd9dbb5d11b0e101a7c152fc9eb761c0bbfab53607478` |
+| `execution_contract_digest` | `e6f28c3c198a6e186af48698dd59221b64186ada51dd88edd128eaf35ae69343` |
+| `deployment_digest` | `abecbcca81e8d2c1175b43998dcb20c86cb39431868f392691ad454686298b10` |
+
+The checking reader selects the exact namespace, graph and version under the existing authorization rules. A prior expected pin comes from an authoritative binding. It releases metadata read resources before checking the admitted pair. It verifies all three saved digests outside metadata read and effect transactions and uses the same canonical values for complete interpretation. Content consistency is one prerequisite. New effects additionally require exact agreement with the intended version and any prior pin, complete interpretation and current effect authorization. Current version, policy and recovery conditions retain their own checks.
+
+Existing authorization and request-envelope checks precede accepted/skipped replay. A matching receipt returns the recorded outcome before current graph interpretation. Legacy records preserve authorized historical reads. Incompatible or inconsistent required values refuse new effects before allocation. Retirement, closure and recovery retain their existing conditions and outcomes. Exclude protected canonical values from diagnostics, including DEBUG and errors, generic serialization and events. Existing digest projections retain their current authorization.
+
+Before hashing, admit the exact pair under a finite bound and reserve the aggregate hash work. For B admitted canonical bytes, the three SHA-256 states consume exactly `2B + 29` preimage bytes. Bounded ASCII chunks feed the corresponding leaf hash and the deployment hash, with a fixed scratch allowance. Decoding, canonical re-encoding, interpretation and retained preparation have separate owners. The [server engine work](https://github.com/realkarych/kora/issues/593) owns the calculator and checking reader, exact and one-over bounds and evidence on both databases. Complete production activation also requires backend-safe acquisition before driver materialization, a compatible finite production bound and proof of exact version and current authority before effects.
+
 #### Saved CEL expression facts
 
 The project owner accepted this binding on 2026-11-05 under [#783](https://github.com/realkarych/kora/issues/783). Each complete first-slice `execution_contract` includes `cel_expressions`, a closed object containing `interpretation: "kora.cel-expression-facts.v1"` followed by `fields`. The interpretation is supported within `kora.execution.v1`. The `fields` array contains the complete expression inventory, including an explicit empty array when no expressions apply.
