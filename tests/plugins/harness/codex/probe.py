@@ -15,6 +15,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
 
+from kora.plugins.harness.codex.app_server_errors import (
+    HTTP_ERROR_CODES,
+    NativeErrorRefused,
+    TurnErrors,
+    decode_error_info,
+    reject_premature_error,
+)
 from kora.plugins.harness.codex.app_server_rpc import (
     AppServerRpc,
     Notification,
@@ -61,6 +68,7 @@ ClientCase = Literal["client-complete", "client-exit"]
 StartupCase = Literal["startup-version", "startup-home"]
 HookInputCase = Literal["patch-allow", "patch-deny", "decoder-refuse"]
 InterruptCase = Literal["interrupt-model", "interrupt-command", "interrupt-kill"]
+ErrorCase = Literal["error-401", "error-429", "error-503"]
 ProbeCase = (
     Case
     | ProviderCase
@@ -70,6 +78,7 @@ ProbeCase = (
     | StartupCase
     | HookInputCase
     | InterruptCase
+    | ErrorCase
 )
 
 CODEX = "/usr/local/bin/codex"
@@ -87,6 +96,12 @@ HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
 INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
 INTERRUPT_PRIMER_ID = "kora-interrupt-primer"
+ERROR_CASES: dict[ErrorCase, int] = {
+    "error-401": 401,
+    "error-429": 429,
+    "error-503": 503,
+}
+ERROR_CANARY = "kora-private-provider-error-canary"
 SYNTHETIC_BEARER = "kora-probe-synthetic-value"
 MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -365,6 +380,8 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
+        elif case in ERROR_CASES:
+            self.request_limit = 1
         elif case in INTERRUPT_CASES:
             self.request_limit = 1 if case == "interrupt-model" else 2
         elif (
@@ -420,6 +437,24 @@ class ResponsesFixture:
                 self.request_admitted.set()
                 if self.case == "client-exit":
                     await asyncio.Future[None]()
+                if self.case in ERROR_CASES:
+                    status = ERROR_CASES[self.case]
+                    body = json.dumps(
+                        {
+                            "error": {
+                                "type": "kora_probe_failure",
+                                "message": ERROR_CANARY,
+                            }
+                        }
+                    ).encode()
+                    writer.write(
+                        f"HTTP/1.1 {status} Fixture failure\r\n".encode()
+                        + b"Content-Type: application/json\r\nConnection: close\r\n"
+                        + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                        + body
+                    )
+                    await writer.drain()
+                    return
                 if self.case == "interrupt-model":
                     writer.write(
                         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -494,7 +529,11 @@ class ResponsesFixture:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
         require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
-        if self.case == "provider_key_present" or self.case in CLIENT_CASES:
+        if (
+            self.case == "provider_key_present"
+            or self.case in CLIENT_CASES
+            or self.case in ERROR_CASES
+        ):
             require(self.requests == 1, "unexpected_responses_request")
             return FINAL_RESPONSE
         if self.requests == 1:
@@ -644,6 +683,38 @@ class ResponsesFixture:
         await server.wait_closed()
 
 
+class ErrorProbe:
+    def __init__(self, thread_id: str, case: ErrorCase) -> None:
+        self.errors: TurnErrors = TurnErrors(thread_id)
+        self.case: ErrorCase = case
+        self.observations: int = 0
+
+    def observe(self, notification: Notification) -> None:
+        observation = self.errors.accept(notification)
+        if observation is not None:
+            self.observations += 1
+
+    def verify(self, terminal: TurnCompletion) -> None:
+        observation = self.errors.for_turn(terminal.turn_id)
+        require(
+            terminal.status == "failed" and self.observations == 1,
+            "native_error_terminal_or_count",
+        )
+        if observation is None:
+            raise ProbeFailure("native_error_notice_missing")
+        require(not observation.will_retry, "native_error_unexpected_retry")
+        detail = decode_error_info(terminal.error)
+        require(
+            detail == observation.info
+            and detail.code in HTTP_ERROR_CODES
+            and detail.http_status_code == ERROR_CASES[self.case],
+            "native_error_details_mismatch",
+        )
+        diagnostic(
+            "INFO", "probe.native_error_verified", f"{self.case}:{detail.code.value}"
+        )
+
+
 class UsageProbe:
     def __init__(self, thread_id: str) -> None:
         self.usage = TurnUsage(thread_id)
@@ -758,6 +829,7 @@ class Stdio:
             or case in SHELL_ARGUMENTS
             or case in CLIENT_CASES
             or case in HOOK_INPUT_CASES
+            or case in ERROR_CASES
             or case == "usage"
         )
         if ephemeral:
@@ -765,7 +837,7 @@ class Stdio:
         prompt = "Run the probe marker command."
         if case in PATCH_CASES:
             prompt = "Apply the probe marker patch."
-        elif case in PROVIDER_CASES or case in CLIENT_CASES:
+        elif case in PROVIDER_CASES or case in CLIENT_CASES or case in ERROR_CASES:
             prompt = "Complete the fixture turn."
         start = await self.call("thread/start", thread_params)
         thread = as_object(start.get("thread"))
@@ -775,16 +847,32 @@ class Stdio:
         require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
         thread_id = cast("str", thread_id)
         usage = UsageProbe(thread_id) if case == "usage" else None
+        errors = ErrorProbe(thread_id, case) if case in ERROR_CASES else None
+
+        def observe(notification: Notification) -> None:
+            if usage is not None:
+                usage.observe(notification)
+            if errors is not None:
+                errors.observe(notification)
+
+        def observe_before_send(notification: Notification) -> None:
+            if usage is not None:
+                reject_premature_usage(notification)
+            if errors is not None:
+                reject_premature_error(notification)
+
         self.terminal = await observe_app_server_turn(
             self.rpc,
             thread_id=thread_id,
             prompt=prompt,
             deadline=self.deadline,
-            observe=usage.observe if usage is not None else None,
-            observe_before_send=reject_premature_usage if usage is not None else None,
+            observe=observe,
+            observe_before_send=observe_before_send,
             on_waiting=self.waiting_terminal.set,
         )
-        if case == "provider_key_absent":
+        if errors is not None:
+            errors.verify(self.terminal)
+        elif case == "provider_key_absent":
             require(
                 self.terminal.status == "failed", "missing_provider_key_not_refused"
             )
@@ -1217,6 +1305,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             or fixture.case in STARTUP_REFUSALS
             or fixture.case in HOOK_INPUT_CASES
             or fixture.case in INTERRUPT_CASES
+            or fixture.case in ERROR_CASES
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
@@ -1359,6 +1448,28 @@ async def run_interrupt_case(case: InterruptCase) -> None:
             RECEIPTS.is_file() == (case != "interrupt-model"),
             "interrupt_hook_receipt_state",
         )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_error_case(case: ErrorCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("deny", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+
+        await drive(fixture, root, workspace)
+
+        require(
+            fixture.failure is None, fixture.failure or "native_error_fixture_failed"
+        )
+        require(
+            fixture.requests == fixture.connections == 1, "native_error_request_count"
+        )
+        require(not RECEIPTS.exists(), "native_error_hook_ran")
+        require(not os.path.lexists(workspace / MARKER), "native_error_marker_exists")
     diagnostic("INFO", "probe.case_verified", case)
 
 
@@ -1531,6 +1642,8 @@ async def run() -> None:
         await run_interrupt_case("interrupt-command")
     elif sys.argv[1:] == ["--interrupt-kill"]:
         await run_interrupt_case("interrupt-kill")
+    elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in ERROR_CASES:
+        await run_error_case(cast("ErrorCase", sys.argv[1].removeprefix("--")))
     elif sys.argv[1:] == ["--startup-version"]:
         await run_startup_refusal("startup-version")
     elif sys.argv[1:] == ["--startup-home"]:
@@ -1550,7 +1663,7 @@ async def run() -> None:
 
 
 def report_connection_failure(
-    error: RpcError | StartupError | TurnError | UsageError,
+    error: RpcError | StartupError | TurnError | UsageError | NativeErrorRefused,
 ) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
@@ -1562,7 +1675,7 @@ def main() -> int:
     except ProbeFailure as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
-    except (RpcError, StartupError, TurnError, UsageError) as error:
+    except (RpcError, StartupError, TurnError, UsageError, NativeErrorRefused) as error:
         return report_connection_failure(error)
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
