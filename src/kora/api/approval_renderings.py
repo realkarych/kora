@@ -1,8 +1,10 @@
-from asyncio import CancelledError
-from collections import deque
 from dataclasses import dataclass, field
-from enum import StrEnum
 
+from kora.api.cel_renderings import (
+    IncompleteRenderings,
+    RenderingRefusal,
+    compile_rendering_sites,
+)
 from kora.api.exchange import COMPONENT
 from kora.cel_eval.errors import EvaluatorUnavailable, Fault
 from kora.cel_eval.thread import Evaluator
@@ -24,12 +26,6 @@ COMPLETED: EventSpec = CATALOG.register(
         {"status": FieldKind.STRING},
     )
 )
-
-
-class RenderingRefusal(StrEnum):
-    INVALID_ALLOWANCE = "invalid_allowance"
-    CAPACITY_EXHAUSTED = "capacity_exhausted"
-    NATIVE_REFUSED = "rendering_refused"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,36 +64,16 @@ async def compile_approval_sites(
     *,
     max_rendering_characters: int,
 ) -> RenderingCheck:
-    remaining = max_rendering_characters
-    for site in sites:
-        remaining -= len(site.checked.rendering)
-        if remaining < 0:
-            return announce(
-                IncompleteApprovalRenderings(RenderingRefusal.CAPACITY_EXHAUSTED)
-            )
-    pending = deque(sites)
+    verification = compile_rendering_sites(
+        sites, evaluator, max_rendering_characters=max_rendering_characters
+    )
     del sites
-    site = None
-    compiled = 0
-    try:
-        while pending:
-            site = pending.popleft()
-            result = await evaluator.validate(site.checked)
-            if not result.valid:
-                return announce(
-                    IncompleteApprovalRenderings(
-                        RenderingRefusal.NATIVE_REFUSED, site.path, result.fault
-                    )
-                )
-            compiled += 1
-            site = None
-        return announce(CompiledApprovalRenderings(compiled))
-    except (EvaluatorUnavailable, CancelledError) as error:
-        error.__traceback__ = None
-        raise
-    finally:
-        pending.clear()
-        site = None
+    result = await verification
+    return announce(
+        IncompleteApprovalRenderings(result.reason, result.path, result.fault)
+        if isinstance(result, IncompleteRenderings)
+        else CompiledApprovalRenderings(result.expressions)
+    )
 
 
 async def compile_approval_renderings(
