@@ -1,3 +1,4 @@
+from asyncio import CancelledError
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -25,6 +26,7 @@ from kora.cel.tree import (
     StringLiteral,
     Unary,
 )
+from kora.cel_eval.errors import EvaluatorUnavailable
 from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import Evaluator
 from kora.ir.approval_compilation import ApprovalPrerequisite, checked_approval_sites
@@ -102,6 +104,10 @@ class FieldPatterns:
 class PreparedPatterns:
     probes: dict[str, PatternCompilation | None]
     fields: dict[FieldPath, FieldPatterns]
+
+    def clear(self) -> None:
+        self.probes.clear()
+        self.fields.clear()
 
 
 def node_children(node: Node) -> Iterator[Node]:
@@ -255,15 +261,27 @@ async def validate_cel_patterns(
     if isinstance(prepared, IncompletePatternCheck):
         return announce(prepared)
     try:
+        return await validate_prepared_patterns(prepared, evaluator)
+    finally:
+        prepared.clear()
+
+
+async def validate_prepared_patterns(
+    prepared: PreparedPatterns, evaluator: Evaluator
+) -> PatternCheck:
+    pattern = None
+    try:
         for pattern in prepared.probes:
             result = await evaluator.validate_pattern(pattern)
             if result is PatternCompilation.INCOMPLETE:
                 return announce(IncompletePatternCheck.NATIVE_INCOMPLETE)
             prepared.probes[pattern] = result
         return announce(collect_pattern_findings(prepared))
+    except (EvaluatorUnavailable, CancelledError) as error:
+        error.__traceback__ = None
+        raise
     finally:
-        prepared.probes.clear()
-        prepared.fields.clear()
+        pattern = None
 
 
 async def validate_sensor_trigger_patterns(
