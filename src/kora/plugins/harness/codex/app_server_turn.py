@@ -1,9 +1,14 @@
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, cast
 
-from kora.plugins.harness.codex.app_server_rpc import AppServerRpc, Notification
+from kora.plugins.harness.codex.app_server_rpc import (
+    AppServerRpc,
+    ControlRequest,
+    Notification,
+)
 
 TerminalStatus = Literal["completed", "failed", "interrupted"]
 TERMINAL_METHOD = "turn/completed"
@@ -15,6 +20,7 @@ class TurnFailure(StrEnum):
     IDENTITY_MISMATCH = "turn_identity_mismatch"
     PREMATURE_COMPLETION = "turn_premature_completion"
     DUPLICATE_COMPLETION = "turn_duplicate_completion"
+    INVALID_INTERRUPT = "turn_invalid_interrupt"
 
 
 class TurnError(Exception):
@@ -88,6 +94,8 @@ async def observe_app_server_turn(
     observe: Callable[[Notification], bool | None] | None = None,
     observe_before_send: Callable[[Notification], bool | None] | None = None,
     on_waiting: Callable[[], None] | None = None,
+    on_started: Callable[[str], None] | None = None,
+    stop: asyncio.Event | None = None,
 ) -> TurnCompletion:
     identifier(thread_id, TurnFailure.INVALID_START)
     completion: TurnCompletion | None = None
@@ -122,8 +130,27 @@ async def observe_app_server_turn(
     if completion is not None and completion.turn_id != turn_id:
         raise TurnError(TurnFailure.IDENTITY_MISMATCH)
     rpc.check_deadline(deadline)
+    if on_started is not None:
+        on_started(turn_id)
     if completion is None and on_waiting is not None:
         on_waiting()
+    if completion is None and stop is not None:
+
+        def accept_interrupt(reply: object) -> None:
+            if not isinstance(reply, dict) or reply:
+                raise TurnError(TurnFailure.INVALID_INTERRUPT)
+
+        await rpc.receive_until(
+            deadline=deadline,
+            observe=observe_pending,
+            complete=lambda: completion is not None,
+            control=ControlRequest(
+                stop,
+                "turn/interrupt",
+                {"threadId": thread_id, "turnId": turn_id},
+                accept_interrupt,
+            ),
+        )
     while completion is None:
         await rpc.receive(deadline=deadline, observe=observe_pending)
     return completion

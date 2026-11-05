@@ -55,6 +55,14 @@ class Reply:
     refused: bool
 
 
+@dataclass(frozen=True, repr=False)
+class ControlRequest:
+    requested: asyncio.Event
+    method: str
+    params: dict[str, object]
+    accept: Callable[[object], None]
+
+
 def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -318,6 +326,19 @@ class AppServerRpc:
         except OSError:
             raise RpcError(RpcFailure.DISCONNECTED) from None
 
+    async def _request(
+        self, method: str, params: dict[str, object], deadline: float
+    ) -> int:
+        self._require_observation_capacity()
+        request_id = self._next_request_id()
+        if not rpc_integer(request_id) or request_id in self._used_request_ids:
+            raise RpcError(RpcFailure.REQUEST_ID)
+        self._used_request_ids.add(request_id)
+        await self._send(
+            {"id": request_id, "method": method, "params": params}, deadline
+        )
+        return request_id
+
     @staticmethod
     def _notification(message: Notification | Reply) -> Notification:
         if isinstance(message, Reply):
@@ -349,14 +370,7 @@ class AppServerRpc:
                     await self._receive(deadline)
                 )
                 self._dispatch(message_before_request, observe_buffered)
-            self._require_observation_capacity()
-            request_id = self._next_request_id()
-            if not rpc_integer(request_id) or request_id in self._used_request_ids:
-                raise RpcError(RpcFailure.REQUEST_ID)
-            self._used_request_ids.add(request_id)
-            await self._send(
-                {"id": request_id, "method": method, "params": params}, deadline
-            )
+            request_id = await self._request(method, params, deadline)
             while isinstance(message := await self._receive(deadline), Notification):
                 self._dispatch(message, observe)
             if message.request_id != request_id:
@@ -364,6 +378,56 @@ class AppServerRpc:
         if message.refused:
             raise RpcError(RpcFailure.REMOTE_ERROR)
         return message.result
+
+    async def receive_until(
+        self,
+        *,
+        deadline: float,
+        observe: Callable[[Notification], bool | None],
+        complete: Callable[[], bool],
+        control: ControlRequest,
+    ) -> None:
+        async with self._operation(deadline):
+            requested = asyncio.create_task(
+                control.requested.wait(), name="codex-rpc-stop"
+            )
+            reading: asyncio.Task[Notification | Reply] | None = None
+            request_id: int | None = None
+            acknowledged = False
+            try:
+                while not complete() or (request_id is not None and not acknowledged):
+                    self.check_deadline(deadline)
+                    if reading is None:
+                        reading = asyncio.create_task(
+                            self._receive(deadline), name="codex-rpc-read"
+                        )
+                    pending: set[asyncio.Task[object]] = {reading}
+                    if request_id is None and not complete():
+                        pending.add(requested)
+                    await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    if reading.done():
+                        message = reading.result()
+                        reading = None
+                        if isinstance(message, Notification):
+                            self._dispatch(message, observe)
+                        else:
+                            if message.request_id != request_id or acknowledged:
+                                raise RpcError(RpcFailure.UNEXPECTED_REPLY)
+                            if message.refused:
+                                raise RpcError(RpcFailure.REMOTE_ERROR)
+                            control.accept(message.result)
+                            acknowledged = True
+                    if request_id is None and requested.done() and not complete():
+                        request_id = await self._request(
+                            control.method, control.params, deadline
+                        )
+            finally:
+                owned: list[asyncio.Task[object]] = [requested]
+                if reading is not None:
+                    owned.append(reading)
+                for task in owned:
+                    task.cancel()
+                await asyncio.gather(*owned, return_exceptions=True)
 
     async def notify(self, method: str, *, deadline: float) -> None:
         async with self._operation(deadline):

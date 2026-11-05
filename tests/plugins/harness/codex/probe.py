@@ -39,8 +39,6 @@ from kora.plugins.harness.codex.app_server_turn import (
     TurnError,
     observe_app_server_turn,
     reject_premature_completion,
-    started_turn_id,
-    terminal_observation,
 )
 from kora.plugins.harness.codex.app_server_usage import (
     TokenCounts,
@@ -901,16 +899,11 @@ class Stdio:
         require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
         thread_id = cast("str", thread_id)
         usage = TurnUsage(thread_id)
+        usage_ready = asyncio.Event()
+        stop = asyncio.Event()
         turn_id: str | None = None
 
         def observe(notification: Notification) -> None:
-            if notification.method == "turn/completed":
-                require(self.terminal is None, "interrupt_duplicate_terminal")
-                self.terminal = terminal_observation(notification.params, thread_id)
-                require(
-                    turn_id is not None and self.terminal.turn_id == turn_id,
-                    "interrupt_terminal_identity_mismatch",
-                )
             snapshot = decode_usage(notification)
             if snapshot is not None:
                 require(
@@ -918,109 +911,111 @@ class Stdio:
                     "interrupt_unexpected_usage_counts",
                 )
                 usage.accept(snapshot)
-
-        def observe_before_interrupt(notification: Notification) -> None:
-            reject_premature_completion(notification)
-            observe(notification)
+                usage_ready.set()
 
         def observe_before_start(notification: Notification) -> None:
-            reject_premature_completion(notification)
             reject_premature_usage(notification)
+
+        def started(identity: str) -> None:
+            nonlocal turn_id
+            turn_id = identity
 
         with ExitStack() as resources:
             listener = resources.enter_context(socket.socket(socket.AF_UNIX))
             listener.setblocking(False)
             listener.bind(str(CONTROL / "interrupt.sock"))
             listener.listen(1)
-            turn_id = started_turn_id(
-                await self.rpc.call(
-                    "turn/start",
-                    {
-                        "threadId": thread_id,
-                        "input": [{"type": "text", "text": "Run the fixture action."}],
-                    },
-                    deadline=self.deadline,
-                    observe=observe_before_interrupt,
-                    observe_before_send=observe_before_start,
-                )
-            )
-            child_fd: int | None = None
-            loop = asyncio.get_running_loop()
-            if fixture.case == "interrupt-model":
-                await fixture.stream_ready.wait()
-            else:
-                child, _ = await loop.sock_accept(listener)
-                resources.enter_context(child)
-                child.setblocking(False)
-                raw_pid = bytearray()
-                while not raw_pid.endswith(b"\n"):
-                    part = await loop.sock_recv(child, 16 - len(raw_pid))
-                    require(bool(part), "interrupt_child_pid_missing")
-                    raw_pid.extend(part)
-                    require(len(raw_pid) < 16, "interrupt_child_pid_limit")
-                require(
-                    re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw_pid) is not None,
-                    "interrupt_child_pid_invalid",
-                )
-                child_fd = open_child_pidfd(int(raw_pid))
-                resources.callback(os.close, child_fd)
-                verify_interrupt_hooks()
-                diagnostic("INFO", "probe.interrupt_barrier", "command_ready")
-                while usage.for_turn(turn_id) is None:
-                    await self.rpc.receive(
-                        deadline=self.deadline, observe=observe_before_interrupt
-                    )
-                diagnostic("INFO", "probe.interrupt_barrier", "usage_ready")
-                require(
-                    not select.select([child_fd], [], [], 0)[0],
-                    "interrupt_child_exited_early",
-                )
-            require(self.terminal is None, "interrupt_terminal_before_stop")
-            require(process.returncode is None, "interrupt_app_server_exited_early")
-            if fixture.case == "interrupt-kill":
-                process.kill()
-                try:
-                    while True:
-                        await self.rpc.receive(
-                            deadline=self.deadline, observe=observe_before_interrupt
-                        )
-                except RpcError as error:
-                    require(
-                        error.reason is RpcFailure.DISCONNECTED,
-                        "interrupt_kill_not_eof",
-                    )
-                require(
-                    await process.wait() == -signal.SIGKILL, "interrupt_kill_status"
-                )
-                require(self.terminal is None, "interrupt_kill_terminal_observed")
-            else:
-                reply = await self.rpc.call(
-                    "turn/interrupt",
-                    {"threadId": thread_id, "turnId": turn_id},
+            observation = asyncio.create_task(
+                observe_app_server_turn(
+                    self.rpc,
+                    thread_id=thread_id,
+                    prompt="Run the fixture action.",
                     deadline=self.deadline,
                     observe=observe,
-                    observe_before_send=observe_before_interrupt,
+                    observe_before_send=observe_before_start,
+                    on_waiting=self.waiting_terminal.set,
+                    on_started=started,
+                    stop=stop,
                 )
-                require(reply == {}, "interrupt_reply_invalid")
-                while self.terminal is None:
-                    await self.rpc.receive(deadline=self.deadline, observe=observe)
-                require(
-                    self.terminal.status == "interrupted", "interrupt_status_invalid"
-                )
-                if child_fd is not None:
-                    await wait_pidfd_exit(child_fd)
-                else:
-                    await fixture.stream_closed.wait()
-                require(process.returncode is None, "interrupt_app_server_exited")
-            snapshot = usage.for_turn(turn_id)
-            require(
-                (snapshot is None)
-                if fixture.case == "interrupt-model"
-                else snapshot is not None and snapshot.counts == EXPECTED_USAGE[0],
-                "interrupt_usage_not_preserved",
             )
-            require(not usage.observation_gap, "interrupt_usage_gap")
-            require(not os.path.lexists(workspace / MARKER), "interrupt_marker_exists")
+            try:
+                await self.waiting_terminal.wait()
+                require(turn_id is not None, "interrupt_start_identity_missing")
+                acknowledged_turn = cast("str", turn_id)
+                child_fd: int | None = None
+                loop = asyncio.get_running_loop()
+                if fixture.case == "interrupt-model":
+                    await fixture.stream_ready.wait()
+                else:
+                    child, _ = await loop.sock_accept(listener)
+                    resources.enter_context(child)
+                    child.setblocking(False)
+                    raw_pid = bytearray()
+                    while not raw_pid.endswith(b"\n"):
+                        part = await loop.sock_recv(child, 16 - len(raw_pid))
+                        require(bool(part), "interrupt_child_pid_missing")
+                        raw_pid.extend(part)
+                        require(len(raw_pid) < 16, "interrupt_child_pid_limit")
+                    require(
+                        re.fullmatch(rb"[1-9][0-9]{0,9}\n", raw_pid) is not None,
+                        "interrupt_child_pid_invalid",
+                    )
+                    child_fd = open_child_pidfd(int(raw_pid))
+                    resources.callback(os.close, child_fd)
+                    verify_interrupt_hooks()
+                    diagnostic("INFO", "probe.interrupt_barrier", "command_ready")
+                    await usage_ready.wait()
+                    require(
+                        usage.for_turn(acknowledged_turn) is not None,
+                        "interrupt_usage_missing",
+                    )
+                    diagnostic("INFO", "probe.interrupt_barrier", "usage_ready")
+                    require(
+                        not select.select([child_fd], [], [], 0)[0],
+                        "interrupt_child_exited_early",
+                    )
+                require(not observation.done(), "interrupt_terminal_before_stop")
+                require(process.returncode is None, "interrupt_app_server_exited_early")
+                if fixture.case == "interrupt-kill":
+                    process.kill()
+                    try:
+                        await observation
+                    except RpcError as error:
+                        require(
+                            error.reason is RpcFailure.DISCONNECTED,
+                            "interrupt_kill_not_eof",
+                        )
+                    else:
+                        raise ProbeFailure("interrupt_kill_terminal_observed")
+                    require(
+                        await process.wait() == -signal.SIGKILL, "interrupt_kill_status"
+                    )
+                else:
+                    stop.set()
+                    self.terminal = await observation
+                    require(
+                        self.terminal.status == "interrupted",
+                        "interrupt_status_invalid",
+                    )
+                    if child_fd is not None:
+                        await wait_pidfd_exit(child_fd)
+                    else:
+                        await fixture.stream_closed.wait()
+                    require(process.returncode is None, "interrupt_app_server_exited")
+                snapshot = usage.for_turn(acknowledged_turn)
+                require(
+                    (snapshot is None)
+                    if fixture.case == "interrupt-model"
+                    else snapshot is not None and snapshot.counts == EXPECTED_USAGE[0],
+                    "interrupt_usage_not_preserved",
+                )
+                require(not usage.observation_gap, "interrupt_usage_gap")
+                require(
+                    not os.path.lexists(workspace / MARKER), "interrupt_marker_exists"
+                )
+            finally:
+                observation.cancel()
+                await asyncio.gather(observation, return_exceptions=True)
 
 
 def open_child_pidfd(pid: int) -> int:
