@@ -34,6 +34,7 @@ from kora.plugins.harness.codex.app_server_rpc import (
     RpcError,
     RpcFailure,
 )
+from kora.plugins.harness.codex.app_server_session import AppServerTurnSession
 from kora.plugins.harness.codex.app_server_startup import (
     StartupError,
     StartupFailure,
@@ -1011,6 +1012,7 @@ class Stdio:
         self.waiting_terminal = asyncio.Event()
         self.messages: MessageProbe | None = None
         self.outputs: OutputProbe | None = None
+        self.session: AppServerTurnSession | None = None
 
     async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
         return as_object(
@@ -1138,17 +1140,56 @@ class Stdio:
             if outputs is not None:
                 outputs.started(turn_id)
 
-        self.terminal = await observe_app_server_turn(
-            self.rpc,
-            thread_id=thread_id,
-            prompt=prompt,
-            deadline=self.deadline,
-            observe=observe,
-            observe_before_send=observe_before_send,
-            on_waiting=self.waiting_terminal.set,
-            on_started=observe_started,
-            output_schema=OUTPUT_SCHEMA if outputs is not None else None,
-        )
+        if any(value is not None for value in (usage, errors, messages, outputs)):
+            self.session = AppServerTurnSession(thread_id, max_messages=16)
+            self.terminal = await self.session.run(
+                self.rpc,
+                prompt=prompt,
+                deadline=self.deadline,
+                observe=observe,
+                on_waiting=self.waiting_terminal.set,
+                on_started=observe_started,
+                output_schema=OUTPUT_SCHEMA if outputs is not None else None,
+            )
+            state = self.session.snapshot()
+            self.verify_session_terminal(self.terminal)
+            if usage is not None:
+                require(
+                    state.usage == usage.usage.for_turn(self.terminal.turn_id)
+                    and state.usage_gap == usage.usage.observation_gap,
+                    "session_usage_mismatch",
+                )
+            if errors is not None:
+                require(
+                    state.latest_error == errors.errors.for_turn(self.terminal.turn_id),
+                    "session_error_mismatch",
+                )
+            selected_messages = (
+                messages.messages
+                if messages is not None
+                else outputs.messages
+                if outputs is not None
+                else None
+            )
+            if selected_messages is not None:
+                require(
+                    state.latest_message
+                    == selected_messages.for_turn(self.terminal.turn_id)
+                    and state.message_count == selected_messages.count,
+                    "session_messages_mismatch",
+                )
+            diagnostic("INFO", "probe.session_terminal_verified", case)
+        else:
+            self.terminal = await observe_app_server_turn(
+                self.rpc,
+                thread_id=thread_id,
+                prompt=prompt,
+                deadline=self.deadline,
+                observe=observe,
+                observe_before_send=observe_before_send,
+                on_waiting=self.waiting_terminal.set,
+                on_started=observe_started,
+            )
         if outputs is not None:
             outputs.verify(self.terminal)
         if messages is not None:
@@ -1167,6 +1208,21 @@ class Stdio:
             require(self.terminal.status == "completed", "turn_not_completed")
         if usage is not None:
             usage.verify(self.terminal.turn_id)
+
+    def verify_session_terminal(self, terminal: TurnCompletion) -> None:
+        if self.session is None:
+            raise ProbeFailure("session_missing")
+        state = self.session.snapshot()
+        require(
+            state.turn_id == terminal.turn_id
+            and state.terminal_status == terminal.status
+            and state.final_message == terminal.final_message,
+            "session_terminal_mismatch",
+        )
+        detail = (
+            decode_error_info(terminal.error) if terminal.error is not None else None
+        )
+        require(state.terminal_error == detail, "session_terminal_error_mismatch")
 
     async def interrupt_turn(
         self,
@@ -1198,9 +1254,6 @@ class Stdio:
                 usage.accept(snapshot)
                 usage_ready.set()
 
-        def observe_before_start(notification: Notification) -> None:
-            reject_premature_usage(notification)
-
         def started(identity: str) -> None:
             nonlocal turn_id
             turn_id = identity
@@ -1210,14 +1263,13 @@ class Stdio:
             listener.setblocking(False)
             listener.bind(str(CONTROL / "interrupt.sock"))
             listener.listen(1)
+            self.session = AppServerTurnSession(thread_id, max_messages=16)
             observation = asyncio.create_task(
-                observe_app_server_turn(
+                self.session.run(
                     self.rpc,
-                    thread_id=thread_id,
                     prompt="Run the fixture action.",
                     deadline=self.deadline,
                     observe=observe,
-                    observe_before_send=observe_before_start,
                     on_waiting=self.waiting_terminal.set,
                     on_started=started,
                     stop=stop,
@@ -1295,6 +1347,23 @@ class Stdio:
                     "interrupt_usage_not_preserved",
                 )
                 require(not usage.observation_gap, "interrupt_usage_gap")
+                state = self.session.snapshot()
+                require(
+                    state.turn_id == acknowledged_turn
+                    and state.usage == snapshot
+                    and not state.usage_gap,
+                    "session_interrupt_usage_mismatch",
+                )
+                if self.terminal is None:
+                    require(
+                        state.terminal_status is None
+                        and state.final_message is None
+                        and state.terminal_error is None,
+                        "session_kill_terminal_invented",
+                    )
+                else:
+                    self.verify_session_terminal(self.terminal)
+                diagnostic("INFO", "probe.session_interrupt_verified", fixture.case)
                 require(
                     not os.path.lexists(workspace / MARKER), "interrupt_marker_exists"
                 )
@@ -1559,6 +1628,28 @@ async def observe_client_exit(
             require(stdio.outputs is not None, "output_observer_missing")
             cast("OutputProbe", stdio.outputs).verify_pending()
             await fixture.stream_closed.wait()
+        if stdio.session is not None:
+            state = stdio.session.snapshot()
+            require(
+                state.turn_id is not None
+                and state.terminal_status is None
+                and state.final_message is None
+                and state.terminal_error is None,
+                "session_exit_terminal_invented",
+            )
+            if fixture.case == "messages-kill":
+                require(
+                    state.latest_message is None and state.message_count == 0,
+                    "session_delta_promoted",
+                )
+            elif fixture.case == "output-kill":
+                require(
+                    state.latest_message is not None
+                    and state.latest_message.text == OUTPUT_TEXT
+                    and state.message_count == 1,
+                    "session_completed_item_lost",
+                )
+            diagnostic("INFO", "probe.session_partial_verified", fixture.case)
     finally:
         if not killer.done():
             killer.cancel()
