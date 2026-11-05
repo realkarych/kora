@@ -2,10 +2,15 @@ import asyncio
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import threading
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from typing import Final, Literal
+
+from pydantic import StrictBool, StrictInt
 
 from kora.conformance.bridge import ConstructorArguments, PreparedConformance
 from kora.conformance.vcs import VcsBench, VcsBinding, VcsConformanceInputs, VcsRemote
@@ -14,15 +19,71 @@ from kora.executor.entry import Executor
 from kora.executor.launcher import Ending, LaunchSpec, ProcessLauncher, StepOutcome
 from kora.ir.json import JsonObject
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
+from kora.protocols.boundary import BoundaryModel
 from kora.protocols.common import ProtocolContext
 from kora.protocols.lifetime import ConformanceLifetime
 from kora.protocols.metadata import ProtocolName, ProviderMetadata
-from kora.protocols.vcs import CredentialRequest, Vcs
-from kora.runner.filesystem import DirectoryAnchor
+from kora.protocols.vcs import CredentialRequest, PathText, Vcs
+from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 from kora_tooling_fixture.owned_directory import (
     directory_identity,
     dispose_owned_directory,
 )
+
+PREPARATION_ENTERED: Final[bytes] = b"prepare_entered\n"
+PREPARATION_COMPLETE: Final[bytes] = b"prepare_complete\n"
+MAX_PREPARATION_EVIDENCE: Final[int] = 128
+PreparationStep = Literal[
+    "init_remote",
+    "init_gone",
+    "init_seed",
+    "add_seed",
+    "commit_seed",
+    "push_seed",
+    "read_revision",
+]
+PreparationFailure = Literal["deadline", "nonzero", "signal", "io"]
+
+
+class PreparationEvidence(BoundaryModel):
+    path: PathText
+    device: StrictInt
+    inode: StrictInt
+    occupy_remote: StrictBool
+
+    def append(self, record: bytes, prefix: int) -> bool:
+        path = Path(self.path)
+        if not path.is_absolute() or ".." in path.parts:
+            return False
+        if prefix + len(record) > MAX_PREPARATION_EVIDENCE:
+            return False
+        try:
+            with ExitStack() as resources:
+                parent = DirectoryAnchor.open_path(path.parent)
+                resources.callback(parent.close)
+                descriptor = os.open(
+                    path.name,
+                    os.O_WRONLY
+                    | os.O_APPEND
+                    | os.O_NOFOLLOW
+                    | os.O_NONBLOCK
+                    | os.O_CLOEXEC,
+                    dir_fd=parent.descriptor,
+                )
+                resources.callback(os.close, descriptor)
+                opened = os.fstat(descriptor)
+                if (
+                    (opened.st_dev, opened.st_ino) != (self.device, self.inode)
+                    or not stat.S_ISREG(opened.st_mode)
+                    or stat.S_IMODE(opened.st_mode) != 0o600
+                    or opened.st_uid != os.getuid()
+                    or opened.st_nlink != 1
+                    or opened.st_size != prefix
+                ):
+                    return False
+                return os.write(descriptor, record) == len(record)
+        except (OSError, FilesystemError):
+            return False
 
 
 def git(root: Path, *arguments: str) -> str:
@@ -49,6 +110,44 @@ def git(root: Path, *arguments: str) -> str:
         timeout=5,
     )
     return result.stdout.decode().strip()
+
+
+def seed_repositories(root: Path, observation: PreparationEvidence | None) -> str:
+    def note_failure(step: PreparationStep, reason: PreparationFailure) -> None:
+        if observation is not None:
+            observation.append(
+                f"git_{step}_{reason}\n".encode("ascii"), len(PREPARATION_ENTERED)
+            )
+
+    def prepare_git(step: PreparationStep, *arguments: str) -> str:
+        try:
+            return git(root, *arguments)
+        except subprocess.TimeoutExpired:
+            note_failure(step, "deadline")
+            raise
+        except subprocess.CalledProcessError as error:
+            note_failure(step, "signal" if error.returncode < 0 else "nonzero")
+            raise
+        except OSError:
+            note_failure(step, "io")
+            raise
+
+    prepare_git("init_remote", "init", "-q", "--bare", "remote.git")
+    prepare_git("init_gone", "init", "-q", "--bare", "gone.git")
+    prepare_git("init_seed", "init", "-q", "seed")
+    (root / "seed" / "file.txt").write_text("seed\n")
+    prepare_git("add_seed", "-C", "seed", "add", ".")
+    prepare_git("commit_seed", "-C", "seed", "commit", "-q", "-m", "seed")
+    prepare_git(
+        "push_seed",
+        "-C",
+        "seed",
+        "push",
+        "-q",
+        str(root / "remote.git"),
+        "HEAD:refs/heads/main",
+    )
+    return prepare_git("read_revision", "-C", "seed", "rev-parse", "HEAD")
 
 
 class ObservedLauncher(ProcessLauncher):
@@ -132,6 +231,17 @@ class Adapter:
         fixture_data: JsonObject,
         lifetime: ConformanceLifetime,
     ) -> PreparedConformance:
+        supplied = fixture_data.get("vcs_preparation_evidence")
+        evidence = (
+            PreparationEvidence.model_validate(supplied)
+            if supplied is not None
+            else None
+        )
+        observation = (
+            evidence
+            if evidence is not None and evidence.append(PREPARATION_ENTERED, 0)
+            else None
+        )
         parsed = configured_paths(config)
         root = Path(parsed.remotes["local"].path).parent
         assert root.parent == Path.cwd()
@@ -141,22 +251,9 @@ class Adapter:
         self.root = root
         self.identity = directory_identity(anchor.descriptor)
         anchor.close()
-        git(root, "init", "-q", "--bare", "remote.git")
-        git(root, "init", "-q", "--bare", "gone.git")
-        git(root, "init", "-q", "seed")
-        (root / "seed" / "file.txt").write_text("seed\n")
-        git(root, "-C", "seed", "add", ".")
-        git(root, "-C", "seed", "commit", "-q", "-m", "seed")
-        git(
-            root,
-            "-C",
-            "seed",
-            "push",
-            "-q",
-            str(root / "remote.git"),
-            "HEAD:refs/heads/main",
-        )
-        revision = git(root, "-C", "seed", "rev-parse", "HEAD")
+        if evidence is not None and evidence.occupy_remote:
+            (root / "remote.git").touch(mode=0o600, exist_ok=False)
+        revision = seed_repositories(root, observation)
         remote = VcsRemote(
             repo="local",
             revision=revision,
@@ -190,6 +287,8 @@ class Adapter:
             self.bench,
             self.effect,
         )
+        if observation is not None:
+            observation.append(PREPARATION_COMPLETE, len(PREPARATION_ENTERED))
         return self
 
     def bind_configuration(self, config: JsonObject) -> ConstructorArguments:

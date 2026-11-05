@@ -5,8 +5,12 @@ import signal
 import socket
 import stat
 import subprocess
+from collections.abc import Generator
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Final
 
 import pytest
 
@@ -60,6 +64,95 @@ def assert_closed(report: CommandResult) -> None:
 def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
     for marker in markers:
         assert marker not in process.stdout + process.stderr
+
+
+MAX_VCS_PREPARATION_EVIDENCE: Final[int] = 128
+VCS_PREPARATION_ENDINGS: Final[frozenset[bytes]] = frozenset(
+    f"git_{step}_{reason}".encode("ascii")
+    for step in (
+        "init_remote",
+        "init_gone",
+        "init_seed",
+        "add_seed",
+        "commit_seed",
+        "push_seed",
+        "read_revision",
+    )
+    for reason in ("deadline", "nonzero", "signal", "io")
+) | {b"prepare_complete"}
+
+
+@dataclass(frozen=True)
+class VcsPreparationProbe:
+    path: Path
+    fixture_data: Path
+    descriptor: int
+    device: int
+    inode: int
+
+    def observed(self) -> tuple[str, ...]:
+        try:
+            opened = os.fstat(self.descriptor)
+            if (
+                (opened.st_dev, opened.st_ino) != (self.device, self.inode)
+                or not stat.S_ISREG(opened.st_mode)
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_uid != os.getuid()
+                or opened.st_nlink != 1
+            ):
+                return ("evidence_unavailable",)
+            payload = os.pread(self.descriptor, MAX_VCS_PREPARATION_EVIDENCE + 1, 0)
+        except OSError:
+            return ("evidence_unavailable",)
+        if not payload:
+            return ("entry_not_observed",)
+        if len(payload) > MAX_VCS_PREPARATION_EVIDENCE or not payload.endswith(b"\n"):
+            return ("evidence_malformed",)
+        records = payload[:-1].split(b"\n")
+        if (
+            len(records) > 2
+            or records[0] != b"prepare_entered"
+            or (len(records) == 2 and records[1] not in VCS_PREPARATION_ENDINGS)
+        ):
+            return ("evidence_malformed",)
+        return tuple(record.decode("ascii") for record in records)
+
+
+@contextmanager
+def vcs_preparation_probe(
+    tmp_path: Path, *, occupy_remote: bool = False
+) -> Generator[VcsPreparationProbe]:
+    root = private_home(tmp_path / "vcs-observation").resolve(strict=True)
+    path = root / "preparation"
+    descriptor = os.open(
+        path,
+        os.O_CREAT
+        | os.O_EXCL
+        | os.O_RDWR
+        | os.O_NOFOLLOW
+        | os.O_NONBLOCK
+        | os.O_CLOEXEC,
+        0o600,
+    )
+    try:
+        opened = os.fstat(descriptor)
+        data = root / "fixture.json"
+        data.write_text(
+            json.dumps(
+                {
+                    "vcs_preparation_evidence": {
+                        "path": str(path),
+                        "device": opened.st_dev,
+                        "inode": opened.st_ino,
+                        "occupy_remote": occupy_remote,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        yield VcsPreparationProbe(path, data, descriptor, opened.st_dev, opened.st_ino)
+    finally:
+        os.close(descriptor)
 
 
 def test_installed_static_token_authentication_conformance(
@@ -467,16 +560,29 @@ def test_installed_provider_supports_local_tooling(
         )
     )
 
-    process = installed.run(
-        *conformance_arguments(protocol.value, "configured", config, plugin),
-        environment={
-            "HOME": str(home),
-            "KORA_LOG_COMPONENT_LEVELS": "protocols.loading=DEBUG",
-        },
-    )
+    with ExitStack() as resources:
+        probe = (
+            resources.enter_context(vcs_preparation_probe(tmp_path))
+            if protocol is ProtocolName.VCS
+            else None
+        )
+        process = installed.run(
+            *conformance_arguments(
+                protocol.value,
+                "configured",
+                config,
+                plugin,
+                probe.fixture_data if probe is not None else None,
+            ),
+            environment={
+                "HOME": str(home),
+                "KORA_LOG_COMPONENT_LEVELS": "protocols.loading=DEBUG",
+            },
+        )
+        preparation = probe.observed() if probe is not None else ()
 
     outcome = CommandResult.model_validate_json(process.stdout)
-    assert process.code == 0, (process.stdout, process.stderr)
+    assert process.code == 0, (process.stdout, process.stderr, preparation)
     assert outcome.outcome is OriginalOutcome.COMPLETE
     assert outcome.completed == outcome.expected == expected
     assert_closed(outcome)
@@ -484,6 +590,72 @@ def test_installed_provider_supports_local_tooling(
     assert len(records) == 1
     assert records[0]["event"] == "protocols.loading.provider_loaded"
     assert records[0]["protocol"] == protocol.value
+    assert not list(home.rglob("journal"))
+    if protocol is ProtocolName.VCS:
+        assert preparation == ("prepare_entered", "prepare_complete")
+
+
+def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(vcs_configuration(Path("vcs-private-setup-canary"))))
+
+    with vcs_preparation_probe(tmp_path, occupy_remote=True) as probe:
+        process = installed_conformance.run(
+            *conformance_arguments(
+                "vcs", "configured", config, "fixtures_vcs", probe.fixture_data
+            ),
+            environment={"HOME": str(home)},
+        )
+        preparation = probe.observed()
+    exposed = any(
+        marker in process.stdout + process.stderr
+        for marker in (b"vcs-private-setup-canary", b"remote.git")
+    )
+
+    assert not exposed
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 1
+    assert outcome.outcome is OriginalOutcome.FAILED
+    assert outcome.reason == "refused"
+    assert outcome.completed == 0
+    assert outcome.expected == 13
+    assert outcome.cleanup is not None
+    assert outcome.cleanup.state is CleanupOutcome.CLOSED
+    assert outcome.cleanup.unresolved_count == 0
+    assert preparation == ("prepare_entered", "git_init_remote_nonzero")
+    assert not list(home.rglob("journal"))
+
+
+def test_installed_vcs_ignores_replaced_preparation_evidence_file(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(vcs_configuration(Path("vcs"))))
+    with vcs_preparation_probe(tmp_path) as probe:
+        original = probe.path.rename(probe.path.with_name("original"))
+        probe.path.touch(mode=0o600, exist_ok=False)
+
+        process = installed_conformance.run(
+            *conformance_arguments(
+                "vcs", "configured", config, "fixtures_vcs", probe.fixture_data
+            ),
+            environment={"HOME": str(home)},
+        )
+        preparation = probe.observed()
+        original_size = original.stat().st_size
+        replacement_size = probe.path.stat().st_size
+
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 0
+    assert outcome.outcome is OriginalOutcome.COMPLETE
+    assert outcome.completed == outcome.expected == 13
+    assert_closed(outcome)
+    assert preparation == ("entry_not_observed",)
+    assert original_size == replacement_size == 0
     assert not list(home.rglob("journal"))
 
 
