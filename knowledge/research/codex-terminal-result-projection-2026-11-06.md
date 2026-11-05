@@ -60,7 +60,7 @@ sh tests/plugins/harness/codex/run_hook_probe.sh --check-app-server-interrupt
 | Mode | Verified native observations | Exit; removals; wall time (diagnostic) |
 | --- | --- | --- |
 | Errors | Failed terminals with matching nonretry notices: 401 and 503 `httpConnectionFailed`, 429 `responseTooManyFailedAttempts` | 0; 3; 14.01s |
-| Output | Completed turns admit the final summary with valid and invalid JSON text; server death after a text delta yields confirmed partial state without a terminal | 0; 3; 9.67s |
+| Output | Completed turns admit the final summary with valid and invalid JSON text; server death after a completed assistant item retains that observation without a terminal or terminal-selected output | 0; 3; 9.67s |
 | Interrupt | Held model stream and running command yield native interrupted terminals; the command interruption observes child exit by pidfd. Server kill yields actual reap and RPC disconnect with an open tool prefix and no terminal. | 0; 3; 11.65s |
 
 A separate final Docker inventory found no remaining probe containers.
