@@ -1,10 +1,11 @@
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, cast
 
-from kora.plugins.harness.codex.app_server_rpc import AppServerRpc
+from kora.plugins.harness.codex.app_server_rpc import AppServerRpc, Notification
 
 ExecutionOs = Literal["linux", "macos"]
 PRODUCT_TOKEN = re.compile(r"[!#$%&'*+\-.^_\x60|~0-9A-Za-z]{1,64}")
@@ -77,6 +78,7 @@ async def initialize_app_server(
     *,
     deadline: float,
     experimental_api: bool = False,
+    observe: Callable[[Notification], bool | None] | None = None,
 ) -> str:
     params: dict[str, object] = {
         "clientInfo": {
@@ -87,7 +89,10 @@ async def initialize_app_server(
     if experimental_api:
         params["capabilities"] = {"experimentalApi": True}
     response = await rpc.call(
-        "initialize", params, deadline=deadline, observe=lambda _notice: None
+        "initialize",
+        params,
+        deadline=deadline,
+        observe=observe if observe is not None else lambda _notice: None,
     )
     verify_startup(response, expected)
     await rpc.notify("initialized", deadline=deadline)

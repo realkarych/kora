@@ -117,6 +117,7 @@ def verify_thread(value: object, expected: SelectedEnvironment) -> str:
         or thread.get("environments") != [selection]
         or thread.get("ephemeral") is not True
         or thread.get("turns") != []
+        or not {"forkedFromId", "parentThreadId"}.issubset(thread)
         or thread.get("forkedFromId") is not None
         or thread.get("parentThreadId") is not None
     ):
@@ -142,7 +143,13 @@ async def prepare_selected_thread(
             method, params, deadline=deadline, observe=reject_premature_completion
         )
 
-    await initialize_app_server(rpc, identity, deadline=deadline, experimental_api=True)
+    await initialize_app_server(
+        rpc,
+        identity,
+        deadline=deadline,
+        experimental_api=True,
+        observe=reject_premature_completion,
+    )
     local = fields(await call("environment/status", {"environmentId": "local"}))
     if local.get("status") != "unknown":
         raise SelectedStartupError(SelectedStartupFailure.LOCAL_STATUS)

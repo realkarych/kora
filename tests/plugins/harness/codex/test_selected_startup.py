@@ -28,6 +28,7 @@ SELECTED = SelectedEnvironment(
 BEARER = "z" * 43
 THREAD_ID = "018f0302-3491-7b42-92c0-9d15c2933393"
 PRIVATE_CANARY = "private-native-reply-canary"
+OMITTED = object()
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,7 @@ def thread_fields() -> dict[str, object]:
             "modelProvider": "kora_responses",
             "ephemeral": True,
             "forkedFromId": None,
+            "parentThreadId": None,
             "turns": [],
             "environments": [
                 {
@@ -221,6 +223,14 @@ async def test_selected_startup_prepares_exact_ephemeral_thread_without_a_turn()
             },
             SelectedStartupFailure.EXECUTOR_CWD,
         ),
+        (
+            2,
+            {
+                "shell": {"name": "bash", "path": "/bin/bash"},
+                "cwd": "file:///fixture/other",
+            },
+            SelectedStartupFailure.EXECUTOR_CWD,
+        ),
         (3, {"status": "pending"}, SelectedStartupFailure.EXECUTOR_STATUS),
         (
             3,
@@ -237,6 +247,7 @@ async def test_selected_startup_prepares_exact_ephemeral_thread_without_a_turn()
         "uri-authority",
         "encoded-separator",
         "malformed-uri",
+        "wrong-checkout",
         "not-ready",
         "ready-with-error",
     ],
@@ -277,8 +288,33 @@ async def test_selected_startup_refuses_metadata_before_a_later_request(
         ("thread", "ephemeral", False),
         ("thread", "forkedFromId", THREAD_ID),
         ("thread", "parentThreadId", THREAD_ID),
+        ("thread", "forkedFromId", OMITTED),
+        ("thread", "parentThreadId", OMITTED),
         ("thread", "environments", []),
         ("thread", "environments", [{"environmentId": "local"}]),
+        (
+            "thread",
+            "environments",
+            [
+                {
+                    "environmentId": SELECTED.environment_id,
+                    "cwd": str(SELECTED.workspace),
+                    "runtimeWorkspaceRoots": ["/fixture/other"],
+                },
+            ],
+        ),
+        (
+            "thread",
+            "environments",
+            [
+                {
+                    "environmentId": environment,
+                    "cwd": str(SELECTED.workspace),
+                    "runtimeWorkspaceRoots": [str(SELECTED.workspace)],
+                }
+                for environment in (SELECTED.environment_id, "another")
+            ],
+        ),
         ("thread", "turns", [{"id": PRIVATE_CANARY}]),
         ("response", "cwd", "/fixture/other"),
         ("response", "model", PRIVATE_CANARY),
@@ -294,8 +330,12 @@ async def test_selected_startup_refuses_metadata_before_a_later_request(
         "not-ephemeral",
         "fork",
         "parent",
+        "missing-fork",
+        "missing-parent",
         "no-selection",
         "local-selection",
+        "nested-root",
+        "extra-selection",
         "prior-turn",
         "response-cwd",
         "response-model",
@@ -312,7 +352,10 @@ async def test_selected_startup_refuses_conflicting_thread_acknowledgements(
     target = (
         payload if scope == "response" else cast("dict[str, object]", payload["thread"])
     )
-    target[field] = value
+    if value is OMITTED:
+        del target[field]
+    else:
+        target[field] = value
     async with wire() as connection:
         startup = connection.start(
             prepare_selected_thread(
@@ -434,8 +477,11 @@ async def test_selected_startup_preserves_info_refusal_and_transport_abort(
         assert trailing == b""
 
 
+@pytest.mark.parametrize("phase", ["initialize", "local-status"])
 @pytest.mark.asyncio
-async def test_selected_startup_refuses_premature_native_turn_completion() -> None:
+async def test_selected_startup_refuses_premature_native_turn_completion(
+    phase: Literal["initialize", "local-status"],
+) -> None:
     exchanges = selected_exchanges()
     async with wire() as connection:
         startup = connection.start(
@@ -444,8 +490,11 @@ async def test_selected_startup_refuses_premature_native_turn_completion() -> No
             )
         )
 
-        await initialize(connection)
-        await receive(connection, 2, exchanges[0])
+        if phase == "initialize":
+            await connection.peer_reader.readline()
+        else:
+            await initialize(connection)
+            await receive(connection, 2, exchanges[0])
         await connection.send(frame({"method": "turn/completed", "params": {}}))
         with pytest.raises(TurnError) as caught:
             await startup
