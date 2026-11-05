@@ -414,6 +414,45 @@ For previously unbound StructuredOutput revision-1 contracts, `kora.execution.v1
 
 [ADR-0027](../../docs/decisions/0027-bounded-effective-schema-validation.md) additionally requires the exact `schema_validation.policy` and complete `parameters` map in each affected future effective contract, alongside original document/source identities, ordered applicable constraints, exact reference targets and required behavior/checker bindings. Reference closure supplies targets, not extra top-level assertions; equal original bytes do not collapse local document bases. The existing deployment/effective-contract writer owns their canonical saving and inclusion in the effective-contract, execution-contract and deployment identities. Prepared execution views and normalized resource accounting are not a second saved schema digest or database format. The initial `kora.structured-output-schema-policy.v1` identity remains reserved/unavailable pending a concrete owner-approved accounting/parameter/charging specification. Missing or unsupported interpretation refuses new effects without current defaults; saved historical results remain readable. Acceptance-affecting policy/charging/engine changes require a new immutable identity or explicitly supported immutable compatibility binding. Actual writer, replay and retention activation remain with existing consumers and #216.
 
+#### Saved CEL expression facts
+
+The project owner accepted this binding on 2026-11-05 under [#783](https://github.com/realkarych/kora/issues/783). Each complete first-slice `execution_contract` includes `cel_expressions`, a closed object containing `interpretation: "kora.cel-expression-facts.v1"` followed by `fields`. The interpretation is supported within `kora.execution.v1`. The `fields` array contains the complete expression inventory, including an explicit empty array when no expressions apply.
+
+Each entry contains exactly the following members in order.
+
+| Member | Saved value |
+|---|---|
+| `path` | An array of exact declaration path segments. Use logical strings and original nonnegative integer case or trigger indices. |
+| `origin` | `authored` for a present expression, or `approval_default` for the supported generated approval condition. |
+| `result` | The field's expected result kind, `bool` or `string`, under the existing checker and evaluator rules. |
+| `rendering` | The exact canonical CEL rendering successfully compiled by the pinned binding. |
+| `cost` | A closed object containing `steps`, `memory` and `compile_steps` in that order. Each is the exact nonnegative integer from the supported checked estimate. `compile_steps` is the existing logical cache-miss charge. |
+| `reads` | The checked expression's local projection mapping by CEL variable name. Each value is a closed object containing normalized `whole` and `presence` path arrays in that order. Save an empty mapping explicitly. |
+
+Let `N` be the node's exact path, `["graph","nodes",NODE]` or `["graph","subgraphs",BODY,"nodes",NODE]`. The inventory covers these field paths.
+
+| Field | Path |
+|---|---|
+| Branch case condition and reason | `N + ["config","cases",INDEX,"when"]` and `N + ["config","cases",INDEX,"reason"]` |
+| Branch else reason | `N + ["config","else_reason"]` |
+| Ordinary node and body retry predicates | `N + ["retry","predicate"]` and `["graph","subgraphs",BODY,"retry","predicate"]` |
+| Approval | `N + ["config","approve_when"]` |
+| Event or polling wait | `N + ["config","event","match"]` or `N + ["config","poll","until"]` |
+| Root sensor trigger | `["graph","triggers",INDEX,"poll","until"]` |
+| Authored infrastructure retry | `["runtime","infrastructure_retry","predicate"]` |
+
+Inspect the root and every stored body once, including dormant fields and unused bodies, without expanding invocations. Omitted optional fields contribute no entries. For each omitted approval condition, add one generated entry after successful resolution and checking of the pinned form and default condition. An explicit equivalent expression keeps `authored` provenance. Configured infrastructure predicates belong to trusted validation and contribute no authored declaration record.
+
+Sort the entries by the compact ASCII canonical JSON encoding of `path` and the `reads` keys by their compact ASCII canonical JSON string encoding. Preserve the normalized path arrays from [IR section 7.5](ir.md#75-projections-and-typed-conversion). Reject duplicates, noncanonical path sets and missing, extra or mismatched fields. Equal renderings remain associated with distinct declaration paths. The local read paths are inputs to separate composition of producer, run-parameter and ephemeral event or observation projections. The graph-version contract retains its separate requirement for the frozen path set of each readable output.
+
+The writer derives facts from one unchanged snapshot and the identical typed inventory used by native verification. Capture detached, charged facts while checked sites are available. Release checked trees and bound snapshots before awaiting native pattern verification. Publication requires successful compilation of every rendering, successful verification of every pattern and zero expression errors or omitted required findings. Refusal or cancellation releases staged facts. Preparation uses the existing physical graph-value codec and existing execution-contract and deployment digest domains. Both digests cover the complete saved section.
+
+The checking reader uses the intended owner-scoped namespace, graph, version and contract identity. It verifies exact structure, completeness, canonical order and value agreement with deterministic derivation from pinned IR and independently verified saved type, output and parameter sections. This includes the effective form and default interpretation bound by the saved outputs and pinned IR. Use the supported CEL interpretation and the pinned schema roots and checker views for both comparison and auxiliary types and bounds. Complete comparison and transient binding preparation before effect transactions. Bind the prepared state to the same verified identity through use. Evaluation uses the checked saved renderings, estimates and projection contracts with that prepared state. Current publication and effect authorization retain their own checks.
+
+Admit aggregate snapshot bytes, pending typed and bound state, repeated context/reference work, retained facts, canonical ordering and comparison scratch, and transient bindings before growth. Native queue admission separately covers submitted work. Writer, reader and consumer plans own actual bounds and release evidence. Producer path composition and stored projection value representation retain separate implementation and verification.
+
+The section belongs to the graph version and shares its lifetime. Treat renderings and paths as protected graph definition content. The record contains static facts only. Keep this member internal under the [graph-version response contract](api-and-agent-surface.md#historical-execution-records-adr-0018). Any future response or export including it requires separate review of a bounded projection and current graph-content authorization. Exclude the member from generic serialization, diagnostics, events and verification records. Missing, unsupported or inconsistent required CEL facts refuse new effects under the existing graph-version compatibility rules. Authorized historical reads, accepted/skipped replay, closure, retirement and recovery retain their existing ordering. The first successful durable production graph-version commit containing a saved estimate ends the [provisional CEL semantics exception](ir.md#76-data-bounds-cost-and-evaluation).
+
 #### Saved disabled retry policies
 
 The project owner accepted this immutable binding on 2026-11-04 under [#692](https://github.com/realkarych/kora/issues/692). Every complete first-slice `execution_contract` contains `retry_policies`, a closed object with these members in order:

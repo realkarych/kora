@@ -424,7 +424,7 @@ Branch conditions and reasons, retry predicates, `approve_when`, event `match` a
 - `outputs.<name>` is an output of the failed attempt, or an export of the failed subgraph attempt, that passed validation and the data bounds. Every member is non-required.
 - `params` are the run parameters, typed by the [effective graph parameter schema](#graph-parameter-schema-omission) and bound from the projection cut at run creation.
 - `response` is the approval form response, typed by `form`, projected and bound-checked when the response is received.
-- `payload` is the inbound event body and `observation` the sensor result. Neither has a declared schema; both are `map(string, dyn)`.
+- `payload` is the inbound event body and `observation` the sensor result. The static checker binds each as `dyn`. Ingress value shape and conversion follow the applicable event and observation contracts.
 
 The project owner accepted the first-slice infrastructure predicate context on 2026-11-05 under [#775](https://github.com/realkarych/kora/issues/775). The only externally bound variable is `params`. Its type comes from the effective graph parameter schema and the existing parameter checker view and reference roots. The `bool` entry uses the existing section 7.4 static result rule, including `dyn`. Local comprehension names follow the same shadowing rule. A binder named `params` demands that environment, and unavailable schema prerequisites leave dependent checking incomplete. Omission leaves the predicate absent.
 
@@ -502,7 +502,7 @@ A schema is mapped after resolving `$ref` and a single-schema `allOf`. Its type 
 | array with `items` | `list(T)`; with `prefixItems` or without `items`, `list(dyn)` |
 | a `type` array of several non-null types, any other `anyOf`, `oneOf` or multi-schema `allOf`, an `enum` of mixed types, the boolean schema `true`, a schema with no type, keyword or `$ref` | `dyn` |
 
-`payload` and `observation` are `map(string, dyn)`, and a `dyn` value is checked dynamically:
+The checker uses `dyn` for `payload` and `observation`. The following rules apply to dynamic checking.
 
 - dot selection on `payload`, `observation` or another `dyn` value is allowed and needs no guard, and a missing key is the evaluation error `missing_field`; a schema-typed `map(string, V)` is read by index, guarded by `in` like an open object's extra keys;
 - a `dyn` operand satisfies the same-type rule for `==`;
@@ -561,6 +561,8 @@ Diagnostics use the [shared representation and collection contract](diagnostics.
 ### 7.5 Projections and typed conversion
 
 **Projection path sets.** At deployment the checker records, for every output an expression can read, the set of paths it reads, and freezes these path sets in `graph_version.execution_contract`.
+
+The [saved CEL expression facts](data-model.md#saved-cel-expression-facts) preserve the checker-local reads of each expression. Graph composition uses these local reads to derive the applicable frozen producer and parameter path sets. Event payload and sensor observation projections retain their own consumers and lifetimes.
 
 - **Notation.** A frozen path set is a pair of sorted lists, `whole` and `presence`. Paths are relative to the variable: `.name` selects a field, `['k']` a map key or non-identifier field, `[*]` every list element, and the empty string the whole variable. String keys use single-quoted literals with canonical escapes; keyword and reserved names use brackets. The parser round-trips generated canonical paths under the rendering-length bound, including escaped non-BMP keys. Whole paths subsume the same path's presence and every deeper path. A presence ancestor may coexist with a deeper read; it never discards the selected descendants.
 - **Composition.** Paths compose through every route by which a value reaches an expression:
@@ -676,7 +678,7 @@ An expression over either dimension of the budget is `IR027`. The charges model 
 
 - The steps budget is **100,000,000,000,000 logical charge units**, ten times the previous provisional budget. All fourteen time weights remain unchanged. The memory budget remains **16 MiB (16,777,216 logical estimated bytes)** with the provisional base and multiplier above. Neither dimension is a calibrated bound on elapsed time or RSS.
 - The observed coarse regression target is **100 ms per evaluation interval** on the reference CI runner. The [compact protocol](../research/cel-cost-calibration-2026-10-22.md#current-compact-regression-protocol) measures ten fixed cases, each in a fresh child, with one cold cache miss and three warm cache hits through `Evaluator.evaluate`. Each of the forty intervals must be at most 100,000,000 ns. The interval includes binding, queueing, cache-miss compilation when needed, native execution and result delivery; expression checking and evaluator startup precede it, and result assertions follow it. This is neither an interruption deadline nor a bound for every admitted expression.
-- The selected initial data bounds remain 4,096 canonical bytes and 256 values in both original and converted aggregates. The [qualified smaller-bound result](../research/cel-cost-calibration-2026-10-22.md#qualified-smaller-bound-result) retains the earlier conversion evidence. Before the first stored estimate, these settings remain provisional under the initial `kora.execution.v1` exception. That exception ends at the first stored estimate; later data-bound or cost-rule changes require a new execution semantics identity, without implying a migration mechanism.
+- The selected initial data bounds are 4,096 canonical bytes and 256 values in both original and converted aggregates. The [qualified smaller-bound result](../research/cel-cost-calibration-2026-10-22.md#qualified-smaller-bound-result) records the conversion evidence. The provisional `kora.execution.v1` exception ends at the first successful durable production graph-version commit containing a [saved estimate](data-model.md#saved-cel-expression-facts), including an estimate of a dormant authored field. An empty inventory or an uncommitted result precedes this boundary. Later data-bound or cost-rule changes require a new execution semantics identity.
 - The golden corpus pins provisional estimate outputs. The compact regression and golden checks replace exhaustive time/memory fitting and crash-margin calibration as the pre-consumer validation gate under [issue #167](https://github.com/realkarych/kora/issues/167). Projections and real consumer integration remain prerequisites for author-expression consumers; schema-driven checking landed under [issue #337](https://github.com/realkarych/kora/issues/337) and [issue #330](https://github.com/realkarych/kora/issues/330), and the correction of minimum-int unary negation under [issue #372](https://github.com/realkarych/kora/issues/372). The independently tested evaluator infrastructure of [issue #166](https://github.com/realkarych/kora/issues/166) does not activate those consumers.
 - The weights and provisional regex tables belong to `kora.execution.v1`, under the pin rule at the start of section 7. Their values have not been established by full numerical calibration.
 
