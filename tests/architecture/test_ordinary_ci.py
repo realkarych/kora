@@ -29,12 +29,11 @@ IR_RESOURCE_MODULES = frozenset(
         "tests/ir/test_output_schema_resources.py",
     }
 )
-IR_INTEGRATION_MODULES = frozenset(
-    {
-        "tests/ir/test_structured_schema_collection_predicates.py",
-        "tests/ir/test_structured_schema_string_lengths.py",
-        "tests/ir/test_subgraph_interface_resources.py",
-    }
+INTEGRATION_SELECTION = (
+    "tests/api",
+    "tests/cli",
+    "tests/ir/test_structured_schema_string_lengths.py",
+    "tests/plugins/artifact_type/test_agent_session.py",
 )
 FIRST_MODULES = (
     "tests/architecture/test_ir_measurement_ci.py",
@@ -56,6 +55,8 @@ FIRST_MODULES = (
     "tests/ir/test_expression_syntax_resources.py",
     "tests/ir/test_edge_type_resources.py",
     "tests/ir/test_approval_predicate_resources.py",
+    "tests/engine/test_graph_output_inventory.py",
+    "tests/ir/test_structured_schema_collection_predicates.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -284,18 +285,12 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         "tests/ir/test_inline_schema_resources.py",
         "tests/ir/test_fan_out_type_resources.py",
         "tests/ir/test_export_type_resources.py",
+        "tests/ir/test_diagnostic_collection.py",
+        "tests/ir/test_subgraph_interface_resources.py",
     }
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
-    assert cohorts["integration"] == selected_files(
-        ["tests/api", "tests/cli"]
-    ) | IR_INTEGRATION_MODULES | {"tests/plugins/artifact_type/test_agent_session.py"}
-    assert IR_INTEGRATION_MODULES.isdisjoint(cohorts["other"])
-    assert tuple(arrays["integration"]) == (
-        "tests/api",
-        "tests/cli",
-        *sorted(IR_INTEGRATION_MODULES),
-        "tests/plugins/artifact_type/test_agent_session.py",
-    )
+    assert cohorts["integration"] == selected_files(list(INTEGRATION_SELECTION))
+    assert tuple(arrays["integration"]) == INTEGRATION_SELECTION
     assert (
         "tests/plugins/artifact_type/test_agent_session.py"
         not in cohorts["measurements"]
