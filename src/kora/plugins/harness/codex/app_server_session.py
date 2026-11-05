@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 
 from kora.plugins.harness.codex.app_server_errors import (
@@ -29,7 +30,10 @@ from kora.plugins.harness.codex.app_server_turn import (
     observe_app_server_turn,
 )
 from kora.plugins.harness.codex.app_server_usage import (
+    ConfirmedUsage,
     TurnUsage,
+    UsageChange,
+    UsageObserver,
     UsageSnapshot,
     decode_usage,
     reject_premature_usage,
@@ -115,21 +119,46 @@ class AppServerTurnSession:
         observe: Callable[[Notification], bool | None] | None = None,
         on_started: Callable[[str], None] | None = None,
         on_waiting: Callable[[], None] | None = None,
+        usage_observer: UsageObserver | None = None,
     ) -> TurnCompletion:
         if self._used:
             raise SessionRefused(SessionFailure.ALREADY_USED)
         self._used = True
+        source_time: datetime | None = None
+        usage_pending = False
+
+        def publish_usage() -> None:
+            nonlocal usage_pending
+            if not usage_pending or usage_observer is None:
+                return
+            snapshot = self._snapshot
+            if snapshot.usage is not None and source_time is not None:
+                usage_pending = False
+                usage_observer.observe(
+                    ConfirmedUsage(
+                        snapshot.usage.counts, source_time, snapshot.usage_gap
+                    )
+                )
 
         def accept(notification: Notification) -> bool | None:
+            nonlocal source_time, usage_pending
             usage = decode_usage(notification)
             if usage is not None:
-                self._usage.accept(usage)
+                previous_gap = self._usage.observation_gap
+                change = self._usage.accept(usage)
+                if usage_observer is not None:
+                    if change is UsageChange.ADVANCED:
+                        source_time = usage_observer.source_time()
+                        usage_pending = True
+                    elif self._usage.observation_gap != previous_gap:
+                        usage_pending = True
             self._messages.accept(notification)
             self._errors.accept(notification)
             self._tools.accept(notification)
             turn_id = self._snapshot.turn_id
             if turn_id is not None:
                 self._snapshot = self._confirmed(turn_id)
+                publish_usage()
             return observe(notification) if observe is not None else None
 
         def reject_premature(notification: Notification) -> bool | None:
@@ -143,6 +172,7 @@ class AppServerTurnSession:
             self._snapshot = self._confirmed(turn_id)
             if on_started is not None:
                 on_started(turn_id)
+            publish_usage()
 
         completion = await observe_app_server_turn(
             rpc,

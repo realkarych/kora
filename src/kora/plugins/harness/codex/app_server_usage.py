@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import cast
 
@@ -69,6 +71,19 @@ class UsageSnapshot:
     thread_id: str
     turn_id: str
     counts: TokenCounts
+
+
+@dataclass(frozen=True)
+class ConfirmedUsage:
+    counts: TokenCounts
+    observed_at: datetime
+    observation_gap: bool
+
+
+@dataclass(frozen=True, repr=False)
+class UsageObserver:
+    source_time: Callable[[], datetime]
+    observe: Callable[[ConfirmedUsage], None]
 
 
 def object_fields(value: object) -> dict[str, object]:

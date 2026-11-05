@@ -11,6 +11,7 @@ import socket
 import subprocess
 import sys
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
@@ -49,10 +50,12 @@ from kora.plugins.harness.codex.app_server_turn import (
     reject_premature_completion,
 )
 from kora.plugins.harness.codex.app_server_usage import (
+    ConfirmedUsage,
     TokenCounts,
     TurnUsage,
     UsageChange,
     UsageError,
+    UsageObserver,
     decode_usage,
     reject_premature_usage,
 )
@@ -504,6 +507,7 @@ USAGE_FINAL_RESPONSE = sse(
         "total_tokens": 80,
     },
 )
+USAGE_SOURCE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 EXPECTED_USAGE = (TokenCounts(100, 20, 30, 10, 4), TokenCounts(160, 25, 40, 30, 10))
 
 
@@ -1121,6 +1125,16 @@ class UsageProbe:
     def __init__(self, thread_id: str) -> None:
         self.usage = TurnUsage(thread_id)
         self.advances = 0
+        self.confirmed_counts: list[TokenCounts] = []
+
+    def confirmed(self, observation: ConfirmedUsage) -> None:
+        require(
+            len(self.confirmed_counts) < len(EXPECTED_USAGE)
+            and observation.observed_at == USAGE_SOURCE_TIME
+            and not observation.observation_gap,
+            "unexpected_confirmed_usage",
+        )
+        self.confirmed_counts.append(observation.counts)
 
     def observe(self, notification: Notification) -> None:
         snapshot = decode_usage(notification)
@@ -1141,6 +1155,13 @@ class UsageProbe:
 
     def verify(self, turn_id: str) -> None:
         require(self.advances == len(EXPECTED_USAGE), "missing_usage_snapshot")
+        require(
+            tuple(self.confirmed_counts) in (EXPECTED_USAGE, EXPECTED_USAGE[1:]),
+            "unexpected_confirmed_usage_counts",
+        )
+        diagnostic(
+            "INFO", "probe.confirmed_usage_verified", str(len(self.confirmed_counts))
+        )
         snapshot = self.usage.for_turn(turn_id)
         if snapshot is None:
             raise ProbeFailure("missing_usage_snapshot")
@@ -1369,6 +1390,11 @@ class Stdio:
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
                 output_schema=OUTPUT_SCHEMA if outputs is not None else None,
+                usage_observer=(
+                    UsageObserver(lambda: USAGE_SOURCE_TIME, usage.confirmed)
+                    if usage is not None
+                    else None
+                ),
             )
             state = self.session.snapshot()
             self.verify_session_terminal(self.terminal)
