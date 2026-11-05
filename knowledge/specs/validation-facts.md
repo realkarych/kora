@@ -189,3 +189,22 @@ A complete coverage set supports conclusions about both present and absent kinds
 Server composition copies only the names or kinds into the immutable same-call view and binds each result to the invocation, namespace, agent site and exact configured selection. The projection preserves each result's availability and contains no credentials, environment values, raw configuration or provider objects. Sections 3, 4 and 7 govern consistency, execution authority and failure disposition.
 
 Work item 15 owns the real native source, shared launch-construction definitions and conformance for the selected version, platform and profile. The evidence matrix identifies the current complete Codex reservation and coverage declarations as unavailable. The real source and the launch definitions it relies on must land together. Work items 3 and 11 and [#549](https://github.com/realkarych/kora/issues/549) own configured selection and projection into validation. [#199](https://github.com/realkarych/kora/issues/199) owns session hosting, and [#593](https://github.com/realkarych/kora/issues/593) owns the saved contract and canonical start. This decision introduces no provider ABI member, public operation, persisted format or executable producer.
+
+### Selected first execution profile
+
+The owner-selected [first Codex execution profile](codex-execution-profile.md),
+recorded under [#769](https://github.com/realkarych/kora/issues/769) on
+2026-11-05, uses API-key authentication and one app-server plus one selected
+native exec-server under the existing runtime/runner lifecycle owner. Both
+roles share the admitted candidate filesystem/workspace/policy binding;
+the native connection capability covers process and filesystem RPCs.
+Identity-preserving live reconnect or attempt failure and actual owner-bounded
+listener/session/descendant closure remain implementing obligations.
+
+The profile decision supplies no native receiver, complete inventory,
+construction, declaration or consumer activation. This section's separate
+availability, effect-free inspection, real-source/co-landing, configured
+selection, conservative coverage and platform evidence gates are unchanged.
+ChatGPT account/OAuth support is deferred under
+[#770](https://github.com/realkarych/kora/issues/770) until the first API-key
+adapter is integrated and qualified through the common runner.
