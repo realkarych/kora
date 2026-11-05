@@ -20,14 +20,24 @@ from tests.cel_eval.children import ROOT, full_path, run_child
                 "capacity_exhausted",
                 "capacity_exhausted",
                 "capacity_exhausted",
-                "infrastructure_context_unresolved",
                 "typed_refused",
                 "typed_refused",
             ],
         ),
+        (
+            "infrastructure",
+            [
+                *(["complete"] * 5),
+                *(["typed_refused"] * 6),
+                "schema_unresolved",
+                "syntax_unresolved",
+                "capacity_exhausted",
+                "capacity_exhausted",
+            ],
+        ),
         ("lifetime", ["complete"]),
     ],
-    ids=["cross-family", "preflight", "resource-release"],
+    ids=["cross-family", "preflight", "infrastructure", "resource-release"],
 )
 def test_graph_cel_uses_complete_bounded_native_verification(
     scenario: str, statuses: list[str]

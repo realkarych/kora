@@ -22,7 +22,13 @@ from kora.ir.branch_expressions import BranchExpressionResult, checked_branch_si
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
-from kora.ir.retry_expressions import RetryExpressionResult, checked_retry_sites
+from kora.ir.retry_expressions import (
+    CheckedRetrySite,
+    InfrastructureRetryPrerequisite,
+    RetryExpressionResult,
+    checked_infrastructure_retry_site,
+    checked_retry_sites,
+)
 from kora.ir.trigger_expressions import (
     SensorTriggerExpressionResult,
     checked_sensor_trigger_sites,
@@ -44,7 +50,6 @@ COMPLETED: EventSpec = CATALOG.register(
 class GraphCelRefusal(StrEnum):
     INVALID_ALLOWANCE = "invalid_allowance"
     CAPACITY_EXHAUSTED = "capacity_exhausted"
-    INFRASTRUCTURE_CONTEXT_UNRESOLVED = "infrastructure_context_unresolved"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +61,7 @@ class GraphCelChecks:
 TypedRefusal = (
     GraphCelRefusal
     | ApprovalPrerequisite
+    | InfrastructureRetryPrerequisite
     | DiagnosticCollection
     | BranchExpressionResult
     | RetryExpressionResult
@@ -73,9 +79,6 @@ GraphCelResult = (
 def checked_graph_sites(
     document: GraphDocument, max_declarations: int, max_triggers: int
 ) -> tuple[CheckedPatternSite, ...] | TypedRefusal:
-    infrastructure = document.runtime.infrastructure_retry
-    if infrastructure is not MISSING and infrastructure.predicate is not MISSING:
-        return GraphCelRefusal.INFRASTRUCTURE_CONTEXT_UNRESOLVED
     triggers = document.graph.triggers
     if triggers is not MISSING and len(triggers) > max_triggers:
         return GraphCelRefusal.CAPACITY_EXHAUSTED
@@ -101,6 +104,13 @@ def checked_graph_sites(
             )
             for site in inventory
         )
+    infrastructure = checked_infrastructure_retry_site(document)
+    if isinstance(infrastructure, CheckedRetrySite):
+        sites.append(
+            CheckedPatternSite(infrastructure.path, infrastructure.checked, True)
+        )
+    elif infrastructure is not None:
+        return infrastructure
     return tuple(sites)
 
 
@@ -112,7 +122,11 @@ def announce(result: GraphCelResult) -> GraphCelResult:
         elif isinstance(result, IncompleteRenderings):
             status = result.reason.value
         elif isinstance(
-            result, GraphCelRefusal | ApprovalPrerequisite | IncompletePatternCheck
+            result,
+            GraphCelRefusal
+            | ApprovalPrerequisite
+            | InfrastructureRetryPrerequisite
+            | IncompletePatternCheck,
         ):
             status = result.value
         else:

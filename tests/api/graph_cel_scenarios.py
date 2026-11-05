@@ -17,8 +17,11 @@ from kora.api.graph_cel import (
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
 from kora.cel_eval.thread import EvaluationThread, Evaluator
+from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
+from kora.ir.json import JsonObject
+from kora.ir.retry_expressions import InfrastructureRetryPrerequisite
 from kora.ir.wait_expressions import WaitExpressionResult
 from kora.observability import Level, LoggingSettings, bound_scope, configure_process
 from kora.observability.settings import RenderFormat
@@ -50,6 +53,20 @@ DECLARATIONS: int = 13
 WORK: int = 100_000
 SINGLE_FAMILY_CHARACTERS: int = 100
 SINGLE_FAMILY_PATTERN_WORK: int = 160
+PREEXISTING_RENDERING_CHARACTERS: int = 360
+PREEXISTING_PATTERN_WORK: int = 600
+INFRASTRUCTURE_PATH: FieldPath = ("runtime", "infrastructure_retry", "predicate")
+PARAMETER_SCHEMA: JsonObject = {
+    "$ref": "#/$defs/flags",
+    "$defs": {
+        "flags": {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean"}},
+            "required": ["enabled"],
+        }
+    },
+}
+UNRESOLVED_SCHEMA: JsonObject = {"$ref": "#/$defs/missing"}
 PATTERN_OFFSET: int = len('"a".matches(')
 APPROVAL_PATTERN_OFFSET: int = len('true || "😀".matches(')
 REJECTED_OFFSETS: dict[FieldPath, int] = {
@@ -65,7 +82,10 @@ REJECTED_OFFSETS: dict[FieldPath, int] = {
 
 
 def mixed_document(
-    *, rejected: bool = False, wait_node: dict[str, object] | None = None
+    *,
+    rejected: bool = False,
+    wait_node: dict[str, object] | None = None,
+    params: JsonObject | None = None,
 ) -> GraphDocument:
     prefix = "(?ii)" if rejected else "^"
     escaped = r"\u0070" + PATTERN_MARKER[1:]
@@ -73,6 +93,7 @@ def mixed_document(
     escaped_predicate = f'true || "😀".matches("{prefix}{escaped}")'
     return document_for(
         contracts=BUILTINS,
+        params=params,
         nodes={
             "branch": branch(predicate, '"reason"', '"fallback"'),
             "target": node(depends_on=["branch"]),
@@ -92,6 +113,17 @@ def mixed_document(
         },
         triggers=[{"kind": "manual"}, sensor(predicate)],
     )
+
+
+def with_infrastructure(
+    document: GraphDocument, predicate: str | None
+) -> GraphDocument:
+    raw = document.model_dump(mode="json")
+    policy: dict[str, object] = {"max_attempts": 1}
+    if predicate is not None:
+        policy["predicate"] = predicate
+    raw["runtime"] = {"runtime": "local", "vcs": "git", "infrastructure_retry": policy}
+    return GraphDocument.model_validate(raw)
 
 
 def verify(
@@ -155,13 +187,6 @@ def check_refusals() -> None:
     missing_input = mixed_document(
         wait_node=wait("inputs.unavailable.ok", poll=True, inputs=unavailable_inputs())
     )
-    runtime_data = document.model_dump(mode="json")
-    runtime_data["runtime"] = {
-        "runtime": "local",
-        "vcs": "git",
-        "infrastructure_retry": {"max_attempts": 1, "predicate": "true"},
-    }
-    infrastructure = GraphDocument.model_validate(runtime_data)
     owner = EvaluationThread(load_binding())
 
     with asyncio.Runner() as runner:
@@ -188,7 +213,6 @@ def check_refusals() -> None:
         oversized_renderings = runner.run(
             verify(document, evaluator, characters=SINGLE_FAMILY_CHARACTERS)
         )
-        unavailable_context = runner.run(verify(infrastructure, evaluator))
         typed_refusal = runner.run(verify(invalid_wait, evaluator))
         unresolved = runner.run(verify(missing_input, evaluator))
 
@@ -201,13 +225,106 @@ def check_refusals() -> None:
     assert oversized_renderings == IncompleteRenderings(
         RenderingRefusal.CAPACITY_EXHAUSTED
     )
-    assert unavailable_context is GraphCelRefusal.INFRASTRUCTURE_CONTEXT_UNRESOLVED
     assert isinstance(typed_refusal, WaitExpressionResult)
     assert not typed_refusal.wait_expressions_valid
     assert isinstance(unresolved, WaitExpressionResult)
     assert unresolved.context_unresolved == 1
     assert unresolved.diagnostics.valid
     assert not unresolved.wait_expressions_complete
+    assert_settled(owner)
+
+
+def check_infrastructure() -> None:
+    base = mixed_document(rejected=True, params=PARAMETER_SCHEMA)
+    source = f'params.enabled && "a".matches("(?ii){PATTERN_MARKER}")'
+    with_predicate = with_infrastructure(base, source)
+    admitted = (
+        with_infrastructure(document_for(), None),
+        with_infrastructure(document_for(params=UNRESOLVED_SCHEMA), "true"),
+        with_infrastructure(document_for(params={}), "params.enabled"),
+    )
+    invalid = tuple(
+        (
+            with_infrastructure(document_for(params=schema), expression),
+            offset,
+        )
+        for schema, expression, offset in (
+            (None, "params.enabled", 7),
+            (PARAMETER_SCHEMA, "[true].exists(params, params)", 7),
+            (PARAMETER_SCHEMA, "inputs.ready", 0),
+            (PARAMETER_SCHEMA, "outputs.ready", 0),
+            (PARAMETER_SCHEMA, "failure.message", 0),
+            (PARAMETER_SCHEMA, "1", 0),
+        )
+    )
+    missing_schema = with_infrastructure(
+        document_for(params=UNRESOLVED_SCHEMA), "params.enabled"
+    )
+    bad_syntax = with_infrastructure(document_for(), "(")
+    owner = EvaluationThread(load_binding())
+
+    with asyncio.Runner() as runner:
+        loop = runner.get_loop()
+        evaluator = runner.run(open_evaluator(owner))
+        try:
+            results = [runner.run(verify(document, evaluator)) for document in admitted]
+            prefix = runner.run(
+                verify(
+                    base,
+                    evaluator,
+                    characters=PREEXISTING_RENDERING_CHARACTERS,
+                    pattern_work=PREEXISTING_PATTERN_WORK,
+                )
+            )
+            native = observe_deliveries(
+                loop,
+                loop.create_task(verify(with_predicate, evaluator)),
+                owner,
+                FIELDS + 2,
+            )
+            assert_idle(owner, 1)
+        finally:
+            runner.run(evaluator.close())
+        static = [
+            (runner.run(verify(document, evaluator)), offset)
+            for document, offset in invalid
+        ]
+        schema_refusal = runner.run(verify(missing_schema, evaluator))
+        syntax_refusal = runner.run(verify(bad_syntax, evaluator))
+        rendering_refusal = runner.run(
+            verify(
+                with_predicate, evaluator, characters=PREEXISTING_RENDERING_CHARACTERS
+            )
+        )
+        pattern_refusal = runner.run(
+            verify(with_predicate, evaluator, pattern_work=PREEXISTING_PATTERN_WORK)
+        )
+
+    for result, count in zip(results, (0, 1, 1), strict=True):
+        assert isinstance(result, GraphCelChecks)
+        assert result.compiled_fields == count
+        assert result.diagnostics.valid
+    assert isinstance(prefix, GraphCelChecks)
+    assert prefix.compiled_fields == FIELDS
+    assert isinstance(native, GraphCelChecks)
+    assert native.compiled_fields == FIELDS + 1
+    assert len(native.diagnostics.errors) == len(REJECTED_OFFSETS) + 1
+    assert {item.path: item.offset for item in native.diagnostics.errors} == {
+        **REJECTED_OFFSETS,
+        INFRASTRUCTURE_PATH: source.index('"(?ii)'),
+    }
+    assert {item.code for item in native.diagnostics.errors} == {"IR011"}
+    for refusal, offset in static:
+        assert isinstance(refusal, DiagnosticCollection)
+        assert [(item.code, item.path, item.offset) for item in refusal.errors] == [
+            ("IR011", INFRASTRUCTURE_PATH, offset)
+        ]
+    assert schema_refusal is InfrastructureRetryPrerequisite.SCHEMA_UNRESOLVED
+    assert syntax_refusal is InfrastructureRetryPrerequisite.SYNTAX_UNRESOLVED
+    assert rendering_refusal == IncompleteRenderings(
+        RenderingRefusal.CAPACITY_EXHAUSTED
+    )
+    assert pattern_refusal is IncompletePatternCheck.CAPACITY_EXHAUSTED
     assert_settled(owner)
 
 
@@ -225,7 +342,7 @@ def check_lifetime() -> None:
         evaluator = runner.run(open_evaluator(owner))
         try:
             cancel_delivery(runner, evaluator, prior_deliveries=0)
-            cancel_delivery(runner, evaluator, prior_deliveries=FIELDS)
+            cancel_delivery(runner, evaluator, prior_deliveries=FIELDS + 1)
             reused = runner.run(verify(mixed_document(), evaluator))
             assert_idle(owner, 1)
         finally:
@@ -250,7 +367,9 @@ def check_lifetime() -> None:
 def cancel_delivery(
     runner: asyncio.Runner, evaluator: Evaluator, *, prior_deliveries: int
 ) -> None:
-    document = mixed_document()
+    document = with_infrastructure(
+        mixed_document(params=PARAMETER_SCHEMA), "params.enabled"
+    )
     document_ref = ref(document)
     baseline = checked_expression_count()
     loop = runner.get_loop()
@@ -273,7 +392,7 @@ def cancel_delivery(
 
     assert delivery.outstanding == delivery.deliveries == 1
     assert document_released
-    assert trees_during_delivery == (0 if prior_deliveries else FIELDS)
+    assert trees_during_delivery == (0 if prior_deliveries else FIELDS + 1)
     assert patterns_during_delivery == 1
     assert cancelled.value.__context__ is None
     assert checked_expression_count() == baseline
@@ -285,6 +404,7 @@ def run(scenario: str) -> None:
     cases = {
         "mixed": check_mixed,
         "refusals": check_refusals,
+        "infrastructure": check_infrastructure,
         "lifetime": check_lifetime,
     }
     diagnostics = configure_process(

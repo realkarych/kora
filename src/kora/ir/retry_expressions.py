@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import StrEnum
 from itertools import chain
 
 from pydantic import MISSING
@@ -6,6 +7,7 @@ from pydantic import MISSING
 from kora.cel import CheckedExpression, Environment, ResultKind, Variable, check_typed
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
+from kora.cel.meter import Meter
 from kora.ir.approval_inputs import InputFailure
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
@@ -77,6 +79,41 @@ class RetryExpressionResult:
 class CheckedRetrySite:
     path: FieldPath
     checked: CheckedExpression
+
+
+class InfrastructureRetryPrerequisite(StrEnum):
+    SYNTAX_UNRESOLVED = "syntax_unresolved"
+    SCHEMA_UNRESOLVED = "schema_unresolved"
+
+
+def checked_infrastructure_retry_site(
+    document: GraphDocument,
+) -> CheckedRetrySite | DiagnosticCollection | InfrastructureRetryPrerequisite | None:
+    policy = document.runtime.infrastructure_retry
+    if policy is MISSING or policy.predicate is MISSING:
+        return None
+    source = policy.predicate
+    meter = Meter()
+    try:
+        required = required_context(source, meter, frozenset({"params"}))
+    except DiagnosticError:
+        return InfrastructureRetryPrerequisite.SYNTAX_UNRESOLVED
+    variables: dict[str, Variable] = {}
+    if "params" in required:
+        contexts = InputParameterContexts(
+            document.type_contracts, document.graph.params
+        )
+        parameter = contexts.parameter_context()
+        if parameter is None:
+            return InfrastructureRetryPrerequisite.SCHEMA_UNRESOLVED
+        variables["params"] = parameter
+    checked = check_typed(source, Environment(variables, ResultKind.BOOL), meter)
+    path: FieldPath = ("runtime", "infrastructure_retry", "predicate")
+    if isinstance(checked, CheckedExpression):
+        return CheckedRetrySite(path, checked)
+    collector = DiagnosticCollector()
+    collector.add(from_cel(checked, path=path, exact_expression_field=True))
+    return collector.finish()
 
 
 class RetryExpressionChecks(InputParameterContexts):
