@@ -521,3 +521,97 @@ async def test_partial_tool_lifecycle_survives_failure_and_native_interruption(
         )
         assert state.final_message is None
         assert owned_tasks() == set()
+
+
+@pytest.mark.parametrize(
+    ("ending", "expected"),
+    [
+        ("malformed", ToolFailure.INVALID_OBSERVATION),
+        ("duplicate", ToolFailure.DUPLICATE),
+        ("kind-change", ToolFailure.INVALID_TRANSITION),
+        ("overflow", ToolFailure.ITEM_LIMIT),
+    ],
+)
+@pytest.mark.asyncio
+async def test_refused_tool_input_keeps_the_previous_session_snapshot(
+    ending: str, expected: ToolFailure
+) -> None:
+    async with wire() as connection:
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=1)
+        observed = asyncio.Event()
+        seen: list[Notification] = []
+
+        def observe(notification: Notification) -> None:
+            seen.append(notification)
+            if len(seen) == 2:
+                observed.set()
+
+        operation = connection.start(
+            session.run(
+                connection.rpc,
+                prompt=PROMPT,
+                deadline=future_deadline(),
+                observe=observe,
+            )
+        )
+        await connection.peer_reader.readline()
+        await connection.send(started(), usage_frame(), encoded(tool_notice()))
+        await observed.wait()
+        previous = session.snapshot()
+        refused = {
+            "malformed": tool_notice(phase="completed", source=PRIVATE),
+            "duplicate": tool_notice(),
+            "kind-change": tool_notice(phase="completed", kind="fileChange"),
+            "overflow": tool_notice(identity="second"),
+        }[ending]
+
+        await connection.send(encoded(refused))
+        with pytest.raises(ToolRefused) as caught:
+            await operation
+
+        assert caught.value.reason is expected
+        assert session.snapshot() is previous
+        assert previous.tool_counts == ToolCounts(1, 1, 0, 1, 0)
+        assert previous.usage == snapshot(FIRST)
+        assert previous.latest_tool is not None
+        assert previous.latest_tool.item_id == ITEM
+        assert len(seen) == 2
+        assert owned_tasks() == set()
+
+
+@pytest.mark.asyncio
+async def test_session_releases_replaced_tool_observations() -> None:
+    async with wire() as connection:
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=2)
+        observed = asyncio.Event()
+        operation = connection.start(
+            session.run(
+                connection.rpc,
+                prompt=PROMPT,
+                deadline=future_deadline(),
+                observe=lambda _notice: observed.set(),
+            )
+        )
+        await connection.peer_reader.readline()
+        await connection.send(started(), encoded(tool_notice(identity=PRIVATE)))
+        await observed.wait()
+        previous = session.snapshot()
+        assert previous.latest_tool is not None
+        reference = weakref.ref(previous.latest_tool)
+        observed.clear()
+
+        await connection.send(encoded(tool_notice(identity="replacement")))
+        await observed.wait()
+        del previous
+        gc.collect()
+        await connection.send(completed())
+        await operation
+        current = session.snapshot()
+
+        assert reference() is None
+        assert current.tool_counts == ToolCounts(2, 2, 0, 2, 0)
+        assert current.latest_tool is not None
+        assert current.latest_tool.item_id == "replacement"
+        assert PRIVATE not in repr(current)
+        assert current.terminal_status == "completed"
+        assert owned_tasks() == set()

@@ -41,7 +41,7 @@ from kora.plugins.harness.codex.app_server_startup import (
     StartupIdentity,
     initialize_app_server,
 )
-from kora.plugins.harness.codex.app_server_tools import ToolRefused
+from kora.plugins.harness.codex.app_server_tools import ToolCounts, ToolRefused
 from kora.plugins.harness.codex.app_server_turn import (
     TurnCompletion,
     TurnError,
@@ -866,6 +866,28 @@ class ToolProbe:
         )
 
     def verify(self, session: AppServerTurnSession) -> None:
+        expected: tuple[tuple[str, str, str, str | None, int | None], ...]
+        if self.case == "allow":
+            expected = (
+                (
+                    "commandExecution",
+                    "started",
+                    "inProgress",
+                    "unifiedExecStartup",
+                    None,
+                ),
+                ("commandExecution", "completed", "completed", "unifiedExecStartup", 0),
+            )
+        elif self.case == "patch-allow":
+            expected = (
+                ("fileChange", "started", "inProgress", None, None),
+                ("fileChange", "completed", "completed", None, None),
+            )
+        elif self.case in ("deny", "patch-deny", "decoder-refuse"):
+            expected = ()
+        else:
+            raise ProbeFailure("tool_fixture_case_unknown")
+        require(tuple(self.events) == expected, "tool_native_lifecycle_mismatch")
         state = session.snapshot()
         starts = sum(event[1] == "started" for event in self.events)
         completions = sum(event[1] == "completed" for event in self.events)
@@ -1339,6 +1361,7 @@ class Stdio:
         thread_id = cast("str", thread_id)
         usage = TurnUsage(thread_id)
         usage_ready = asyncio.Event()
+        tools_ready = asyncio.Event()
         stop = asyncio.Event()
         turn_id: str | None = None
 
@@ -1351,6 +1374,14 @@ class Stdio:
                 )
                 usage.accept(snapshot)
                 usage_ready.set()
+            if self.session is not None:
+                latest = self.session.snapshot().latest_tool
+                if (
+                    latest is not None
+                    and latest.item_id == CALL_ID
+                    and latest.phase == "started"
+                ):
+                    tools_ready.set()
 
         def started(identity: str) -> None:
             nonlocal turn_id
@@ -1402,6 +1433,12 @@ class Stdio:
                     verify_interrupt_hooks()
                     diagnostic("INFO", "probe.interrupt_barrier", "command_ready")
                     await usage_ready.wait()
+                    await tools_ready.wait()
+                    require(
+                        self.session.snapshot().tool_counts
+                        == ToolCounts(2, 2, 1, 1, 0),
+                        "interrupt_open_tool_barrier_missing",
+                    )
                     require(
                         usage.for_turn(acknowledged_turn) is not None,
                         "interrupt_usage_missing",
@@ -1448,6 +1485,27 @@ class Stdio:
                 )
                 require(not usage.observation_gap, "interrupt_usage_gap")
                 state = self.session.snapshot()
+                counts = state.tool_counts
+                if fixture.case == "interrupt-model":
+                    require(counts == ToolCounts(), "model_interrupt_tool_invented")
+                elif fixture.case == "interrupt-kill":
+                    require(
+                        counts == ToolCounts(2, 2, 1, 1, 0),
+                        "kill_tool_completion_invented",
+                    )
+                else:
+                    require(
+                        counts.items == counts.started == 2
+                        and counts.completed in (1, 2)
+                        and counts.open == 2 - counts.completed
+                        and counts.completion_without_start == 0,
+                        "interrupt_tool_prefix_invalid",
+                    )
+                diagnostic(
+                    "INFO",
+                    "probe.interrupt_tool_prefix_verified",
+                    f"{fixture.case}:{counts.started}:{counts.completed}:{counts.open}",
+                )
                 require(
                     state.turn_id == acknowledged_turn
                     and state.usage == snapshot
