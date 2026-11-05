@@ -250,6 +250,12 @@ class AppServerRpc:
         if self._clock() >= deadline:
             raise RpcError(RpcFailure.DEADLINE)
 
+    def snapshot_object(self, value: dict[str, object]) -> dict[str, object]:
+        document = decode_object(encode_frame(value, self._max_frame_bytes)[:-1])
+        if document is None:
+            raise RpcError(RpcFailure.INVALID_OUTBOUND)
+        return document
+
     @asynccontextmanager
     async def _operation(self, deadline: float) -> AsyncGenerator[None]:
         if self._unusable:

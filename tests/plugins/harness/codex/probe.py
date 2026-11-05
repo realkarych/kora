@@ -74,6 +74,7 @@ HookInputCase = Literal["patch-allow", "patch-deny", "decoder-refuse"]
 InterruptCase = Literal["interrupt-model", "interrupt-command", "interrupt-kill"]
 ErrorCase = Literal["error-401", "error-429", "error-503"]
 MessageCase = Literal["messages-plain", "messages-stream", "messages-kill"]
+OutputCase = Literal["output-valid", "output-invalid", "output-kill"]
 ProbeCase = (
     Case
     | ProviderCase
@@ -85,11 +86,22 @@ ProbeCase = (
     | InterruptCase
     | ErrorCase
     | MessageCase
+    | OutputCase
 )
 
 CODEX = "/usr/local/bin/codex"
 CODEX_VERSION = "0.166.0"
 MESSAGE_CASES = frozenset({"messages-plain", "messages-stream", "messages-kill"})
+OUTPUT_CASES = frozenset({"output-valid", "output-invalid", "output-kill"})
+OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
+OUTPUT_TEXT = '{"ok":true}'
+INVALID_OUTPUT_TEXT = '{"ok":true,"ok":false}'
+OUTPUT_MESSAGE = "kora-output-message"
 MESSAGE_TEXT = "kora-private-message-canary: незавершённый 🌲"
 MESSAGE_CONTENT: tuple[tuple[MessagePhase, str], ...] = (
     ("commentary", "kora-private-message-canary: наблюдение 🌲"),
@@ -327,6 +339,25 @@ def message_response(*, complete: bool) -> bytes:
     ).encode()
 
 
+def output_response(case: ProbeCase, *, complete: bool) -> bytes:
+    text = INVALID_OUTPUT_TEXT if case == "output-invalid" else OUTPUT_TEXT
+    item: dict[str, object] = {
+        "id": OUTPUT_MESSAGE,
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+    if complete:
+        return sse("kora-output-response", item)
+    events: tuple[dict[str, object], ...] = (
+        {"type": "response.created", "response": {"id": "kora-output-response"}},
+        {"type": "response.output_item.done", "item": item},
+    )
+    return "".join(
+        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+    ).encode()
+
+
 def command_response(
     arguments: dict[str, object], *, usage: dict[str, object] | None = None
 ) -> bytes:
@@ -459,7 +490,7 @@ class ResponsesFixture:
         self.request_limit: int
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
-        elif case in ERROR_CASES or case in MESSAGE_CASES:
+        elif case in ERROR_CASES or case in MESSAGE_CASES or case in OUTPUT_CASES:
             self.request_limit = 1
         elif case in INTERRUPT_CASES:
             self.request_limit = 1 if case == "interrupt-model" else 2
@@ -534,9 +565,11 @@ class ResponsesFixture:
                     )
                     await writer.drain()
                     return
-                if self.case == "interrupt-model" or self.case == "messages-kill":
+                if self.case in {"interrupt-model", "messages-kill", "output-kill"}:
                     prelude = (
-                        message_response(complete=False)
+                        output_response(self.case, complete=False)
+                        if self.case == "output-kill"
+                        else message_response(complete=False)
                         if self.case == "messages-kill"
                         else b'data: {"type":"response.created","response":'
                         b'{"id":"kora-probe-open-response"}}\n\n'
@@ -612,6 +645,15 @@ class ResponsesFixture:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
         require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
+        if self.case in OUTPUT_CASES:
+            formatting = as_object(as_object(request.get("text")).get("format"))
+            require(
+                formatting.get("type") == "json_schema"
+                and formatting.get("schema") == OUTPUT_SCHEMA,
+                "native_output_schema_mismatch",
+            )
+            require(self.requests == 1, "unexpected_output_request")
+            return output_response(self.case, complete=True)
         if self.case in MESSAGE_CASES:
             require(self.requests == 1, "unexpected_message_request")
             return (
@@ -773,6 +815,53 @@ class ResponsesFixture:
         await server.wait_closed()
 
 
+class OutputProbe:
+    def __init__(self, thread_id: str, case: ProbeCase) -> None:
+        self.thread_id = thread_id
+        self.expected = INVALID_OUTPUT_TEXT if case == "output-invalid" else OUTPUT_TEXT
+        self.messages = TurnMessages(thread_id, max_messages=2, max_text_bytes=4096)
+        self.acknowledged_turn: str | None = None
+        self.item_completed = asyncio.Event()
+        self.terminal_text: str | None = None
+
+    def started(self, turn_id: str) -> None:
+        self.messages.for_turn(turn_id)
+        self.acknowledged_turn = turn_id
+
+    def observe(self, notification: Notification) -> None:
+        observation = self.messages.accept(notification)
+        if observation is not None:
+            require(
+                observation.message_id == OUTPUT_MESSAGE
+                and observation.text == self.expected,
+                "output_message_mismatch",
+            )
+            require(self.messages.count == 1, "output_message_count")
+            if self.acknowledged_turn is not None:
+                self.messages.for_turn(self.acknowledged_turn)
+            self.item_completed.set()
+
+    def verify(self, terminal: TurnCompletion) -> None:
+        selected = terminal.final_message
+        if selected is None:
+            raise ProbeFailure("output_terminal_summary_missing")
+        require(terminal.status == "completed", "output_turn_not_completed")
+        require(
+            selected == self.messages.for_turn(terminal.turn_id),
+            "output_summary_message_mismatch",
+        )
+        self.terminal_text = selected.text
+
+    def verify_pending(self) -> None:
+        require(self.acknowledged_turn is not None, "output_start_identity_missing")
+        require(
+            self.item_completed.is_set()
+            and self.messages.for_turn(cast("str", self.acknowledged_turn)) is not None,
+            "output_item_not_completed",
+        )
+        require(self.terminal_text is None, "output_premature_terminal_selection")
+
+
 class MessageProbe:
     def __init__(self, thread_id: str, case: ProbeCase) -> None:
         self.thread_id = thread_id
@@ -921,6 +1010,7 @@ class Stdio:
         self.terminal: TurnCompletion | None = None
         self.waiting_terminal = asyncio.Event()
         self.messages: MessageProbe | None = None
+        self.outputs: OutputProbe | None = None
 
     async def call(self, method: str, params: dict[str, object]) -> dict[str, object]:
         return as_object(
@@ -992,6 +1082,7 @@ class Stdio:
             or case in HOOK_INPUT_CASES
             or case in ERROR_CASES
             or case in MESSAGE_CASES
+            or case in OUTPUT_CASES
             or case == "usage"
         )
         if ephemeral:
@@ -1004,6 +1095,7 @@ class Stdio:
             or case in CLIENT_CASES
             or case in ERROR_CASES
             or case in MESSAGE_CASES
+            or case in OUTPUT_CASES
         ):
             prompt = "Complete the fixture turn."
         start = await self.call("thread/start", thread_params)
@@ -1017,6 +1109,8 @@ class Stdio:
         errors = ErrorProbe(thread_id, case) if case in ERROR_CASES else None
         messages = MessageProbe(thread_id, case) if case in MESSAGE_CASES else None
         self.messages = messages
+        outputs = OutputProbe(thread_id, case) if case in OUTPUT_CASES else None
+        self.outputs = outputs
 
         def observe(notification: Notification) -> None:
             if usage is not None:
@@ -1025,6 +1119,8 @@ class Stdio:
                 errors.observe(notification)
             if messages is not None:
                 messages.observe(notification)
+            if outputs is not None:
+                outputs.observe(notification)
 
         def observe_before_send(notification: Notification) -> None:
             if usage is not None:
@@ -1033,6 +1129,14 @@ class Stdio:
                 reject_premature_error(notification)
             if messages is not None:
                 reject_premature_message(notification)
+            if outputs is not None:
+                reject_premature_message(notification)
+
+        def observe_started(turn_id: str) -> None:
+            if messages is not None:
+                messages.started(turn_id)
+            if outputs is not None:
+                outputs.started(turn_id)
 
         self.terminal = await observe_app_server_turn(
             self.rpc,
@@ -1042,8 +1146,11 @@ class Stdio:
             observe=observe,
             observe_before_send=observe_before_send,
             on_waiting=self.waiting_terminal.set,
-            on_started=messages.started if messages is not None else None,
+            on_started=observe_started,
+            output_schema=OUTPUT_SCHEMA if outputs is not None else None,
         )
+        if outputs is not None:
+            outputs.verify(self.terminal)
         if messages is not None:
             messages.verify(self.terminal)
         if errors is not None:
@@ -1417,6 +1524,11 @@ async def signal_after_request(
         messages = cast("MessageProbe", stdio.messages)
         await messages.delta_seen.wait()
         messages.verify_partial()
+    if fixture.case == "output-kill":
+        require(stdio.outputs is not None, "output_observer_missing")
+        outputs = cast("OutputProbe", stdio.outputs)
+        await outputs.item_completed.wait()
+        outputs.verify_pending()
     require(process.returncode is None, "client_child_exited_before_signal")
     process.kill()
 
@@ -1442,6 +1554,10 @@ async def observe_client_exit(
         if fixture.case == "messages-kill":
             require(stdio.messages is not None, "message_observer_missing")
             cast("MessageProbe", stdio.messages).verify_partial()
+            await fixture.stream_closed.wait()
+        if fixture.case == "output-kill":
+            require(stdio.outputs is not None, "output_observer_missing")
+            cast("OutputProbe", stdio.outputs).verify_pending()
             await fixture.stream_closed.wait()
     finally:
         if not killer.done():
@@ -1489,6 +1605,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             or fixture.case in INTERRUPT_CASES
             or fixture.case in ERROR_CASES
             or fixture.case in MESSAGE_CASES
+            or fixture.case in OUTPUT_CASES
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
@@ -1521,7 +1638,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             stdio = Stdio(rpc, deadline, identity)
             if fixture.case in INTERRUPT_CASES:
                 await stdio.interrupt_turn(workspace, fixture, process)
-            elif fixture.case == "client-exit" or fixture.case == "messages-kill":
+            elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
             else:
                 await stdio.observe(workspace, fixture.case, executor_url)
@@ -1631,6 +1748,24 @@ async def run_interrupt_case(case: InterruptCase) -> None:
             RECEIPTS.is_file() == (case != "interrupt-model"),
             "interrupt_hook_receipt_state",
         )
+    diagnostic("INFO", "probe.case_verified", case)
+
+
+async def run_output_case(case: OutputCase) -> None:
+    RECEIPTS.unlink(missing_ok=True)
+    (CONTROL / "decision").write_text("deny", encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        fixture = ResponsesFixture(case, one_shot=False)
+
+        await drive(fixture, root, workspace)
+
+        require(fixture.failure is None, fixture.failure or "output_fixture_failed")
+        require(fixture.requests == fixture.connections == 1, "output_request_count")
+        require(not RECEIPTS.exists(), "output_hook_ran")
+        require(not os.path.lexists(workspace / MARKER), "output_marker_exists")
     diagnostic("INFO", "probe.case_verified", case)
 
 
@@ -1843,6 +1978,8 @@ async def run() -> None:
         await run_interrupt_case("interrupt-command")
     elif sys.argv[1:] == ["--interrupt-kill"]:
         await run_interrupt_case("interrupt-kill")
+    elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in OUTPUT_CASES:
+        await run_output_case(cast("OutputCase", sys.argv[1].removeprefix("--")))
     elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in MESSAGE_CASES:
         await run_message_case(cast("MessageCase", sys.argv[1].removeprefix("--")))
     elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in ERROR_CASES:

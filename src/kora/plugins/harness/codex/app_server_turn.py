@@ -4,6 +4,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Literal, cast
 
+from kora.plugins.harness.codex.app_server_messages import (
+    CompletedMessage,
+    MessageRefused,
+    decode_completed_message,
+)
 from kora.plugins.harness.codex.app_server_rpc import (
     AppServerRpc,
     ControlRequest,
@@ -12,6 +17,7 @@ from kora.plugins.harness.codex.app_server_rpc import (
 
 TerminalStatus = Literal["completed", "failed", "interrupted"]
 TERMINAL_METHOD = "turn/completed"
+MAX_FINAL_MESSAGE_BYTES = 1_048_576
 
 
 class TurnFailure(StrEnum):
@@ -34,6 +40,7 @@ class TurnCompletion:
     turn_id: str
     status: TerminalStatus
     error: dict[str, object] | None
+    final_message: CompletedMessage | None = None
 
 
 def object_fields(value: object, failure: TurnFailure) -> dict[str, object]:
@@ -61,6 +68,33 @@ def started_turn_id(reply: object) -> str:
     return identifier(turn.get("id"), failure)
 
 
+def summary_message(
+    turn: dict[str, object], thread_id: str, turn_id: str
+) -> CompletedMessage | None:
+    if turn.get("itemsView") != "summary":
+        return None
+    items = turn.get("items")
+    if not isinstance(items, list):
+        raise TurnError(TurnFailure.INVALID_COMPLETION)
+    entries = cast("list[object]", items)
+    if len(entries) != 1:
+        raise TurnError(TurnFailure.INVALID_COMPLETION)
+    try:
+        message = decode_completed_message(
+            Notification(
+                "item/completed",
+                {"threadId": thread_id, "turnId": turn_id, "item": entries[0]},
+                None,
+            ),
+            max_text_bytes=MAX_FINAL_MESSAGE_BYTES,
+        )
+    except MessageRefused:
+        raise TurnError(TurnFailure.INVALID_COMPLETION) from None
+    if message is None:
+        raise TurnError(TurnFailure.INVALID_COMPLETION)
+    return message
+
+
 def terminal_observation(params: object, thread_id: str) -> TurnCompletion:
     failure = TurnFailure.INVALID_COMPLETION
     fields = object_fields(params, failure)
@@ -77,7 +111,12 @@ def terminal_observation(params: object, thread_id: str) -> TurnCompletion:
         error = object_fields(error, failure)
         if status == "completed" or not isinstance(error.get("message"), str):
             raise TurnError(failure)
-    return TurnCompletion(turn_id, status, error)
+    return TurnCompletion(
+        turn_id,
+        status,
+        error,
+        summary_message(turn, thread_id, turn_id) if status == "completed" else None,
+    )
 
 
 def reject_premature_completion(notification: Notification) -> None:
@@ -96,8 +135,15 @@ async def observe_app_server_turn(
     on_waiting: Callable[[], None] | None = None,
     on_started: Callable[[str], None] | None = None,
     stop: asyncio.Event | None = None,
+    output_schema: dict[str, object] | None = None,
 ) -> TurnCompletion:
     identifier(thread_id, TurnFailure.INVALID_START)
+    params: dict[str, object] = {
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": prompt}],
+    }
+    if output_schema is not None:
+        params["outputSchema"] = rpc.snapshot_object(output_schema)
     completion: TurnCompletion | None = None
     turn_id: str | None = None
 
@@ -121,7 +167,7 @@ async def observe_app_server_turn(
     turn_id = started_turn_id(
         await rpc.call(
             "turn/start",
-            {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]},
+            params,
             deadline=deadline,
             observe=observe_pending,
             observe_before_send=observe_buffered,
