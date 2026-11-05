@@ -16,6 +16,12 @@ from kora.plugins.harness.codex.app_server_messages import (
     reject_premature_message,
 )
 from kora.plugins.harness.codex.app_server_rpc import AppServerRpc, Notification
+from kora.plugins.harness.codex.app_server_tools import (
+    ToolCounts,
+    ToolObservation,
+    TurnTools,
+    reject_premature_tool,
+)
 from kora.plugins.harness.codex.app_server_turn import (
     MAX_FINAL_MESSAGE_BYTES,
     TerminalStatus,
@@ -51,10 +57,12 @@ class TurnObservations:
     terminal_status: TerminalStatus | None = None
     final_message: CompletedMessage | None = None
     terminal_error: NativeErrorInfo | None = None
+    tool_counts: ToolCounts = ToolCounts()
+    latest_tool: ToolObservation | None = None
 
 
 class AppServerTurnSession:
-    def __init__(self, thread_id: str, *, max_messages: int) -> None:
+    def __init__(self, thread_id: str, *, max_messages: int, max_tools: int) -> None:
         self._thread_id = thread_id
         self._messages = TurnMessages(
             thread_id,
@@ -63,6 +71,7 @@ class AppServerTurnSession:
         )
         self._usage = TurnUsage(thread_id)
         self._errors = TurnErrors(thread_id)
+        self._tools = TurnTools(thread_id, max_tools=max_tools)
         self._used = False
         self._snapshot = TurnObservations()
 
@@ -75,6 +84,7 @@ class AppServerTurnSession:
         usage = self._usage.for_turn(turn_id)
         message = self._messages.for_turn(turn_id)
         error = self._errors.for_turn(turn_id)
+        tool = self._tools.for_turn(turn_id)
         terminal_error = (
             decode_error_info(completion.error)
             if completion is not None and completion.error is not None
@@ -90,6 +100,8 @@ class AppServerTurnSession:
             terminal_status=completion.status if completion is not None else None,
             final_message=completion.final_message if completion is not None else None,
             terminal_error=terminal_error,
+            tool_counts=self._tools.counts,
+            latest_tool=tool,
         )
 
     async def run(
@@ -114,6 +126,7 @@ class AppServerTurnSession:
                 self._usage.accept(usage)
             self._messages.accept(notification)
             self._errors.accept(notification)
+            self._tools.accept(notification)
             turn_id = self._snapshot.turn_id
             if turn_id is not None:
                 self._snapshot = self._confirmed(turn_id)
@@ -123,6 +136,7 @@ class AppServerTurnSession:
             reject_premature_usage(notification)
             reject_premature_message(notification)
             reject_premature_error(notification)
+            reject_premature_tool(notification)
             return observe(notification) if observe is not None else None
 
         def started(turn_id: str) -> None:

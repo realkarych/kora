@@ -91,7 +91,7 @@ run_variant() {
     shift
     image=$(
         tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py \
-            -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_session.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py |
+            -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_session.py app_server_tools.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
     )
     case "$image" in

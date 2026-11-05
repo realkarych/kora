@@ -86,7 +86,7 @@ async def test_combined_state_is_published_only_after_matching_acknowledgement(
     order: str,
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         raw_states: list[TurnObservations] = []
         started_states: list[TurnObservations] = []
         observations = (
@@ -152,7 +152,7 @@ async def test_provisional_cross_stream_turn_mismatch_never_publishes_state(
     kind: str,
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         seen: list[Notification] = []
         mismatch = {
             "usage": encoded(usage_notice(FIRST, turn_id="wrong-turn")),
@@ -193,7 +193,7 @@ async def test_later_identity_refusal_keeps_the_previous_confirmed_snapshot(
     kind: str, wrong_thread: bool
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         observed = asyncio.Event()
         states: list[TurnObservations] = []
         field = "thread" if wrong_thread else "turn"
@@ -256,7 +256,7 @@ async def test_presend_observations_refuse_without_callbacks_or_turn_bytes(
     kind: str,
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         seen: list[Notification] = []
         notices = {
             "usage": usage_frame(),
@@ -301,7 +301,7 @@ async def test_presend_observations_refuse_without_callbacks_or_turn_bytes(
 @pytest.mark.asyncio
 async def test_usage_regression_is_sticky_without_replacing_confirmed_counts() -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         operation = connection.start(
             session.run(connection.rpc, prompt=PROMPT, deadline=future_deadline())
         )
@@ -333,7 +333,7 @@ async def test_terminal_error_retains_only_closed_details_and_no_output(
     status: TerminalStatus,
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=1)
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=16)
         operation = connection.start(
             session.run(connection.rpc, prompt=PROMPT, deadline=future_deadline())
         )
@@ -367,7 +367,7 @@ async def test_failure_preserves_confirmed_partial_state_and_settles_tasks(
     clock.value = asyncio.get_running_loop().time()
     deadline = clock.value + 100.0
     async with wire(clock=clock.now) as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         observed = asyncio.Event()
         notices: list[str] = []
         stop = asyncio.Event() if controlled else None
@@ -451,7 +451,7 @@ async def test_stop_races_preserve_actual_terminal_and_combined_usage(
     terminal_first: bool, status: TerminalStatus
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=1)
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=16)
         stop = asyncio.Event()
         observed = asyncio.Event()
         operation = connection.start(
@@ -490,7 +490,7 @@ async def test_malformed_input_cannot_replace_confirmed_state_or_reach_callback(
     kind: str,
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         observed = asyncio.Event()
         seen: list[Notification] = []
 
@@ -540,7 +540,7 @@ async def test_malformed_input_cannot_replace_confirmed_state_or_reach_callback(
 @pytest.mark.asyncio
 async def test_terminal_summary_selects_output_without_a_completed_item() -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=1)
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=16)
         operation = connection.start(
             session.run(connection.rpc, prompt=PROMPT, deadline=future_deadline())
         )
@@ -567,7 +567,7 @@ async def test_failed_presend_schema_is_one_shot_and_does_not_close_borrowed_rpc
     None
 ):
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=1)
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=16)
         schema: dict[str, object] = {"invalid": object()}
 
         with pytest.raises(RpcError) as failed:
@@ -591,7 +591,7 @@ async def test_failed_presend_schema_is_one_shot_and_does_not_close_borrowed_rpc
 @pytest.mark.asyncio
 async def test_item_text_overflow_keeps_the_previous_message_snapshot() -> None:
     async with wire(frame_budget=2_097_152) as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         observed = asyncio.Event()
         operation = connection.start(
             session.run(
@@ -624,7 +624,7 @@ async def test_one_shot_refusal_does_not_write_or_disrupt_the_first_operation(
     concurrent: bool,
 ) -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=1)
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=16)
         operation = connection.start(
             session.run(connection.rpc, prompt=PROMPT, deadline=future_deadline())
         )
@@ -653,7 +653,7 @@ async def test_one_shot_refusal_does_not_write_or_disrupt_the_first_operation(
 @pytest.mark.asyncio
 async def test_replaced_messages_release_and_count_overflow_preserves_state() -> None:
     async with wire() as connection:
-        session = AppServerTurnSession(THREAD, max_messages=2)
+        session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         observed = asyncio.Event()
         operation = connection.start(
             session.run(

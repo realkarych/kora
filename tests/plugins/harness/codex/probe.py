@@ -41,6 +41,7 @@ from kora.plugins.harness.codex.app_server_startup import (
     StartupIdentity,
     initialize_app_server,
 )
+from kora.plugins.harness.codex.app_server_tools import ToolRefused
 from kora.plugins.harness.codex.app_server_turn import (
     TurnCompletion,
     TurnError,
@@ -816,6 +817,90 @@ class ResponsesFixture:
         await server.wait_closed()
 
 
+class ToolProbe:
+    def __init__(self, case: ProbeCase) -> None:
+        self.case = case
+        self.events: list[tuple[str, str, str, str | None, int | None]] = []
+
+    def observe(self, notification: Notification) -> None:
+        if notification.method not in ("item/started", "item/completed"):
+            return
+        item = as_object(as_object(notification.params).get("item"))
+        kind = item.get("type")
+        if not isinstance(kind, str) or kind not in ("commandExecution", "fileChange"):
+            return
+        require(item.get("id") == CALL_ID, "tool_item_hook_identity_mismatch")
+        status = item.get("status")
+        require(
+            status in ("inProgress", "completed", "failed", "declined"),
+            "tool_native_status_unknown",
+        )
+        source = item.get("source") if kind == "commandExecution" else None
+        require(
+            source
+            in (
+                None,
+                "agent",
+                "userShell",
+                "unifiedExecStartup",
+                "unifiedExecInteraction",
+            ),
+            "tool_native_source_unknown",
+        )
+        code = item.get("exitCode") if kind == "commandExecution" else None
+        require(code is None or type(code) is int, "tool_native_exit_invalid")
+        phase = "started" if notification.method == "item/started" else "completed"
+        event = (
+            kind,
+            phase,
+            cast("str", status),
+            cast("str | None", source),
+            cast("int | None", code),
+        )
+        require(len(self.events) < 2, "tool_native_lifecycle_overflow")
+        self.events.append(event)
+        diagnostic(
+            "INFO",
+            "probe.tool_lifecycle_observed",
+            ":".join(str(value) if value is not None else "unknown" for value in event),
+        )
+
+    def verify(self, session: AppServerTurnSession) -> None:
+        state = session.snapshot()
+        starts = sum(event[1] == "started" for event in self.events)
+        completions = sum(event[1] == "completed" for event in self.events)
+        require(
+            state.tool_counts.items == bool(self.events)
+            and state.tool_counts.started == starts
+            and state.tool_counts.completed == completions
+            and state.tool_counts.open == max(starts - completions, 0)
+            and state.tool_counts.completion_without_start
+            == max(completions - starts, 0),
+            "tool_session_counts_mismatch",
+        )
+        latest = state.latest_tool
+        if self.events:
+            if latest is None:
+                raise ProbeFailure("tool_session_observation_missing")
+            require(
+                latest.item_id == CALL_ID
+                and (
+                    latest.kind,
+                    latest.phase,
+                    latest.status,
+                    latest.source,
+                    latest.exit_code,
+                )
+                == self.events[-1],
+                "tool_session_observation_mismatch",
+            )
+        else:
+            require(latest is None, "tool_session_observation_invented")
+        diagnostic(
+            "INFO", "probe.tool_lifecycle_verified", f"{self.case}:{len(self.events)}"
+        )
+
+
 class OutputProbe:
     def __init__(self, thread_id: str, case: ProbeCase) -> None:
         self.thread_id = thread_id
@@ -1113,6 +1198,11 @@ class Stdio:
         self.messages = messages
         outputs = OutputProbe(thread_id, case) if case in OUTPUT_CASES else None
         self.outputs = outputs
+        tools = (
+            ToolProbe(case)
+            if case in HOOK_INPUT_CASES or case in ("allow", "deny")
+            else None
+        )
 
         def observe(notification: Notification) -> None:
             if usage is not None:
@@ -1123,6 +1213,8 @@ class Stdio:
                 messages.observe(notification)
             if outputs is not None:
                 outputs.observe(notification)
+            if tools is not None:
+                tools.observe(notification)
 
         def observe_before_send(notification: Notification) -> None:
             if usage is not None:
@@ -1140,8 +1232,12 @@ class Stdio:
             if outputs is not None:
                 outputs.started(turn_id)
 
-        if any(value is not None for value in (usage, errors, messages, outputs)):
-            self.session = AppServerTurnSession(thread_id, max_messages=16)
+        if any(
+            value is not None for value in (usage, errors, messages, outputs, tools)
+        ):
+            self.session = AppServerTurnSession(
+                thread_id, max_messages=16, max_tools=16
+            )
             self.terminal = await self.session.run(
                 self.rpc,
                 prompt=prompt,
@@ -1179,6 +1275,8 @@ class Stdio:
                     "session_messages_mismatch",
                 )
             diagnostic("INFO", "probe.session_terminal_verified", case)
+            if tools is not None:
+                tools.verify(self.session)
         else:
             self.terminal = await observe_app_server_turn(
                 self.rpc,
@@ -1263,7 +1361,9 @@ class Stdio:
             listener.setblocking(False)
             listener.bind(str(CONTROL / "interrupt.sock"))
             listener.listen(1)
-            self.session = AppServerTurnSession(thread_id, max_messages=16)
+            self.session = AppServerTurnSession(
+                thread_id, max_messages=16, max_tools=16
+            )
             observation = asyncio.create_task(
                 self.session.run(
                     self.rpc,
@@ -2099,7 +2199,8 @@ def report_connection_failure(
     | TurnError
     | UsageError
     | NativeErrorRefused
-    | MessageRefused,
+    | MessageRefused
+    | ToolRefused,
 ) -> int:
     diagnostic("ERROR", "probe.case_failed", error.reason.value)
     return 1
@@ -2118,6 +2219,7 @@ def main() -> int:
         UsageError,
         NativeErrorRefused,
         MessageRefused,
+        ToolRefused,
     ) as error:
         return report_connection_failure(error)
     except TimeoutError:
