@@ -7,6 +7,7 @@ from kora.ir.structured_json import (
     StructuredOutputValidationError,
     decode_json,
 )
+from kora.plugins.harness.codex.app_server_messages import CompletedMessage
 from kora.plugins.harness.codex.app_server_turn import TurnCompletion
 from kora.protocols.harness import OutputCandidate
 
@@ -29,7 +30,15 @@ def output_candidate(
     message = completion.final_message
     if completion.status != "completed" or message is None:
         return None
-    if message.thread_id != thread_id or message.turn_id != completion.turn_id:
+    return final_message_candidate(
+        message, thread_id=thread_id, turn_id=completion.turn_id
+    )
+
+
+def final_message_candidate(
+    message: CompletedMessage, *, thread_id: str, turn_id: str
+) -> OutputCandidate:
+    if message.thread_id != thread_id or message.turn_id != turn_id:
         raise OutputRefused(OutputFailure.IDENTITY_MISMATCH)
     if len(message.text) > MAX_JSON_BYTES:
         raise OutputRefused(OutputFailure.TEXT_LIMIT)
