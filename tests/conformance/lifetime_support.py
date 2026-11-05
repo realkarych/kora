@@ -26,7 +26,6 @@ from kora.protocols.lifetime import (
     CleanupReference,
     ClosureReport,
     LifetimeLimits,
-    ProcessRegistration,
 )
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import (
@@ -446,12 +445,6 @@ def journal_file(home: Path, invocation_id: str) -> Path:
 def retained_journal(home: Path, invocation_id: str) -> tuple[Path, JournalSnapshot]:
     path = journal_file(home, invocation_id)
     return path, JournalSnapshot.model_validate_json(path.read_bytes())
-
-
-def independent_process(journal: JournalSnapshot, clock: Clock) -> RecoveredProcess:
-    registration = journal.entries[-1].registration
-    assert isinstance(registration, ProcessRegistration)
-    return RecoveredProcess(registration, clock, NativeIdentityReader())
 
 
 async def kill_independent(

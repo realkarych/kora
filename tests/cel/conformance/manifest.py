@@ -1,6 +1,5 @@
 from typing import Final
 
-SOURCE: Final[str] = "https://github.com/google/cel-spec"
 COMMIT: Final[str] = "40a3c9007a9305d1f2638d5f538a4e011732cace"
 LICENSE_SHA256: Final[str] = (
     "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"

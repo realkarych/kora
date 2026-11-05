@@ -18,7 +18,6 @@ from tests.support.workflows import (
 
 MEASUREMENT = "tests/measurements/test_ir_models_cost.py"
 RUN = f"{MEASUREMENT}::test_ir_configuration_repeated_lifetime"
-SCHEMA_RUN = f"{MEASUREMENT}::test_ir_schema_repeated_lifetime"
 NEEDED_JOBS = {
     "scaffold-evidence": "SCAFFOLD",
     "ir-measurements": "IR_MATRIX",
