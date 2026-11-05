@@ -12,7 +12,7 @@ from tests.plugins.storage.pressure_models import PressureFailure, PressureRepor
 def preserve_owner(manifest: Path, output: Path, prefix: str) -> None:
     record = read_manifest(manifest)
     (output / f"{prefix}.manifest.json").write_text(
-        record.model_dump_json(), encoding="utf-8"
+        record.encoded().decode(), encoding="utf-8"
     )
     child = manifest.parent / "child-report.json"
     if child.exists():

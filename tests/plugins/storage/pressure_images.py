@@ -208,8 +208,8 @@ def linux_attachment(directory: Path, stamp: ImageStamp) -> Attachment | None:
     return Attachment(loop, loop, mounted)
 
 
-def darwin_attachment(directory: Path) -> Attachment | None:
-    raw: object = plistlib.loads(command(("/usr/bin/hdiutil", "info", "-plist")))
+def darwin_attachment(directory: Path, effect: Effect = command) -> Attachment | None:
+    raw: object = plistlib.loads(effect(("/usr/bin/hdiutil", "info", "-plist")))
     inventory = DiskImages.model_validate(raw)
     image = str(directory / image_name())
     selected = tuple(
@@ -255,10 +255,12 @@ def darwin_attachment(directory: Path) -> Attachment | None:
     return Attachment(roots[0], volume, bool(volumes), entities)
 
 
-def discover(directory: Path, stamp: ImageStamp) -> Attachment | None:
+def discover(
+    directory: Path, stamp: ImageStamp, effect: Effect = command
+) -> Attachment | None:
     inspect_image(directory / image_name(), stamp)
     return (
-        darwin_attachment(directory)
+        darwin_attachment(directory, effect)
         if sys.platform == "darwin"
         else linux_attachment(directory, stamp)
     )
@@ -362,8 +364,9 @@ def detach(
     effect: Effect,
     observe: Observe,
     owner_device: int,
+    native_release: Callable[[Attachment], None] | None = None,
 ) -> None:
-    owned = discover(directory, stamp)
+    owned = discover(directory, stamp, effect)
     if owned is None:
         return
     if sys.platform == "darwin":
@@ -371,12 +374,15 @@ def detach(
             directory / "mounted", owned.volume, owned.entities, owner_device
         )
         try:
-            effect(("/usr/sbin/diskutil", "eject", owned.device))
+            if native_release is None:
+                raise PressureFailure("native_owner_missing")
+            native_release(owned)
         except PressureFailure as failure:
             if failure.code != "command_failed":
                 raise
             failure.add_note(observe(binding))
             raise
+        return
     else:
         if owned.mounted:
             effect(

@@ -92,12 +92,14 @@ def wait_closed(token: ProcessToken, seconds: float) -> None:
 def collect_process(
     process: subprocess.Popen[bytes],
     seconds: float,
+    *,
+    deadline: float | None = None,
 ) -> tuple[bytes, bytes, int]:
     output = bytearray()
     error_output = bytearray()
     if process.stdout is None or process.stderr is None:
         raise PressureFailure("command_pipe_missing")
-    deadline = time.monotonic() + seconds
+    deadline = time.monotonic() + seconds if deadline is None else deadline
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ, output)
@@ -117,12 +119,17 @@ def collect_process(
                     if len(output) + len(error_output) + len(chunk) > 1048576:
                         raise PressureFailure("command_output_limit")
                     target.extend(chunk)
-        status = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        status = process.wait(timeout=max(0, deadline - time.monotonic()))
         return bytes(output), bytes(error_output), status
+    except subprocess.TimeoutExpired:
+        raise PressureFailure("command_deadline") from None
     finally:
         if process.poll() is None:
             process.kill()
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=max(0, deadline + 5 - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise PressureFailure("command_closure_unresolved") from None
 
 
 def native_command_label(arguments: tuple[str, ...]) -> NativeCommandLabel:
@@ -153,11 +160,23 @@ def command(
     on_closed: Callable[[], None] | None = None,
     on_started: Callable[[ProcessToken], None] | None = None,
     on_finished: Callable[[int], None] | None = None,
+    activation: bytes | None = None,
+    private_output: bool = False,
+    deadline: float | None = None,
 ) -> bytes:
+    if activation is not None and len(activation) != 32:
+        raise PressureFailure("command_activation_invalid")
+    active_deadline = time.monotonic() + seconds if deadline is None else deadline
+    settlement_deadline = active_deadline + 5
+    activation_failed = False
+    if time.monotonic() >= active_deadline:
+        if on_closed is not None:
+            on_closed()
+        raise PressureFailure("command_deadline")
     try:
         process = subprocess.Popen(
             arguments,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if activation is None else subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -171,13 +190,33 @@ def command(
             if token is None:
                 raise PressureFailure("command_identity_unavailable")
             on_started(token)
-        output, error_output, status = collect_process(process, seconds)
+        if time.monotonic() >= active_deadline:
+            raise PressureFailure("command_deadline")
+        if activation is not None:
+            if process.stdin is None:
+                raise PressureFailure("command_activation_missing")
+            try:
+                process.stdin.write(activation)
+                process.stdin.close()
+            except BrokenPipeError:
+                activation_failed = True
+        output, error_output, status = collect_process(
+            process, seconds, deadline=active_deadline
+        )
     finally:
         try:
             if process.poll() is None:
                 process.kill()
-            process.wait()
+            try:
+                process.wait(timeout=max(0, settlement_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                raise PressureFailure("command_closure_unresolved") from None
         finally:
+            if process.stdin is not None and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    activation_failed = True
             if process.stdout is not None:
                 process.stdout.close()
             if process.stderr is not None:
@@ -189,17 +228,19 @@ def command(
             command_stdout=output,
             command_label=native_command_label(arguments),
             command_status=status,
+            private_output=private_output,
         )
     if on_finished is not None:
         on_finished(status)
     if on_closed is not None:
         on_closed()
-    if status != 0:
+    if status != 0 or activation_failed:
         raise PressureFailure(
             "command_failed",
             command_stderr=error_output,
             command_stdout=output,
             command_label=native_command_label(arguments),
             command_status=status,
+            private_output=private_output,
         )
     return output

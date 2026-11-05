@@ -14,6 +14,8 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self
 
+from pydantic import ValidationError
+
 from kora.plugins.storage.files import DIRECTORY_FLAGS, FileLease, trusted_directory
 from tests.plugins.storage import pressure_images
 from tests.plugins.storage.pressure_holders import (
@@ -23,6 +25,8 @@ from tests.plugins.storage.pressure_holders import (
 )
 from tests.plugins.storage.pressure_models import (
     ImageStamp,
+    NativePhase,
+    NativeRequest,
     PressureFailure,
     PressureManifest,
     PressureReport,
@@ -33,6 +37,11 @@ from tests.plugins.storage.pressure_native import (
     command,
     process_token,
     wait_closed,
+)
+from tests.plugins.storage.pressure_native_records import (
+    NATIVE_FILES,
+    native_note,
+    read_outcome,
 )
 from tests.plugins.storage.pressure_workload import PressureStart
 
@@ -157,7 +166,15 @@ def read_manifest(path: Path) -> PressureManifest:
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
         encoded = stream.read(16385)
-    manifest = PressureManifest.model_validate_json(encoded)
+    try:
+        manifest = PressureManifest.model_validate_json(encoded)
+    except ValidationError:
+        raise PressureFailure("manifest_invalid") from None
+    if manifest.version == 1 and any(
+        (path.parent / name).exists() or (path.parent / name).is_symlink()
+        for name in NATIVE_FILES
+    ):
+        raise PressureFailure("legacy_native_state")
     directory = path.parent
     actual = directory.lstat()
     if (
@@ -198,6 +215,8 @@ class PressureController:
         self.cleaning = False
         self.pause_response = False
         self.hold_pending = False
+        self.native_starting: bool = False
+        self.native_deadline: float | None = None
 
     def __enter__(self) -> Self:
         return self
@@ -257,11 +276,19 @@ class PressureController:
         self.validate_directory()
         save(
             self.directory / "pressure-manifest.json",
-            self.manifest.model_dump_json().encode(),
+            self.manifest.encoded(),
             hold_pending=self.hold_pending,
         )
 
-    def effect(self, arguments: tuple[str, ...]) -> bytes:
+    def effect(
+        self,
+        arguments: tuple[str, ...],
+        *,
+        seconds: float = 30,
+        activation: bytes | None = None,
+        private_output: bool = False,
+        deadline: float | None = None,
+    ) -> bytes:
         self.validate_directory()
         self.check_parent()
         self.manifest = self.manifest.model_copy(
@@ -275,26 +302,47 @@ class PressureController:
         try:
             return command(
                 arguments,
+                seconds,
+                activation=activation,
+                private_output=private_output,
+                deadline=deadline,
                 on_closed=self.command_closed,
                 on_started=self.command_started,
                 on_finished=self.command_finished,
             )
         except PressureFailure as error:
             self.report = self.report.model_copy(update={"failure": error.code})
+            prefix = "native-command" if private_output else "command"
             try:
                 if error.command_stderr is not None:
-                    save(self.directory / "command-stderr.txt", error.command_stderr)
+                    save(
+                        self.directory / (prefix + "-stderr.txt"), error.command_stderr
+                    )
                 if error.command_stdout is not None:
-                    save(self.directory / "command-stdout.txt", error.command_stdout)
+                    save(
+                        self.directory / (prefix + "-stdout.txt"), error.command_stdout
+                    )
             except (OSError, PressureFailure) as persistence:
                 raise BaseExceptionGroup(
                     "native command and diagnostic persistence failed",
-                    [error, persistence],
+                    [
+                        error,
+                        PressureFailure("native_diagnostic_persistence")
+                        if private_output
+                        else persistence,
+                    ],
                 ) from None
             raise
 
     def command_started(self, token: ProcessToken) -> None:
         self.manifest = self.manifest.model_copy(update={"command": token})
+        if self.native_starting:
+            request = self.manifest.native
+            if request is None or request.helper is not None:
+                raise PressureFailure("native_registration_invalid")
+            self.manifest = self.manifest.model_copy(
+                update={"native": request.model_copy(update={"helper": token})}
+            )
         self.persist()
 
     def command_finished(self, status: int) -> None:
@@ -309,6 +357,131 @@ class PressureController:
                 raise PressureFailure("controller_control_closed")
         self.manifest = self.manifest.model_copy(update={"command_inflight": False})
         self.persist()
+
+    def native_seconds(self) -> float:
+        if self.native_deadline is None:
+            return 30
+        remaining = self.native_deadline - time.monotonic() - 5
+        if remaining <= 0:
+            raise PressureFailure("native_release_deadline")
+        return remaining
+
+    def native_inventory(self, arguments: tuple[str, ...]) -> bytes:
+        return self.effect(
+            arguments,
+            seconds=self.native_seconds(),
+            deadline=None if self.native_deadline is None else self.native_deadline - 5,
+        )
+
+    def settle_native(self) -> None:
+        request = self.manifest.native
+        if request is None:
+            if any(
+                (self.directory / name).exists() or (self.directory / name).is_symlink()
+                for name in NATIVE_FILES
+            ):
+                raise PressureFailure("native_record_unbound")
+            return
+        try:
+            if request.helper is None:
+                raise PressureFailure("native_completion_unknown")
+            if (
+                request.controller != self.manifest.controller
+                and process_token(request.controller.pid) == request.controller
+            ):
+                raise PressureFailure("native_controller_active")
+            wait_closed(request.helper, self.native_seconds())
+            outcome = request.outcome or read_outcome(self.directory, request)
+            self.manifest = self.manifest.model_copy(
+                update={"native": request.model_copy(update={"outcome": outcome})}
+            )
+            if self.manifest.command == request.helper:
+                self.manifest = self.manifest.model_copy(
+                    update={"command_inflight": False}
+                )
+            self.persist()
+        except PressureFailure as failure:
+            failure.add_note(native_note(request))
+            raise
+
+    def native_phase(
+        self, phase: NativePhase, owned: pressure_images.Attachment
+    ) -> None:
+        stamp = self.manifest.image_stamp
+        if stamp is None or self.native_deadline is None:
+            raise PressureFailure("native_image_missing")
+        request = NativeRequest(
+            version=1,
+            request_id=uuid.uuid4().hex,
+            nonce=self.manifest.nonce,
+            controller=self.manifest.controller,
+            image_stamp=stamp,
+            phase=phase,
+            device=owned.device,
+            volume=owned.volume,
+            entities=owned.entities,
+            deadline=self.native_deadline - 5,
+            helper=None,
+            outcome=None,
+        )
+        self.manifest = self.manifest.model_copy(
+            update={"version": 2, "native": request}
+        )
+        self.persist()
+        self.native_starting = True
+        try:
+            self.effect(
+                (
+                    sys.executable,
+                    "-m",
+                    "tests.plugins.storage.pressure_disk_arbitration",
+                    str(self.directory),
+                ),
+                seconds=self.native_seconds(),
+                activation=request.request_id.encode(),
+                private_output=True,
+                deadline=request.deadline,
+            )
+        finally:
+            self.native_starting = False
+            self.settle_native()
+        settled = self.manifest.native
+        if settled is None or settled.outcome is None:
+            raise PressureFailure("native_completion_unknown")
+        if settled.outcome.result != "success":
+            failure = PressureFailure("command_failed", command_label="native")
+            failure.add_note(native_note(settled))
+            raise failure
+
+    def release_native(self, expected: pressure_images.Attachment) -> None:
+        if sys.platform != "darwin" or self.native_deadline is None:
+            raise PressureFailure("native_platform")
+        self.settle_native()
+        stamp = self.manifest.image_stamp
+        if stamp is None:
+            raise PressureFailure("native_image_missing")
+        owned = pressure_images.discover(self.directory, stamp, self.native_inventory)
+        if owned != expected or owned is None:
+            raise PressureFailure("attachment_identity")
+        if owned.mounted:
+            self.native_phase("unmount", owned)
+            checked = pressure_images.discover(
+                self.directory, stamp, self.native_inventory
+            )
+            if (
+                checked is None
+                or checked.device != owned.device
+                or checked.entities != owned.entities
+                or checked.mounted
+            ):
+                raise PressureFailure("attachment_identity")
+            owned = checked
+        self.native_phase("eject", owned)
+        if (
+            pressure_images.discover(self.directory, stamp, self.native_inventory)
+            is not None
+        ):
+            raise PressureFailure("attachment_still_present")
 
     def start_child(self) -> None:
         parent, child = multiprocessing.get_context("spawn").Pipe(duplex=True)
@@ -388,13 +561,13 @@ class PressureController:
                 self.persist()
             finally:
                 self.hold_pending = False
-        attachment = pressure_images.discover(self.directory, stamp)
+        attachment = pressure_images.discover(self.directory, stamp, self.effect)
         if attachment is None:
             raise PressureFailure("attachment_missing")
         self.manifest = self.manifest.model_copy(update={"mount_requested": True})
         self.persist()
         pressure_images.mount(self.directory, attachment, self.effect)
-        mounted = pressure_images.discover(self.directory, stamp)
+        mounted = pressure_images.discover(self.directory, stamp, self.effect)
         if mounted is None:
             raise PressureFailure("mount_missing")
         self.validate_directory()
@@ -490,6 +663,7 @@ class PressureController:
         self.cleaning = True
         self.validate_directory()
         self.close_child()
+        self.settle_native()
         if self.manifest.command_inflight:
             if (
                 self.manifest.command is None
@@ -508,13 +682,21 @@ class PressureController:
                 self.manifest = self.manifest.model_copy(update={"image_stamp": stamp})
                 self.persist()
                 if self.manifest.attachment_requested:
-                    pressure_images.detach(
-                        self.directory,
-                        stamp,
-                        self.effect,
-                        self.observe_holders,
-                        self.manifest.directory_stamp.device,
-                    )
+                    if sys.platform == "darwin":
+                        self.native_deadline = time.monotonic() + 30
+                    try:
+                        pressure_images.detach(
+                            self.directory,
+                            stamp,
+                            self.native_inventory
+                            if sys.platform == "darwin"
+                            else self.effect,
+                            self.observe_holders,
+                            self.manifest.directory_stamp.device,
+                            self.release_native,
+                        )
+                    finally:
+                        self.native_deadline = None
             elif self.manifest.attachment_requested:
                 raise PressureFailure("attachment_unresolved")
             self.manifest = self.manifest.model_copy(update={"detached": True})
@@ -577,7 +759,8 @@ def create(
             raise PressureFailure("controller_identity")
         manifest = PressureManifest.model_validate(
             {
-                "version": 1,
+                "version": 2 if sys.platform == "darwin" else 1,
+                "native": None,
                 "platform": sys.platform,
                 "uid": os.geteuid(),
                 "directory": str(canonical),

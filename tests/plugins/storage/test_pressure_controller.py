@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import plistlib
 import re
@@ -369,7 +370,7 @@ def test_pressure_owner_recovers_legacy_source_directory(tmp_path: Path) -> None
     finally:
         close_controller(process, directory)
 
-    assert manifest.version == 1
+    assert manifest.version == (2 if sys.platform == "darwin" else 1)
     assert mounted.st_uid == os.geteuid()
     if sys.platform == "darwin":
         assert mounted.st_mode & 0o777 == 0o700
@@ -462,6 +463,8 @@ def test_pressure_owner_refuses_symlinked_acquisition_ancestor(tmp_path: Path) -
 
 
 def test_local_storage_enospc_recovers(tmp_path: Path) -> None:
+    from tests.plugins.storage.pressure_controller import read_manifest
+
     directory = tmp_path / "pressure"
 
     result, report = run_controller(directory, "enospc")
@@ -482,6 +485,19 @@ def test_local_storage_enospc_recovers(tmp_path: Path) -> None:
     assert report.unknown_state_charged
     assert report.cleanup_completed
     assert report.resources_closed
+    manifest = read_manifest(directory / "pressure-manifest.json")
+    if sys.platform == "darwin":
+        request = manifest.native
+        assert request is not None
+        assert request.phase == "eject"
+        assert request.outcome is not None
+        assert request.outcome.result == "success"
+        assert request.outcome.code == 0
+        assert request.outcome.cf_closed
+        assert process_token(request.outcome.helper.pid) != request.outcome.helper
+    else:
+        assert manifest.version == 1
+        assert manifest.native is None
     assert not (
         directory / ("filesystem.dmg" if sys.platform == "darwin" else "filesystem.img")
     ).exists()
@@ -608,12 +624,32 @@ def test_failed_unmount_retains_ownership_until_the_blocker_closes(
                 mounted = os.path.ismount(controller.directory / "mounted")
                 assert failure.value.code == "command_failed"
                 if sys.platform == "darwin":
-                    assert str(failure.value).startswith(
-                        "command_failed: command=diskutil eject exit="
+                    assert str(failure.value) == "command_failed: command=native"
+                    request = controller.manifest.native
+                    assert request is not None
+                    assert request.outcome is not None
+                    assert request.phase == "unmount"
+                    assert request.outcome.result == "refused"
+                    assert request.outcome.code is not None
+                    assert request.outcome.cf_closed
+                    assert not controller.manifest.command_inflight
+                    assert controller.manifest.command_exit_status == 0
+                    assert (
+                        process_token(request.outcome.helper.pid)
+                        != request.outcome.helper
                     )
                     notes = failure.value.__notes__
-                    assert len(notes) == 1
-                    note = notes[0]
+                    assert len(notes) == 2
+                    native = json.loads(notes[0])
+                    assert native == {
+                        "native_summary_version": 1,
+                        "phase": "unmount",
+                        "result": "refused",
+                        "recorded_completion_known": True,
+                        "recorded_cf_closed": True,
+                        "code": request.outcome.code,
+                    }
+                    note = notes[1]
                     assert note.startswith("holder_observation v1 binding=unchanged"), (
                         note
                     )
@@ -698,25 +734,14 @@ def test_failed_unmount_retains_ownership_until_the_blocker_closes(
                         character == "\n" or 32 <= ord(character) <= 126
                         for character in note
                     )
-                    status = re.search(r" exit=([0-9]+) ", str(failure.value))
-                    assert status is not None
-                    assert controller.manifest.command_exit_status == int(status[1])
-                    assert (
-                        controller.directory / "command-stderr.txt"
-                    ).read_bytes() == failure.value.command_stderr
+                    assert failure.value.command_stderr is None
+                    assert not (controller.directory / "command-stderr.txt").exists()
                     timing = next(
                         line
                         for line in note.splitlines()
                         if line.startswith("elapsed_ms ")
                     )
-                    stderr = failure.value.command_stderr or b""
-                    phase = (
-                        "unmount"
-                        if b"couldn't unmount" in stderr
-                        else "eject"
-                        if b"couldn't eject" in stderr
-                        else "other"
-                    )
+                    phase = request.phase
                     record_testsuite_property("pressure_holder_observation_ms", timing)
                     record_testsuite_property("pressure_busy_detach_phase", phase)
                 else:

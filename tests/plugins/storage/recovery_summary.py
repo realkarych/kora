@@ -42,8 +42,10 @@ def explicit_version(value: object) -> Literal[1]:
 class RecordedManifest(PressureManifest):
     @field_validator("version", mode="before")
     @classmethod
-    def validate_version(cls, value: object) -> Literal[1]:
-        return explicit_version(value)
+    def validate_version(cls, value: object) -> Literal[1, 2]:
+        if type(value) is not int or value not in (1, 2):
+            raise ValueError("invalid record version")
+        return 1 if value == 1 else 2
 
 
 class RecordedReport(PressureReport):
