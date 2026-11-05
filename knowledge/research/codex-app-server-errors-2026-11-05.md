@@ -25,10 +25,11 @@ code text/payloads are not retained by the typed projection.
 Missing/null code and an unrecognized future code have separate values. Known
 codes in the wrong representation and malformed recognized payloads refuse with
 fixed exceptions. Unknown future single-tag object payloads are discarded. The
-single-turn reducer holds one latest immutable observation, checks its selected
-thread and provisional turn before replacement, and checks the eventually
-acknowledged turn before returning evidence. It creates no history, queue, task
-or timer. An internal-retry observation alone establishes no terminal outcome.
+single-turn reducer holds one latest immutable observation and checks its selected
+thread and provisional turn before replacement. `accept()` returns provisional
+observations immediately; `for_turn()` checks the eventually acknowledged turn
+before returning selected evidence. It creates no history, queue, task or timer.
+An internal-retry observation alone establishes no terminal outcome.
 
 The existing RPC owner supplies frame, depth, message and deadline admission.
 Pre-send refusal covers notifications in its already-read lookahead, including a
