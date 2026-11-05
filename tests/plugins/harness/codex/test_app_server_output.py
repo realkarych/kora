@@ -138,6 +138,24 @@ def test_produced_null_is_present_and_candidate_values_are_detached() -> None:
         "[" * 17 + "0" + "]" * 17,
         "1" * 4216,
     ],
+    ids=[
+        "empty",
+        "whitespace",
+        "fenced",
+        "prefixed",
+        "multiple-roots",
+        "duplicate-literal",
+        "duplicate-escaped",
+        "nan",
+        "positive-infinity",
+        "negative-infinity",
+        "overflow",
+        "escaped-surrogate",
+        "raw-surrogate",
+        "bom",
+        "depth",
+        "integer-bits",
+    ],
 )
 def test_invalid_result_text_never_falls_back_or_exposes_content(text: str) -> None:
     source = completion(text)
@@ -151,7 +169,9 @@ def test_invalid_result_text_never_falls_back_or_exposes_content(text: str) -> N
 
 
 @pytest.mark.parametrize(
-    "text", ["x" * (MAX_JSON_BYTES + 1), "é" * (MAX_JSON_BYTES // 2 + 1)]
+    "text",
+    ["x" * (MAX_JSON_BYTES + 1), "é" * (MAX_JSON_BYTES // 2 + 1)],
+    ids=["characters", "utf8-bytes"],
 )
 def test_raw_text_admission_precedes_decoding_and_enforces_utf8_bytes(
     text: str,
