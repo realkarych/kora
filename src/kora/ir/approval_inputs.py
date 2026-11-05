@@ -18,6 +18,7 @@ from kora.ir.output_schemas import StructuredAncestry, is_native_output_role
 from kora.ir.schema_equality import compare_json
 from kora.ir.topology import (
     AgentNode,
+    BranchNode,
     CommandNode,
     GraphBody,
     HumanInputNode,
@@ -186,7 +187,9 @@ class DirectInputContexts:
                 self.variables[key] = InputFailure.SCHEMA
         return self.variables[key]
 
-    def context(self, body: GraphBody, node: HumanInputNode) -> Variable | InputFailure:
+    def context(
+        self, body: GraphBody, node: HumanInputNode | BranchNode
+    ) -> Variable | InputFailure:
         inputs = {} if node.inputs is MISSING else node.inputs
         sources: dict[str, InputView | PublishedInput] = {}
         for name, binding in inputs.items():

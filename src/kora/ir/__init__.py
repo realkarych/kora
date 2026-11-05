@@ -27,6 +27,10 @@ if TYPE_CHECKING:
         ApprovalResponsePredicateResult,
         validate_approval_response_predicates,
     )
+    from kora.ir.branch_expressions import (
+        BranchExpressionResult,
+        validate_branch_expressions,
+    )
     from kora.ir.command_result import (
         CommandResult,
         CommandResultValidationError,
@@ -171,6 +175,8 @@ if TYPE_CHECKING:
     from kora.ir.vcs_ref import PrincipalRef, VcsRef
 
 __all__ = [
+    "BranchExpressionResult",
+    "validate_branch_expressions",
     "SensorTriggerExpressionResult",
     "validate_sensor_trigger_expressions",
     "KnownTargetParameterTypeResult",
@@ -316,6 +322,10 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {"BranchExpressionResult", "validate_branch_expressions"}:
+        from kora.ir import branch_expressions
+
+        return getattr(branch_expressions, name)
     if name in {"SensorTriggerExpressionResult", "validate_sensor_trigger_expressions"}:
         from kora.ir import trigger_expressions
 

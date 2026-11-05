@@ -28,6 +28,7 @@ from kora.cel.tree import (
 from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import Evaluator
 from kora.ir.approval_compilation import ApprovalPrerequisite, checked_approval_sites
+from kora.ir.branch_expressions import BranchExpressionResult, checked_branch_sites
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import DiagnosticPath, from_cel, path_sequence
 from kora.ir.document import GraphDocument
@@ -306,6 +307,29 @@ async def validate_approval_patterns(
             CheckedPatternSite(site.path, site.checked, site.authored)
             for site in inventory
         ),
+        evaluator,
+        max_work=max_work,
+    )
+    del document, inventory
+    return await verification
+
+
+async def validate_branch_patterns(
+    document: GraphDocument,
+    evaluator: Evaluator,
+    *,
+    max_declarations: int,
+    max_work: int,
+) -> PatternCheck | BranchExpressionResult:
+    if type(max_declarations) is not int or max_declarations < 0:
+        return announce(IncompletePatternCheck.INVALID_INVENTORY)
+    inventory = checked_branch_sites(document, max_declarations=max_declarations)
+    if inventory is None:
+        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
+    if isinstance(inventory, BranchExpressionResult):
+        return inventory
+    verification = validate_cel_patterns(
+        tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
         evaluator,
         max_work=max_work,
     )

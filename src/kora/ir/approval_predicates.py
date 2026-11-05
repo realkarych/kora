@@ -8,37 +8,18 @@ from kora.cel import (
     Environment,
     ResultKind,
     SchemaError,
-    SchemaTypes,
     check_typed,
 )
-from kora.cel.cost import Variable
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
-from kora.cel.meter import Meter
-from kora.cel.parser import parse
-from kora.cel.tree import (
-    Binary,
-    Call,
-    Comprehension,
-    Conditional,
-    Has,
-    Identifier,
-    Index,
-    ListLiteral,
-    Literal,
-    Node,
-    Select,
-    Unary,
-)
-from kora.ir.approval_form import default_approval_form
-from kora.ir.approval_inputs import DirectInputContexts, InputFailure
+from kora.ir.approval_inputs import InputFailure
 from kora.ir.contracts import TypeContract
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
 from kora.ir.document import GraphDocument
+from kora.ir.expression_contexts import InputParameterContexts
 from kora.ir.graph_links import COMPONENT, safe_source
 from kora.ir.json import JsonObject
-from kora.ir.schema_catalogue import contract_schema
 from kora.ir.topology import GraphBody, HumanInputNode
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
@@ -99,66 +80,16 @@ class ApprovalResponsePredicateResult:
         return self.approval_predicates_complete and self.diagnostics.valid
 
 
-def required_context(source: str, meter: Meter) -> frozenset[str]:
-    pending: list[Node] = [parse(source, meter=meter)]
-    required: set[str] = set()
-    while pending:
-        node = pending.pop()
-        meter.tick()
-        if isinstance(node, Literal):
-            continue
-        if isinstance(node, Identifier):
-            if node.name in {"inputs", "params"}:
-                required.add(node.name)
-        elif isinstance(node, Comprehension):
-            if node.variable in {"inputs", "params"}:
-                required.add(node.variable)
-            pending.extend((node.range, *node.arguments))
-        elif isinstance(node, Select | Unary):
-            pending.append(node.operand)
-        elif isinstance(node, Has):
-            pending.append(node.target)
-        elif isinstance(node, Index):
-            pending.extend((node.operand, node.index))
-        elif isinstance(node, Binary):
-            pending.extend((node.left, node.right))
-        elif isinstance(node, Conditional):
-            pending.extend((node.condition, node.then, node.otherwise))
-        elif isinstance(node, Call):
-            pending.extend(node.arguments)
-            if node.receiver is not None:
-                pending.append(node.receiver)
-        elif isinstance(node, ListLiteral):
-            pending.extend(node.elements)
-        else:
-            pending.extend(
-                part for entry in node.entries for part in (entry.key, entry.value)
-            )
-    return frozenset(required)
-
-
-class ApprovalPredicateChecks:
+class ApprovalPredicateChecks(InputParameterContexts):
     def __init__(
         self,
         contracts: dict[str, TypeContract],
         parameters: JsonObject | MISSING,
         collector: DiagnosticCollector | None = None,
     ) -> None:
-        roots = {
-            "urn:kora:artifact:" + name.replace("/", ":"): root
-            for name, contract in contracts.items()
-            if (root := contract_schema(name, contract)) is not None
-        }
-        self.schemas: SchemaTypes = SchemaTypes(roots.get)
-        self.parameters: JsonObject | MISSING = parameters
-        self.parameter_variable: Variable | None | MISSING = MISSING
-        self.meter: Meter = Meter()
+        super().__init__(contracts, parameters)
         self.collector: DiagnosticCollector = (
             DiagnosticCollector() if collector is None else collector
-        )
-        self.default_form: JsonObject = default_approval_form()
-        self.inputs: DirectInputContexts = DirectInputContexts(
-            self.schemas, contracts, roots, self.default_form
         )
         self.human_inputs: int = 0
         self.seen: int = 0
@@ -166,19 +97,6 @@ class ApprovalPredicateChecks:
         self.syntax_unresolved: int = 0
         self.context_unresolved: int = 0
         self.schema_unresolved: int = 0
-
-    def parameter_context(self) -> Variable | None:
-        if self.parameter_variable is MISSING:
-            parameters: JsonObject = (
-                {"type": "object", "properties": {}, "additionalProperties": False}
-                if self.parameters is MISSING
-                else self.parameters
-            )
-            try:
-                self.parameter_variable = self.schemas.variable(parameters)
-            except SchemaError:
-                self.parameter_variable = None
-        return self.parameter_variable
 
     def check(
         self,
@@ -193,26 +111,16 @@ class ApprovalPredicateChecks:
             return None
         self.seen += 1
         try:
-            required = required_context(predicate, self.meter)
+            variables = self.context(body, node, predicate)
         except DiagnosticError:
             self.syntax_unresolved += 1
             return None
-        variables: dict[str, Variable] = {}
-        if "inputs" in required:
-            inputs = self.inputs.context(body, node)
-            if inputs is InputFailure.CONTEXT:
-                self.context_unresolved += 1
-                return None
-            if inputs is InputFailure.SCHEMA:
-                self.schema_unresolved += 1
-                return None
-            variables["inputs"] = inputs
-        if "params" in required:
-            parameter = self.parameter_context()
-            if parameter is None:
-                self.schema_unresolved += 1
-                return None
-            variables["params"] = parameter
+        if variables is InputFailure.CONTEXT:
+            self.context_unresolved += 1
+            return None
+        if variables is InputFailure.SCHEMA:
+            self.schema_unresolved += 1
+            return None
         form = self.default_form if node.config.form is MISSING else node.config.form
         try:
             variables["response"] = self.schemas.variable(form)

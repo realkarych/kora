@@ -63,6 +63,13 @@ def input_path_fields(node: Node) -> Iterator[SyntaxField]:
                     )
 
 
+def branch_fields(node: BranchNode) -> Iterator[SyntaxField]:
+    for index, case in enumerate(node.config.cases):
+        yield SyntaxField(case.when, ("config", "cases", index, "when"))
+        yield from authored_field(case.reason, ("config", "cases", index, "reason"))
+    yield from authored_field(node.config.else_reason, ("config", "else_reason"))
+
+
 def node_fields(node: Node) -> Iterator[SyntaxField]:
     yield from retry_fields(node.retry)
     if node.inputs is not MISSING:
@@ -73,10 +80,7 @@ def node_fields(node: Node) -> Iterator[SyntaxField]:
     if isinstance(node, AgentNode | CommandNode):
         yield from input_path_fields(node)
     elif isinstance(node, BranchNode):
-        for index, case in enumerate(node.config.cases):
-            yield SyntaxField(case.when, ("config", "cases", index, "when"))
-            yield from authored_field(case.reason, ("config", "cases", index, "reason"))
-        yield from authored_field(node.config.else_reason, ("config", "else_reason"))
+        yield from branch_fields(node)
     elif isinstance(node, HumanInputNode):
         yield from authored_field(node.config.approve_when, ("config", "approve_when"))
         yield from input_path_fields(node)
