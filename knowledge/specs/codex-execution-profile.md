@@ -42,6 +42,14 @@ Under [#781](https://github.com/realkarych/kora/issues/781), the private Codex c
 
 The constructor refuses overlapping lexical placements and collisions on the exact names it assigns or reserves for the provider-key owner. These are partial launch definitions, not complete reservations. Physical path identity, binary and effective managed-control checks, secret admission, materialization, final environment assembly and process launch remain with the runtime owner. The [combined Linux fixture](../research/codex-launch-construction-2026-11-05.md) consumes these exact definitions and checks the selected command environment and effects with synthetic credentials. It does not activate the production launch or declaration contracts.
 
+## Selected startup and checkout trust
+
+Under [#787](https://github.com/realkarych/kora/issues/787), the private app-server recipe marks the admitted checkout explicitly untrusted and disables project instructions, as required by ADR-0009. This precedes native startup. The pinned app-server can otherwise mark an explicitly requested writable checkout trusted during thread creation, before returning its acknowledgement. The runtime still owns protected materialization and the physical checkout binding.
+
+The startup helper borrows the fresh attempt's exclusive app-server RPC and the owner's expected native metadata. It checks startup identity and refuses an available built-in executor before delivering the bearer. It registers the selected loopback executor, checks its reported Bash spelling, checkout and ready status, then prepares one ephemeral thread with the exact selected workspace and environment. Inconsistent, missing or premature replies refuse before it hands a thread id to the turn controller. The helper does not initiate a turn or retry. Native registration/info may connect or recover internally, and the metadata is not authority over the peer or path.
+
+The [selected startup probe](../research/codex-selected-startup-2026-11-06.md) exercises the real Linux checkout controls, expected reply fields and separate bearer/Bash refusal stages with synthetic credentials. Its direct process and container observations do not replace the runtime's independent endpoint identity, reconnect fencing or whole-domain closure. Complete facts, runtime activation and native macOS qualification remain pending.
+
 ## Resource owner and stopping
 
 One invocation's existing runtime/runner owner retains both native roles and every acquired stream, reader/writer/control task, listener, active connection/session, process/output/filesystem handle, native filesystem helper, HTTP request/body stream, descendant and per-attempt tree. Internal state requires explicit finite admission/retention and actual settlement; two top-level processes do not bound this state by themselves.
