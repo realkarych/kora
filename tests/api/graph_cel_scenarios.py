@@ -3,6 +3,7 @@ import gc
 import json
 from collections.abc import Coroutine
 from dataclasses import asdict
+from functools import partial
 from typing import cast
 from weakref import ref
 
@@ -28,12 +29,21 @@ from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.db.graph_value_json import ObjectReader
+from kora.ir.approval_compilation import checked_approval_sites
+from kora.ir.branch_expressions import checked_branch_sites
+from kora.ir.cel_inventory_admission import CheckedInventoryAdmission
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
 from kora.ir.json import JsonObject
-from kora.ir.retry_expressions import InfrastructureRetryPrerequisite
-from kora.ir.wait_expressions import WaitExpressionResult
+from kora.ir.retry_expressions import (
+    CheckedRetrySite,
+    InfrastructureRetryPrerequisite,
+    checked_infrastructure_retry_site,
+    checked_retry_sites,
+)
+from kora.ir.trigger_expressions import checked_sensor_trigger_sites
+from kora.ir.wait_expressions import WaitExpressionResult, checked_wait_sites
 from kora.observability import Level, LoggingSettings, bound_scope, configure_process
 from kora.observability.settings import RenderFormat
 from tests.api.cel_pattern_validation_scenarios import (
@@ -66,6 +76,8 @@ SINGLE_FAMILY_CHARACTERS: int = 100
 SINGLE_FAMILY_PATTERN_WORK: int = 160
 PREEXISTING_RENDERING_CHARACTERS: int = 360
 PREEXISTING_PATTERN_WORK: int = 600
+SCOPED_TYPED_WORK: int = 600
+SCOPED_TYPED_BYTES: int = 3500
 INFRASTRUCTURE_PATH: FieldPath = ("runtime", "infrastructure_retry", "predicate")
 PARAMETER_SCHEMA: JsonObject = {
     "$ref": "#/$defs/flags",
@@ -146,6 +158,8 @@ def verify(
     characters: int = WORK,
     pattern_work: int = WORK,
     facts_bytes: int | None = None,
+    typed_work: int | None = None,
+    typed_bytes: int | None = None,
 ) -> Coroutine[None, None, GraphCelResult]:
     return verify_graph_cel(
         document,
@@ -155,6 +169,8 @@ def verify(
         max_rendering_characters=characters,
         max_pattern_work=pattern_work,
         max_facts_bytes=facts_bytes,
+        max_typed_work=typed_work,
+        max_typed_bytes=typed_bytes,
     )
 
 
@@ -355,6 +371,130 @@ def pending_facts() -> int:
     return sum(isinstance(value, GraphCelFacts) for value in gc.get_objects())
 
 
+def check_typed_limits() -> None:
+    source = f'params.enabled && "a".matches("^{PATTERN_MARKER}")'
+    document = with_infrastructure(mixed_document(params=PARAMETER_SCHEMA), source)
+    small = with_infrastructure(document_for(params=PARAMETER_SCHEMA), "params.enabled")
+    wide_schema: JsonObject = {
+        "type": "object",
+        "properties": {
+            "enabled": {"type": "boolean"},
+            **{f"flag{index}": {"type": "boolean"} for index in range(200)},
+        },
+        "required": ["enabled"],
+    }
+    wide = with_infrastructure(document_for(params=wide_schema), "params.enabled")
+    scoped = (
+        partial(checked_branch_sites, document, max_declarations=DECLARATIONS),
+        partial(checked_approval_sites, document, max_declarations=DECLARATIONS),
+        partial(checked_retry_sites, document, max_declarations=DECLARATIONS),
+        partial(checked_wait_sites, document, max_declarations=DECLARATIONS),
+        partial(checked_sensor_trigger_sites, document, max_triggers=2),
+        partial(checked_infrastructure_retry_site, document),
+    )
+    owner = EvaluationThread(load_binding())
+
+    scoped_counts: list[int] = []
+    scoped_work: list[int] = []
+    scoped_bytes: list[int] = []
+    for check in scoped:
+        allowance = CheckedInventoryAdmission(SCOPED_TYPED_WORK, SCOPED_TYPED_BYTES)
+        result = check(admission=allowance)
+        assert isinstance(result, (tuple, CheckedRetrySite))
+        scoped_counts.append(len(result) if isinstance(result, tuple) else 1)
+        scoped_work.append(SCOPED_TYPED_WORK - allowance.remaining_work)
+        scoped_bytes.append(SCOPED_TYPED_BYTES - allowance.remaining_bytes)
+    result = None
+    whole_work = sum(scoped_work)
+    whole_bytes = sum(scoped_bytes)
+    with asyncio.Runner() as runner:
+        loop = runner.get_loop()
+        evaluator = runner.run(open_evaluator(owner))
+        try:
+            full = observe_deliveries(
+                loop,
+                loop.create_task(
+                    verify(
+                        document,
+                        evaluator,
+                        facts_bytes=WORK,
+                        typed_work=whole_work,
+                        typed_bytes=whole_bytes,
+                    )
+                ),
+                owner,
+                FIELDS + 2,
+            )
+            small_result = runner.run(
+                verify(
+                    small,
+                    evaluator,
+                    typed_work=SCOPED_TYPED_WORK,
+                    typed_bytes=SCOPED_TYPED_BYTES,
+                )
+            )
+            wide_result = runner.run(
+                verify(wide, evaluator, typed_work=WORK, typed_bytes=SCOPED_TYPED_BYTES)
+            )
+            assert_idle(owner, 1)
+        finally:
+            runner.run(evaluator.close())
+        baseline = checked_expression_count()
+        retained_facts = pending_facts()
+        work_refused = runner.run(
+            verify(
+                document,
+                evaluator,
+                facts_bytes=WORK,
+                typed_work=whole_work - 1,
+                typed_bytes=whole_bytes,
+            )
+        )
+        bytes_refused = runner.run(
+            verify(
+                document,
+                evaluator,
+                facts_bytes=WORK,
+                typed_work=whole_work,
+                typed_bytes=whole_bytes - 1,
+            )
+        )
+        schema_refused = runner.run(
+            verify(
+                wide,
+                evaluator,
+                typed_work=SCOPED_TYPED_WORK,
+                typed_bytes=SCOPED_TYPED_BYTES,
+            )
+        )
+        partial_limit = runner.run(verify(document, evaluator, typed_bytes=WORK))
+        invalid_limit = runner.run(
+            verify(document, evaluator, typed_work=WORK, typed_bytes=0)
+        )
+
+    assert scoped_counts == [3, 2, 2, 1, 1, 1]
+    assert all(work > 0 for work in scoped_work)
+    assert all(size > 0 for size in scoped_bytes)
+    assert isinstance(full, GraphCelChecks)
+    assert full.compiled_fields == FIELDS + 1
+    assert full.diagnostics.valid
+    assert full.facts is not None
+    for admitted in (small_result, wide_result):
+        assert isinstance(admitted, GraphCelChecks)
+        assert admitted.compiled_fields == 1
+        assert admitted.diagnostics.valid
+    assert (
+        work_refused
+        is bytes_refused
+        is schema_refused
+        is GraphCelRefusal.CAPACITY_EXHAUSTED
+    )
+    assert partial_limit is invalid_limit is GraphCelRefusal.INVALID_ALLOWANCE
+    assert checked_expression_count() == baseline
+    assert pending_facts() == retained_facts
+    assert_settled(owner)
+
+
 def check_facts() -> None:
     source = f'params.enabled && "a".matches("^{PATTERN_MARKER}")'
     document = with_infrastructure(mixed_document(params=PARAMETER_SCHEMA), source)
@@ -548,6 +688,7 @@ def run(scenario: str) -> None:
         "refusals": check_refusals,
         "infrastructure": check_infrastructure,
         "facts": check_facts,
+        "typed-limits": check_typed_limits,
         "lifetime": check_lifetime,
     }
     diagnostics = configure_process(

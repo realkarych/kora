@@ -13,6 +13,7 @@ from kora.cel import (
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
 from kora.ir.approval_inputs import InputFailure
+from kora.ir.cel_inventory_admission import CheckedInventoryAdmission
 from kora.ir.contracts import TypeContract
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
@@ -86,8 +87,9 @@ class ApprovalPredicateChecks(InputParameterContexts):
         contracts: dict[str, TypeContract],
         parameters: JsonObject | MISSING,
         collector: DiagnosticCollector | None = None,
+        admission: CheckedInventoryAdmission | None = None,
     ) -> None:
-        super().__init__(contracts, parameters)
+        super().__init__(contracts, parameters, admission)
         self.collector: DiagnosticCollector = (
             DiagnosticCollector() if collector is None else collector
         )

@@ -7,6 +7,10 @@ from kora.cel import CheckedExpression, Environment, ResultKind, check_typed
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
 from kora.ir.approval_inputs import InputFailure
+from kora.ir.cel_inventory_admission import (
+    CheckedInventoryAdmission,
+    retain_checked_site,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
 from kora.ir.document import GraphDocument
@@ -80,8 +84,12 @@ class CheckedBranchSite:
 
 
 class BranchExpressionChecks(InputParameterContexts):
-    def __init__(self, document: GraphDocument) -> None:
-        super().__init__(document.type_contracts, document.graph.params)
+    def __init__(
+        self,
+        document: GraphDocument,
+        admission: CheckedInventoryAdmission | None = None,
+    ) -> None:
+        super().__init__(document.type_contracts, document.graph.params, admission)
         self.collector: DiagnosticCollector = DiagnosticCollector()
         self.branches: int = 0
         self.seen: int = 0
@@ -131,6 +139,7 @@ class BranchExpressionChecks(InputParameterContexts):
                     )
                 )
             elif sites is not None:
+                retain_checked_site(self.admission, field_path, checked)
                 sites.append(CheckedBranchSite(field_path, checked))
 
 
@@ -139,7 +148,10 @@ def validate_branch_expressions(document: GraphDocument) -> BranchExpressionResu
 
 
 def checked_branch_sites(
-    document: GraphDocument, *, max_declarations: int
+    document: GraphDocument,
+    *,
+    max_declarations: int,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> tuple[CheckedBranchSite, ...] | BranchExpressionResult | None:
     graph = document.graph
     definitions = {} if graph.subgraphs is MISSING else graph.subgraphs
@@ -156,16 +168,18 @@ def checked_branch_sites(
                 if remaining < 0:
                     return None
     sites: list[CheckedBranchSite] = []
-    result = _check_branch_expressions(document, sites)
+    result = _check_branch_expressions(document, sites, admission)
     if not result.branch_expressions_valid:
         return result
     return tuple(sites)
 
 
 def _check_branch_expressions(
-    document: GraphDocument, sites: list[CheckedBranchSite] | None
+    document: GraphDocument,
+    sites: list[CheckedBranchSite] | None,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> BranchExpressionResult:
-    checks = BranchExpressionChecks(document)
+    checks = BranchExpressionChecks(document, admission)
     graph = document.graph
     definitions = {} if graph.subgraphs is MISSING else graph.subgraphs
     bodies = chain(

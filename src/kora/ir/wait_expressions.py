@@ -8,6 +8,10 @@ from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
 from kora.cel.types import DYN
 from kora.ir.approval_inputs import InputFailure
+from kora.ir.cel_inventory_admission import (
+    CheckedInventoryAdmission,
+    retain_checked_site,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
 from kora.ir.document import GraphDocument
@@ -81,8 +85,12 @@ class CheckedWaitSite:
 
 
 class WaitExpressionChecks(InputParameterContexts):
-    def __init__(self, document: GraphDocument) -> None:
-        super().__init__(document.type_contracts, document.graph.params)
+    def __init__(
+        self,
+        document: GraphDocument,
+        admission: CheckedInventoryAdmission | None = None,
+    ) -> None:
+        super().__init__(document.type_contracts, document.graph.params, admission)
         self.collector: DiagnosticCollector = DiagnosticCollector()
         self.waits: int = 0
         self.seen: int = 0
@@ -133,6 +141,7 @@ class WaitExpressionChecks(InputParameterContexts):
                     )
                 )
             elif sites is not None:
+                retain_checked_site(self.admission, field_path, checked)
                 sites.append(CheckedWaitSite(field_path, checked))
 
 
@@ -141,7 +150,10 @@ def validate_wait_expressions(document: GraphDocument) -> WaitExpressionResult:
 
 
 def checked_wait_sites(
-    document: GraphDocument, *, max_declarations: int
+    document: GraphDocument,
+    *,
+    max_declarations: int,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> tuple[CheckedWaitSite, ...] | WaitExpressionResult | None:
     graph = document.graph
     definitions = {} if graph.subgraphs is MISSING else graph.subgraphs
@@ -153,16 +165,18 @@ def checked_wait_sites(
         if remaining < 0:
             return None
     sites: list[CheckedWaitSite] = []
-    result = _check_wait_expressions(document, sites)
+    result = _check_wait_expressions(document, sites, admission)
     if not result.wait_expressions_valid:
         return result
     return tuple(sites)
 
 
 def _check_wait_expressions(
-    document: GraphDocument, sites: list[CheckedWaitSite] | None
+    document: GraphDocument,
+    sites: list[CheckedWaitSite] | None,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> WaitExpressionResult:
-    checks = WaitExpressionChecks(document)
+    checks = WaitExpressionChecks(document, admission)
     graph = document.graph
     definitions = {} if graph.subgraphs is MISSING else graph.subgraphs
     bodies = chain(

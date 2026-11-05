@@ -5,9 +5,13 @@ from pydantic import MISSING
 from kora.cel import CheckedExpression, Environment, ResultKind, Variable, check_typed
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
-from kora.cel.meter import Meter
 from kora.cel.parser import parse
 from kora.cel.types import DYN
+from kora.ir.cel_inventory_admission import (
+    CheckedInventoryAdmission,
+    inventory_meter,
+    retain_checked_site,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
 from kora.ir.document import GraphDocument
@@ -65,24 +69,29 @@ def validate_sensor_trigger_expressions(
 
 
 def checked_sensor_trigger_sites(
-    document: GraphDocument, *, max_triggers: int
+    document: GraphDocument,
+    *,
+    max_triggers: int,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> tuple[CheckedSensorTrigger, ...] | SensorTriggerExpressionResult | None:
     triggers = document.graph.triggers
     if triggers is not MISSING and len(triggers) > max_triggers:
         return None
     sites: list[CheckedSensorTrigger] = []
-    result = _check_sensor_trigger_expressions(document, sites)
+    result = _check_sensor_trigger_expressions(document, sites, admission)
     if not result.expressions_valid:
         return result
     return tuple(sites)
 
 
 def _check_sensor_trigger_expressions(
-    document: GraphDocument, sites: list[CheckedSensorTrigger] | None
+    document: GraphDocument,
+    sites: list[CheckedSensorTrigger] | None,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> SensorTriggerExpressionResult:
     environment = Environment({"observation": Variable(DYN)}, ResultKind.BOOL)
-    syntax_meter = Meter()
-    checker_meter = Meter()
+    syntax_meter = inventory_meter(admission)
+    checker_meter = inventory_meter(admission)
     collector = DiagnosticCollector()
     graph = document.graph
     triggers = () if graph.triggers is MISSING else graph.triggers
@@ -112,6 +121,7 @@ def _check_sensor_trigger_expressions(
                 )
             )
         elif sites is not None:
+            retain_checked_site(admission, path, outcome)
             sites.append(CheckedSensorTrigger(path, outcome))
     result = SensorTriggerExpressionResult(
         collector.finish(),

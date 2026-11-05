@@ -46,9 +46,29 @@ from tests.cel_eval.children import ROOT, full_path, run_child
                 "complete",
             ],
         ),
+        (
+            "typed-limits",
+            [
+                "complete",
+                "complete",
+                "complete",
+                "capacity_exhausted",
+                "capacity_exhausted",
+                "capacity_exhausted",
+                "invalid_allowance",
+                "invalid_allowance",
+            ],
+        ),
         ("lifetime", ["complete"]),
     ],
-    ids=["cross-family", "preflight", "infrastructure", "facts", "resource-release"],
+    ids=[
+        "cross-family",
+        "preflight",
+        "infrastructure",
+        "facts",
+        "typed-limits",
+        "resource-release",
+    ],
 )
 def test_graph_cel_uses_complete_bounded_native_verification(
     scenario: str, statuses: list[str]

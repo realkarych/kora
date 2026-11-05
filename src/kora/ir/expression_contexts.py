@@ -20,6 +20,7 @@ from kora.cel.tree import (
 )
 from kora.ir.approval_form import default_approval_form
 from kora.ir.approval_inputs import DirectInputContexts, InputFailure
+from kora.ir.cel_inventory_admission import CheckedInventoryAdmission, inventory_meter
 from kora.ir.contracts import TypeContract
 from kora.ir.json import JsonObject
 from kora.ir.schema_catalogue import contract_schema
@@ -68,19 +69,31 @@ def required_context(
     return frozenset(required)
 
 
+def expression_schema_roots(
+    contracts: dict[str, TypeContract], admission: CheckedInventoryAdmission | None
+) -> dict[str, JsonObject]:
+    if admission is not None:
+        admission.charge_work(len(contracts))
+    return {
+        "urn:kora:artifact:" + name.replace("/", ":"): root
+        for name, contract in contracts.items()
+        if (root := contract_schema(name, contract)) is not None
+    }
+
+
 class InputParameterContexts:
     def __init__(
-        self, contracts: dict[str, TypeContract], parameters: JsonObject | MISSING
+        self,
+        contracts: dict[str, TypeContract],
+        parameters: JsonObject | MISSING,
+        admission: CheckedInventoryAdmission | None = None,
     ) -> None:
-        roots = {
-            "urn:kora:artifact:" + name.replace("/", ":"): root
-            for name, contract in contracts.items()
-            if (root := contract_schema(name, contract)) is not None
-        }
-        self.schemas: SchemaTypes = SchemaTypes(roots.get)
+        roots = expression_schema_roots(contracts, admission)
+        self.admission: CheckedInventoryAdmission | None = admission
+        self.schemas: SchemaTypes = SchemaTypes(roots.get, inventory_meter(admission))
         self.parameters: JsonObject | MISSING = parameters
         self.parameter_variable: Variable | None | MISSING = MISSING
-        self.meter: Meter = Meter()
+        self.meter: Meter = inventory_meter(admission)
         self.default_form: JsonObject = default_approval_form()
         self.inputs: DirectInputContexts = DirectInputContexts(
             self.schemas, contracts, roots, self.default_form

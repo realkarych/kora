@@ -7,8 +7,12 @@ from pydantic import MISSING
 from kora.cel import CheckedExpression, Environment, ResultKind, Variable, check_typed
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
 from kora.cel.diagnostics import DiagnosticError
-from kora.cel.meter import Meter
 from kora.ir.approval_inputs import InputFailure
+from kora.ir.cel_inventory_admission import (
+    CheckedInventoryAdmission,
+    inventory_meter,
+    retain_checked_site,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import from_cel
 from kora.ir.document import GraphDocument
@@ -88,12 +92,14 @@ class InfrastructureRetryPrerequisite(StrEnum):
 
 def checked_infrastructure_retry_site(
     document: GraphDocument,
+    *,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> CheckedRetrySite | DiagnosticCollection | InfrastructureRetryPrerequisite | None:
     policy = document.runtime.infrastructure_retry
     if policy is MISSING or policy.predicate is MISSING:
         return None
     source = policy.predicate
-    meter = Meter()
+    meter = inventory_meter(admission)
     try:
         required = required_context(source, meter, frozenset({"params"}))
     except DiagnosticError:
@@ -101,7 +107,7 @@ def checked_infrastructure_retry_site(
     variables: dict[str, Variable] = {}
     if "params" in required:
         contexts = InputParameterContexts(
-            document.type_contracts, document.graph.params
+            document.type_contracts, document.graph.params, admission
         )
         parameter = contexts.parameter_context()
         if parameter is None:
@@ -110,6 +116,7 @@ def checked_infrastructure_retry_site(
     checked = check_typed(source, Environment(variables, ResultKind.BOOL), meter)
     path: FieldPath = ("runtime", "infrastructure_retry", "predicate")
     if isinstance(checked, CheckedExpression):
+        retain_checked_site(admission, path, checked)
         return CheckedRetrySite(path, checked)
     collector = DiagnosticCollector()
     collector.add(from_cel(checked, path=path, exact_expression_field=True))
@@ -117,8 +124,12 @@ def checked_infrastructure_retry_site(
 
 
 class RetryExpressionChecks(InputParameterContexts):
-    def __init__(self, document: GraphDocument) -> None:
-        super().__init__(document.type_contracts, document.graph.params)
+    def __init__(
+        self,
+        document: GraphDocument,
+        admission: CheckedInventoryAdmission | None = None,
+    ) -> None:
+        super().__init__(document.type_contracts, document.graph.params, admission)
         self.collector: DiagnosticCollector = DiagnosticCollector()
         self.policies: int = 0
         self.seen: int = 0
@@ -172,6 +183,7 @@ class RetryExpressionChecks(InputParameterContexts):
                     )
                 )
             elif sites is not None:
+                retain_checked_site(self.admission, field_path, checked)
                 sites.append(CheckedRetrySite(field_path, checked))
 
     def retry_context(
@@ -203,7 +215,10 @@ def validate_retry_expressions(document: GraphDocument) -> RetryExpressionResult
 
 
 def checked_retry_sites(
-    document: GraphDocument, *, max_declarations: int
+    document: GraphDocument,
+    *,
+    max_declarations: int,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> tuple[CheckedRetrySite, ...] | RetryExpressionResult | None:
     graph = document.graph
     definitions = {} if graph.subgraphs is MISSING else graph.subgraphs
@@ -215,16 +230,18 @@ def checked_retry_sites(
         if remaining < 0:
             return None
     sites: list[CheckedRetrySite] = []
-    result = _check_retry_expressions(document, sites)
+    result = _check_retry_expressions(document, sites, admission)
     if not result.retry_expressions_valid:
         return result
     return tuple(sites)
 
 
 def _check_retry_expressions(
-    document: GraphDocument, sites: list[CheckedRetrySite] | None
+    document: GraphDocument,
+    sites: list[CheckedRetrySite] | None,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> RetryExpressionResult:
-    checks = RetryExpressionChecks(document)
+    checks = RetryExpressionChecks(document, admission)
     graph = document.graph
     definitions = {} if graph.subgraphs is MISSING else graph.subgraphs
     bodies = chain(

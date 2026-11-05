@@ -21,6 +21,10 @@ from kora.ir.approval_compilation import (
     checked_approval_sites,
 )
 from kora.ir.branch_expressions import BranchExpressionResult, checked_branch_sites
+from kora.ir.cel_inventory_admission import (
+    CheckedInventoryAdmission,
+    InventoryAdmissionExhausted,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
@@ -80,7 +84,11 @@ GraphCelResult = (
 
 
 def checked_graph_sites(
-    document: GraphDocument, max_declarations: int, max_triggers: int
+    document: GraphDocument,
+    max_declarations: int,
+    max_triggers: int,
+    *,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> tuple[CheckedPatternSite, ...] | TypedRefusal:
     triggers = document.graph.triggers
     if triggers is not MISSING and len(triggers) > max_triggers:
@@ -94,7 +102,7 @@ def checked_graph_sites(
     )
     sites: list[CheckedPatternSite] = []
     for produce in producers:
-        inventory = produce(document)
+        inventory = produce(document, admission=admission)
         if inventory is None:
             return GraphCelRefusal.CAPACITY_EXHAUSTED
         if not isinstance(inventory, tuple):
@@ -107,7 +115,7 @@ def checked_graph_sites(
             )
             for site in inventory
         )
-    infrastructure = checked_infrastructure_retry_site(document)
+    infrastructure = checked_infrastructure_retry_site(document, admission=admission)
     if isinstance(infrastructure, CheckedRetrySite):
         sites.append(
             CheckedPatternSite(infrastructure.path, infrastructure.checked, True)
@@ -147,6 +155,8 @@ async def verify_graph_cel(
     max_rendering_characters: int,
     max_pattern_work: int,
     max_facts_bytes: int | None = None,
+    max_typed_work: int | None = None,
+    max_typed_bytes: int | None = None,
 ) -> GraphCelResult:
     if (
         any(
@@ -155,14 +165,26 @@ async def verify_graph_cel(
         )
         or type(max_pattern_work) is not int
         or max_pattern_work <= 0
-        or (
-            max_facts_bytes is not None
-            and (type(max_facts_bytes) is not int or max_facts_bytes <= 0)
+        or any(
+            type(limit) is not int or limit <= 0
+            for limit in (max_facts_bytes, max_typed_work, max_typed_bytes)
+            if limit is not None
         )
+        or (max_typed_work is None) != (max_typed_bytes is None)
     ):
         return announce(GraphCelRefusal.INVALID_ALLOWANCE)
-    inventory = checked_graph_sites(document, max_declarations, max_triggers)
-    del document
+    admission = (
+        CheckedInventoryAdmission(max_typed_work, max_typed_bytes)
+        if max_typed_work is not None and max_typed_bytes is not None
+        else None
+    )
+    try:
+        inventory = checked_graph_sites(
+            document, max_declarations, max_triggers, admission=admission
+        )
+    except InventoryAdmissionExhausted:
+        return announce(GraphCelRefusal.CAPACITY_EXHAUSTED)
+    del document, admission
     if not isinstance(inventory, tuple):
         return announce(inventory)
     prepared = prepare_patterns(inventory, max_pattern_work)

@@ -7,6 +7,10 @@ from pydantic import MISSING
 from kora.cel import CheckedExpression
 from kora.ir.approval_defaults import ApprovalDefaultChecks
 from kora.ir.approval_predicates import ApprovalPredicateChecks
+from kora.ir.cel_inventory_admission import (
+    CheckedInventoryAdmission,
+    retain_checked_site,
+)
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.document import GraphDocument
 from kora.ir.topology import HumanInputNode
@@ -33,7 +37,10 @@ class CheckedApprovalSite:
 
 
 def checked_approval_sites(
-    document: GraphDocument, *, max_declarations: int
+    document: GraphDocument,
+    *,
+    max_declarations: int,
+    admission: CheckedInventoryAdmission | None = None,
 ) -> (
     tuple[CheckedApprovalSite, ...] | DiagnosticCollection | ApprovalPrerequisite | None
 ):
@@ -47,8 +54,10 @@ def checked_approval_sites(
         if remaining < 0:
             return None
     collector = DiagnosticCollector()
-    defaults = ApprovalDefaultChecks(document.type_contracts, collector)
-    authored = ApprovalPredicateChecks(document.type_contracts, graph.params, collector)
+    defaults = ApprovalDefaultChecks(document.type_contracts, collector, admission)
+    authored = ApprovalPredicateChecks(
+        document.type_contracts, graph.params, collector, admission
+    )
     sites: list[CheckedApprovalSite] = []
     bodies = chain(
         ((graph, ("graph",)),),
@@ -66,11 +75,9 @@ def checked_approval_sites(
                 else defaults.check(node, name, node_path)
             )
             if checked is not None:
-                sites.append(
-                    CheckedApprovalSite(
-                        (*node_path, "config", "approve_when"), checked, is_authored
-                    )
-                )
+                field_path = (*node_path, "config", "approve_when")
+                retain_checked_site(admission, field_path, checked)
+                sites.append(CheckedApprovalSite(field_path, checked, is_authored))
     if authored.syntax_unresolved:
         return ApprovalPrerequisite.SYNTAX_UNRESOLVED
     if authored.context_unresolved:

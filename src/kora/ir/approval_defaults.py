@@ -12,15 +12,15 @@ from kora.cel import (
     check_typed,
 )
 from kora.cel.diagnostics import Diagnostic as CelDiagnostic
-from kora.cel.meter import Meter
 from kora.cel.types import Record, unwrap
 from kora.ir.approval_form import default_approval_form
+from kora.ir.cel_inventory_admission import CheckedInventoryAdmission, inventory_meter
 from kora.ir.contracts import TypeContract
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import Diagnostic
 from kora.ir.document import GraphDocument
+from kora.ir.expression_contexts import expression_schema_roots
 from kora.ir.graph_links import COMPONENT, safe_source
-from kora.ir.schema_catalogue import contract_schema
 from kora.ir.topology import HumanInputNode
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
@@ -69,14 +69,11 @@ class ApprovalDefaultChecks:
         self,
         contracts: dict[str, TypeContract],
         collector: DiagnosticCollector | None = None,
+        admission: CheckedInventoryAdmission | None = None,
     ) -> None:
-        roots = {
-            "urn:kora:artifact:" + name.replace("/", ":"): root
-            for name, contract in contracts.items()
-            if (root := contract_schema(name, contract)) is not None
-        }
-        self.schemas = SchemaTypes(roots.get)
-        self.checker_meter = Meter()
+        roots = expression_schema_roots(contracts, admission)
+        self.schemas = SchemaTypes(roots.get, inventory_meter(admission))
+        self.checker_meter = inventory_meter(admission)
         self.collector = DiagnosticCollector() if collector is None else collector
         self.default_form = default_approval_form()
         self.human_inputs: int = 0
