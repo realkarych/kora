@@ -5,6 +5,7 @@ from kora.engine.graph_outputs import GraphOutputContract, build_graph_output_co
 from kora.engine.graph_type_references import array_text
 from kora.engine.graph_types import build_graph_type_contracts
 from kora.ir.json import JsonObject, JsonValue
+from tests.engine.graph_schema_cases import declaration
 
 LIMIT = 1_000_000
 
@@ -69,6 +70,20 @@ def child(root: JsonObject, *path: str) -> JsonObject:
     for name in path:
         value = cast(JsonObject, value[name])
     return value
+
+
+def output_preparation_capacity_document() -> JsonObject:
+    raw = output_document()
+    contracts = child(raw, "type_contracts")
+    for index in range(64):
+        contracts["example/Type" + str(index)] = declaration({})
+    child(raw, "graph", "nodes", "producer", "config")["output_schema"] = {
+        "allOf": [
+            {"$ref": "urn:kora:artifact:example:Type" + str(index)}
+            for index in range(64)
+        ]
+    }
+    return raw
 
 
 def output_arguments(

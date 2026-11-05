@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from pydantic import MISSING
 
+from kora.cel import CheckedExpression
 from kora.ir.config import Retry
 from kora.ir.declarations import OutputTarget
 from kora.ir.topology import (
@@ -17,6 +18,13 @@ from kora.ir.topology import (
 from kora.ir.trigger import SensorTrigger
 
 FieldPath = tuple[str | int, ...]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class CheckedCelSite:
+    path: FieldPath
+    checked: CheckedExpression
+    authored: bool
 
 
 @dataclass(frozen=True)

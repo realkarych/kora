@@ -28,6 +28,7 @@ from tests.engine.graph_output_cases import (
     input_bytes,
     output_arguments,
     output_document,
+    output_preparation_capacity_document,
 )
 from tests.engine.graph_schema_cases import declaration
 
@@ -501,17 +502,7 @@ def test_graph_output_generated_reference_refuses_before_path_materialization() 
 
 
 def test_graph_output_retains_actual_preparation_capacity() -> None:
-    raw = output_document()
-    contracts = child(raw, "type_contracts")
-    for index in range(64):
-        contracts["example/Type" + str(index)] = declaration({})
-    child(raw, "graph", "nodes", "producer", "config")["output_schema"] = {
-        "allOf": [
-            {"$ref": "urn:kora:artifact:example:Type" + str(index)}
-            for index in range(64)
-        ]
-    }
-    arguments = output_arguments(raw)
+    arguments = output_arguments(output_preparation_capacity_document())
 
     result = build_graph_output_contract(*arguments, max_encoded_bytes=LIMIT)
 

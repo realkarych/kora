@@ -34,6 +34,7 @@ from kora.ir.branch_expressions import BranchExpressionResult, checked_branch_si
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import DiagnosticPath, from_cel, path_sequence
 from kora.ir.document import GraphDocument
+from kora.ir.expression_fields import CheckedCelSite as CheckedPatternSite
 from kora.ir.expression_fields import FieldPath
 from kora.ir.retry_expressions import RetryExpressionResult, checked_retry_sites
 from kora.ir.trigger_expressions import (
@@ -53,13 +54,6 @@ COMPLETED: EventSpec = CATALOG.register(
     )
 )
 PATH_TYPE: TypeAdapter[FieldPath] = TypeAdapter(DiagnosticPath)
-
-
-@dataclass(frozen=True, slots=True, repr=False)
-class CheckedPatternSite:
-    path: FieldPath
-    checked: CheckedExpression
-    authored: bool
 
 
 @dataclass(frozen=True, slots=True)

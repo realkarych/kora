@@ -21,20 +21,20 @@ from kora.api.graph_cel import (
     GraphCelChecks,
     GraphCelRefusal,
     GraphCelResult,
-    checked_graph_sites,
     verify_graph_cel,
 )
-from kora.api.graph_cel_facts import GraphCelFacts
 from kora.cel_eval.binding import load_binding
 from kora.cel_eval.errors import EvaluatorUnavailable, UnavailableReason
 from kora.cel_eval.thread import EvaluationThread, Evaluator
 from kora.db.graph_value_json import ObjectReader
+from kora.engine.graph_cel_facts import GraphCelFacts
 from kora.ir.approval_compilation import checked_approval_sites
 from kora.ir.branch_expressions import checked_branch_sites
 from kora.ir.cel_inventory_admission import CheckedInventoryAdmission
 from kora.ir.diagnostic_collection import DiagnosticCollection
 from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import FieldPath
+from kora.ir.graph_cel_inventory import checked_graph_sites
 from kora.ir.json import JsonObject
 from kora.ir.retry_expressions import (
     CheckedRetrySite,
