@@ -3,19 +3,31 @@ from dataclasses import dataclass
 from typing import Never
 
 from kora.cel_eval.errors import raise_safe
-from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
+from kora.db.graph_value_json import (
+    GraphValueFailure,
+    GraphValueRejected,
+    decoded_string,
+)
 from kora.db.graph_values import (
     DecodedGraphValues,
     EncodedGraphValues,
     prepare_graph_values,
     read_graph_values,
 )
+from kora.db.graph_version_reads import (
+    DOUBLE_WIDTH,
+    AcquiredGraphVersion,
+    transport_limit,
+)
 from kora.db.reads import GraphVersionRow
+from kora.db.types import DIGEST_LENGTH
 
 DEPLOYMENT_START = b'{"ir":'
 DEPLOYMENT_CONTRACT = b',"execution_contract":'
 DEPLOYMENT_END = b"}"
 HASH_CHUNK_BYTES = 4096
+JSON_WHITESPACE = " \t\n\r"
+HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,40 +151,94 @@ def prepare_graph_version_identity(
     raise_safe(GraphValueRejected(reason))
 
 
-def _checked_graph_version_identity(
-    row: GraphVersionRow, pin: GraphVersionPin, limits: GraphVersionIdentityLimits
-) -> CheckedGraphVersionIdentity:
-    if (
-        row.graph_id != pin.graph_id
-        or row.id != pin.version_id
-        or row.execution_contract_digest != pin.execution_contract_digest
-    ):
+def _transport_string(value: bytes, encoding: str) -> str:
+    text = value.decode(encoding).strip(JSON_WHITESPACE)
+    inner, end = decoded_string(text, 0)
+    if end != len(text) or not inner.isascii():
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    return inner
+
+
+def _transport_digest(value: bytes, encoding: str) -> str:
+    digest = value.decode(encoding)
+    if len(digest) != DIGEST_LENGTH or any(point not in HEX_DIGITS for point in digest):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    return digest
+
+
+def _acquired_values(
+    row: AcquiredGraphVersion, pin: GraphVersionPin, limits: GraphVersionIdentityLimits
+) -> tuple[EncodedGraphValues, GraphVersionDigests]:
+    width = 2 if row.encoding in DOUBLE_WIDTH else 1
+    first, second = row.payloads
+    if any(len(value) != width * DIGEST_LENGTH for value in row.digests):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    if len(first) + len(second) > transport_limit(limits.max_encoded_bytes, width):
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
+    ir_digest, contract_digest, deployment_digest = row.digests
+    try:
+        stored = GraphVersionDigests(
+            _transport_digest(ir_digest, row.encoding),
+            _transport_digest(contract_digest, row.encoding),
+            _transport_digest(deployment_digest, row.encoding),
+        )
+        if stored.execution_contract_digest != pin.execution_contract_digest:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        return EncodedGraphValues(
+            _transport_string(first, row.encoding),
+            _transport_string(second, row.encoding),
+        ), stored
+    except UnicodeDecodeError:
+        raise GraphValueRejected(GraphValueFailure.INVALID) from None
+
+
+def _row_values(
+    row: GraphVersionRow, pin: GraphVersionPin
+) -> tuple[EncodedGraphValues, GraphVersionDigests]:
+    if row.execution_contract_digest != pin.execution_contract_digest:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     if type(row.value_encoding_version) is not int or row.value_encoding_version != 1:
         raise GraphValueRejected(GraphValueFailure.VERSION)
     if type(row.ir) is not str or type(row.execution_contract) is not str:
         raise GraphValueRejected(GraphValueFailure.INVALID)
+    return EncodedGraphValues(row.ir, row.execution_contract), GraphVersionDigests(
+        row.ir_digest, row.execution_contract_digest, row.deployment_digest
+    )
+
+
+def _checked_graph_version_identity(
+    row: GraphVersionRow | AcquiredGraphVersion,
+    pin: GraphVersionPin,
+    limits: GraphVersionIdentityLimits,
+) -> CheckedGraphVersionIdentity:
+    if row.graph_id != pin.graph_id or row.id != pin.version_id:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    pair, stored = (
+        _acquired_values(row, pin, limits)
+        if isinstance(row, AcquiredGraphVersion)
+        else _row_values(row, pin)
+    )
     values = read_graph_values(
-        row.value_encoding_version,
-        row.ir,
-        row.execution_contract,
+        pair.value_encoding_version,
+        pair.ir,
+        pair.execution_contract,
         max_encoded_bytes=limits.max_encoded_bytes,
     )
     if not isinstance(values, DecodedGraphValues):
         raise GraphValueRejected(GraphValueFailure.VERSION)
-    stored = GraphVersionDigests(
-        row.ir_digest, row.execution_contract_digest, row.deployment_digest
-    )
     if (
-        _canonical_digests(row.ir, row.execution_contract, limits.max_hash_bytes)
+        _canonical_digests(pair.ir, pair.execution_contract, limits.max_hash_bytes)
         != stored
     ):
         raise GraphValueRejected(GraphValueFailure.INVALID)
-    return CheckedGraphVersionIdentity(row.ir, values, pin)
+    return CheckedGraphVersionIdentity(pair.ir, values, pin)
 
 
 def read_graph_version_identity(
-    row: GraphVersionRow, pin: GraphVersionPin, *, limits: GraphVersionIdentityLimits
+    row: GraphVersionRow | AcquiredGraphVersion,
+    pin: GraphVersionPin,
+    *,
+    limits: GraphVersionIdentityLimits,
 ) -> CheckedGraphVersionIdentity:
     try:
         return _checked_graph_version_identity(row, pin, limits)
