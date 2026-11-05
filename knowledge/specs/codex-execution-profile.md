@@ -36,6 +36,12 @@ Provider credentials, runtime controls, adapter assignments, workload values and
 
 The provider key never enters declaration values, argv, diagnostics or durable deployment/metadata configuration. Any permitted native per-attempt sensitive material retains an explicit private secret/file owner, bounded retention and cleanup. This profile adds no provider-key secrecy guarantee from candidate tools beyond DD-30 and the cooperative-local residual. The separate provider-key and selected-executor probes do not establish their combined process/start environment behavior.
 
+## Private launch construction
+
+Under [#781](https://github.com/realkarych/kora/issues/781), the private Codex constructor builds both role inputs from already selected provider settings, admitted lexical placements, a shared checkout, the executable and Bash paths, and the executor capability digest. It emits native arguments, environment assignments and TOML without allocating a runtime or inspecting ambient state. The app-server recipe names the provider credential and disables the built-in executor. The exec-server recipe contains the capability digest, not a raw bearer or provider credential. The caller retains both secret values and their actual delivery.
+
+The constructor refuses overlapping lexical placements and collisions on the exact names it assigns or takes from the provider-key owner. These are partial launch definitions, not complete reservations. Physical path identity, binary and effective managed-control checks, secret admission, materialization, final environment assembly and process launch remain with the runtime owner. The [combined Linux fixture](../research/codex-launch-construction-2026-11-05.md) consumes these exact definitions and checks the selected command environment and effects with synthetic credentials. It does not activate the production launch or declaration contracts.
+
 ## Resource owner and stopping
 
 One invocation's existing runtime/runner owner retains both native roles and every acquired stream, reader/writer/control task, listener, active connection/session, process/output/filesystem handle, native filesystem helper, HTTP request/body stream, descendant and per-attempt tree. Internal state requires explicit finite admission/retention and actual settlement; two top-level processes do not bound this state by themselves.
