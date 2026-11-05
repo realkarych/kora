@@ -9,6 +9,10 @@ from kora.plugins.harness.codex.pre_tool_use import (
     HookInputRefused,
     decode_pre_tool_use,
 )
+from tests.plugins.harness.codex.selected_launch import (
+    SELECTED_COMMAND,
+    SELECTED_DENIAL,
+)
 
 CONTROL = Path("/var/lib/kora-hook-probe/control")
 MAX_INPUT_BYTES = 16_384
@@ -31,7 +35,8 @@ def deny(reason: str) -> int:
 def main() -> int:
     decision = (CONTROL / "decision").read_text(encoding="utf-8")
     executor = decision in {"executor-allow", "executor-deny", "executor-stall"}
-    nested_input = decision == "shell_controls" or executor
+    selected = decision in {"selected-allow", "selected-deny"}
+    nested_input = decision == "shell_controls" or executor or selected
     expected_command = "touch kora-probe.marker"
     patch = decision in {"patch-allow", "patch-deny"}
     if decision in {"interactive", "decoder-refuse"} or nested_input or patch:
@@ -59,6 +64,9 @@ def main() -> int:
     if executor:
         origin = '"${KORA_PROBE_EXECUTOR_ORIGIN-}"'
         expected_command += f" && printf '%s\\n' {origin} >> kora-probe.marker"
+
+    if selected:
+        expected_command = SELECTED_COMMAND
 
     allowance = 1 if decision == "decoder-refuse" else MAX_INPUT_BYTES
     try:
@@ -103,6 +111,7 @@ def main() -> int:
         "interactive",
         "shell_controls",
         "executor-allow",
+        "selected-allow",
         "patch-allow",
         "interrupt",
     }:
@@ -113,6 +122,8 @@ def main() -> int:
         return deny("kora managed hook probe denied the marker command")
     if decision == "executor-deny":
         return deny("kora managed hook probe denied the executor command")
+    if decision == "selected-deny":
+        return deny(SELECTED_DENIAL)
     if decision == "patch-deny":
         return deny(PATCH_DENIAL)
     return deny(INPUT_REFUSAL)

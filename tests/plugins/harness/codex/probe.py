@@ -56,6 +56,15 @@ from kora.plugins.harness.codex.app_server_usage import (
     decode_usage,
     reject_premature_usage,
 )
+from tests.plugins.harness.codex.selected_launch import (
+    SELECTED_COMMAND,
+    SELECTED_DENIAL,
+    SELECTED_LAUNCH_CASES,
+    SelectedLaunchCase,
+    materialize_native_inputs,
+    prepare_native_inputs,
+    role_homes,
+)
 
 Case = Literal["allow", "deny", "stall", "interactive", "usage"]
 ProviderCase = Literal[
@@ -80,6 +89,7 @@ OutputCase = Literal["output-valid", "output-invalid", "output-kill"]
 ProbeCase = (
     Case
     | ProviderCase
+    | SelectedLaunchCase
     | ShellCase
     | ExecutorCase
     | ClientCase
@@ -490,7 +500,9 @@ class ResponsesFixture:
         self.case: ProbeCase = case
         self.one_shot = one_shot
         self.request_limit: int
-        if case in PROVIDER_CASES:
+        if case == "selected-key-absent":
+            self.request_limit = 0
+        elif case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
         elif case in ERROR_CASES or case in MESSAGE_CASES or case in OUTPUT_CASES:
             self.request_limit = 1
@@ -633,7 +645,7 @@ class ResponsesFixture:
             & fields.keys(),
             "unexpected_responses_credentials",
         )
-        if self.case == "provider_key_present":
+        if self.case in {"provider_key_present", "selected-allow", "selected-deny"}:
             require(
                 authorization_count == 1
                 and fields[b"authorization"] == f"Bearer {SYNTHETIC_BEARER}".encode(),
@@ -708,6 +720,8 @@ class ResponsesFixture:
                 verify_one_shot_schema(command_tools[0])
                 if self.case == "allow":
                     return stdin_response(1)
+            if self.case in SELECTED_LAUNCH_CASES:
+                return command_response({"cmd": SELECTED_COMMAND})
             if self.case in SHELL_ARGUMENTS:
                 command = (
                     EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
@@ -783,7 +797,16 @@ class ResponsesFixture:
             require(output == SHELL_RESTRICTED, "native_shell_restriction_missing")
         elif self.case == "executor-deny":
             require(output == EXECUTOR_DENIAL, "executor_hook_denial_missing")
-        elif self.case in SHELL_ARGUMENTS:
+        elif self.case == "selected-deny":
+            require(
+                output
+                == (
+                    f"Command blocked by PreToolUse hook: {SELECTED_DENIAL}. "
+                    f"Command: {SELECTED_COMMAND}"
+                ),
+                "selected_hook_denial_missing",
+            )
+        elif self.case in SHELL_ARGUMENTS or self.case == "selected-allow":
             header, separator, _ = output.partition("\nOutput:\n")
             status = [
                 line
@@ -1132,7 +1155,11 @@ class Stdio:
         )
 
     async def observe(
-        self, workspace: Path, case: ProbeCase, executor_url: str | None = None
+        self,
+        workspace: Path,
+        case: ProbeCase,
+        executor_url: str | None = None,
+        executor_bearer: str = SYNTHETIC_EXECUTOR_BEARER,
     ) -> None:
         await initialize_app_server(
             self.rpc,
@@ -1150,16 +1177,16 @@ class Stdio:
             )
             return
         if executor_url is not None:
-            await self.register_executor(executor_url)
+            await self.register_executor(executor_url, executor_bearer)
         await self.run_turn(workspace, case, selected_executor=executor_url is not None)
 
-    async def register_executor(self, executor_url: str) -> None:
+    async def register_executor(self, executor_url: str, bearer: str) -> None:
         await self.call(
             "environment/add",
             {
                 "environmentId": EXECUTOR_ID,
                 "execServerUrl": executor_url,
-                "authBearerToken": SYNTHETIC_EXECUTOR_BEARER,
+                "authBearerToken": bearer,
             },
         )
         local = await self.call("environment/status", {"environmentId": "local"})
@@ -1186,6 +1213,7 @@ class Stdio:
             ]
         ephemeral = (
             case in PROVIDER_CASES
+            or case in SELECTED_LAUNCH_CASES
             or case in SHELL_ARGUMENTS
             or case in CLIENT_CASES
             or case in HOOK_INPUT_CASES
@@ -1316,7 +1344,7 @@ class Stdio:
             messages.verify(self.terminal)
         if errors is not None:
             errors.verify(self.terminal)
-        elif case == "provider_key_absent":
+        elif case in {"provider_key_absent", "selected-key-absent"}:
             require(
                 self.terminal.status == "failed", "missing_provider_key_not_refused"
             )
@@ -1644,7 +1672,7 @@ async def start_executor(root: Path, workspace: Path) -> asyncio.subprocess.Proc
     (Path(child_env["CODEX_HOME"]) / "config.toml").write_text(
         config + EXECUTOR_SHELL_POLICY, encoding="utf-8"
     )
-    return await asyncio.create_subprocess_exec(
+    argv = (
         CODEX,
         "exec-server",
         "--strict-config",
@@ -1654,6 +1682,15 @@ async def start_executor(root: Path, workspace: Path) -> asyncio.subprocess.Proc
         "capability-token",
         "--ws-token-sha256",
         hashlib.sha256(SYNTHETIC_EXECUTOR_BEARER.encode()).hexdigest(),
+    )
+    return await launch_executor(argv, workspace, child_env)
+
+
+async def launch_executor(
+    argv: tuple[str, ...], workspace: Path, child_env: dict[str, str]
+) -> asyncio.subprocess.Process:
+    return await asyncio.create_subprocess_exec(
+        *argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
@@ -1842,6 +1879,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     process: asyncio.subprocess.Process | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
+    bearer = SYNTHETIC_EXECUTOR_BEARER
     try:
         port = int(server.sockets[0].getsockname()[1])
         args = ["app-server", "--listen", "stdio://"]
@@ -1858,20 +1896,37 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
-            if fixture.case in EXECUTOR_CASES:
-                executor = await start_executor(root / "executor", workspace)
+            if fixture.case in SELECTED_LAUNCH_CASES:
+                bearer = secrets.token_urlsafe(32)
+                inputs = prepare_native_inputs(
+                    root, workspace, binary=Path(CODEX), port=port, bearer=bearer
+                )
+                child_env = materialize_native_inputs(inputs.app_server)
+                exec_env = materialize_native_inputs(inputs.exec_server)
+                if fixture.case != "selected-key-absent":
+                    child_env["CODEX_API_KEY"] = SYNTHETIC_BEARER
+                executor = await launch_executor(
+                    inputs.exec_server.argv, inputs.exec_server.cwd, exec_env
+                )
                 executor_url = await read_executor_url(executor)
-            child_env = environment(root, port, fixture.case)
+                app_argv = inputs.app_server.argv
+                app_cwd = inputs.app_server.cwd
+            else:
+                if fixture.case in EXECUTOR_CASES:
+                    executor = await start_executor(root / "executor", workspace)
+                    executor_url = await read_executor_url(executor)
+                child_env = environment(root, port, fixture.case)
+                app_argv = (CODEX, *args)
+                app_cwd = workspace
             identity = startup_identity(fixture.case, Path(child_env["CODEX_HOME"]))
             process = await asyncio.create_subprocess_exec(
-                CODEX,
-                *args,
+                *app_argv,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 limit=MAX_FRAME_BYTES,
                 start_new_session=True,
-                cwd=workspace,
+                cwd=app_cwd,
                 env=child_env,
             )
             assert process.stdin is not None
@@ -1890,7 +1945,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
             else:
-                await stdio.observe(workspace, fixture.case, executor_url)
+                await stdio.observe(workspace, fixture.case, executor_url, bearer)
         require(fixture.case not in STALLED_CASES, "stalled_turn_completed")
     except (TimeoutError, RpcError) as error:
         if isinstance(error, RpcError) and error.reason is not RpcFailure.DEADLINE:
@@ -1919,7 +1974,10 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
         raise
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
-        if process is not None and (
+        if fixture.case in SELECTED_LAUNCH_CASES:
+            async with asyncio.timeout_at(cleanup_deadline):
+                await close_selected_launch(fixture, server, process, executor)
+        elif process is not None and (
             fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
         ):
             try:
@@ -1938,6 +1996,79 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 for outcome in outcomes:
                     if isinstance(outcome, BaseException):
                         raise outcome
+
+
+async def close_selected_launch(
+    fixture: ResponsesFixture,
+    server: asyncio.Server,
+    app: asyncio.subprocess.Process | None,
+    executor: asyncio.subprocess.Process | None,
+) -> None:
+    children = [child for child in (app, executor) if child is not None]
+    try:
+        outcomes = await asyncio.gather(
+            *(stop_native_process(child) for child in children), return_exceptions=True
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+        require(
+            all(child.returncode is not None for child in children),
+            "selected_native_children_not_reaped",
+        )
+    finally:
+        await fixture.close(server)
+    if len(children) == 2:
+        diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
+
+
+async def run_selected_launch(case: SelectedLaunchCase) -> None:
+    if case != "selected-key-absent":
+        (CONTROL / "decision").write_text(case, encoding="utf-8")
+    with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
+        root = Path(scratch)
+        workspace = root / "workspace"
+        workspace.mkdir()
+        marker = workspace / MARKER
+        fixture = ResponsesFixture(case, one_shot=True)
+        await drive(fixture, root, workspace)
+        require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
+        require(
+            fixture.connections == fixture.requests == fixture.request_limit,
+            "unexpected_selected_launch_request_count",
+        )
+        if case == "selected-key-absent":
+            require(
+                not os.path.lexists(RECEIPTS)
+                and not os.path.lexists(CONTROL / "invocations"),
+                "missing_key_reached_hook",
+            )
+        else:
+            verify_shell_hook(SELECTED_COMMAND)
+        if case == "selected-allow":
+            bash = Path("/bin/bash").resolve(strict=True)
+            expected = f"{bash}\n{role_homes(root / 'exec').home}\n".encode()
+            require(
+                marker.is_file() and not marker.is_symlink(),
+                "selected_marker_missing",
+            )
+            with marker.open("rb") as contents:
+                require(
+                    contents.read(len(expected) + 1) == expected,
+                    "unexpected_selected_marker",
+                )
+        else:
+            require(not os.path.lexists(marker), "refused_selected_marker_exists")
+        for role in ("app", "exec"):
+            codex_home = role_homes(root / role).codex_home
+            require(
+                not any(
+                    os.path.lexists(codex_home / name)
+                    for name in ("auth.json", "environments.toml")
+                ),
+                "selected_native_auth_state_created",
+            )
+    diagnostic("INFO", "probe.case_verified", case)
 
 
 async def run_case(case: Case, one_shot: bool = False) -> None:
@@ -2245,6 +2376,10 @@ async def run() -> None:
         await run_hook_input_case("decoder-refuse")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
+    elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in SELECTED_LAUNCH_CASES:
+        await run_selected_launch(
+            cast("SelectedLaunchCase", sys.argv[1].removeprefix("--"))
+        )
     else:
         require(not sys.argv[1:], "unexpected_arguments")
         await run_case("allow")
