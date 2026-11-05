@@ -25,7 +25,8 @@ format nor an account fallback.
 Both native roles remain candidate-side under one existing runtime/runner
 lifecycle authority. Native local-executor fallback is disabled; the selected
 Bash metadata and managed one-shot/login controls must qualify before turns.
-The full process/filesystem endpoint, exact workspace/path binding, live
+The full exposed endpoint, including process/filesystem and outbound HTTP,
+exact workspace/path binding, live
 reconnect identity and owner-bounded stopping are explicit. The Python adapter,
 Policy, independent enforcement and publication keep their existing owners.
 No public executor selector, provider ABI, persisted profile, new dependency,
@@ -103,9 +104,22 @@ required before activation.
 
 ## Resource, threat and activation boundaries
 
+The pinned [WebSocket processor registry](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/exec-server/src/server/registry.rs#L77-L81)
+also exposes `http/request` through the initialized authenticated connection.
+The [native HTTP handler](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/exec-server/src/server/handler.rs#L277-L327)
+owns outbound requests and streamed bodies. The
+[wire schema](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/exec-server-protocol/src/protocol.rs#L1140-L1197)
+permits executor-environment header lookup and requests without a native timeout.
+The capability scope is therefore not restricted to command/filesystem methods.
+Native HTTP retains existing candidate network/credential controls and adds no
+egress permission or enforcement guarantee. Header/redirect and body-stream
+ownership, admission and independent stopping need implementation evidence.
+The fixed local `/readyz` response is availability data, not authorized RPC
+access; authentication claims concern the WebSocket execution connection.
+
 The existing runtime owner covers partial startup, registration/initialization,
 transport loss, a blocked hook/read/request, cancellation, unexpected native
-exit, reconnect and shutdown. Both direct roles, all handles/helpers/descendants,
+exit, reconnect and shutdown. Both direct roles, all handles/helpers/descendants, HTTP requests/body streams,
 streams/tasks/connections and per-attempt trees retain finite admission and
 actual closure obligations. Failure cleaning one role cannot abandon the other.
 Independent inherited D/D+30 thresholds and retained unknown ownership are
@@ -115,7 +129,7 @@ classifies its bound otherwise. No new numerical method/campaign or gate change.
 
 Existing TM-03 maps managed controls and complete interception; TM-05/TM-11
 retain candidate versus supervisor/control/publication separation; TM-06/TM-07
-cover keys, bearer, environments and channels; TM-09/TM-10 cover owned native
+cover keys, bearer, environments, native HTTP and channels; TM-09/TM-10 cover owned native
 roles/connections/handles/helpers; TM-12 covers pin integrity and truthful
 qualification. Independent security review established no mandatory threat-model
 text edit for this design scope; the cooperative-local residual remains.

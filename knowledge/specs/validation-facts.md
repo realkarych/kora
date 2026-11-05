@@ -197,7 +197,9 @@ recorded under [#769](https://github.com/realkarych/kora/issues/769) on
 2026-11-05, uses API-key authentication and one app-server plus one selected
 native exec-server under the existing runtime/runner lifecycle owner. Both
 roles share the admitted candidate filesystem/workspace/policy binding;
-the native connection capability covers process and filesystem RPCs.
+the native connection capability covers the exposed RPC surface, including
+process, filesystem and outbound HTTP requests/streams, under the existing
+candidate network and credential controls.
 Identity-preserving live reconnect or attempt failure and actual owner-bounded
 listener/session/descendant closure remain implementing obligations.
 
