@@ -86,6 +86,7 @@ PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
 INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
+INTERRUPT_PRIMER_ID = "kora-interrupt-primer"
 SYNTHETIC_BEARER = "kora-probe-synthetic-value"
 MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -324,8 +325,14 @@ USAGE_TOOL_RESPONSE = command_response(
         "total_tokens": 110,
     },
 )
-INTERRUPT_TOOL_RESPONSE = command_response(
-    {"cmd": INTERRUPT_COMMAND, "login": False, "timeout_ms": 60_000},
+INTERRUPT_PRIMER_RESPONSE = sse(
+    "kora-interrupt-primer-response",
+    {
+        "type": "function_call",
+        "call_id": INTERRUPT_PRIMER_ID,
+        "name": "exec_command",
+        "arguments": json.dumps({"cmd": ":", "login": False, "timeout_ms": 60_000}),
+    },
     usage={
         "input_tokens": 100,
         "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
@@ -333,6 +340,9 @@ INTERRUPT_TOOL_RESPONSE = command_response(
         "output_tokens_details": {"reasoning_tokens": 4},
         "total_tokens": 110,
     },
+)
+INTERRUPT_TOOL_RESPONSE = command_response(
+    {"cmd": INTERRUPT_COMMAND, "login": False, "timeout_ms": 60_000}
 )
 USAGE_FINAL_RESPONSE = sse(
     "kora-probe-response-2",
@@ -356,7 +366,7 @@ class ResponsesFixture:
         if case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
         elif case in INTERRUPT_CASES:
-            self.request_limit = 1
+            self.request_limit = 1 if case == "interrupt-model" else 2
         elif (
             case == "executor-stall" or case in CLIENT_CASES or case in STARTUP_REFUSALS
         ):
@@ -509,7 +519,7 @@ class ResponsesFixture:
             if self.case in INTERRUPT_CASES:
                 require("write_stdin" not in names, "interrupt_stdin_advertised")
                 verify_one_shot_schema(command_tools[0])
-                return INTERRUPT_TOOL_RESPONSE
+                return INTERRUPT_PRIMER_RESPONSE
             if self.case == "interactive":
                 require("write_stdin" in names, "interactive_stdin_not_advertised")
                 return command_response(
@@ -533,6 +543,14 @@ class ResponsesFixture:
             return USAGE_TOOL_RESPONSE if self.case == "usage" else TOOL_RESPONSE
 
         require(self.requests <= self.request_limit, "unexpected_responses_request")
+        if self.case in INTERRUPT_CASES:
+            output = tool_output(request, INTERRUPT_PRIMER_ID)
+            require(
+                re.search(r"(?m)^(?:Process exited with code |Exit code: )0$", output)
+                is not None,
+                "interrupt_primer_not_successful",
+            )
+            return INTERRUPT_TOOL_RESPONSE
         require(self.case not in STALLED_CASES, "stalled_hook_returned")
         if self.case == "interactive":
             if self.requests == 2:
@@ -858,7 +876,7 @@ class Stdio:
                 )
                 child_fd = open_child_pidfd(int(raw_pid))
                 resources.callback(os.close, child_fd)
-                hook_pid(INTERRUPT_COMMAND)
+                verify_interrupt_hooks()
                 diagnostic("INFO", "probe.interrupt_barrier", "command_ready")
                 while usage.for_turn(turn_id) is None:
                     await self.rpc.receive(
@@ -921,6 +939,30 @@ def open_child_pidfd(pid: int) -> int:
     if sys.platform == "linux":
         return os.pidfd_open(pid)
     raise ProbeFailure("interrupt_requires_linux")
+
+
+def verify_interrupt_hooks() -> None:
+    with RECEIPTS.open("rb") as receipts:
+        raw = receipts.read(4097)
+    require(len(raw) <= 4096, "interrupt_receipt_limit")
+    lines = raw.splitlines()
+    require(len(lines) == 2, "interrupt_receipt_count")
+    for line, call_id, command in zip(
+        lines, (INTERRUPT_PRIMER_ID, CALL_ID), (":", INTERRUPT_COMMAND), strict=True
+    ):
+        receipt = parse_object(line)
+        pid = receipt.pop("pid", None)
+        require(type(pid) is int and pid > 1, "interrupt_hook_pid_invalid")
+        require(
+            receipt
+            == {
+                "event": "PreToolUse",
+                "tool": "Bash",
+                "call": call_id,
+                "command": command,
+            },
+            "interrupt_receipt_invalid",
+        )
 
 
 async def wait_pidfd_exit(descriptor: int) -> None:
@@ -1311,7 +1353,7 @@ async def run_interrupt_case(case: InterruptCase) -> None:
         await drive(fixture, root, workspace)
 
         require(fixture.failure is None, fixture.failure or "interrupt_fixture_failed")
-        require(fixture.requests == 1, "interrupt_request_count")
+        require(fixture.requests == fixture.request_limit, "interrupt_request_count")
         require(not os.path.lexists(workspace / MARKER), "interrupt_marker_exists")
         require(
             RECEIPTS.is_file() == (case != "interrupt-model"),

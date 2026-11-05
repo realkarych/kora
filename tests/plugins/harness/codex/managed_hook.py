@@ -69,9 +69,13 @@ def main() -> int:
         if error.reason is HookInputFailure.INPUT_TOO_LARGE:
             return deny(CAP_REFUSAL)
         return deny(INPUT_REFUSAL)
+    expected_call_id = "kora-hook-probe-call"
+    if decision == "interrupt" and call.tool_use_id == "kora-interrupt-primer":
+        expected_command = ":"
+        expected_call_id = "kora-interrupt-primer"
     if (
         call.tool != ("apply_patch" if patch else "Bash")
-        or call.tool_use_id != "kora-hook-probe-call"
+        or call.tool_use_id != expected_call_id
         or call.command != (PATCH if patch else expected_command)
     ):
         return deny(INPUT_REFUSAL)
