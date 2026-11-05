@@ -414,6 +414,7 @@ Branch conditions and reasons, retry predicates, `approve_when`, event `match` a
 | `branch` `cases[].when` | `inputs`, `params` | `bool` | scheduler, branch pass | fails the branch with `config_error`; its direct targets become `upstream_failed` (section 4.5) |
 | `branch` `cases[].reason`, `else_reason` (evaluated only on a `$fail_attempt` route) | `inputs`, `params` | `string` | scheduler, branch pass | fails the branch with `config_error`; the iteration does not end as `attempt_failed` |
 | `retry.predicate` (node and subgraph) | `outputs`, `inputs`, `params` | `bool` | scheduler, retry handling | no retry; the node keeps its original error class |
+| `runtime.infrastructure_retry.predicate` (first-slice static check) | `params` | `bool` | dormant in the first slice | inapplicable while dormant |
 | `human_input` `approve_when` | `response`, `inputs`, `params` | `bool` | the shared approval transition (direct API response or channel observation) | the request becomes `failed` and the node fails with `config_error` |
 | `wait_event` `event.match` | `payload`, `inputs`, `params` | `bool` | scheduler, wake-ups | the event does not match this wait |
 | `wait_event` `poll.until` | `observation`, `inputs`, `params` | `bool` | scheduler, prepared-observation apply | "not yet": the wait keeps polling |
@@ -424,6 +425,10 @@ Branch conditions and reasons, retry predicates, `approve_when`, event `match` a
 - `params` are the run parameters, typed by the [effective graph parameter schema](#graph-parameter-schema-omission) and bound from the projection cut at run creation.
 - `response` is the approval form response, typed by `form`, projected and bound-checked when the response is received.
 - `payload` is the inbound event body and `observation` the sensor result. Neither has a declared schema; both are `map(string, dyn)`.
+
+The project owner accepted the first-slice infrastructure predicate context on 2026-11-05 under [#775](https://github.com/realkarych/kora/issues/775). The only externally bound variable is `params`. Its type comes from the effective graph parameter schema and the existing parameter checker view and reference roots. The `bool` entry uses the existing section 7.4 static result rule, including `dyn`. Local comprehension names follow the same shadowing rule. A binder named `params` demands that environment, and unavailable schema prerequisites leave dependent checking incomplete. Omission leaves the predicate absent.
+
+Apply this same static and native rule to each applicable authored or configured infrastructure predicate for the graph, including masked settings. Authored diagnostics use the exact `runtime.infrastructure_retry.predicate` path and preserve the original code-point offset when available. Configured failures stay with their trusted configuration owner and use the existing safe refusal boundary, with configured text, private paths and offsets kept out of author-facing diagnostics and logs. The [first-slice disabled policy](first-slice.md#refusal-contract) keeps the predicate dormant and admits zero infrastructure replacements.
 
 ### 7.2 Parser, limits and canonical rendering
 
