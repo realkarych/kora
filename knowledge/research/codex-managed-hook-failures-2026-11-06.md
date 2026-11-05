@@ -29,15 +29,16 @@ For timeout, the fixture matches the kernel peer PID from the ready
 socket to the recorded helper PID. It opens the pidfd while that exact
 helper is live, then observes its exit and barrier EOF before teardown.
 Pidfds for both native roles verify that neither role has exited at
-that point. The selected fixture then closes the Responses server and
-its streams, reaps both direct native children, and the wrapper removes
-the exact container. It does not separately inventory the executor
+that point. The selected fixture then reaps both direct native children and closes
+the Responses server and its streams. The wrapper removes the exact
+container. It does not separately inventory the executor
 listener and WebSocket handles before removal.
 
 The pinned [hook parser](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/hooks/src/events/pre_tool_use.rs#L200-L301)
 distinguishes blocking from failure. The
 [pinned timeout path](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/hooks/src/engine/command_runner.rs#L331-L400)
-reports a failed hook and cleans up the command process group. The
+reports a failed hook and attempts to kill the hook command's process
+group. The
 [tool dispatch](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/tools/registry.rs#L839-L890)
 can continue after a nonblocking hook result. In the observed cases,
 an explicit deny works, but a failed managed hook does not enforce
