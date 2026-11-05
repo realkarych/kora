@@ -82,6 +82,8 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
         "model": "fixture/model:2026",
         "model_provider": "kora_responses",
         "sandbox_mode": "read-only",
+        "project_doc_max_bytes": 0,
+        "projects": {str(root / "workspace"): {"trust_level": "untrusted"}},
         "model_providers": {
             "kora_responses": {
                 "name": "kora Responses",
@@ -129,6 +131,18 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
     }
     assert isinstance(inputs.app_server.environment, MappingProxyType)
     assert isinstance(inputs.exec_server.environment, MappingProxyType)
+    assert not root.exists()
+
+
+def test_codex_trust_config_quotes_one_exact_checkout(tmp_path: Path) -> None:
+    root = tmp_path / 'quoted-"checkout-π-\\suffix'
+
+    inputs = construct(root)
+    config = tomllib.loads(inputs.app_server.config)
+    trust: object = config.get("projects")
+
+    assert trust == {str(root / "workspace"): {"trust_level": "untrusted"}}
+    assert config.get("project_doc_max_bytes") == 0
     assert not root.exists()
 
 

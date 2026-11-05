@@ -1,4 +1,5 @@
 import hashlib
+import tomllib
 from pathlib import Path
 from typing import Literal
 
@@ -10,10 +11,33 @@ from kora.plugins.harness.codex.launch_configuration import (
     build_launch_inputs,
 )
 
-SelectedLaunchCase = Literal["selected-allow", "selected-deny", "selected-key-absent"]
+SelectedLaunchCase = Literal[
+    "selected-allow",
+    "selected-deny",
+    "selected-key-absent",
+    "selected-startup-ready",
+    "selected-startup-bearer",
+    "selected-startup-bash",
+]
 SELECTED_LAUNCH_CASES = frozenset(
-    {"selected-allow", "selected-deny", "selected-key-absent"}
+    {
+        "selected-allow",
+        "selected-deny",
+        "selected-key-absent",
+        "selected-startup-ready",
+        "selected-startup-bearer",
+        "selected-startup-bash",
+    }
 )
+SELECTED_AUTH_CASES = frozenset(
+    {"selected-allow", "selected-deny", "selected-startup-ready"}
+)
+SELECTED_REFUSALS = frozenset(
+    {"selected-key-absent", "selected-startup-bearer", "selected-startup-bash"}
+)
+SELECTED_MODEL = "gpt-5.5"
+PROJECT_MODEL_CANARY = "kora-checkout-model-canary"
+PROJECT_DOC_CANARY = b"kora-checkout-instruction-canary"
 SELECTED_DENIAL = "kora managed hook probe denied the selected command"
 SELECTED_COMMAND = (
     'test -z "${CODEX_API_KEY+x}" && '
@@ -31,7 +55,7 @@ def prepare_native_inputs(
 ) -> CodexLaunchInputs:
     return build_launch_inputs(
         CodexLaunchProfile(
-            "gpt-5.5", f"http://127.0.0.1:{port}/v1", "danger-full-access"
+            SELECTED_MODEL, f"http://127.0.0.1:{port}/v1", "danger-full-access"
         ),
         executable=binary,
         bash=Path("/bin/bash"),
@@ -53,3 +77,24 @@ def materialize_native_inputs(inputs: NativeProcessInputs) -> dict[str, str]:
         "LANG": "C.UTF-8",
         **inputs.environment,
     }
+
+
+def plant_checkout_canaries(workspace: Path) -> None:
+    dot_git = workspace / ".git"
+    (dot_git / "objects").mkdir(parents=True)
+    (dot_git / "refs" / "heads").mkdir(parents=True)
+    (dot_git / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    project = workspace / ".codex"
+    project.mkdir()
+    (project / "config.toml").write_text(
+        f'model = "{PROJECT_MODEL_CANARY}"\n', encoding="utf-8"
+    )
+    (workspace / "AGENTS.md").write_bytes(PROJECT_DOC_CANARY + b"\n")
+
+
+def workspace_remains_untrusted(config: Path, workspace: Path) -> bool:
+    settings = tomllib.loads(config.read_text(encoding="utf-8"))
+    return (
+        settings.get("projects") == {str(workspace): {"trust_level": "untrusted"}}
+        and settings.get("project_doc_max_bytes") == 0
+    )

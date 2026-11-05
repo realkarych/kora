@@ -56,14 +56,27 @@ from kora.plugins.harness.codex.app_server_usage import (
     decode_usage,
     reject_premature_usage,
 )
+from kora.plugins.harness.codex.launch_configuration import CODEX_VERSION
+from kora.plugins.harness.codex.selected_startup import (
+    SelectedEnvironment,
+    SelectedStartupError,
+    SelectedStartupFailure,
+    prepare_selected_thread,
+)
 from tests.plugins.harness.codex.selected_launch import (
+    PROJECT_DOC_CANARY,
+    SELECTED_AUTH_CASES,
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_LAUNCH_CASES,
+    SELECTED_MODEL,
+    SELECTED_REFUSALS,
     SelectedLaunchCase,
     materialize_native_inputs,
+    plant_checkout_canaries,
     prepare_native_inputs,
     role_homes,
+    workspace_remains_untrusted,
 )
 
 Case = Literal["allow", "deny", "stall", "interactive", "usage"]
@@ -102,7 +115,6 @@ ProbeCase = (
 )
 
 CODEX = "/usr/local/bin/codex"
-CODEX_VERSION = "0.166.0"
 MESSAGE_CASES = frozenset({"messages-plain", "messages-stream", "messages-kill"})
 OUTPUT_CASES = frozenset({"output-valid", "output-invalid", "output-kill"})
 OUTPUT_SCHEMA: dict[str, object] = {
@@ -500,7 +512,7 @@ class ResponsesFixture:
         self.case: ProbeCase = case
         self.one_shot = one_shot
         self.request_limit: int
-        if case == "selected-key-absent":
+        if case in SELECTED_REFUSALS:
             self.request_limit = 0
         elif case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
@@ -556,7 +568,17 @@ class ResponsesFixture:
                 fields = self.verify_headers(headers)
                 size = int(fields.get(b"content-length", b"0"))
                 require(0 < size <= MAX_FRAME_BYTES, "invalid_responses_size")
-                request = parse_object(await reader.readexactly(size))
+                body = await reader.readexactly(size)
+                if self.case == "selected-startup-ready":
+                    require(
+                        PROJECT_DOC_CANARY not in body, "project_instructions_applied"
+                    )
+                request = parse_object(body)
+                if self.case == "selected-startup-ready":
+                    require(
+                        request.get("model") == SELECTED_MODEL,
+                        "project_model_applied",
+                    )
                 response = self.respond(request)
                 self.request_admitted.set()
                 if self.case == "client-exit":
@@ -645,7 +667,7 @@ class ResponsesFixture:
             & fields.keys(),
             "unexpected_responses_credentials",
         )
-        if self.case in {"provider_key_present", "selected-allow", "selected-deny"}:
+        if self.case == "provider_key_present" or self.case in SELECTED_AUTH_CASES:
             require(
                 authorization_count == 1
                 and fields[b"authorization"] == f"Bearer {SYNTHETIC_BEARER}".encode(),
@@ -806,7 +828,7 @@ class ResponsesFixture:
                 ),
                 "selected_hook_denial_missing",
             )
-        elif self.case in SHELL_ARGUMENTS or self.case == "selected-allow":
+        elif self.case in SHELL_ARGUMENTS or self.case in SELECTED_AUTH_CASES:
             header, separator, _ = output.partition("\nOutput:\n")
             status = [
                 line
@@ -1180,6 +1202,44 @@ class Stdio:
             await self.register_executor(executor_url, executor_bearer)
         await self.run_turn(workspace, case, selected_executor=executor_url is not None)
 
+    async def observe_selected(
+        self, workspace: Path, case: ProbeCase, endpoint: str, bearer: str
+    ) -> None:
+        expected_failure = (
+            SelectedStartupFailure.EXECUTOR_INFO_REFUSED
+            if case == "selected-startup-bearer"
+            else SelectedStartupFailure.EXECUTOR_SHELL
+            if case == "selected-startup-bash"
+            else None
+        )
+        if case == "selected-startup-bearer":
+            bearer = ("b" if bearer.startswith("a") else "a") + bearer[1:]
+        expected = SelectedEnvironment(
+            EXECUTOR_ID,
+            endpoint,
+            Path(
+                EXECUTOR_BASH_OVERRIDE
+                if case == "selected-startup-bash"
+                else "/bin/bash"
+            ),
+            workspace,
+            SELECTED_MODEL,
+        )
+        try:
+            thread_id = await prepare_selected_thread(
+                self.rpc, self.identity, expected, bearer, deadline=self.deadline
+            )
+        except SelectedStartupError as error:
+            if error.reason is not expected_failure:
+                raise
+            diagnostic("INFO", "probe.selected_startup_refused", error.reason.value)
+            return
+        require(expected_failure is None, "selected_startup_unexpectedly_accepted")
+        diagnostic("INFO", "probe.selected_startup_prepared", case)
+        await self.run_turn(
+            workspace, case, selected_executor=True, thread_id=thread_id
+        )
+
     async def register_executor(self, executor_url: str, bearer: str) -> None:
         await self.call(
             "environment/add",
@@ -1203,9 +1263,9 @@ class Stdio:
             "executor_shell_mismatch",
         )
 
-    async def run_turn(
+    async def start_legacy_thread(
         self, workspace: Path, case: ProbeCase, *, selected_executor: bool
-    ) -> None:
+    ) -> str:
         thread_params: dict[str, object] = {"cwd": str(workspace)}
         if selected_executor:
             thread_params["environments"] = [
@@ -1224,6 +1284,26 @@ class Stdio:
         )
         if ephemeral:
             thread_params["ephemeral"] = True
+        start = await self.call("thread/start", thread_params)
+        thread = as_object(start.get("thread"))
+        if ephemeral:
+            require(thread.get("ephemeral") is True, "thread_not_ephemeral")
+        thread_id = thread.get("id")
+        require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
+        return cast("str", thread_id)
+
+    async def run_turn(
+        self,
+        workspace: Path,
+        case: ProbeCase,
+        *,
+        selected_executor: bool,
+        thread_id: str | None = None,
+    ) -> None:
+        if thread_id is None:
+            thread_id = await self.start_legacy_thread(
+                workspace, case, selected_executor=selected_executor
+            )
         prompt = "Run the probe marker command."
         if case in PATCH_CASES:
             prompt = "Apply the probe marker patch."
@@ -1235,13 +1315,6 @@ class Stdio:
             or case in OUTPUT_CASES
         ):
             prompt = "Complete the fixture turn."
-        start = await self.call("thread/start", thread_params)
-        thread = as_object(start.get("thread"))
-        if ephemeral:
-            require(thread.get("ephemeral") is True, "thread_not_ephemeral")
-        thread_id = thread.get("id")
-        require(isinstance(thread_id, str) and bool(thread_id), "missing_thread_id")
-        thread_id = cast("str", thread_id)
         usage = UsageProbe(thread_id) if case == "usage" else None
         errors = ErrorProbe(thread_id, case) if case in ERROR_CASES else None
         messages = MessageProbe(thread_id, case) if case in MESSAGE_CASES else None
@@ -1944,6 +2017,11 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 await stdio.interrupt_turn(workspace, fixture, process)
             elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
+            elif fixture.case in SELECTED_LAUNCH_CASES:
+                assert executor_url is not None
+                await stdio.observe_selected(
+                    workspace, fixture.case, executor_url, bearer
+                )
             else:
                 await stdio.observe(workspace, fixture.case, executor_url, bearer)
         require(fixture.case not in STALLED_CASES, "stalled_turn_completed")
@@ -2028,12 +2106,17 @@ async def close_selected_launch(
 
 
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
-    if case != "selected-key-absent":
-        (CONTROL / "decision").write_text(case, encoding="utf-8")
+    if case in SELECTED_AUTH_CASES:
+        decision = "selected-allow" if case == "selected-startup-ready" else case
+        (CONTROL / "decision").write_text(decision, encoding="utf-8")
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
-        workspace = root / "workspace"
+        workspace = root / (
+            "workspace :@" if case == "selected-startup-ready" else "workspace"
+        )
         workspace.mkdir()
+        if case == "selected-startup-ready":
+            plant_checkout_canaries(workspace)
         marker = workspace / MARKER
         fixture = ResponsesFixture(case, one_shot=True)
         await drive(fixture, root, workspace)
@@ -2042,15 +2125,15 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             fixture.connections == fixture.requests == fixture.request_limit,
             "unexpected_selected_launch_request_count",
         )
-        if case == "selected-key-absent":
+        if case in SELECTED_REFUSALS:
             require(
                 not os.path.lexists(RECEIPTS)
                 and not os.path.lexists(CONTROL / "invocations"),
-                "missing_key_reached_hook",
+                "refused_selected_startup_reached_hook",
             )
         else:
             verify_shell_hook(SELECTED_COMMAND)
-        if case == "selected-allow":
+        if case in {"selected-allow", "selected-startup-ready"}:
             bash = Path("/bin/bash").resolve(strict=True)
             expected = f"{bash}\n{role_homes(root / 'exec').home}\n".encode()
             require(
@@ -2064,6 +2147,13 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
                 )
         else:
             require(not os.path.lexists(marker), "refused_selected_marker_exists")
+        if case == "selected-startup-ready":
+            require(
+                workspace_remains_untrusted(
+                    role_homes(root / "app").codex_home / "config.toml", workspace
+                ),
+                "checkout_trust_changed",
+            )
         for role in ("app", "exec"):
             codex_home = role_homes(root / role).codex_home
             require(
@@ -2420,6 +2510,9 @@ def main() -> int:
         ToolRefused,
     ) as error:
         return report_connection_failure(error)
+    except SelectedStartupError as error:
+        diagnostic("ERROR", "probe.case_failed", error.reason.value)
+        return 1
     except TimeoutError:
         diagnostic("ERROR", "probe.case_failed", "cleanup_deadline_expired")
         return 1

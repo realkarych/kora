@@ -1,3 +1,4 @@
+import json
 import re
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
@@ -10,6 +11,8 @@ from urllib.parse import urlsplit
 
 NativeSandbox = Literal["read-only", "workspace-write", "danger-full-access"]
 
+CODEX_VERSION = "0.166.0"
+MODEL_PROVIDER = "kora_responses"
 PROVIDER_KEY = "CODEX_API_KEY"
 BUILTIN_EXECUTOR = "CODEX_EXEC_SERVER_URL"
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
@@ -91,12 +94,16 @@ class CodexLaunchProfile:
         ):
             raise LaunchConfigurationError(LaunchConfigurationFailure.INVALID_PROVIDER)
 
-    def app_server_config(self) -> str:
+    def app_server_config(self, workspace: Path) -> str:
         return f"""model = "{self.model}"
-model_provider = "kora_responses"
+model_provider = "{MODEL_PROVIDER}"
 sandbox_mode = "{self.sandbox}"
+project_doc_max_bytes = 0
 {NATIVE_SETTINGS}
-[model_providers.kora_responses]
+[projects.{json.dumps(str(workspace), ensure_ascii=False)}]
+trust_level = "untrusted"
+
+[model_providers.{MODEL_PROVIDER}]
 name = "kora Responses"
 base_url = "{self.base_url}"
 wire_api = "responses"
@@ -141,6 +148,10 @@ class CodexLaunchInputs:
 
 
 def valid_path(path: Path) -> bool:
+    try:
+        str(path).encode("utf-8")
+    except UnicodeEncodeError:
+        return False
     return (
         path.anchor == "/"
         and path != path.parent
@@ -200,7 +211,7 @@ def build_launch_inputs(
                 "--strict-config",
             ),
             cwd=workspace,
-            config=profile.app_server_config(),
+            config=profile.app_server_config(workspace),
             environment=MappingProxyType(app_env),
         ),
         exec_server=NativeProcessInputs(
