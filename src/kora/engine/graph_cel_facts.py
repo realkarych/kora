@@ -18,6 +18,7 @@ from kora.ir.cel_inventory_admission import (
     CheckedInventoryAdmission,
     InventoryAdmissionExhausted,
 )
+from kora.ir.document import GraphDocument
 from kora.ir.expression_fields import CheckedCelSite
 from kora.ir.graph_cel_inventory import checked_graph_sites
 from kora.ir.json import JsonObject, JsonValue
@@ -120,7 +121,8 @@ def read_graph_cel_facts(
     ir_text: str, execution_contract: object, *, limits: GraphCelReadLimits
 ) -> GraphCelFacts:
     try:
-        return checked_saved_facts(ir_text, execution_contract, limits)
+        facts, _, _ = checked_saved_facts(ir_text, execution_contract, limits)
+        return facts
     except GraphValueRejected as rejection:
         reason = rejection.reason
     del ir_text, execution_contract
@@ -129,7 +131,7 @@ def read_graph_cel_facts(
 
 def checked_saved_facts(
     ir_text: str, execution_contract: object, limits: GraphCelReadLimits
-) -> GraphCelFacts:
+) -> tuple[GraphCelFacts, GraphDocument, tuple[CheckedCelSite, ...]]:
     if type(execution_contract) is not dict:
         raise GraphValueRejected(GraphValueFailure.INVALID)
     contract = cast(dict[object, object], execution_contract)
@@ -176,4 +178,4 @@ def checked_saved_facts(
     expected = stage_graph_cel_facts(sites, comparison.remaining)
     if saved != expected.text:
         raise GraphValueRejected(GraphValueFailure.INVALID)
-    return GraphCelFacts(saved)
+    return GraphCelFacts(saved), document, sites
