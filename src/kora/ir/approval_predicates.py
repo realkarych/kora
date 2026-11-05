@@ -139,7 +139,10 @@ def required_context(source: str, meter: Meter) -> frozenset[str]:
 
 class ApprovalPredicateChecks:
     def __init__(
-        self, contracts: dict[str, TypeContract], parameters: JsonObject | MISSING
+        self,
+        contracts: dict[str, TypeContract],
+        parameters: JsonObject | MISSING,
+        collector: DiagnosticCollector | None = None,
     ) -> None:
         roots = {
             "urn:kora:artifact:" + name.replace("/", ":"): root
@@ -150,7 +153,9 @@ class ApprovalPredicateChecks:
         self.parameters: JsonObject | MISSING = parameters
         self.parameter_variable: Variable | None | MISSING = MISSING
         self.meter: Meter = Meter()
-        self.collector: DiagnosticCollector = DiagnosticCollector()
+        self.collector: DiagnosticCollector = (
+            DiagnosticCollector() if collector is None else collector
+        )
         self.default_form: JsonObject = default_approval_form()
         self.inputs: DirectInputContexts = DirectInputContexts(
             self.schemas, contracts, roots, self.default_form

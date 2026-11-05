@@ -65,7 +65,11 @@ class ApprovalDefaultResult:
 
 
 class ApprovalDefaultChecks:
-    def __init__(self, contracts: dict[str, TypeContract]) -> None:
+    def __init__(
+        self,
+        contracts: dict[str, TypeContract],
+        collector: DiagnosticCollector | None = None,
+    ) -> None:
         roots = {
             "urn:kora:artifact:" + name.replace("/", ":"): root
             for name, contract in contracts.items()
@@ -73,7 +77,7 @@ class ApprovalDefaultChecks:
         }
         self.schemas = SchemaTypes(roots.get)
         self.checker_meter = Meter()
-        self.collector = DiagnosticCollector()
+        self.collector = DiagnosticCollector() if collector is None else collector
         self.default_form = default_approval_form()
         self.human_inputs: int = 0
         self.predicates: int = 0

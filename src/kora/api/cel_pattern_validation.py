@@ -27,6 +27,7 @@ from kora.cel.tree import (
 )
 from kora.cel_eval.evaluate import PatternCompilation
 from kora.cel_eval.thread import Evaluator
+from kora.ir.approval_compilation import ApprovalPrerequisite, checked_approval_sites
 from kora.ir.diagnostic_collection import DiagnosticCollection, DiagnosticCollector
 from kora.ir.diagnostics import DiagnosticPath, from_cel, path_sequence
 from kora.ir.document import GraphDocument
@@ -230,13 +231,16 @@ def collect_pattern_findings(prepared: PreparedPatterns) -> PatternCheck:
     return CompletePatternCheck(collector.finish())
 
 
-def announce(result: PatternCheck) -> PatternCheck:
+def emit_completion(status: str) -> None:
     diagnostics = current_diagnostics()
     if diagnostics is not None:
-        status = (
-            result.value if isinstance(result, IncompletePatternCheck) else "complete"
-        )
         diagnostics.logger(COMPONENT).emit(COMPLETED, status=status)
+
+
+def announce(result: PatternCheck) -> PatternCheck:
+    emit_completion(
+        result.value if isinstance(result, IncompletePatternCheck) else "complete"
+    )
     return result
 
 
@@ -271,6 +275,37 @@ async def validate_sensor_trigger_patterns(
         return inventory
     verification = validate_cel_patterns(
         tuple(CheckedPatternSite(site.path, site.checked, True) for site in inventory),
+        evaluator,
+        max_work=max_work,
+    )
+    del document, inventory
+    return await verification
+
+
+async def validate_approval_patterns(
+    document: GraphDocument,
+    evaluator: Evaluator,
+    *,
+    max_declarations: int,
+    max_work: int,
+) -> PatternCheck | DiagnosticCollection | ApprovalPrerequisite:
+    if type(max_declarations) is not int or max_declarations < 0:
+        return announce(IncompletePatternCheck.INVALID_INVENTORY)
+    inventory = checked_approval_sites(document, max_declarations=max_declarations)
+    if inventory is None:
+        return announce(IncompletePatternCheck.CAPACITY_EXHAUSTED)
+    if isinstance(inventory, ApprovalPrerequisite | DiagnosticCollection):
+        emit_completion(
+            inventory.value
+            if isinstance(inventory, ApprovalPrerequisite)
+            else "typed_refused"
+        )
+        return inventory
+    verification = validate_cel_patterns(
+        tuple(
+            CheckedPatternSite(site.path, site.checked, site.authored)
+            for site in inventory
+        ),
         evaluator,
         max_work=max_work,
     )
