@@ -30,7 +30,8 @@ if [ ! -x "$buildx" ]; then
     printf '%s\n' '{"level":"ERROR","event":"probe.buildx_required"}' >&2
     exit 1
 fi
-reservation=$(mktemp -d "${TMPDIR:-/tmp}/kora-hook-probe.XXXXXXXX")
+reservation_root=$(CDPATH='' cd -- "${TMPDIR:-/tmp}" && pwd -P)
+reservation=$(mktemp -d "$reservation_root/kora-hook-probe.XXXXXXXX")
 container="kora-hook-probe-${reservation##*.}"
 container_id=
 attach_pid=
