@@ -5,9 +5,10 @@ from dataclasses import dataclass
 
 import pytest
 from alembic import command
-from sqlalchemy import Connection, event, insert, inspect, select, update
+from sqlalchemy import Connection, event, func, insert, inspect, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.util import await_
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.graph_read_admission import (
@@ -177,24 +178,45 @@ async def test_graph_admission_matches_exact_scope_and_independent_allowances(
 async def test_graph_admission_remains_in_the_original_snapshot(
     database: Database,
 ) -> None:
-    scope = await seed_scope(database)
+    async with database.transaction() as connection:
+        seeder = Seeder(connection)
+        namespace_id = await seeder.namespace()
+        graph_id = await seeder.graph(namespace_id)
+        version_id = await seeder.graph_version(graph_id)
+    scope = Scope(namespace_id, graph_id, version_id)
     ledger = ConnectionLedger(database)
+    interleaved: list[str] = []
 
-    async def publish() -> Scope:
+    async def insert_witness() -> None:
         async with database.transaction() as connection:
-            version_id = await Seeder(connection).graph_version(scope.graph_id, 2)
-            await insert_admission(connection, version_id)
-        return Scope(scope.namespace_id, scope.graph_id, version_id)
+            await insert_admission(connection, scope.version_id)
+
+    def commit_after_scope(
+        connection: object, cursor: object, statement: str, *arguments: object
+    ) -> None:
+        if not interleaved:
+            await_(asyncio.wait_for(insert_witness(), CONDITION_DEADLINE_SECONDS))
+            interleaved.append(statement)
 
     async with database.read_snapshot() as connection:
         before = await read_admission(connection, scope)
-        new_scope = await asyncio.wait_for(publish(), CONDITION_DEADLINE_SECONDS)
-        during = await read_admission(connection, new_scope)
+        event.listen(
+            connection.sync_connection, "after_cursor_execute", commit_after_scope
+        )
+        try:
+            during = await read_admission(connection, scope)
+        finally:
+            event.remove(
+                connection.sync_connection, "after_cursor_execute", commit_after_scope
+            )
     async with database.read_snapshot() as connection:
-        after = await read_admission(connection, new_scope)
+        after = await read_admission(connection, scope)
 
-    assert before == after == ADMISSION
-    assert during is None
+    assert before is during is None
+    assert after == ADMISSION
+    [scope_statement] = interleaved
+    assert "graph_version_read_admission" not in scope_statement
+    assert "graph_version" in scope_statement
     assert ledger.outstanding == database.units_in_flight() == 0
 
 
@@ -271,6 +293,7 @@ async def test_graph_admission_uses_only_narrow_scope_on_a_wide_version(
         version_id = await seeder.graph_version(graph_id, ir={"legacy": WIDE})
     scope = Scope(namespace_id, graph_id, version_id)
     opened: set[object] = set()
+    details: list[str] = []
 
     async with database.read_snapshot() as connection:
         with executed_queries(connection) as statements:
@@ -288,6 +311,10 @@ async def test_graph_admission_uses_only_narrow_scope_on_a_wide_version(
             opened = {
                 by_root[opcode[3]] for opcode in instructions if opcode[1] == "OpenRead"
             }
+            plan = await connection.exec_driver_sql(
+                "EXPLAIN QUERY PLAN " + scope_sql, scope_args
+            )
+            details = [str(tuple(row)[-1]) for row in plan]
             toast_size = 0
         else:
             toast_size = (
@@ -309,6 +336,10 @@ async def test_graph_admission_uses_only_narrow_scope_on_a_wide_version(
     if database.dialect is Dialect.SQLITE:
         assert GRAPH_VERSION_SCOPE_INDEX in opened
         assert "graph_version" not in opened
+        assert (
+            f"SEARCH v USING COVERING INDEX {GRAPH_VERSION_SCOPE_INDEX} "
+            "(graph_id=? AND id=?)"
+        ) in details
     else:
         assert type(toast_size) is int
         assert toast_size > 0
@@ -329,7 +360,7 @@ class AdmissionMigrationRefused(RuntimeError):
 class LateMigrationFailure:
     database: Database | None = None
     ledger: ConnectionLedger | None = None
-    observed_ddl: bool = False
+    observed_stamp: bool = False
 
     def open(self, settings: DatabaseSettings) -> Database:
         self.database = Database(settings)
@@ -342,14 +373,9 @@ class LateMigrationFailure:
     def after(
         self, connection: Connection, cursor: object, statement: str, *arguments: object
     ) -> None:
-        prefix = (
-            "CREATE INDEX ix_graph_version_graph_id_id"
-            if connection.dialect.name == "sqlite"
-            else "CREATE TABLE graph_version_read_admission"
-        )
-        if statement.lstrip().startswith(prefix):
-            self.observed_ddl = True
-            raise AdmissionMigrationRefused("late graph admission DDL refusal")
+        if statement.lstrip().startswith("UPDATE alembic_version SET version_num="):
+            self.observed_stamp = True
+            raise AdmissionMigrationRefused("late graph admission stamp refusal")
 
 
 @pytest.mark.asyncio
@@ -368,7 +394,9 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
         async with database.read_transaction() as connection:
             before = (await connection.execute(select(graph_version))).all()
 
-        with pytest.raises(AdmissionMigrationRefused, match="late graph admission DDL"):
+        with pytest.raises(
+            AdmissionMigrationRefused, match="late graph admission stamp"
+        ):
             await upgrade_database(empty_database_settings, interruption.open)
         async with database.read_transaction() as connection:
             rolled_back = await connection.run_sync(current_revision)
@@ -388,8 +416,21 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
             witness = await read_admission(
                 connection, Scope(namespace_id, graph_id, version_id)
             )
+            admitted_count = await connection.scalar(
+                select(func.count()).select_from(graph_version_read_admission)
+            )
+            primary = await connection.run_sync(
+                lambda sync: inspect(sync).get_pk_constraint(
+                    "graph_version_read_admission"
+                )
+            )
+            foreign_keys = await connection.run_sync(
+                lambda sync: inspect(sync).get_foreign_keys(
+                    "graph_version_read_admission"
+                )
+            )
 
-        assert interruption.observed_ddl
+        assert interruption.observed_stamp
         assert interruption.database is not None
         assert interruption.ledger is not None
         assert (
@@ -410,6 +451,12 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
         )
         assert before == after
         assert witness is None
+        assert admitted_count == 0
+        assert primary["constrained_columns"] == ["graph_version_id"]
+        [foreign_key] = foreign_keys
+        assert foreign_key["constrained_columns"] == ["graph_version_id"]
+        assert foreign_key["referred_table"] == "graph_version"
+        assert foreign_key["referred_columns"] == ["id"]
         keys = [
             index["column_names"]
             for index in indexes
