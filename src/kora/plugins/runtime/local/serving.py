@@ -392,10 +392,12 @@ class ControlServer:
         if entry.submitter != submitter:
             raise delivery_error("submitter_superseded")
         unchanged(self._identities, submitter.process)
+        if entry.gate_closed:
+            self._deadline_closed = True
+            raise delivery_error("deadline_expired")
         deadline = entry.deadline
         if (
-            entry.gate_closed
-            or self._deadline_closed
+            self._deadline_closed
             or (cutoff is not None and self._clock.monotonic_ns() >= cutoff)
             or (
                 deadline is not None
