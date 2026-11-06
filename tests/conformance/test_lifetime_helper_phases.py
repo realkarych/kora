@@ -211,7 +211,7 @@ async def test_selected_helper_keeps_original_scope_and_term_kill_phases(
                     raise AssertionError(
                         (failure.reason.value, term_phase_state(owner, helper))
                     ) from failure
-                assert acknowledgement == b"t"
+                assert acknowledgement == bytes((signal.SIGTERM,))
                 assert not helper.anchor.exited
                 clock.advance(100_000_000)
                 await asyncio.wait_for(
