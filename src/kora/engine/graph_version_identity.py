@@ -79,18 +79,27 @@ class PreparedGraphVersionIdentity:
 
 
 class CheckedGraphVersionIdentity:
-    __slots__ = ("_canonical_ir", "_values", "_pin")
+    __slots__ = ("_canonical_ir", "_canonical_contract", "_values", "_pin")
 
     def __init__(
-        self, canonical_ir: str, values: DecodedGraphValues, pin: GraphVersionPin
+        self,
+        canonical_ir: str,
+        canonical_contract: str,
+        values: DecodedGraphValues,
+        pin: GraphVersionPin,
     ) -> None:
         self._canonical_ir: str = canonical_ir
+        self._canonical_contract: str = canonical_contract
         self._values: DecodedGraphValues = values
         self._pin: GraphVersionPin = pin
 
     @property
     def canonical_ir(self) -> str:
         return self._canonical_ir
+
+    @property
+    def canonical_contract(self) -> str:
+        return self._canonical_contract
 
     @property
     def values(self) -> DecodedGraphValues:
@@ -231,7 +240,7 @@ def _checked_graph_version_identity(
         != stored
     ):
         raise GraphValueRejected(GraphValueFailure.INVALID)
-    return CheckedGraphVersionIdentity(pair.ir, values, pin)
+    return CheckedGraphVersionIdentity(pair.ir, pair.execution_contract, values, pin)
 
 
 def read_graph_version_identity(

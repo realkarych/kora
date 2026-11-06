@@ -34,21 +34,46 @@ TRANSPORT_COLUMNS = (
 
 
 class AcquiredGraphVersion:
-    __slots__ = ("_graph_id", "_version_id", "_encoding", "_payloads", "_digests")
+    __slots__ = (
+        "_namespace_id",
+        "_graph_id",
+        "_version_id",
+        "_encoding",
+        "_payloads",
+        "_digests",
+    )
+    _namespace_id: str
+    _graph_id: str
+    _version_id: str
+    _encoding: TransportEncoding
+    _payloads: tuple[bytes, bytes]
+    _digests: tuple[bytes, bytes, bytes]
 
     def __init__(
         self,
+        namespace_id: str,
         graph_id: str,
         version_id: str,
         encoding: TransportEncoding,
         payloads: tuple[bytes, bytes],
         digests: tuple[bytes, bytes, bytes],
     ) -> None:
-        self._graph_id: str = graph_id
-        self._version_id: str = version_id
-        self._encoding: TransportEncoding = encoding
-        self._payloads: tuple[bytes, bytes] = payloads
-        self._digests: tuple[bytes, bytes, bytes] = digests
+        object.__setattr__(self, "_namespace_id", namespace_id)
+        object.__setattr__(self, "_graph_id", graph_id)
+        object.__setattr__(self, "_version_id", version_id)
+        object.__setattr__(self, "_encoding", encoding)
+        object.__setattr__(self, "_payloads", payloads)
+        object.__setattr__(self, "_digests", digests)
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("graph version transport is immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("graph version transport is immutable")
+
+    @property
+    def namespace_id(self) -> str:
+        return self._namespace_id
 
     @property
     def graph_id(self) -> str:
@@ -191,6 +216,7 @@ async def _acquire_graph_version(
         tuple[bytes, bytes, bytes, bytes, bytes], raw
     )
     return AcquiredGraphVersion(
+        namespace_id,
         graph_id,
         version_id,
         cast(TransportEncoding, encoding),
