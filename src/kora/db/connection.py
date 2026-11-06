@@ -395,11 +395,11 @@ class Database:
     @asynccontextmanager
     async def read_snapshot(self) -> AsyncGenerator[AsyncConnection, None]:
         if self.dialect is Dialect.SQLITE:
-            setup = "BEGIN DEFERRED"
+            setup = text("BEGIN DEFERRED")
         else:
-            setup = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+            setup = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         async with self.read_transaction() as connection:
-            await complete(connection.exec_driver_sql(setup))
+            await complete(connection.execute(setup))
             self._refuse_when_closed()
             yield connection
 
