@@ -437,7 +437,7 @@ class MutationObservation(StorageModel):
 
 class StorageLimits(StorageModel):
     private_bytes: Annotated[StrictInt, Field(ge=1048576, le=17179869184)] = 2147483648
-    stage_slots: Annotated[StrictInt, Field(ge=1, le=32)] = 8
+    stage_slots: Annotated[StrictInt, Field(ge=1, le=64)] = 8
     deletion_slots: Annotated[StrictInt, Field(ge=1, le=32)] = 8
     data_work_slots: Annotated[StrictInt, Field(ge=1, le=8)] = 4
     reader_slots: Annotated[StrictInt, Field(ge=1, le=16)] = 8

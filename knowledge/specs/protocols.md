@@ -1579,7 +1579,7 @@ The finite data-job allowance includes individual reader pulls as well as mutati
 | Setting | Default and supported range |
 |---|---|
 | Private payload bytes | 2 GiB; 1 MiB–16 GiB |
-| Stage slots | Default 8. Range 1–32 in the current provider, extended to 1–64 after [graph stage capacity qualification](#graph-stage-capacity). |
+| Stage slots | Default 8. Range 1–64 under the [graph stage capacity contract](#graph-stage-capacity). |
 | Deletion slots | 8; 1–32 |
 | Root data-work slots | 4; 1–8 |
 | Root reader slots | 8; 1–16 |
