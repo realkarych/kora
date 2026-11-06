@@ -379,9 +379,6 @@ MAX_SEAL_ENTRIES: Final[int] = 1000
 RESOLVE_NO_SYMLINKS: Final[int] = 0x04
 RESOLVE_BENEATH: Final[int] = 0x08
 OPENAT2: Final[int] = 437
-REFUSED_OPEN: Final[frozenset[int]] = frozenset(
-    {errno.ELOOP, errno.ENOTDIR, errno.EXDEV, errno.ENXIO, errno.EMLINK, errno.EAGAIN}
-)
 
 
 class SealCapacityError(FilesystemError):
@@ -446,7 +443,7 @@ def _collect(
         try:
             metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
         except OSError as error:
-            if error.errno not in REFUSED_OPEN:
+            if error.errno == errno.EIO:
                 raise
             count = _count(count)
             refused.append(relative)
@@ -474,7 +471,7 @@ def _collect(
         try:
             digest = _file_digest(root, parent, name, relative, device)
         except OSError as error:
-            if error.errno not in REFUSED_OPEN:
+            if error.errno == errno.EIO:
                 raise
             digest = None
         if digest is None:
@@ -500,9 +497,9 @@ def _open_child_directory(parent: int, name: str) -> int | None:
     try:
         return os.open(name, flags, dir_fd=parent)
     except OSError as error:
-        if error.errno in REFUSED_OPEN:
-            return None
-        raise
+        if error.errno == errno.EIO:
+            raise
+        return None
 
 
 def _file_digest(

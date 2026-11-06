@@ -1101,12 +1101,12 @@ async def test_seal_refuses_linked_and_special_files(
         await until_exited(runtime, handle, ctx)
         attempt = attempt_directory(root, runtime, "attempt-1")
         journal = attempt / "journal.jsonl"
+        log = attempt / "runner.log"
 
     digest = f"sha256:{hashlib.sha256(b'payload').hexdigest()}"
     manifest = sealed_manifest(journal)
-    assert manifest is not None
-    assert manifest[0] == (("payload", digest),)
-    assert manifest[1] == ("hard", "linked", "pipe")
+    assert manifest == ((("payload", digest),), ("hard", "linked", "pipe"))
+    assert seal_outcomes(log) == ["sealed"]
     assert outside.read_bytes() == b"outside"
 
 
@@ -1176,11 +1176,14 @@ async def test_seal_journal_failure_keeps_the_files(
             attempt = attempt_directory(root, runtime, "attempt-1")
             payload = attempt / "candidate" / "payload"
             payload.write_bytes(b"kept")
+            journal_path = attempt / "journal.jsonl"
             fill(attempt)
+            with journal_path.open("ab", buffering=0) as stored:
+                fill_descriptor(stored.fileno())
             runner = await running_pid(runtime, "attempt-1")
             os.kill(child_pids(runner)[0], signal.SIGTERM)
             await until_exited(runtime, handle, ctx)
-            journal = (attempt / "journal.jsonl").read_text()
+            journal = journal_path.read_bytes()
             outcomes = seal_outcomes(attempt / "runner.log")
             retained = payload.read_bytes()
         finally:
@@ -1189,8 +1192,8 @@ async def test_seal_journal_failure_keeps_the_files(
             reap_runners(root)
             shutil.rmtree(small)
 
-    assert "runner.outputs_sealed" not in journal
-    assert "runner.candidate_started" in journal
+    assert b"runner.outputs_sealed" not in journal
+    assert b"runner.candidate_started" in journal
     assert outcomes == ["journal_unavailable"]
     assert retained == b"kept"
 
