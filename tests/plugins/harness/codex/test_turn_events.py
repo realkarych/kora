@@ -187,7 +187,7 @@ async def test_unconfirmed_items_do_not_reach_the_sink(
 
         diagnostic = "".join(traceback.format_exception(error))
         assert PRIVATE_TEXT not in diagnostic
-        assert PRIVATE_ID not in diagnostic
+        assert "native-item-id" not in diagnostic
         assert delivered == []
         assert session.snapshot().latest_message is None
 
@@ -217,6 +217,40 @@ async def test_start_callback_failure_discards_pending_message_delivery() -> Non
             await operation
 
         assert delivered == []
+        assert session.snapshot().terminal_status is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_callback_failure_releases_earlier_delivered_messages() -> None:
+    session = AppServerTurnSession(THREAD, max_messages=3, max_tools=1)
+    delivered: list[weakref.ReferenceType[CompletedMessage]] = []
+
+    def publish(ordinal: int, message: CompletedMessage) -> None:
+        if ordinal == 2:
+            raise ValueError("message callback refused")
+        delivered.append(weakref.ref(message))
+
+    async with wire() as connection:
+        operation = connection.start(
+            session.run(
+                connection.rpc,
+                prompt=PROMPT,
+                deadline=future_deadline(),
+                on_message=publish,
+            )
+        )
+        await start_request(connection)
+
+        await connection.send(
+            *(encoded(message(identity=f"native-{i}")) for i in range(3)), started()
+        )
+        with pytest.raises(ValueError, match="^message callback refused$") as caught:
+            await operation
+
+        assert caught.value.__traceback__ is not None
+        assert len(delivered) == 1
+        assert delivered[0]() is None
+        assert session.snapshot().message_count == 3
         assert session.snapshot().terminal_status is None
 
 
