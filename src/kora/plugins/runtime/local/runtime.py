@@ -87,7 +87,7 @@ from kora.runner.identity import (
     NativeIdentityReader,
     ProcessScanFailure,
 )
-from kora.runner.native_io import NativeIOUnresolved, observed
+from kora.runner.native_io import NativeIOSubmissionUncertain, observed
 from kora.runner.peers import PeerSource, kernel_source
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
@@ -723,7 +723,13 @@ class LocalRuntime:
         stopped: Event,
     ) -> None:
         descriptor: int | None = None
-        settled = True
+        caller_owned = True
+
+        def dispose() -> None:
+            nonlocal descriptor
+            if descriptor is not None:
+                owned, descriptor = descriptor, None
+                os.close(owned)
 
         def active() -> None:
             if stopped.is_set() or self._closing is not None:
@@ -741,7 +747,7 @@ class LocalRuntime:
             write_transfer_bytes(spool, piece)
 
         try:
-            await self.executor.run(acquire)
+            await self.executor.run(acquire, after_uncertain_submission=dispose)
             spool = descriptor
             if spool is None:
                 raise RuntimeError("missing spool descriptor")
@@ -757,7 +763,10 @@ class LocalRuntime:
                     continue
                 for offset in range(0, len(view), SECTION_FRAME_BYTES):
                     piece = view[offset : offset + SECTION_FRAME_BYTES]
-                    await self.executor.run(partial(write, spool, piece))
+                    await self.executor.run(
+                        partial(write, spool, piece),
+                        after_uncertain_submission=dispose,
+                    )
             if total != item.size:
                 raise delivery_error("integrity_error")
             await transfer_input(
@@ -771,14 +780,15 @@ class LocalRuntime:
                 spool,
                 item,
                 deadline,
-                active,
+                close_spool=dispose,
+                active=active,
             )
-        except NativeIOUnresolved:
-            settled = False
+        except NativeIOSubmissionUncertain:
+            caller_owned = False
             raise
         finally:
-            if settled and descriptor is not None:
-                os.close(descriptor)
+            if caller_owned:
+                dispose()
 
     def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
         if workload.execution_domain_id != self.execution_domain_id:

@@ -32,6 +32,7 @@ from kora.runner.channels import (
     cancel_task,
     wait_future,
 )
+from kora.runner.native_io import NativeIOSubmissionUncertain
 from kora.runner.peers import PeerRefused, PeerSource
 from kora.runner.registry import TransitionExecutor
 
@@ -65,9 +66,14 @@ async def attested(
     runner: ProcessIdentity,
     source: PeerSource,
     executor: TransitionExecutor,
+    *,
+    after_uncertain_submission: Callable[[], None] | None = None,
 ) -> None:
     try:
-        listener = await executor.run(lambda: source.attest(endpoint, None))
+        listener = await executor.run(
+            lambda: source.attest(endpoint, None),
+            after_uncertain_submission=after_uncertain_submission,
+        )
     except PeerRefused as refused:
         raise ListenerRefused(refused.reason.value) from None
     if listener != runner:
@@ -140,13 +146,33 @@ async def transfer_input(
     spool: int,
     item: TransferItem,
     message_deadline: int,
+    *,
+    close_spool: Callable[[], None],
     active: Callable[[], None] | None = None,
 ) -> None:
     deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
     endpoint = await connected(path, clock, deadline)
     channel = BoundedChannel(endpoint, clock)
+    endpoint_owned = True
+
+    def dispose_attestation() -> None:
+        try:
+            endpoint.close()
+        finally:
+            close_spool()
+
     try:
-        await attested(endpoint, runner, source, executor)
+        try:
+            await attested(
+                endpoint,
+                runner,
+                source,
+                executor,
+                after_uncertain_submission=dispose_attestation,
+            )
+        except NativeIOSubmissionUncertain:
+            endpoint_owned = False
+            raise
         request = AttachRequest(
             op="attach", request_id=request_id, dispatcher_id=dispatcher_id
         )
@@ -163,13 +189,21 @@ async def transfer_input(
             min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline),
         )
         await _send_spool(
-            channel, clock, executor, spool, item.size, message_deadline, active
+            channel,
+            clock,
+            executor,
+            spool,
+            item.size,
+            message_deadline,
+            active,
+            close_spool,
         )
         answered = min(clock.monotonic_ns() + START_PROGRESS_NS, message_deadline)
         _, payload = await channel.read_typed_frame(answered, reservations)
         read_delivery(payload, request_id, "transferred")
     finally:
-        channel.close()
+        if endpoint_owned:
+            channel.close()
 
 
 async def _send_spool(
@@ -180,6 +214,7 @@ async def _send_spool(
     size: int,
     message_deadline: int,
     active: Callable[[], None] | None,
+    close_spool: Callable[[], None],
 ) -> None:
     def read(length: int, offset: int) -> bytes:
         if active is not None:
@@ -191,7 +226,9 @@ async def _send_spool(
     offset = 0
     while offset < size:
         length = min(SECTION_FRAME_BYTES, size - offset)
-        chunk = await executor.run(partial(read, length, offset))
+        chunk = await executor.run(
+            partial(read, length, offset), after_uncertain_submission=close_spool
+        )
         if not chunk:
             raise message_refused(MessageRefusal.MALFORMED)
         deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)

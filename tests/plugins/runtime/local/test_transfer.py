@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -524,6 +525,7 @@ async def test_observational_attach_cannot_transfer(tmp_path: Path) -> None:
                             source.fileno(),
                             input_item("payload", payload),
                             clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
+                            close_spool=source.close,
                         )
                     )
             finally:
@@ -708,6 +710,60 @@ async def test_runtime_close_settles_parked_spool(
     assert operation.cancelled()
     assert stopped.is_set()
     assert names == ()
+    assert not (attempt / "input").exists()
+
+
+@pytest.mark.asyncio
+async def test_definite_native_refusal_releases_spool(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    spooled = asyncio.Event()
+    resume = asyncio.Event()
+    release_native = threading.Event()
+
+    async def parked() -> AsyncIterator[bytes]:
+        yield b"a"
+        spooled.set()
+        await resume.wait()
+        yield b"b"
+
+    def hold_native() -> None:
+        if not release_native.wait(5):
+            raise TimeoutError("test native admission release")
+
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+        original = live_descriptors()
+        executor = runtime.executor
+
+        async with asyncio.TaskGroup() as tasks:
+            operation = tasks.create_task(
+                protocol_error(
+                    runtime.transfer_in(
+                        handle, input_item("payload", b"ab"), parked(), ctx
+                    )
+                )
+            )
+            try:
+                async with asyncio.timeout(5):
+                    await spooled.wait()
+                    added = live_descriptors() - original
+                    assert len(added) == 1
+                    spool_fd = added.pop()
+                    assert os.fstat(spool_fd).st_nlink == 0
+                    for _ in range(executor.admitted):
+                        tasks.create_task(executor.run(hold_native))
+                    await until(lambda: len(executor.jobs) == executor.admitted)
+                    resume.set()
+                    refused = await operation
+                    after_refusal = live_descriptors()
+            finally:
+                release_native.set()
+                resume.set()
+
+    assert refused.code == "registry_busy"
+    assert refused.retryable is True
+    assert spool_fd not in after_refusal
     assert not (attempt / "input").exists()
 
 
