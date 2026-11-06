@@ -247,9 +247,10 @@ jobs:
             tests/ir/test_structured_schema_collection_predicates.py
             tests/engine/test_graph_outputs.py
             tests/engine/test_graph_native_outputs.py
+            tests/engine/test_graph_projection_paths.py
           )
           second=(tests/conformance tests/ir/test_inline_schema_resources.py tests/ir/test_fan_out_type_resources.py tests/ir/test_export_type_resources.py tests/ir/test_diagnostic_collection.py tests/ir/test_subgraph_interface_resources.py --ignore=tests/conformance/test_artifact_storage_conformance.py --ignore=tests/conformance/test_installed_conformance.py)
-          second+=(tests/ir/test_structured_schema_container_counts.py)
+          second+=(tests/ir/test_structured_schema_container_counts.py tests/plugins/artifact_type/test_agent_session.py)
           for path in "${first[@]}"; do
             second+=("--ignore=$path")
           done
@@ -268,13 +269,13 @@ jobs:
             tests/api
             tests/cli
             tests/ir/test_structured_schema_string_lengths.py
-            tests/plugins/artifact_type/test_agent_session.py
           )
           other=(tests --ignore=tests/ir/test_approval_predicate_resources.py --ignore=tests/ir/test_fan_out_type_resources.py --ignore=tests/ir/test_export_type_resources.py --ignore=tests/ir/test_input_path_resources.py --ignore=tests/ir/test_expression_syntax_resources.py --ignore=tests/ir/test_edge_type_resources.py --ignore=tests/api --ignore=tests/conformance --ignore=tests/plugins --ignore=tests/cli --ignore=tests/db --ignore=tests/measurements --ignore=tests/ir/test_inline_schema_resources.py --ignore=tests/ir/test_type_schema_resources.py --ignore=tests/ir/test_structured_schema_assertions.py --ignore=tests/ir/test_structured_schema_collection_predicates.py --ignore=tests/ir/test_structured_schema_string_lengths.py --ignore=tests/ir/test_subgraph_interface_resources.py --ignore=tests/architecture/test_ir_measurement_ci.py --ignore=tests/architecture/test_no_suppression.py --ignore=tests/ir/test_output_schema_resources.py)
           other+=(--ignore=tests/engine/test_graph_output_inventory.py --ignore=tests/ir/test_diagnostic_collection.py)
           other+=(
             --ignore=tests/engine/test_graph_outputs.py
             --ignore=tests/engine/test_graph_native_outputs.py
+            --ignore=tests/engine/test_graph_projection_paths.py
             --ignore=tests/ir/test_structured_schema_container_counts.py
           )
           pids=()
