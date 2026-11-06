@@ -751,6 +751,10 @@ class LocalRuntime:
                 if total > item.size:
                     raise delivery_error("integrity_error")
                 view = memoryview(chunk)
+                if not view:
+                    active()
+                    await asyncio.sleep(0)
+                    continue
                 for offset in range(0, len(view), SECTION_FRAME_BYTES):
                     piece = view[offset : offset + SECTION_FRAME_BYTES]
                     await self.executor.run(partial(write, spool, piece))

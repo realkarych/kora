@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import hashlib
 import json
 import os
@@ -37,6 +38,7 @@ from kora.plugins.runtime.local.serving import COMPONENT
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle
 from kora.protocols.runtime import TransferItem
 from kora.protocols.time import SystemClock
@@ -102,6 +104,19 @@ async def chunks(payload: bytes) -> AsyncIterator[bytes]:
 
 def mode_of(path: Path) -> int:
     return os.stat(path).st_mode & 0o777
+
+
+def live_descriptors() -> set[int]:
+    descriptors: set[int] = set()
+    for descriptor in descriptor_numbers(os.getpid()):
+        try:
+            os.fstat(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            descriptors.add(descriptor)
+    return descriptors
 
 
 def journal_kinds(attempt: Path) -> list[str]:
@@ -628,7 +643,12 @@ async def test_held_body_loses_transfer_authority(
         await until(lambda: descriptor_numbers(entry.runner.pid) == before)
         async with asyncio.timeout(5):
             while True:
-                current = await recorded(runtime, handle.attempt_id)
+                try:
+                    current = await recorded(runtime, handle.attempt_id)
+                except KoraProtocolError as error:
+                    if error.code != "lineage_unavailable":
+                        raise
+                    continue
                 assert isinstance(current, Running)
                 if lose_authority != "deadline" or current.gate_closed:
                     break
@@ -668,7 +688,7 @@ async def test_runtime_close_settles_parked_spool(
         entry = await recorded(runtime, handle.attempt_id)
         assert isinstance(entry, Running)
         spool = Path(entry.socket_path).parent / "spool"
-        descriptors = set(descriptor_numbers(os.getpid()))
+        descriptors = live_descriptors()
 
         async with asyncio.TaskGroup() as tasks:
             operation = tasks.create_task(
@@ -676,18 +696,50 @@ async def test_runtime_close_settles_parked_spool(
             )
             async with asyncio.timeout(5):
                 await entered.wait()
-                added = set(descriptor_numbers(os.getpid())) - descriptors
+                added = live_descriptors() - descriptors
                 assert len(added) == 1
                 spool_fd = added.pop()
                 assert os.fstat(spool_fd).st_nlink == 0
                 await runtime.close()
-        after = descriptor_numbers(os.getpid())
+        after = live_descriptors()
         names = tuple(spool.iterdir())
 
     assert spool_fd not in after
     assert operation.cancelled()
     assert stopped.is_set()
     assert names == ()
+    assert not (attempt / "input").exists()
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_allow_runtime_shutdown(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    started = asyncio.Event()
+    exhausted = asyncio.Event()
+
+    async def empty_chunks() -> AsyncIterator[bytes]:
+        started.set()
+        for _ in range(4096):
+            yield b""
+        exhausted.set()
+        await asyncio.Event().wait()
+
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+
+        async with asyncio.TaskGroup() as tasks:
+            operation = tasks.create_task(
+                runtime.transfer_in(
+                    handle, input_item("payload", b""), empty_chunks(), ctx
+                )
+            )
+            async with asyncio.timeout(5):
+                await started.wait()
+                await runtime.close()
+
+    assert operation.cancelled()
+    assert not exhausted.is_set()
     assert not (attempt / "input").exists()
 
 
