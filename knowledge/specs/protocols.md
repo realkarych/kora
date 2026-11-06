@@ -1579,7 +1579,7 @@ The finite data-job allowance includes individual reader pulls as well as mutati
 | Setting | Default and supported range |
 |---|---|
 | Private payload bytes | 2 GiB; 1 MiB–16 GiB |
-| Stage slots | 8; 1–32 |
+| Stage slots | Default 8. Range 1–32 in the current provider, extended to 1–64 after [graph stage capacity qualification](#graph-stage-capacity). |
 | Deletion slots | 8; 1–32 |
 | Root data-work slots | 4; 1–8 |
 | Root reader slots | 8; 1–16 |
@@ -1597,6 +1597,14 @@ One data mutation owns a stage at a time. Nonwaiting local admission precedes ta
 Storage DTO version is a required strict integer 1. Collections are immutable tuples, all nested records are closed, and each complete DTO fits 16 KiB/depth 16. A compact manifest stores per-part declarations and immutable part identities under one StageRef, rather than repeating StageRefs. Operation request digests use UTF-8 canonical JSON with sorted keys, compact separators and unescaped Unicode: `{version: 1, kind, storage_identity, operation_id, arguments}`. All optional fields appear explicitly as null, and every nested version and target/manifest/preparation field is included. The operation's `request_digest` is excluded. A receiver validates this binding before effects. Fixed vectors and changed-field tests establish the recipe. Digests retain the `sha256:` prefix.
 
 Inventory is a keyset query over immutable byte-ordered keys. Only the ordered prefix fitting the full page envelope is emitted; the continuation key is the last emitted key, never a discarded fetched row. Saved cursor identity/kind must match the receiver and requested scan. Inventory grants no ownership or closure authority. Diagnostics contain only safe operation, outcome, reason, counts and duration, never payload digests, private references/paths or arbitrary backend exceptions. Local implementation and executable evidence are tracked in [the implementation review record](../reviews/local-artifact-storage-2026-10-23.md).
+
+#### Graph stage capacity
+
+The project owner accepted the capacity and compatibility contract on 2026-11-06 under [#867](https://github.com/realkarych/kora/issues/867#issuecomment-6690499419). A [new file-bearing deployment](api-and-agent-surface.md#graph-deploy-command-resource-content) retains one genuine provider stage per distinct admitted physical address through the publication decision. It requires an explicitly provisioned, qualified local root with 64 stage slots and sufficient private payload and control capacity for the maximum admitted graph. Trusted composition binds the actual receiver, implementation and configuration to that root's anchored physical identity, provisioned manifest and qualified resource envelope. A claimed configuration value or feature flag supplies no such proof.
+
+The qualified provider supports provisioning 64 slots while keeping the default of eight. A newly provisioned 64-slot root requires a supporting provider version. Existing smaller roots keep their exact limit manifest, storage identity and supported work. This contract gives no authority to resize a live root or substitute a different physical store. Compatibility or reprovisioning for file-bearing deployment on an existing smaller root requires its own supported design.
+
+Before provider adoption, qualify real 64-slot admission, refusal of the next stage, bounded inventory paging, exact retirement and release, empty state and same-identity reopening on Linux and macOS. Check old roots with their exact original limits. Prove that an occupied stage can retire and release under useful admission saturation. A possibly dispatched but unregistered begin still requires its exact durable intent and an admissible cleanup path with authoritative closure. Keep the charge and ownership while closure or capacity remains unresolved. The three-reconstruction bound, finite operation deadline, root-epoch rules and authoritative release requirements continue to apply.
 
 ## 8. Artifact type (FR-4.1–4.3)
 
