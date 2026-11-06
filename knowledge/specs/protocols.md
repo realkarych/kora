@@ -2362,7 +2362,13 @@ The private one-turn projection reads only the same controller's confirmed termi
 
 When output is required after a confirmed completed turn, only the final message in its admitted terminal summary supplies a candidate. The existing strict text decoder accepts JSON null as a present candidate. The projection reports `output_missing` or `output_invalid_json` for unavailable text or invalid JSON and preserves the native result. Identity refusal propagates. Malformed or oversized native summary input is refused before projection, including when output is unselected; an earlier streamed message is not an output fallback. Failed and interrupted turns do not supply a candidate.
 
-The [pinned evidence record](../research/codex-terminal-result-projection-2026-11-06.md) separates native observations from shared projection checks. The common runner and adapter retain event publication, first-cause precedence, limit/retry signaling, final output validation and publication, and actual resource closure. A projected terminal or candidate does not establish a final attempt outcome or artifact validity.
+The [pinned evidence record](../research/codex-terminal-result-projection-2026-11-06.md) separates native observations from shared projection checks. The common runner and adapter retain production journal publication, first-cause precedence, limit/retry signaling, final output validation and publication, and actual resource closure. A projected terminal or candidate does not establish a final attempt outcome or artifact validity.
+
+### Codex selected turn composition
+
+Under [#872](https://github.com/realkarych/kora/issues/872), the private operation borrows one fresh exclusive app-server transport from the caller. It prepares the selected executor and thread, then opens one turn. Confirmed assistant messages and cumulative usage pass through the existing projections to the same event sink. A confirmed terminal contributes one provisional `result` event, with the strict output candidate returned separately. The caller supplies the usage identity, timestamps, masking registry and optional stop signal. The inherited deadline applies to startup and event emission, including usage after stamp creation and the result after projection.
+
+On startup refusal or transport loss, the existing failure propagates and events already accepted by the sink remain observable. Transport loss supplies no terminal result. The caller retires the borrowed transport and retains process, stream and cleanup ownership. The [selected Linux evidence](../research/codex-selected-turn-events-2026-11-06.md) covers the completed and cut paths through the shared sink and usage ledger. Production registration, journal ownership, required tool policy and final attempt outcome remain with the common execution path.
 
 ## 15. Inherited-deadline conformance gates (ADR-0022)
 
