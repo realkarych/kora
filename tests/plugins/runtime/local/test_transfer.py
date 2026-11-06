@@ -9,7 +9,7 @@ import socket
 import subprocess
 import sys
 import threading
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
@@ -35,7 +35,7 @@ from kora.plugins.runtime.local.channel import (
 from kora.plugins.runtime.local.command import INCOMING
 from kora.plugins.runtime.local.control import attested, connected, transfer_input
 from kora.plugins.runtime.local.runtime import LocalRuntime
-from kora.plugins.runtime.local.serving import COMPONENT
+from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
@@ -47,8 +47,9 @@ from kora.runner.channels import BoundedChannel, ChannelError
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.journal import read_records
+from kora.runner.native_io import NativeIOSubmissionUncertain, NativeIOUnresolved
 from kora.runner.peers import kernel_source
-from kora.runner.registry import Running, TransitionExecutor, takeover_cell
+from kora.runner.registry import Registry, Running, TransitionExecutor, takeover_cell
 from tests.plugins.runtime.local.test_command import (
     attempt_directory,
     binary,
@@ -765,6 +766,138 @@ async def test_definite_native_refusal_releases_spool(
     assert refused.retryable is True
     assert spool_fd not in after_refusal
     assert not (attempt / "input").exists()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_spool_is_released_during_runtime_shutdown(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    spooled = asyncio.Event()
+    resume = asyncio.Event()
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+
+    async def parked() -> AsyncIterator[bytes]:
+        yield b"a"
+        spooled.set()
+        await resume.wait()
+        yield b"b"
+
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        pool_stopped = False
+        try:
+            handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+            original = live_descriptors()
+
+            async def transfer() -> None:
+                with pytest.raises(NativeIOSubmissionUncertain):
+                    await runtime.transfer_in(
+                        handle, input_item("payload", b"ab"), parked(), ctx
+                    )
+
+            async with asyncio.TaskGroup() as tasks:
+                operation = tasks.create_task(transfer())
+                async with asyncio.timeout(5):
+                    await spooled.wait()
+                    added = live_descriptors() - original
+                    assert len(added) == 1
+                    spool_fd = added.pop()
+                    spool_inode = os.fstat(spool_fd).st_ino
+                    runtime.executor.executor.shutdown(wait=False)
+                    pool_stopped = True
+                    resume.set()
+                    await operation
+                    retained_inode = os.fstat(spool_fd).st_ino
+        finally:
+            try:
+                if pool_stopped:
+                    with pytest.raises(NativeIOUnresolved):
+                        await runtime.close()
+                else:
+                    await runtime.close()
+            finally:
+                release_commands(root)
+                reap_runners(root)
+        remaining = live_descriptors()
+
+    assert retained_inode == spool_inode
+    assert spool_fd not in remaining
+    assert runtime.registry.directory.closed
+    assert runtime.sweeps.closing is not None
+    assert runtime.sweeps.closing.done()
+    assert not (attempt / "input").exists()
+
+
+class TransferShutdownServer(ControlServer):
+    def recheck(self, ready: asyncio.Event) -> None:
+        self._recheck_ready: asyncio.Event = ready
+
+    async def retain_disposal(self, dispose: Callable[[], None]) -> None:
+        self._executor.executor.shutdown(wait=False)
+        await self._transfer_native(lambda: None, dispose)
+
+    def recheck_done(self) -> bool:
+        return self._ticking is not None and self._ticking.done()
+
+    async def _tick(self) -> None:
+        await self._recheck_ready.wait()
+        await self._reverify()
+
+
+@pytest.mark.asyncio
+async def test_runner_drains_deferred_cleanup_after_socket_check_failure(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    cleanup = threading.Event()
+    ready = asyncio.Event()
+    descriptor = os.open(tmp_path / "owned", os.O_RDWR | os.O_CREAT, 0o600)
+
+    def dispose() -> None:
+        os.close(descriptor)
+        cleanup.set()
+
+    with short_directory() as base:
+        directory = private_directory(base, "s")
+        bound = rebound(directory, "control.sock")
+        registry = Registry(
+            open_local_directory(directory), "domain-1", lambda: "a" * 32
+        )
+        reader = NativeIdentityReader()
+        server = TransferShutdownServer(
+            bound,
+            directory,
+            "control.sock",
+            SystemClock(),
+            kernel_source(reader),
+            kora_capture.diagnostics.logger(COMPONENT),
+            registry,
+            registry.key("attempt-1"),
+            identity_of(os.getpid()),
+            reader,
+        )
+        server.recheck(ready)
+        server.start()
+
+        try:
+            with pytest.raises(NativeIOSubmissionUncertain):
+                await server.retain_disposal(dispose)
+            ready.set()
+            await until(server.recheck_done)
+            retained = not cleanup.is_set()
+        finally:
+            try:
+                with pytest.raises(NativeIOUnresolved):
+                    await server.close()
+            finally:
+                registry.directory.close()
+                if not cleanup.is_set():
+                    os.close(descriptor)
+                bound.close()
+
+    assert retained
+    assert cleanup.is_set()
+    assert bound.directory.closed
 
 
 @pytest.mark.asyncio

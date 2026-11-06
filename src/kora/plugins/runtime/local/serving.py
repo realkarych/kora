@@ -264,6 +264,7 @@ class ControlServer:
         self._executor = TransitionExecutor(EXECUTOR_WORKERS, EXECUTOR_JOBS)
         self._connections: set[asyncio.Task[None]] = set()
         self._unresolved_disposal: Callable[[], None] | None = None
+        self._transfer_native_settled = False
         self._refusals: Counter[str] = Counter()
         self._accepting: asyncio.Task[None] | None = None
         self._ticking: asyncio.Task[None] | None = None
@@ -554,7 +555,7 @@ class ControlServer:
                     raise delivery_error("transfer_refused")
                 if observational:
                     raise delivery_error("execution_unauthorized")
-                entry = await self._executor.run(lambda: self._authorized(submitter))
+                entry = await self._transfer_native(lambda: self._authorized(submitter))
                 cutoff = transfer_cutoff(self._clock, entry.deadline)
                 if cutoff is not None:
                     deadline = min(deadline, cutoff)
@@ -588,8 +589,8 @@ class ControlServer:
                         authorize()
                         command.complete_seen(decision, item, digest)
 
-                    await self._executor.run(complete)
-                await self._executor.run(authorize)
+                    await self._transfer_native(complete)
+                await self._transfer_native(authorize)
             except KoraProtocolError as error:
                 await self._answer(
                     channel, self._transfer_answer(request.request_id, error)
@@ -607,11 +608,23 @@ class ControlServer:
             channel.close()
         except ChannelError:
             if cutoff is not None and self._clock.monotonic_ns() >= cutoff:
-                await self._executor.run(lambda: self._authorized(submitter, cutoff))
+                await self._transfer_native(lambda: self._authorized(submitter, cutoff))
             raise
         finally:
             if command is not None and claimed:
                 command.end_transfer()
+
+    async def _transfer_native(
+        self,
+        operation: Callable[[], Result],
+        dispose: Callable[[], None] | None = None,
+    ) -> Result:
+        def settled() -> None:
+            self._transfer_native_settled = True
+            if dispose is not None:
+                dispose()
+
+        return await self._executor.run(operation, after_uncertain_submission=settled)
 
     def _transfer_io(
         self, command: CommandSession, operation: Callable[[], Result]
@@ -651,7 +664,7 @@ class ControlServer:
                 self._transfer_io(command, lambda: command.discard_incoming(owned))
 
         async def run(operation: Callable[[], None]) -> None:
-            await self._executor.run(operation, after_uncertain_submission=dispose)
+            await self._transfer_native(operation, dispose)
 
         try:
             try:
@@ -797,20 +810,36 @@ class ControlServer:
 
     async def _release(self) -> None:
         self._bound.listener.close()
+        tasks = [*self._connections]
         if self._accepting is not None:
-            await cancel_task(self._accepting)
+            tasks.append(self._accepting)
         if self._ticking is not None:
-            await cancel_task(self._ticking)
-        for connection in tuple(self._connections):
-            await cancel_task(connection)
+            tasks.append(self._ticking)
         try:
-            await self._executor.close()
+            for task in tasks:
+                task.cancel()
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException) and not isinstance(
+                    outcome, asyncio.CancelledError
+                ):
+                    raise outcome
         finally:
-            if self._command is not None:
-                await self._command.aclose()
+            settled = False
+            try:
+                await self._executor.close()
+                settled = True
+            finally:
+                if (
+                    settled or self._transfer_native_settled
+                ) and self._unresolved_disposal is None:
+                    try:
+                        if self._command is not None:
+                            await self._command.aclose()
+                    finally:
+                        self._workload = None
+                        self._workload_sha256 = None
+                        self._bound.directory.close()
+                        self._flush()
         if self._unresolved_disposal is not None:
             raise NativeIOUnresolved
-        self._workload = None
-        self._workload_sha256 = None
-        self._bound.directory.close()
-        self._flush()

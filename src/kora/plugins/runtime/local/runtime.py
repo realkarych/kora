@@ -375,6 +375,7 @@ class LocalRuntime:
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
         self._deliveries: set[asyncio.Task[None]] = set()
+        self._transfer_native_settled = False
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -731,6 +732,10 @@ class LocalRuntime:
                 owned, descriptor = descriptor, None
                 os.close(owned)
 
+        def dispose_deferred() -> None:
+            self._transfer_native_settled = True
+            dispose()
+
         def active() -> None:
             if stopped.is_set() or self._closing is not None:
                 raise ChannelError(ChannelFailure.CLOSED)
@@ -747,7 +752,9 @@ class LocalRuntime:
             write_transfer_bytes(spool, piece)
 
         try:
-            await self.executor.run(acquire, after_uncertain_submission=dispose)
+            await self.executor.run(
+                acquire, after_uncertain_submission=dispose_deferred
+            )
             spool = descriptor
             if spool is None:
                 raise RuntimeError("missing spool descriptor")
@@ -765,7 +772,7 @@ class LocalRuntime:
                     piece = view[offset : offset + SECTION_FRAME_BYTES]
                     await self.executor.run(
                         partial(write, spool, piece),
-                        after_uncertain_submission=dispose,
+                        after_uncertain_submission=dispose_deferred,
                     )
             if total != item.size:
                 raise delivery_error("integrity_error")
@@ -780,7 +787,7 @@ class LocalRuntime:
                 spool,
                 item,
                 deadline,
-                close_spool=dispose,
+                close_spool=dispose_deferred,
                 active=active,
             )
         except NativeIOSubmissionUncertain:
@@ -1171,8 +1178,13 @@ class LocalRuntime:
                 await asyncio.gather(*observations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)
         finally:
-            await self.executor.close()
-            await self._swept.wait()
-            await self.sweeps.close()
-            self.registry.directory.close()
-            self._root.close()
+            settled = False
+            try:
+                await self.executor.close()
+                settled = True
+            finally:
+                await self._swept.wait()
+                await self.sweeps.close()
+                if settled or self._transfer_native_settled:
+                    self.registry.directory.close()
+                    self._root.close()
