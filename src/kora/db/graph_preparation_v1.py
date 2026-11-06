@@ -7,10 +7,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.schema import Constraint, conv
 
-from kora.db.identifiers import CROCKFORD_ALPHABET
-from kora.db.types import BYTE_ORDER_COLLATION, POSTGRESQL, SQLITE
+from kora.db.types import POSTGRESQL, SQLITE
 
 TABLE_NAME: str = "graph_deployment_preparation"
+ULID_ALPHABET: str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 ULID_COLUMNS: tuple[tuple[str, bool], ...] = (
     ("id", False),
     ("namespace_id", False),
@@ -31,9 +31,7 @@ RESULT_TARGET: str = (
 
 
 def exact_text() -> Text:
-    return Text(collation="BINARY").with_variant(
-        Text(collation=BYTE_ORDER_COLLATION), POSTGRESQL
-    )
+    return Text(collation="BINARY").with_variant(Text(collation="C"), POSTGRESQL)
 
 
 def named_check(name: str, predicate: str) -> CheckConstraint:
@@ -77,7 +75,7 @@ def domain_checks(dialect: str) -> tuple[CheckConstraint, ...]:
             ascii_check(
                 dialect,
                 column,
-                CROCKFORD_ALPHABET,
+                ULID_ALPHABET,
                 "= 26",
                 "0-7",
                 nullable=nullable,

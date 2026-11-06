@@ -97,6 +97,15 @@ async def test_preparation_native_checks_refuse_invalid_scope_and_shape(
 ) -> None:
     async with database.transaction() as connection:
         values = await preparation_values(connection)
+        await connection.execute(
+            namespace.insert().values(
+                id="legacy-namespace",
+                name="legacy",
+                policy_revision=1,
+                policy={},
+                **Seeder(connection).stamps(),
+            )
+        )
     invalid: tuple[dict[str, str | None], ...] = (
         {"id": "8" + "0" * 25},
         {"id": "0" * 25 + "I"},
@@ -104,6 +113,7 @@ async def test_preparation_native_checks_refuse_invalid_scope_and_shape(
         {"id": MAX_ULID.lower()},
         {"id": "0" * 25},
         {"namespace_id": "1" * 26},
+        {"namespace_id": "legacy-namespace"},
         {"namespace_id": None},
         {"graph_name": "9invalid"},
         {"graph_name": "g-invalid"},
@@ -122,10 +132,16 @@ async def test_preparation_native_checks_refuse_invalid_scope_and_shape(
         {"state": "open"},
         {"state": "closed_without_publication"},
         {"result_graph_id": None},
+        {"result_graph_id": "0" * 25 + "U"},
         {"result_graph_version_id": None},
         {"result_graph_version_id": "Z" * 26},
         {"initial_graph_id": "0" * 26},
-        {"initial_graph_id": "U" * 26},
+        {
+            "initial_graph_id": "0" * 25 + "U",
+            "state": "open",
+            "result_graph_id": None,
+            "result_graph_version_id": None,
+        },
     )
 
     for replacement in invalid:
