@@ -53,7 +53,7 @@ from kora.runner.channels import (
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 from kora.runner.identity import IdentityReader, IdentityState
 from kora.runner.journal import space_error
-from kora.runner.native_io import NativeIOUnresolved
+from kora.runner.native_io import NativeIOUnresolved, observed
 from kora.runner.peers import PeerRefused, PeerSource, unchanged
 from kora.runner.registry import (
     AttemptKey,
@@ -553,6 +553,14 @@ class ControlServer:
                 decision = command.decide_transfer(submitter, observational, item)
                 claimed = True
             except KoraProtocolError as error:
+                if error.code == "deadline_expired":
+                    try:
+                        await self._answer(
+                            channel, self._transfer_answer(request.request_id, error)
+                        )
+                    finally:
+                        channel.close()
+                    return
                 await read_transfer_bytes(channel, self._clock, item.size, deadline)
                 await self._answer(
                     channel, self._transfer_answer(request.request_id, error)
@@ -584,6 +592,9 @@ class ControlServer:
                 delivery_envelope(request.request_id, "transferred"),
                 min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS),
             )
+        except NativeIOUnresolved:
+            claimed = False
+            raise
         except ChannelError:
             if cutoff is not None and self._clock.monotonic_ns() >= cutoff:
                 await self._executor.run(lambda: self._authorized(submitter, cutoff))
@@ -616,6 +627,7 @@ class ControlServer:
         authorize: Callable[[], None],
     ) -> None:
         incoming: Incoming | None = None
+        settled = True
 
         def open_incoming() -> None:
             nonlocal incoming
@@ -657,14 +669,29 @@ class ControlServer:
                     lambda: command.finish_incoming(opened, item, digest, authorize),
                 )
             )
+        except NativeIOUnresolved:
+            settled = False
+            raise
         finally:
-            if incoming is not None:
+            if settled and incoming is not None:
                 try:
                     await self._executor.run(dispose)
-                except (KoraProtocolError, NativeIOUnresolved):
-                    if incoming is None:
+                except KoraProtocolError as error:
+                    if incoming is None or error.code not in {
+                        "registry_busy",
+                        "runtime_closed",
+                    }:
                         raise
-                    dispose()
+                    try:
+                        cleanup = asyncio.get_running_loop().run_in_executor(
+                            None, dispose
+                        )
+                    except RuntimeError as failure:
+                        raise NativeIOUnresolved from failure
+                    cancelled = await observed(cleanup)
+                    cleanup.result()
+                    if cancelled:
+                        raise asyncio.CancelledError from None
 
     async def _start(
         self, submitter: Submitter, request_id: str, observational: bool

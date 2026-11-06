@@ -15,7 +15,6 @@ from kora.ir.vcs_ref_json import JsonRefusal, canonical_bytes, decode_strict_jso
 from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import (
     NANOSECONDS_PER_SECOND,
-    ClockSample,
     ExecutionDeadline,
     thresholds,
 )
@@ -466,8 +465,7 @@ def write_transfer_bytes(descriptor: int, payload: memoryview) -> None:
 def transfer_cutoff(clock: Clock, deadline: ExecutionDeadline | None) -> int | None:
     if deadline is None:
         return None
-    sample = ClockSample(clock.now(), clock.monotonic_ns())
-    return thresholds(deadline, sample).interrupt_at_ns
+    return thresholds(deadline, clock.sample()).interrupt_at_ns
 
 
 async def read_transfer_bytes(

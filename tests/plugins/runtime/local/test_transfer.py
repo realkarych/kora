@@ -66,7 +66,6 @@ from tests.support.local_runners import (
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
-    open_descriptors,
     prepared,
     private_directory,
     protocol_error,
@@ -633,6 +632,11 @@ async def test_held_body_loses_transfer_authority(
                 assert isinstance(current, Running)
                 if lose_authority != "deadline" or current.gate_closed:
                     break
+        if lose_authority == "deadline":
+            async with transfer_channel(runtime, ctx, current) as late:
+                await transfer_header(late, ctx, item)
+                refused = await protocol_error(transferred(late, ctx))
+                assert refused.code == "deadline_expired"
         names = tuple((attempt / "input").iterdir())
         kinds = journal_kinds(attempt)
 
@@ -664,7 +668,7 @@ async def test_runtime_close_settles_parked_spool(
         entry = await recorded(runtime, handle.attempt_id)
         assert isinstance(entry, Running)
         spool = Path(entry.socket_path).parent / "spool"
-        descriptors = open_descriptors()
+        descriptors = set(descriptor_numbers(os.getpid()))
 
         async with asyncio.TaskGroup() as tasks:
             operation = tasks.create_task(
@@ -672,13 +676,15 @@ async def test_runtime_close_settles_parked_spool(
             )
             async with asyncio.timeout(5):
                 await entered.wait()
-                active = open_descriptors()
+                added = set(descriptor_numbers(os.getpid())) - descriptors
+                assert len(added) == 1
+                spool_fd = added.pop()
+                assert os.fstat(spool_fd).st_nlink == 0
                 await runtime.close()
-        after = open_descriptors()
+        after = descriptor_numbers(os.getpid())
         names = tuple(spool.iterdir())
 
-    assert active == descriptors + 1
-    assert after < active
+    assert spool_fd not in after
     assert operation.cancelled()
     assert stopped.is_set()
     assert names == ()
@@ -752,8 +758,9 @@ async def test_unrecorded_collision_refuses_without_opening(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_journal", ["symlink", "mode"])
 async def test_transfer_removes_placement_when_journal_refuses(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, invalid_journal: str
 ) -> None:
     payload = b"payload"
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
@@ -762,7 +769,11 @@ async def test_transfer_removes_placement_when_journal_refuses(
         target.write_bytes(b"outside")
         journal = attempt / "journal.jsonl"
         journal.unlink(missing_ok=True)
-        journal.symlink_to(target)
+        if invalid_journal == "symlink":
+            journal.symlink_to(target)
+        else:
+            journal.write_bytes(b"wrong-mode")
+            journal.chmod(0o644)
 
         refused = await protocol_error(
             runtime.transfer_in(
@@ -799,7 +810,6 @@ async def test_fenced_journal_refuses_transfer(
             entry = await recorded(runtime, handle.attempt_id)
             assert isinstance(entry, Running)
             incoming = attempt / "input" / INCOMING
-            log = attempt / "runner.log"
 
             if failure == "open":
                 fill(attempt)
@@ -814,15 +824,20 @@ async def test_fenced_journal_refuses_transfer(
                     await until(incoming.exists)
                     fill(attempt)
                     await transfer_body(channel, ctx, payload[:-1])
-                    await until(
-                        lambda: any(
-                            outcome == "journal_unavailable"
-                            for outcome, _ in transfer_diagnostics(log)
-                        )
-                    )
+                    async with asyncio.timeout(3):
+                        while True:
+                            observed_fence = await protocol_error(
+                                runtime.start(handle, ctx)
+                            )
+                            if observed_fence.code == "journal_unavailable":
+                                break
+                            assert observed_fence.code == "workload_busy"
                 await until(lambda: not incoming.exists())
             (attempt / "filler").unlink()
             blocked = await protocol_error(runtime.start(handle, ctx))
+            refused_again = await protocol_error(
+                runtime.transfer_in(handle, item, chunks(payload), ctx)
+            )
             present = (attempt / "input").exists() and any(
                 (attempt / "input").iterdir()
             )
@@ -835,5 +850,7 @@ async def test_fenced_journal_refuses_transfer(
 
     assert blocked.code == "journal_unavailable"
     assert blocked.retryable is True
+    assert refused_again.code == "journal_unavailable"
+    assert refused_again.retryable is True
     assert present is False
     assert "transfer.materialised" not in text

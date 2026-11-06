@@ -264,6 +264,8 @@ class CommandSession:
     ) -> None:
         authorize()
         if digest != item.sha256:
+            self._unlink_input(incoming.directory, INCOMING)
+            authorize()
             self._reject(item)
             raise delivery_error("integrity_error")
         directory = incoming.directory
@@ -663,7 +665,7 @@ class CommandSession:
         started: int,
     ) -> Literal["write", "repeat", "conflict"]:
         with self._lock:
-            if self._stage is _Stage.FENCED or self._journal.closed:
+            if self._stage is _Stage.FENCED:
                 raise delivery_error("journal_unavailable")
             if observational or self._execution != submitter:
                 raise delivery_error("execution_unauthorized")
@@ -673,6 +675,8 @@ class CommandSession:
                 or self._transferring
             ):
                 raise delivery_error("transfer_refused")
+            if self._journal.closed:
+                raise delivery_error("journal_unavailable")
             self._transferring = True
             self._transfer_ns = started
             previous = self._inputs.get(item.name)
@@ -682,26 +686,23 @@ class CommandSession:
                 return "conflict"
             return "write"
 
+    def _append_transfer(self, kind: str, item: TransferItem) -> None:
+        try:
+            if self._journal.append(kind, {"name": item.name, "sha256": item.sha256}):
+                return
+        except FilesystemError:
+            pass
+        self.fence_transfer()
+        raise delivery_error("journal_unavailable")
+
     def _record_input(self, item: TransferItem) -> None:
-        recorded = self._journal.append(
-            "transfer.materialised",
-            {"name": item.name, "sha256": item.sha256},
-        )
-        if not recorded:
-            self.fence_transfer()
-            raise delivery_error("journal_unavailable")
+        self._append_transfer("transfer.materialised", item)
         with self._lock:
             self._inputs[item.name] = item.sha256
         self._emit_transfer("materialised")
 
     def _reject(self, item: TransferItem) -> None:
-        recorded = self._journal.append(
-            "transfer.rejected",
-            {"name": item.name, "sha256": item.sha256},
-        )
-        if not recorded:
-            self.fence_transfer()
-            raise delivery_error("journal_unavailable")
+        self._append_transfer("transfer.rejected", item)
         self._emit_transfer("rejected")
 
     def _unlink_input(self, directory: DirectoryAnchor, name: str) -> None:

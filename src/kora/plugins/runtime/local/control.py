@@ -1,6 +1,7 @@
 import asyncio
 import os
 import socket
+from collections.abc import Callable
 from functools import partial
 
 from kora.ir.vcs_ref_json import canonical_bytes
@@ -24,7 +25,13 @@ from kora.plugins.runtime.local.channel import (
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import TransferItem, Workload
 from kora.protocols.time import Clock
-from kora.runner.channels import BoundedChannel, cancel_task, wait_future
+from kora.runner.channels import (
+    BoundedChannel,
+    ChannelError,
+    ChannelFailure,
+    cancel_task,
+    wait_future,
+)
 from kora.runner.peers import PeerRefused, PeerSource
 from kora.runner.registry import TransitionExecutor
 
@@ -133,6 +140,7 @@ async def transfer_input(
     spool: int,
     item: TransferItem,
     message_deadline: int,
+    active: Callable[[], None] | None = None,
 ) -> None:
     deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
     endpoint = await connected(path, clock, deadline)
@@ -154,7 +162,9 @@ async def transfer_input(
             canonical_bytes(header.model_dump(mode="json")),
             min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline),
         )
-        await _send_spool(channel, clock, executor, spool, item.size, message_deadline)
+        await _send_spool(
+            channel, clock, executor, spool, item.size, message_deadline, active
+        )
         answered = min(clock.monotonic_ns() + START_PROGRESS_NS, message_deadline)
         _, payload = await channel.read_typed_frame(answered, reservations)
         read_delivery(payload, request_id, "transferred")
@@ -169,11 +179,19 @@ async def _send_spool(
     descriptor: int,
     size: int,
     message_deadline: int,
+    active: Callable[[], None] | None,
 ) -> None:
+    def read(length: int, offset: int) -> bytes:
+        if active is not None:
+            active()
+        if clock.monotonic_ns() >= message_deadline:
+            raise ChannelError(ChannelFailure.DEADLINE)
+        return os.pread(descriptor, length, offset)
+
     offset = 0
     while offset < size:
         length = min(SECTION_FRAME_BYTES, size - offset)
-        chunk = await executor.run(partial(os.pread, descriptor, length, offset))
+        chunk = await executor.run(partial(read, length, offset))
         if not chunk:
             raise message_refused(MessageRefusal.MALFORMED)
         deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
