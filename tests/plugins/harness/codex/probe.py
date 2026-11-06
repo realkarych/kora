@@ -24,6 +24,7 @@ from kora.plugins.harness.codex.app_server_errors import (
     reject_premature_error,
 )
 from kora.plugins.harness.codex.app_server_messages import (
+    CompletedMessage,
     MessagePhase,
     MessageRefused,
     TurnMessages,
@@ -1074,6 +1075,7 @@ class MessageProbe:
         self.thread_id = thread_id
         self.case = case
         self.messages = TurnMessages(thread_id, max_messages=4, max_text_bytes=4096)
+        self.confirmed_count = 0
         self.acknowledged_turn: str | None = None
         self.delta_turn: str | None = None
         self.delta_seen = asyncio.Event()
@@ -1105,18 +1107,25 @@ class MessageProbe:
             self.delta_turn = cast("str", identity)
             self.delta_seen.set()
         observation = self.messages.accept(notification)
-        if observation is not None:
-            require(self.case != "messages-kill", "partial_message_completed")
-            require(
-                self.messages.count <= len(self.expected), "message_count_unexpected"
-            )
-            phase, text = self.expected[self.messages.count - 1]
-            require(
-                observation.phase == phase and observation.text == text,
-                "message_content_mismatch",
-            )
-            if self.acknowledged_turn is not None:
-                self.messages.for_turn(self.acknowledged_turn)
+        if observation is not None and self.acknowledged_turn is not None:
+            self.messages.for_turn(self.acknowledged_turn)
+
+    def confirmed(self, ordinal: int, observation: CompletedMessage) -> None:
+        require(
+            self.case != "messages-kill"
+            and ordinal == self.confirmed_count + 1
+            and ordinal <= len(self.expected),
+            "message_count_unexpected",
+        )
+        phase, text = self.expected[ordinal - 1]
+        require(
+            observation.thread_id == self.thread_id
+            and observation.turn_id == self.acknowledged_turn
+            and observation.phase == phase
+            and observation.text == text,
+            "message_content_mismatch",
+        )
+        self.confirmed_count = ordinal
 
     def verify(self, terminal: TurnCompletion) -> None:
         require(terminal.status == "completed", "message_turn_not_completed")
@@ -1124,6 +1133,10 @@ class MessageProbe:
         require(
             self.messages.for_turn(terminal.turn_id) is not None,
             "message_completion_missing",
+        )
+        require(self.confirmed_count == len(self.expected), "message_handoff_missing")
+        diagnostic(
+            "INFO", "probe.confirmed_messages_verified", str(self.confirmed_count)
         )
 
     def verify_partial(self) -> None:
@@ -1134,6 +1147,7 @@ class MessageProbe:
         )
         require(
             self.messages.count == 0
+            and self.confirmed_count == 0
             and self.messages.for_turn(cast("str", identity)) is None,
             "partial_message_adopted",
         )
@@ -1496,6 +1510,7 @@ class Stdio:
                 observe=observe,
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
+                on_message=messages.confirmed if messages is not None else None,
                 output_schema=OUTPUT_SCHEMA if outputs is not None else None,
                 usage_observer=(
                     UsageObserver(lambda: USAGE_SOURCE_TIME, usage.confirmed)
@@ -2027,6 +2042,7 @@ async def observe_client_exit(
             require(stdio.messages is not None, "message_observer_missing")
             cast("MessageProbe", stdio.messages).verify_partial()
             await fixture.stream_closed.wait()
+            diagnostic("INFO", "probe.confirmed_messages_verified", "0")
         if fixture.case == "output-kill":
             require(stdio.outputs is not None, "output_observer_missing")
             cast("OutputProbe", stdio.outputs).verify_pending()
