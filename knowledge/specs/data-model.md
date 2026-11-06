@@ -460,6 +460,8 @@ Retain the [deploy content limits](api-and-agent-surface.md#graph-deploy-command
 
 The [server engine work](https://github.com/realkarych/kora/issues/593) owns construction and checking, bounded acquisition and actual read release, and same-version reference and publication/expiry races on both databases. Deployment content delivery, installation-aware validation and runtime protection remain separate activation requirements.
 
+The internal declaration helper under [#824](https://github.com/realkarych/kora/issues/824) derives this member from bounded canonical IR and compares it against freshly decoded saved data. It checks the declared JCS digests and exact logical shape under explicit source, work and scratch allowances. Its result establishes declaration consistency. Deployment bytes, retained references, complete interpretation and effect authority still require their own checks.
+
 #### Graph version digest inputs
 
 The project owner accepted these preimages on 2026-11-06 under [#805](https://github.com/realkarych/kora/issues/805). For the paired physical encoding, let I and C be the exact compact ASCII canonical object texts accepted by the codec for the compiled IR and execution contract. Each text preserves its saved object's member order. The complete producer owns normalization of resolved contract maps before encoding.
