@@ -615,7 +615,7 @@ Body shapes (DD-36; unsupported first-slice operations are excluded by the matri
 
 The [complete execution contract](data-model.md#complete-first-slice-execution-contract) binds the [logical manifest](data-model.md#saved-command-resource-manifests) of every admitted command. Verify the exact content supplied for each declared `(node_path, name)`. The 64-file limit counts occurrences, including repeated digests and empty files. Count decoded bytes per occurrence toward the 1 MiB version limit and the 256 KiB file limit. Missing, extra or mismatching content retains the existing `API003` resource refusal. The graph version and its exact physical resource ownership publish together under the existing shared-address fence.
 
-The authorized graph-version projection keeps its specified fields. It excludes the internal command-resource section, physical references and raw verification evidence. The authorized IR, digests and `CommandResult` retain their existing fields and rules.
+The authorized graph-version projection keeps its specified fields. It excludes the internal command-resource section, [physical references](data-model.md#saved-physical-command-resource-references) and raw verification evidence. The authorized IR, digests and `CommandResult` retain their existing fields and rules. Equal-deployment reuse keeps the original compatible version and its physical binding under current authority and eligibility checks.
 
 ### First-slice operation coverage
 

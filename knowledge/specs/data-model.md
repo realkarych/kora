@@ -462,6 +462,30 @@ The [server engine work](https://github.com/realkarych/kora/issues/593) owns con
 
 The internal declaration helper under [#824](https://github.com/realkarych/kora/issues/824) derives this member from bounded canonical IR and compares it against freshly decoded saved data. It checks the declared JCS digests and exact logical shape under explicit source, work and scratch allowances. Its result establishes declaration consistency. Deployment bytes, retained references, complete interpretation and effect authority still require their own checks.
 
+#### Saved physical command-resource references
+
+The project owner accepted this representation on 2026-11-06 under [#828](https://github.com/realkarych/kora/issues/828#issuecomment-6681098805). The existing `graph_version.resources` column stores one closed native JSON object with `interpretation: "kora.graph-resource-refs.v1"` and `commands`. The array contains exactly the commands with nonempty [logical manifests](#saved-command-resource-manifests). A version without declared files has an explicit empty array. Empty logical command declarations remain in the execution contract.
+
+| Object | Exact members |
+| --- | --- |
+| Command entry | `path`, `resource_set_digest`, `resources`. |
+| File entry | `name`, `sha256`, `size`, `executable`, `storage_ref`. |
+| `storage_ref` | The existing typed storage `ContentRef` from the [artifact storage contract](protocols.md#7-artifact-storage-fr-44). Its exact fields are `version`, `address`, `object_incarnation` and `total_size`. |
+| Content address | `version`, `storage_identity`, `payload_digest`. |
+| Storage identity | `version`, `store_id`. |
+
+Each storage record uses its existing exact version 1 and field validation. The physical reference's full payload digest and total size must equal the logical file digest and integer size. Match physical identity using the complete `ContentRef`, including store and object incarnation. Raw paths, identifiers alone and worker transfer references cannot establish that match. Paths and arrays retain the exact path and UTF-8 file order of the logical manifest. Object member order in the physical column carries no meaning. The physical reference is outside the execution-contract and deployment digests.
+
+Native JSON defines decoded object identity. Trusted writers emit unique member names. The checker rejects duplicate array associations and duplicate object keys visible in acquired transport. PostgreSQL JSONB does not preserve pre-normalization lexical duplicate keys.
+
+The deployment path verifies each supplied occurrence and uses the existing staging and provider result owners. Final publication checks current authority and exact durable owner eligibility for namespace, graph, version, command path, file name and complete physical reference under the [#216 shared-address fence](#10-retention-dd-4). Commit the graph version and its ownership together. Equal-content reuse still verifies and binds every occurrence. Equal-deployment deduplication preserves the original compatible version and its exact physical bindings. A later promotion cannot replace its incarnation or restore expired eligibility. The durable owner layout, deletion generation and holds stay with #216.
+
+Under existing authority, acquire only the selected version and its independent durable owner evidence in one coherent bounded read snapshot. Use a fixed number of exact scoped queries and enforce aggregate row and byte bounds with explicit overflow refusal. The evidence must come from the durable owner and must agree on the same namespace, graph, version, command path, name and exact reference. A second copy of the physical column supplies no independent evidence. A substituted store or incarnation refuses new effects even when digest and size agree. Acquisition and reconciliation exclude per-file backend queries, payload reads and global inventory scans.
+
+Bound physical transport before driver materialization independently of the paired-value and hash allowances in [graph version digest inputs](#graph-version-digest-inputs). Database work and temporary representations before serialization have their own bound. The implementation must prove that bound for oversized or malformed selected rows, including legacy input, or verify a write/storage invariant with a bounded legacy refusal. A post-render JSONB length check alone only guards transport. The implementation owns the acquisition expression and exact and one-over tests on SQLite and PostgreSQL, including native SQLite encodings, JSONB member reorder and actual read-resource release. This representation selects no numerical production bound or migration.
+
+After releasing the read unit, check the exact nonempty logical subset and reconcile the independently acquired owner evidence. Admit cumulative parsing, validation, work and every retained copy before growth. Missing, duplicate, extra or changed entries refuse new effects. Unversioned, expired or inconsistent metadata retains historical identity under existing read rules. Current availability, eligible-owner and grant checks remain separate. Internal references and raw verification evidence stay out of generic serialization, events, public views, errors and diagnostics including DEBUG. The existing authorized worker transfer contract remains distinct.
+
 #### Graph version digest inputs
 
 The project owner accepted these preimages on 2026-11-06 under [#805](https://github.com/realkarych/kora/issues/805). For the paired physical encoding, let I and C be the exact compact ASCII canonical object texts accepted by the codec for the compiled IR and execution contract. Each text preserves its saved object's member order. The complete producer owns normalization of resolved contract maps before encoding.
