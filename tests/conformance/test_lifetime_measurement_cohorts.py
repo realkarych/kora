@@ -25,9 +25,9 @@ from pathlib import Path
 
 async def main() -> None:
     reader, writer = await asyncio.open_unix_connection(sys.argv[1])
-    writer.write(sys.argv[2].encode('ascii'))
-    await writer.drain()
     try:
+        writer.write(sys.argv[2].encode('ascii'))
+        await writer.drain()
         request = await reader.readexactly(1)
         if request == b'f':
             raise SystemExit(3)
