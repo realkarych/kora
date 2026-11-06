@@ -235,12 +235,15 @@ Passes run every 1 s when idle and immediately after a wake-up. A state transiti
 | notification lock | transaction-scoped advisory lock per namespace, shared or exclusive (section 19) | implicit: one writer |
 | lock wait bound | `lock_timeout` per lock acquisition of a signal route (section 12) | none: the in-process writer queue |
 | connection | pool | one writer connection under one `asyncio` lock, each transaction started with `BEGIN IMMEDIATE`; read functions and read-only transactions use separate read-only connections, which WAL mode permits; WAL mode, `busy_timeout` 5 s, `synchronous=NORMAL`; the database file is created with mode 0600 ([issue #153](https://github.com/realkarych/kora/issues/153)); the writer pool is disposed only once no unit is in flight, because disposing a static pool closes its connection even while a unit holds it ([issue #158](https://github.com/realkarych/kora/issues/158)) |
+| opt-in coherent read snapshot ([#854](https://github.com/realkarych/kora/issues/854)) | `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY` before the first data read on the existing pool | `BEGIN DEFERRED` on an existing query-only WAL reader before the first data read |
 | wake-up | payload-free `NOTIFY` in the transaction, `LISTEN` in the scheduler, plus 1 s poll | in-process event plus 1 s poll |
 | JSON columns | `jsonb`, indexed on `consumed_versions` keys | `json` text, no indexes on JSON keys; sufficient at standalone scale. Partial indexes on ordinary columns exist on both databases |
 | concurrency | n api replicas, n workers | all coroutines in one process; local runtime only by default (Docker allowed) |
 | migrations | `kora db upgrade`, online (NFR-7.2) | same migration files |
 
 The schema and all queries are shared; this table is the authority for every dialect-specific statement, and the repository layer has no other. Anything that works only on SQLite or only on Postgres is a bug by NFR-0.1.
+
+`Database.read_snapshot()` establishes its view at the first data read and holds one existing lease for the bounded read unit. Trusted callers leave transaction and session controls to the context. Release the snapshot before detached validation, storage or network work. General read and writer units keep their own transaction modes.
 
 **Standalone bootstrap** (DD-36, amended by [issue #141](https://github.com/realkarych/kora/issues/141)): `kora standalone` reads `kora.toml` (or defaults), creates the namespace `default` and the data directory `./.kora-data/{kora.db,artifacts,workspaces}`. Its first initialization issues two distinct personal user tokens for the same owner and namespace: the CLI token has `approve`, `platform` and `transcripts`; the MCP token has only the namespace-local `transcripts` capability. The CLI reads `KORA_TOKEN`, while stdio MCP reads only `KORA_MCP_TOKEN`; both use `KORA_URL`. These client variables do not configure the worker credential.
 

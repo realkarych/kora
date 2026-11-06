@@ -506,6 +506,8 @@ Under existing authority, use an exact namespace, graph and version lookup. The 
 
 The database implementation demonstrates actual SQLite page access and overflow and PostgreSQL inline, compressed and external TOAST shapes, independently of bytes transferred to the driver. Prove one coherent snapshot under an intervening version or owner change on both databases. An ordinary `read_transaction` does not by itself establish a repeatable read across multiple queries. A favorable VM-step count or absence of large driver rows alone cannot qualify database-side admission.
 
+The metadata layer provides an opt-in [`read_snapshot` unit](scheduler.md#10-standalone-sqlite-versus-postgres) under [#854](https://github.com/realkarych/kora/issues/854). It supplies one stable view for a finite group of related reads. Scoped admission, physical work bounds and durable owner selection belong to the complete loader.
+
 #### Graph version digest inputs
 
 The project owner accepted these preimages on 2026-11-06 under [#805](https://github.com/realkarych/kora/issues/805). For the paired physical encoding, let I and C be the exact compact ASCII canonical object texts accepted by the codec for the compiled IR and execution contract. Each text preserves its saved object's member order. The complete producer owns normalization of resolved contract maps before encoding.
