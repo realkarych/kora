@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field, replace
@@ -42,6 +43,62 @@ TOKEN_NAME: str = "ghp_" + "a" * 36
 FAST: ProcessLauncher = ProcessLauncher(
     kill_grace_ns=500_000_000, eof_bound_ns=500_000_000
 )
+GIT_CHILD_STOP_PROBE: str = """
+import os
+import signal
+import subprocess
+import sys
+
+from kora.plugins.vcs.git import decoder, tree_build
+
+helper = {"tree": tree_build, "decoder": decoder}[sys.argv[1]]
+missing = sys.argv[2] if len(sys.argv) > 2 else None
+children: list[subprocess.Popen[bytes]] = []
+
+def spawn() -> subprocess.Popen[bytes]:
+    child = subprocess.Popen(
+        [sys.executable, "-I", "-c", "import signal; signal.alarm(5); signal.pause()"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    children.append(child)
+    return child
+
+def interrupted_spawn() -> subprocess.Popen[bytes]:
+    if missing is None:
+        child = spawn()
+        os.kill(os.getpid(), signal.SIGTERM)
+        return child
+    os.kill(os.getpid(), signal.SIGTERM)
+    try:
+        return subprocess.Popen([missing], stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        print("spawn failed")
+        raise
+
+signal.signal(signal.SIGTERM, helper.terminate)
+try:
+    if missing is not None:
+        helper.start_owned(spawn)
+    helper.start_owned(interrupted_spawn)
+    raise AssertionError("helper returned after SIGTERM")
+except SystemExit as stopped:
+    assert stopped.code == 128 + signal.SIGTERM
+    assert signal.getsignal(signal.SIGTERM) is helper.terminate
+    child, = children
+    assert child.returncode == -signal.SIGTERM
+    try:
+        os.waitpid(child.pid, os.WNOHANG)
+    except ChildProcessError:
+        raise stopped
+    raise AssertionError("helper left an unreaped child")
+finally:
+    for child in children:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+"""
 
 
 def test_a_secret_in_a_path_name_is_found_when_its_blob_is_reused(
@@ -80,6 +137,29 @@ async def started_children(pids: Path) -> list[int]:
     while not any(pids.iterdir()) and time.monotonic() < deadline:
         await asyncio.sleep(0.01)
     return [int(path.name) for path in pids.iterdir()]
+
+
+@pytest.mark.parametrize("helper", ["tree", "decoder"])
+@pytest.mark.parametrize("spawn_fails", [False, True])
+def test_git_helper_settles_owned_child_after_term_during_acquisition(
+    tmp_path: Path, helper: str, spawn_fails: bool
+) -> None:
+    missing = (str(tmp_path / "missing-git"),) if spawn_fails else ()
+    arguments = (sys.executable, "-c", GIT_CHILD_STOP_PROBE, helper, *missing)
+    source = Path(__file__).parents[3] / "src"
+
+    result = subprocess.run(
+        arguments,
+        cwd=tmp_path,
+        env={"PYTHONPATH": str(source)},
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 143, result.stderr
+    assert result.stdout == (b"spawn failed\n" if spawn_fails else b"")
+    assert result.stderr == b""
 
 
 @pytest.mark.parametrize(

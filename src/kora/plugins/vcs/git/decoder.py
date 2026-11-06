@@ -5,7 +5,7 @@ import re
 import signal
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -71,18 +71,39 @@ def terminate(number: int, frame: FrameType | None) -> None:
     sys.exit(128 + number)
 
 
+def start_owned(
+    launch: Callable[[], subprocess.Popen[bytes]],
+) -> subprocess.Popen[bytes]:
+    pending: int | None = None
+
+    def defer(number: int, frame: FrameType | None) -> None:
+        nonlocal pending
+        pending = number
+
+    previous = signal.signal(signal.SIGTERM, defer)
+    try:
+        process = launch()
+        CHILDREN.append(process)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        if pending is not None:
+            terminate(pending, None)
+    return process
+
+
 class Git:
     def __init__(self, binary: str, repository: str) -> None:
         self.argv = [binary, f"--git-dir={repository}"]
 
     def output(self, *arguments: str) -> bytes:
-        process = subprocess.Popen(
-            [*self.argv, *arguments],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=None,
+        process = start_owned(
+            lambda: subprocess.Popen(
+                [*self.argv, *arguments],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=None,
+            )
         )
-        CHILDREN.append(process)
         output, _ = process.communicate()
         CHILDREN.remove(process)
         if process.returncode != 0:
@@ -90,14 +111,14 @@ class Git:
         return output
 
     def batch(self) -> subprocess.Popen[bytes]:
-        process = subprocess.Popen(
-            [*self.argv, "cat-file", "--batch"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
+        return start_owned(
+            lambda: subprocess.Popen(
+                [*self.argv, "cat-file", "--batch"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+            )
         )
-        CHILDREN.append(process)
-        return process
 
 
 def new_commits(git: Git, prepared: str, base: str) -> list[tuple[str, list[str]]]:
@@ -110,13 +131,14 @@ def new_commits(git: Git, prepared: str, base: str) -> list[tuple[str, list[str]
 
 
 def stdin_output(git: Git, arguments: Sequence[str], data: bytes) -> bytes:
-    process = subprocess.Popen(
-        [*git.argv, *arguments],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=None,
+    process = start_owned(
+        lambda: subprocess.Popen(
+            [*git.argv, *arguments],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+        )
     )
-    CHILDREN.append(process)
     output, _ = process.communicate(data)
     CHILDREN.remove(process)
     if process.returncode != 0:
