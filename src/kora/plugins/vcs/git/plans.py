@@ -32,8 +32,9 @@ TREE_HELPER: Final[str] = str(HELPERS / "tree_build.py")
 DECODER_HELPER: Final[str] = str(HELPERS / "decoder.py")
 OBJECT_ID: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 REF_FORBIDDEN: Final[re.Pattern[str]] = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
-COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: \S+ #[1-9][0-9]*")
+COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: [^\s{}]+ #[1-9][0-9]*")
 PUBLISH_PREFIX: Final[str] = "kora/"
+PLACEHOLDER_BRACES: Final[frozenset[str]] = frozenset("{}")
 REPOSITORY: Final[str] = "repo"
 INDEX_FILE: Final[str] = "index.jsonl"
 PREPARED_REF: Final[str] = "refs/kora/prepared"
@@ -79,7 +80,11 @@ def is_full_ref(name: str) -> bool:
 
 
 def is_publish_branch(name: str) -> bool:
-    return name.startswith(PUBLISH_PREFIX) and is_branch(name)
+    return (
+        name.startswith(PUBLISH_PREFIX)
+        and not PLACEHOLDER_BRACES.intersection(name)
+        and is_branch(name)
+    )
 
 
 def is_commit_message(text: str) -> bool:
