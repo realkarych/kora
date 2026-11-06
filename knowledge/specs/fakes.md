@@ -20,6 +20,46 @@ Every kora fake is a module named `fake` in its plugin family and ships in the o
 - **Layer table.** The family rows and the `kora.testing` composition root of [ADR-0026](../../docs/decisions/0026-package-layers.md) already cover these modules, so the [package layer table](../architecture/detailed.md#package-layers) gains no row. Section 2 adds one import rule.
 - **The directory-backed VCS is a fake.** It has no remote, no review and no code host, so it is not production-eligible and is excluded with the others. "The fake VCS" in the specifications names `kora.plugins.vcs.fake`.
 
+### Directory VCS checkout foundation (#297)
+
+The checkout-only foundation uses the shared local VCS configuration, principal,
+credential-binding and pinned repository rules. It is not a complete `Vcs`
+implementation: publication and inspection belong to #298, and candidate revision
+chains to #299. There is no provider entry point or serving-process activation.
+
+A repository contains `revisions`, `trees`, `blobs` and `heads` directories.
+Revision and tree identifiers are SHA-256 digests of their exact canonical JSON
+bytes. A revision has exactly `parent`, `message` and `tree`; a tree is a
+path-sorted array of entries containing exactly `path`, `mode`, `size` and
+`sha256`. Blob names are their content digests. Modes are `regular`, `executable`
+or `symlink`; symlink targets are blob data. Named heads contain one revision
+identifier. No timestamps participate in revision identity.
+
+Checkout validates the pinned repository and requested revision/tree, materialises
+regular files before symlinks and captures commit and branch. A `VcsRef` also
+validates its base and captures the paths changed between the two snapshots.
+Missing revisions or bases fail checkout with `config_error`. Path validation
+matches sealing: no absolute/traversing paths, reserved `.git`/`.kora` variants,
+case-fold collisions or descendants beneath a file or symlink. Opens are
+descriptor-relative and no-follow; new candidate files are create-only.
+
+The candidate's `.kora/dirvcs` store contains only its checkout tree and checkout
+identity, not other heads or repository history. Candidate commits, export,
+preparation and publication are not activated by this foundation.
+
+Retained format limits are 80 KiB per revision document, 64 KiB per message,
+50,000 tree entries, 64 MiB per tree document, 256 MiB per blob, 4 KiB per path
+or symlink target and 255 UTF-8 bytes per path component. Tree structure is bounded
+before JSON decoding, including the 250,000 punctuation-token limit outside strings.
+Helper operations run through the existing executor and preserve its failure,
+deadline and child-closure rules; helper exit alone does not claim publication.
+
+Checkout evidence is `test_directory_checkout_runs_through_the_real_executor`;
+parser evidence is `test_dirvcs_path_rules_match_the_sealing_rules` and
+`test_dirvcs_tree_parsing_refuses_before_allocation`. Full VCS conformance remains
+pending the later slices. The reserved-loading and standard-library-only checks
+also cover this new module.
+
 ## 2. Fakes never reach a serving process
 
 A process that serves the API or runs a worker never selects a fake runtime, harness or VCS. Each rule below closes one path.

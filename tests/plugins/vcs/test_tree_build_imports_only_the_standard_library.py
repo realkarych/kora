@@ -18,7 +18,9 @@ def imported_roots(path: Path) -> set[str]:
     return roots
 
 
-@pytest.mark.parametrize("helper", ["tree_build.py", "decoder.py", "export.py"])
+@pytest.mark.parametrize(
+    "helper", ["tree_build.py", "decoder.py", "export.py", "../fake/store.py"]
+)
 def test_tree_build_imports_only_the_standard_library(helper: str) -> None:
     roots = imported_roots(HELPERS / helper)
 

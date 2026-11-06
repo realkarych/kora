@@ -153,6 +153,7 @@ def run_serving(log_path: str) -> dict[str, object]:
         (harness, "fake"),
         (harness, "genuine"),
         (ProtocolName.RUNTIME, "fake"),
+        (ProtocolName.VCS, "directory"),
     )
     result: dict[str, object] = {"before": testing_modules()}
     result["imported"] = {

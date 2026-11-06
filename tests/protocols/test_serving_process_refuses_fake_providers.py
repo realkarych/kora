@@ -24,6 +24,7 @@ IMPLEMENTED_MODULE: Final[str] = "\n".join(
     ]
 )
 ENTRIES: Final[dict[str, str]] = {
+    "vcs.directory": "kora.plugins.vcs.fake:DirVcs",
     "harness.fake": f"{PREFIX}implemented:provider",
     "harness.genuine": "kora.plugins.harness.fake:FakeHarness",
     "harness.implemented": f"{PREFIX}implemented:provider",
@@ -57,6 +58,7 @@ def test_serving_process_refuses_fake_providers(tmp_path: Path) -> None:
     result = json.loads(completed.stdout)
     assert result["before"] == []
     assert result["imported"] == {
+        "vcs.directory": "provider_reserved",
         "harness.fake": "provider_reserved",
         "harness.genuine": "provider_reserved",
         "runtime.fake": "provider_reserved",
