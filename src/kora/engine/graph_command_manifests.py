@@ -2,7 +2,7 @@ from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from functools import cmp_to_key
 from hashlib import sha256
-from typing import Never, cast
+from typing import Never, Self, cast
 from unicodedata import is_normalized
 
 from pydantic import MISSING
@@ -63,10 +63,12 @@ class CommandResourceContent:
     name: str
     data: bytes
 
-    def __init__(self, path: tuple[str, ...], name: str, data: bytes) -> None:
-        object.__setattr__(self, "path", path)
-        object.__setattr__(self, "name", name)
-        object.__setattr__(self, "data", data)
+    def __new__(cls, path: tuple[str, ...], name: str, data: bytes) -> Self:
+        content = super().__new__(cls)
+        object.__setattr__(content, "path", path)
+        object.__setattr__(content, "name", name)
+        object.__setattr__(content, "data", data)
+        return content
 
     def __setattr__(self, name: str, value: object) -> Never:
         raise AttributeError("command resource contents are immutable")

@@ -1,4 +1,5 @@
 import pickle
+from collections.abc import Callable
 from dataclasses import replace
 from hashlib import sha256
 from traceback import walk_tb
@@ -141,7 +142,9 @@ def test_command_contents_admit_the_exact_file_count_and_refuse_one_over() -> No
     assert_content_free(refusal.value, GraphValueFailure.INVALID)
 
 
-def test_command_contents_admit_exact_decoded_limits_and_refuse_one_over() -> None:
+def test_command_contents_admit_exact_decoded_limits_and_refuse_aggregate_over() -> (
+    None
+):
     payload = b"x" * COMMAND_RESOURCE_MAX_BYTES
     root = tuple(
         CommandResourceContent(ROOT, f"file-{index}", payload) for index in range(2)
@@ -152,24 +155,32 @@ def test_command_contents_admit_exact_decoded_limits_and_refuse_one_over() -> No
     empty = CommandResourceContent(BODY, "tail", b"")
     ir_text = source_for(root, (*body, empty))
     aggregate_over = (*root, *body, CommandResourceContent(BODY, empty.name, b"x"))
-    file_over = (
-        *root,
-        body[0],
-        CommandResourceContent(BODY, body[1].name, payload + b"x"),
-        empty,
-    )
+    source_too_small = replace(LIMITS, ir_bytes=1)
 
     accepted = verify_graph_command_contents(
         ir_text, (*root, *body, empty), limits=LIMITS
     )
     with pytest.raises(GraphValueRejected) as aggregate_refusal:
-        verify_graph_command_contents(ir_text, aggregate_over, limits=LIMITS)
-    with pytest.raises(GraphValueRejected) as file_refusal:
-        verify_graph_command_contents(ir_text, file_over, limits=LIMITS)
+        verify_graph_command_contents(ir_text, aggregate_over, limits=source_too_small)
 
     assert accepted == (*root, *body, empty)
     assert all(item.data is payload for item in accepted[:-1])
     assert_content_free(aggregate_refusal.value, GraphValueFailure.INVALID)
+
+
+def test_command_contents_refuse_a_single_oversized_file_before_reading_ir() -> None:
+    root = CommandResourceContent(ROOT, "first", b"x")
+    late = CommandResourceContent(BODY, "last", b"y" * COMMAND_RESOURCE_MAX_BYTES)
+    over = CommandResourceContent(BODY, late.name, late.data + b"y")
+    ir_text = source_for((root,), (late,))
+    limits = replace(LIMITS, ir_bytes=1)
+
+    with pytest.raises(GraphValueRejected) as source_refusal:
+        verify_graph_command_contents(ir_text, (root, late), limits=limits)
+    with pytest.raises(GraphValueRejected) as file_refusal:
+        verify_graph_command_contents(ir_text, (root, over), limits=limits)
+
+    assert_content_free(source_refusal.value, GraphValueFailure.BUDGET)
     assert_content_free(file_refusal.value, GraphValueFailure.INVALID)
 
 
@@ -194,19 +205,50 @@ def test_command_contents_reserve_all_hash_work_before_any_payload_digest() -> N
     assert_content_free(mismatch.value, GraphValueFailure.INVALID)
 
 
+def test_command_contents_budget_covers_additional_name_comparisons() -> None:
+    canonical_order = tuple(
+        CommandResourceContent(ROOT, "x" * 80 + str(index), b"") for index in range(8)
+    )
+    ir_text = source_for(canonical_order)
+    low = 0
+    high = LIMITS.work
+    while low + 1 < high:
+        middle = (low + high) // 2
+        try:
+            verify_graph_command_contents(
+                ir_text, canonical_order, limits=replace(LIMITS, work=middle)
+            )
+        except GraphValueRejected:
+            low = middle
+        else:
+            high = middle
+    limits = replace(LIMITS, work=high)
+
+    verified = verify_graph_command_contents(ir_text, canonical_order, limits=limits)
+    with pytest.raises(GraphValueRejected) as refusal:
+        verify_graph_command_contents(
+            ir_text, tuple(reversed(canonical_order)), limits=limits
+        )
+
+    assert verified == canonical_order
+    assert_content_free(refusal.value, GraphValueFailure.BUDGET)
+
+
 def test_command_contents_protect_bytes_and_failure_frames() -> None:
     valid = CommandResourceContent(ROOT, MARKER, MARKER.encode())
     valid_tail = CommandResourceContent(ROOT, "tail", b"")
     ir_text = source_for((valid, valid_tail))
     wrong = CommandResourceContent(ROOT, MARKER, b"x" * len(valid.data))
-    wide = CommandResourceContent(ROOT, MARKER * 100, b"")
-    limits = replace(LIMITS, scratch=1000)
+    wide = CommandResourceContent(ROOT, MARKER * 1000, b"")
+    limits = replace(LIMITS, scratch=16_000)
+    reinitialize = cast(Callable[[tuple[str, ...], str, bytes], None], valid.__init__)
 
     verified = verify_graph_command_contents(
         ir_text, (valid, valid_tail), limits=LIMITS
     )
     with pytest.raises(AttributeError, match="immutable"):
         verified[0].name = "replacement"
+    reinitialize(BODY, valid_tail.name, wrong.data)
     with pytest.raises(TypeError, match="explicit access"):
         pickle.dumps(verified)
     with pytest.raises(ValueError, match="not iterable") as encoder:
@@ -215,12 +257,15 @@ def test_command_contents_protect_bytes_and_failure_frames() -> None:
         raise RuntimeError(MARKER)
     except RuntimeError:
         with pytest.raises(GraphValueRejected) as mismatch:
-            verify_graph_command_contents(ir_text, (wrong, valid_tail), limits=LIMITS)
+            verify_graph_command_contents(ir_text, (wrong, valid_tail), limits=limits)
         with pytest.raises(GraphValueRejected) as budget:
             verify_graph_command_contents(ir_text, (wrong, wide), limits=limits)
 
     assert MARKER not in repr(verified)
     assert MARKER not in repr(encoder.value)
+    assert verified[0].path == ROOT
+    assert verified[0].name == MARKER
+    assert verified[0].data == MARKER.encode()
     assert_content_free(mismatch.value, GraphValueFailure.INVALID)
     assert_content_free(budget.value, GraphValueFailure.BUDGET)
     for refusal in (mismatch.value, budget.value):
