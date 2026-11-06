@@ -88,23 +88,28 @@ cleanup() {
 }
 
 prepare_selected_turn() {
-    fixture_revision=$(git -C "$repo_dir" rev-parse HEAD)
-    set -- src/kora tests/plugins/harness/codex pyproject.toml uv.lock .python-version README.md
-    git -C "$repo_dir" ls-tree -r "$fixture_revision" -- "$@" > "$reservation/source-tree"
-    awk '$1 != "100644" && $1 != "100755" { exit 1 }' "$reservation/source-tree"
-    timeout -k 2s 20s git -C "$repo_dir" archive --format=tar \
-        --output="$reservation/source.tar" "$fixture_revision" "$@"
     mkdir "$reservation/source" "$reservation/uv-home" "$reservation/uv-tmp"
-    tar -xf "$reservation/source.tar" -C "$reservation/source"
+    fixture_revision=$(env -i PATH="$PATH" HOME="$reservation/uv-home" git -C "$repo_dir" rev-parse HEAD)
+    set -- src/kora tests/plugins/harness/codex pyproject.toml uv.lock .python-version README.md
+    env -i PATH="$PATH" HOME="$reservation/uv-home" \
+        git -C "$repo_dir" ls-tree -r "$fixture_revision" -- "$@" > "$reservation/source-tree"
+    awk '$1 != "100644" && $1 != "100755" { exit 1 }' "$reservation/source-tree"
+    env -i PATH="$PATH" HOME="$reservation/uv-home" \
+        timeout -k 2s 20s git -C "$repo_dir" archive --format=tar \
+            --output="$reservation/source.tar" "$fixture_revision" "$@"
+    env -i PATH="$PATH" tar -xf "$reservation/source.tar" -C "$reservation/source"
     rm "$reservation/source.tar"
     env -i PATH="$PATH" HOME="$reservation/uv-home" TMPDIR="$reservation/uv-tmp" \
         timeout -k 2s 120s sh -eu -c '
-            uv --no-config --no-cache --offline export --locked --no-default-groups \
-                --extra conformance --no-emit-project --project "$1/source" \
+            cd "$1"
+            probe_python=$(uv --no-config --no-cache --no-python-downloads python find --system 3.11.17)
+            uv --no-config --no-cache --no-python-downloads --offline export \
+                --locked --no-default-groups --extra conformance --no-emit-project \
+                --project "$1/source" --python "$probe_python" \
                 --output-file "$1/requirements.txt" >/dev/null
             uv --no-config --no-cache --no-python-downloads pip install \
                 --default-index https://pypi.org/simple --require-hashes --only-binary :all: --no-deps \
-                --python-platform x86_64-manylinux_2_28 --python-version 3.11.17 \
+                --python "$probe_python" --python-platform x86_64-manylinux_2_28 --python-version 3.11.17 \
                 --target "$1/linux-packages" -r "$1/requirements.txt"
         ' sh "$reservation"
     probe_dir=$reservation/source/tests/plugins/harness/codex
@@ -117,7 +122,7 @@ probe_context() {
     if [ "$variant" = selected-turn ]; then
         set -- "$@" -C "$reservation/source/src" kora -C "$reservation" linux-packages
     fi
-    tar -cf - "$@"
+    env -i PATH="$PATH" tar -cf - "$@"
 }
 
 run_variant() {

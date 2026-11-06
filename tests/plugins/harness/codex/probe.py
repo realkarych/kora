@@ -2082,6 +2082,9 @@ async def observe_selected_event_turn(
     async def cut_after_message() -> None:
         await fixture.stream_ready.wait()
         await message_emitted.wait()
+        require(
+            not fixture.stream_closed.is_set(), "selected_event_stream_closed_early"
+        )
         signal_native_process(app, signal.SIGKILL)
 
     cut = fixture.case == "selected-turn-cut"
@@ -2137,7 +2140,8 @@ async def observe_selected_event_turn(
     usage = [event.data for event in sink.events if isinstance(event, UsageEvent)]
     results = [event.data for event in sink.events if isinstance(event, ResultEvent)]
     require(
-        len(messages) == sink.count.events == 1
+        len(sink.events) == (2 if cut else 4)
+        and len(messages) == sink.count.events == 1
         and messages[0].text == SELECTED_OUTPUT_TEXT.replace(EVENT_CANARY, MASK)
         and not messages[0].truncated,
         "selected_event_message_mismatch",
