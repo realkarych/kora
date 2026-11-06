@@ -146,7 +146,6 @@ def prepared_class(world: World, checkout: Checkout, forge: Forge) -> ErrorClass
                 plan,
                 sealed,
                 workspace,
-                publish_request(remote, checkout),
                 pinned(world.binding()),
                 checkout.areas,
                 (),

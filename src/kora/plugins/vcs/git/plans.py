@@ -18,6 +18,7 @@ from kora.plugins.vcs.git.environment import (
 )
 from kora.plugins.vcs.git.tools import GitTools
 from kora.plugins.vcs.local import limited_argv
+from kora.protocols.policy import is_node_path
 from kora.protocols.vcs import (
     Capture,
     CheckoutPlan,
@@ -32,7 +33,9 @@ TREE_HELPER: Final[str] = str(HELPERS / "tree_build.py")
 DECODER_HELPER: Final[str] = str(HELPERS / "decoder.py")
 OBJECT_ID: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 REF_FORBIDDEN: Final[re.Pattern[str]] = re.compile(r"[\x00-\x20\x7f~^:?*\[\\]")
-COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: [^\s{}]+ #[1-9][0-9]*")
+COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(
+    r"kora: (?P<node_path>[^\s{}]+) #[1-9][0-9]*"
+)
 PUBLISH_PREFIX: Final[str] = "kora/"
 PLACEHOLDER_BRACES: Final[frozenset[str]] = frozenset("{}")
 REPOSITORY: Final[str] = "repo"
@@ -88,7 +91,8 @@ def is_publish_branch(name: str) -> bool:
 
 
 def is_commit_message(text: str) -> bool:
-    return COMMIT_MESSAGE.fullmatch(text) is not None
+    matched = COMMIT_MESSAGE.fullmatch(text)
+    return matched is not None and is_node_path(matched["node_path"])
 
 
 @dataclass(frozen=True)
@@ -270,7 +274,7 @@ def checkout_plan(
 
 
 def publish_plan(
-    settings: PlanSettings, branch: str, message: str, moment: datetime
+    settings: PlanSettings, repo: str, branch: str, message: str, moment: datetime
 ) -> PublishPlan:
     exporting = Steps(settings, "candidate", export_options(), CANDIDATE_HOME)
     hooks = "{control_root}/hooks"
@@ -427,6 +431,8 @@ def publish_plan(
         ),
     )
     return PublishPlan(
+        repo=repo,
+        branch=branch,
         required_tools=settings.tools.names(),
         files=(),
         export=export,

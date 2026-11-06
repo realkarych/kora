@@ -51,7 +51,6 @@ def test_candidate_git_configuration_cannot_execute_in_publisher(
             plan,
             sealed,
             workspace,
-            publish_request(remote, checkout),
             pinned(world.binding()),
             checkout.areas,
             (),

@@ -75,6 +75,8 @@ def plan_digest(plan: CheckoutPlan | PublishPlan) -> str:
         {
             **common,
             "kind": "publish",
+            "repo": plan.repo,
+            "branch": plan.branch,
             "export": steps_document(plan.export),
             "prepare": steps_document(plan.prepare),
             "inspect": steps_document(plan.inspect),

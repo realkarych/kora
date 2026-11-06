@@ -135,6 +135,7 @@ class GitVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
             self.refuse(ctx, "vcs_request_invalid")
         plan = publish_plan(
             self.settings(remote),
+            request.repo,
             request.branch,
             request.commit_message,
             ctx.clock.now(),

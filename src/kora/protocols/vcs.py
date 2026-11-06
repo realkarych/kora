@@ -280,6 +280,8 @@ class CheckoutPlan(BoundaryModel):
 
 
 class PublishPlan(BoundaryModel):
+    repo: RepoText
+    branch: BranchText
     required_tools: NamedItems
     files: PlanFiles
     export: PlanSteps

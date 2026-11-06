@@ -70,7 +70,6 @@ from kora.protocols.vcs import (
     PreparedPublication,
     PublicationInput,
     PublishPlan,
-    PublishRequest,
     RelativePath,
     WorkspaceRef,
 )
@@ -365,7 +364,6 @@ class Executor:
         plan: PublishPlan,
         sealed: PublicationInput,
         workspace: WorkspaceRef,
-        request: PublishRequest,
         pinned: PinnedPublication,
         areas: Areas,
         secrets: Sequence[SecretValue],
@@ -379,7 +377,7 @@ class Executor:
         require_supported(pinned.binding, Phase.PREPARE)
         if workspace.base_commit != workspace.commit:
             misconfigured("workspace_base_differs", Phase.PREPARE)
-        if not pinned.attempt_id == workspace.attempt_id == request.attempt_id:
+        if pinned.attempt_id != workspace.attempt_id or plan.repo != workspace.repo:
             misconfigured("workload_conflict", Phase.PREPARE)
         if len(secrets) > self.settings.scan.max_secrets:
             misconfigured("scanner_secrets_exceeded", Phase.SCAN)
@@ -389,7 +387,7 @@ class Executor:
             persisted.plan_digest != digest or persisted.input_digest != sealed.digest
         ):
             misconfigured("workload_conflict", Phase.PREPARE)
-        destination = self.destination(request.repo, Phase.PREPARE)
+        destination = self.destination(plan.repo, Phase.PREPARE)
         publication_root = require_area(areas.publication, Phase.PREPARE)
         control_root = require_area(areas.control, Phase.PREPARE)
         await self.verify_sealed(sealed, areas)
@@ -405,7 +403,6 @@ class Executor:
                 plan,
                 revision,
                 workspace,
-                request,
                 pinned,
                 destination,
                 Path(revision.location),
@@ -511,7 +508,6 @@ class Executor:
         plan: PublishPlan,
         revision: PreparedRevision,
         workspace: WorkspaceRef,
-        request: PublishRequest,
         pinned: PinnedPublication,
         destination: Destination,
         work: Path,
@@ -577,7 +573,7 @@ class Executor:
         if revision.commit == revision.base_commit and not changed:
             invalid("empty_change", Phase.INSPECT)
         result = self.result(
-            revision, request, pinned, destination, captures, changed, verdict, secrets
+            revision, plan, pinned, destination, captures, changed, verdict, secrets
         )
         ctx.logger.emit(PHASE_FINISHED, phase=Phase.INSPECT.value, outcome="inspected")
         return result
@@ -585,7 +581,7 @@ class Executor:
     def result(
         self,
         revision: PreparedRevision,
-        request: PublishRequest,
+        plan: PublishPlan,
         pinned: PinnedPublication,
         destination: Destination,
         captures: Captures,
@@ -596,8 +592,8 @@ class Executor:
         target = destination_digest(
             destination.provider,
             destination.remote,
-            request.repo,
-            request.branch,
+            plan.repo,
+            plan.branch,
             revision.base_commit,
             destination.transport,
         )
@@ -608,8 +604,8 @@ class Executor:
                 input_digest=revision.input_digest,
                 prepared_digest=revision.prepared_digest,
                 inspection_digest=verdict.inspection_digest,
-                repo=request.repo,
-                branch=request.branch,
+                repo=plan.repo,
+                branch=plan.branch,
                 commit=revision.commit,
                 base_commit=revision.base_commit,
                 destination_digest=target,

@@ -366,6 +366,8 @@ def checkout_plan(**changes: object) -> dict[str, object]:
 
 def publish_plan(**changes: object) -> dict[str, object]:
     return {
+        "repo": "local",
+        "branch": "kora/graph/run-1/agent/1",
         "required_tools": ["git"],
         "files": [plan_file(area="publication")],
         "export": [plan_step(cwd="candidate", capture=None)],

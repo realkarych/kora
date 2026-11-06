@@ -69,7 +69,6 @@ def preparation(world: World, launcher: RecordingLauncher) -> Callable[[], objec
             plan,
             sealed,
             workspace,
-            publish_request(remote, checkout),
             pinned(world.binding()),
             checkout.areas,
             (),

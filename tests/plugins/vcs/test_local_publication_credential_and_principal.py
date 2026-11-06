@@ -102,7 +102,6 @@ def test_requested_credential_required_binding_is_refused(
                 plan,
                 sealed,
                 workspace,
-                publish_request(remote, checkout),
                 required,
                 checkout.areas,
                 (),

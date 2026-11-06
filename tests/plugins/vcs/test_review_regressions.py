@@ -241,7 +241,6 @@ def test_remote_substitution_before_preparation_is_refused(
                 plan,
                 sealed,
                 workspace,
-                publish_request(remote, checkout),
                 pinned(world.binding()),
                 checkout.areas,
                 (),

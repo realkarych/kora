@@ -31,7 +31,6 @@ from kora.protocols.vcs import (
     InspectionManifest,
     PublicationInput,
     PublishPlan,
-    PublishRequest,
 )
 from tests.plugins.vcs.git_support import GIT, REPO, World, git, make_world
 
@@ -149,7 +148,6 @@ async def near_cap_import(
     plan: PublishPlan,
     sealed: PublicationInput,
     checkout: Checkout,
-    request: PublishRequest,
     started: float,
     sealed_at: float,
 ) -> dict[str, float | int | str]:
@@ -159,7 +157,6 @@ async def near_cap_import(
             plan,
             sealed,
             checkout.workspace(),
-            request,
             pinned(world.binding()),
             checkout.areas,
             (),
@@ -207,22 +204,18 @@ async def measured(world: World, dataset: str) -> dict[str, float | int | str]:
         near_cap_candidate(world, candidate)
     context = world.context()
     remote = world.remote_fixture()
-    request = publish_request(remote, checkout)
-    plan = await world.provider.publish_plan(request, context)
+    plan = await world.provider.publish_plan(publish_request(remote, checkout), context)
     workspace = checkout.workspace()
     started = time.perf_counter()
     exported = await world.executor.export(plan, workspace, checkout.areas, context)
     sealed = await world.executor.seal(exported, workspace, checkout.areas, context)
     sealed_at = time.perf_counter()
     if dataset == "near_cap":
-        return await near_cap_import(
-            world, plan, sealed, checkout, request, started, sealed_at
-        )
+        return await near_cap_import(world, plan, sealed, checkout, started, sealed_at)
     result = await world.executor.prepare_and_inspect(
         plan,
         sealed,
         workspace,
-        request,
         pinned(world.binding()),
         checkout.areas,
         (),

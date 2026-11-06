@@ -137,7 +137,6 @@ def test_a_changed_plan_is_a_workload_conflict(
                 other,
                 prepared.sealed,
                 prepared.checkout.workspace(),
-                changed,
                 pinned(world.binding()),
                 prepared.checkout.areas,
                 (),

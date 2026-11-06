@@ -43,7 +43,7 @@ from kora.observability import LoggingSettings
 from kora.plugins.vcs.git.plans import TREE_HELPER
 from kora.plugins.vcs.local import RemoteRefused, remote_path
 from kora.protocols.deadlines import ExecutionDeadline
-from kora.protocols.vcs import PublicationInput, PublishPlan, PublishRequest
+from kora.protocols.vcs import PublicationInput, PublishPlan
 from tests.measurements.harness import Report, Sample, report_lifecycle, settled_counts
 from tests.plugins.vcs.git_support import REPO, ManualClock, World, git, make_world
 from tests.plugins.vcs.launchers import RecordingLauncher, StallingLauncher
@@ -96,7 +96,6 @@ KEPT: Kept = Kept()
 class Sealed:
     checkout: Checkout
     plan: PublishPlan
-    request: PublishRequest
     sealed: PublicationInput
 
 
@@ -168,12 +167,13 @@ async def sealed_change(world: World, cycle: int, files: dict[str, str]) -> Seal
     for name, content in files.items():
         (candidate / name).write_text(content)
     context = world.context()
-    request = publish_request(remote_for(world, cycle), checkout)
-    plan = await world.provider.publish_plan(request, context)
+    plan = await world.provider.publish_plan(
+        publish_request(remote_for(world, cycle), checkout), context
+    )
     workspace = checkout.workspace()
     exported = await world.executor.export(plan, workspace, checkout.areas, context)
     sealed = await world.executor.seal(exported, workspace, checkout.areas, context)
-    return Sealed(checkout, plan, request, sealed)
+    return Sealed(checkout, plan, sealed)
 
 
 async def inspected(
@@ -183,7 +183,6 @@ async def inspected(
         change.plan,
         change.sealed,
         change.checkout.workspace(),
-        change.request,
         pinned(world.binding()),
         change.checkout.areas,
         (world.capture.scope.admit(LEAKED_VALUE),),
