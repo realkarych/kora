@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.ir.json import JsonObject
 from kora.observability import LoggingSettings, configure_process
 from kora.plugins.runtime.local.control import runner_status, start_command
 from kora.plugins.runtime.local.runtime import LocalRuntime
@@ -297,6 +299,132 @@ def test_command_journal_ignores_torn_tail(tmp_path: Path) -> None:
 
     assert complete == ((0, "runner.candidate_started"),)
     assert torn == complete
+
+
+def descriptors_for(path: Path) -> set[int]:
+    expected = path.stat()
+    result: set[int] = set()
+    for descriptor in descriptor_numbers(os.getpid()):
+        try:
+            actual = os.fstat(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            if (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino):
+                result.add(descriptor)
+    return result
+
+
+def live_journal_writers() -> set[threading.Thread]:
+    return {thread for thread in threading.enumerate() if thread.name == "kora-journal"}
+
+
+@pytest.mark.asyncio
+async def test_running_journal_releases_owned_descriptors(tmp_path: Path) -> None:
+    directory = private_directory(tmp_path, "attempt")
+    anchor = open_local_directory(directory)
+    path = directory / "journal.jsonl"
+    original = descriptors_for(directory)
+    writers = live_journal_writers()
+    journal = RunningJournal(anchor, SystemClock())
+
+    try:
+        written = await asyncio.to_thread(
+            journal.append, "runner.candidate_started", {}
+        )
+        file_descriptors = descriptors_for(path)
+        directory_descriptors = descriptors_for(directory)
+        records = read_records(anchor)
+        anchor.close()
+        later = await asyncio.to_thread(journal.append, "transfer.materialised", {})
+        journal.close()
+        journal.close()
+        refused = not journal.append("transfer.rejected", {})
+        await until(lambda: live_journal_writers() <= writers)
+        remaining = descriptors_for(path)
+    finally:
+        journal.close()
+        anchor.close()
+
+    assert written
+    assert later
+    assert refused
+    assert records == ((0, "runner.candidate_started"),)
+    assert len(file_descriptors) == 1
+    assert directory_descriptors == original
+    assert remaining == set()
+
+
+@pytest.mark.asyncio
+async def test_running_journal_releases_directory_on_unsafe_file(
+    tmp_path: Path,
+) -> None:
+    directory = private_directory(tmp_path, "attempt")
+    foreign = tmp_path / "foreign"
+    foreign.write_bytes(b"retained")
+    (directory / "journal.jsonl").symlink_to(foreign)
+    anchor = open_local_directory(directory)
+    original = descriptors_for(directory)
+    writers = live_journal_writers()
+    journal = RunningJournal(anchor, SystemClock())
+
+    try:
+        refused = not await asyncio.to_thread(
+            journal.append, "runner.candidate_started", {}
+        )
+        still_refused = not journal.append("transfer.rejected", {})
+        await until(lambda: live_journal_writers() <= writers)
+        directory_descriptors = descriptors_for(directory)
+        data = foreign.read_bytes()
+    finally:
+        journal.close()
+        anchor.close()
+
+    assert refused
+    assert still_refused
+    assert directory_descriptors == original
+    assert data == b"retained"
+
+
+@pytest.mark.asyncio
+@pytest.mark.host_fixture
+async def test_running_journal_releases_file_after_native_write_failure() -> None:
+    directory = private_directory(
+        prepared("small-filesystem"), f"{PATH_MARKER}-{os.getpid()}-journal-writer"
+    )
+    anchor = open_local_directory(directory)
+    path = directory / "journal.jsonl"
+    writers = live_journal_writers()
+    journal = RunningJournal(anchor, SystemClock())
+    payload: JsonObject = {"value": "a" * 131_072}
+
+    try:
+        written = await asyncio.to_thread(
+            journal.append, "runner.candidate_started", {}
+        )
+        file_descriptors = descriptors_for(path)
+        fill(directory)
+
+        refused = not await asyncio.to_thread(
+            journal.append, "transfer.materialised", payload
+        )
+        await until(lambda: live_journal_writers() <= writers)
+        remaining = descriptors_for(path)
+        (directory / "filler").unlink()
+        still_refused = not journal.append("transfer.rejected", {})
+        records = read_records(anchor)
+    finally:
+        journal.close()
+        anchor.close()
+        shutil.rmtree(directory)
+
+    assert written
+    assert len(file_descriptors) == 1
+    assert refused
+    assert remaining == set()
+    assert still_refused
+    assert records == ((0, "runner.candidate_started"),)
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,7 @@ import errno
 import os
 import sys
 import threading
-from queue import Queue
+from collections import deque
 from typing import Final
 
 from kora.ir.json import JsonObject
@@ -15,6 +15,7 @@ from kora.runner.filesystem import (
     open_private_file,
     read_private_file,
 )
+from kora.runner.native_io import BorrowedInvocation, NativeIONotInvoked
 from kora.runner.registry import synchronize
 
 JOURNAL_NAME: Final[str] = "journal.jsonl"
@@ -24,9 +25,11 @@ RECORD_DEPTH: Final[int] = 8
 
 
 class _Write:
-    def __init__(self, line: bytes) -> None:
+    def __init__(self, line: bytes, deadline: int) -> None:
         self.line = line
-        self.done = threading.Event()
+        self.deadline = deadline
+        self.started = False
+        self.done = False
         self.synced = False
         self.written = False
 
@@ -35,9 +38,8 @@ class RunningJournal:
     def __init__(self, directory: DirectoryAnchor, clock: Clock) -> None:
         self._directory = directory
         self._clock = clock
-        self._lock = threading.Lock()
-        self._jobs: Queue[_Write | None] = Queue()
-        self._fd: int | None = None
+        self._state = threading.Condition()
+        self._jobs: deque[_Write] = deque()
         self._next = 0
         self._closed = False
         self._not_durable = 0
@@ -45,105 +47,177 @@ class RunningJournal:
 
     @property
     def not_durable(self) -> int:
-        with self._lock:
+        with self._state:
             return self._not_durable
 
     @property
     def closed(self) -> bool:
-        with self._lock:
+        with self._state:
             return self._closed
 
     def append(self, kind: str, data: JsonObject) -> bool:
-        with self._lock:
+        deadline = self._clock.monotonic_ns() + SYNC_DEADLINE_NS
+        launch: tuple[threading.Thread, DirectoryAnchor, BorrowedInvocation] | None = (
+            None
+        )
+        with self._state:
             if self._closed:
                 return False
-            starting = self._fd is None
-            if starting:
-                try:
-                    self._fd = open_private_file(
-                        self._directory,
-                        JOURNAL_NAME,
-                        os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                    )
-                except OSError:
-                    self._closed = True
-                    return False
-            index = self._next
             line = canonical_bytes(
                 {
-                    "i": index,
+                    "i": self._next,
                     "at": instant_wire(self._clock.now()),
                     "kind": kind,
                     "data": data,
                 }
             )
-            job = _Write(line + b"\n")
-            self._jobs.put(job)
-        if starting:
-            self._thread = threading.Thread(
-                target=self._write, name="kora-journal", daemon=True
+            job = _Write(line + b"\n", deadline)
+            self._jobs.append(job)
+            self._next += 1
+            if self._thread is None:
+                try:
+                    launch = self._prepare_writer()
+                except (OSError, RuntimeError, MemoryError):
+                    self._close_locked()
+                    return False
+                self._thread = launch[0]
+            self._state.notify_all()
+        if launch is not None:
+            thread, directory, ownership = launch
+            try:
+                thread.start()
+            except (RuntimeError, MemoryError):
+                self.close()
+                if ownership.seal() is None:
+                    directory.close()
+                return False
+        return self._wait(job)
+
+    def _prepare_writer(
+        self,
+    ) -> tuple[threading.Thread, DirectoryAnchor, BorrowedInvocation]:
+        ownership = BorrowedInvocation()
+        descriptor = os.dup(self._directory.descriptor)
+        try:
+            directory = DirectoryAnchor(descriptor, self._directory.identity)
+            thread = threading.Thread(
+                target=self._write,
+                args=(directory, ownership),
+                name="kora-journal",
+                daemon=True,
             )
-            self._thread.start()
-        return self._wait(job, index)
+            return thread, directory, ownership
+        except (RuntimeError, MemoryError):
+            os.close(descriptor)
+            raise
 
     def close(self) -> None:
-        with self._lock:
-            self._closed = True
-            self._jobs.put(None)
+        with self._state:
+            self._close_locked()
 
-    def _wait(self, job: _Write, index: int) -> bool:
-        deadline = self._clock.monotonic_ns() + SYNC_DEADLINE_NS
-        while not job.done.is_set():
-            remaining = deadline - self._clock.monotonic_ns()
-            if remaining <= 0:
-                break
-            job.done.wait(remaining / 1_000_000_000)
-        with self._lock:
-            if job.synced:
-                self._next = index + 1
-                return True
+    def _close_locked(self) -> None:
+        if not self._closed:
             self._closed = True
-            if job.written or not job.done.is_set():
+            self._jobs.clear()
+            self._state.notify_all()
+
+    def _wait(self, job: _Write) -> bool:
+        with self._state:
+            while not job.done and not self._closed:
+                remaining = job.deadline - self._clock.monotonic_ns()
+                if remaining <= 0:
+                    break
+                self._state.wait(remaining / 1_000_000_000)
+            if job.synced:
+                return True
+            self._close_locked()
+            if job.written or (job.started and not job.done):
                 self._not_durable += 1
             return False
 
-    def _write(self) -> None:
+    def _write(self, directory: DirectoryAnchor, ownership: BorrowedInvocation) -> None:
         try:
-            synchronize(self._directory.descriptor)
-        except OSError:
-            with self._lock:
-                self._closed = True
-        while True:
-            job = self._jobs.get()
-            if job is None:
+            ownership.enter()
+        except NativeIONotInvoked:
+            return
+        descriptor: int | None = None
+        try:
+            with self._state:
+                if self._closed:
+                    return
+                deadline = self._jobs[0].deadline
+            if not self._available(deadline):
                 return
-            with self._lock:
-                closed = self._closed
-                descriptor = self._fd
-            if closed or descriptor is None:
-                job.done.set()
-                continue
+            directory.verify()
+            if not self._available(deadline):
+                return
+            descriptor = open_private_file(
+                directory, JOURNAL_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+            )
+            if not self._available(deadline):
+                return
+            synchronize(directory.descriptor)
+            directory.close()
+            self._write_pending(descriptor)
+        except (OSError, FilesystemError):
+            self.close()
+        finally:
+            self.close()
             try:
-                self._store(descriptor, job)
-                job.synced = True
-            except OSError:
-                with self._lock:
-                    self._closed = True
+                directory.close()
             finally:
-                job.done.set()
+                if descriptor is not None:
+                    os.close(descriptor)
 
-    def _store(self, descriptor: int, job: _Write) -> None:
+    def _write_pending(self, descriptor: int) -> None:
+        while True:
+            with self._state:
+                self._state.wait_for(lambda: self._closed or bool(self._jobs))
+                if self._closed:
+                    return
+                job = self._jobs.popleft()
+                if self._clock.monotonic_ns() >= job.deadline:
+                    self._close_locked()
+                    return
+                job.started = True
+            try:
+                stored = self._store(descriptor, job)
+            except OSError:
+                stored = False
+            with self._state:
+                job.done = True
+                job.synced = (
+                    stored
+                    and not self._closed
+                    and self._clock.monotonic_ns() < job.deadline
+                )
+                if not job.synced:
+                    self._close_locked()
+                    return
+                self._state.notify_all()
+
+    def _available(self, deadline: int) -> bool:
+        with self._state:
+            return not self._closed and self._clock.monotonic_ns() < deadline
+
+    def _store(self, descriptor: int, job: _Write) -> bool:
         view = memoryview(job.line)
         while view:
+            if not self._available(job.deadline):
+                return False
             written = os.write(descriptor, view)
             if written <= 0:
                 raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
             view = view[written:]
-        job.written = True
+        with self._state:
+            job.written = True
+        if not self._available(job.deadline):
+            return False
         if sys.platform == "darwin":
             synchronize(descriptor)
         else:
             os.fdatasync(descriptor)
+        return True
 
 
 def read_records(directory: DirectoryAnchor) -> tuple[tuple[int, str], ...]:
