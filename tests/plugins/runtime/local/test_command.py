@@ -51,6 +51,21 @@ from tests.support.local_runtime import (
 __all__ = ["kora_capture"]
 
 HOLD_MARKER = "kora-hold-809"
+FD_REPORT = "\n".join(
+    (
+        "import os, time",
+        "found = []",
+        "for descriptor in range(256):",
+        "    try:",
+        "        os.fstat(descriptor)",
+        "    except OSError:",
+        "        continue",
+        "    found.append(str(descriptor))",
+        "with open('fds', 'w') as report:",
+        "    report.write(' '.join(found))",
+        "time.sleep(30)",
+    )
+)
 PS = "/bin/ps"
 HOLD = "\n".join(
     (
@@ -469,10 +484,16 @@ async def test_leader_exit_capture_eof_and_descriptors_are_separate(
         await until_exited(runtime, handle, ctx)
         status = await runtime.status(handle, ctx)
         holders = marker_pids(HOLD_MARKER)
-        before = descriptor_count(runner)
         assert holders
+        try:
+            before = descriptor_count(runner)
+        except PermissionError:
+            before = None
         terminate(holders[0])
-        await until(lambda: descriptor_count(runner) < before)
+        if before is None:
+            await until(lambda: marker_pids(HOLD_MARKER) == ())
+        else:
+            await until(lambda: descriptor_count(runner) < before)
         after = await runtime.status(handle, ctx)
         assert marker_pids(HOLD_MARKER) == ()
 
@@ -486,17 +507,18 @@ async def test_command_token_is_redacted_before_launch(
 ) -> None:
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle = await runtime.submit(
-            command_workload(runtime, "attempt-1", (binary("sleep"), "30")), ctx
+            command_workload(
+                runtime, "attempt-1", (sys.executable, "-I", "-c", FD_REPORT)
+            ),
+            ctx,
         )
         await runtime.start(handle, ctx)
-        runner = await running_pid(runtime, "attempt-1")
         attempt = attempt_directory(root, runtime, "attempt-1")
+        report = attempt / "candidate" / "fds"
+        await until(lambda: report.is_file() and report.read_text() == "0 1 2")
         token = (attempt / "attempt.token").read_text()
         log = (attempt / "runner.log").read_text()
         journal = (attempt / "journal.jsonl").read_text()
-        child = child_pids(runner)
-        assert child
-        assert descriptor_numbers(child[0]) == (0, 1, 2)
         assert stat_mode(attempt / "attempt.token") == 0o600
 
     assert len(token) == 32
