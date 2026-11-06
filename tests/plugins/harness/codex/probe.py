@@ -42,7 +42,11 @@ from kora.plugins.harness.codex.app_server_startup import (
     StartupIdentity,
     initialize_app_server,
 )
-from kora.plugins.harness.codex.app_server_tools import ToolCounts, ToolRefused
+from kora.plugins.harness.codex.app_server_tools import (
+    ToolCounts,
+    ToolRefused,
+    reject_premature_tool,
+)
 from kora.plugins.harness.codex.app_server_turn import (
     TurnCompletion,
     TurnError,
@@ -75,6 +79,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_HOOK_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
+    SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
     SelectedHookCase,
     SelectedLaunchCase,
@@ -120,6 +125,7 @@ ProbeCase = (
     | OutputCase
 )
 
+PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, str, str]] = {
     "selected-hook-deny": ("blocked", "feedback", SELECTED_DENIAL),
     "selected-hook-no-reason": (
@@ -130,6 +136,8 @@ SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, str, str]] = {
     ),
     "selected-hook-exit-one": ("failed", "error", "hook exited with code 1"),
     "selected-hook-timeout": ("failed", "error", "hook timed out after 5s"),
+    "selected-patch-deny": ("blocked", "feedback", PATCH_DENIAL),
+    "selected-patch-exit-one": ("failed", "error", "hook exited with code 1"),
 }
 
 CODEX = "/usr/local/bin/codex"
@@ -160,6 +168,8 @@ PROVIDER_CASES = frozenset(
 CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
+DIRECT_PATCH_CASES = PATCH_CASES | SELECTED_PATCH_CASES
+PATCH_WRITE_CASES = frozenset({"patch-allow", "selected-patch-exit-one"})
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
 INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
 INTERRUPT_PRIMER_ID = "kora-interrupt-primer"
@@ -180,7 +190,6 @@ PATCH_MARKER = b"direct patch marker\n"
 PATCH = (
     f"*** Begin Patch\n*** Add File: {MARKER}\n+direct patch marker\n*** End Patch\n"
 )
-PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 CAP_REFUSAL = "kora managed hook probe refused oversized input"
 STDIN_CALL_ID = "kora-hook-probe-stdin"
 STDIN_READY = "kora-stdin-ready"
@@ -728,7 +737,7 @@ class ResponsesFixture:
                 as_object(tool)
                 for tool in as_list(request.get("tools"), "responses_tools_missing")
             ]
-            if self.case in PATCH_CASES:
+            if self.case in DIRECT_PATCH_CASES:
                 patch_tools = [
                     tool for tool in tools if tool.get("name") == "apply_patch"
                 ]
@@ -795,9 +804,9 @@ class ResponsesFixture:
             )
             return TOOL_RESPONSE
 
-        if self.case in PATCH_CASES:
+        if self.case in DIRECT_PATCH_CASES:
             output = tool_output(request, CALL_ID, "custom_tool_call_output")
-            if self.case == "patch-allow":
+            if self.case in PATCH_WRITE_CASES:
                 lines = output.splitlines()
                 require(
                     len(lines) == 5
@@ -884,17 +893,29 @@ class ResponsesFixture:
 
 
 class ToolProbe:
-    def __init__(self, case: ProbeCase) -> None:
+    def __init__(self, case: ProbeCase, thread_id: str) -> None:
         self.case = case
+        self.thread_id = thread_id
+        self.turn_id: str | None = None
         self.events: list[tuple[str, str, str, str | None, int | None]] = []
 
     def observe(self, notification: Notification) -> None:
         if notification.method not in ("item/started", "item/completed"):
             return
-        item = as_object(as_object(notification.params).get("item"))
+        params = as_object(notification.params)
+        item = as_object(params.get("item"))
         kind = item.get("type")
         if not isinstance(kind, str) or kind not in ("commandExecution", "fileChange"):
             return
+        turn_id = params.get("turnId")
+        require(
+            params.get("threadId") == self.thread_id
+            and isinstance(turn_id, str)
+            and 0 < len(turn_id) <= 256
+            and self.turn_id in (None, turn_id),
+            "tool_native_turn_identity",
+        )
+        self.turn_id = cast("str", turn_id)
         require(item.get("id") == CALL_ID, "tool_item_hook_identity_mismatch")
         status = item.get("status")
         require(
@@ -931,7 +952,9 @@ class ToolProbe:
             ":".join(str(value) if value is not None else "unknown" for value in event),
         )
 
-    def verify(self, session: AppServerTurnSession) -> None:
+    def verify(
+        self, terminal: TurnCompletion, session: AppServerTurnSession | None
+    ) -> None:
         expected: tuple[tuple[str, str, str, str | None, int | None], ...]
         if self.case == "allow":
             expected = (
@@ -944,16 +967,29 @@ class ToolProbe:
                 ),
                 ("commandExecution", "completed", "completed", "unifiedExecStartup", 0),
             )
-        elif self.case == "patch-allow":
+        elif self.case in PATCH_WRITE_CASES:
             expected = (
                 ("fileChange", "started", "inProgress", None, None),
                 ("fileChange", "completed", "completed", None, None),
             )
-        elif self.case in ("deny", "patch-deny", "decoder-refuse"):
+        elif self.case in (
+            "deny",
+            "patch-deny",
+            "selected-patch-deny",
+            "decoder-refuse",
+        ):
             expected = ()
         else:
             raise ProbeFailure("tool_fixture_case_unknown")
         require(tuple(self.events) == expected, "tool_native_lifecycle_mismatch")
+        require(self.turn_id in (None, terminal.turn_id), "tool_native_turn_mismatch")
+        if session is not None:
+            self.verify_session(session)
+        diagnostic(
+            "INFO", "probe.tool_lifecycle_verified", f"{self.case}:{len(self.events)}"
+        )
+
+    def verify_session(self, session: AppServerTurnSession) -> None:
         state = session.snapshot()
         starts = sum(event[1] == "started" for event in self.events)
         completions = sum(event[1] == "completed" for event in self.events)
@@ -984,9 +1020,6 @@ class ToolProbe:
             )
         else:
             require(latest is None, "tool_session_observation_invented")
-        diagnostic(
-            "INFO", "probe.tool_lifecycle_verified", f"{self.case}:{len(self.events)}"
-        )
 
 
 class OutputProbe:
@@ -1386,7 +1419,7 @@ class Stdio:
                 workspace, case, selected_executor=selected_executor
             )
         prompt = "Run the probe marker command."
-        if case in PATCH_CASES:
+        if case in DIRECT_PATCH_CASES:
             prompt = "Apply the probe marker patch."
         elif (
             case in PROVIDER_CASES
@@ -1403,8 +1436,8 @@ class Stdio:
         outputs = OutputProbe(thread_id, case) if case in OUTPUT_CASES else None
         self.outputs = outputs
         tools = (
-            ToolProbe(case)
-            if case in HOOK_INPUT_CASES or case in ("allow", "deny")
+            ToolProbe(case, thread_id)
+            if case in DIRECT_PATCH_CASES or case in ("allow", "deny", "decoder-refuse")
             else None
         )
         hook = (
@@ -1428,6 +1461,8 @@ class Stdio:
                 hook.observe(notification)
 
         def observe_before_send(notification: Notification) -> None:
+            if tools is not None:
+                reject_premature_tool(notification)
             if usage is not None:
                 reject_premature_usage(notification)
             if errors is not None:
@@ -1448,7 +1483,7 @@ class Stdio:
             if outputs is not None:
                 outputs.started(turn_id)
 
-        if any(
+        if case not in SELECTED_PATCH_CASES and any(
             value is not None for value in (usage, errors, messages, outputs, tools)
         ):
             self.session = AppServerTurnSession(
@@ -1496,8 +1531,6 @@ class Stdio:
                     "session_messages_mismatch",
                 )
             diagnostic("INFO", "probe.session_terminal_verified", case)
-            if tools is not None:
-                tools.verify(self.session)
         else:
             self.terminal = await observe_app_server_turn(
                 self.rpc,
@@ -1509,6 +1542,8 @@ class Stdio:
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
             )
+        if tools is not None:
+            tools.verify(self.terminal, self.session)
         if hook is not None:
             hook.verify(self.terminal.turn_id)
         if outputs is not None:
@@ -2299,13 +2334,18 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
                 and not os.path.lexists(CONTROL / "invocations"),
                 "refused_selected_startup_reached_hook",
             )
+        elif case in SELECTED_PATCH_CASES:
+            verify_patch_hook()
         else:
             verify_shell_hook(SELECTED_COMMAND)
         executes = case in SELECTED_AUTH_CASES and case not in {
             "selected-deny",
             "selected-hook-deny",
+            "selected-patch-deny",
         }
-        if executes:
+        if case in SELECTED_PATCH_CASES:
+            verify_patch_marker(marker, writes=executes)
+        elif executes:
             bash = Path("/bin/bash").resolve(strict=True)
             expected = f"{bash}\n{role_homes(root / 'exec').home}\n".encode()
             require(
@@ -2475,27 +2515,35 @@ async def run_hook_input_case(case: HookInputCase) -> None:
             fixture.connections == fixture.requests == 2,
             "unexpected_hook_input_request_count",
         )
-        with (CONTROL / "invocations").open("rb") as invocations:
-            require(
-                invocations.read(2) == b"1", "unexpected_hook_input_invocation_count"
-            )
         if case == "decoder-refuse":
+            verify_hook_invocation()
             require(not os.path.lexists(RECEIPTS), "decoder_refusal_receipt_exists")
         else:
-            hook_pid(PATCH, tool="apply_patch")
-        if case == "patch-allow":
-            require(
-                marker.is_file() and not marker.is_symlink(),
-                "direct_patch_marker_missing",
-            )
-            with marker.open("rb") as contents:
-                require(
-                    contents.read(len(PATCH_MARKER) + 1) == PATCH_MARKER,
-                    "direct_patch_marker_content",
-                )
-        else:
-            require(not os.path.lexists(marker), "blocked_hook_input_marker_exists")
+            verify_patch_hook()
+        verify_patch_marker(marker, writes=case in PATCH_WRITE_CASES)
     diagnostic("INFO", "probe.case_verified", case)
+
+
+def verify_hook_invocation() -> None:
+    with (CONTROL / "invocations").open("rb") as invocations:
+        require(invocations.read(2) == b"1", "unexpected_hook_input_invocation_count")
+
+
+def verify_patch_hook() -> None:
+    verify_hook_invocation()
+    hook_pid(PATCH, tool="apply_patch")
+
+
+def verify_patch_marker(marker: Path, *, writes: bool) -> None:
+    if not writes:
+        require(not os.path.lexists(marker), "blocked_hook_input_marker_exists")
+        return
+    require(marker.is_file() and not marker.is_symlink(), "direct_patch_marker_missing")
+    with marker.open("rb") as contents:
+        require(
+            contents.read(len(PATCH_MARKER) + 1) == PATCH_MARKER,
+            "direct_patch_marker_content",
+        )
 
 
 async def run_provider_case(case: ProviderCase | ClientCase) -> None:

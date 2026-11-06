@@ -11,12 +11,16 @@ from kora.plugins.harness.codex.launch_configuration import (
     build_launch_inputs,
 )
 
-SelectedHookCase = Literal[
-    "selected-hook-deny",
-    "selected-hook-no-reason",
-    "selected-hook-exit-one",
-    "selected-hook-timeout",
-]
+SelectedPatchCase = Literal["selected-patch-deny", "selected-patch-exit-one"]
+SelectedHookCase = (
+    Literal[
+        "selected-hook-deny",
+        "selected-hook-no-reason",
+        "selected-hook-exit-one",
+        "selected-hook-timeout",
+    ]
+    | SelectedPatchCase
+)
 SelectedLaunchCase = (
     SelectedHookCase
     | Literal[
@@ -28,8 +32,12 @@ SelectedLaunchCase = (
         "selected-startup-bash",
     ]
 )
+SELECTED_PATCH_CASES: frozenset[SelectedPatchCase] = frozenset(
+    {"selected-patch-deny", "selected-patch-exit-one"}
+)
 SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     {
+        *SELECTED_PATCH_CASES,
         "selected-hook-deny",
         "selected-hook-no-reason",
         "selected-hook-exit-one",
