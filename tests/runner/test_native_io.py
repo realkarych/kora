@@ -1,4 +1,5 @@
 import asyncio
+import errno
 import os
 import threading
 from pathlib import Path
@@ -6,7 +7,13 @@ from pathlib import Path
 import pytest
 
 from kora.protocols.errors import KoraProtocolError
-from kora.runner.native_io import NativeExecutor, NativeIOBusy, NativeIOUnresolved
+from kora.runner.native_io import (
+    NativeExecutor,
+    NativeIOBusy,
+    NativeIONotInvoked,
+    NativeIOSubmissionUncertain,
+    NativeIOUnresolved,
+)
 from kora.runner.registry import TransitionExecutor
 
 pytestmark = pytest.mark.asyncio
@@ -51,7 +58,14 @@ async def test_native_cleanup_runs_off_loop_and_retains_admission(
 ) -> None:
     executor = TransitionExecutor(workers=1, admitted=1)
     resource = FileOperation(tmp_path / "owned")
-    caller = asyncio.create_task(executor.run(resource.acquire, resource.release))
+    deferred = threading.Event()
+    caller = asyncio.create_task(
+        executor.run(
+            resource.acquire,
+            resource.release,
+            after_uncertain_submission=deferred.set,
+        )
+    )
     await reached(resource.opened)
 
     try:
@@ -79,6 +93,7 @@ async def test_native_cleanup_runs_off_loop_and_retains_admission(
     assert not resource.worker.is_alive()
     with pytest.raises(OSError, match="Bad file descriptor"):
         os.fstat(resource.descriptor)
+    assert not deferred.is_set()
 
 
 async def test_native_close_waits_for_cancelled_cleanup(tmp_path: Path) -> None:
@@ -300,6 +315,7 @@ async def test_native_worker_loss_does_not_release_unresolved_capacity() -> None
     released = threading.Event()
     queued = asyncio.Event()
     second_executed = threading.Event()
+    deferred = threading.Event()
 
     def hold() -> bool:
         started.set()
@@ -307,7 +323,7 @@ async def test_native_worker_loss_does_not_release_unresolved_capacity() -> None
 
     async def second() -> None:
         queued.set()
-        await executor.run(second_executed.set)
+        await executor.run(second_executed.set, after_uncertain_submission=deferred.set)
 
     first = asyncio.create_task(executor.run(hold))
     await reached(started)
@@ -315,10 +331,12 @@ async def test_native_worker_loss_does_not_release_unresolved_capacity() -> None
     await queued.wait()
     try:
         executor.executor.shutdown(wait=False, cancel_futures=True)
-        with pytest.raises(NativeIOUnresolved):
+        with pytest.raises(NativeIONotInvoked):
             await pending
-        with pytest.raises(NativeIOUnresolved):
-            await executor.run(second_executed.set)
+        with pytest.raises(NativeIONotInvoked):
+            await executor.run(
+                second_executed.set, after_uncertain_submission=deferred.set
+            )
         assert len(executor.jobs) == 2
         assert not second_executed.is_set()
     finally:
@@ -329,6 +347,81 @@ async def test_native_worker_loss_does_not_release_unresolved_capacity() -> None
 
     assert len(executor.jobs) == 1
     assert not second_executed.is_set()
+    assert not deferred.is_set()
+
+
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+async def test_uncertain_submission_cleanup_follows_actual_pool_join(
+    tmp_path: Path, cleanup_raises: bool
+) -> None:
+    executor = TransitionExecutor(workers=2, admitted=2)
+    descriptor = os.open(tmp_path / "borrowed", os.O_RDWR | os.O_CREAT, 0o600)
+    loop_thread = threading.current_thread()
+    held = threading.Event()
+    release = threading.Event()
+    invoked = threading.Event()
+    close_started = asyncio.Event()
+    cleanup_observations: list[tuple[bool, bool, int]] = []
+    workers: list[threading.Thread] = []
+
+    def hold() -> None:
+        workers.append(threading.current_thread())
+        held.set()
+        if not release.wait(5):
+            raise TimeoutError("test worker release")
+        os.fstat(descriptor)
+
+    def cleanup() -> None:
+        cleanup_observations.append(
+            (
+                workers[0].is_alive(),
+                threading.current_thread() is loop_thread,
+                os.fstat(descriptor).st_ino,
+            )
+        )
+        os.close(descriptor)
+        if cleanup_raises:
+            raise asyncio.CancelledError
+
+    async def close() -> None:
+        close_started.set()
+        with pytest.raises(NativeIOUnresolved):
+            await executor.close()
+
+    inode = os.fstat(descriptor).st_ino
+    first = asyncio.create_task(executor.run(hold))
+    await reached(held)
+
+    try:
+        executor.executor.shutdown(wait=False)
+        with pytest.raises(NativeIOSubmissionUncertain):
+            await executor.run(invoked.set, after_uncertain_submission=cleanup)
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(close())
+            tasks.create_task(close())
+            await close_started.wait()
+            alive_during_close = workers[0].is_alive()
+            inode_during_close = os.fstat(descriptor).st_ino
+            observations_before_join = tuple(cleanup_observations)
+            release.set()
+        await first
+        await close()
+        with pytest.raises(OSError, match=os.strerror(errno.EBADF)) as closed:
+            os.fstat(descriptor)
+    finally:
+        release.set()
+        await first
+        await close()
+        if not cleanup_observations:
+            os.close(descriptor)
+
+    assert alive_during_close
+    assert inode_during_close == inode
+    assert observations_before_join == ()
+    assert not invoked.is_set()
+    assert cleanup_observations == [(False, False, inode)]
+    assert closed.value.errno == errno.EBADF
+    assert len(executor.jobs) == 1
 
 
 async def test_native_cleanup_error_retains_resource_owner(tmp_path: Path) -> None:
