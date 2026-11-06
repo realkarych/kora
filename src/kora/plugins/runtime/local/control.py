@@ -6,6 +6,7 @@ from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     ENVELOPE_BYTES,
     FRAME_PROGRESS_NS,
+    START_PROGRESS_NS,
     AttachRequest,
     FrameType,
     StatusValue,
@@ -78,6 +79,39 @@ async def runner_status(
         reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
         _, payload = await channel.read_typed_frame(deadline, reservations)
         return read_status(payload, request_id)
+    finally:
+        channel.close()
+
+
+async def start_command(
+    path: str,
+    runner: ProcessIdentity,
+    dispatcher_id: str,
+    source: PeerSource,
+    executor: TransitionExecutor,
+    clock: Clock,
+    request_id: str,
+) -> None:
+    deadline = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    endpoint = await connected(path, clock, deadline)
+    channel = BoundedChannel(endpoint, clock)
+    try:
+        await attested(endpoint, runner, source, executor)
+        request = AttachRequest(
+            op="attach", request_id=request_id, dispatcher_id=dispatcher_id
+        )
+        await channel.write_typed_frame(
+            FrameType.JSON, canonical_bytes(request.model_dump(mode="json")), deadline
+        )
+        reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
+        _, payload = await channel.read_typed_frame(deadline, reservations)
+        read_delivery(payload, request_id, "attached")
+        started = clock.monotonic_ns() + START_PROGRESS_NS
+        await channel.write_typed_frame(
+            FrameType.JSON, control_request("start", request_id), started
+        )
+        _, payload = await channel.read_typed_frame(started, reservations)
+        read_delivery(payload, request_id, "started")
     finally:
         channel.close()
 

@@ -22,8 +22,10 @@ from kora.observability import (
     FieldKind,
     Level,
     LoggingSettings,
+    ProcessDiagnostics,
     configure_process,
 )
+from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.serving import (
     COMPONENT,
     BoundSocket,
@@ -32,6 +34,7 @@ from kora.plugins.runtime.local.serving import (
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
+from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import Clock, SystemClock
 from kora.runner.filesystem import (
     DirectoryAnchor,
@@ -244,6 +247,7 @@ class PreparedRegistration:
         reader: NativeIdentityReader,
         identity: ProcessIdentity,
         log: ComponentLogger,
+        command: CommandSession | None = None,
     ) -> ControlServer:
         bound = self.bound
         if bound is None:
@@ -259,6 +263,7 @@ class PreparedRegistration:
             self.key,
             identity,
             reader,
+            command=command,
         )
         self.bound = None
         return server
@@ -315,23 +320,38 @@ def prepare_registration(arguments: RunnerArguments) -> PreparedRegistration:
             return prepared
 
 
-async def supervise(arguments: RunnerArguments, log: ComponentLogger) -> None:
+async def supervise(
+    arguments: RunnerArguments, log: ComponentLogger, diagnostics: ProcessDiagnostics
+) -> None:
     clock = SystemClock()
     reader = NativeIdentityReader()
     identity = own_identity(reader)
-    prepared = prepare_registration(arguments)
+    attempt = attempt_directory(arguments)
     try:
-        await prepared.register(identity, clock)
-        log.emit(REGISTERED)
-        signal_ready()
-        server = prepared.server(clock, reader, identity, log)
+        prepared = prepare_registration(arguments)
         try:
-            server.start()
-            await asyncio.Event().wait()
+            await prepared.register(identity, clock)
+            log.emit(REGISTERED)
+            signal_ready()
+            key = AttemptKey(arguments.execution_domain_id, arguments.attempt_id)
+            candidate = str(arguments.state_root / "attempts" / key.name / "candidate")
+            command = CommandSession(
+                attempt,
+                candidate,
+                SecretScope(diagnostics),
+                clock,
+                diagnostics.logger(COMPONENT),
+            )
+            server = prepared.server(clock, reader, identity, log, command)
+            try:
+                server.start()
+                await asyncio.Event().wait()
+            finally:
+                await server.close()
         finally:
-            await server.close()
+            prepared.close()
     finally:
-        prepared.close()
+        attempt.close()
 
 
 def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:
@@ -369,7 +389,7 @@ def run(argv: Sequence[str]) -> int:
     log = diagnostics.logger(COMPONENT).bind(attempt_id=arguments.attempt_id)
     log.emit(STARTED)
     try:
-        asyncio.run(supervise(arguments, log))
+        asyncio.run(supervise(arguments, log, diagnostics))
     except RunnerRefused as refusal:
         log.emit(REFUSED, reason=str(refusal.args[0]))
         return EXIT_REFUSED

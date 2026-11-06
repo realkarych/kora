@@ -29,6 +29,7 @@ from kora.plugins.runtime.local.control import (
     ListenerRefused,
     deliver_workload,
     runner_status,
+    start_command,
 )
 from kora.plugins.runtime.local.services import (
     SERVICE_REFUSED,
@@ -574,6 +575,32 @@ class LocalRuntime:
                 raise
             raise refusal("runner_unreachable") from None
         return value.status
+
+    async def start(self, handle: Handle, ctx: ProtocolContext) -> None:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        entry = await self.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        try:
+            await start_command(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+            )
+        except ListenerRefused:
+            raise refusal("runner_unreachable") from None
+        except (ChannelError, OSError):
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code == "message_refused":
+                raise refusal("runner_unreachable") from None
+            raise
 
     def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
         if workload.execution_domain_id != self.execution_domain_id:

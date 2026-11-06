@@ -1,5 +1,7 @@
 # Structured component diagnostics
 
+Command-execution amendment dated 2026-11-06, issue #809: `runtime.local.command` records `outcome` (`started`, `exited`, `refused` or `journal_unavailable`) and `waited_ms` only. It carries no argv, path, pid, token, workspace or attempt id. A failed diagnostic write does not block the journal or the stop. Journal closure emits one WARNING. The command tests in `tests/plugins/runtime/local/test_command.py` own the activation evidence. Wording pending line-by-line owner review.
+
 Workload-delivery amendment dated 2026-11-01, issue #611: existing counted `runtime.local.runner.auth_refused` adds fixed reasons `not_submitter` and `head_changed`; `exited` covers a dead recorded peer. New delivery refusals expose only allowlisted fixed error envelopes, never workload values, hashes, identities, pids or paths. The delivery/attach/deadline tests in `tests/plugins/runtime/local/test_delivery.py` and existing control logging tests own activation evidence. No per-frame INFO event, journal authority or new diagnostic sink is introduced.
 
 Local-runtime control-channel amendment dated 2026-10-30: the `runtime.local.runner.auth_refused`, `runtime.local.runner.socket_rechecked` and `runtime.local.listener_refused` events under [issue #315](https://github.com/realkarych/kora/issues/315), approved by the project owner with the [plan update](https://github.com/realkarych/kora/issues/315#issuecomment-6509767448) on 2026-10-30; wording pending line-by-line owner review.

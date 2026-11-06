@@ -26,6 +26,7 @@ HEADER_DEPTH: Final[int] = 3
 ENVELOPE_BYTES: Final[int] = 8192
 ENVELOPE_DEPTH: Final[int] = 4
 FRAME_PROGRESS_NS: Final[int] = 5 * NANOSECONDS_PER_SECOND
+START_PROGRESS_NS: Final[int] = 15 * NANOSECONDS_PER_SECOND
 MESSAGE_PROGRESS_NS: Final[int] = 60 * NANOSECONDS_PER_SECOND
 WORKLOAD_SECTION_BYTES: Final[int] = 12 * 1048576
 WORKLOAD_SECTION_DEPTH: Final[int] = 18
@@ -61,6 +62,14 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     ),
     "submitter_superseded": EnvelopeEntry("the recorded submitter has changed", True),
     "workload_busy": EnvelopeEntry("a workload message is already admitted", True),
+    "workload_kind_unavailable": EnvelopeEntry(
+        "the held workload cannot be executed as a command", False
+    ),
+    "execution_unauthorized": EnvelopeEntry(
+        "the attached submitter cannot start execution", False
+    ),
+    "command_not_started": EnvelopeEntry("the command process did not start", False),
+    "journal_unavailable": EnvelopeEntry("the command journal is not durable", True),
 }
 REFUSED_MESSAGE: Final[str] = "the control message was refused"
 RETRYABLE_REFUSALS: Final[frozenset[MessageRefusal]] = frozenset(
@@ -182,7 +191,7 @@ class EmptyValue(BoundaryModel):
 
 class DeliveryEnvelope(BoundaryModel):
     request_id: Identifier
-    result: Literal["attached", "accepted"]
+    result: Literal["attached", "accepted", "started"]
     value: EmptyValue
 
 
@@ -200,7 +209,7 @@ def delivery_error(code: str) -> KoraProtocolError:
 
 
 def delivery_envelope(
-    request_id: str, result: Literal["attached", "accepted"]
+    request_id: str, result: Literal["attached", "accepted", "started"]
 ) -> bytes:
     return canonical_bytes(
         DeliveryEnvelope(
@@ -210,7 +219,7 @@ def delivery_envelope(
 
 
 def read_delivery(
-    payload: bytes, request_id: str, result: Literal["attached", "accepted"]
+    payload: bytes, request_id: str, result: Literal["attached", "accepted", "started"]
 ) -> None:
     decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
     if isinstance(decoded, JsonRefusal):

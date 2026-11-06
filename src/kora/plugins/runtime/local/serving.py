@@ -33,6 +33,7 @@ from kora.plugins.runtime.local.channel import (
     status_envelope,
     workload_digest,
 )
+from kora.plugins.runtime.local.command import CommandSession
 from kora.plugins.runtime.local.spawn import open_socket_directory
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
@@ -45,7 +46,7 @@ from kora.runner.channels import (
     cancel_task,
 )
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
-from kora.runner.identity import IdentityReader
+from kora.runner.identity import IdentityReader, IdentityState
 from kora.runner.peers import PeerRefused, PeerSource, unchanged
 from kora.runner.registry import (
     AttemptKey,
@@ -183,6 +184,32 @@ def decoded_workload(section: bytearray) -> Workload:
     return decode_section(section, ACCEPT_WORKLOAD.sections[0], Workload)
 
 
+def recorded_absent(reader: IdentityReader, recorded: ProcessIdentity) -> bool:
+    if (
+        recorded.host_id is None
+        or recorded.boot_id is None
+        or recorded.pid_namespace is None
+    ):
+        return False
+    try:
+        observation = reader.read(recorded.pid)
+    except OSError:
+        return False
+    if observation.state is IdentityState.ABSENT:
+        return True
+    process = observation.process
+    if observation.state is not IdentityState.PRESENT or process is None:
+        return False
+    identity = process.identity
+    if (
+        identity.host_id != recorded.host_id
+        or identity.boot_id != recorded.boot_id
+        or identity.pid_namespace != recorded.pid_namespace
+    ):
+        return False
+    return process.dead or identity.start_time != recorded.start_time
+
+
 class ControlServer:
     def __init__(
         self,
@@ -199,6 +226,7 @@ class ControlServer:
         *,
         binder: Callable[[Path, str], BoundSocket] = rebound,
         decoder: Callable[[bytearray], Workload] = decoded_workload,
+        command: CommandSession | None = None,
     ) -> None:
         bound.listener.setblocking(False)
         self._bound = bound
@@ -209,6 +237,7 @@ class ControlServer:
         self._log = log
         self._binder = binder
         self._decoder = decoder
+        self._command = command
         self._deadline_closed = False
         self._registry = registry
         self._key = key
@@ -291,9 +320,17 @@ class ControlServer:
             if isinstance(request, AttachRequest):
                 submitter = Submitter(dispatcher_id=request.dispatcher_id, process=peer)
                 head = await self._executor.run(self._running)
+                observational = False
                 if head.submitter != submitter:
-                    raise AuthenticationRefused(Refusal.NOT_SUBMITTER)
-                await self._executor.run(lambda: unchanged(self._identities, peer))
+                    recorded = head.submitter.process
+                    gone = await self._executor.run(
+                        lambda: recorded_absent(self._identities, recorded)
+                    )
+                    if not gone:
+                        raise AuthenticationRefused(Refusal.NOT_SUBMITTER)
+                    observational = True
+                else:
+                    await self._executor.run(lambda: unchanged(self._identities, peer))
                 if observer:
                     self._observers -= 1
                     observer = False
@@ -303,7 +340,7 @@ class ControlServer:
                     deadline,
                 )
                 await cancel_task(expiration)
-                await self._attached(channel, submitter)
+                await self._attached(channel, submitter, observational)
                 return
             if request.op != "status":
                 self._refused(Refusal.BEFORE_ATTACH)
@@ -370,7 +407,12 @@ class ControlServer:
             FrameType.JSON, payload, self._clock.monotonic_ns() + FRAME_PROGRESS_NS
         )
 
-    async def _attached(self, channel: BoundedChannel, submitter: Submitter) -> None:
+    async def _attached(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+    ) -> None:
         while True:
             started = self._clock.monotonic_ns()
             _, payload = await channel.read_typed_frame(
@@ -378,11 +420,14 @@ class ControlServer:
             )
             request = read_request(payload)
             if request is not None:
-                answer = (
-                    status_envelope(request.request_id, self._observed())
-                    if request.op == "status"
-                    else error_envelope(request.request_id, operation_unknown())
-                )
+                if request.op == "status":
+                    answer = status_envelope(request.request_id, self._observed())
+                elif request.op == "start":
+                    answer = await self._start(
+                        submitter, request.request_id, observational
+                    )
+                else:
+                    answer = error_envelope(request.request_id, operation_unknown())
                 await self._answer(channel, answer)
                 continue
             header = parse_header(payload, ACCEPT_WORKLOAD)
@@ -439,6 +484,8 @@ class ControlServer:
                         if self._workload is None:
                             self._workload = decoded
                             self._workload_sha256 = declaration.sha256
+                            if self._command is not None:
+                                self._command.note(submitter)
                     answer = delivery_envelope(header.request_id, "accepted")
                 except KoraProtocolError as error:
                     if error.code not in ENVELOPE_ERRORS:
@@ -451,11 +498,43 @@ class ControlServer:
                 if not sink:
                     self._admitted = False
 
+    async def _start(
+        self, submitter: Submitter, request_id: str, observational: bool
+    ) -> bytes:
+        command = self._command
+        if command is None:
+            return error_envelope(
+                request_id, delivery_error("workload_kind_unavailable")
+            )
+        command.prepare()
+        try:
+            await self._executor.run(
+                lambda: command.begin(
+                    submitter,
+                    observational,
+                    self._workload,
+                    lambda: self._authorized(submitter),
+                )
+            )
+        except KoraProtocolError as error:
+            if error.code not in ENVELOPE_ERRORS:
+                raise
+            return error_envelope(request_id, error)
+        finally:
+            command.attach_drains()
+            command.abort_unused()
+        return delivery_envelope(request_id, "started")
+
     def _observed(self) -> StatusValue:
+        command = self._command
+        if command is None:
+            state, phase, code = "starting", "preparation", None
+        else:
+            state, phase, code = command.status()
         status = RuntimeStatus(
-            state="starting",
-            exit_code=None,
-            phase="preparation",
+            state=state,
+            exit_code=code,
+            phase=phase,
             observed_at=self._clock.now(),
         )
         return StatusValue(status=status, holds_workload=self._workload is not None)
@@ -519,6 +598,8 @@ class ControlServer:
             await cancel_task(self._ticking)
         for connection in tuple(self._connections):
             await cancel_task(connection)
+        if self._command is not None:
+            await self._command.aclose()
         await self._executor.close()
         self._workload = None
         self._workload_sha256 = None

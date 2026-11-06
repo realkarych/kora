@@ -28,6 +28,7 @@ async def cancel_supervisor(root: Path, domain: str, nonce: str) -> None:
                 supervise(
                     RunnerArguments(root, "attempt-1", domain, nonce),
                     capture.diagnostics.logger(COMPONENT),
+                    capture.diagnostics,
                 )
             )
             try:
