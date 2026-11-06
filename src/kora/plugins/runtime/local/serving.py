@@ -265,6 +265,7 @@ class ControlServer:
         self._connections: set[asyncio.Task[None]] = set()
         self._unresolved_disposal: Callable[[], None] | None = None
         self._transfer_native_settled = False
+        self._resources_settled = False
         self._refusals: Counter[str] = Counter()
         self._accepting: asyncio.Task[None] | None = None
         self._ticking: asyncio.Task[None] | None = None
@@ -273,6 +274,10 @@ class ControlServer:
     @property
     def connections(self) -> int:
         return len(self._connections)
+
+    @property
+    def resources_settled(self) -> bool:
+        return self._resources_settled
 
     def start(self) -> None:
         self._accepting = asyncio.create_task(self._accept(self._bound.listener))
@@ -833,6 +838,7 @@ class ControlServer:
                 if (
                     settled or self._transfer_native_settled
                 ) and self._unresolved_disposal is None:
+                    self._resources_settled = True
                     try:
                         if self._command is not None:
                             await self._command.aclose()

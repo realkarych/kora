@@ -889,6 +889,8 @@ async def test_runner_drains_deferred_cleanup_after_socket_check_failure(
             try:
                 with pytest.raises(NativeIOUnresolved):
                     await server.close()
+                released_by_server = bound.directory.closed
+                resources_settled = server.resources_settled
             finally:
                 registry.directory.close()
                 if not cleanup.is_set():
@@ -897,7 +899,8 @@ async def test_runner_drains_deferred_cleanup_after_socket_check_failure(
 
     assert retained
     assert cleanup.is_set()
-    assert bound.directory.closed
+    assert released_by_server
+    assert resources_settled
 
 
 @pytest.mark.asyncio

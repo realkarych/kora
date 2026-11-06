@@ -327,6 +327,7 @@ async def supervise(
     reader = NativeIdentityReader()
     identity = own_identity(reader)
     attempt = attempt_directory(arguments)
+    server: ControlServer | None = None
     try:
         prepared = prepare_registration(arguments)
         try:
@@ -349,9 +350,11 @@ async def supervise(
             finally:
                 await server.close()
         finally:
-            prepared.close()
+            if server is None or server.resources_settled:
+                prepared.close()
     finally:
-        attempt.close()
+        if server is None or server.resources_settled:
+            attempt.close()
 
 
 def attempt_directory(arguments: RunnerArguments) -> DirectoryAnchor:
