@@ -372,7 +372,7 @@ class ControlServer:
                     return
                 self._observers += 1
                 observer = True
-            answer = status_envelope(request.request_id, self._observed())
+            answer = status_envelope(request.request_id, await self._status_value())
             await channel.write_typed_frame(
                 FrameType.JSON, answer, self._clock.monotonic_ns() + FRAME_PROGRESS_NS
             )
@@ -445,7 +445,8 @@ class ControlServer:
             request = read_request(payload)
             if request is not None:
                 if request.op == "status":
-                    answer = status_envelope(request.request_id, self._observed())
+                    observed = await self._status_value()
+                    answer = status_envelope(request.request_id, observed)
                 elif request.op == "start":
                     answer = await self._start(
                         submitter, request.request_id, observational
@@ -748,12 +749,15 @@ class ControlServer:
             command.attach_drains()
         return delivery_envelope(request_id, "started")
 
-    def _observed(self) -> StatusValue:
+    async def _status_value(self) -> StatusValue:
         command = self._command
         if command is None:
             state, phase, code = "starting", "preparation", None
         else:
             state, phase, code = command.status()
+            if state == "exited":
+                await self._executor.run(command.seal_outputs)
+                state, phase, code = command.status()
         status = RuntimeStatus(
             state=state,
             exit_code=code,

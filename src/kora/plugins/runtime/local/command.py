@@ -16,6 +16,7 @@ from typing import Final, Literal
 from pydantic import MISSING, ValidationError
 
 from kora.ir.config import CommandConfig
+from kora.ir.json import JsonObject, JsonShapeError, JsonValue
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
@@ -29,8 +30,11 @@ from kora.runner.channels import CaptureDrain, cancel_task
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
+    SealCapacityError,
+    SealedTree,
     open_private_directory,
     rename_no_replace,
+    seal_regular_tree,
     verify_private,
 )
 from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
@@ -53,6 +57,15 @@ TRANSFER: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner handled an input transfer",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
+SEAL: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.seal",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner sealed command files",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -209,6 +222,8 @@ class CommandSession:
         self._inputs: dict[str, str] = {}
         self._transferring = False
         self._transfer_ns = 0
+        self._sealed = False
+        self._sealing = False
 
     def note(self, submitter: Submitter) -> None:
         with self._lock:
@@ -381,6 +396,87 @@ class CommandSession:
                     self._emit("exited", running_ns)
         phase: PhaseName = "complete" if code == 0 else "failed"
         return "exited", phase, code
+
+    def seal_outputs(self) -> None:
+        started = self._clock.monotonic_ns()
+        with self._lock:
+            while self._sealing:
+                self._lock.wait()
+            if self._sealed:
+                return
+            owner = self._owner
+            running = self._stage is _Stage.RUNNING
+            self._sealing = True
+        try:
+            if self._ready_to_seal(owner, running):
+                self._write_seal(started)
+        finally:
+            with self._lock:
+                self._sealing = False
+                self._lock.notify_all()
+
+    def _ready_to_seal(self, owner: ChildOwner | None, running: bool) -> bool:
+        if owner is None or owner.pid is None or not running:
+            return False
+        if not owner.collected() or owner.status is None:
+            return False
+        if observed_exit(owner.status) is None:
+            return False
+        if sys.platform != "linux":
+            return True
+        listed = adopted_pids()
+        if listed is None:
+            return False
+        return all(pid == owner.pid for pid in listed)
+
+    def _write_seal(self, started: int) -> None:
+        try:
+            directory = open_private_directory(self._attempt, "candidate")
+        except (OSError, FilesystemError) as error:
+            self._settle_seal(started, error)
+            return
+        try:
+            try:
+                sealed = seal_regular_tree(directory)
+            except SealCapacityError:
+                self._finish_seal("refused", started)
+                return
+            except OSError as error:
+                self._settle_seal(started, error)
+                return
+        finally:
+            directory.close()
+        self._record_seal(sealed, started)
+
+    def _settle_seal(self, started: int, error: OSError | FilesystemError) -> None:
+        if isinstance(error, OSError) and space_error(error):
+            self._journal.close()
+            self._finish_seal("journal_unavailable", started)
+            return
+        self._finish_seal("refused", started)
+
+    def _record_seal(self, sealed: SealedTree, started: int) -> None:
+        files: list[JsonValue] = [
+            {"name": item.name, "sha256": item.sha256} for item in sealed.files
+        ]
+        refused: list[JsonValue] = list(sealed.refused)
+        payload: JsonObject = {"files": files, "refused": refused}
+        try:
+            recorded = self._journal.append("runner.outputs_sealed", payload)
+        except JsonShapeError:
+            self._finish_seal("refused", started)
+            return
+        if not recorded:
+            self._finish_seal("journal_unavailable", started)
+            return
+        self._finish_seal("sealed", started)
+
+    def _finish_seal(self, outcome: str, started: int) -> None:
+        with self._lock:
+            self._sealed = True
+        waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
+        level = Level.INFO if outcome == "sealed" else Level.WARNING
+        self._log.emit_at(level, SEAL, outcome=outcome, waited_ms=waited)
 
     async def aclose(self) -> None:
         self._stop.set()

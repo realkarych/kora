@@ -1,6 +1,7 @@
 import asyncio
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -796,3 +797,200 @@ async def test_controller_process_death_keeps_the_same_command(tmp_path: Path) -
     assert observed.status.state == "running"
     assert refused.code == "execution_unauthorized"
     assert still == leader
+
+
+def seal_outcomes(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    found: list[str] = []
+    for line in path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("event") != "runtime.local.seal":
+            continue
+        outcome = record.get("outcome")
+        if isinstance(outcome, str):
+            found.append(outcome)
+    return found
+
+
+def sealed_manifest(
+    path: Path,
+) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]] | None:
+    if not path.exists():
+        return None
+    found: tuple[tuple[tuple[str, str], ...], tuple[str, ...]] | None = None
+    for line in path.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("kind") != "runner.outputs_sealed":
+            continue
+        data = record.get("data")
+        pairs: list[tuple[str, str]] = []
+        names: list[str] = []
+        for item in data.get("files"):
+            name = item.get("name")
+            digest = item.get("sha256")
+            if isinstance(name, str) and isinstance(digest, str):
+                pairs.append((name, digest))
+        for item in data.get("refused"):
+            if isinstance(item, str):
+                names.append(item)
+        found = (tuple(pairs), tuple(names))
+    return found
+
+
+@pytest.mark.asyncio
+async def test_command_outputs_are_sealed_when_the_leader_exits(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    digest = f"sha256:{hashlib.sha256(b'payload').hexdigest()}"
+    script = "open('payload','wb').write(b'payload')"
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
+            ctx,
+        )
+        await runtime.start(handle, ctx)
+        await until_exited(runtime, handle, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        journal = attempt / "journal.jsonl"
+        first = journal.read_text()
+        await runtime.status(handle, ctx)
+        second = journal.read_text()
+        runner = await running_pid(runtime, "attempt-1")
+        os.kill(runner, signal.SIGKILL)
+        retained = journal.read_text()
+        outcomes = seal_outcomes(attempt / "runner.log")
+
+    manifest = sealed_manifest(journal)
+    assert manifest == ((("payload", digest),), ())
+    assert first.count("runner.outputs_sealed") == 1
+    assert second == first
+    assert retained == first
+    assert outcomes == ["sealed"]
+    assert digest not in (attempt / "runner.log").read_text()
+
+
+@pytest.mark.asyncio
+async def test_seal_refuses_linked_and_special_files(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    script = "\n".join(
+        (
+            "import os, sys",
+            "open('payload','wb').write(b'payload')",
+            "os.symlink(sys.argv[1], 'linked')",
+            "os.mkfifo('pipe')",
+            "os.link(sys.argv[1], 'hard')",
+        )
+    )
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(
+                runtime, "attempt-1", (sys.executable, "-c", script, str(outside))
+            ),
+            ctx,
+        )
+        await runtime.start(handle, ctx)
+        await until_exited(runtime, handle, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        journal = attempt / "journal.jsonl"
+
+    digest = f"sha256:{hashlib.sha256(b'payload').hexdigest()}"
+    manifest = sealed_manifest(journal)
+    assert manifest is not None
+    assert manifest[0] == (("payload", digest),)
+    assert manifest[1] == ("hard", "linked", "pipe")
+    assert outside.read_bytes() == b"outside"
+
+
+@pytest.mark.asyncio
+async def test_running_command_is_not_sealed(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(runtime, "attempt-1", (binary("sleep"), "60")),
+            ctx,
+        )
+        await runtime.start(handle, ctx)
+        status = await runtime.status(handle, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        journal = (attempt / "journal.jsonl").read_text()
+
+    assert status.state == "running"
+    assert "runner.outputs_sealed" not in journal
+
+
+@pytest.mark.asyncio
+async def test_seal_stops_at_one_thousand_entries(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    script = "\n".join(
+        (
+            "from pathlib import Path",
+            "root = Path('.')",
+            "for index in range(1001):",
+            "    (root / f'f{index:04d}').write_bytes(b'x')",
+        )
+    )
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
+            ctx,
+        )
+        await runtime.start(handle, ctx)
+        await until_exited(runtime, handle, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        journal = (attempt / "journal.jsonl").read_text()
+        outcomes = seal_outcomes(attempt / "runner.log")
+
+    assert "runner.outputs_sealed" not in journal
+    assert outcomes == ["refused"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.host_fixture
+async def test_seal_journal_failure_keeps_the_files(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    small = private_directory(
+        prepared("small-filesystem"), f"{PATH_MARKER}-{os.getpid()}-seal"
+    )
+    root = private_directory(small, "state")
+    ctx = runtime_context(kora_capture)
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        try:
+            handle = await runtime.submit(
+                command_workload(runtime, "attempt-1", (binary("sleep"), "60")),
+                ctx,
+            )
+            await runtime.start(handle, ctx)
+            attempt = attempt_directory(root, runtime, "attempt-1")
+            payload = attempt / "candidate" / "payload"
+            payload.write_bytes(b"kept")
+            fill(attempt)
+            runner = await running_pid(runtime, "attempt-1")
+            os.kill(child_pids(runner)[0], signal.SIGTERM)
+            await until_exited(runtime, handle, ctx)
+            journal = (attempt / "journal.jsonl").read_text()
+            outcomes = seal_outcomes(attempt / "runner.log")
+            retained = payload.read_bytes()
+        finally:
+            release_commands(root)
+            await runtime.close()
+            reap_runners(root)
+            shutil.rmtree(small)
+
+    assert "runner.outputs_sealed" not in journal
+    assert "runner.candidate_started" in journal
+    assert outcomes == ["journal_unavailable"]
+    assert retained == b"kept"
