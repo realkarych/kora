@@ -735,9 +735,15 @@ class TransitionExecutor(NativeExecutor):
         self,
         function: Callable[[], Result],
         on_cancel: Callable[[Result], None] | None = None,
+        *,
+        after_uncertain_submission: Callable[[], None] | None = None,
     ) -> Result:
         try:
-            return await super().run(function, on_cancel)
+            return await super().run(
+                function,
+                on_cancel,
+                after_uncertain_submission=after_uncertain_submission,
+            )
         except NativeIOClosed:
             raise refusal("runtime_closed") from None
         except NativeIOBusy:

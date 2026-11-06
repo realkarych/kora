@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -20,10 +21,58 @@ class NativeIOUnresolved(Exception):
     pass
 
 
+class NativeIONotInvoked(NativeIOUnresolved):
+    pass
+
+
+class NativeIOSubmissionUncertain(NativeIOUnresolved):
+    pass
+
+
+@dataclass
+class BorrowedInvocation:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    worker: threading.Thread | None = None
+    sealed: bool = False
+
+    def enter(self) -> None:
+        with self.lock:
+            if self.sealed:
+                raise NativeIONotInvoked
+            self.worker = threading.current_thread()
+
+    def seal(self) -> threading.Thread | None:
+        with self.lock:
+            self.sealed = True
+            return self.worker
+
+
 @dataclass(eq=False)
 class NativeOperation:
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     retained: object | None = None
+    borrower: BorrowedInvocation | None = None
+    deferred_cleanup: Callable[[], None] | None = None
+    cleanup_attempted: bool = False
+
+    def invoke(self, function: Callable[[], Result]) -> Result:
+        if self.borrower is not None:
+            self.borrower.enter()
+        result = function()
+        self.retained = result
+        return result
+
+    def release_deferred(self) -> None:
+        cleanup = self.deferred_cleanup
+        borrower = self.borrower
+        if cleanup is None or borrower is None or self.cleanup_attempted:
+            return
+        worker = borrower.seal()
+        if worker is not None:
+            worker.join()
+        self.cleanup_attempted = True
+        cleanup()
+        self.deferred_cleanup = None
 
 
 async def observed(observation: asyncio.Future[Result]) -> bool:
@@ -68,15 +117,23 @@ class NativeExecutor:
         self,
         function: Callable[[], Result],
         on_cancel: Callable[[Result], None] | None = None,
+        *,
+        after_uncertain_submission: Callable[[], None] | None = None,
     ) -> Result:
-        return await self.execute(function, on_cancel, wait=True)
+        return await self.execute(
+            function, on_cancel, after_uncertain_submission, wait=True
+        )
 
     async def run_nowait(
         self,
         function: Callable[[], Result],
         on_cancel: Callable[[Result], None] | None = None,
+        *,
+        after_uncertain_submission: Callable[[], None] | None = None,
     ) -> Result:
-        return await self.execute(function, on_cancel, wait=False)
+        return await self.execute(
+            function, on_cancel, after_uncertain_submission, wait=False
+        )
 
     def pool_shutdown(self) -> None:
         if self.loop is not None and not self.loop.is_closed():
@@ -98,28 +155,28 @@ class NativeExecutor:
         self,
         function: Callable[[], Result],
         on_cancel: Callable[[Result], None] | None,
+        after_uncertain_submission: Callable[[], None] | None,
         *,
         wait: bool,
     ) -> Result:
         if self.closed:
             raise NativeIOClosed
         if self.unresolved:
-            raise NativeIOUnresolved
+            raise NativeIONotInvoked
         if len(self.jobs) >= self.admitted:
             raise NativeIOBusy
         if not wait and (not self.available or self.waiting):
             raise NativeIOBusy
         self.loop = asyncio.get_running_loop()
-        owned = NativeOperation()
+        owned = NativeOperation(
+            borrower=BorrowedInvocation()
+            if after_uncertain_submission is not None
+            else None
+        )
         self.jobs.add(owned)
         unresolved = True
         acquired = False
         cancelled = False
-
-        def invoke() -> Result:
-            value = function()
-            owned.retained = value
-            return value
 
         try:
             if self.available and not self.waiting:
@@ -129,17 +186,20 @@ class NativeExecutor:
                 self.waiting.append(ready)
                 cancelled = await observed(ready)
                 if self.unresolved:
-                    raise NativeIOUnresolved
+                    raise NativeIONotInvoked
             acquired = True
             try:
-                future = self.executor.submit(invoke)
-            except RuntimeError as error:
-                raise NativeIOUnresolved from error
+                future = self.executor.submit(owned.invoke, function)
+            except (RuntimeError, MemoryError):
+                owned.deferred_cleanup = after_uncertain_submission
+                if owned.borrower is not None:
+                    owned.borrower.seal()
+                raise NativeIOSubmissionUncertain from None
             unresolved = False
             cancelled = await completed(future) or cancelled
             if future.cancelled():
                 unresolved = True
-                raise NativeIOUnresolved
+                raise NativeIONotInvoked
             try:
                 result = future.result()
             except Exception:
@@ -166,6 +226,11 @@ class NativeExecutor:
                 self.available += 1
             self.wake_waiters()
 
+    def join_workers(self) -> None:
+        self.executor.shutdown(wait=True)
+        for job in self.jobs:
+            job.release_deferred()
+
     async def drain(self) -> None:
         for job in tuple(self.jobs):
             while not job.settled.is_set():
@@ -173,15 +238,15 @@ class NativeExecutor:
                     await job.settled.wait()
                 except asyncio.CancelledError:
                     continue
-        joining = asyncio.get_running_loop().run_in_executor(
-            None, self.executor.shutdown, True
-        )
+        joining = asyncio.get_running_loop().run_in_executor(None, self.join_workers)
         while not joining.done():
             try:
                 await asyncio.wait({joining})
             except asyncio.CancelledError:
                 continue
-        joining.result()
+        failure = joining.exception()
+        if failure is not None and not any(job.cleanup_attempted for job in self.jobs):
+            raise failure
         if self.unresolved:
             raise NativeIOUnresolved
 
