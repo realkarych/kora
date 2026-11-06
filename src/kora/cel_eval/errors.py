@@ -68,7 +68,7 @@ class EvaluatorUnavailable(RuntimeError):
         self.reason = reason
 
 
-def raise_safe(error: Exception) -> NoReturn:
+def raise_safe(error: BaseException) -> NoReturn:
     try:
         raise error
     finally:

@@ -113,16 +113,19 @@ class CheckedGraphVersionIdentity:
         raise TypeError("graph version identity requires explicit access")
 
 
-def _canonical_digests(
-    ir: str, contract: str, max_hash_bytes: int
-) -> GraphVersionDigests:
-    required = (
-        2 * (len(ir) + len(contract))
+def graph_version_hash_bytes(ir_bytes: int, contract_bytes: int) -> int:
+    return (
+        2 * (ir_bytes + contract_bytes)
         + len(DEPLOYMENT_START)
         + len(DEPLOYMENT_CONTRACT)
         + len(DEPLOYMENT_END)
     )
-    if required > max_hash_bytes:
+
+
+def _canonical_digests(
+    ir: str, contract: str, max_hash_bytes: int
+) -> GraphVersionDigests:
+    if graph_version_hash_bytes(len(ir), len(contract)) > max_hash_bytes:
         raise GraphValueRejected(GraphValueFailure.BUDGET)
 
     deployment = hashlib.sha256(DEPLOYMENT_START)

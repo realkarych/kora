@@ -99,6 +99,16 @@ def reserve_source_passes(
     )
 
 
+def admit_graph_projection_source(
+    ir_text: str, limits: GraphProjectionReadLimits
+) -> None:
+    admission = ProjectionAdmission(limits.work, limits.scratch_bytes)
+    try:
+        reserve_source_passes(ir_text, limits, admission)
+    except ProjectionRejected:
+        raise GraphValueRejected(GraphValueFailure.BUDGET) from None
+
+
 def encode_set(
     whole: tuple[str, ...], presence: tuple[str, ...], budget: TextBudget
 ) -> str:

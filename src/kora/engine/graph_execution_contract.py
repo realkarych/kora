@@ -19,8 +19,10 @@ from kora.engine.graph_resource_references import (
 from kora.engine.graph_version_identity import (
     GraphVersionIdentityLimits,
     GraphVersionPin,
+    graph_version_hash_bytes,
     read_graph_version_identity,
 )
+from kora.ir.json import JsonObject
 from kora.ir.structured_schema_work import PARAMETERS as SCHEMA_PREPARATION_LIMITS
 
 MEMBERS = (
@@ -80,7 +82,25 @@ class CheckedExecutionContract:
         raise TypeError("checked execution contract requires explicit access")
 
 
-def _admit(limits: ExecutionContractReadLimits) -> None:
+def structured_output_preparation_reservation(output_bytes: int) -> tuple[int, int]:
+    preparations = output_bytes // DIGEST_LENGTH
+    source = (
+        SCHEMA_PREPARATION_LIMITS["max_input_bytes"]
+        + SCHEMA_PREPARATION_LIMITS["max_input_nodes"]
+    )
+    scratch = (
+        source
+        + SCHEMA_PREPARATION_LIMITS["max_auxiliary_bytes"]
+        + SCHEMA_PREPARATION_LIMITS["max_auxiliary_entries"]
+    )
+    return scratch, preparations * (
+        source + SCHEMA_PREPARATION_LIMITS["max_preparation_work"]
+    )
+
+
+def execution_contract_read_reservation(
+    limits: ExecutionContractReadLimits,
+) -> tuple[int, int]:
     resources = limits.resources
     logical = resources.logical
     if any(
@@ -103,15 +123,8 @@ def _admit(limits: ExecutionContractReadLimits) -> None:
     pair_copies = NATIVE_TRANSPORT_COPIES * native + CANONICAL_PAIR_COPIES * pair
     projection = limits.projection
     cel = projection.cel
-    preparations = cel.output_context_bytes // DIGEST_LENGTH
-    preparation_source = (
-        SCHEMA_PREPARATION_LIMITS["max_input_bytes"]
-        + SCHEMA_PREPARATION_LIMITS["max_input_nodes"]
-    )
-    preparation_scratch = (
-        preparation_source
-        + SCHEMA_PREPARATION_LIMITS["max_auxiliary_bytes"]
-        + SCHEMA_PREPARATION_LIMITS["max_auxiliary_entries"]
+    preparation_scratch, preparation_work = structured_output_preparation_reservation(
+        cel.output_context_bytes
     )
     retained = (
         pair_copies
@@ -140,7 +153,7 @@ def _admit(limits: ExecutionContractReadLimits) -> None:
     work = (
         pair_copies
         + decimal_work
-        + min(limits.identity.max_hash_bytes, 2 * pair + 29)
+        + min(limits.identity.max_hash_bytes, graph_version_hash_bytes(pair, 0))
         + projection.source_bytes
         + projection.work
         + cel.typed_work
@@ -148,11 +161,32 @@ def _admit(limits: ExecutionContractReadLimits) -> None:
         + logical.work
         + resources.work
         + limits.physical_input_bytes
-        + preparations
-        * (preparation_source + SCHEMA_PREPARATION_LIMITS["max_preparation_work"])
+        + preparation_work
     )
     if retained > limits.max_retained_bytes or work > limits.max_work:
         raise GraphValueRejected(GraphValueFailure.BUDGET)
+    return retained, work
+
+
+def check_execution_contract_members(
+    canonical_ir: str,
+    saved: JsonObject,
+    physical: object,
+    scope: GraphResourceScope,
+    owners: tuple[GraphResourceOwner, ...],
+    limits: ExecutionContractReadLimits,
+) -> GraphResourceReferences:
+    if len(saved) != len(MEMBERS) or tuple(saved) != MEMBERS:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    read_graph_cel_projection_paths(canonical_ir, saved, limits=limits.projection)
+    return check_graph_resource_references(
+        canonical_ir,
+        saved["command_resources"],
+        physical,
+        scope,
+        owners,
+        limits=limits.resources,
+    )
 
 
 def _checked_result(
@@ -164,7 +198,7 @@ def _checked_result(
     limits: ExecutionContractReadLimits,
 ) -> CheckedExecutionContract | GraphValueFailure:
     try:
-        _admit(limits)
+        execution_contract_read_reservation(limits)
         if (
             type(acquired) is not AcquiredGraphVersion
             or type(scope) is not GraphResourceScope
@@ -175,19 +209,13 @@ def _checked_result(
         ):
             raise GraphValueRejected(GraphValueFailure.INVALID)
         identity = read_graph_version_identity(acquired, pin, limits=limits.identity)
-        saved = identity.values.execution_contract
-        if len(saved) != len(MEMBERS) or tuple(saved) != MEMBERS:
-            raise GraphValueRejected(GraphValueFailure.INVALID)
-        read_graph_cel_projection_paths(
-            identity.canonical_ir, saved, limits=limits.projection
-        )
-        resources = check_graph_resource_references(
+        resources = check_execution_contract_members(
             identity.canonical_ir,
-            saved["command_resources"],
+            identity.values.execution_contract,
             physical,
             scope,
             owners,
-            limits=limits.resources,
+            limits,
         )
         return CheckedExecutionContract(
             scope, pin, identity.canonical_ir, identity.canonical_contract, resources
