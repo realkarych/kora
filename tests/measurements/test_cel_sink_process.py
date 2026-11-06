@@ -1,13 +1,25 @@
+import asyncio
 import hashlib
 import json
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import TypedDict
 
 import pytest
 
+from kora.protocols.lifetime_records import ProcessRegistration
+from kora.runner.child_wait import KernelChildWatch, Readiness, native_direct_child_wait
+from kora.runner.identity import NativeIdentityReader
 from tests.cel_eval.children import ROOT, full_path, run_child
-from tests.measurements.cel_sink_process import READY, SinkProcessResult, run_sink_child
+from tests.measurements.cel_sink_process import (
+    READY,
+    SinkProcessResult,
+    run_sink_child,
+    stop_sink_group,
+)
 from tests.measurements.harness import new_report
 from tests.measurements.test_cel_evaluator_lifetime import (
     SinkPayload,
@@ -122,6 +134,49 @@ def test_cel_sink_missing_or_malformed_readiness_refuses_success(code: str) -> N
     with pytest.raises(AssertionError, match="fixture_post_work_exit"):
         sink_exit_gate(new_report(), "fixture", result)
     assert_released(result, descriptors_before)
+
+
+@pytest.mark.asyncio
+async def test_cel_sink_group_cleanup_reaps_the_exited_leader() -> None:
+    with subprocess.Popen(
+        [sys.executable, "-I", "-c", "import os; os.read(0, 1); raise SystemExit(7)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    ) as child:
+        writer = child.stdin
+        assert writer is not None
+        observed = NativeIdentityReader().read(child.pid).process
+        assert observed is not None
+        registration = ProcessRegistration(
+            process=observed.identity,
+            acquisition_operation_id="c" * 32,
+            process_group_id=observed.process_group_id,
+            session_id=observed.session_id,
+        )
+        probe, _ = native_direct_child_wait()
+        watch = KernelChildWatch(child.pid)
+        try:
+            assert child.poll() is None
+            deadline = time.monotonic() + 5
+
+            writer.write(b"x")
+            writer.flush()
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                await watch.changed
+            if probe is not None:
+                assert probe.read(registration) is Readiness.READY
+            stop_sink_group(child, deadline)
+
+            assert child.returncode == 7
+            with pytest.raises(ChildProcessError):
+                os.waitpid(child.pid, os.WNOHANG)
+            with pytest.raises(ProcessLookupError):
+                os.killpg(child.pid, 0)
+        finally:
+            watch.close()
+            writer.close()
 
 
 @pytest.mark.parametrize("descriptor", [1, 2])
