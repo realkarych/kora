@@ -2,6 +2,8 @@ import asyncio
 import errno
 import os
 import threading
+from collections.abc import Callable
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from kora.runner.native_io import (
     NativeIONotInvoked,
     NativeIOSubmissionUncertain,
     NativeIOUnresolved,
+    NativeOperation,
 )
 from kora.runner.registry import TransitionExecutor
 
@@ -422,6 +425,69 @@ async def test_uncertain_submission_cleanup_follows_actual_pool_join(
     assert cleanup_observations == [(False, False, inode)]
     assert closed.value.errno == errno.EBADF
     assert len(executor.jobs) == 1
+
+
+class ObservedJoinThread(threading.Thread):
+    def __init__(self, target: Callable[[], None]) -> None:
+        super().__init__(target=target)
+        self.joined = threading.Event()
+
+    def join(self, timeout: float | None = None) -> None:
+        self.joined.set()
+        super().join(timeout)
+
+
+async def test_deferred_cleanup_joins_borrower_outside_pool(tmp_path: Path) -> None:
+    borrowed = tmp_path / "borrowed"
+    descriptor = os.open(borrowed, os.O_RDWR | os.O_CREAT, 0o600)
+    returned = threading.Event()
+    release_thread = threading.Event()
+    closed = threading.Event()
+    owner = NativeOperation(borrower=Future())
+
+    def native_thread() -> None:
+        owner.invoke(lambda: os.fstat(descriptor))
+        returned.set()
+        if not release_thread.wait(5):
+            raise TimeoutError("test thread release")
+
+    def cleanup() -> None:
+        os.close(descriptor)
+        closed.set()
+
+    owner.deferred_cleanup = cleanup
+    worker = ObservedJoinThread(native_thread)
+    worker.start()
+    await reached(returned)
+
+    closing = asyncio.create_task(asyncio.to_thread(owner.release_deferred))
+    try:
+        await reached(worker.joined)
+        descriptor_is_open = os.fstat(descriptor).st_ino == borrowed.stat().st_ino
+        cleaned_during_join = closed.is_set()
+    finally:
+        release_thread.set()
+        await closing
+        if not closed.is_set():
+            os.close(descriptor)
+
+    assert descriptor_is_open
+    assert not cleaned_during_join
+    assert not worker.is_alive()
+    assert closed.is_set()
+
+
+async def test_deferred_cleanup_disarms_a_late_borrower() -> None:
+    entered = threading.Event()
+    closed = threading.Event()
+    owner = NativeOperation(borrower=Future(), deferred_cleanup=closed.set)
+
+    await asyncio.to_thread(owner.release_deferred)
+    with pytest.raises(NativeIONotInvoked):
+        owner.invoke(entered.set)
+
+    assert closed.is_set()
+    assert not entered.is_set()
 
 
 async def test_native_cleanup_error_retains_resource_owner(tmp_path: Path) -> None:
