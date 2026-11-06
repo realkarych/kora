@@ -9,7 +9,12 @@ REAP_INTERVAL_SECONDS: Final[float] = 0.01
 
 
 class ChildOwner:
-    def __init__(self, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop | None = None,
+        on_exit: Callable[[int], None] | None = None,
+    ) -> None:
         self.loop = asyncio.get_running_loop() if loop is None else loop
         self.lock = threading.Lock()
         self.bound = threading.Event()
@@ -22,7 +27,7 @@ class ChildOwner:
         self.error: OSError | None = None
         self.joining: asyncio.Future[None] | None = None
         self.thread = threading.Thread(
-            target=self.observe, name="kora-child-reaper", daemon=True
+            target=self.observe, args=(on_exit,), name="kora-child-reaper", daemon=True
         )
         try:
             self.thread.start()
@@ -61,7 +66,7 @@ class ChildOwner:
             self.reaped = True
         return self.reaped
 
-    def observe(self) -> None:
+    def observe(self, on_exit: Callable[[int], None] | None) -> None:
         self.bound.wait()
         while True:
             with self.lock:
@@ -75,6 +80,8 @@ class ChildOwner:
         except RuntimeError:
             if not self.loop.is_closed():
                 raise
+        if self.status is not None and on_exit is not None:
+            on_exit(self.status)
 
     def signal(self, value: signal.Signals) -> bool:
         with self.lock:

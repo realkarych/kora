@@ -22,9 +22,8 @@ def pause(directory: int) -> None:
         os.close(descriptor)
 
 
-def acknowledge_term(signal_number: int, frame: FrameType | None) -> None:
-    if signal_number == signal.SIGTERM:
-        os.write(PROBE, b"t")
+def keep_fifo_held(_signal_number: int, _frame: FrameType | None) -> None:
+    return None
 
 
 async def run() -> None:
@@ -37,21 +36,28 @@ async def run() -> None:
     channel = BoundedChannel(endpoint, clock)
     fifo_directory = os.environ.get("KORA_TEST_FIFO_DIRECTORY_FD")
     phase = os.environ["KORA_TEST_PAUSE_PHASE"]
-    if fifo_directory is not None:
-        if os.environ["KORA_TEST_RESIST_TERM"] == "1":
-            signal.signal(signal.SIGTERM, acknowledge_term)
+    previous_wakeup: int | None = None
+    if fifo_directory is not None and os.environ["KORA_TEST_RESIST_TERM"] == "1":
+        signal.signal(signal.SIGTERM, keep_fifo_held)
+        signal.siginterrupt(signal.SIGTERM, False)
+        os.set_blocking(PROBE, False)
+        previous_wakeup = signal.set_wakeup_fd(PROBE)
     try:
         mutation = MUTATION.validate_json(await channel.read_record(deadline, 1048576))
         if fifo_directory is not None and phase in ("before", "both"):
             pause(int(fifo_directory))
         await respond_mutation(endpoint, channel, mutation, descriptors, deadline)
     finally:
-        channel.close()
-        for descriptor in descriptors[:-1]:
-            os.close(descriptor)
-        if fifo_directory is not None and phase in ("after", "both"):
-            pause(int(fifo_directory))
-        os.close(PROBE)
+        try:
+            channel.close()
+            for descriptor in descriptors[:-1]:
+                os.close(descriptor)
+            if fifo_directory is not None and phase in ("after", "both"):
+                pause(int(fifo_directory))
+        finally:
+            if previous_wakeup is not None:
+                signal.set_wakeup_fd(previous_wakeup)
+            os.close(PROBE)
 
 
 if __name__ == "__main__":

@@ -582,6 +582,7 @@ async def test_start_waits_for_transfer_slot(
                 await transferred(channel, ctx)
                 rejected = None
         await runtime.start(handle, ctx)
+        await until(lambda: "command_exited" in journal_kinds(attempt))
         anchor = open_local_directory(attempt)
         try:
             records = read_records(anchor)
@@ -598,9 +599,10 @@ async def test_start_waits_for_transfer_slot(
         assert rejected is not None
         assert rejected.code == "integrity_error"
         suffix.append("transfer.rejected")
-    assert [kind for _, kind in records][-len(suffix) - 1 :] == [
+    assert [kind for _, kind in records][-len(suffix) - 2 :] == [
         *suffix,
         "runner.candidate_started",
+        "command_exited",
     ]
 
 
