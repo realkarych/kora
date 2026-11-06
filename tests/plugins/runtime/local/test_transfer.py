@@ -110,17 +110,21 @@ def mode_of(path: Path) -> int:
     return os.stat(path).st_mode & 0o777
 
 
-def live_descriptors() -> set[int]:
-    descriptors: set[int] = set()
+def descriptor_identities() -> dict[int, tuple[int, int]]:
+    descriptors: dict[int, tuple[int, int]] = {}
     for descriptor in descriptor_numbers(os.getpid()):
         try:
-            os.fstat(descriptor)
+            metadata = os.fstat(descriptor)
         except OSError as error:
             if error.errno != errno.EBADF:
                 raise
         else:
-            descriptors.add(descriptor)
+            descriptors[descriptor] = (metadata.st_dev, metadata.st_ino)
     return descriptors
+
+
+def live_descriptors() -> set[int]:
+    return set(descriptor_identities())
 
 
 def journal_kinds(attempt: Path) -> list[str]:
@@ -699,12 +703,17 @@ async def test_disconnected_transfer_closes_exact_incoming_descriptor(
                 await transfer_header(channel, live.ctx, input_item("payload", b"x"))
                 await until(incoming.exists)
                 pending = incoming.stat()
-                owned = {
-                    descriptor
-                    for descriptor in live_descriptors() - baseline
-                    if os.fstat(descriptor).st_ino == pending.st_ino
-                    and os.fstat(descriptor).st_dev == pending.st_dev
-                }
+                identity = (pending.st_dev, pending.st_ino)
+
+                def open_incoming() -> set[int]:
+                    return {
+                        descriptor
+                        for descriptor, current in descriptor_identities().items()
+                        if current == identity and descriptor not in baseline
+                    }
+
+                await until(lambda: bool(open_incoming()))
+                owned = open_incoming()
             finally:
                 channel.close()
             await until(lambda: not incoming.exists())
