@@ -382,14 +382,32 @@ class CommandSession:
         phase: PhaseName = "complete" if code == 0 else "failed"
         return "exited", phase, code
 
+    def _record_exit(self, status: int) -> None:
+        code = observed_exit(status)
+        if code is None:
+            return
+        with self._lock:
+            self._lock.wait_for(
+                lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
+            )
+            if self._stage is not _Stage.RUNNING or self._stop.is_set():
+                return
+            started = self._running_ns
+        if not self._journal.append("command_exited", {"exit_code": code}):
+            with self._lock:
+                if not self._stop.is_set():
+                    self._emit("journal_unavailable", started)
+
     async def aclose(self) -> None:
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
+            self._journal.close()
+            self._lock.notify_all()
         for task in tuple(self._tasks):
             await cancel_task(task)
         for drain in self._drains:
             drain.close()
         self._close_pipes()
-        self._journal.close()
         self._scope.release()
 
     def _claim(
@@ -415,6 +433,9 @@ class CommandSession:
             if self._transferring:
                 self._emit("refused", started)
                 raise delivery_error("workload_busy")
+            if self._journal.closed:
+                self._emit("journal_unavailable", started)
+                raise delivery_error("journal_unavailable")
             if self._stage is _Stage.RUNNING:
                 self._emit("started", started)
                 return None
@@ -448,7 +469,7 @@ class CommandSession:
                 raise delivery_error("journal_unavailable") from None
             self._finish(_Stage.IDLE, "refused", started)
             raise
-        owner = ChildOwner(loop=self._loop)
+        owner = ChildOwner(loop=self._loop, on_exit=self._record_exit)
         with self._lock:
             self._owner = owner
         durable = False
@@ -669,14 +690,14 @@ class CommandSession:
                 raise delivery_error("journal_unavailable")
             if observational or self._execution != submitter:
                 raise delivery_error("execution_unauthorized")
+            if self._journal.closed:
+                raise delivery_error("journal_unavailable")
             if (
                 item.kind != "input"
                 or self._stage is not _Stage.IDLE
                 or self._transferring
             ):
                 raise delivery_error("transfer_refused")
-            if self._journal.closed:
-                raise delivery_error("journal_unavailable")
             self._transferring = True
             self._transfer_ns = started
             previous = self._inputs.get(item.name)

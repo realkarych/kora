@@ -1,6 +1,7 @@
 import asyncio
 import ctypes
 import errno
+import hashlib
 import json
 import os
 import shutil
@@ -17,15 +18,31 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.ir.json import JsonObject
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import LoggingSettings, configure_process
-from kora.plugins.runtime.local.control import runner_status, start_command
+from kora.plugins.runtime.local.channel import (
+    ENVELOPE_BYTES,
+    FRAME_PROGRESS_NS,
+    AttachRequest,
+    FrameType,
+    control_request,
+    read_delivery,
+)
+from kora.plugins.runtime.local.control import (
+    attested,
+    connected,
+    runner_status,
+    start_command,
+)
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle
-from kora.protocols.runtime import Workload
+from kora.protocols.runtime import RawEvent, TransferItem, Workload
 from kora.protocols.time import SystemClock
+from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.journal import RunningJournal, read_records
@@ -234,17 +251,30 @@ def fill(directory: Path) -> None:
         directory / "filler", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
     )
     try:
-        for size in (65536, 4096, 1):
-            block = b"\0" * size
-            while True:
-                try:
-                    os.write(descriptor, block)
-                except OSError as error:
-                    if error.errno != errno.ENOSPC:
-                        raise
-                    break
+        fill_descriptor(descriptor)
     finally:
         os.close(descriptor)
+
+
+def fill_descriptor(descriptor: int) -> None:
+    for size in (65536, 4096, 1):
+        block = b"\0" * size
+        while True:
+            try:
+                os.write(descriptor, block)
+            except OSError as error:
+                if error.errno != errno.ENOSPC:
+                    raise
+                break
+
+
+def journal_events(path: Path) -> tuple[RawEvent, ...]:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return ()
+    complete = raw[: raw.rfind(b"\n") + 1]
+    return tuple(RawEvent.model_validate_json(line) for line in complete.splitlines())
 
 
 async def worker() -> None:
@@ -445,17 +475,64 @@ async def test_command_start_is_durable_before_acknowledgement(
         runner = await running_pid(runtime, "attempt-1")
         journal = attempt_directory(root, runtime, "attempt-1") / "journal.jsonl"
         text = journal.read_text()
-        for pid in child_pids(runner):
-            terminate(pid)
-        os.kill(runner, signal.SIGKILL)
-        await until(lambda: runner_pids(root) == ())
-        repeated = await protocol_error(runtime.submit(workload, ctx))
+        children = child_pids(runner)
+        try:
+            os.kill(runner, signal.SIGKILL)
+            await until(lambda: runner_pids(root) == ())
+            repeated = await protocol_error(runtime.submit(workload, ctx))
+        finally:
+            for pid in children:
+                terminate(pid)
+            assert all(exited_within(pid, 10) for pid in children)
 
     assert text.endswith("\n")
     assert text.count("runner.candidate_started") == 1
     assert journal.read_text() == text
     assert repeated.code == "runner_unreachable"
     assert runner_pids(root) == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expected", [0, 23, -signal.SIGTERM])
+async def test_command_exit_is_journalled_without_status(
+    tmp_path: Path, kora_capture: Capture, expected: int
+) -> None:
+    forged = '{"kind":"command_exited","data":{"exit_code":72}}'
+    terminal = (
+        f"raise SystemExit({expected})"
+        if expected >= 0
+        else f"import os\nos.kill(os.getpid(), {-expected})"
+    )
+    script = f"print({forged!r}, flush=True)\n{terminal}"
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(
+                runtime, "attempt-1", (sys.executable, "-I", "-c", script)
+            ),
+            ctx,
+        )
+        journal = attempt_directory(root, runtime, "attempt-1") / "journal.jsonl"
+
+        await runtime.start(handle, ctx)
+        await until(
+            lambda: any(
+                event.kind == "command_exited" for event in journal_events(journal)
+            )
+        )
+        recorded_events = journal_events(journal)
+        await runtime.start(handle, ctx)
+        status = await runtime.status(handle, ctx)
+        repeated = journal_events(journal)
+
+    assert [event.i for event in recorded_events] == [0, 1]
+    assert [event.kind for event in recorded_events] == [
+        "runner.candidate_started",
+        "command_exited",
+    ]
+    assert recorded_events[1].data == {"exit_code": expected}
+    assert repeated == recorded_events
+    assert status.state == "exited"
+    assert status.exit_code == expected
 
 
 @pytest.mark.asyncio
@@ -563,31 +640,63 @@ async def test_same_submitter_reconnect_does_not_spawn(
 
 
 @pytest.mark.asyncio
-async def test_cancelled_start_does_not_kill_the_command(
+async def test_disconnected_start_does_not_kill_the_command(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with launched(tmp_path, kora_capture) as (runtime, ctx, _root):
-        handle = await runtime.submit(
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        await runtime.submit(
             command_workload(runtime, "attempt-1", (binary("sleep"), "60")), ctx
         )
-        runner = await running_pid(runtime, "attempt-1")
-        task = asyncio.create_task(runtime.start(handle, ctx))
-        await until(lambda: len(child_pids(runner)) == 1)
-        task.cancel()
+        entry = await recorded(runtime, "attempt-1")
+        assert isinstance(entry, Running)
+        deadline = ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS
+        endpoint = await connected(entry.socket_path, ctx.clock, deadline)
+        channel = BoundedChannel(endpoint, ctx.clock)
+        request = AttachRequest(
+            op="attach", request_id="wire", dispatcher_id=entry.submitter.dispatcher_id
+        )
+
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        held = child_pids(runner)
-        assert len(held) == 1
-        os.kill(held[0], 0)
+            await attested(
+                endpoint,
+                entry.runner,
+                kernel_source(NativeIdentityReader()),
+                runtime.executor,
+            )
+            await channel.write_typed_frame(
+                FrameType.JSON,
+                canonical_bytes(request.model_dump(mode="json")),
+                deadline,
+            )
+            _, payload = await channel.read_typed_frame(
+                deadline, {FrameType.JSON.value: ENVELOPE_BYTES}
+            )
+            read_delivery(payload, "wire", "attached")
+            await channel.write_typed_frame(
+                FrameType.JSON, control_request("start", "wire"), deadline
+            )
+            await until(lambda: len(child_pids(entry.runner.pid)) == 1)
+        finally:
+            channel.close()
+        (leader,) = child_pids(entry.runner.pid)
+        journal = attempt_directory(root, runtime, "attempt-1") / "journal.jsonl"
+        await until(lambda: len(journal_events(journal)) == 1)
+        os.kill(leader, signal.SIGTERM)
+        await until(lambda: len(journal_events(journal)) == 2)
+        events = journal_events(journal)
+
+    assert [event.kind for event in events] == [
+        "runner.candidate_started",
+        "command_exited",
+    ]
+    assert events[1].data == {"exit_code": -signal.SIGTERM}
 
 
 @pytest.mark.asyncio
 async def test_launch_failure_has_no_fabricated_exit(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with launched(tmp_path, kora_capture) as (runtime, ctx, _root):
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle = await runtime.submit(
             command_workload(runtime, "attempt-1", ("/no/such/kora-command-809",)),
             ctx,
@@ -598,7 +707,10 @@ async def test_launch_failure_has_no_fabricated_exit(
         second = await protocol_error(runtime.start(handle, ctx))
         status = await runtime.status(handle, ctx)
         assert child_pids(runner) == ()
+        journal = attempt_directory(root, runtime, "attempt-1") / "journal.jsonl"
+        events = journal_events(journal)
 
+    assert events == ()
     assert first.code == "command_not_started"
     assert second.code == "command_not_started"
     assert first.retryable is False
@@ -610,13 +722,16 @@ async def test_launch_failure_has_no_fabricated_exit(
 async def test_leader_exit_capture_eof_and_descriptors_are_separate(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with launched(tmp_path, kora_capture) as (runtime, ctx, _root):
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle = await runtime.submit(
             command_workload(runtime, "attempt-1", (sys.executable, "-I", "-c", HOLD)),
             ctx,
         )
         await runtime.start(handle, ctx)
         runner = await running_pid(runtime, "attempt-1")
+        journal = attempt_directory(root, runtime, "attempt-1") / "journal.jsonl"
+        await until(lambda: len(journal_events(journal)) == 2)
+        events = journal_events(journal)
         await until_exited(runtime, handle, ctx)
         status = await runtime.status(handle, ctx)
         holders = marker_pids(HOLD_MARKER)
@@ -633,6 +748,8 @@ async def test_leader_exit_capture_eof_and_descriptors_are_separate(
         after = await runtime.status(handle, ctx)
         assert marker_pids(HOLD_MARKER) == ()
 
+    assert events[-1].kind == "command_exited"
+    assert events[-1].data == {"exit_code": 0}
     assert (status.state, status.exit_code) == ("exited", 0)
     assert (after.state, after.exit_code) == (status.state, status.exit_code)
 
@@ -728,7 +845,84 @@ async def test_journal_enospc_closes_refuses_and_stops_the_candidate(
     assert again.code == "journal_unavailable"
     assert child_pids(runner) == ()
     assert "runner.candidate_started" not in stored
+    assert "command_exited" not in stored
     assert isinstance(entry, Running)
+
+
+async def empty_transfer() -> AsyncGenerator[bytes]:
+    yield b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.host_fixture
+async def test_terminal_journal_enospc_fences_without_losing_exit(
+    kora_capture: Capture,
+) -> None:
+    small = private_directory(
+        prepared("small-filesystem"), f"{PATH_MARKER}-{os.getpid()}-command-exit"
+    )
+    root = private_directory(small, "state")
+    ctx = runtime_context(kora_capture)
+    item = TransferItem(
+        kind="input",
+        name="after-exit",
+        size=0,
+        sha256=f"sha256:{hashlib.sha256(b'').hexdigest()}",
+    )
+    with short_directory() as base:
+        runtime = await open_spawning(root, ctx, base / "sockets")
+        try:
+            workload = command_workload(runtime, "attempt-1", (binary("sleep"), "60"))
+            handle = await runtime.submit(workload, ctx)
+            await runtime.start(handle, ctx)
+            runner = await running_pid(runtime, "attempt-1")
+            (leader,) = child_pids(runner)
+            attempt = attempt_directory(root, runtime, "attempt-1")
+            journal = attempt / "journal.jsonl"
+            (started,) = journal_events(journal)
+            fill(attempt)
+            with journal.open("ab", buffering=0) as filler:
+                fill_descriptor(filler.fileno())
+            full_size = journal.stat().st_size
+
+            os.kill(leader, signal.SIGTERM)
+            async with asyncio.timeout(10):
+                while True:
+                    try:
+                        await runtime.start(handle, ctx)
+                    except KoraProtocolError as error:
+                        start_error = error
+                        break
+            transfer_error = await protocol_error(
+                runtime.transfer_in(handle, item, empty_transfer(), ctx)
+            )
+            status = await runtime.status(handle, ctx)
+            anchor = open_local_directory(attempt)
+            try:
+                retained = read_records(anchor)
+            finally:
+                anchor.close()
+            persisted = journal_events(journal)
+            size = journal.stat().st_size
+        finally:
+            release_commands(root)
+            await runtime.close()
+            reap_runners(root)
+            shutil.rmtree(small)
+
+    assert started.kind == "runner.candidate_started"
+    assert retained == ((started.i, started.kind),)
+    assert persisted == (started,)
+    assert size == full_size
+    assert start_error.code == "journal_unavailable"
+    assert start_error.retryable is True
+    assert transfer_error.code == "journal_unavailable"
+    assert transfer_error.retryable is True
+    assert (status.state, status.phase, status.exit_code) == (
+        "exited",
+        "failed",
+        -signal.SIGTERM,
+    )
 
 
 @pytest.mark.asyncio
