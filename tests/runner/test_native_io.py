@@ -3,13 +3,13 @@ import errno
 import os
 import threading
 from collections.abc import Callable
-from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
 
 from kora.protocols.errors import KoraProtocolError
 from kora.runner.native_io import (
+    BorrowedInvocation,
     NativeExecutor,
     NativeIOBusy,
     NativeIONotInvoked,
@@ -443,7 +443,7 @@ async def test_deferred_cleanup_joins_borrower_outside_pool(tmp_path: Path) -> N
     returned = threading.Event()
     release_thread = threading.Event()
     closed = threading.Event()
-    owner = NativeOperation(borrower=Future())
+    owner = NativeOperation(borrower=BorrowedInvocation())
 
     def native_thread() -> None:
         owner.invoke(lambda: os.fstat(descriptor))
@@ -480,7 +480,7 @@ async def test_deferred_cleanup_joins_borrower_outside_pool(tmp_path: Path) -> N
 async def test_deferred_cleanup_disarms_a_late_borrower() -> None:
     entered = threading.Event()
     closed = threading.Event()
-    owner = NativeOperation(borrower=Future(), deferred_cleanup=closed.set)
+    owner = NativeOperation(borrower=BorrowedInvocation(), deferred_cleanup=closed.set)
 
     await asyncio.to_thread(owner.release_deferred)
     with pytest.raises(NativeIONotInvoked):

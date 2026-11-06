@@ -29,33 +29,47 @@ class NativeIOSubmissionUncertain(NativeIOUnresolved):
     pass
 
 
+@dataclass
+class BorrowedInvocation:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    worker: threading.Thread | None = None
+    sealed: bool = False
+
+    def enter(self) -> None:
+        with self.lock:
+            if self.sealed:
+                raise NativeIONotInvoked
+            self.worker = threading.current_thread()
+
+    def seal(self) -> threading.Thread | None:
+        with self.lock:
+            self.sealed = True
+            return self.worker
+
+
 @dataclass(eq=False)
 class NativeOperation:
     settled: asyncio.Event = field(default_factory=asyncio.Event)
     retained: object | None = None
-    borrower: Future[threading.Thread] | None = None
+    borrower: BorrowedInvocation | None = None
     deferred_cleanup: Callable[[], None] | None = None
     cleanup_attempted: bool = False
 
     def invoke(self, function: Callable[[], Result]) -> Result:
-        borrower = self.borrower
-        if borrower is not None and not borrower.set_running_or_notify_cancel():
-            raise NativeIONotInvoked
-        try:
-            result = function()
-            self.retained = result
-            return result
-        finally:
-            if borrower is not None:
-                borrower.set_result(threading.current_thread())
+        if self.borrower is not None:
+            self.borrower.enter()
+        result = function()
+        self.retained = result
+        return result
 
     def release_deferred(self) -> None:
         cleanup = self.deferred_cleanup
         borrower = self.borrower
         if cleanup is None or borrower is None or self.cleanup_attempted:
             return
-        if not borrower.cancel():
-            borrower.result().join()
+        worker = borrower.seal()
+        if worker is not None:
+            worker.join()
         self.cleanup_attempted = True
         cleanup()
         self.deferred_cleanup = None
@@ -155,7 +169,9 @@ class NativeExecutor:
             raise NativeIOBusy
         self.loop = asyncio.get_running_loop()
         owned = NativeOperation(
-            borrower=Future() if after_uncertain_submission is not None else None
+            borrower=BorrowedInvocation()
+            if after_uncertain_submission is not None
+            else None
         )
         self.jobs.add(owned)
         unresolved = True
@@ -177,7 +193,7 @@ class NativeExecutor:
             except (RuntimeError, MemoryError):
                 owned.deferred_cleanup = after_uncertain_submission
                 if owned.borrower is not None:
-                    owned.borrower.cancel()
+                    owned.borrower.seal()
                 raise NativeIOSubmissionUncertain from None
             unresolved = False
             cancelled = await completed(future) or cancelled
