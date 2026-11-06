@@ -8,7 +8,7 @@ The first working authentication profile uses an explicit native Responses provi
 
 The selected execution arrangement uses the official pinned Codex 0.166.0 binary for two roles per attempt: one app-server and one exec-server. The selected-executor interface is experimental. Its acceptance is restricted to the exact supported binary/control profile; a changed pin or unverified branch requires new matching implementation and evidence, not compatibility inferred from a version-like field.
 
-Server composition under #549 retains selected-instance binding and endpoint/default resolution. This profile creates no server-wide default, provider factory, public executor selector, persisted profile format or new provider ABI member. Runtime construction, native declarations and host integration remain with their implementing issues.
+Server composition under #549 retains selected-instance binding and endpoint/default resolution. The optional in-process launcher extension approved under [#826](https://github.com/realkarych/kora/issues/826#issuecomment-6681105608) is the launch interface for this profile. Configured selection and declaration reads follow the existing effect-free contract.
 
 ## Execution and path binding
 
@@ -41,6 +41,23 @@ The provider key never enters declaration values, argv, diagnostics or durable d
 Under [#781](https://github.com/realkarych/kora/issues/781), the private Codex constructor builds both role inputs from already selected provider settings, admitted lexical placements, a shared checkout, the executable and Bash paths, and the executor capability digest. It emits native arguments, environment assignments and TOML without allocating a runtime or inspecting ambient state. The app-server recipe names the provider credential and disables the built-in executor. The exec-server recipe contains the capability digest, not a raw bearer or provider credential. The caller retains both secret values and their actual delivery.
 
 The constructor refuses overlapping lexical placements and collisions on the exact names it assigns or reserves for the provider-key owner. These are partial launch definitions, not complete reservations. Physical path identity, binary and effective managed-control checks, secret admission, materialization, final environment assembly and process launch remain with the runtime owner. The [combined Linux fixture](../research/codex-launch-construction-2026-11-05.md) consumes these exact definitions and checks the selected command environment and effects with synthetic credentials. It does not activate the production launch or declaration contracts.
+
+## Bound native launch
+
+The selected Codex profile uses [bound native start](protocols.md#bound-native-start). Part D of #184 binds the two recipes from #781 to the same attempt and candidate checkout, with separate private role placements. Both roles use the same pinned official executable. The binding fixes each complete argument vector and native configuration. The adapter requests a role and receives the resources the runtime owner binds to that start.
+
+| Slot | Bound native command | Harness-credential grant |
+| --- | --- | --- |
+| app-server | `app-server` with the selected stdio and strict-config arguments | Exactly the admitted `CODEX_API_KEY` |
+| exec-server | `exec-server` with the selected loopback, strict-config and capability-digest arguments | Empty |
+
+Before either start or any value disclosure, the runtime refuses missing required or unexpected harness credentials, duplicate owners within either role's environment, and forbidden names across the selected profile. It verifies the pinned executable, admitted Bash, bound checkout and placement view, and the configuration and environment for the actual launch. The verified configuration fixes the Responses destination and untrusted checkout. App-server's bound environment sets `CODEX_EXEC_SERVER_URL=none` to disable the built-in executor. App-server's stdio and the attested exec-server endpoint stay under the runtime owner. The live checks follow the startup order below.
+
+The harness grant supplies the key only to app-server's initial environment. Exec-server and its Bash child's initial environments must omit that key. This delivery guarantee retains DD-30 and the cooperative-local same-user residual. Independently authorized workload secrets keep their own grant. The raw executor bearer remains confined to the admitted registration channel.
+
+Native conformance under part D and #199 exercises both starts with an official binary and a synthetic key on Linux and macOS. It verifies the app-server grant and key absence in exec-server and its Bash child, and observes refusal before disclosure and activation with a valid synthetic grant for legacy allocation, wrong-role or argument substitution, and mismatched executable, configuration or environment. It exercises missing and unexpected grants, forbidden and duplicate names, unknown, stale, reused, cross-attempt and concurrently requested slots, and expiry or stop during acquisition, gated launch and delivery. Partial start tests include one running role when the second fails and verify actual closure of roles, descendants, streams, endpoints and private trees. Diagnostics and durable data follow the existing negative secret-evidence obligations.
+
+The SDK launch path remains available to SDK-selected profiles. Codex activation requires the real owner-bound launcher and host, selected-profile conformance, complete applicable declarations under #549, and the separate required Policy gate below.
 
 ## Selected startup and checkout trust
 
