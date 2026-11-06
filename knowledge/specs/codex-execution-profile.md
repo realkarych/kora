@@ -50,6 +50,16 @@ The startup helper borrows the fresh attempt's exclusive app-server RPC and the 
 
 The [selected startup probe](../research/codex-selected-startup-2026-11-06.md) exercises the real Linux checkout controls, expected reply fields and separate bearer/Bash refusal stages with synthetic credentials. Its direct process and container observations do not replace the runtime's independent endpoint identity, reconnect fencing or whole-domain closure. Complete facts, runtime activation and native macOS qualification remain pending.
 
+## Required tool policy activation
+
+Under [#810](https://github.com/realkarych/kora/issues/810), both native roles retain the same approved official Codex release. The [selected-profile fault probe](../research/codex-managed-hook-failures-2026-11-06.md) observed official 0.166.0 report a failed managed hook and still execute the Bash command after exit 1, exit 2 without the blocking reason, and timeout. An explicit managed denial blocked the identical command. These are Linux Bash observations.
+
+Before activating this profile for required tool policy, prove that the authenticated managed `PreToolUse` decision controls every claimed covered call before it reaches the tool. A denial, absent or invalid decision, Policy failure or timeout cannot release that call. A late decision, replay, input rewrite without matching authorization, or mismatched role, attempt, selected workspace or call cannot authorize effects. Qualification binds the actual covered action to the selected official version, platform and controls, not to candidate-supplied metadata or a reported success. Preserve the denied-call behavior in [section 13](protocols.md#13-conformance-suites-nfr-102) and the existing `test_required_policy_is_enforced_or_rejected` and `test_policy_failure_denies` obligations.
+
+An official native blocking facility or a separately qualified runtime guard may supply the required control. Any guard supplements the same managed hook decision and the runtime's existing authority. Neither path is qualified by this design. `hook/completed`, an executor identifier, a native tool result and a later interrupt do not supply blocking authorization. The [source and evidence limits](../research/codex-official-policy-gate-2026-11-06.md) distinguish the paths and remaining checks.
+
+Until qualification, complete `policy_coverage` remains unavailable for the affected selected profile under the [selected validation facts](validation-facts.md#10-native-codex-declarations). A missing guarantee is not a known-empty declaration. Existing validation and refusal semantics, independent reservation facts, and the runtime owner's deadline, first cause and actual closure remain unchanged.
+
 ## Resource owner and stopping
 
 One invocation's existing runtime/runner owner retains both native roles and every acquired stream, reader/writer/control task, listener, active connection/session, process/output/filesystem handle, native filesystem helper, HTTP request/body stream, descendant and per-attempt tree. Internal state requires explicit finite admission/retention and actual settlement; two top-level processes do not bound this state by themselves.
