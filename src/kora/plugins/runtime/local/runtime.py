@@ -1,5 +1,4 @@
 import asyncio
-import errno
 import os
 import re
 import secrets
@@ -17,7 +16,13 @@ from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
-from kora.plugins.runtime.local.channel import delivery_error, workload_digest
+from kora.plugins.runtime.local.channel import (
+    MESSAGE_PROGRESS_NS,
+    delivery_error,
+    transfer_cutoff,
+    workload_digest,
+    write_transfer_bytes,
+)
 from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
 from kora.plugins.runtime.local.configuration import (
     STATE_ROOT_LENGTH as STATE_ROOT_LENGTH,
@@ -64,11 +69,12 @@ from kora.protocols.runtime import (
 )
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget
-from kora.runner.channels import ChannelError
+from kora.runner.channels import ChannelError, ChannelFailure, wait_future
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_local_directory,
+    open_private_directory,
 )
 from kora.runner.identity import (
     SCAN_NS,
@@ -79,6 +85,7 @@ from kora.runner.identity import (
     NativeIdentityReader,
     ProcessScanFailure,
 )
+from kora.runner.native_io import observed
 from kora.runner.peers import PeerSource, kernel_source
 from kora.runner.processes import ExitAnchor, SignalResult, wait_member_change
 from kora.runner.registry import (
@@ -619,12 +626,122 @@ class LocalRuntime:
         key = self.key_of(handle, ctx)
         if self._closing is not None:
             raise refusal("runtime_closed")
+        task = asyncio.create_task(self._transfer(key, item, chunks, ctx))
+        self._deliveries.add(task)
+        try:
+            await task
+        finally:
+            self._deliveries.discard(task)
+
+    async def _transfer(
+        self,
+        key: AttemptKey,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+    ) -> None:
+        clock = ctx.clock
+        deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
         entry = await self.entry(key)
         if not isinstance(entry, Running):
             raise refusal("runner_starting")
-        spool = self._launch.socket_directory / "spool" / secrets.token_hex(16)
+        if entry.gate_closed:
+            raise delivery_error("deadline_expired")
+        cutoff = transfer_cutoff(clock, entry.deadline)
+        if cutoff is not None:
+            deadline = min(deadline, cutoff)
+        if clock.monotonic_ns() >= deadline:
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable")
+        task = asyncio.create_task(
+            self._spool_and_send(entry, item, chunks, ctx, deadline)
+        )
         try:
-            await self._fill_spool(spool, item, chunks)
+            try:
+                await wait_future(task, deadline, clock)
+            finally:
+                task.cancel()
+                if await observed(task):
+                    raise asyncio.CancelledError
+        except (ListenerRefused, ChannelError, OSError, FilesystemError):
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code != "message_refused":
+                raise
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable") from None
+        await self._check_transfer_deadline(key, entry, ctx, cutoff)
+
+    async def _check_transfer_deadline(
+        self, key: AttemptKey, entry: Running, ctx: ProtocolContext, cutoff: int | None
+    ) -> None:
+        if cutoff is not None and ctx.clock.monotonic_ns() >= cutoff:
+            await self.transition(
+                key,
+                lambda current: takeover_cell(current, entry, entry.submitter, True),
+                ctx,
+                "transfer_in",
+            )
+
+    def _open_spool(self) -> int:
+        root = open_socket_directory(self._launch.socket_directory)
+        try:
+            try:
+                os.mkdir("spool", mode=0o700, dir_fd=root.descriptor)
+            except FileExistsError:
+                pass
+            directory = open_private_directory(root, "spool")
+            try:
+                name = secrets.token_hex(16)
+                flags = (
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+                )
+                descriptor = os.open(name, flags, 0o600, dir_fd=directory.descriptor)
+                try:
+                    os.unlink(name, dir_fd=directory.descriptor)
+                except OSError:
+                    os.close(descriptor)
+                    raise
+                return descriptor
+            finally:
+                directory.close()
+        finally:
+            root.close()
+
+    async def _spool_and_send(
+        self,
+        entry: Running,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+        deadline: int,
+    ) -> None:
+        descriptor: int | None = None
+
+        def acquire() -> None:
+            nonlocal descriptor
+            if ctx.clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+            descriptor = self._open_spool()
+
+        try:
+            await self.executor.run(acquire)
+            spool = descriptor
+            if spool is None:
+                raise RuntimeError("missing spool descriptor")
+            total = 0
+            async for chunk in chunks:
+                total += len(chunk)
+                if total > item.size:
+                    raise delivery_error("integrity_error")
+                if ctx.clock.monotonic_ns() >= deadline:
+                    raise ChannelError(ChannelFailure.DEADLINE)
+                await self.executor.run(
+                    partial(write_transfer_bytes, spool, memoryview(chunk))
+                )
+            if total != item.size:
+                raise delivery_error("integrity_error")
             await transfer_input(
                 entry.socket_path,
                 entry.runner,
@@ -635,46 +752,11 @@ class LocalRuntime:
                 self._new_identifier(),
                 spool,
                 item,
+                deadline,
             )
-        except ListenerRefused:
-            raise refusal("runner_unreachable") from None
-        except (ChannelError, OSError):
-            raise refusal("runner_unreachable") from None
-        except KoraProtocolError as error:
-            if error.code == "message_refused":
-                raise refusal("runner_unreachable") from None
-            raise
         finally:
-            spool.unlink(missing_ok=True)
-
-    async def _fill_spool(
-        self, path: Path, item: TransferItem, chunks: AsyncIterator[bytes]
-    ) -> None:
-        path.parent.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(path.parent, 0o700)
-        descriptor = os.open(
-            path,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-        )
-        try:
-            total = 0
-            async for chunk in chunks:
-                total += len(chunk)
-                if total > item.size:
-                    raise delivery_error("integrity_error")
-                view = memoryview(chunk)
-                offset = 0
-                while offset < len(view):
-                    written = os.write(descriptor, view[offset:])
-                    if written <= 0:
-                        raise OSError(errno.EIO, os.strerror(errno.EIO))
-                    offset += written
-            if total != item.size:
-                raise delivery_error("integrity_error")
-            await self.executor.run(lambda: os.fsync(descriptor))
-        finally:
-            os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
 
     def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
         if workload.execution_domain_id != self.execution_domain_id:

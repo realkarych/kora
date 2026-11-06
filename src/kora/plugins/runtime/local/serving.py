@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar
 
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.accepted_socket import accept_socket
@@ -34,13 +34,15 @@ from kora.plugins.runtime.local.channel import (
     read_transfer_bytes,
     receive_section,
     status_envelope,
+    transfer_cutoff,
     workload_digest,
+    write_transfer_bytes,
 )
-from kora.plugins.runtime.local.command import CommandSession
+from kora.plugins.runtime.local.command import CommandSession, Incoming
 from kora.plugins.runtime.local.spawn import open_socket_directory
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
-from kora.protocols.runtime import RuntimeStatus, Workload
+from kora.protocols.runtime import RuntimeStatus, TransferItem, Workload
 from kora.protocols.time import Clock
 from kora.runner.channels import (
     BoundedChannel,
@@ -51,6 +53,7 @@ from kora.runner.channels import (
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 from kora.runner.identity import IdentityReader, IdentityState
 from kora.runner.journal import space_error
+from kora.runner.native_io import NativeIOUnresolved
 from kora.runner.peers import PeerRefused, PeerSource, unchanged
 from kora.runner.registry import (
     AttemptKey,
@@ -62,6 +65,8 @@ from kora.runner.registry import (
     refusal,
     takeover_cell,
 )
+
+Result = TypeVar("Result")
 
 UNATTACHED: Final[int] = 8
 CONNECTIONS: Final[int] = 16
@@ -382,7 +387,7 @@ class ControlServer:
             raise AuthenticationRefused(Refusal.HEAD_CHANGED)
         return entry
 
-    def _authorized(self, submitter: Submitter) -> Running:
+    def _authorized(self, submitter: Submitter, cutoff: int | None = None) -> Running:
         entry = self._running()
         if entry.submitter != submitter:
             raise delivery_error("submitter_superseded")
@@ -391,6 +396,7 @@ class ControlServer:
         if (
             entry.gate_closed
             or self._deadline_closed
+            or (cutoff is not None and self._clock.monotonic_ns() >= cutoff)
             or (
                 deadline is not None
                 and self._clock.now() >= deadline.at - deadline.clock_uncertainty
@@ -436,10 +442,9 @@ class ControlServer:
                 continue
             transfer = read_transfer(payload)
             if transfer is not None:
-                answer = await self._receive_transfer(
-                    channel, submitter, observational, transfer
+                await self._receive_transfer(
+                    channel, submitter, observational, transfer, started
                 )
-                await self._answer(channel, answer)
                 continue
             header = parse_header(payload, ACCEPT_WORKLOAD)
             declaration = header.sections[0]
@@ -520,68 +525,146 @@ class ControlServer:
         submitter: Submitter,
         observational: bool,
         request: TransferRequest,
-    ) -> bytes:
+        started: int,
+    ) -> None:
         item = request.item
         command = self._command
-        if command is None:
-            await read_transfer_bytes(channel, self._clock, None, item.size)
-            return error_envelope(
-                request.request_id, delivery_error("transfer_refused")
+        cutoff: int | None = None
+        deadline = started + MESSAGE_PROGRESS_NS
+        claimed = False
+
+        def authorize() -> None:
+            if self._closing is not None:
+                raise delivery_error("transfer_refused")
+            self._authorized(submitter, cutoff)
+            if self._clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        try:
+            try:
+                if command is None:
+                    raise delivery_error("transfer_refused")
+                if observational:
+                    raise delivery_error("execution_unauthorized")
+                entry = await self._executor.run(lambda: self._authorized(submitter))
+                cutoff = transfer_cutoff(self._clock, entry.deadline)
+                if cutoff is not None:
+                    deadline = min(deadline, cutoff)
+                decision = command.decide_transfer(submitter, observational, item)
+                claimed = True
+            except KoraProtocolError as error:
+                await read_transfer_bytes(channel, self._clock, item.size, deadline)
+                await self._answer(
+                    channel, self._transfer_answer(request.request_id, error)
+                )
+                return
+            try:
+                if decision == "write":
+                    await self._store_transfer(
+                        channel, command, item, deadline, authorize
+                    )
+                else:
+                    digest = await read_transfer_bytes(
+                        channel, self._clock, item.size, deadline
+                    )
+
+                    def complete() -> None:
+                        authorize()
+                        command.complete_seen(decision, item, digest)
+
+                    await self._executor.run(complete)
+                await self._executor.run(authorize)
+            except KoraProtocolError as error:
+                await self._answer(
+                    channel, self._transfer_answer(request.request_id, error)
+                )
+                return
+            await channel.write_typed_frame(
+                FrameType.JSON,
+                delivery_envelope(request.request_id, "transferred"),
+                min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS),
             )
-        try:
-            decision = command.decide_transfer(submitter, observational, item)
-        except KoraProtocolError as error:
-            await read_transfer_bytes(channel, self._clock, None, item.size)
-            return self._transfer_answer(request.request_id, error)
-        if decision != "write":
-            digest = await read_transfer_bytes(channel, self._clock, None, item.size)
-            try:
-                await self._executor.run(
-                    lambda: command.complete_seen(decision, item, digest)
-                )
-            except KoraProtocolError as error:
-                return self._transfer_answer(request.request_id, error)
-            return delivery_envelope(request.request_id, "transferred")
-        try:
-            try:
-                descriptor = command.open_incoming()
-            except OSError as error:
-                await read_transfer_bytes(channel, self._clock, None, item.size)
-                if not space_error(error):
-                    raise
-                command.fence_transfer()
-                return error_envelope(
-                    request.request_id, delivery_error("journal_unavailable")
-                )
-            owned = True
-            try:
-                digest = await read_transfer_bytes(
-                    channel, self._clock, descriptor, item.size
-                )
-                owned = False
-                await self._executor.run(
-                    lambda: command.finish_incoming(descriptor, item, digest)
-                )
-            except OSError as error:
-                if owned:
-                    command.discard_incoming(descriptor)
-                    if space_error(error):
-                        command.fence_transfer()
-                        return error_envelope(
-                            request.request_id, delivery_error("journal_unavailable")
-                        )
-                raise
-            except KoraProtocolError as error:
-                if owned:
-                    command.discard_incoming(descriptor)
-                return self._transfer_answer(request.request_id, error)
-            except BaseException:
-                if owned:
-                    command.discard_incoming(descriptor)
-                raise
-            return delivery_envelope(request.request_id, "transferred")
+        except ChannelError:
+            if cutoff is not None and self._clock.monotonic_ns() >= cutoff:
+                await self._executor.run(lambda: self._authorized(submitter, cutoff))
+            raise
         finally:
-            command.end_transfer()
+            if command is not None and claimed:
+                command.end_transfer()
+
+    def _transfer_io(
+        self, command: CommandSession, operation: Callable[[], Result]
+    ) -> Result:
+        try:
+            return operation()
+        except FilesystemError:
+            raise delivery_error("transfer_refused") from None
+        except OSError as error:
+            if space_error(error):
+                command.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+                raise delivery_error("transfer_refused") from None
+            raise
+
+    async def _store_transfer(
+        self,
+        channel: BoundedChannel,
+        command: CommandSession,
+        item: TransferItem,
+        deadline: int,
+        authorize: Callable[[], None],
+    ) -> None:
+        incoming: Incoming | None = None
+
+        def open_incoming() -> None:
+            nonlocal incoming
+            authorize()
+            incoming = self._transfer_io(command, command.open_incoming)
+
+        def dispose() -> None:
+            nonlocal incoming
+            if incoming is not None:
+                owned, incoming = incoming, None
+                self._transfer_io(command, lambda: command.discard_incoming(owned))
+
+        try:
+            try:
+                await self._executor.run(open_incoming)
+            except KoraProtocolError:
+                await read_transfer_bytes(channel, self._clock, item.size, deadline)
+                raise
+            opened = incoming
+            if opened is None:
+                raise RuntimeError("missing incoming descriptor")
+
+            async def write(piece: memoryview) -> None:
+                def write_piece() -> None:
+                    if self._clock.monotonic_ns() >= deadline:
+                        raise ChannelError(ChannelFailure.DEADLINE)
+                    write_transfer_bytes(opened.descriptor, piece)
+
+                await self._executor.run(
+                    partial(self._transfer_io, command, write_piece)
+                )
+
+            digest = await read_transfer_bytes(
+                channel, self._clock, item.size, deadline, write
+            )
+            await self._executor.run(
+                lambda: self._transfer_io(
+                    command,
+                    lambda: command.finish_incoming(opened, item, digest, authorize),
+                )
+            )
+        finally:
+            if incoming is not None:
+                try:
+                    await self._executor.run(dispose)
+                except (KoraProtocolError, NativeIOUnresolved):
+                    if incoming is None:
+                        raise
+                    dispose()
 
     async def _start(
         self, submitter: Submitter, request_id: str, observational: bool
@@ -591,7 +674,6 @@ class ControlServer:
             return error_envelope(
                 request_id, delivery_error("workload_kind_unavailable")
             )
-        command.prepare()
         try:
             await self._executor.run(
                 lambda: command.begin(
@@ -607,7 +689,6 @@ class ControlServer:
             return error_envelope(request_id, error)
         finally:
             command.attach_drains()
-            command.abort_unused()
         return delivery_envelope(request_id, "started")
 
     def _observed(self) -> StatusValue:

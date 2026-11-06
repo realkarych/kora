@@ -4,9 +4,13 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -14,24 +18,39 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import LoggingSettings, configure_process
-from kora.plugins.runtime.local.control import transfer_input
+from kora.plugins.runtime.local.channel import (
+    ENVELOPE_BYTES,
+    FRAME_PROGRESS_NS,
+    MESSAGE_PROGRESS_NS,
+    SECTION_FRAME_BYTES,
+    AttachRequest,
+    FrameType,
+    TransferRequest,
+    read_delivery,
+)
+from kora.plugins.runtime.local.command import INCOMING
+from kora.plugins.runtime.local.control import attested, connected, transfer_input
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
+from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.identity import Handle
 from kora.protocols.runtime import TransferItem
 from kora.protocols.time import SystemClock
+from kora.runner.channels import BoundedChannel, ChannelError
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import NativeIdentityReader
 from kora.runner.journal import read_records
 from kora.runner.peers import kernel_source
-from kora.runner.registry import Running, TransitionExecutor
+from kora.runner.registry import Running, TransitionExecutor, takeover_cell
 from tests.plugins.runtime.local.test_command import (
     attempt_directory,
     binary,
     command_workload,
+    descriptor_numbers,
     fill,
     launched,
     reap_runners,
@@ -47,6 +66,7 @@ from tests.support.local_runners import (
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
+    open_descriptors,
     prepared,
     private_directory,
     protocol_error,
@@ -143,6 +163,66 @@ async def accepted(
     workload = command_workload(runtime, attempt, (binary("true"),))
     handle = await runtime.submit(workload, ctx)
     return handle, attempt_directory(root, runtime, attempt)
+
+
+@asynccontextmanager
+async def transfer_channel(
+    runtime: LocalRuntime, ctx: ProtocolContext, entry: Running
+) -> AsyncGenerator[BoundedChannel]:
+    deadline = ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS
+    endpoint = await connected(entry.socket_path, ctx.clock, deadline)
+    channel = BoundedChannel(endpoint, ctx.clock)
+    try:
+        endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        await attested(
+            endpoint,
+            entry.runner,
+            kernel_source(NativeIdentityReader()),
+            runtime.executor,
+        )
+        request = AttachRequest(
+            op="attach", request_id="wire", dispatcher_id=entry.submitter.dispatcher_id
+        )
+        await channel.write_typed_frame(
+            FrameType.JSON, canonical_bytes(request.model_dump(mode="json")), deadline
+        )
+        _, payload = await channel.read_typed_frame(
+            deadline, {FrameType.JSON.value: ENVELOPE_BYTES}
+        )
+        read_delivery(payload, "wire", "attached")
+        yield channel
+    finally:
+        channel.close()
+
+
+async def transfer_header(
+    channel: BoundedChannel, ctx: ProtocolContext, item: TransferItem
+) -> None:
+    request = TransferRequest(op="transfer_in", request_id="wire", item=item)
+    await channel.write_typed_frame(
+        FrameType.JSON,
+        canonical_bytes(request.model_dump(mode="json")),
+        ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+    )
+
+
+async def transfer_body(
+    channel: BoundedChannel, ctx: ProtocolContext, payload: bytes
+) -> None:
+    for offset in range(0, len(payload), SECTION_FRAME_BYTES):
+        await channel.write_typed_frame(
+            FrameType.BYTES,
+            payload[offset : offset + SECTION_FRAME_BYTES],
+            ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+        )
+
+
+async def transferred(channel: BoundedChannel, ctx: ProtocolContext) -> None:
+    _, payload = await channel.read_typed_frame(
+        ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+        {FrameType.JSON.value: ENVELOPE_BYTES},
+    )
+    read_delivery(payload, "wire", "transferred")
 
 
 @pytest.mark.asyncio
@@ -415,20 +495,23 @@ async def test_observational_attach_cannot_transfer(tmp_path: Path) -> None:
             spool = base / "body"
             spool.write_bytes(payload)
             executor = TransitionExecutor()
+            clock = SystemClock()
             try:
-                refused = await protocol_error(
-                    transfer_input(
-                        path.strip(),
-                        identity,
-                        "dispatcher-2",
-                        kernel_source(NativeIdentityReader()),
-                        executor,
-                        SystemClock(),
-                        "transfer-1",
-                        spool,
-                        input_item("payload", payload),
+                with spool.open("rb") as source:
+                    refused = await protocol_error(
+                        transfer_input(
+                            path.strip(),
+                            identity,
+                            "dispatcher-2",
+                            kernel_source(NativeIdentityReader()),
+                            executor,
+                            clock,
+                            "transfer-1",
+                            source.fileno(),
+                            input_item("payload", payload),
+                            clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
+                        )
                     )
-                )
             finally:
                 await executor.close()
             created = any((root / "attempts").glob("*/input"))
@@ -447,11 +530,263 @@ async def test_observational_attach_cannot_transfer(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.host_fixture
-async def test_fenced_journal_refuses_transfer(
+@pytest.mark.parametrize("replay", [False, True])
+async def test_start_waits_for_transfer_slot(
+    tmp_path: Path, kora_capture: Capture, replay: bool
+) -> None:
+    payload = b"x" * (8 * SECTION_FRAME_BYTES) + b"y"
+    item = input_item("payload", payload)
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+        if replay:
+            await runtime.transfer_in(handle, item, chunks(payload), ctx)
+        entry = await recorded(runtime, "attempt-1")
+        assert isinstance(entry, Running)
+
+        async with transfer_channel(runtime, ctx, entry) as channel:
+            await transfer_header(channel, ctx, item)
+            if replay:
+                await transfer_body(channel, ctx, payload[:-1])
+            else:
+                await until(lambda: (attempt / "input" / INCOMING).exists())
+            busy = await protocol_error(runtime.start(handle, ctx))
+            candidate_exists = (attempt / "candidate").exists()
+            if replay:
+                await transfer_body(channel, ctx, b"z")
+                rejected = await protocol_error(transferred(channel, ctx))
+            else:
+                await transfer_body(channel, ctx, payload)
+                await transferred(channel, ctx)
+                rejected = None
+        await runtime.start(handle, ctx)
+        anchor = open_local_directory(attempt)
+        try:
+            records = read_records(anchor)
+        finally:
+            anchor.close()
+
+    assert busy.code == "workload_busy"
+    assert busy.retryable is True
+    assert candidate_exists is False
+    indices = [index for index, _ in records]
+    assert indices == list(range(indices[0], indices[0] + len(indices)))
+    suffix = ["transfer.materialised"]
+    if replay:
+        assert rejected is not None
+        assert rejected.code == "integrity_error"
+        suffix.append("transfer.rejected")
+    assert [kind for _, kind in records][-len(suffix) - 1 :] == [
+        *suffix,
+        "runner.candidate_started",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lose_authority", ["deadline", "superseded"])
+async def test_held_body_loses_transfer_authority(
+    tmp_path: Path, kora_capture: Capture, lose_authority: str
+) -> None:
+    item = input_item("payload", b"x")
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(runtime, "attempt-1", (binary("true"),))
+        if lose_authority == "deadline":
+            deadline = ExecutionDeadline(
+                at=ctx.clock.now() + timedelta(seconds=4),
+                scope_kind="attempt",
+                scope_id="attempt-1",
+                clock_uncertainty=timedelta(0),
+                grace=DEADLINE_GRACE,
+            )
+            ctx = replace(ctx, deadline=deadline)
+            workload = workload.model_copy(update={"deadline": deadline})
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, handle.attempt_id)
+        entry = await recorded(runtime, handle.attempt_id)
+        assert isinstance(entry, Running)
+        before = descriptor_numbers(entry.runner.pid)
+        incoming = attempt / "input" / INCOMING
+
+        async with transfer_channel(runtime, ctx, entry) as channel:
+            await transfer_header(channel, ctx, item)
+            await until(incoming.exists)
+            if lose_authority == "deadline":
+                with pytest.raises(ChannelError):
+                    await transferred(channel, ctx)
+            else:
+                key = runtime.registry.key(handle.attempt_id)
+                successor = entry.submitter.model_copy(
+                    update={"dispatcher_id": "dispatcher-2"}
+                )
+                await runtime.transition(
+                    key,
+                    lambda current: takeover_cell(current, entry, successor, False),
+                    ctx,
+                    "submit",
+                )
+                await transfer_body(channel, ctx, b"x")
+                refused = await protocol_error(transferred(channel, ctx))
+                assert refused.code == "submitter_superseded"
+        await until(lambda: descriptor_numbers(entry.runner.pid) == before)
+        async with asyncio.timeout(5):
+            while True:
+                current = await recorded(runtime, handle.attempt_id)
+                assert isinstance(current, Running)
+                if lose_authority != "deadline" or current.gate_closed:
+                    break
+        names = tuple((attempt / "input").iterdir())
+        kinds = journal_kinds(attempt)
+
+    assert isinstance(current, Running)
+    assert current.gate_closed == (lose_authority == "deadline")
+    assert names == ()
+    assert "transfer.materialised" not in kinds
+    assert "transfer.rejected" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_settles_parked_spool(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    payload = b"x"
+    entered = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def parked() -> AsyncIterator[bytes]:
+        try:
+            yield b"a"
+            entered.set()
+            await asyncio.Event().wait()
+            yield b"b"
+        finally:
+            stopped.set()
+
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+        entry = await recorded(runtime, handle.attempt_id)
+        assert isinstance(entry, Running)
+        spool = Path(entry.socket_path).parent / "spool"
+        descriptors = open_descriptors()
+
+        async with asyncio.TaskGroup() as tasks:
+            operation = tasks.create_task(
+                runtime.transfer_in(handle, input_item("payload", b"ab"), parked(), ctx)
+            )
+            async with asyncio.timeout(5):
+                await entered.wait()
+                active = open_descriptors()
+                await runtime.close()
+        after = open_descriptors()
+        names = tuple(spool.iterdir())
+
+    assert active == descriptors + 1
+    assert after < active
+    assert operation.cancelled()
+    assert stopped.is_set()
+    assert names == ()
+    assert not (attempt / "input").exists()
+
+
+@pytest.mark.asyncio
+async def test_transfer_refuses_symlinked_spool(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    payload = b"payload"
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+        entry = await recorded(runtime, handle.attempt_id)
+        assert isinstance(entry, Running)
+        outside = tmp_path / "spool-target"
+        outside.mkdir(mode=0o755)
+        outside.chmod(0o755)
+        spool = Path(entry.socket_path).parent / "spool"
+        spool.symlink_to(outside, target_is_directory=True)
+
+        refused = await protocol_error(
+            runtime.transfer_in(
+                handle, input_item("payload", payload), chunks(payload), ctx
+            )
+        )
+        names = tuple(outside.iterdir())
+        mode = mode_of(outside)
+
+    assert refused.code == "runner_unreachable"
+    assert names == ()
+    assert mode == 0o755
+    assert not (attempt / "input").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collision", ["fifo", "hardlink", "oversized"])
+async def test_unrecorded_collision_refuses_without_opening(
+    tmp_path: Path, kora_capture: Capture, collision: str
+) -> None:
+    payload = b"payload"
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+        directory = private_directory(attempt, "input")
+        target = directory / "payload"
+        if collision == "fifo":
+            os.mkfifo(target, 0o400)
+        elif collision == "hardlink":
+            outside = attempt / "outside"
+            outside.write_bytes(payload)
+            target.hardlink_to(outside)
+        else:
+            target.write_bytes(payload + b"extra")
+        previous = target.stat()
+
+        refused = await protocol_error(
+            runtime.transfer_in(
+                handle, input_item("payload", payload), chunks(payload), ctx
+            )
+        )
+        current = target.stat()
+        names = sorted(path.name for path in directory.iterdir())
+        kinds = journal_kinds(attempt)
+
+    expected = "workload_conflict" if collision == "oversized" else "transfer_refused"
+    assert refused.code == expected
+    assert current.st_ino == previous.st_ino
+    assert current.st_size == previous.st_size
+    assert names == ["payload"]
+    assert "transfer.materialised" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_transfer_removes_placement_when_journal_refuses(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    payload = b"payload"
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+        target = tmp_path / "outside-journal"
+        target.write_bytes(b"outside")
+        journal = attempt / "journal.jsonl"
+        journal.unlink(missing_ok=True)
+        journal.symlink_to(target)
+
+        refused = await protocol_error(
+            runtime.transfer_in(
+                handle, input_item("payload", payload), chunks(payload), ctx
+            )
+        )
+        blocked = await protocol_error(runtime.start(handle, ctx))
+        names = tuple((attempt / "input").iterdir())
+        contents = target.read_bytes()
+
+    assert refused.code == "journal_unavailable"
+    assert blocked.code == "journal_unavailable"
+    assert names == ()
+    assert contents == b"outside"
+
+
+@pytest.mark.asyncio
+@pytest.mark.host_fixture
+@pytest.mark.parametrize("failure", ["open", "body"])
+async def test_fenced_journal_refuses_transfer(
+    tmp_path: Path, kora_capture: Capture, failure: str
+) -> None:
+    payload = b"x" * (SECTION_FRAME_BYTES + 1)
+    item = input_item("payload", payload)
     small = private_directory(
         prepared("small-filesystem"), f"{PATH_MARKER}-{os.getpid()}-transfer"
     )
@@ -461,12 +796,33 @@ async def test_fenced_journal_refuses_transfer(
         runtime = await open_spawning(root, ctx, base / "sockets")
         try:
             handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
-            fill(attempt)
-            refused = await protocol_error(
-                runtime.transfer_in(
-                    handle, input_item("payload", payload), chunks(payload), ctx
+            entry = await recorded(runtime, handle.attempt_id)
+            assert isinstance(entry, Running)
+            incoming = attempt / "input" / INCOMING
+            log = attempt / "runner.log"
+
+            if failure == "open":
+                fill(attempt)
+                refused = await protocol_error(
+                    runtime.transfer_in(handle, item, chunks(payload), ctx)
                 )
-            )
+                assert refused.code == "journal_unavailable"
+                assert refused.retryable is True
+            else:
+                async with transfer_channel(runtime, ctx, entry) as channel:
+                    await transfer_header(channel, ctx, item)
+                    await until(incoming.exists)
+                    fill(attempt)
+                    await transfer_body(channel, ctx, payload[:-1])
+                    await until(
+                        lambda: any(
+                            outcome == "journal_unavailable"
+                            for outcome, _ in transfer_diagnostics(log)
+                        )
+                    )
+                await until(lambda: not incoming.exists())
+            (attempt / "filler").unlink()
+            blocked = await protocol_error(runtime.start(handle, ctx))
             present = (attempt / "input").exists() and any(
                 (attempt / "input").iterdir()
             )
@@ -477,7 +833,7 @@ async def test_fenced_journal_refuses_transfer(
             reap_runners(root)
             shutil.rmtree(small)
 
-    assert refused.code == "journal_unavailable"
-    assert refused.retryable is True
+    assert blocked.code == "journal_unavailable"
+    assert blocked.retryable is True
     assert present is False
     assert "transfer.materialised" not in text

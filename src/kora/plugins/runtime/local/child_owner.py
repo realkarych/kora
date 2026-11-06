@@ -9,8 +9,8 @@ REAP_INTERVAL_SECONDS: Final[float] = 0.01
 
 
 class ChildOwner:
-    def __init__(self) -> None:
-        self.loop = asyncio.get_running_loop()
+    def __init__(self, *, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        self.loop = asyncio.get_running_loop() if loop is None else loop
         self.lock = threading.Lock()
         self.bound = threading.Event()
         self.wake = threading.Event()

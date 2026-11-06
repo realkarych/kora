@@ -1,7 +1,7 @@
 import errno
 import hashlib
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
 from functools import partial
@@ -13,7 +13,12 @@ from kora.executor.digests import object_digest
 from kora.ir.json import JsonObjectField
 from kora.ir.vcs_ref_json import JsonRefusal, canonical_bytes, decode_strict_json
 from kora.protocols.common import BoundaryModel
-from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
+from kora.protocols.deadlines import (
+    NANOSECONDS_PER_SECOND,
+    ClockSample,
+    ExecutionDeadline,
+    thresholds,
+)
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.identity import Count, Identifier, Sha256
 from kora.protocols.runtime import RuntimeStatus, TransferItem, Workload
@@ -449,7 +454,7 @@ def read_transfer(payload: bytes) -> TransferRequest | None:
     return None if request is None or request.op != "transfer_in" else request
 
 
-def _write_all(descriptor: int, payload: memoryview) -> None:
+def write_transfer_bytes(descriptor: int, payload: memoryview) -> None:
     offset = 0
     while offset < len(payload):
         written = os.write(descriptor, payload[offset:])
@@ -458,19 +463,26 @@ def _write_all(descriptor: int, payload: memoryview) -> None:
         offset += written
 
 
+def transfer_cutoff(clock: Clock, deadline: ExecutionDeadline | None) -> int | None:
+    if deadline is None:
+        return None
+    sample = ClockSample(clock.now(), clock.monotonic_ns())
+    return thresholds(deadline, sample).interrupt_at_ns
+
+
 async def read_transfer_bytes(
     channel: BoundedChannel,
     clock: Clock,
-    descriptor: int | None,
     size: int,
+    deadline_ns: int,
+    write: Callable[[memoryview], Awaitable[None]] | None = None,
 ) -> str:
     digest = hashlib.sha256()
     remaining = size
-    failed: OSError | None = None
-    deadline_ns = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+    failed: KoraProtocolError | None = None
     while remaining:
         if clock.monotonic_ns() >= deadline_ns:
-            raise message_refused(MessageRefusal.DEADLINE)
+            raise ChannelError(ChannelFailure.DEADLINE)
         window = min(SECTION_FRAME_BYTES, remaining)
         view = memoryview(bytearray(window))
         frame_deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, deadline_ns)
@@ -478,10 +490,12 @@ async def read_transfer_bytes(
             frame_deadline, FrameType.BYTES, view
         )
         piece = view[:received]
-        if descriptor is not None and failed is None:
+        if write is not None and failed is None:
             try:
-                _write_all(descriptor, piece)
-            except OSError as error:
+                await write(piece)
+            except KoraProtocolError as error:
+                if error.code != "journal_unavailable":
+                    raise
                 failed = error
         digest.update(piece)
         remaining -= received
