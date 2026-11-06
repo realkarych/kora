@@ -642,12 +642,22 @@ def test_failed_unmount_retains_ownership_until_the_blocker_closes(
                     assert len(notes) == 2
                     native = json.loads(notes[0])
                     assert native == {
-                        "native_summary_version": 1,
+                        "native_summary_version": 2,
                         "phase": "unmount",
                         "result": "refused",
                         "recorded_completion_known": True,
                         "recorded_cf_closed": True,
                         "code": request.outcome.code,
+                        "dissenter_pid": (
+                            "none"
+                            if request.outcome.dissenter_pid is None
+                            else request.outcome.dissenter_pid
+                        ),
+                        "dissenter_comm": (
+                            "none"
+                            if request.outcome.dissenter_comm is None
+                            else request.outcome.dissenter_comm
+                        ),
                     }
                     note = notes[1]
                     assert note.startswith("holder_observation v1 binding=unchanged"), (

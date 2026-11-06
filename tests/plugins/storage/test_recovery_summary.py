@@ -192,6 +192,53 @@ def test_summary_contains_only_approved_scalars(tmp_path: Path) -> None:
     assert frozenset(os.listdir("/dev/fd")) == before
 
 
+def test_summary_excludes_recorded_dissenter(tmp_path: Path) -> None:
+    helper: dict[str, JsonValue] = {"pid": 54321, "identity": MARKER}
+    image_stamp: dict[str, JsonValue] = {"device": 1, "inode": 3}
+    base = manifest()
+    native: dict[str, JsonValue] = {
+        "version": 1,
+        "request_id": "1" * 32,
+        "nonce": base["nonce"],
+        "controller": base["controller"],
+        "image_stamp": image_stamp,
+        "phase": "eject",
+        "device": "/dev/disk9",
+        "volume": None,
+        "entities": ["/dev/disk9"],
+        "deadline": 1.0,
+        "helper": helper,
+        "outcome": {
+            "version": 1,
+            "request_id": "1" * 32,
+            "phase": "eject",
+            "helper": helper,
+            "result": "refused",
+            "code": 49168,
+            "cf_closed": True,
+            "text_present": False,
+            "text_truncated": False,
+            "dissenter_pid": 4242,
+            "dissenter_comm": "private-comm",
+        },
+    }
+    record = base | {
+        "version": 2,
+        "image_stamp": image_stamp,
+        "attachment_requested": True,
+        "native": native,
+    }
+    (tmp_path / "pressure-manifest.json").write_text(json.dumps(record))
+
+    rendered = recovery_summary(tmp_path)
+
+    result = SUMMARY.validate_json(rendered)
+    assert result["manifest_state"] == "ok"
+    assert result.keys() == KEYS
+    assert "4242" not in rendered
+    assert "private-comm" not in rendered
+
+
 @pytest.mark.parametrize("state", ["omitted", "false", "null", "invalid"])
 def test_persisted_fields_remain_distinct_from_defaults(
     tmp_path: Path, state: str

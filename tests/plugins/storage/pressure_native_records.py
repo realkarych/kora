@@ -73,16 +73,29 @@ def read_outcome(directory: Path, request: NativeRequest) -> NativeOutcome:
     return outcome
 
 
+def reported_value(known: bool, value: int | str | None) -> int | str:
+    if not known:
+        return "unknown"
+    return "none" if value is None else value
+
+
 def native_note(request: NativeRequest) -> str:
     outcome = request.outcome
+    known = outcome is not None
     return json.dumps(
         {
-            "native_summary_version": 1,
+            "native_summary_version": 2,
             "phase": request.phase,
             "result": "unknown" if outcome is None else outcome.result,
             "recorded_completion_known": outcome is not None,
             "recorded_cf_closed": "unknown" if outcome is None else outcome.cf_closed,
             "code": "unknown" if outcome is None else outcome.code,
+            "dissenter_pid": reported_value(
+                known, None if outcome is None else outcome.dissenter_pid
+            ),
+            "dissenter_comm": reported_value(
+                known, None if outcome is None else outcome.dissenter_comm
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),

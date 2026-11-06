@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import cast
 
 from tests.plugins.storage.pressure_controller import read_manifest, save
+from tests.plugins.storage.pressure_holders import Native, process_comm
 from tests.plugins.storage.pressure_models import (
     NativeOutcome,
     NativeRequest,
@@ -35,6 +36,10 @@ def private_text(cf: ctypes.CDLL, string: int) -> tuple[bytes, bool]:
     return encoded, count < units
 
 
+def reported_process(value: int) -> int | None:
+    return value if value > 0 else None
+
+
 class NativeCall:
     def __init__(self, request: NativeRequest) -> None:
         self.request: NativeRequest = request
@@ -47,6 +52,8 @@ class NativeCall:
         self.text: bytes = b""
         self.text_present: bool = False
         self.text_truncated: bool = False
+        self.dissenter_pid: int | None = None
+        self.dissenter_comm: str | None = None
 
     def perform(self) -> None:
         if sys.platform != "darwin":
@@ -70,6 +77,8 @@ class NativeCall:
         unschedule = ffi(None, ref, ref, ref)(("DASessionUnscheduleFromRunLoop", da))
         status = ffi(ctypes.c_uint32, ref)(("DADissenterGetStatus", da))
         status_string = ffi(ref, ref)(("DADissenterGetStatusString", da))
+        process_id = ffi(ctypes.c_int, ref)(("DADissenterGetProcessID", da))
+        native = Native()
         operation = ffi(None, ref, ctypes.c_uint32, callback_type, ref)(
             ("DADiskUnmount" if self.request.phase == "unmount" else "DADiskEject", da)
         )
@@ -96,6 +105,11 @@ class NativeCall:
                 None
                 if dissenter is None
                 else cast(int | None, status_string(dissenter))
+            )
+            self.dissenter_pid = (
+                None
+                if dissenter is None
+                else reported_process(cast(int, process_id(dissenter)))
             )
             self.text_present = string is not None
             if string is not None:
@@ -131,6 +145,8 @@ class NativeCall:
                 run_loop(mode, max(0, deadline - time.monotonic()), 1)
             if self.invalid or not self.finished:
                 raise PressureFailure("native_completion_unknown")
+            if self.dissenter_pid is not None:
+                self.dissenter_comm = process_comm(native, self.dissenter_pid)
         finally:
             if scheduled:
                 unschedule(session, loop, mode)
@@ -162,6 +178,8 @@ class NativeCall:
             cf_closed=True,
             text_present=self.text_present,
             text_truncated=self.text_truncated,
+            dissenter_pid=self.dissenter_pid,
+            dissenter_comm=self.dissenter_comm,
         )
 
 

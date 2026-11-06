@@ -506,6 +506,21 @@ def module_violations(source: str) -> set[str]:
     return violations
 
 
+def test_disk_arbitration_helper_sends_no_signal() -> None:
+    source = Path(__file__).with_name("pressure_disk_arbitration.py").read_text()
+
+    tree = ast.parse(source)
+    names = {
+        node.attr if isinstance(node, ast.Attribute) else node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute | ast.Name)
+    }
+
+    assert names.isdisjoint(
+        {"kill", "killpg", "signal", "send_signal", "terminate", "pthread_kill"}
+    )
+
+
 def test_holder_observer_module_contract() -> None:
     source = Path(__file__).with_name("pressure_holders.py").read_text()
     conforming = (

@@ -508,6 +508,11 @@ class Native:
         return None, "layout"
 
 
+def process_comm(native: Native, pid: int) -> str | None:
+    short, _ = native.query(pid, 13, 64)
+    return None if short is None else comm_label(short[16:32])
+
+
 class Scan:
     def __init__(
         self,

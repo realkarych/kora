@@ -52,6 +52,10 @@ class NativeOutcome(BoundaryModel):
     cf_closed: Literal[True]
     text_present: StrictBool
     text_truncated: StrictBool
+    dissenter_pid: Annotated[StrictInt, Field(ge=1, le=2147483647)] | None = None
+    dissenter_comm: (
+        Annotated[StrictStr, Field(pattern=r"^[A-Za-z0-9._+-]{1,16}$")] | None
+    ) = None
 
     @field_validator("version", mode="before")
     @classmethod
@@ -78,6 +82,10 @@ class NativeOutcome(BoundaryModel):
             and self.code != 0
             or self.text_truncated
             and not self.text_present
+            or self.dissenter_pid is not None
+            and self.result != "refused"
+            or self.dissenter_comm is not None
+            and self.dissenter_pid is None
         ):
             raise ValueError("native outcome is inconsistent")
         return self
