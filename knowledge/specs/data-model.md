@@ -465,6 +465,8 @@ Compact the row only after freshly rechecking the exact terminal state and relea
 
 [#867](https://github.com/realkarych/kora/issues/867) owns finite admission, executable issuer fencing, stage records, bounded recovery discovery and reclamation. Charge every retained preparation, including unresolved and still-needed terminal rows. Prove stable settled-record counts and cleanup progress at full useful-request capacity before activation. A terminal record's age alone cannot release custody.
 
+The [#910 migration](https://github.com/realkarych/kora/issues/910) creates the empty relation with native domain and row-shape checks on SQLite and PostgreSQL. It preserves existing graph, version and HTTP receipt history. Downgrade requires a compatible backup. The guarded writer and bounded reader separately establish immutable custody and verified read admission before activation.
+
 ##### Interrupted graph deployment
 
 The project owner accepted this recovery boundary on 2026-11-06 under [#867](https://github.com/realkarych/kora/issues/867#issuecomment-6689824988). The live original request owns useful preparation under its operation deadline and the [storage-call admission rules](#authority-for-graph-staging-calls). Publication still requires its own current authority and request ownership. The single graph-ID correction remains part of that request. Recovery can determine the exact original publication outcome, reconcile issued storage operations and perform their authorized cleanup. It cannot take over useful preparation or promotion, consume new request bytes, publish a graph or version, or create a success receipt for interrupted precommit work. Saved request or actor information grants no publication authority.
