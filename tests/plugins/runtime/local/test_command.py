@@ -382,6 +382,7 @@ async def test_running_journal_releases_directory_on_unsafe_file(
         still_refused = not journal.append("transfer.rejected", {})
         await until(lambda: live_journal_writers() <= writers)
         directory_descriptors = descriptors_for(directory)
+        foreign_descriptors = descriptors_for(foreign)
         data = foreign.read_bytes()
     finally:
         journal.close()
@@ -390,6 +391,7 @@ async def test_running_journal_releases_directory_on_unsafe_file(
     assert refused
     assert still_refused
     assert directory_descriptors == original
+    assert foreign_descriptors == set()
     assert data == b"retained"
 
 

@@ -44,6 +44,7 @@ class RunningJournal:
         self._closed = False
         self._not_durable = 0
         self._thread: threading.Thread | None = None
+        self._writer_ready = False
 
     @property
     def not_durable(self) -> int:
@@ -91,6 +92,9 @@ class RunningJournal:
                 if ownership.seal() is None:
                     directory.close()
                 return False
+            with self._state:
+                self._writer_ready = True
+                self._state.notify_all()
         return self._wait(job)
 
     def _prepare_writer(
@@ -144,6 +148,7 @@ class RunningJournal:
         try:
             try:
                 with self._state:
+                    self._state.wait_for(lambda: self._closed or self._writer_ready)
                     if self._closed:
                         return
                     deadline = self._jobs[0].deadline
