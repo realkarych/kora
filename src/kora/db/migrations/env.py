@@ -1,10 +1,15 @@
+from functools import partial
 from typing import Literal
 
 from alembic import context
 from alembic.autogenerate.api import AutogenContext
 from sqlalchemy import Connection
 
-from kora.db.migrations.environment import CONNECTION_ATTRIBUTE, column_types_differ
+from kora.db.migrations.environment import (
+    CONNECTION_ATTRIBUTE,
+    column_types_differ,
+    include_schema_object,
+)
 from kora.db.tables import metadata
 from kora.db.types import (
     CollatedText,
@@ -47,6 +52,7 @@ def run_migrations() -> None:
         connection=connection,
         target_metadata=metadata,
         compare_type=column_types_differ,
+        include_object=partial(include_schema_object, connection.dialect.name),
         render_item=render_item,
         transaction_per_migration=connection.dialect.name == "postgresql",
     )

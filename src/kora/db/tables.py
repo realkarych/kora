@@ -165,6 +165,33 @@ graph_version: Table = Table(
     UniqueConstraint("graph_id", "number"),
 )
 
+GRAPH_VERSION_SCOPE_INDEX: str = "ix_graph_version_graph_id_id"
+Index(GRAPH_VERSION_SCOPE_INDEX, graph_version.c.graph_id, graph_version.c.id).ddl_if(
+    dialect="sqlite"
+)
+
+graph_version_read_admission: Table = Table(
+    "graph_version_read_admission",
+    metadata,
+    Column(
+        "graph_version_id",
+        identifier(),
+        ForeignKey("graph_version.id"),
+        primary_key=True,
+    ),
+    Column("format_version", Integer, nullable=False),
+    Column("db_input_bytes", BigInteger, nullable=False),
+    Column("resource_transport_bytes", BigInteger, nullable=False),
+    CheckConstraint("format_version = 1", name="format_version"),
+    CheckConstraint("db_input_bytes > 0", name="db_input_bytes"),
+    CheckConstraint("resource_transport_bytes > 0", name="resource_transport_bytes"),
+    CheckConstraint(
+        "typeof(format_version) = 'integer' AND typeof(db_input_bytes) = 'integer' "
+        "AND typeof(resource_transport_bytes) = 'integer'",
+        name="integer_storage",
+    ).ddl_if(dialect="sqlite"),
+)
+
 graph_deployment_preparation: Table = Table(
     GRAPH_PREPARATION_TABLE, metadata, *graph_preparation_elements_v1()
 )

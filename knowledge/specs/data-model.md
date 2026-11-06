@@ -621,6 +621,8 @@ The database implementation demonstrates actual SQLite page access and overflow 
 
 The metadata layer provides an opt-in [`read_snapshot` unit](scheduler.md#10-standalone-sqlite-versus-postgres) under [#854](https://github.com/realkarych/kora/issues/854). It supplies one stable view for a finite group of related reads. Scoped admission, physical work bounds and durable owner selection belong to the complete loader.
 
+The [narrow metadata foundation](https://github.com/realkarych/kora/issues/861) adds the relation and its exact scoped lookup on a caller-owned snapshot. SQLite uses a covering graph/version index and checks native field types before transferring admission values. PostgreSQL reads only the scope keys and the fixed-width witness fields. The migration preserves historical values and creates no witnesses for existing versions. Publication, authenticated representation and restore verification, and the combined physical loader remain pending.
+
 #### Graph version digest inputs
 
 The project owner accepted these preimages on 2026-11-06 under [#805](https://github.com/realkarych/kora/issues/805). For the paired physical encoding, let I and C be the exact compact ASCII canonical object texts accepted by the codec for the compiled IR and execution contract. Each text preserves its saved object's member order. The complete producer owns normalization of resolved contract maps before encoding.

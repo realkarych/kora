@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from alembic import command
@@ -8,10 +9,11 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import Column, Connection, func, select
+from sqlalchemy.schema import SchemaItem
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 from kora.db.connection import MIGRATION_LEASE
-from kora.db.tables import metadata
+from kora.db.tables import GRAPH_VERSION_SCOPE_INDEX, metadata
 from kora.db.types import POSTGRESQL
 
 MIGRATIONS_DIRECTORY: Path = Path(__file__).resolve().parent
@@ -95,8 +97,29 @@ def column_types_differ(
     return None
 
 
+def include_schema_object(
+    dialect: str,
+    _item: SchemaItem,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: SchemaItem | None,
+) -> bool:
+    return not (
+        dialect == POSTGRESQL
+        and type_ == "index"
+        and name == GRAPH_VERSION_SCOPE_INDEX
+        and not reflected
+        and compare_to is None
+    )
+
+
 def schema_differences(connection: Connection) -> Sequence[str]:
     context = MigrationContext.configure(
-        connection, opts={"compare_type": column_types_differ}
+        connection,
+        opts={
+            "compare_type": column_types_differ,
+            "include_object": partial(include_schema_object, connection.dialect.name),
+        },
     )
     return [str(difference) for difference in compare_metadata(context, metadata)]
