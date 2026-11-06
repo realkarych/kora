@@ -85,10 +85,10 @@ def run_sink_child(
             assert child.stderr is not None
             completed = False
             try:
-                signal.signal(signal.SIGINT, previous_handler)
-                if interrupted:
-                    signal.raise_signal(signal.SIGINT)
                 with selectors.DefaultSelector() as selector:
+                    signal.signal(signal.SIGINT, previous_handler)
+                    if interrupted:
+                        signal.raise_signal(signal.SIGINT)
                     selector.register(child.stdout, selectors.EVENT_READ, "stdout")
                     selector.register(child.stderr, selectors.EVENT_READ, "stderr")
                     while selector.get_map() and not overflow and not protocol_error:

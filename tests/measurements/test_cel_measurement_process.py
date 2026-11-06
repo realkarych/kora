@@ -1,12 +1,20 @@
+import errno
 import json
 import os
+import selectors
+import signal
+import subprocess
 import sys
+from functools import partial
 from pathlib import Path
+from types import FrameType
+from typing import Literal, cast
 
 import pytest
 
-from tests.cel_eval.children import ROOT, full_path
+from tests.cel_eval.children import ROOT, full_path, run_child
 from tests.measurements.cel_measurement_process import run_process
+from tests.measurements.cel_sink_process import run_sink_child
 
 
 @pytest.mark.parametrize(
@@ -114,3 +122,69 @@ else:
     assert result.code == 0
     assert result.stdout == b"released"
     assert not result.stderr
+
+
+def assert_selector_interrupt_closes(
+    supervisor: Literal["measurement", "sink"],
+) -> None:
+    child_code = 'import os\nwhile True:\n    os.write(1, b"x" * 65536)\n'
+    launch = (
+        partial(run_process, [sys.executable, "-I", "-c", child_code])
+        if supervisor == "measurement"
+        else partial(run_sink_child, child_code, full_path(ROOT), deadline_seconds=10.0)
+    )
+    selector_init = selectors.DefaultSelector.__init__.__code__
+    observed: tuple[int, int] | None = None
+
+    def interrupt_after_allocation(frame: FrameType, event: str, value: object) -> None:
+        nonlocal observed
+        if event != "return" or frame.f_code is not selector_init:
+            return
+        caller = frame.f_back
+        if caller is None or caller.f_code is not launch.func.__code__:
+            return
+        assert observed is None
+        selector = cast(selectors.DefaultSelector, frame.f_locals["self"])
+        child = cast(subprocess.Popen[bytes], caller.f_locals["child"])
+        observed = (selector.fileno(), child.pid)
+        signal.raise_signal(signal.SIGINT)
+
+    descriptors_before = len(os.listdir("/dev/fd"))
+    handler_before = signal.getsignal(signal.SIGINT)
+    observer_before = sys.getprofile()
+    sys.setprofile(interrupt_after_allocation)
+    try:
+        with pytest.raises(KeyboardInterrupt) as interruption:
+            launch()
+    finally:
+        sys.setprofile(observer_before)
+
+    assert interruption.value.__traceback__ is not None
+    assert observed is not None
+    descriptor, pid = observed
+    with pytest.raises(OSError, match=rf"\[Errno {errno.EBADF}\]") as closed:
+        os.fstat(descriptor)
+    assert closed.value.errno == errno.EBADF
+    assert signal.getsignal(signal.SIGINT) is handler_before
+    assert len(os.listdir("/dev/fd")) == descriptors_before
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    with pytest.raises(ChildProcessError):
+        os.waitpid(pid, os.WNOHANG)
+
+
+@pytest.mark.parametrize("supervisor", ["measurement", "sink"])
+def test_cel_selector_startup_interrupt_closes_native_descriptor(
+    supervisor: Literal["measurement", "sink"],
+) -> None:
+    code = (
+        "from tests.measurements.test_cel_measurement_process "
+        "import assert_selector_interrupt_closes\n"
+        "assert_selector_interrupt_closes(sys.argv[2])\n"
+    )
+
+    result = run_child(code, full_path(ROOT), supervisor)
+
+    assert result.code == 0, result.stderr
+    assert result.stdout == ""
+    assert result.stderr == ""
