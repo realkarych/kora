@@ -142,32 +142,34 @@ class RunningJournal:
             return
         descriptor: int | None = None
         try:
-            with self._state:
-                if self._closed:
+            try:
+                with self._state:
+                    if self._closed:
+                        return
+                    deadline = self._jobs[0].deadline
+                if not self._available(deadline):
                     return
-                deadline = self._jobs[0].deadline
-            if not self._available(deadline):
+                directory.verify()
+                if not self._available(deadline):
+                    return
+                descriptor = open_private_file(
+                    directory, JOURNAL_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                )
+                if not self._available(deadline):
+                    return
+                synchronize(directory.descriptor)
+            except (OSError, FilesystemError):
+                self.close()
                 return
-            directory.verify()
-            if not self._available(deadline):
-                return
-            descriptor = open_private_file(
-                directory, JOURNAL_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND
-            )
-            if not self._available(deadline):
-                return
-            synchronize(directory.descriptor)
-            directory.close()
+            finally:
+                directory.close()
             self._write_pending(descriptor)
-        except (OSError, FilesystemError):
+        except OSError:
             self.close()
         finally:
             self.close()
-            try:
-                directory.close()
-            finally:
-                if descriptor is not None:
-                    os.close(descriptor)
+            if descriptor is not None:
+                os.close(descriptor)
 
     def _write_pending(self, descriptor: int) -> None:
         while True:

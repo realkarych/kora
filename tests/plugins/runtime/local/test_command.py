@@ -357,13 +357,19 @@ async def test_running_journal_releases_owned_descriptors(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hard_link", [False, True], ids=["symlink", "hardlink"])
 async def test_running_journal_releases_directory_on_unsafe_file(
-    tmp_path: Path,
+    tmp_path: Path, hard_link: bool
 ) -> None:
     directory = private_directory(tmp_path, "attempt")
     foreign = tmp_path / "foreign"
     foreign.write_bytes(b"retained")
-    (directory / "journal.jsonl").symlink_to(foreign)
+    foreign.chmod(0o600)
+    path = directory / "journal.jsonl"
+    if hard_link:
+        path.hardlink_to(foreign)
+    else:
+        path.symlink_to(foreign)
     anchor = open_local_directory(directory)
     original = descriptors_for(directory)
     writers = live_journal_writers()
