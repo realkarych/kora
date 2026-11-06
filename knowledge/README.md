@@ -4,6 +4,10 @@ This is the section-by-section reference behind [human-facing documentation](../
 
 <a id="which-file-to-load-for-which-task"></a>
 
+## Proposed raw-crash storage
+
+The [separate raw-crash storage proposal](research/separate-raw-crash-storage-2026-11-06.md) records the diagnostic-only FSKit boundary, preserved state-root restrictions, qualification gaps and size/dependency blockers under #778. It is not an active storage contract or evidence of native support.
+
 ## Current contracts by task
 
 For trusted configured harness/runtime facts supplied to validation, start with [same-call validation facts](specs/validation-facts.md): the accepted call lifetime and producer/consumer ownership, incomplete-result handling, separation from execution authority and remaining #549 implementation decisions.
@@ -58,6 +62,8 @@ For the local artifact-storage implementation, [storage section 7.4](specs/proto
 Load focused dated evidence when the task needs it: [harness policy hooks](research/harness-policy-hooks.md), [Codex hook tool input](research/codex-hook-tool-input-2026-10-23.md), [harness edit-path resolution](research/harness-edit-path-resolution-2026-10-24.md), [cooperative-provider failures](research/cooperative-provider-failure-model.md), [deadline clocks](research/execution-deadline-clock-model.md), [threat-model structure](research/threat-model-document-structure-2026-10-18.md), [host support](research/ai-development-host-support-2026-10-18.md), [scaffold/toolchain](research/repository-scaffold-and-ci-2026-10-18.md), [logging stack and CI scanners](research/logging-stack-and-ci-scanners-2026-10-20.md), [no-suppression checks](research/no-suppression-checks-2026-10-20.md), [CEL conformance data](research/cel-conformance-data-2026-10-20.md), [CEL crate lock copy](research/cel-crate-lock-copy-2026-10-21.md), [CEL binding pin baseline](research/cel-stack-2026-10-21.md), [local runtime peer attestation](research/local-runtime-attestation-probe-2026-10-30.md), or [console precedents](research/orchestrator-consoles.md). Evidence dates are in the files; absence of a measurement is not a pass.
 
 ## Decisions and historical evidence
+
+The [macOS native I/O fixture feasibility record](research/macos-native-io-fixture-feasibility-2026-11-06.md) preserves the FSKit session-barrier and NFS server-loss findings, evidence limits and conditions for revisiting them. It does not implement or qualify the fixtures tracked in #778, #802 and #827.
 
 The completed 2026-10-17 editorial work has two current destinations: the [technical introduction](../docs/technical-introduction.md) explains the core, and the [architecture reference](architecture/detailed.md) owns component maps, terminology and unresolved implementation questions. The [original introduction research](https://github.com/realkarych/kora/blob/c407647ee16e4969e934479f1c3a6cb197dd3e95/knowledge/research/technical-introduction-2026-10-17.md) and [original consolidation audit](https://github.com/realkarych/kora/blob/c407647ee16e4969e934479f1c3a6cb197dd3e95/knowledge/research/architecture-documentation-consolidation-2026-10-17.md) retain the source maps, alternatives and one-off review/export criteria for closed issues #67 and #76. Their design-only observations and editorial acceptance criteria describe those historical revisions, not current implementation readiness or CI requirements.
 

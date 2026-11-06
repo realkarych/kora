@@ -15,6 +15,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
+    SELECTED_PATCH_CASES,
 )
 
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -49,9 +50,11 @@ def main() -> int:
         "selected-allow",
         "selected-deny",
     }
-    nested_input = decision == "shell_controls" or executor or selected
+    patch = (
+        decision in {"patch-allow", "patch-deny"} or decision in SELECTED_PATCH_CASES
+    )
+    nested_input = decision == "shell_controls" or executor or (selected and not patch)
     expected_command = "touch kora-probe.marker"
-    patch = decision in {"patch-allow", "patch-deny"}
     if decision in {"interactive", "decoder-refuse"} or nested_input or patch:
         with (CONTROL / "invocations").open("a", encoding="utf-8") as invocations:
             invocations.write("1")
@@ -139,12 +142,12 @@ def main() -> int:
         return deny(SELECTED_DENIAL)
     if decision == "selected-hook-no-reason":
         return 2
-    if decision == "selected-hook-exit-one":
+    if decision in {"selected-hook-exit-one", "selected-patch-exit-one"}:
         return 1
     if decision == "selected-hook-timeout":
         hold_for_native_timeout()
         return deny(INPUT_REFUSAL)
-    if decision == "patch-deny":
+    if decision in {"patch-deny", "selected-patch-deny"}:
         return deny(PATCH_DENIAL)
     return deny(INPUT_REFUSAL)
 

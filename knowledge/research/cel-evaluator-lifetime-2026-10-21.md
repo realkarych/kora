@@ -95,3 +95,23 @@ The retained [failed Linux run 40984371991](https://github.com/realkarych/kora/a
 Each child exited zero with empty stderr. The child `work_seconds` value is calculated after its cleanup and is not a pure workload duration. Parent writer/resource assertions after the failed historical exit gate were not reached in those cases. These failures remain failed; the retained artifact lacks the new parent-controlled boundary and cannot establish a passing replacement interval.
 
 Ordinary Linux/macOS regressions cover the actual workload boundary, distinct total/phase comparisons, real pre-boundary and post-acknowledgement stalls, a successful report followed by an interpreter-exit stall, missing/malformed readiness, bounded output overflow, nonzero exit, inherited launch environment, owned sessions and interruption with direct-child reap and descriptor release. The implementing pull request records source- and revision-matched execution evidence; source assertions alone do not establish a pass. The normal producer result and required-step proof remain the blocking CI authority; the aggregate consumer retains its exact artifact inventory and source receipts. No new artifact evaluator, CI job or repeated qualification campaign is introduced.
+
+## Sink group termination correction, 2026-11-06
+
+[#858](https://github.com/realkarych/kora/issues/858) repairs the group-signal
+permission classification in the sink-exit launcher. The owner still polls
+its direct child before signaling the owned group. After EPERM it uses the
+remaining existing absolute deadline to reap the exact child, then requires
+ESRCH from a signal-zero group query within that deadline. The known absence
+and successful signal paths retain actual reap. A live or unresolved denial
+fails after the owned pipes close and the interrupt handler is restored.
+The launcher takes its end timestamp after pipe closure. All workload,
+measurement, output and acceptance gates in the preceding amendment apply.
+
+In the [historical macOS CI failure](https://github.com/realkarych/kora/actions/runs/42219442307/job/127898428896)
+the malformed-readiness child hit EPERM. A separate native macOS probe left
+the direct child exited and unreaped, observed EPERM and then reaped its
+actual status. This supports the mechanism without attributing the exact
+timing in the historical run. The regression observes a real exiting
+process without consuming its status and verifies the exit status, reap
+and missing group.

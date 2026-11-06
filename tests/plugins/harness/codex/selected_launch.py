@@ -11,12 +11,16 @@ from kora.plugins.harness.codex.launch_configuration import (
     build_launch_inputs,
 )
 
-SelectedHookCase = Literal[
-    "selected-hook-deny",
-    "selected-hook-no-reason",
-    "selected-hook-exit-one",
-    "selected-hook-timeout",
-]
+SelectedPatchCase = Literal["selected-patch-deny", "selected-patch-exit-one"]
+SelectedHookCase = (
+    Literal[
+        "selected-hook-deny",
+        "selected-hook-no-reason",
+        "selected-hook-exit-one",
+        "selected-hook-timeout",
+    ]
+    | SelectedPatchCase
+)
 SelectedLaunchCase = (
     SelectedHookCase
     | Literal[
@@ -26,19 +30,27 @@ SelectedLaunchCase = (
         "selected-startup-ready",
         "selected-startup-bearer",
         "selected-startup-bash",
+        "selected-turn-complete",
+        "selected-turn-cut",
     ]
+)
+SELECTED_PATCH_CASES: frozenset[SelectedPatchCase] = frozenset(
+    {"selected-patch-deny", "selected-patch-exit-one"}
 )
 SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     {
+        *SELECTED_PATCH_CASES,
         "selected-hook-deny",
         "selected-hook-no-reason",
         "selected-hook-exit-one",
         "selected-hook-timeout",
     }
 )
+SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
 SELECTED_LAUNCH_CASES = frozenset(
     {
         *SELECTED_HOOK_CASES,
+        *SELECTED_TURN_CASES,
         "selected-allow",
         "selected-deny",
         "selected-key-absent",
@@ -48,7 +60,13 @@ SELECTED_LAUNCH_CASES = frozenset(
     }
 )
 SELECTED_AUTH_CASES = frozenset(
-    {*SELECTED_HOOK_CASES, "selected-allow", "selected-deny", "selected-startup-ready"}
+    {
+        *SELECTED_HOOK_CASES,
+        *SELECTED_TURN_CASES,
+        "selected-allow",
+        "selected-deny",
+        "selected-startup-ready",
+    }
 )
 SELECTED_REFUSALS = frozenset(
     {"selected-key-absent", "selected-startup-bearer", "selected-startup-bash"}

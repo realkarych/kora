@@ -24,6 +24,7 @@ from kora.plugins.harness.codex.app_server_errors import (
     reject_premature_error,
 )
 from kora.plugins.harness.codex.app_server_messages import (
+    CompletedMessage,
     MessagePhase,
     MessageRefused,
     TurnMessages,
@@ -42,7 +43,11 @@ from kora.plugins.harness.codex.app_server_startup import (
     StartupIdentity,
     initialize_app_server,
 )
-from kora.plugins.harness.codex.app_server_tools import ToolCounts, ToolRefused
+from kora.plugins.harness.codex.app_server_tools import (
+    ToolCounts,
+    ToolRefused,
+    reject_premature_tool,
+)
 from kora.plugins.harness.codex.app_server_turn import (
     TurnCompletion,
     TurnError,
@@ -75,7 +80,9 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_HOOK_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
+    SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
+    SELECTED_TURN_CASES,
     SelectedHookCase,
     SelectedLaunchCase,
     materialize_native_inputs,
@@ -120,6 +127,7 @@ ProbeCase = (
     | OutputCase
 )
 
+PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, str, str]] = {
     "selected-hook-deny": ("blocked", "feedback", SELECTED_DENIAL),
     "selected-hook-no-reason": (
@@ -130,6 +138,8 @@ SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, str, str]] = {
     ),
     "selected-hook-exit-one": ("failed", "error", "hook exited with code 1"),
     "selected-hook-timeout": ("failed", "error", "hook timed out after 5s"),
+    "selected-patch-deny": ("blocked", "feedback", PATCH_DENIAL),
+    "selected-patch-exit-one": ("failed", "error", "hook exited with code 1"),
 }
 
 CODEX = "/usr/local/bin/codex"
@@ -144,6 +154,16 @@ OUTPUT_SCHEMA: dict[str, object] = {
 OUTPUT_TEXT = '{"ok":true}'
 INVALID_OUTPUT_TEXT = '{"ok":true,"ok":false}'
 OUTPUT_MESSAGE = "kora-output-message"
+EVENT_CANARY = "kora-event-mask-canary"
+OUTPUT_CANARY = "kora-candidate-content-canary"
+SELECTED_OUTPUT = {"ok": True, "note": f"{EVENT_CANARY} {OUTPUT_CANARY}"}
+SELECTED_OUTPUT_TEXT = json.dumps(SELECTED_OUTPUT, separators=(",", ":"))
+SELECTED_OUTPUT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}, "note": {"type": "string"}},
+    "required": ["ok", "note"],
+    "additionalProperties": False,
+}
 MESSAGE_TEXT = "kora-private-message-canary: незавершённый 🌲"
 MESSAGE_CONTENT: tuple[tuple[MessagePhase, str], ...] = (
     ("commentary", "kora-private-message-canary: наблюдение 🌲"),
@@ -160,6 +180,8 @@ PROVIDER_CASES = frozenset(
 CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
+DIRECT_PATCH_CASES = PATCH_CASES | SELECTED_PATCH_CASES
+PATCH_WRITE_CASES = frozenset({"patch-allow", "selected-patch-exit-one"})
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
 INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
 INTERRUPT_PRIMER_ID = "kora-interrupt-primer"
@@ -180,7 +202,6 @@ PATCH_MARKER = b"direct patch marker\n"
 PATCH = (
     f"*** Begin Patch\n*** Add File: {MARKER}\n+direct patch marker\n*** End Patch\n"
 )
-PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 CAP_REFUSAL = "kora managed hook probe refused oversized input"
 STDIN_CALL_ID = "kora-hook-probe-stdin"
 STDIN_READY = "kora-stdin-ready"
@@ -381,8 +402,14 @@ def message_response(*, complete: bool) -> bytes:
     ).encode()
 
 
-def output_response(case: ProbeCase, *, complete: bool) -> bytes:
-    text = INVALID_OUTPUT_TEXT if case == "output-invalid" else OUTPUT_TEXT
+def output_response(
+    case: ProbeCase, *, complete: bool, usage: dict[str, object] | None = None
+) -> bytes:
+    text = OUTPUT_TEXT
+    if case in SELECTED_TURN_CASES:
+        text = SELECTED_OUTPUT_TEXT
+    elif case == "output-invalid":
+        text = INVALID_OUTPUT_TEXT
     item: dict[str, object] = {
         "id": OUTPUT_MESSAGE,
         "type": "message",
@@ -390,7 +417,7 @@ def output_response(case: ProbeCase, *, complete: bool) -> bytes:
         "content": [{"type": "output_text", "text": text}],
     }
     if complete:
-        return sse("kora-output-response", item)
+        return sse("kora-output-response", item, usage=usage)
     events: tuple[dict[str, object], ...] = (
         {"type": "response.created", "response": {"id": "kora-output-response"}},
         {"type": "response.output_item.done", "item": item},
@@ -482,15 +509,22 @@ FINAL_ITEM: dict[str, object] = {
     "content": [{"type": "output_text", "text": "Probe turn finished."}],
 }
 FINAL_RESPONSE = sse("kora-probe-response-2", FINAL_ITEM)
+FIRST_RESPONSE_USAGE: dict[str, object] = {
+    "input_tokens": 100,
+    "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
+    "output_tokens": 10,
+    "output_tokens_details": {"reasoning_tokens": 4},
+    "total_tokens": 110,
+}
+SECOND_RESPONSE_USAGE: dict[str, object] = {
+    "input_tokens": 60,
+    "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 10},
+    "output_tokens": 20,
+    "output_tokens_details": {"reasoning_tokens": 6},
+    "total_tokens": 80,
+}
 USAGE_TOOL_RESPONSE = command_response(
-    {"cmd": COMMAND, "login": False},
-    usage={
-        "input_tokens": 100,
-        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 30},
-        "output_tokens": 10,
-        "output_tokens_details": {"reasoning_tokens": 4},
-        "total_tokens": 110,
-    },
+    {"cmd": COMMAND, "login": False}, usage=FIRST_RESPONSE_USAGE
 )
 INTERRUPT_PRIMER_RESPONSE = sse(
     "kora-interrupt-primer-response",
@@ -514,13 +548,7 @@ INTERRUPT_TOOL_RESPONSE = command_response(
 USAGE_FINAL_RESPONSE = sse(
     "kora-probe-response-2",
     FINAL_ITEM,
-    usage={
-        "input_tokens": 60,
-        "input_tokens_details": {"cached_tokens": 5, "cache_write_tokens": 10},
-        "output_tokens": 20,
-        "output_tokens_details": {"reasoning_tokens": 6},
-        "total_tokens": 80,
-    },
+    usage=SECOND_RESPONSE_USAGE,
 )
 USAGE_SOURCE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 EXPECTED_USAGE = (TokenCounts(100, 20, 30, 10, 4), TokenCounts(160, 25, 40, 30, 10))
@@ -548,6 +576,7 @@ class ResponsesFixture:
                 3 if case == "interactive" or (one_shot and case == "allow") else 2
             )
         self.request_admitted = asyncio.Event()
+        self.first_usage_emitted = asyncio.Event()
         self.stream_ready = asyncio.Event()
         self.stream_closed = asyncio.Event()
         self.connections: int = 0
@@ -600,6 +629,11 @@ class ResponsesFixture:
                     )
                 response = self.respond(request)
                 self.request_admitted.set()
+                second_selected = (
+                    self.case in SELECTED_TURN_CASES and self.requests == 2
+                )
+                if second_selected:
+                    await self.first_usage_emitted.wait()
                 if self.case == "client-exit":
                     await asyncio.Future[None]()
                 if self.case in ERROR_CASES:
@@ -620,14 +654,11 @@ class ResponsesFixture:
                     )
                     await writer.drain()
                     return
-                if self.case in {"interrupt-model", "messages-kill", "output-kill"}:
+                if self.case in {"interrupt-model", "messages-kill", "output-kill"} or (
+                    second_selected and self.case == "selected-turn-cut"
+                ):
                     prelude = (
-                        output_response(self.case, complete=False)
-                        if self.case == "output-kill"
-                        else message_response(complete=False)
-                        if self.case == "messages-kill"
-                        else b'data: {"type":"response.created","response":'
-                        b'{"id":"kora-probe-open-response"}}\n\n'
+                        response if second_selected else self.open_stream_prelude()
                     )
                     writer.write(
                         b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -700,13 +731,19 @@ class ResponsesFixture:
         require(request.get("stream") is True, "responses_stream_not_requested")
         self.requests += 1
         require(self.case not in STARTUP_REFUSALS, "startup_unexpected_model_request")
-        if self.case in OUTPUT_CASES:
+        if self.case in OUTPUT_CASES or self.case in SELECTED_TURN_CASES:
             formatting = as_object(as_object(request.get("text")).get("format"))
+            schema = (
+                SELECTED_OUTPUT_SCHEMA
+                if self.case in SELECTED_TURN_CASES
+                else OUTPUT_SCHEMA
+            )
             require(
                 formatting.get("type") == "json_schema"
-                and formatting.get("schema") == OUTPUT_SCHEMA,
+                and formatting.get("schema") == schema,
                 "native_output_schema_mismatch",
             )
+        if self.case in OUTPUT_CASES:
             require(self.requests == 1, "unexpected_output_request")
             return output_response(self.case, complete=True)
         if self.case in MESSAGE_CASES:
@@ -728,7 +765,7 @@ class ResponsesFixture:
                 as_object(tool)
                 for tool in as_list(request.get("tools"), "responses_tools_missing")
             ]
-            if self.case in PATCH_CASES:
+            if self.case in DIRECT_PATCH_CASES:
                 patch_tools = [
                     tool for tool in tools if tool.get("name") == "apply_patch"
                 ]
@@ -762,7 +799,10 @@ class ResponsesFixture:
                 if self.case == "allow":
                     return stdin_response(1)
             if self.case in SELECTED_LAUNCH_CASES:
-                return command_response({"cmd": SELECTED_COMMAND})
+                usage = (
+                    FIRST_RESPONSE_USAGE if self.case in SELECTED_TURN_CASES else None
+                )
+                return command_response({"cmd": SELECTED_COMMAND}, usage=usage)
             if self.case in SHELL_ARGUMENTS:
                 command = (
                     EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
@@ -795,9 +835,9 @@ class ResponsesFixture:
             )
             return TOOL_RESPONSE
 
-        if self.case in PATCH_CASES:
+        if self.case in DIRECT_PATCH_CASES:
             output = tool_output(request, CALL_ID, "custom_tool_call_output")
-            if self.case == "patch-allow":
+            if self.case in PATCH_WRITE_CASES:
                 lines = output.splitlines()
                 require(
                     len(lines) == 5
@@ -867,7 +907,23 @@ class ResponsesFixture:
                 (DENIAL in output) == (self.case == "deny"),
                 "unexpected_hook_denial_result",
             )
+        if self.case in SELECTED_TURN_CASES:
+            return output_response(
+                self.case,
+                complete=self.case == "selected-turn-complete",
+                usage=SECOND_RESPONSE_USAGE,
+            )
         return USAGE_FINAL_RESPONSE if self.case == "usage" else FINAL_RESPONSE
+
+    def open_stream_prelude(self) -> bytes:
+        if self.case == "output-kill":
+            return output_response(self.case, complete=False)
+        if self.case == "messages-kill":
+            return message_response(complete=False)
+        return (
+            b'data: {"type":"response.created","response":'
+            b'{"id":"kora-probe-open-response"}}\n\n'
+        )
 
     async def close(self, server: asyncio.Server) -> None:
         server.close()
@@ -884,17 +940,29 @@ class ResponsesFixture:
 
 
 class ToolProbe:
-    def __init__(self, case: ProbeCase) -> None:
+    def __init__(self, case: ProbeCase, thread_id: str) -> None:
         self.case = case
+        self.thread_id = thread_id
+        self.turn_id: str | None = None
         self.events: list[tuple[str, str, str, str | None, int | None]] = []
 
     def observe(self, notification: Notification) -> None:
         if notification.method not in ("item/started", "item/completed"):
             return
-        item = as_object(as_object(notification.params).get("item"))
+        params = as_object(notification.params)
+        item = as_object(params.get("item"))
         kind = item.get("type")
         if not isinstance(kind, str) or kind not in ("commandExecution", "fileChange"):
             return
+        turn_id = params.get("turnId")
+        require(
+            params.get("threadId") == self.thread_id
+            and isinstance(turn_id, str)
+            and 0 < len(turn_id) <= 256
+            and self.turn_id in (None, turn_id),
+            "tool_native_turn_identity",
+        )
+        self.turn_id = cast("str", turn_id)
         require(item.get("id") == CALL_ID, "tool_item_hook_identity_mismatch")
         status = item.get("status")
         require(
@@ -931,7 +999,9 @@ class ToolProbe:
             ":".join(str(value) if value is not None else "unknown" for value in event),
         )
 
-    def verify(self, session: AppServerTurnSession) -> None:
+    def verify(
+        self, terminal: TurnCompletion, session: AppServerTurnSession | None
+    ) -> None:
         expected: tuple[tuple[str, str, str, str | None, int | None], ...]
         if self.case == "allow":
             expected = (
@@ -944,16 +1014,29 @@ class ToolProbe:
                 ),
                 ("commandExecution", "completed", "completed", "unifiedExecStartup", 0),
             )
-        elif self.case == "patch-allow":
+        elif self.case in PATCH_WRITE_CASES:
             expected = (
                 ("fileChange", "started", "inProgress", None, None),
                 ("fileChange", "completed", "completed", None, None),
             )
-        elif self.case in ("deny", "patch-deny", "decoder-refuse"):
+        elif self.case in (
+            "deny",
+            "patch-deny",
+            "selected-patch-deny",
+            "decoder-refuse",
+        ):
             expected = ()
         else:
             raise ProbeFailure("tool_fixture_case_unknown")
         require(tuple(self.events) == expected, "tool_native_lifecycle_mismatch")
+        require(self.turn_id in (None, terminal.turn_id), "tool_native_turn_mismatch")
+        if session is not None:
+            self.verify_session(session)
+        diagnostic(
+            "INFO", "probe.tool_lifecycle_verified", f"{self.case}:{len(self.events)}"
+        )
+
+    def verify_session(self, session: AppServerTurnSession) -> None:
         state = session.snapshot()
         starts = sum(event[1] == "started" for event in self.events)
         completions = sum(event[1] == "completed" for event in self.events)
@@ -984,9 +1067,6 @@ class ToolProbe:
             )
         else:
             require(latest is None, "tool_session_observation_invented")
-        diagnostic(
-            "INFO", "probe.tool_lifecycle_verified", f"{self.case}:{len(self.events)}"
-        )
 
 
 class OutputProbe:
@@ -1041,6 +1121,7 @@ class MessageProbe:
         self.thread_id = thread_id
         self.case = case
         self.messages = TurnMessages(thread_id, max_messages=4, max_text_bytes=4096)
+        self.confirmed_count = 0
         self.acknowledged_turn: str | None = None
         self.delta_turn: str | None = None
         self.delta_seen = asyncio.Event()
@@ -1072,18 +1153,25 @@ class MessageProbe:
             self.delta_turn = cast("str", identity)
             self.delta_seen.set()
         observation = self.messages.accept(notification)
-        if observation is not None:
-            require(self.case != "messages-kill", "partial_message_completed")
-            require(
-                self.messages.count <= len(self.expected), "message_count_unexpected"
-            )
-            phase, text = self.expected[self.messages.count - 1]
-            require(
-                observation.phase == phase and observation.text == text,
-                "message_content_mismatch",
-            )
-            if self.acknowledged_turn is not None:
-                self.messages.for_turn(self.acknowledged_turn)
+        if observation is not None and self.acknowledged_turn is not None:
+            self.messages.for_turn(self.acknowledged_turn)
+
+    def confirmed(self, ordinal: int, observation: CompletedMessage) -> None:
+        require(
+            self.case != "messages-kill"
+            and ordinal == self.confirmed_count + 1
+            and ordinal <= len(self.expected),
+            "message_count_unexpected",
+        )
+        phase, text = self.expected[ordinal - 1]
+        require(
+            observation.thread_id == self.thread_id
+            and observation.turn_id == self.acknowledged_turn
+            and observation.phase == phase
+            and observation.text == text,
+            "message_content_mismatch",
+        )
+        self.confirmed_count = ordinal
 
     def verify(self, terminal: TurnCompletion) -> None:
         require(terminal.status == "completed", "message_turn_not_completed")
@@ -1091,6 +1179,10 @@ class MessageProbe:
         require(
             self.messages.for_turn(terminal.turn_id) is not None,
             "message_completion_missing",
+        )
+        require(self.confirmed_count == len(self.expected), "message_handoff_missing")
+        diagnostic(
+            "INFO", "probe.confirmed_messages_verified", str(self.confirmed_count)
         )
 
     def verify_partial(self) -> None:
@@ -1101,6 +1193,7 @@ class MessageProbe:
         )
         require(
             self.messages.count == 0
+            and self.confirmed_count == 0
             and self.messages.for_turn(cast("str", identity)) is None,
             "partial_message_adopted",
         )
@@ -1386,7 +1479,7 @@ class Stdio:
                 workspace, case, selected_executor=selected_executor
             )
         prompt = "Run the probe marker command."
-        if case in PATCH_CASES:
+        if case in DIRECT_PATCH_CASES:
             prompt = "Apply the probe marker patch."
         elif (
             case in PROVIDER_CASES
@@ -1403,8 +1496,8 @@ class Stdio:
         outputs = OutputProbe(thread_id, case) if case in OUTPUT_CASES else None
         self.outputs = outputs
         tools = (
-            ToolProbe(case)
-            if case in HOOK_INPUT_CASES or case in ("allow", "deny")
+            ToolProbe(case, thread_id)
+            if case in DIRECT_PATCH_CASES or case in ("allow", "deny", "decoder-refuse")
             else None
         )
         hook = (
@@ -1428,6 +1521,8 @@ class Stdio:
                 hook.observe(notification)
 
         def observe_before_send(notification: Notification) -> None:
+            if tools is not None:
+                reject_premature_tool(notification)
             if usage is not None:
                 reject_premature_usage(notification)
             if errors is not None:
@@ -1448,7 +1543,7 @@ class Stdio:
             if outputs is not None:
                 outputs.started(turn_id)
 
-        if any(
+        if case not in SELECTED_PATCH_CASES and any(
             value is not None for value in (usage, errors, messages, outputs, tools)
         ):
             self.session = AppServerTurnSession(
@@ -1461,6 +1556,7 @@ class Stdio:
                 observe=observe,
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
+                on_message=messages.confirmed if messages is not None else None,
                 output_schema=OUTPUT_SCHEMA if outputs is not None else None,
                 usage_observer=(
                     UsageObserver(lambda: USAGE_SOURCE_TIME, usage.confirmed)
@@ -1496,8 +1592,6 @@ class Stdio:
                     "session_messages_mismatch",
                 )
             diagnostic("INFO", "probe.session_terminal_verified", case)
-            if tools is not None:
-                tools.verify(self.session)
         else:
             self.terminal = await observe_app_server_turn(
                 self.rpc,
@@ -1509,6 +1603,8 @@ class Stdio:
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
             )
+        if tools is not None:
+            tools.verify(self.terminal, self.session)
         if hook is not None:
             hook.verify(self.terminal.turn_id)
         if outputs is not None:
@@ -1951,6 +2047,164 @@ async def stop_native_process(process: asyncio.subprocess.Process) -> None:
             require(writer.is_closing(), "native_stdin_not_closed")
 
 
+async def observe_selected_event_turn(
+    fixture: ResponsesFixture,
+    rpc: AppServerRpc,
+    identity: StartupIdentity,
+    expected: SelectedEnvironment,
+    bearer: str,
+    app: asyncio.subprocess.Process,
+    deadline: float,
+) -> None:
+    from itertools import count
+
+    from kora.conformance.harness import ConformanceSink, Trace
+    from kora.ir.json import JsonObject
+    from kora.observability.redaction import MASK, SecretRegistry
+    from kora.plugins.harness.codex.selected_turn import (
+        SelectedTurnInputs,
+        run_selected_turn,
+    )
+    from kora.plugins.harness.codex.usage_events import UsageStamp
+    from kora.protocols.harness import ResultEvent, TurnEvent, UsageEvent
+    from kora.runner.usage import UsageLedger
+
+    message_emitted = asyncio.Event()
+
+    class SelectedSink(ConformanceSink):
+        def emit(self, kind: str, data: JsonObject) -> None:
+            super().emit(kind, data)
+            if kind == "usage":
+                fixture.first_usage_emitted.set()
+            elif kind == "turn":
+                message_emitted.set()
+
+    async def cut_after_message() -> None:
+        await fixture.stream_ready.wait()
+        await message_emitted.wait()
+        require(
+            not fixture.stream_closed.is_set(), "selected_event_stream_closed_early"
+        )
+        signal_native_process(app, signal.SIGKILL)
+
+    cut = fixture.case == "selected-turn-cut"
+    sink = SelectedSink(None, Trace())
+    registry = SecretRegistry()
+    registration = registry.register(EVENT_CANARY)
+    sequence = count(1)
+
+    def next_stamp() -> UsageStamp:
+        ordinal = next(sequence)
+        return UsageStamp(f"selected-usage-{ordinal}", ordinal)
+
+    killer = asyncio.create_task(cut_after_message()) if cut else None
+    result = None
+    try:
+        try:
+            result = await run_selected_turn(
+                rpc,
+                identity,
+                expected,
+                bearer,
+                SelectedTurnInputs(
+                    "Run the probe marker command and return JSON.",
+                    SELECTED_OUTPUT_SCHEMA,
+                    True,
+                    16,
+                    16,
+                ),
+                deadline=deadline,
+                sink=sink,
+                registry=registry,
+                usage_message_id="selected-usage",
+                source_time=lambda: USAGE_SOURCE_TIME,
+                next_usage_stamp=next_stamp,
+            )
+        except RpcError as error:
+            if killer is None or error.reason is not RpcFailure.DISCONNECTED:
+                raise
+            require(killer.done(), "selected_event_app_not_signalled")
+            killer.result()
+            require(
+                await app.wait() == -signal.SIGKILL, "selected_event_app_not_killed"
+            )
+            await fixture.stream_closed.wait()
+            diagnostic("INFO", "probe.selected_event_peer_eof", fixture.case)
+    finally:
+        registration.release()
+        if killer is not None:
+            killer.cancel()
+            await asyncio.gather(killer, return_exceptions=True)
+
+    messages = [event.data for event in sink.events if isinstance(event, TurnEvent)]
+    usage = [event.data for event in sink.events if isinstance(event, UsageEvent)]
+    results = [event.data for event in sink.events if isinstance(event, ResultEvent)]
+    require(
+        len(sink.events) == (2 if cut else 4)
+        and len(messages) == sink.count.events == 1
+        and messages[0].text == SELECTED_OUTPUT_TEXT.replace(EVENT_CANARY, MASK)
+        and not messages[0].truncated,
+        "selected_event_message_mismatch",
+    )
+    expected_counts = ((50, 20, 30, 10, 4), (95, 25, 40, 30, 10))
+    require(
+        tuple(
+            (
+                data.input_tokens,
+                data.cached_input_tokens,
+                data.cache_creation_tokens,
+                data.output_tokens,
+                data.reasoning_tokens,
+            )
+            for data in usage
+        )
+        == (expected_counts[:1] if cut else expected_counts),
+        "selected_event_usage_counts_mismatch",
+    )
+    ledger = UsageLedger()
+    for ordinal, data in enumerate(usage, 1):
+        require(
+            data.observation_id == f"selected-usage-{ordinal}"
+            and data.observation_sequence == ordinal
+            and data.observed_at == USAGE_SOURCE_TIME
+            and data.coverage.completeness == "partial"
+            and data.coverage.attribution_gap
+            and not data.coverage.observation_gap,
+            "selected_event_usage_identity_mismatch",
+        )
+        ledger.observe(data)
+    coverage = ledger.coverage(result_seen=not cut)
+    require(
+        ledger.latest == usage[-1]
+        and ledger.rows() == ()
+        and coverage.completeness == "unavailable"
+        and coverage.attribution_gap,
+        "selected_event_ledger_mismatch",
+    )
+    if cut:
+        require(result is None and not results, "selected_event_cut_result_emitted")
+    else:
+        require(
+            result is not None
+            and results == [result.data]
+            and sink.events[-1].kind == "result"
+            and result.data.subtype == "codex_completed"
+            and not result.data.is_error
+            and result.failure_class is None
+            and result.output_diagnostic is None
+            and result.output is not None
+            and result.output.value == SELECTED_OUTPUT
+            and EVENT_CANARY not in result.data.model_dump_json()
+            and OUTPUT_CANARY not in result.data.model_dump_json(),
+            "selected_event_result_mismatch",
+        )
+    diagnostic(
+        "INFO",
+        "probe.selected_events_verified",
+        f"{fixture.case}:messages={len(messages)},usage={len(usage)},results={len(results)}",
+    )
+
+
 async def signal_after_request(
     process: asyncio.subprocess.Process, fixture: ResponsesFixture, stdio: Stdio
 ) -> None:
@@ -1992,6 +2246,7 @@ async def observe_client_exit(
             require(stdio.messages is not None, "message_observer_missing")
             cast("MessageProbe", stdio.messages).verify_partial()
             await fixture.stream_closed.wait()
+            diagnostic("INFO", "probe.confirmed_messages_verified", "0")
         if fixture.case == "output-kill":
             require(stdio.outputs is not None, "output_observer_missing")
             cast("OutputProbe", stdio.outputs).verify_pending()
@@ -2174,6 +2429,23 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 await stdio.interrupt_turn(workspace, fixture, process)
             elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
+            elif fixture.case in SELECTED_TURN_CASES:
+                assert executor_url is not None
+                await observe_selected_event_turn(
+                    fixture,
+                    rpc,
+                    identity,
+                    SelectedEnvironment(
+                        EXECUTOR_ID,
+                        executor_url,
+                        Path("/bin/bash"),
+                        workspace,
+                        SELECTED_MODEL,
+                    ),
+                    bearer,
+                    process,
+                    deadline,
+                )
             elif fixture.case in SELECTED_LAUNCH_CASES:
                 assert executor_url is not None
                 if fixture.case == "selected-hook-timeout":
@@ -2275,7 +2547,11 @@ async def close_selected_launch(
 
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
     if case in SELECTED_AUTH_CASES:
-        decision = "selected-allow" if case == "selected-startup-ready" else case
+        decision = (
+            "selected-allow"
+            if case == "selected-startup-ready" or case in SELECTED_TURN_CASES
+            else case
+        )
         (CONTROL / "decision").write_text(decision, encoding="utf-8")
     with TemporaryDirectory(prefix="kora-codex-", dir="/tmp") as scratch:
         root = Path(scratch)
@@ -2299,13 +2575,18 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
                 and not os.path.lexists(CONTROL / "invocations"),
                 "refused_selected_startup_reached_hook",
             )
+        elif case in SELECTED_PATCH_CASES:
+            verify_patch_hook()
         else:
             verify_shell_hook(SELECTED_COMMAND)
         executes = case in SELECTED_AUTH_CASES and case not in {
             "selected-deny",
             "selected-hook-deny",
+            "selected-patch-deny",
         }
-        if executes:
+        if case in SELECTED_PATCH_CASES:
+            verify_patch_marker(marker, writes=executes)
+        elif executes:
             bash = Path("/bin/bash").resolve(strict=True)
             expected = f"{bash}\n{role_homes(root / 'exec').home}\n".encode()
             require(
@@ -2475,27 +2756,35 @@ async def run_hook_input_case(case: HookInputCase) -> None:
             fixture.connections == fixture.requests == 2,
             "unexpected_hook_input_request_count",
         )
-        with (CONTROL / "invocations").open("rb") as invocations:
-            require(
-                invocations.read(2) == b"1", "unexpected_hook_input_invocation_count"
-            )
         if case == "decoder-refuse":
+            verify_hook_invocation()
             require(not os.path.lexists(RECEIPTS), "decoder_refusal_receipt_exists")
         else:
-            hook_pid(PATCH, tool="apply_patch")
-        if case == "patch-allow":
-            require(
-                marker.is_file() and not marker.is_symlink(),
-                "direct_patch_marker_missing",
-            )
-            with marker.open("rb") as contents:
-                require(
-                    contents.read(len(PATCH_MARKER) + 1) == PATCH_MARKER,
-                    "direct_patch_marker_content",
-                )
-        else:
-            require(not os.path.lexists(marker), "blocked_hook_input_marker_exists")
+            verify_patch_hook()
+        verify_patch_marker(marker, writes=case in PATCH_WRITE_CASES)
     diagnostic("INFO", "probe.case_verified", case)
+
+
+def verify_hook_invocation() -> None:
+    with (CONTROL / "invocations").open("rb") as invocations:
+        require(invocations.read(2) == b"1", "unexpected_hook_input_invocation_count")
+
+
+def verify_patch_hook() -> None:
+    verify_hook_invocation()
+    hook_pid(PATCH, tool="apply_patch")
+
+
+def verify_patch_marker(marker: Path, *, writes: bool) -> None:
+    if not writes:
+        require(not os.path.lexists(marker), "blocked_hook_input_marker_exists")
+        return
+    require(marker.is_file() and not marker.is_symlink(), "direct_patch_marker_missing")
+    with marker.open("rb") as contents:
+        require(
+            contents.read(len(PATCH_MARKER) + 1) == PATCH_MARKER,
+            "direct_patch_marker_content",
+        )
 
 
 async def run_provider_case(case: ProviderCase | ClientCase) -> None:

@@ -258,6 +258,7 @@ async def test_presend_observations_refuse_without_callbacks_or_turn_bytes(
     async with wire() as connection:
         session = AppServerTurnSession(THREAD, max_messages=2, max_tools=16)
         seen: list[Notification] = []
+        published: list[int] = []
         notices = {
             "usage": usage_frame(),
             "message": encoded(message()),
@@ -280,6 +281,7 @@ async def test_presend_observations_refuse_without_callbacks_or_turn_bytes(
                 prompt=PROMPT,
                 deadline=future_deadline(),
                 observe=seen.append,
+                on_message=lambda ordinal, _: published.append(ordinal),
             )
         connection.writer.write_eof()
         remaining = await connection.peer_reader.read()
@@ -293,6 +295,7 @@ async def test_presend_observations_refuse_without_callbacks_or_turn_bytes(
             }[kind]
         )
         assert seen == []
+        assert published == []
         assert session.snapshot() == TurnObservations()
         assert remaining == b""
         assert owned_tasks() == set()

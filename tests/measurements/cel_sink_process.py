@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from types import FrameType
 
@@ -37,6 +38,25 @@ def begin_cleanup() -> None:
         raise RuntimeError("sink measurement acknowledgement is invalid")
 
 
+def stop_sink_group(child: subprocess.Popen[bytes], deadline: float) -> None:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError as denied:
+        try:
+            child.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise denied from None
+        try:
+            os.killpg(child.pid, 0)
+        except ProcessLookupError:
+            if time.monotonic() <= deadline:
+                return
+        raise denied
+    child.wait()
+
+
 def run_sink_child(
     code: str,
     path: Sequence[str],
@@ -64,25 +84,29 @@ def run_sink_child(
 
     previous_handler = signal.signal(signal.SIGINT, defer_interrupt)
     try:
-        with subprocess.Popen(
-            [
-                sys.executable,
-                "-I",
-                "-c",
-                PRELUDE + code,
-                json.dumps(list(path)),
-                *arguments,
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-            start_new_session=True,
-            bufsize=0,
-        ) as child:
+        with ExitStack() as pipes:
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    PRELUDE + code,
+                    json.dumps(list(path)),
+                    *arguments,
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                close_fds=True,
+                start_new_session=True,
+                bufsize=0,
+            )
             assert child.stdin is not None
             assert child.stdout is not None
             assert child.stderr is not None
+            pipes.callback(child.stderr.close)
+            pipes.callback(child.stdout.close)
+            pipes.callback(child.stdin.close)
             completed = False
             try:
                 with selectors.DefaultSelector() as selector:
@@ -148,39 +172,21 @@ def run_sink_child(
                         else:
                             completed = True
             finally:
-                try:
-                    if not completed and child.poll() is None:
-                        try:
-                            os.killpg(child.pid, signal.SIGKILL)
-                        except ProcessLookupError:
-                            pass
-                        except PermissionError:
-                            if child.poll() is None:
-                                raise
-                finally:
-                    try:
-                        child.wait()
-                    finally:
-                        try:
-                            child.stdin.close()
-                        finally:
-                            try:
-                                child.stdout.close()
-                            finally:
-                                child.stderr.close()
-            ended = time.monotonic()
-            timed_out = timed_out or ended > deadline
-            return SinkProcessResult(
-                child.pid,
-                child.returncode,
-                bytes(outputs["stdout"]),
-                bytes(outputs["stderr"]),
-                bytes(readiness),
-                ended - started,
-                None if cleanup_started is None else ended - cleanup_started,
-                timed_out,
-                overflow,
-                protocol_error,
-            )
+                if not completed and child.poll() is None:
+                    stop_sink_group(child, deadline)
+        ended = time.monotonic()
+        timed_out = timed_out or ended > deadline
+        return SinkProcessResult(
+            child.pid,
+            child.returncode,
+            bytes(outputs["stdout"]),
+            bytes(outputs["stderr"]),
+            bytes(readiness),
+            ended - started,
+            None if cleanup_started is None else ended - cleanup_started,
+            timed_out,
+            overflow,
+            protocol_error,
+        )
     finally:
         signal.signal(signal.SIGINT, previous_handler)

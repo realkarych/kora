@@ -9,7 +9,7 @@ import struct
 import subprocess
 import sys
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
@@ -94,15 +94,36 @@ def terminate(number: int, frame: FrameType | None) -> None:
     sys.exit(128 + number)
 
 
+def start_owned(
+    launch: Callable[[], subprocess.Popen[bytes]],
+) -> subprocess.Popen[bytes]:
+    pending: int | None = None
+
+    def defer(number: int, frame: FrameType | None) -> None:
+        nonlocal pending
+        pending = number
+
+    previous = signal.signal(signal.SIGTERM, defer)
+    try:
+        process = launch()
+        CHILDREN.processes.append(process)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        if pending is not None:
+            terminate(pending, None)
+    return process
+
+
 def tracked(argv: list[str], environment: dict[str, str] | None) -> tuple[int, bytes]:
-    process = subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=None,
-        env=environment,
+    process = start_owned(
+        lambda: subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            env=environment,
+        )
     )
-    CHILDREN.processes.append(process)
     output, _ = process.communicate()
     CHILDREN.processes.remove(process)
     return process.returncode, output
@@ -134,15 +155,15 @@ class Git:
     def start(
         self, arguments: Sequence[str], environment: dict[str, str] | None = None
     ) -> subprocess.Popen[bytes]:
-        process = subprocess.Popen(
-            self.argv(arguments),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            env=environment,
+        return start_owned(
+            lambda: subprocess.Popen(
+                self.argv(arguments),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
+                env=environment,
+            )
         )
-        CHILDREN.processes.append(process)
-        return process
 
 
 def checked_id(value: object) -> str:

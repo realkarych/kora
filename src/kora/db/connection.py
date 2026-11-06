@@ -393,6 +393,17 @@ class Database:
             await self._leave_unit_and_release()
 
     @asynccontextmanager
+    async def read_snapshot(self) -> AsyncGenerator[AsyncConnection, None]:
+        if self.dialect is Dialect.SQLITE:
+            setup = text("BEGIN DEFERRED")
+        else:
+            setup = text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        async with self.read_transaction() as connection:
+            await complete(connection.execute(setup))
+            self._refuse_when_closed()
+            yield connection
+
+    @asynccontextmanager
     async def _unit(
         self, engine: AsyncEngine, transactional: bool = True
     ) -> AsyncGenerator[AsyncConnection, None]:

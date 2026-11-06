@@ -42,6 +42,7 @@ from kora.plugins.harness.codex.app_server_usage import (
 
 class SessionFailure(StrEnum):
     ALREADY_USED = "session_already_used"
+    PENDING_MESSAGE_LIMIT = "session_pending_message_limit"
 
 
 class SessionRefused(Exception):
@@ -120,12 +121,21 @@ class AppServerTurnSession:
         on_started: Callable[[str], None] | None = None,
         on_waiting: Callable[[], None] | None = None,
         usage_observer: UsageObserver | None = None,
+        on_message: Callable[[int, CompletedMessage], None] | None = None,
     ) -> TurnCompletion:
         if self._used:
             raise SessionRefused(SessionFailure.ALREADY_USED)
         self._used = True
         source_time: datetime | None = None
         usage_pending = False
+        pending_messages: list[CompletedMessage] = []
+        pending_bytes = 0
+
+        def publish_message(ordinal: int, message: CompletedMessage) -> None:
+            if on_message is not None:
+                rpc.check_deadline(deadline)
+                on_message(ordinal, message)
+                rpc.check_deadline(deadline)
 
         def publish_usage() -> None:
             nonlocal usage_pending
@@ -141,7 +151,7 @@ class AppServerTurnSession:
                 )
 
         def accept(notification: Notification) -> bool | None:
-            nonlocal source_time, usage_pending
+            nonlocal source_time, usage_pending, pending_bytes
             usage = decode_usage(notification)
             if usage is not None:
                 previous_gap = self._usage.observation_gap
@@ -152,13 +162,28 @@ class AppServerTurnSession:
                         usage_pending = True
                     elif self._usage.observation_gap != previous_gap:
                         usage_pending = True
-            self._messages.accept(notification)
+            message = self._messages.accept(notification)
             self._errors.accept(notification)
             self._tools.accept(notification)
             turn_id = self._snapshot.turn_id
             if turn_id is not None:
                 self._snapshot = self._confirmed(turn_id)
+                if message is not None:
+                    publish_message(self._snapshot.message_count, message)
                 publish_usage()
+            elif message is not None and on_message is not None:
+                pending_bytes += sum(
+                    len(value.encode("utf-8"))
+                    for value in (
+                        message.thread_id,
+                        message.turn_id,
+                        message.message_id,
+                        message.text,
+                    )
+                )
+                if pending_bytes > MAX_FINAL_MESSAGE_BYTES:
+                    raise SessionRefused(SessionFailure.PENDING_MESSAGE_LIMIT)
+                pending_messages.append(message)
             return observe(notification) if observe is not None else None
 
         def reject_premature(notification: Notification) -> bool | None:
@@ -172,19 +197,25 @@ class AppServerTurnSession:
             self._snapshot = self._confirmed(turn_id)
             if on_started is not None:
                 on_started(turn_id)
+            for ordinal, message in enumerate(pending_messages, 1):
+                publish_message(ordinal, message)
+            pending_messages.clear()
             publish_usage()
 
-        completion = await observe_app_server_turn(
-            rpc,
-            thread_id=self._thread_id,
-            prompt=prompt,
-            deadline=deadline,
-            output_schema=output_schema,
-            stop=stop,
-            observe=accept,
-            observe_before_send=reject_premature,
-            on_started=started,
-            on_waiting=on_waiting,
-        )
+        try:
+            completion = await observe_app_server_turn(
+                rpc,
+                thread_id=self._thread_id,
+                prompt=prompt,
+                deadline=deadline,
+                output_schema=output_schema,
+                stop=stop,
+                observe=accept,
+                observe_before_send=reject_premature,
+                on_started=started,
+                on_waiting=on_waiting,
+            )
+        finally:
+            pending_messages.clear()
         self._snapshot = self._confirmed(completion.turn_id, completion)
         return completion

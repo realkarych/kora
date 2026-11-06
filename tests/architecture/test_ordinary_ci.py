@@ -33,7 +33,6 @@ INTEGRATION_SELECTION = (
     "tests/api",
     "tests/cli",
     "tests/ir/test_structured_schema_string_lengths.py",
-    "tests/plugins/artifact_type/test_agent_session.py",
 )
 FIRST_MODULES = (
     "tests/architecture/test_ir_measurement_ci.py",
@@ -57,6 +56,9 @@ FIRST_MODULES = (
     "tests/ir/test_approval_predicate_resources.py",
     "tests/engine/test_graph_output_inventory.py",
     "tests/ir/test_structured_schema_collection_predicates.py",
+    "tests/engine/test_graph_outputs.py",
+    "tests/engine/test_graph_native_outputs.py",
+    "tests/engine/test_graph_projection_paths.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -287,6 +289,8 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         "tests/ir/test_export_type_resources.py",
         "tests/ir/test_diagnostic_collection.py",
         "tests/ir/test_subgraph_interface_resources.py",
+        "tests/ir/test_structured_schema_container_counts.py",
+        "tests/plugins/artifact_type/test_agent_session.py",
     }
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(list(INTEGRATION_SELECTION))
