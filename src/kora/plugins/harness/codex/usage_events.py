@@ -43,6 +43,7 @@ class CodexUsageEvents:
         *,
         message_id: str,
         next_stamp: Callable[[], UsageStamp],
+        check_deadline: Callable[[], None] | None = None,
     ) -> None:
         try:
             self._message_id = MESSAGE_ID.validate_python(message_id)
@@ -50,6 +51,7 @@ class CodexUsageEvents:
             raise UsageEventRefused(UsageEventFailure.INVALID_OBSERVATION) from None
         self._sink = sink
         self._next_stamp = next_stamp
+        self._check_deadline = check_deadline
         self._last_stamp: UsageStamp | None = None
 
     def observe(self, observation: ConfirmedUsage) -> None:
@@ -97,7 +99,10 @@ class CodexUsageEvents:
             )
         except ValidationError:
             raise UsageEventRefused(UsageEventFailure.INVALID_OBSERVATION) from None
-        self._sink.emit("usage", parse_json_object(usage.model_dump(mode="json")))
+        payload = parse_json_object(usage.model_dump(mode="json"))
+        if self._check_deadline is not None:
+            self._check_deadline()
+        self._sink.emit("usage", payload)
         self._last_stamp = stamp
 
     def _revision(self) -> UsageStamp:

@@ -2,14 +2,15 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-startup|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-startup|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-startup|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-startup|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
 
 probe_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+repo_dir=$(CDPATH='' cd -- "$probe_dir/../../../.." && pwd)
 rpc_dir=$probe_dir/../../../../src/kora/plugins/harness/codex
 if [ -n "${DOCKER_HOST:-}" ] && [ -z "${DOCKER_CONTEXT:-}" ]; then
     endpoint=$DOCKER_HOST
@@ -86,12 +87,44 @@ cleanup() {
     exit "$status"
 }
 
+prepare_selected_turn() {
+    fixture_revision=$(git -C "$repo_dir" rev-parse HEAD)
+    set -- src/kora tests/plugins/harness/codex pyproject.toml uv.lock .python-version README.md
+    git -C "$repo_dir" ls-tree -r "$fixture_revision" -- "$@" > "$reservation/source-tree"
+    awk '$1 != "100644" && $1 != "100755" { exit 1 }' "$reservation/source-tree"
+    timeout -k 2s 20s git -C "$repo_dir" archive --format=tar \
+        --output="$reservation/source.tar" "$fixture_revision" "$@"
+    mkdir "$reservation/source" "$reservation/uv-home" "$reservation/uv-tmp"
+    tar -xf "$reservation/source.tar" -C "$reservation/source"
+    rm "$reservation/source.tar"
+    env -i PATH="$PATH" HOME="$reservation/uv-home" TMPDIR="$reservation/uv-tmp" \
+        timeout -k 2s 120s sh -eu -c '
+            uv --no-config --no-cache --offline export --locked --no-default-groups \
+                --extra conformance --no-emit-project --project "$1/source" \
+                --output-file "$1/requirements.txt" >/dev/null
+            uv --no-config --no-cache --no-python-downloads pip install \
+                --default-index https://pypi.org/simple --require-hashes --only-binary :all: --no-deps \
+                --python-platform x86_64-manylinux_2_28 --python-version 3.11.17 \
+                --target "$1/linux-packages" -r "$1/requirements.txt"
+        ' sh "$reservation"
+    probe_dir=$reservation/source/tests/plugins/harness/codex
+    rpc_dir=$reservation/source/src/kora/plugins/harness/codex
+}
+
+probe_context() {
+    set -- -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py selected_launch.py \
+        -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_session.py app_server_tools.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py launch_configuration.py selected_startup.py
+    if [ "$variant" = selected-turn ]; then
+        set -- "$@" -C "$reservation/source/src" kora -C "$reservation" linux-packages
+    fi
+    tar -cf - "$@"
+}
+
 run_variant() {
     variant=$1
     shift
     image=$(
-        tar -cf - -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py selected_launch.py \
-            -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_session.py app_server_tools.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py launch_configuration.py selected_startup.py |
+        probe_context |
             local_docker 300s build --quiet --platform linux/amd64 --network none --target "$variant" -
     )
     case "$image" in
@@ -149,6 +182,12 @@ case "${1:-}" in
             run_variant shell-controls "--selected-$probe_case"
             release_container
         done
+        ;;
+    --check-selected-turn)
+        prepare_selected_turn
+        run_variant selected-turn --selected-turn-complete
+        release_container
+        run_variant selected-turn --selected-turn-cut
         ;;
     --check-selected-startup)
         for probe_case in ready bearer bash; do
