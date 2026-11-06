@@ -57,6 +57,8 @@ FIRST_MODULES = (
     "tests/ir/test_approval_predicate_resources.py",
     "tests/engine/test_graph_output_inventory.py",
     "tests/ir/test_structured_schema_collection_predicates.py",
+    "tests/engine/test_graph_outputs.py",
+    "tests/engine/test_graph_native_outputs.py",
 )
 COMPLETION_FIELDS = (
     "DEPENDENCIES_OUTCOME",
@@ -287,6 +289,7 @@ def test_ordinary_cohorts_partition_the_general_lane_files(tmp_path: Path) -> No
         "tests/ir/test_export_type_resources.py",
         "tests/ir/test_diagnostic_collection.py",
         "tests/ir/test_subgraph_interface_resources.py",
+        "tests/ir/test_structured_schema_container_counts.py",
     }
     assert IR_RESOURCE_MODULES.isdisjoint(cohorts["other"])
     assert cohorts["integration"] == selected_files(list(INTEGRATION_SELECTION))
