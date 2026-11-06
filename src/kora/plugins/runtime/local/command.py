@@ -1,4 +1,6 @@
 import asyncio
+import errno
+import hashlib
 import os
 import secrets
 import select
@@ -20,7 +22,7 @@ from kora.plugins.runtime.local.child_owner import ChildOwner
 from kora.plugins.runtime.local.environment import candidate_environment
 from kora.plugins.runtime.local.spawn import DEFAULT_SIGNALS
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.runtime import Workload
+from kora.protocols.runtime import TransferItem, Workload
 from kora.protocols.secret_value import SecretScope, SecretValue
 from kora.protocols.time import Clock
 from kora.runner.channels import CaptureDrain, cancel_task
@@ -28,6 +30,7 @@ from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_private_directory,
+    rename_no_replace,
     verify_private,
 )
 from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
@@ -40,6 +43,16 @@ COMMAND: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner handled a command",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
+INCOMING: Final[str] = ".incoming\x7f"
+TRANSFER: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.transfer",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner handled an input transfer",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -186,11 +199,101 @@ class CommandSession:
         self._reported_exit = False
         self._running_ns = 0
         self._warned = False
+        self._inputs: dict[str, str] = {}
+        self._transferring = False
+        self._transfer_ns = 0
 
     def note(self, submitter: Submitter) -> None:
         with self._lock:
             if self._execution is None:
                 self._execution = submitter
+
+    def decide_transfer(
+        self, submitter: Submitter, observational: bool, item: TransferItem
+    ) -> Literal["write", "repeat", "conflict"]:
+        self._transfer_ns = self._clock.monotonic_ns()
+        try:
+            return self._transfer_decision(submitter, observational, item)
+        except KoraProtocolError as error:
+            outcome = (
+                "journal_unavailable"
+                if error.code == "journal_unavailable"
+                else "refused"
+            )
+            self._emit_transfer(outcome)
+            raise
+
+    def open_incoming(self) -> int:
+        self._ensure_input()
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        directory = open_private_directory(self._attempt, "input")
+        try:
+            try:
+                return os.open(INCOMING, flags, 0o600, dir_fd=directory.descriptor)
+            except FileExistsError:
+                os.unlink(INCOMING, dir_fd=directory.descriptor)
+                return os.open(INCOMING, flags, 0o600, dir_fd=directory.descriptor)
+        finally:
+            directory.close()
+
+    def discard_incoming(self, descriptor: int) -> None:
+        os.close(descriptor)
+        self._unlink_input(INCOMING)
+
+    def finish_incoming(self, descriptor: int, item: TransferItem, digest: str) -> None:
+        if digest != item.sha256:
+            self.discard_incoming(descriptor)
+            self._reject(item)
+            raise delivery_error("integrity_error")
+        created = False
+        try:
+            synchronize(descriptor)
+            os.fchmod(descriptor, 0o400)
+            directory = open_private_directory(self._attempt, "input")
+            try:
+                created = self._place_incoming(directory, item)
+                synchronize(directory.descriptor)
+            finally:
+                directory.close()
+        except OSError as error:
+            if created:
+                self._unlink_input(item.name)
+            else:
+                self._unlink_input(INCOMING)
+            if error.errno == errno.ELOOP:
+                raise delivery_error("transfer_refused") from None
+            if space_error(error):
+                self.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            raise
+        finally:
+            os.close(descriptor)
+        self._record_input(item, created)
+
+    def complete_seen(
+        self,
+        decision: Literal["repeat", "conflict"],
+        item: TransferItem,
+        digest: str,
+    ) -> None:
+        if decision == "conflict":
+            self._emit_transfer("refused")
+            raise delivery_error("workload_conflict")
+        if digest != item.sha256:
+            self._reject(item)
+            raise delivery_error("integrity_error")
+
+    def end_transfer(self) -> None:
+        with self._lock:
+            self._transferring = False
+
+    def fence_transfer(self) -> None:
+        with self._lock:
+            self._stage = _Stage.FENCED
+            closed = self._journal.closed
+        if not closed:
+            self._journal.close()
+        self._emit_transfer("journal_unavailable")
 
     def prepare(self) -> None:
         if self._stage is _Stage.IDLE and self._owner is None:
@@ -539,6 +642,103 @@ class CommandSession:
                     continue
                 if reaped == pid:
                     seen.pop(pid, None)
+
+    def _transfer_decision(
+        self, submitter: Submitter, observational: bool, item: TransferItem
+    ) -> Literal["write", "repeat", "conflict"]:
+        with self._lock:
+            if self._stage is _Stage.FENCED or self._journal.closed:
+                raise delivery_error("journal_unavailable")
+            if observational or self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+            if (
+                item.kind != "input"
+                or self._stage is not _Stage.IDLE
+                or self._transferring
+            ):
+                raise delivery_error("transfer_refused")
+            previous = self._inputs.get(item.name)
+            if previous == item.sha256:
+                return "repeat"
+            if previous is not None:
+                return "conflict"
+            self._transferring = True
+            return "write"
+
+    def _ensure_input(self) -> None:
+        try:
+            os.mkdir("input", mode=0o700, dir_fd=self._attempt.descriptor)
+        except FileExistsError:
+            pass
+        opened = open_private_directory(self._attempt, "input")
+        opened.close()
+        synchronize(self._attempt.descriptor)
+
+    def _place_incoming(self, directory: DirectoryAnchor, item: TransferItem) -> bool:
+        try:
+            rename_no_replace(directory, INCOMING, item.name)
+        except OSError as error:
+            if error.errno != errno.EEXIST:
+                raise
+            self._unlink_input(INCOMING)
+            if self._file_digest(directory, item.name) != item.sha256:
+                raise delivery_error("workload_conflict") from None
+            return False
+        return True
+
+    def _record_input(self, item: TransferItem, created: bool) -> None:
+        recorded = self._journal.append(
+            "transfer.materialised",
+            {"name": item.name, "sha256": item.sha256},
+        )
+        if not recorded:
+            if created:
+                self._unlink_input(item.name)
+            self.fence_transfer()
+            raise delivery_error("journal_unavailable")
+        with self._lock:
+            self._inputs[item.name] = item.sha256
+        self._emit_transfer("materialised")
+
+    def _reject(self, item: TransferItem) -> None:
+        recorded = self._journal.append(
+            "transfer.rejected",
+            {"name": item.name, "sha256": item.sha256},
+        )
+        if not recorded:
+            self.fence_transfer()
+            raise delivery_error("journal_unavailable")
+        self._emit_transfer("rejected")
+
+    def _unlink_input(self, name: str) -> None:
+        directory = open_private_directory(self._attempt, "input")
+        try:
+            try:
+                os.unlink(name, dir_fd=directory.descriptor)
+            except FileNotFoundError:
+                return
+            synchronize(directory.descriptor)
+        finally:
+            directory.close()
+
+    def _file_digest(self, directory: DirectoryAnchor, name: str) -> str:
+        descriptor = os.open(
+            name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory.descriptor
+        )
+        digest = hashlib.sha256()
+        try:
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    return "sha256:" + digest.hexdigest()
+                digest.update(chunk)
+        finally:
+            os.close(descriptor)
+
+    def _emit_transfer(self, outcome: str) -> None:
+        waited = max(0, (self._clock.monotonic_ns() - self._transfer_ns) // 1_000_000)
+        level = Level.INFO if outcome == "materialised" else Level.WARNING
+        self._log.emit_at(level, TRANSFER, outcome=outcome, waited_ms=waited)
 
     def _emit(self, outcome: str, started: int) -> None:
         if outcome == "journal_unavailable":

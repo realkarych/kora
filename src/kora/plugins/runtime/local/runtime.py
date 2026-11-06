@@ -1,10 +1,11 @@
 import asyncio
+import errno
 import os
 import re
 import secrets
 import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -16,7 +17,7 @@ from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.ir.json import JsonObject
 from kora.observability import CATALOG, EventSpec, FieldKind, Level
-from kora.plugins.runtime.local.channel import workload_digest
+from kora.plugins.runtime.local.channel import delivery_error, workload_digest
 from kora.plugins.runtime.local.configuration import CONFIG_SCHEMA as CONFIG_SCHEMA
 from kora.plugins.runtime.local.configuration import (
     STATE_ROOT_LENGTH as STATE_ROOT_LENGTH,
@@ -30,6 +31,7 @@ from kora.plugins.runtime.local.control import (
     deliver_workload,
     runner_status,
     start_command,
+    transfer_input,
 )
 from kora.plugins.runtime.local.services import (
     SERVICE_REFUSED,
@@ -54,7 +56,12 @@ from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.evidence import TerminationReceipt
 from kora.protocols.identity import Handle, ProcessIdentity
-from kora.protocols.runtime import RuntimeCapabilities, RuntimeStatus, Workload
+from kora.protocols.runtime import (
+    RuntimeCapabilities,
+    RuntimeStatus,
+    TransferItem,
+    Workload,
+)
 from kora.protocols.time import Clock
 from kora.protocols.vcs import WorkspaceTarget
 from kora.runner.channels import ChannelError
@@ -601,6 +608,73 @@ class LocalRuntime:
             if error.code == "message_refused":
                 raise refusal("runner_unreachable") from None
             raise
+
+    async def transfer_in(
+        self,
+        handle: Handle,
+        item: TransferItem,
+        chunks: AsyncIterator[bytes],
+        ctx: ProtocolContext,
+    ) -> None:
+        key = self.key_of(handle, ctx)
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        entry = await self.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        spool = self._launch.socket_directory / "spool" / secrets.token_hex(16)
+        try:
+            await self._fill_spool(spool, item, chunks)
+            await transfer_input(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                ctx.clock,
+                self._new_identifier(),
+                spool,
+                item,
+            )
+        except ListenerRefused:
+            raise refusal("runner_unreachable") from None
+        except (ChannelError, OSError):
+            raise refusal("runner_unreachable") from None
+        except KoraProtocolError as error:
+            if error.code == "message_refused":
+                raise refusal("runner_unreachable") from None
+            raise
+        finally:
+            spool.unlink(missing_ok=True)
+
+    async def _fill_spool(
+        self, path: Path, item: TransferItem, chunks: AsyncIterator[bytes]
+    ) -> None:
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        descriptor = os.open(
+            path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+        )
+        try:
+            total = 0
+            async for chunk in chunks:
+                total += len(chunk)
+                if total > item.size:
+                    raise delivery_error("integrity_error")
+                view = memoryview(chunk)
+                offset = 0
+                while offset < len(view):
+                    written = os.write(descriptor, view[offset:])
+                    if written <= 0:
+                        raise OSError(errno.EIO, os.strerror(errno.EIO))
+                    offset += written
+            if total != item.size:
+                raise delivery_error("integrity_error")
+            await self.executor.run(lambda: os.fsync(descriptor))
+        finally:
+            os.close(descriptor)
 
     def checked_digest(self, workload: Workload, ctx: ProtocolContext) -> str:
         if workload.execution_domain_id != self.execution_domain_id:

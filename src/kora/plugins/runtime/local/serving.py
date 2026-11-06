@@ -22,6 +22,7 @@ from kora.plugins.runtime.local.channel import (
     AttachRequest,
     FrameType,
     StatusValue,
+    TransferRequest,
     decode_section,
     delivery_envelope,
     delivery_error,
@@ -29,6 +30,8 @@ from kora.plugins.runtime.local.channel import (
     operation_unknown,
     parse_header,
     read_request,
+    read_transfer,
+    read_transfer_bytes,
     receive_section,
     status_envelope,
     workload_digest,
@@ -47,6 +50,7 @@ from kora.runner.channels import (
 )
 from kora.runner.filesystem import DirectoryAnchor, FilesystemError
 from kora.runner.identity import IdentityReader, IdentityState
+from kora.runner.journal import space_error
 from kora.runner.peers import PeerRefused, PeerSource, unchanged
 from kora.runner.registry import (
     AttemptKey,
@@ -430,6 +434,13 @@ class ControlServer:
                     answer = error_envelope(request.request_id, operation_unknown())
                 await self._answer(channel, answer)
                 continue
+            transfer = read_transfer(payload)
+            if transfer is not None:
+                answer = await self._receive_transfer(
+                    channel, submitter, observational, transfer
+                )
+                await self._answer(channel, answer)
+                continue
             header = parse_header(payload, ACCEPT_WORKLOAD)
             declaration = header.sections[0]
             refusal: KoraProtocolError | None = None
@@ -497,6 +508,80 @@ class ControlServer:
                 decoded = None
                 if not sink:
                     self._admitted = False
+
+    def _transfer_answer(self, request_id: str, error: KoraProtocolError) -> bytes:
+        if error.code not in ENVELOPE_ERRORS:
+            raise error
+        return error_envelope(request_id, error)
+
+    async def _receive_transfer(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+        request: TransferRequest,
+    ) -> bytes:
+        item = request.item
+        command = self._command
+        if command is None:
+            await read_transfer_bytes(channel, self._clock, None, item.size)
+            return error_envelope(
+                request.request_id, delivery_error("transfer_refused")
+            )
+        try:
+            decision = command.decide_transfer(submitter, observational, item)
+        except KoraProtocolError as error:
+            await read_transfer_bytes(channel, self._clock, None, item.size)
+            return self._transfer_answer(request.request_id, error)
+        if decision != "write":
+            digest = await read_transfer_bytes(channel, self._clock, None, item.size)
+            try:
+                await self._executor.run(
+                    lambda: command.complete_seen(decision, item, digest)
+                )
+            except KoraProtocolError as error:
+                return self._transfer_answer(request.request_id, error)
+            return delivery_envelope(request.request_id, "transferred")
+        try:
+            try:
+                descriptor = command.open_incoming()
+            except OSError as error:
+                await read_transfer_bytes(channel, self._clock, None, item.size)
+                if not space_error(error):
+                    raise
+                command.fence_transfer()
+                return error_envelope(
+                    request.request_id, delivery_error("journal_unavailable")
+                )
+            owned = True
+            try:
+                digest = await read_transfer_bytes(
+                    channel, self._clock, descriptor, item.size
+                )
+                owned = False
+                await self._executor.run(
+                    lambda: command.finish_incoming(descriptor, item, digest)
+                )
+            except OSError as error:
+                if owned:
+                    command.discard_incoming(descriptor)
+                    if space_error(error):
+                        command.fence_transfer()
+                        return error_envelope(
+                            request.request_id, delivery_error("journal_unavailable")
+                        )
+                raise
+            except KoraProtocolError as error:
+                if owned:
+                    command.discard_incoming(descriptor)
+                return self._transfer_answer(request.request_id, error)
+            except BaseException:
+                if owned:
+                    command.discard_incoming(descriptor)
+                raise
+            return delivery_envelope(request.request_id, "transferred")
+        finally:
+            command.end_transfer()
 
     async def _start(
         self, submitter: Submitter, request_id: str, observational: bool

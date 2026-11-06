@@ -1,22 +1,29 @@
 import asyncio
+import os
 import socket
+from pathlib import Path
 
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.plugins.runtime.local.channel import (
     ACCEPT_WORKLOAD,
     ENVELOPE_BYTES,
     FRAME_PROGRESS_NS,
+    MESSAGE_PROGRESS_NS,
+    SECTION_FRAME_BYTES,
     START_PROGRESS_NS,
     AttachRequest,
     FrameType,
+    MessageRefusal,
     StatusValue,
+    TransferRequest,
     control_request,
+    message_refused,
     read_delivery,
     read_status,
     send_message,
 )
 from kora.protocols.identity_records import ProcessIdentity
-from kora.protocols.runtime import Workload
+from kora.protocols.runtime import TransferItem, Workload
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, cancel_task, wait_future
 from kora.runner.peers import PeerRefused, PeerSource
@@ -114,6 +121,68 @@ async def start_command(
         read_delivery(payload, request_id, "started")
     finally:
         channel.close()
+
+
+async def transfer_input(
+    path: str,
+    runner: ProcessIdentity,
+    dispatcher_id: str,
+    source: PeerSource,
+    executor: TransitionExecutor,
+    clock: Clock,
+    request_id: str,
+    spool: Path,
+    item: TransferItem,
+) -> None:
+    deadline = clock.monotonic_ns() + FRAME_PROGRESS_NS
+    endpoint = await connected(path, clock, deadline)
+    channel = BoundedChannel(endpoint, clock)
+    try:
+        await attested(endpoint, runner, source, executor)
+        request = AttachRequest(
+            op="attach", request_id=request_id, dispatcher_id=dispatcher_id
+        )
+        await channel.write_typed_frame(
+            FrameType.JSON, canonical_bytes(request.model_dump(mode="json")), deadline
+        )
+        reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
+        _, payload = await channel.read_typed_frame(deadline, reservations)
+        read_delivery(payload, request_id, "attached")
+        header = TransferRequest(op="transfer_in", request_id=request_id, item=item)
+        started = clock.monotonic_ns()
+        message_deadline = started + MESSAGE_PROGRESS_NS
+        await channel.write_typed_frame(
+            FrameType.JSON,
+            canonical_bytes(header.model_dump(mode="json")),
+            min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline),
+        )
+        await _send_spool(channel, clock, spool, item.size, message_deadline)
+        answered = clock.monotonic_ns() + START_PROGRESS_NS
+        _, payload = await channel.read_typed_frame(answered, reservations)
+        read_delivery(payload, request_id, "transferred")
+    finally:
+        channel.close()
+
+
+async def _send_spool(
+    channel: BoundedChannel,
+    clock: Clock,
+    spool: Path,
+    size: int,
+    message_deadline: int,
+) -> None:
+    descriptor = os.open(spool, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        remaining = size
+        while remaining:
+            chunk = os.read(descriptor, min(SECTION_FRAME_BYTES, remaining))
+            if not chunk:
+                raise message_refused(MessageRefusal.MALFORMED)
+            deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
+            await channel.write_typed_frame(FrameType.BYTES, chunk, deadline)
+            remaining -= len(chunk)
+    finally:
+        os.close(descriptor)
 
 
 async def deliver_workload(

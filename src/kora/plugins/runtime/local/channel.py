@@ -1,4 +1,6 @@
+import errno
 import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
@@ -14,7 +16,7 @@ from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import NANOSECONDS_PER_SECOND
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.identity import Count, Identifier, Sha256
-from kora.protocols.runtime import RuntimeStatus, Workload
+from kora.protocols.runtime import RuntimeStatus, TransferItem, Workload
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from kora.runner.registry import TransitionExecutor
@@ -70,6 +72,10 @@ ENVELOPE_ERRORS: Final[dict[str, EnvelopeEntry]] = {
     ),
     "command_not_started": EnvelopeEntry("the command process did not start", False),
     "journal_unavailable": EnvelopeEntry("the command journal is not durable", True),
+    "integrity_error": EnvelopeEntry(
+        "the transferred bytes do not match the digest", False
+    ),
+    "transfer_refused": EnvelopeEntry("the input cannot be transferred", False),
 }
 REFUSED_MESSAGE: Final[str] = "the control message was refused"
 RETRYABLE_REFUSALS: Final[frozenset[MessageRefusal]] = frozenset(
@@ -185,13 +191,22 @@ class AttachRequest(BoundaryModel):
     dispatcher_id: Identifier
 
 
+class TransferRequest(BoundaryModel):
+    op: Literal["transfer_in"]
+    request_id: Identifier
+    item: TransferItem
+
+
 class EmptyValue(BoundaryModel):
     pass
 
 
+DeliveryResult = Literal["attached", "accepted", "started", "transferred"]
+
+
 class DeliveryEnvelope(BoundaryModel):
     request_id: Identifier
-    result: Literal["attached", "accepted", "started"]
+    result: DeliveryResult
     value: EmptyValue
 
 
@@ -208,9 +223,7 @@ def delivery_error(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, message, retryable, {})
 
 
-def delivery_envelope(
-    request_id: str, result: Literal["attached", "accepted", "started"]
-) -> bytes:
+def delivery_envelope(request_id: str, result: DeliveryResult) -> bytes:
     return canonical_bytes(
         DeliveryEnvelope(
             request_id=request_id, result=result, value=EmptyValue()
@@ -218,9 +231,7 @@ def delivery_envelope(
     )
 
 
-def read_delivery(
-    payload: bytes, request_id: str, result: Literal["attached", "accepted", "started"]
-) -> None:
+def read_delivery(payload: bytes, request_id: str, result: DeliveryResult) -> None:
     decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
     if isinstance(decoded, JsonRefusal):
         raise message_refused(MessageRefusal.MALFORMED)
@@ -427,6 +438,56 @@ def read_error_envelope(payload: bytes) -> tuple[str, KoraProtocolError]:
 def control_request(op: str, request_id: str) -> bytes:
     request = ControlRequest(op=op, request_id=request_id)
     return canonical_bytes(request.model_dump(mode="json"))
+
+
+def read_transfer(payload: bytes) -> TransferRequest | None:
+    if isinstance(
+        decode_strict_json(payload, PRE_ATTACH_BYTES, HEADER_DEPTH), JsonRefusal
+    ):
+        return None
+    request = json_model(TransferRequest, payload)
+    return None if request is None or request.op != "transfer_in" else request
+
+
+def _write_all(descriptor: int, payload: memoryview) -> None:
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+        offset += written
+
+
+async def read_transfer_bytes(
+    channel: BoundedChannel,
+    clock: Clock,
+    descriptor: int | None,
+    size: int,
+) -> str:
+    digest = hashlib.sha256()
+    remaining = size
+    failed: OSError | None = None
+    deadline_ns = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+    while remaining:
+        if clock.monotonic_ns() >= deadline_ns:
+            raise message_refused(MessageRefusal.DEADLINE)
+        window = min(SECTION_FRAME_BYTES, remaining)
+        view = memoryview(bytearray(window))
+        frame_deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, deadline_ns)
+        received = await channel.read_typed_frame_into(
+            frame_deadline, FrameType.BYTES, view
+        )
+        piece = view[:received]
+        if descriptor is not None and failed is None:
+            try:
+                _write_all(descriptor, piece)
+            except OSError as error:
+                failed = error
+        digest.update(piece)
+        remaining -= received
+    if failed is not None:
+        raise failed
+    return "sha256:" + digest.hexdigest()
 
 
 def read_request(payload: bytes) -> ControlRequest | AttachRequest | None:
