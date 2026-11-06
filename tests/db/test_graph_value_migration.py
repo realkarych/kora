@@ -79,8 +79,8 @@ async def test_graph_version_value_encoding_migration(
 
         assert (report.from_revision, report.to_revision, report.steps) == (
             "0006",
-            "0007",
-            1,
+            "0008",
+            2,
         )
         assert after == before.history
         assert versions == [None]
@@ -105,7 +105,10 @@ async def test_graph_value_downgrade_always_refuses_before_mutation(
     try:
         if state != "empty":
             await encoding_predecessor(database)
-        await upgrade_database(empty_database_settings)
+        async with database.migration_connection() as connection:
+            await connection.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), "0007")
+            )
         if state == "encoded":
             async with database.transaction() as connection:
                 await connection.execute(
@@ -243,8 +246,8 @@ async def test_graph_value_migration_recovery_releases_resources(
         assert locks == 0
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
             "0006",
-            "0007",
-            1,
+            "0008",
+            2,
         )
         assert differences == []
         assert stage.database is not None
@@ -291,7 +294,7 @@ async def test_graph_value_migration_failure_preserves_history_and_recovers(
         assert schema_after == schema_before
         assert after == before.history
         assert locks == 0
-        assert recovered.to_revision == "0007"
+        assert recovered.to_revision == "0008"
         assert observed.ledger is not None
         assert (
             observed.ledger.outstanding == observed.ledger.closed_while_checked_out == 0
@@ -333,7 +336,7 @@ async def test_graph_value_migration_handles_prepared_schema(
                 differences_ignoring_expression_indexes
             )
 
-        assert report.to_revision == "0007"
+        assert report.to_revision == "0008"
         assert after == before.history
         assert differences == []
     finally:

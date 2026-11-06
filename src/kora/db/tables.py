@@ -15,6 +15,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
+from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
 from kora.db.types import (
     DIGEST_LENGTH,
     IDENTIFIER_LENGTH,
@@ -161,6 +163,10 @@ graph_version: Table = Table(
     Column("status", name(), nullable=False),
     *audit_columns(),
     UniqueConstraint("graph_id", "number"),
+)
+
+graph_deployment_preparation: Table = Table(
+    GRAPH_PREPARATION_TABLE, metadata, *graph_preparation_elements_v1()
 )
 
 preset: Table = Table(
