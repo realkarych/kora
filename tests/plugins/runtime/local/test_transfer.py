@@ -32,7 +32,7 @@ from kora.plugins.runtime.local.channel import (
     TransferRequest,
     read_delivery,
 )
-from kora.plugins.runtime.local.command import INCOMING
+from kora.plugins.runtime.local.command import INCOMING, CommandSession
 from kora.plugins.runtime.local.control import attested, connected, transfer_input
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
@@ -42,6 +42,7 @@ from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle
 from kora.protocols.runtime import TransferItem
+from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError
 from kora.runner.filesystem import open_local_directory
@@ -61,6 +62,7 @@ from tests.plugins.runtime.local.test_command import (
     release_commands,
     running_pid,
 )
+from tests.support.local_delivery import delivery_server
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
     exited_within,
@@ -620,7 +622,6 @@ async def test_held_body_loses_transfer_authority(
         attempt = attempt_directory(root, runtime, handle.attempt_id)
         entry = await recorded(runtime, handle.attempt_id)
         assert isinstance(entry, Running)
-        before = descriptor_numbers(entry.runner.pid)
         incoming = attempt / "input" / INCOMING
 
         async with transfer_channel(runtime, ctx, entry) as channel:
@@ -643,7 +644,7 @@ async def test_held_body_loses_transfer_authority(
                 await transfer_body(channel, ctx, b"x")
                 refused = await protocol_error(transferred(channel, ctx))
                 assert refused.code == "submitter_superseded"
-        await until(lambda: descriptor_numbers(entry.runner.pid) == before)
+        await until(lambda: not incoming.exists())
         async with asyncio.timeout(5):
             while True:
                 try:
@@ -668,6 +669,53 @@ async def test_held_body_loses_transfer_authority(
     assert names == ()
     assert "transfer.materialised" not in kinds
     assert "transfer.rejected" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_disconnected_transfer_closes_exact_incoming_descriptor(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    attempt = private_directory(tmp_path, "attempt")
+    anchor = open_local_directory(attempt)
+    clock = SystemClock()
+    scope = SecretScope(kora_capture.diagnostics)
+    command = CommandSession(
+        anchor,
+        str(attempt / "candidate"),
+        scope,
+        clock,
+        kora_capture.diagnostics.logger(COMPONENT),
+    )
+    incoming = attempt / "input" / INCOMING
+
+    try:
+        async with delivery_server(
+            tmp_path, kora_capture, clock=clock, command=command
+        ) as live:
+            channel = await live.attach()
+            try:
+                await live.deliver(channel)
+                baseline = live_descriptors()
+                await transfer_header(channel, live.ctx, input_item("payload", b"x"))
+                await until(incoming.exists)
+                pending = incoming.stat()
+                owned = {
+                    descriptor
+                    for descriptor in live_descriptors() - baseline
+                    if os.fstat(descriptor).st_ino == pending.st_ino
+                    and os.fstat(descriptor).st_dev == pending.st_dev
+                }
+            finally:
+                channel.close()
+            await until(lambda: not incoming.exists())
+            remaining = live_descriptors()
+    finally:
+        anchor.close()
+
+    assert len(owned) == 1
+    assert owned.isdisjoint(remaining)
+    assert scope.released
+    assert not (attempt / "input" / "payload").exists()
 
 
 @pytest.mark.asyncio
