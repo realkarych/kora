@@ -23,9 +23,15 @@ the fixture tree was `b896a0c5e6d6daaa91d365d2c7dd5ba45737e682`.
 The evidence landed in [PR #808](https://github.com/realkarych/kora/pull/808)
 as squash `0c2b63b3f93419a0814a5683b60f1a197db74ec9`. Use the original
 dated record for the archive digest, reproduction,
-log hashes and exact cleanup evidence. There is no observation of
-the same fault outcomes for direct file edits, other kinds, native
-macOS or a different release.
+log hashes and exact cleanup evidence.
+
+The [selected direct patch probe](codex-selected-patch-hook-failures-2026-11-06.md)
+observed a separate filesystem effect under the same official Linux profile.
+Explicit denial blocked the patch. After exit 1, the managed hook reported
+failure, the native file-change item completed and the patch wrote the exact
+marker. The pinned source routes the direct patch through the selected
+filesystem client. These cases add no evidence for other direct patch fault
+modes, other tool kinds, native macOS or a different release.
 
 | Boundary | Pinned source observation | Implication and limit |
 | --- | --- | --- |
