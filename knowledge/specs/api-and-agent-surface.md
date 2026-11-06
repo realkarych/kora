@@ -625,6 +625,12 @@ The [complete execution contract](data-model.md#complete-first-slice-execution-c
 
 The authorized graph-version projection keeps its specified fields. It excludes the internal command-resource section, [physical references](data-model.md#saved-physical-command-resource-references) and raw verification evidence. The authorized IR, digests and `CommandResult` retain their existing fields and rules. Equal-deployment reuse keeps the original compatible version and its physical binding under current authority and eligibility checks.
 
+### Interrupted graph deployment
+
+After [precommit interruption](data-model.md#interrupted-graph-deployment), a fresh authorized deployment follows normal admission. It cannot adopt the interrupted request's preparation, replace its operation identities or bypass unresolved address protection. Recovery determines the original outcome and closes already issued storage work under its existing owner.
+
+A committed result with a lost response is available under the existing exact replay rules. HTTP receipt replay requires the original credential and key, the exact request and target, and current authority. An independent current-authorized deployment can return an eligible equal version under normal reuse rules. That version does not prove the interrupted writer committed or provide its receipt. Qualify these paths separately, with no provider redispatch on receipt replay. Existing public shapes and error families apply. Private stage and recovery details, physical store information and creation attribution stay out of public errors and diagnostics.
+
 ### First-slice operation coverage
 
 [First-slice.md](first-slice.md) limits the installation to the 24 user operations below and its worker operations. The bounded-read derivatives in [the complete selector catalogue](bounded-read-projections.md#9-exact-client-read-selectors) activate with their parent operation and their named implementation gates; this does not activate deferred targets, retry or diff in the first slice. The table uses namespace-relative paths under `/api/v1/namespaces/{ns}`; `N` abbreviates `/runs/{run}/nodes/{node_path}`. Each selector names a distinct reachable call, not an extra tool. All request/response and authorization semantics remain those of the full operation above. Worker routes retain their existing parity exclusion; the remote issuer route activates only with a backend that issues in the control plane. Probes have the exact parity-only exclusions of section 7.
