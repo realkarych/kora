@@ -427,7 +427,7 @@ class CommandSession:
         listed = adopted_pids()
         if listed is None:
             return False
-        return all(pid == owner.pid for pid in listed)
+        return not listed
 
     def _write_seal(self, started: int) -> None:
         try:
@@ -438,7 +438,7 @@ class CommandSession:
         try:
             try:
                 sealed = seal_regular_tree(directory)
-            except SealCapacityError:
+            except (SealCapacityError, RecursionError, MemoryError):
                 self._finish_seal("refused", started)
                 return
             except OSError as error:
@@ -463,7 +463,7 @@ class CommandSession:
         payload: JsonObject = {"files": files, "refused": refused}
         try:
             recorded = self._journal.append("runner.outputs_sealed", payload)
-        except JsonShapeError:
+        except (JsonShapeError, UnicodeEncodeError):
             self._finish_seal("refused", started)
             return
         if not recorded:

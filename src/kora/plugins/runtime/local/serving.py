@@ -756,8 +756,12 @@ class ControlServer:
         else:
             state, phase, code = command.status()
             if state == "exited":
-                await self._executor.run(command.seal_outputs)
-                state, phase, code = command.status()
+                try:
+                    await self._executor.run(command.seal_outputs)
+                except KoraProtocolError:
+                    pass
+                else:
+                    state, phase, code = command.status()
         status = RuntimeStatus(
             state=state,
             exit_code=code,

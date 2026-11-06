@@ -994,3 +994,90 @@ async def test_seal_journal_failure_keeps_the_files(
     assert "runner.candidate_started" in journal
     assert outcomes == ["journal_unavailable"]
     assert retained == b"kept"
+
+
+@pytest.mark.asyncio
+async def test_seal_waits_until_no_adopted_child_remains(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    script = "\n".join(
+        (
+            "import os, subprocess, sys",
+            "pid = os.fork()",
+            "if pid == 0:",
+            "    child = subprocess.Popen([sys.argv[1], '30'], start_new_session=True)",
+            "    stream = open('child', 'w')",
+            "    stream.write(str(child.pid))",
+            "    stream.close()",
+            "    raise SystemExit(0)",
+            "os.waitpid(pid, 0)",
+        )
+    )
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(
+                runtime,
+                "attempt-1",
+                (sys.executable, "-c", script, binary("sleep")),
+            ),
+            ctx,
+        )
+        await runtime.start(handle, ctx)
+        await until_exited(runtime, handle, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        child = int((attempt / "candidate" / "child").read_text())
+        journal = (attempt / "journal.jsonl").read_text()
+        status = await runtime.status(handle, ctx)
+        if sys.platform == "linux":
+            assert "runner.outputs_sealed" not in journal
+            os.kill(child, signal.SIGKILL)
+            runner = await running_pid(runtime, "attempt-1")
+            await until(lambda: child not in child_pids(runner))
+            await runtime.status(handle, ctx)
+        else:
+            os.kill(child, signal.SIGKILL)
+        sealed = (attempt / "journal.jsonl").read_text()
+
+    assert status.state == "exited"
+    assert "runner.outputs_sealed" in sealed
+
+
+@pytest.mark.asyncio
+async def test_undecodable_output_name_keeps_the_exit(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    script = "\n".join(
+        (
+            "import os",
+            "flags = os.O_CREAT | os.O_WRONLY | os.O_EXCL",
+            "try:",
+            "    descriptor = os.open(bytes([255]), flags, 0o644)",
+            "except OSError:",
+            "    descriptor = os.open('rejected', flags, 0o644)",
+            "os.close(descriptor)",
+        )
+    )
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
+            ctx,
+        )
+        await runtime.start(handle, ctx)
+        await until_exited(runtime, handle, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        status = await runtime.status(handle, ctx)
+        journal = (attempt / "journal.jsonl").read_text()
+        outcomes = seal_outcomes(attempt / "runner.log")
+        encoded = True
+        for name in os.listdir(attempt / "candidate"):
+            try:
+                name.encode("utf-8")
+            except UnicodeEncodeError:
+                encoded = False
+
+    assert status.state == "exited"
+    if encoded:
+        assert "runner.outputs_sealed" in journal
+    else:
+        assert "runner.outputs_sealed" not in journal
+        assert outcomes == ["refused"]
