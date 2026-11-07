@@ -3,6 +3,7 @@ import errno
 import os
 import socket
 import stat
+import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -512,10 +513,26 @@ class ControlServer:
                         ):
                             raise delivery_error("workload_conflict")
                         if self._workload is None:
+                            command = self._command
+                            prelaunch = None
+                            if (
+                                sys.platform == "darwin"
+                                and command is not None
+                                and decoded.kind == "command"
+                            ):
+                                prelaunch = await self._executor.run(
+                                    partial(
+                                        command.capture_prelaunch,
+                                        started + MESSAGE_PROGRESS_NS,
+                                    )
+                                )
+                                await self._executor.run(
+                                    lambda: self._authorized(submitter)
+                                )
+                            if command is not None:
+                                command.note(submitter, prelaunch)
                             self._workload = decoded
                             self._workload_sha256 = declaration.sha256
-                            if self._command is not None:
-                                self._command.note(submitter)
                     answer = delivery_envelope(header.request_id, "accepted")
                 except KoraProtocolError as error:
                     if error.code not in ENVELOPE_ERRORS:

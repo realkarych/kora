@@ -3,7 +3,7 @@ import errno
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -23,6 +23,7 @@ PROC_RUID_ONLY: Final[int] = 5
 PROC_PIDTBSDINFO: Final[int] = 3
 ARGUMENT_ALIGNMENT: Final[int] = 8
 PROC_PIDT_SHORTBSDINFO: Final[int] = 13
+PROC_PIDUNIQIDENTIFIERINFO: Final[int] = 17
 PROC_FLAG_LP64: Final[int] = 0x10
 DARWIN_ZOMBIE: Final[int] = 5
 CTL_KERN: Final[int] = 1
@@ -68,6 +69,12 @@ class GroupObservation:
 class CommandMember:
     process: ProcessSnapshot
     owned: bool
+
+
+class CommandRead(StrEnum):
+    VERIFIED = "verified"
+    OPAQUE = "opaque"
+    UNSTABLE = "unstable"
 
 
 @dataclass(frozen=True)
@@ -173,6 +180,19 @@ class ShortBsdInfo(ctypes.Structure):
 
 class TimeValue(ctypes.Structure):
     _fields_ = [("seconds", ctypes.c_long), ("nanoseconds", ctypes.c_long)]
+
+
+class DarwinUniqueInfo(ctypes.Structure):
+    _fields_ = [
+        ("image_uuid", ctypes.c_ubyte * 16),
+        ("unique_id", ctypes.c_uint64),
+        ("parent_unique_id", ctypes.c_uint64),
+        ("pid_version", ctypes.c_int32),
+        ("reserved2", ctypes.c_uint32),
+        ("reserved3", ctypes.c_uint64),
+        ("reserved4", ctypes.c_uint64),
+    ]
+    unique_id: int
 
 
 class ProcPidInfo(Protocol):
@@ -567,8 +587,38 @@ class NativeIdentityReader:
         count = size // ctypes.sizeof(ctypes.c_int)
         return tuple(pid for pid in buffer[:count] if pid > 0)
 
+    def command_prelaunch(self, deadline_ns: int) -> dict[int, int]:
+        deadline = min(deadline_ns, self._clock.monotonic_ns() + SCAN_NS)
+        baseline: dict[int, int] = {}
+        if self._library is None or os.getpid() != self._owner:
+            return baseline
+        listed = self._listed_pids(PROC_UID_ONLY, os.getuid(), deadline)
+        for pid in listed or ():
+            if self._clock.monotonic_ns() >= deadline:
+                break
+            unique = self._darwin_unique_id(pid)
+            if unique is not None and self._clock.monotonic_ns() < deadline:
+                baseline[pid] = unique
+        return baseline
+
+    def _darwin_unique_id(self, pid: int) -> int | None:
+        library = self._library
+        if library is None:
+            return None
+        info = DarwinUniqueInfo()
+        query = cast(ProcPidInfo, library.proc_pidinfo)
+        size = ctypes.sizeof(info)
+        result = query(pid, PROC_PIDUNIQIDENTIFIERINFO, 0, ctypes.byref(info), size)
+        return info.unique_id if result == size and info.unique_id else None
+
     def command_census(
-        self, group: int, marker: bytes, deadline_ns: int
+        self,
+        group: int,
+        marker: bytes,
+        deadline_ns: int,
+        *,
+        prelaunch: Mapping[int, int] | None = None,
+        known_pids: Set[int] = frozenset(),
     ) -> CommandCensus:
         scan_deadline = min(deadline_ns, self._clock.monotonic_ns() + SCAN_NS)
         if os.getpid() != self._owner or None in (
@@ -585,6 +635,7 @@ class NativeIdentityReader:
         complete = census.complete
         ambiguous_group = False
         pending_group = set(original)
+        opaque: dict[int, int] = {}
         for pid in (*original, *(census.listed - original)):
             if self._clock.monotonic_ns() >= scan_deadline:
                 return CommandCensus(
@@ -593,9 +644,10 @@ class NativeIdentityReader:
             pending_group.discard(pid)
             if pid == self._owner:
                 continue
-            member, verified = self.command_member(
+            member, observation = self.command_member(
                 pid, group, marker, listed_in_group=pid in original
             )
+            verified = observation is CommandRead.VERIFIED
             if member is not None:
                 members.append(member)
             elif pid in original and not verified:
@@ -604,6 +656,15 @@ class NativeIdentityReader:
                     or self._clock.monotonic_ns() >= scan_deadline
                     or self.read(pid).state is not IdentityState.ABSENT
                 )
+            elif (
+                observation is CommandRead.OPAQUE
+                and prelaunch is not None
+                and pid not in known_pids
+            ):
+                unique = prelaunch.get(pid)
+                if unique is not None and self._darwin_unique_id(pid) == unique:
+                    opaque[pid] = unique
+                    verified = True
             complete = complete and verified
         if complete and not members:
             complete = False
@@ -611,7 +672,11 @@ class NativeIdentityReader:
                 confirmation = census.confirm_empty(
                     self._command_pids(group, scan_deadline)
                 )
-                complete = confirmation.complete
+                complete = confirmation.complete and all(
+                    self._clock.monotonic_ns() < scan_deadline
+                    and self._darwin_unique_id(pid) == unique
+                    for pid, unique in opaque.items()
+                )
                 ambiguous_group = ambiguous_group or confirmation.ambiguous_group
         return CommandCensus(
             tuple(members),
@@ -639,13 +704,13 @@ class NativeIdentityReader:
 
     def command_member(
         self, pid: int, group: int, marker: bytes, *, listed_in_group: bool = False
-    ) -> tuple[CommandMember | None, bool]:
+    ) -> tuple[CommandMember | None, CommandRead]:
         current = self.read(pid).process
         if current is None or not complete_identity(current.identity):
-            return None, False
+            return None, CommandRead.OPAQUE
         adopted = sys.platform == "linux" and current.parent_pid == self._owner
         if current.dead:
-            return None, not adopted
+            return None, CommandRead.UNSTABLE if adopted else CommandRead.VERIFIED
         owned = True if adopted else self._command_marker(pid, marker)
         relevant = owned is True or listed_in_group or current.process_group_id == group
         observed = self.read(pid).process
@@ -658,11 +723,12 @@ class NativeIdentityReader:
                     or (sys.platform == "linux" and observed.parent_pid == self._owner)
                 )
             ):
-                return CommandMember(observed, False), False
-            return (CommandMember(current, False) if relevant else None), False
-        if relevant:
-            return CommandMember(current, owned is True), owned is not None
-        return None, owned is not None
+                return CommandMember(observed, False), CommandRead.UNSTABLE
+            member = CommandMember(current, False) if relevant else None
+            return member, CommandRead.UNSTABLE
+        member = CommandMember(current, owned is True) if relevant else None
+        observation = CommandRead.OPAQUE if owned is None else CommandRead.VERIFIED
+        return member, observation
 
     def _command_marker(self, pid: int, marker: bytes) -> bool | None:
         try:

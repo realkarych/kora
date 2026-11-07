@@ -12,6 +12,7 @@ from kora.protocols.time import Clock
 from kora.runner.identity import (
     PROCESS_SCAN_ENTRIES,
     SCAN_NS,
+    CommandRead,
     IdentityState,
     NativeIdentityReader,
 )
@@ -33,12 +34,14 @@ class CommandDomainStop:
         marker: bytes,
         clock: Clock,
         wake_reaper: Callable[[], None],
+        prelaunch: dict[int, int] | None = None,
     ) -> None:
         self.group = group
         self.marker = marker
         self.clock = clock
         self.wake_reaper = wake_reaper
         self.reader = NativeIdentityReader(clock=clock)
+        self.prelaunch = prelaunch
         self.members: set[ProcessIdentity] = set()
         self.ambiguous_group = False
         self.next_reap_wake = 0
@@ -65,7 +68,17 @@ class CommandDomainStop:
             if self.clock.monotonic_ns() >= next_census or (
                 had_members and not self.members
             ):
-                census = self.reader.command_census(self.group, self.marker, cutoff)
+                census = self.reader.command_census(
+                    self.group,
+                    self.marker,
+                    cutoff,
+                    prelaunch=self.prelaunch,
+                    known_pids=(
+                        frozenset(identity.pid for identity in self.members)
+                        if self.prelaunch
+                        else frozenset()
+                    ),
+                )
                 self.ambiguous_group = self.ambiguous_group or census.ambiguous_group
                 members = {member.process.identity for member in census.members}
                 if len(self.members | members) > PROCESS_SCAN_ENTRIES:
@@ -142,11 +155,11 @@ class CommandDomainStop:
             return False
 
     def _may_signal(self, identity: ProcessIdentity, cutoff: int) -> bool:
-        member, complete = self.reader.command_member(
+        member, observation = self.reader.command_member(
             identity.pid, self.group, self.marker
         )
         return (
-            complete
+            observation is CommandRead.VERIFIED
             and member is not None
             and member.owned
             and member.process.identity == identity

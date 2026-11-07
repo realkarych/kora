@@ -10,8 +10,8 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Generator
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 
 import pytest
@@ -52,6 +52,7 @@ from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import (
     SCAN_NS,
     CommandPIDInventory,
+    CommandRead,
     IdentityState,
     NativeIdentityReader,
     darwin_environment,
@@ -960,6 +961,90 @@ async def test_command_stop_leaves_foreign_token_lookalike_alive(
     assert canary not in contents
 
 
+@contextmanager
+def opaque_environment_process() -> Generator[subprocess.Popen[bytes], None, None]:
+    path = sys.executable
+    script = "import os; os.write(1, b'r'); os.read(0, 1)"
+    if sys.platform == "darwin":
+        parent, name = os.path.split(path)
+        candidates = (f"{parent}/{'./' * count}{name}" for count in range(4))
+        path = next(
+            candidate
+            for candidate in candidates
+            if len(os.fsencode(candidate)) % 8 in (2, 3)
+        )
+        script = "\n".join(
+            (
+                "import ctypes",
+                "argv = ctypes.CDLL(None)._NSGetArgv",
+                "argv.restype = ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))",
+                "ctypes.c_ubyte.from_address(argv()[0][0] - 1).value = 65",
+                script,
+            )
+        )
+    with subprocess.Popen(
+        [path, "-I", "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env={},
+        start_new_session=True,
+    ) as child:
+        try:
+            assert child.stdout is not None
+            assert select.select([child.stdout], [], [], 5)[0]
+            assert child.stdout.read(1) == b"r"
+            yield child
+        finally:
+            assert child.stdin is not None
+            child.stdin.close()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+                raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_present", [True, False], ids=["before", "after"])
+async def test_command_stop_confirms_only_prelaunch_opaque_processes(
+    tmp_path: Path, kora_capture: Capture, already_present: bool
+) -> None:
+    reader = NativeIdentityReader()
+    with ExitStack() as processes:
+        child = (
+            processes.enter_context(opaque_environment_process())
+            if already_present
+            else None
+        )
+        async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+            handle = await runtime.submit(
+                command_workload(runtime, "attempt-1", (binary("true"),)), ctx
+            )
+            log = attempt_directory(root, runtime, "attempt-1") / "runner.log"
+            if child is None:
+                child = processes.enter_context(opaque_environment_process())
+
+            member, observation = reader.command_member(
+                child.pid, os.getpgrp(), b"KORA_ATTEMPT_TOKEN=synthetic"
+            )
+            await runtime.start(handle, ctx)
+            await until(
+                lambda: bool(runtime_outcomes(log, "runtime.local.command_stop"))
+            )
+            outcomes = runtime_outcomes(log, "runtime.local.command_stop")
+            alive = child.poll() is None
+
+    assert member is None
+    assert alive
+    if sys.platform == "darwin":
+        assert observation is CommandRead.OPAQUE
+        assert outcomes == (["confirmed"] if already_present else ["unresolved"])
+    else:
+        assert observation is CommandRead.VERIFIED
+        assert outcomes == ["confirmed"]
+
+
 class ExitAppendClock(SystemClock):
     def __init__(self) -> None:
         self.entered = threading.Event()
@@ -1099,7 +1184,7 @@ def test_census_retains_listed_group_member_after_detach() -> None:
             pid = int(parent.stdout.readline())
             identity = identity_of(pid)
 
-            member, complete = reader.command_member(
+            member, observation = reader.command_member(
                 pid, os.getpgrp(), marker, listed_in_group=True
             )
             unrelated, _ = reader.command_member(pid, os.getpgrp(), marker)
@@ -1115,7 +1200,7 @@ def test_census_retains_listed_group_member_after_detach() -> None:
                 parent.wait(timeout=5)
                 raise
 
-    assert complete
+    assert observation is CommandRead.VERIFIED
     assert member is not None
     assert member.process.identity == identity
     assert member.owned is False
