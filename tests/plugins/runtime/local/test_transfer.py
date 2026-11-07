@@ -1801,6 +1801,12 @@ async def test_transfer_out_returns_the_sealed_file(
         _, repeated = await output_bytes(runtime, handle, ctx, "payload")
         snapshot = attempt / "output-snapshot" / "payload"
         snapshot.chmod(0o600)
+        snapshot.write_bytes(payload)
+        snapshot.chmod(0o400)
+        changed_stamp = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
+        snapshot.chmod(0o600)
         snapshot.write_bytes(b"changed-snapshot")
         snapshot.chmod(0o400)
         seen: list[bytes] = []
@@ -1866,6 +1872,7 @@ async def test_transfer_out_returns_the_sealed_file(
     assert empty_parts == ()
     assert empty == b""
     assert repeated == payload
+    assert changed_stamp.code == "transfer_refused"
     assert mismatch.code == "integrity_error"
     assert seen == []
     assert replaced_name.code == "transfer_refused"
