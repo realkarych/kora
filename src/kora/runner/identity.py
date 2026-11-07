@@ -18,10 +18,12 @@ SCAN_NS: Final[int] = 1_000_000_000
 PROCESS_SCAN_ENTRIES: Final[int] = 65536
 UNKNOWN_READ_PAUSE_SECONDS: Final[float] = 0.001
 PROC_PGRP_ONLY: Final[int] = 2
+PROC_UID_ONLY: Final[int] = 4
 PROC_RUID_ONLY: Final[int] = 5
 PROC_PIDTBSDINFO: Final[int] = 3
 ARGUMENT_ALIGNMENT: Final[int] = 8
 PROC_PIDT_SHORTBSDINFO: Final[int] = 13
+PROC_FLAG_LP64: Final[int] = 0x10
 DARWIN_ZOMBIE: Final[int] = 5
 CTL_KERN: Final[int] = 1
 KERN_ARGMAX: Final[int] = 8
@@ -162,6 +164,7 @@ class ShortBsdInfo(ctypes.Structure):
         ("saved_gid", ctypes.c_uint32),
         ("reserved", ctypes.c_uint32),
     ]
+    flags: int
     status: int
     uid: int
     real_uid: int
@@ -304,14 +307,14 @@ def environment_contains(environment: bytes, marker: bytes) -> bool:
     return environment.startswith(entry) or b"\0" + entry in environment
 
 
-def darwin_environment(data: bytes, marker: bytes) -> bool | None:
+def darwin_environment(data: bytes, marker: bytes, *, alignment: int) -> bool | None:
     word = ctypes.sizeof(ctypes.c_int)
     path_end = data.find(b"\0", word)
     if path_end <= word:
         return None
     count = int.from_bytes(data[:word], sys.byteorder, signed=True)
     length = path_end + 1 - word
-    start = word + -(-length // ARGUMENT_ALIGNMENT) * ARGUMENT_ALIGNMENT
+    start = word + -(-length // alignment) * alignment
     if not 1 <= count <= len(data) - start or any(data[path_end:start]):
         return None
     for _ in range(count):
@@ -618,7 +621,7 @@ class NativeIdentityReader:
 
     def _command_pids(self, group: int, deadline_ns: int) -> CommandPIDInventory | None:
         try:
-            listed = self._listed_pids(PROC_RUID_ONLY, os.getuid(), deadline_ns)
+            listed = self._listed_pids(PROC_UID_ONLY, os.getuid(), deadline_ns)
             if listed is None:
                 return None
             if sys.platform != "darwin":
@@ -693,10 +696,10 @@ class NativeIdentityReader:
         library = self._library
         if library is None:
             return None
-        owner = self._darwin_owner(library, pid)
+        owner, alignment = self._darwin_owner(library, pid)
         if owner is ArgumentMatch.DIFFERENT:
             return False
-        if owner is not ArgumentMatch.EQUAL:
+        if owner is not ArgumentMatch.EQUAL or alignment is None:
             return None
         buffer = self._marker_buffer
         if buffer is None:
@@ -711,8 +714,10 @@ class NativeIdentityReader:
                 raise OSError(ctypes.get_errno())
             if not 0 < length.value < capacity:
                 return None
+            if self._darwin_owner(library, pid) != (owner, alignment):
+                return None
             data = ctypes.string_at(ctypes.addressof(buffer), length.value)
-            return darwin_environment(data, marker)
+            return darwin_environment(data, marker, alignment=alignment)
         finally:
             ctypes.memset(buffer, 0, capacity)
 
@@ -802,7 +807,9 @@ class NativeIdentityReader:
             os.close(directory)
         return ArgumentMatch.EQUAL if arguments == wanted else ArgumentMatch.DIFFERENT
 
-    def _darwin_owner(self, library: ctypes.CDLL, pid: int) -> ArgumentMatch:
+    def _darwin_owner(
+        self, library: ctypes.CDLL, pid: int
+    ) -> tuple[ArgumentMatch, int | None]:
         info = ShortBsdInfo()
         read_info = cast(ProcPidInfo, library.proc_pidinfo)
         result = read_info(
@@ -810,22 +817,21 @@ class NativeIdentityReader:
         )
         if result != ctypes.sizeof(info):
             if result == 0 and ctypes.get_errno() == errno.ESRCH:
-                return ArgumentMatch.ABSENT
-            return ArgumentMatch.UNKNOWN
+                return ArgumentMatch.ABSENT, None
+            return ArgumentMatch.UNKNOWN, None
         if info.status == DARWIN_ZOMBIE:
-            return ArgumentMatch.ABSENT
+            return ArgumentMatch.ABSENT, None
         uids = (info.real_uid, info.uid, info.saved_uid)
-        return (
-            ArgumentMatch.EQUAL
-            if owned_by(uids, os.getuid())
-            else ArgumentMatch.DIFFERENT
-        )
+        if not owned_by(uids, os.getuid()):
+            return ArgumentMatch.DIFFERENT, None
+        alignment = ARGUMENT_ALIGNMENT if info.flags & PROC_FLAG_LP64 else 4
+        return ArgumentMatch.EQUAL, alignment
 
     def _darwin_carries(self, pid: int, expected: tuple[bytes, ...]) -> ArgumentMatch:
         library = self._library
         if library is None:
             return ArgumentMatch.UNKNOWN
-        owner = self._darwin_owner(library, pid)
+        owner, _ = self._darwin_owner(library, pid)
         if owner is not ArgumentMatch.EQUAL:
             return owner
         buffer = self._argument_buffer(library)
@@ -840,7 +846,7 @@ class NativeIdentityReader:
                 if failure == errno.EINVAL:
                     return (
                         ArgumentMatch.ABSENT
-                        if self._darwin_owner(library, pid) is ArgumentMatch.ABSENT
+                        if self._darwin_owner(library, pid)[0] is ArgumentMatch.ABSENT
                         else ArgumentMatch.UNKNOWN
                     )
                 return ArgumentMatch.UNKNOWN
