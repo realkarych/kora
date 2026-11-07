@@ -541,6 +541,7 @@ class ControlServer:
                     if error.code not in ENVELOPE_ERRORS:
                         raise
                     answer = error_envelope(header.request_id, error)
+                prelaunch = None
                 await self._answer(channel, answer)
             finally:
                 prelaunch = None

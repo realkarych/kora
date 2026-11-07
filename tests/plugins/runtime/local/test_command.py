@@ -1034,13 +1034,20 @@ async def test_command_stop_confirms_only_prelaunch_opaque_processes(
             )
             outcomes = runtime_outcomes(log, "runtime.local.command_stop")
             alive = child.poll() is None
+    absent, final_observation = reader.command_member(
+        child.pid, os.getpgrp(), b"KORA_ATTEMPT_TOKEN=synthetic"
+    )
 
-    assert member is None
     assert alive
+    assert absent is None
+    assert final_observation is CommandRead.UNSTABLE
     if sys.platform == "darwin":
+        assert member is None
         assert observation is CommandRead.OPAQUE
         assert outcomes == (["confirmed"] if already_present else ["unresolved"])
     else:
+        assert member is not None
+        assert member.owned
         assert observation is CommandRead.VERIFIED
         assert outcomes == ["confirmed"]
 

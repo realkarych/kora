@@ -559,7 +559,10 @@ class CommandSession:
         try:
             authorize()
             self._prepare_files()
-        except KoraProtocolError:
+        except KoraProtocolError as error:
+            if error.code == "deadline_expired":
+                with self._lock:
+                    self._discard_unlaunched_prelaunch()
             self._finish(_Stage.IDLE, "refused", started)
             raise
         except FilesystemError:

@@ -790,15 +790,17 @@ class NativeIdentityReader:
         name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
         call = cast(Sysctl, library.sysctl)
         try:
-            if call(name, 3, buffer, ctypes.byref(length), None, 0) != 0:
-                failure = ctypes.get_errno()
-                if failure == errno.ESRCH:
-                    return CommandRead.UNSTABLE
+            result = call(name, 3, buffer, ctypes.byref(length), None, 0)
+            failure = ctypes.get_errno() if result != 0 else 0
+            if failure == errno.ESRCH or self._darwin_owner(library, pid) != (
+                owner,
+                alignment,
+            ):
+                return CommandRead.UNSTABLE
+            if result != 0:
                 raise OSError(failure)
             if not 0 < length.value < capacity:
                 return None
-            if self._darwin_owner(library, pid) != (owner, alignment):
-                return CommandRead.UNSTABLE
             data = ctypes.string_at(ctypes.addressof(buffer), length.value)
             return darwin_environment(data, marker, alignment=alignment)
         finally:
