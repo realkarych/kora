@@ -27,6 +27,12 @@ from kora.db.graph_preparation_capacity_v1 import (
 from kora.db.graph_preparation_capacity_v1 import graph_preparation_capacity_elements_v1
 from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
 from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
+from kora.db.graph_version_resource_owner_v1 import (
+    TABLE_NAME as GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+)
+from kora.db.graph_version_resource_owner_v1 import (
+    graph_version_resource_owner_elements_v1,
+)
 from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
 from kora.db.storage_address_fence_v1 import storage_address_fence_elements_v1
 from kora.db.types import (
@@ -180,6 +186,12 @@ graph_version: Table = Table(
 GRAPH_VERSION_SCOPE_INDEX: str = "ix_graph_version_graph_id_id"
 Index(GRAPH_VERSION_SCOPE_INDEX, graph_version.c.graph_id, graph_version.c.id).ddl_if(
     dialect="sqlite"
+)
+
+graph_version_resource_owner: Table = Table(
+    GRAPH_VERSION_RESOURCE_OWNER_TABLE,
+    metadata,
+    *graph_version_resource_owner_elements_v1(),
 )
 
 graph_version_read_admission: Table = Table(

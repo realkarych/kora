@@ -27,7 +27,7 @@ from kora.db.tables import metadata
 from kora.db.types import OutcomePayloadText
 from tests.support.warning_filters import expression_index_warnings_ignored
 
-HEAD_REVISION: str = "0012"
+HEAD_REVISION: str = "0013"
 
 
 def differences_ignoring_expression_indexes(connection: Connection) -> list[str]:
@@ -66,7 +66,7 @@ async def test_migration_reaches_head_and_matches_the_tables(
     assert (report.from_revision, report.to_revision, report.steps) == (
         None,
         HEAD_REVISION,
-        12,
+        13,
     )
     assert revision == HEAD_REVISION
     assert differences == []
@@ -81,7 +81,7 @@ async def test_migration_rerun_is_a_no_op(
 
     second = await upgrade_database(empty_database_settings)
 
-    assert (first.steps, second.steps) == (12, 0)
+    assert (first.steps, second.steps) == (13, 0)
     assert second.from_revision == HEAD_REVISION
     assert second.to_revision == HEAD_REVISION
 
@@ -136,7 +136,7 @@ def test_script_template_renders_without_comments(tmp_path: Path) -> None:
     config.set_main_option("prepend_sys_path", "")
 
     script = ScriptDirectory.from_config(config).generate_revision(
-        "0013", "template probe", head="0012"
+        "0014", "template probe", head=HEAD_REVISION
     )
 
     assert script is not None
@@ -145,7 +145,7 @@ def test_script_template_renders_without_comments(tmp_path: Path) -> None:
     assert not any(line.lstrip().startswith("#") for line in rendered.splitlines())
     assert ast.get_docstring(tree) is None
     assert "def upgrade() -> None:" in rendered
-    assert "down_revision: str | None = '0012'" in rendered
+    assert f"down_revision: str | None = {HEAD_REVISION!r}" in rendered
 
 
 RenderItem: TypeAlias = Callable[[str, object, AutogenContext], str | Literal[False]]
