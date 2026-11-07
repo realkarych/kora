@@ -4,7 +4,7 @@
 
 ## Matched observations
 
-Both releases produced the following results for the same scripted Bash call or direct patch within each tool kind. The fixture correlates each bounded hook receipt, native hook completion and tool response with the selected turn. It checks the real workspace marker separately from the native notifications.
+Both releases produced the following results for the same scripted Bash call or direct patch within each tool kind. The fixture matches the bounded hook receipt and tool response to the scripted call and the native hook completion to the acknowledged thread and turn. It checks the real workspace marker separately from the native notifications.
 
 | Tool and managed hook behavior | Native observation in both releases | Model-visible result | Marker |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@ Both releases produced the following results for the same scripted Bash call or 
 | Bash, exit 1 | Hook `failed` | Bash exit 0 | Exact selected Bash and executor-home marker |
 | Bash, timeout after the hook started | Hook `failed` | Bash exit 0 | Exact selected Bash and executor-home marker |
 | Direct `apply_patch`, exit 2 with the blocking reason | Hook `blocked`, zero file-change or command items | Exact PreToolUse refusal | Absent |
-| Direct `apply_patch`, exit 1 | Hook `failed`, one started and completed `fileChange`, zero command items | Correlated patch result with exit 0 | Regular file with exact patch bytes |
+| Direct `apply_patch`, exit 1 | Hook `failed`, one started and completed `fileChange`, zero command items | Correlated patch result with exit 0 | Regular file with exact marker bytes |
 
 For each timeout the probe matches the ready-socket peer PID to the recorded helper, observes exit through the live helper's pidfd and observes barrier EOF while both native roles are live. Each of the 12 cases then reaped the two direct native children, closed the local Responses server and streams, and confirmed removal of its exact container. The probe-container inventory was empty before and after the campaign. The cleanup evidence covers those owned children and channels and container removal. It supplies no independent inventory of all executor listeners, handles or descendants before removal.
 
