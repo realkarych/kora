@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Final, Literal
 
-from pydantic import Field, StrictBool, StrictInt
+from pydantic import Field, StrictInt
 
 from kora.conformance.bridge import ConstructorArguments, PreparedConformance
 from kora.conformance.vcs import VcsBench, VcsBinding, VcsConformanceInputs, VcsRemote
@@ -57,7 +57,7 @@ class PreparationEvidence(BoundaryModel):
     path: PathText
     device: StrictInt
     inode: StrictInt
-    occupy_remote: StrictBool
+    occupied_repository: Literal["remote", "gone"] | None = None
     deadline_seconds: Annotated[StrictInt, Field(ge=0, le=GIT_DEADLINE_SECONDS)] = (
         GIT_DEADLINE_SECONDS
     )
@@ -158,6 +158,7 @@ def git(
         capture_output=True,
         check=True,
         timeout=deadline,
+        umask=0o077,
     )
     return result.stdout.decode().strip()
 
@@ -351,8 +352,10 @@ class Adapter:
         self.root = root
         self.identity = directory_identity(anchor.descriptor)
         anchor.close()
-        if evidence is not None and evidence.occupy_remote:
-            (root / "remote.git").touch(mode=0o600, exist_ok=False)
+        if evidence is not None and evidence.occupied_repository is not None:
+            (root / f"{evidence.occupied_repository}.git").touch(
+                mode=0o600, exist_ok=False
+            )
         revision = seed_repositories(executable, root, observation)
         remote = VcsRemote(
             repo="local",

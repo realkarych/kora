@@ -11,7 +11,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Final
+from typing import Final, Literal
 
 import pytest
 
@@ -144,7 +144,10 @@ class VcsPreparationProbe:
 
 @contextmanager
 def vcs_preparation_probe(
-    tmp_path: Path, *, occupy_remote: bool = False, deadline_seconds: int | None = None
+    tmp_path: Path,
+    *,
+    occupied_repository: Literal["remote", "gone"] | None = None,
+    deadline_seconds: int | None = None,
 ) -> Generator[VcsPreparationProbe]:
     root = private_home(tmp_path / "vcs-observation").resolve(strict=True)
     path = root / "preparation"
@@ -168,7 +171,7 @@ def vcs_preparation_probe(
                         "path": str(path),
                         "device": opened.st_dev,
                         "inode": opened.st_ino,
-                        "occupy_remote": occupy_remote,
+                        "occupied_repository": occupied_repository,
                         **(
                             {}
                             if deadline_seconds is None
@@ -631,32 +634,49 @@ def test_installed_provider_supports_local_tooling(
         assert timed_steps == VCS_PREPARATION_STEPS
 
 
+@pytest.mark.parametrize(
+    ("occupied_repository", "expected_steps"),
+    [("remote", ("init_remote",)), ("gone", ("init_remote", "init_gone"))],
+)
 def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
     installed_conformance: InstalledTooling,
     tmp_path: Path,
     record_testsuite_property: Callable[[str, object], None],
+    occupied_repository: Literal["remote", "gone"],
+    expected_steps: tuple[str, ...],
 ) -> None:
     home = private_home(tmp_path / "home")
     config = tmp_path / "config.json"
     config.write_text(json.dumps(vcs_configuration(Path("vcs-private-setup-canary"))))
 
-    with vcs_preparation_probe(tmp_path, occupy_remote=True) as probe:
+    with vcs_preparation_probe(
+        tmp_path, occupied_repository=occupied_repository
+    ) as probe:
         process = installed_conformance.run(
             *conformance_arguments(
                 "vcs", "configured", config, "fixtures_vcs", probe.fixture_data
             ),
             environment={"HOME": str(home)},
+            umask=0o022,
         )
         preparation = probe.observed()
         timing = probe.timing()
         timed_steps = probe.timed_steps()
-    record_testsuite_property("vcs_preparation_timing_later", ";".join(timing))
+    if occupied_repository == "remote":
+        record_testsuite_property("vcs_preparation_timing_later", ";".join(timing))
     exposed = any(
         marker in process.stdout + process.stderr
-        for marker in (b"vcs-private-setup-canary", b"remote.git", b"git-trace")
+        for marker in (
+            b"vcs-private-setup-canary",
+            b"remote.git",
+            b"gone.git",
+            b"git-trace",
+        )
     )
 
     assert not exposed
+    assert preparation == ("prepare_entered", f"git_{expected_steps[-1]}_nonzero")
+    assert timed_steps == expected_steps
     outcome = CommandResult.model_validate_json(process.stdout)
     assert process.code == 1
     assert outcome.outcome is OriginalOutcome.FAILED
@@ -666,8 +686,6 @@ def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
     assert outcome.cleanup is not None
     assert outcome.cleanup.state is CleanupOutcome.CLOSED
     assert outcome.cleanup.unresolved_count == 0
-    assert preparation == ("prepare_entered", "git_init_remote_nonzero")
-    assert timed_steps == ("init_remote",)
     assert not list(home.rglob("journal"))
 
 
