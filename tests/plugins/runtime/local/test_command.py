@@ -49,7 +49,10 @@ from kora.protocols.runtime import RawEvent, TransferItem, Workload
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
-from kora.runner.filesystem import open_local_directory
+from kora.runner.filesystem import (
+    DirectoryAnchor,
+    open_local_directory,
+)
 from kora.runner.identity import (
     SCAN_NS,
     CommandPIDInventory,
@@ -60,6 +63,8 @@ from kora.runner.identity import (
 )
 from kora.runner.journal import (
     RECORD_LIMIT,
+    SYNC_DEADLINE_NS,
+    JournalAppendOutcome,
     JournalCapacityError,
     RunningJournal,
     read_records,
@@ -492,6 +497,60 @@ def descriptors_for(path: Path) -> set[int]:
 
 def live_journal_writers() -> set[threading.Thread]:
     return {thread for thread in threading.enumerate() if thread.name == "kora-journal"}
+
+
+class HeldJournalWrite(RunningJournal):
+    def __init__(self, directory: DirectoryAnchor) -> None:
+        super().__init__(directory, SystemClock())
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def _write_line(self, descriptor: int, line: bytes, deadline: int) -> bool:
+        if b'"runner.outputs_sealed"' in line:
+            self.entered.set()
+            assert self.release.wait(10)
+        return super()._write_line(descriptor, line, deadline)
+
+
+@pytest.mark.asyncio
+async def test_seal_append_close_keeps_inflight_outcome_uncertain(
+    tmp_path: Path,
+) -> None:
+    directory = private_directory(tmp_path, "attempt")
+    anchor = open_local_directory(directory)
+    path = directory / "journal.jsonl"
+    writers = live_journal_writers()
+    journal = HeldJournalWrite(anchor)
+    try:
+        assert await asyncio.to_thread(
+            journal.append, "command_exited", {"exit_code": 0}
+        )
+        writing = asyncio.create_task(
+            asyncio.to_thread(journal.append_outcome, "runner.outputs_sealed", {})
+        )
+        assert await asyncio.to_thread(journal.entered.wait, 5)
+
+        journal.close()
+        async with asyncio.timeout(5):
+            outcome = await asyncio.shield(writing)
+        absent = journal.append_outcome("runner.outputs_sealed", {})
+        unfinished = descriptors_for(path)
+        journal.release.set()
+        await until(lambda: live_journal_writers() <= writers)
+        records = read_records(anchor)
+        remaining = descriptors_for(path)
+    finally:
+        journal.close()
+        journal.release.set()
+        await until(lambda: live_journal_writers() <= writers)
+        anchor.close()
+
+    assert outcome is JournalAppendOutcome.UNCERTAIN
+    assert absent is JournalAppendOutcome.ABSENT
+    assert journal.not_durable == 1
+    assert len(unfinished) == 1
+    assert remaining == set()
+    assert records == ((0, "command_exited"),)
 
 
 @pytest.mark.asyncio
@@ -1322,6 +1381,9 @@ class CommandCloseProbe(CommandSession):
     def stopping(self) -> bool:
         return self._stop.is_set()
 
+    def seal_scheduled(self) -> bool:
+        return self._output_seal is not None
+
     def _snapshot_ready(self) -> bool:
         ready = super()._snapshot_ready()
         if not ready and isinstance(self._clock, ExitAppendClock):
@@ -1333,6 +1395,154 @@ class CommandCloseProbe(CommandSession):
         assert task is not None
         async with asyncio.timeout(5):
             await asyncio.shield(task)
+
+
+class SealBoundaryClock(SystemClock):
+    def __init__(self, attempt: Path, case: str) -> None:
+        self.attempt = attempt
+        self.case = case
+        self.path = attempt / "journal.jsonl"
+        self.modes: tuple[int, int, int] | None = None
+        self.prepared = threading.Event()
+        self.partial_mode: int | None = None
+
+    def now(self) -> datetime:
+        snapshot = self.attempt / "output-snapshot"
+        if not self.prepared.is_set() and snapshot.is_dir():
+            nested = snapshot / "a"
+            self.modes = (
+                stat_mode(snapshot),
+                stat_mode(nested),
+                stat_mode(nested / "payload"),
+            )
+            assert sealed_manifest(self.path) is None
+            if self.case == "disk-full":
+                fill(self.attempt)
+            self.prepared.set()
+        return super().now()
+
+    def monotonic_ns(self) -> int:
+        now = super().monotonic_ns()
+        if threading.current_thread().name == "kora-journal" and self.prepared.is_set():
+            if self.case == "before-write" or (
+                self.case == "after-write" and sealed_manifest(self.path) is not None
+            ):
+                return now + SYNC_DEADLINE_NS
+        return now
+
+
+class SealBoundaryProbe(CommandCloseProbe):
+    def _finalize_snapshot(self, snapshot: DirectoryAnchor) -> None:
+        clock = self._clock
+        assert isinstance(clock, SealBoundaryClock)
+        if clock.case == "freeze-failure":
+            root = clock.attempt / "output-snapshot"
+            (root / "z").chmod(0o400)
+            try:
+                super()._finalize_snapshot(snapshot)
+            finally:
+                clock.partial_mode = stat_mode(root / "a")
+        else:
+            super()._finalize_snapshot(snapshot)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "outcome", "retained"),
+    [
+        ("durable", "sealed", True),
+        ("before-write", "journal_unavailable", False),
+        ("after-write", "journal_unavailable", True),
+        ("freeze-failure", "refused", False),
+        pytest.param(
+            "disk-full", "journal_unavailable", False, marks=pytest.mark.host_fixture
+        ),
+    ],
+)
+async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
+    tmp_path: Path, kora_capture: Capture, case: str, outcome: str, retained: bool
+) -> None:
+    parent = prepared("small-filesystem") if case == "disk-full" else tmp_path.resolve()
+    attempt = private_directory(parent, f"{PATH_MARKER}-{os.getpid()}-seal-ack")
+    directory = open_local_directory(attempt)
+    candidate = attempt / "candidate"
+    snapshot = attempt / "output-snapshot"
+    clock = SealBoundaryClock(attempt, case)
+    session = SealBoundaryProbe(
+        directory,
+        str(candidate),
+        SecretScope(kora_capture.diagnostics),
+        clock,
+        kora_capture.diagnostics.logger(COMPONENT),
+    )
+    script = "\n".join(
+        (
+            "from pathlib import Path",
+            "Path('a').mkdir()",
+            "Path('a/payload').write_bytes(b'payload')",
+            "Path('z').touch()",
+            "for index in range(128):",
+            "    Path(f'n{index:04}' + 'x' * 145).touch()",
+        )
+    )
+    submitter = Submitter(dispatcher_id="test", process=identity_of(os.getpid()))
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", script)
+        )
+        prelaunch: dict[int, int] = {}
+        if sys.platform == "darwin":
+            await asyncio.to_thread(
+                session.capture_prelaunch,
+                prelaunch,
+                workload,
+                clock.monotonic_ns() + SCAN_NS,
+            )
+        session.note(submitter, prelaunch)
+        try:
+            await asyncio.to_thread(
+                session.begin, submitter, False, workload, lambda: None
+            )
+            session.attach_drains()
+            await until(session.seal_scheduled)
+            await session.settle_seal()
+            status = session.status()
+            records = read_records(directory)
+            manifest = sealed_manifest(clock.path)
+            present = snapshot.exists()
+            content = (snapshot / "a" / "payload").read_bytes() if present else None
+            original = (candidate / "a" / "payload").read_bytes()
+        finally:
+            await session.aclose()
+            directory.close()
+            if case == "disk-full":
+                shutil.rmtree(attempt)
+
+    diagnostics = [
+        item.get("outcome")
+        for item in kora_capture.finish()
+        if item.get("event") == "runtime.local.seal"
+    ]
+    expected = ((0, "runner.candidate_started"), (1, "command_exited"))
+    assert status == ("exited", "complete", 0)
+    assert diagnostics == [outcome]
+    assert records == (
+        (*expected, (2, "runner.outputs_sealed")) if retained else expected
+    )
+    assert present is retained
+    assert content == (b"payload" if retained else None)
+    assert original == b"payload"
+    if retained:
+        assert manifest is not None
+        digest = f"sha256:{hashlib.sha256(b'payload').hexdigest()}"
+        assert manifest[0][0] == ("a/payload", digest)
+    else:
+        assert manifest is None
+    if case == "freeze-failure":
+        assert clock.partial_mode == 0o500
+        assert clock.modes is None
+    else:
+        assert clock.modes == (0o500, 0o500, 0o400)
 
 
 @pytest.mark.asyncio

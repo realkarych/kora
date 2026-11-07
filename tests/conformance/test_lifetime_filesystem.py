@@ -13,7 +13,10 @@ from kora.runner.filesystem import (
 )
 
 
-def test_anchored_tree_removal_refuses_substituted_name(tmp_path: Path) -> None:
+@pytest.mark.parametrize("frozen", [False, True])
+def test_anchored_tree_removal_refuses_substituted_name(
+    tmp_path: Path, frozen: bool
+) -> None:
     parent = DirectoryAnchor.open_path(tmp_path)
     child = create_directory(parent, "a" * 32)
     original = tmp_path / ("a" * 32)
@@ -22,11 +25,14 @@ def test_anchored_tree_removal_refuses_substituted_name(tmp_path: Path) -> None:
     original.mkdir(mode=0o700)
     marker = original / "foreign"
     marker.write_text("retained")
+    mode = 0o500 if frozen else 0o700
+    original.chmod(mode)
 
     with pytest.raises(FilesystemError):
-        remove_directory(parent, child.identity)
+        remove_directory(parent, child.identity, restore_owner_write=frozen)
 
     assert marker.read_text() == "retained"
+    assert original.stat().st_mode & 0o777 == mode
     assert moved.is_dir()
     child.close()
     parent.close()
@@ -50,7 +56,10 @@ def test_anchored_tree_removal_refuses_symlink_descendant(tmp_path: Path) -> Non
     parent.close()
 
 
-def test_anchored_tree_removal_releases_owned_tree(tmp_path: Path) -> None:
+@pytest.mark.parametrize("frozen", [False, True])
+def test_anchored_tree_removal_releases_owned_tree(
+    tmp_path: Path, frozen: bool
+) -> None:
     parent = DirectoryAnchor.open_path(tmp_path)
     child = create_directory(parent, "c" * 32)
     nested = create_directory(child, "d" * 32)
@@ -59,10 +68,12 @@ def test_anchored_tree_removal_releases_owned_tree(tmp_path: Path) -> None:
     )
     os.write(descriptor, b"owned")
     os.close(descriptor)
+    if frozen:
+        os.fchmod(nested.descriptor, 0o500)
     nested.close()
     child.close()
 
-    remove_directory(parent, child.identity)
+    remove_directory(parent, child.identity, restore_owner_write=frozen)
 
     assert not (tmp_path / ("c" * 32)).exists()
     parent.close()

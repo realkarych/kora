@@ -141,7 +141,9 @@ class DirectoryAnchor:
             os.close(descriptor)
             raise
 
-    def open_child(self, expected: DirectoryIdentity) -> "DirectoryAnchor":
+    def open_child(
+        self, expected: DirectoryIdentity, *, restore_owner_write: bool = False
+    ) -> "DirectoryAnchor":
         self.verify()
         descriptor = os.open(
             expected.name,
@@ -149,6 +151,15 @@ class DirectoryAnchor:
             dir_fd=self.descriptor,
         )
         try:
+            if restore_owner_write:
+                if (
+                    expected.device != self.identity.device
+                    or expected.owner_uid != os.getuid()
+                    or identity_of(descriptor, expected.name) != expected
+                ):
+                    raise FilesystemError("identity_mismatch")
+                if stat.S_IMODE(os.fstat(descriptor).st_mode) == 0o500:
+                    os.fchmod(descriptor, 0o700)
             verify_private(descriptor, directory=True)
             if identity_of(descriptor, expected.name) != expected:
                 raise FilesystemError("identity_mismatch")
@@ -199,16 +210,23 @@ def create_directory(parent: DirectoryAnchor, name: str) -> DirectoryAnchor:
 
 
 def remove_directory(
-    parent: DirectoryAnchor, expected: DirectoryIdentity, *, max_entries: int = 65536
+    parent: DirectoryAnchor,
+    expected: DirectoryIdentity,
+    *,
+    max_entries: int = 65536,
+    restore_owner_write: bool = False,
 ) -> None:
     remaining = [max_entries]
-    _remove_directory(parent, expected, remaining)
+    _remove_directory(parent, expected, remaining, restore_owner_write)
 
 
 def _remove_directory(
-    parent: DirectoryAnchor, expected: DirectoryIdentity, remaining: list[int]
+    parent: DirectoryAnchor,
+    expected: DirectoryIdentity,
+    remaining: list[int],
+    restore_owner_write: bool,
 ) -> None:
-    child = parent.open_child(expected)
+    child = parent.open_child(expected, restore_owner_write=restore_owner_write)
     try:
         with os.scandir(child.descriptor) as entries:
             for entry in entries:
@@ -218,7 +236,11 @@ def _remove_directory(
                 metadata = os.stat(
                     entry.name, dir_fd=child.descriptor, follow_symlinks=False
                 )
-                if metadata.st_uid != os.getuid() or stat.S_ISLNK(metadata.st_mode):
+                if (
+                    metadata.st_uid != os.getuid()
+                    or stat.S_ISLNK(metadata.st_mode)
+                    or (restore_owner_write and metadata.st_dev != expected.device)
+                ):
                     raise FilesystemError("foreign_tree_entry")
                 if stat.S_ISDIR(metadata.st_mode):
                     nested = DirectoryIdentity(
@@ -227,7 +249,7 @@ def _remove_directory(
                         inode=metadata.st_ino,
                         owner_uid=metadata.st_uid,
                     )
-                    _remove_directory(child, nested, remaining)
+                    _remove_directory(child, nested, remaining, restore_owner_write)
                 elif stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1:
                     os.unlink(entry.name, dir_fd=child.descriptor)
                 else:
@@ -452,7 +474,7 @@ def snapshot_regular_tree(
 
 def freeze_private_tree(root: DirectoryAnchor) -> None:
     root.verify()
-    _freeze(root.descriptor)
+    _freeze(root.descriptor, root.identity.device)
     os.fchmod(root.descriptor, 0o500)
     os.fsync(root.descriptor)
 
@@ -688,29 +710,26 @@ def _discard_name(parent: int, name: str) -> None:
         return
 
 
-def _freeze(directory: int) -> None:
+def _freeze(directory: int, device: int) -> None:
     for name in _entry_names(directory):
         metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
-        if stat.S_ISDIR(metadata.st_mode):
-            child = os.open(
-                name,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=directory,
-            )
-            try:
-                _freeze(child)
-                os.fchmod(child, 0o500)
-                os.fsync(child)
-            finally:
-                os.close(child)
-            continue
-        if not stat.S_ISREG(metadata.st_mode):
-            continue
-        descriptor = os.open(
-            name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=directory
-        )
+        nested = stat.S_ISDIR(metadata.st_mode)
+        if metadata.st_dev != device or (
+            not nested and not stat.S_ISREG(metadata.st_mode)
+        ):
+            raise FilesystemError("unsupported_tree_entry")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        if nested:
+            flags |= os.O_DIRECTORY
+        descriptor = os.open(name, flags, dir_fd=directory)
         try:
-            os.fchmod(descriptor, 0o400)
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino) != (device, metadata.st_ino):
+                raise FilesystemError("identity_mismatch")
+            verify_private(descriptor, directory=nested)
+            if nested:
+                _freeze(descriptor, device)
+            os.fchmod(descriptor, 0o500 if nested else 0o400)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)

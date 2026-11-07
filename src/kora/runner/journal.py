@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 from collections import deque
+from enum import Enum, auto
 from typing import Final
 
 from kora.ir.json import JsonObject
@@ -26,6 +27,12 @@ RECORD_DEPTH: Final[int] = 8
 
 class JournalCapacityError(Exception):
     pass
+
+
+class JournalAppendOutcome(Enum):
+    DURABLE = auto()
+    ABSENT = auto()
+    UNCERTAIN = auto()
 
 
 class _Write:
@@ -65,13 +72,21 @@ class RunningJournal:
     def append(
         self, kind: str, data: JsonObject, *, reader_bounded: bool = False
     ) -> bool:
+        return (
+            self.append_outcome(kind, data, reader_bounded=reader_bounded)
+            is JournalAppendOutcome.DURABLE
+        )
+
+    def append_outcome(
+        self, kind: str, data: JsonObject, *, reader_bounded: bool = False
+    ) -> JournalAppendOutcome:
         deadline = self._clock.monotonic_ns() + SYNC_DEADLINE_NS
         launch: tuple[threading.Thread, DirectoryAnchor, BorrowedInvocation] | None = (
             None
         )
         with self._state:
             if self._closed:
-                return False
+                return JournalAppendOutcome.ABSENT
             line = canonical_bytes(
                 {
                     "i": self._next,
@@ -95,7 +110,7 @@ class RunningJournal:
                     launch = self._prepare_writer()
                 except (OSError, RuntimeError, MemoryError):
                     self._close_locked()
-                    return False
+                    return JournalAppendOutcome.ABSENT
                 self._thread = launch[0]
             self._state.notify_all()
         if launch is not None:
@@ -106,7 +121,7 @@ class RunningJournal:
                 self.close()
                 if ownership.seal() is None:
                     directory.close()
-                return False
+                return JournalAppendOutcome.ABSENT
             with self._state:
                 self._writer_ready = True
                 self._state.notify_all()
@@ -140,7 +155,7 @@ class RunningJournal:
             self._jobs.clear()
             self._state.notify_all()
 
-    def _wait(self, job: _Write) -> bool:
+    def _wait(self, job: _Write) -> JournalAppendOutcome:
         with self._state:
             while not job.done and not self._closed:
                 remaining = job.deadline - self._clock.monotonic_ns()
@@ -148,11 +163,12 @@ class RunningJournal:
                     break
                 self._state.wait(remaining / 1_000_000_000)
             if job.synced:
-                return True
+                return JournalAppendOutcome.DURABLE
             self._close_locked()
             if job.written or (job.started and not job.done):
                 self._not_durable += 1
-            return False
+                return JournalAppendOutcome.UNCERTAIN
+            return JournalAppendOutcome.ABSENT
 
     def _write(self, directory: DirectoryAnchor, ownership: BorrowedInvocation) -> None:
         try:
@@ -226,14 +242,8 @@ class RunningJournal:
             return not self._closed and self._clock.monotonic_ns() < deadline
 
     def _store(self, descriptor: int, job: _Write) -> bool:
-        view = memoryview(job.line)
-        while view:
-            if not self._available(job.deadline):
-                return False
-            written = os.write(descriptor, view)
-            if written <= 0:
-                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-            view = view[written:]
+        if not self._write_line(descriptor, job.line, job.deadline):
+            return False
         with self._state:
             job.written = True
         if not self._available(job.deadline):
@@ -242,6 +252,17 @@ class RunningJournal:
             synchronize(descriptor)
         else:
             os.fdatasync(descriptor)
+        return True
+
+    def _write_line(self, descriptor: int, line: bytes, deadline: int) -> bool:
+        view = memoryview(line)
+        while view:
+            if not self._available(deadline):
+                return False
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+            view = view[written:]
         return True
 
 

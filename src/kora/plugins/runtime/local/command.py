@@ -29,6 +29,7 @@ from kora.protocols.secret_value import SecretScope, SecretValue
 from kora.protocols.time import Clock
 from kora.runner.channels import CaptureDrain, cancel_task
 from kora.runner.filesystem import (
+    MAX_SEAL_ENTRIES,
     DirectoryAnchor,
     FilesystemError,
     SealCapacityError,
@@ -44,6 +45,7 @@ from kora.runner.filesystem import (
 from kora.runner.identity import PROCESS_SCAN_ENTRIES, SCAN_NS, NativeIdentityReader
 from kora.runner.journal import (
     SYNC_DEADLINE_NS,
+    JournalAppendOutcome,
     JournalCapacityError,
     RunningJournal,
     space_error,
@@ -433,15 +435,18 @@ class CommandSession:
     async def _seal_confirmed(self) -> None:
         started = self._clock.monotonic_ns()
         executor = NativeExecutor(1, 1)
+        unresolved = False
         try:
             await executor.run(lambda: self._write_snapshot(started))
         except NativeIOUnresolved:
-            self._finish_seal("refused", started)
+            unresolved = True
         finally:
             try:
                 await executor.close()
             except NativeIOUnresolved:
-                self._finish_seal("refused", started)
+                unresolved = True
+        if unresolved:
+            self._finish_seal("refused", started)
 
     def _snapshot_ready(self) -> bool:
         return (
@@ -463,30 +468,35 @@ class CommandSession:
             return
         source: DirectoryAnchor | None = None
         snapshot: DirectoryAnchor | None = None
-        admitted = False
+        retained = False
+        outcome = "refused"
         try:
             try:
                 source = open_private_directory(self._attempt, "candidate")
                 snapshot = create_directory(self._attempt, SNAPSHOT_NAME)
+                if snapshot.identity.device != self._attempt.identity.device:
+                    raise FilesystemError("snapshot_device_mismatch")
                 sealed = snapshot_regular_tree(source, snapshot)
+                self._finalize_snapshot(snapshot)
             except (SealCapacityError, RecursionError, MemoryError):
-                self._finish_seal("refused", started)
-                return
+                pass
             except (OSError, FilesystemError) as error:
-                self._settle_seal(started, error)
-                return
-            if not self._append_seal(sealed, started):
-                return
-            admitted = True
-            try:
-                freeze_private_tree(snapshot)
-            except (OSError, FilesystemError) as error:
-                self._settle_seal(started, error)
-                return
-            self._finish_seal("sealed", started)
-            return
-        except JournalCapacityError:
-            pass
+                if isinstance(error, OSError) and space_error(error):
+                    self._journal.close()
+                    outcome = "journal_unavailable"
+            else:
+                retained = True
+                try:
+                    result = self._append_seal(sealed)
+                except (JournalCapacityError, JsonShapeError, UnicodeEncodeError):
+                    retained = False
+                else:
+                    retained = result is not JournalAppendOutcome.ABSENT
+                    outcome = (
+                        "sealed"
+                        if result is JournalAppendOutcome.DURABLE
+                        else "journal_unavailable"
+                    )
         finally:
             cleanup: OSError | FilesystemError | None = None
             if source is not None:
@@ -501,40 +511,34 @@ class CommandSession:
                 except OSError as error:
                     if cleanup is None:
                         cleanup = error
-                if not admitted:
+                if not retained:
                     try:
-                        remove_directory(self._attempt, identity)
+                        remove_directory(
+                            self._attempt,
+                            identity,
+                            max_entries=MAX_SEAL_ENTRIES,
+                            restore_owner_write=True,
+                        )
                     except (OSError, FilesystemError) as error:
                         if cleanup is None:
                             cleanup = error
             if cleanup is not None:
                 raise cleanup
-        self._finish_seal("refused", started)
+        self._finish_seal(outcome, started)
 
-    def _settle_seal(self, started: int, error: OSError | FilesystemError) -> None:
-        if isinstance(error, OSError) and space_error(error):
-            self._journal.close()
-            self._finish_seal("journal_unavailable", started)
-            return
-        self._finish_seal("refused", started)
+    def _finalize_snapshot(self, snapshot: DirectoryAnchor) -> None:
+        freeze_private_tree(snapshot)
+        synchronize(self._attempt.descriptor)
 
-    def _append_seal(self, sealed: SealedTree, started: int) -> bool:
+    def _append_seal(self, sealed: SealedTree) -> JournalAppendOutcome:
         files: list[JsonValue] = [
             {"name": item.name, "sha256": item.sha256} for item in sealed.files
         ]
         refused: list[JsonValue] = list(sealed.refused)
         payload: JsonObject = {"files": files, "refused": refused}
-        try:
-            recorded = self._journal.append(
-                "runner.outputs_sealed", payload, reader_bounded=True
-            )
-        except (JsonShapeError, UnicodeEncodeError):
-            self._finish_seal("refused", started)
-            return False
-        if not recorded:
-            self._finish_seal("journal_unavailable", started)
-            return False
-        return True
+        return self._journal.append_outcome(
+            "runner.outputs_sealed", payload, reader_bounded=True
+        )
 
     def _finish_seal(self, outcome: str, started: int) -> None:
         with self._lock:
