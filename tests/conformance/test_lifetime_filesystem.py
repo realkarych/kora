@@ -6,8 +6,10 @@ import pytest
 from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
+    SealCapacityError,
     create_directory,
     remove_directory,
+    snapshot_regular_tree,
 )
 
 
@@ -64,3 +66,65 @@ def test_anchored_tree_removal_releases_owned_tree(tmp_path: Path) -> None:
 
     assert not (tmp_path / ("c" * 32)).exists()
     parent.close()
+
+
+def test_snapshot_stops_before_the_one_thousand_and_first_file(tmp_path: Path) -> None:
+    parent = DirectoryAnchor.open_path(tmp_path)
+    source = create_directory(parent, "source")
+    snapshot = create_directory(parent, "snapshot")
+    for index in range(1001):
+        descriptor = os.open(
+            f"f{index:04d}",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=source.descriptor,
+        )
+        os.close(descriptor)
+
+    with pytest.raises(SealCapacityError):
+        snapshot_regular_tree(source, snapshot)
+
+    assert _names(snapshot.descriptor) == []
+    source.close()
+    snapshot.close()
+    parent.close()
+
+
+def test_snapshot_stops_before_the_one_thousand_and_first_directory(
+    tmp_path: Path,
+) -> None:
+    parent = DirectoryAnchor.open_path(tmp_path)
+    source = create_directory(parent, "source")
+    snapshot = create_directory(parent, "snapshot")
+    for index in range(1001):
+        os.mkdir(f"d{index:04d}", 0o700, dir_fd=source.descriptor)
+
+    with pytest.raises(SealCapacityError):
+        snapshot_regular_tree(source, snapshot)
+
+    assert _names(snapshot.descriptor) == []
+    source.close()
+    snapshot.close()
+    parent.close()
+
+
+def test_snapshot_accepts_one_thousand_directories(tmp_path: Path) -> None:
+    parent = DirectoryAnchor.open_path(tmp_path)
+    source = create_directory(parent, "source")
+    snapshot = create_directory(parent, "snapshot")
+    for index in range(1000):
+        os.mkdir(f"d{index:04d}", 0o700, dir_fd=source.descriptor)
+
+    sealed = snapshot_regular_tree(source, snapshot)
+
+    assert sealed.files == ()
+    assert sealed.refused == ()
+    assert _names(snapshot.descriptor) == [f"d{index:04d}" for index in range(1000)]
+    source.close()
+    snapshot.close()
+    parent.close()
+
+
+def _names(descriptor: int) -> list[str]:
+    with os.scandir(descriptor) as entries:
+        return sorted(entry.name for entry in entries)

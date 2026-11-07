@@ -467,13 +467,27 @@ class CommandSession:
                 freeze_private_tree(snapshot)
                 self._finish_seal("sealed", started)
         finally:
+            cleanup: OSError | FilesystemError | None = None
             if source is not None:
-                source.close()
+                try:
+                    source.close()
+                except OSError as error:
+                    cleanup = error
             if snapshot is not None:
                 identity = snapshot.identity
-                snapshot.close()
+                try:
+                    snapshot.close()
+                except OSError as error:
+                    if cleanup is None:
+                        cleanup = error
                 if not admitted:
-                    remove_directory(self._attempt, identity)
+                    try:
+                        remove_directory(self._attempt, identity)
+                    except (OSError, FilesystemError) as error:
+                        if cleanup is None:
+                            cleanup = error
+            if cleanup is not None:
+                raise cleanup
 
     def _settle_seal(self, started: int, error: OSError | FilesystemError) -> None:
         if isinstance(error, OSError) and space_error(error):

@@ -1701,6 +1701,37 @@ async def test_seal_stops_at_one_thousand_entries(
 
 
 @pytest.mark.asyncio
+async def test_seal_counts_directories_toward_the_entry_bound(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    script = "\n".join(
+        (
+            "from pathlib import Path",
+            "root = Path('.')",
+            "for index in range(1001):",
+            "    (root / f'd{index:04d}').mkdir()",
+        )
+    )
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
+            ctx,
+        )
+        await runtime.start(handle, ctx)
+        await until_exited(runtime, handle, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        log = attempt / "runner.log"
+        await until(lambda: seal_outcomes(log) == ["refused"])
+        journal = (attempt / "journal.jsonl").read_text()
+        outcomes = seal_outcomes(log)
+        snapshot = attempt / "output-snapshot"
+
+    assert "runner.outputs_sealed" not in journal
+    assert outcomes == ["refused"]
+    assert not snapshot.exists()
+
+
+@pytest.mark.asyncio
 @pytest.mark.host_fixture
 async def test_seal_journal_failure_keeps_the_files(
     tmp_path: Path, kora_capture: Capture

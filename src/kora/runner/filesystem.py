@@ -176,17 +176,26 @@ def create_directory(parent: DirectoryAnchor, name: str) -> DirectoryAnchor:
         raise FilesystemError("invalid_relative_name")
     parent.verify()
     os.mkdir(name, mode=0o700, dir_fd=parent.descriptor)
-    descriptor = os.open(
-        name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent.descriptor
-    )
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent.descriptor,
+        )
+    except OSError:
+        os.rmdir(name, dir_fd=parent.descriptor)
+        raise
     try:
         verify_private(descriptor, directory=True)
         identity = identity_of(descriptor, name)
         os.fsync(parent.descriptor)
-        return DirectoryAnchor(descriptor, identity)
     except (OSError, FilesystemError):
-        os.close(descriptor)
+        try:
+            os.close(descriptor)
+        finally:
+            os.rmdir(name, dir_fd=parent.descriptor)
         raise
+    return DirectoryAnchor(descriptor, identity)
 
 
 def remove_directory(
@@ -458,18 +467,17 @@ def _collect(
     refused: list[str],
     count: int,
 ) -> int:
-    for name in _entry_names(parent):
+    for name in _bounded_entry_names(parent, count):
+        count = _count(count)
         relative = name if prefix == "" else f"{prefix}/{name}"
         try:
             metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
         except OSError as error:
             if error.errno == errno.EIO:
                 raise
-            count = _count(count)
             refused.append(relative)
             continue
         if stat.S_ISLNK(metadata.st_mode) or metadata.st_dev != device:
-            count = _count(count)
             refused.append(relative)
             continue
         if stat.S_ISDIR(metadata.st_mode):
@@ -486,10 +494,8 @@ def _collect(
             )
             continue
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-            count = _count(count)
             refused.append(relative)
             continue
-        count = _count(count)
         try:
             digest = _copy_file(root, parent, destination, name, relative, device)
         except OSError as error:
@@ -517,7 +523,7 @@ def _copy_directory(
     child = _open_child_directory(parent, name)
     if child is None:
         refused.append(relative)
-        return _count(count)
+        return count
     try:
         try:
             copied = _make_directory(destination, name)
@@ -525,7 +531,7 @@ def _copy_directory(
             if error.errno == errno.EIO:
                 raise
             refused.append(relative)
-            return _count(count)
+            return count
         try:
             count = _collect(
                 root, child, copied, device, relative, files, refused, count
@@ -542,6 +548,17 @@ def _count(count: int) -> int:
     if count >= MAX_SEAL_ENTRIES:
         raise SealCapacityError("seal_capacity")
     return count + 1
+
+
+def _bounded_entry_names(parent: int, count: int) -> tuple[str, ...]:
+    names: list[str] = []
+    with os.scandir(parent) as entries:
+        for entry in entries:
+            if count + len(names) >= MAX_SEAL_ENTRIES:
+                raise SealCapacityError("seal_capacity")
+            names.append(entry.name)
+    names.sort()
+    return tuple(names)
 
 
 def _entry_names(parent: int) -> tuple[str, ...]:
