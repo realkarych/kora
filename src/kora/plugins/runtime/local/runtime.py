@@ -810,6 +810,13 @@ class LocalRuntime:
             await task
         finally:
             self._deliveries.discard(task)
+            abandoned = sys.exc_info()[0] is not None or not task.done()
+            if not task.done():
+                task.cancel()
+                await observed(task)
+            if abandoned:
+                for lease in tuple(found):
+                    lease.close()
         if not found:
             raise RuntimeError("missing output spool")
         return found[0]

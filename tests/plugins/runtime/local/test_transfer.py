@@ -1924,6 +1924,88 @@ async def test_output_shutdown_releases_the_spool(
     assert spool not in released
 
 
+def unlinked_spool(before: set[int]) -> bool:
+    for descriptor in live_descriptors() - before:
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+            continue
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 0:
+            return True
+    return False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_output_pull_releases_the_spool(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+        )
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        await runtime.start(handle, ctx)
+        await until(lambda: seal_logged(attempt))
+        pid = await running_pid(runtime, "attempt-1")
+        before = live_descriptors()
+        os.kill(pid, signal.SIGSTOP)
+
+        async def pull() -> None:
+            async for _chunk in runtime.transfer_out(handle, "payload", ctx):
+                raise AssertionError
+
+        task = asyncio.create_task(pull())
+        try:
+            await until(lambda: unlinked_spool(before))
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            released = live_descriptors()
+        finally:
+            os.kill(pid, signal.SIGCONT)
+
+    assert released == before
+
+
+def test_concurrent_spool_close_releases_one_lease(tmp_path: Path) -> None:
+    path = state_root(tmp_path)
+    root = open_local_directory(path)
+    owner = SpoolOwner.open(
+        root,
+        "domain",
+        identity_of(os.getpid()),
+        NativeIdentityReader(),
+        SystemClock(),
+    )
+    try:
+        lease = owner.acquire(lambda: None)
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def close_once() -> None:
+            barrier.wait(5)
+            try:
+                lease.close()
+            except (OSError, KeyError) as error:
+                errors.append(error)
+
+        threads = tuple(threading.Thread(target=close_once) for _ in range(2))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+            assert not thread.is_alive()
+        assert errors == []
+    finally:
+        try:
+            owner.close()
+        finally:
+            root.close()
+
+
 @pytest.mark.asyncio
 async def test_invalid_output_trailer_returns_no_bytes(tmp_path: Path) -> None:
     payload = b"abcd"
