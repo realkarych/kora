@@ -87,6 +87,13 @@ def domain_checks(dialect: str) -> tuple[CheckConstraint, ...]:
     )
 
 
+def result_checks() -> tuple[CheckConstraint, CheckConstraint]:
+    return (
+        named_check("result_shape", RESULT_SHAPE),
+        named_check("result_target", RESULT_TARGET),
+    )
+
+
 def graph_preparation_elements_v1(
     dialect: str | None = None,
 ) -> tuple[Column[str] | Constraint, ...]:
@@ -116,7 +123,6 @@ def graph_preparation_elements_v1(
             ("namespace.id",),
             name=f"fk_{TABLE_NAME}_namespace_id_namespace",
         ),
-        named_check("result_shape", RESULT_SHAPE),
-        named_check("result_target", RESULT_TARGET),
+        *result_checks(),
         *checks,
     )

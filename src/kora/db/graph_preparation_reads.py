@@ -2,12 +2,13 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Never
 
-from sqlalchemy import Executable, LargeBinary, and_, case, func, select, text
+from sqlalchemy import Executable, LargeBinary, and_, case, func, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.sql.elements import Grouping
 
-from kora.db.graph_preparation_v1 import RESULT_SHAPE, RESULT_TARGET, domain_checks
+from kora.db.graph_preparation_v1 import domain_checks, result_checks
 from kora.db.identifiers import IDENTIFIER_LENGTH, is_identifier
 from kora.db.tables import graph_deployment_preparation
 from kora.db.types import POSTGRESQL, SQLITE
@@ -77,15 +78,12 @@ def graph_preparation_settlement_statement(
 
     fields = graph_deployment_preparation.c
     selected = (fields.state, fields.result_graph_id, fields.result_graph_version_id)
-    predicates = tuple(
-        text(f"({predicate})")
-        for predicate in (
-            *(check.sqltext for check in domain_checks(dialect)),
-            RESULT_SHAPE,
-            RESULT_TARGET,
+    valid = and_(
+        *(
+            Grouping[bool](check.sqltext)
+            for check in (*domain_checks(dialect), *result_checks())
         )
     )
-    valid = and_(*predicates)
     if dialect == SQLITE:
         valid = and_(
             valid,
