@@ -679,11 +679,7 @@ class ControlServer:
                 if observational:
                     raise delivery_error("execution_unauthorized")
                 session = command
-                entry = await self._transfer_native(lambda: self._authorized(submitter))
-                cutoff = transfer_cutoff(self._clock, entry.deadline)
                 deadline = started_ns + MESSAGE_PROGRESS_NS
-                if cutoff is not None:
-                    deadline = min(deadline, cutoff)
 
                 def active() -> None:
                     if self._closing is not None:
@@ -692,7 +688,8 @@ class ControlServer:
                         raise ChannelError(ChannelFailure.DEADLINE)
 
                 def authorize() -> None:
-                    self._authorized(submitter, cutoff)
+                    if self._authorized(submitter).deadline is not None:
+                        raise delivery_error("transfer_refused")
                     active()
 
                 def open_file() -> OpenedOutput:

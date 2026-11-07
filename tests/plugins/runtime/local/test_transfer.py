@@ -108,10 +108,10 @@ from tests.support.local_runners import (
     open_spawning,
     runner_pids,
     short_directory,
+    written,
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
-    NudgedClock,
     prepared,
     private_directory,
     protocol_error,
@@ -2255,11 +2255,7 @@ class OutputWireServer(ControlServer):
     ) -> None:
         self.attempts += 1
         deadline = self._clock.monotonic_ns() + FRAME_PROGRESS_NS
-        payload = (
-            b"p" * SECTION_FRAME_BYTES + b"wire"
-            if request.name == "parked"
-            else b"wire"
-        )
+        payload = b"wire"
         size = MAX_TRANSFER_BYTES + 1 if request.name == "overbound" else len(payload)
         digest = digest_of(payload)
         header: JsonObject = {
@@ -2291,9 +2287,8 @@ class OutputWireServer(ControlServer):
             request.name == "retry" and self.attempts == 1
         ):
             return
-        split = SECTION_FRAME_BYTES if request.name == "parked" else 2
-        await channel.write_typed_frame(FrameType.BYTES, payload[:split], deadline)
-        await channel.write_typed_frame(FrameType.BYTES, payload[split:], deadline)
+        await channel.write_typed_frame(FrameType.BYTES, payload[:2], deadline)
+        await channel.write_typed_frame(FrameType.BYTES, payload[2:], deadline)
         trailer_digest = digest_of(b"wrong") if request.name == "trailer" else digest
         await channel.write_typed_frame(
             FrameType.JSON, output_trailer(request.request_id, trailer_digest), deadline
@@ -2343,39 +2338,51 @@ async def test_output_wire_limits_retries_and_requires_terminal_eof(
 
 
 @pytest.mark.asyncio
-async def test_output_iterator_keeps_its_inherited_monotonic_cutoff(
+async def test_output_refuses_inherited_deadline_before_spool_or_source(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    clock = NudgedClock()
-    async with delivery_server(
-        tmp_path, kora_capture, clock=clock, server_type=OutputWireServer
-    ) as live:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+        )
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, handle.attempt_id)
+        await runtime.start(handle, ctx)
+        await until(lambda: seal_logged(attempt))
+        entry = await recorded(runtime, handle.attempt_id)
+        assert isinstance(entry, Running)
         deadline = ExecutionDeadline(
-            at=clock.now() + timedelta(seconds=32),
+            at=ctx.clock.now() + timedelta(minutes=5),
             scope_kind="attempt",
-            scope_id=live.work.attempt_id,
+            scope_id=handle.attempt_id,
             clock_uncertainty=timedelta(seconds=2),
             grace=DEADLINE_GRACE,
         )
-        await live.write(live.entry.model_copy(update={"deadline": deadline}))
-        handle = live.runtime.registry.key(live.work.attempt_id).handle()
-        iterator = live.runtime.transfer_out(handle, "parked", live.ctx)
+        scoped = entry.model_copy(update={"deadline": deadline})
+        await written(runtime, handle.attempt_id, scoped, ctx)
+        spool = sole_spool(root)
+        before = spool.stat().st_mtime_ns
+        request = OutputRequest(op="transfer_out", request_id="wire", name="payload")
 
-        async with aclosing(iterator):
-            first = await anext(iterator)
-            clock.offset_ns += 31_000_000_000
-            refused = await protocol_error(anext(iterator))
-        persisted = await recorded(live.runtime, handle.attempt_id)
-        fresh = await protocol_error(
-            anext(live.runtime.transfer_out(handle, "parked", live.ctx))
+        refused = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
         )
+        after = spool.stat().st_mtime_ns
+        async with transfer_channel(runtime, ctx, scoped) as channel:
+            wait = ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS
+            await channel.write_typed_frame(
+                FrameType.JSON, canonical_bytes(request.model_dump(mode="json")), wait
+            )
+            _, payload = await channel.read_typed_frame(
+                wait, {FrameType.JSON.value: ENVELOPE_BYTES}
+            )
+            answered, direct = read_error_envelope(payload)
+            await channel.expect_eof(wait)
 
-    assert first == b"p" * SECTION_FRAME_BYTES
-    assert clock.now() < deadline.at - deadline.clock_uncertainty
-    assert refused.code == "deadline_expired"
-    assert isinstance(persisted, Running)
-    assert persisted.gate_closed
-    assert fresh.code == "deadline_expired"
+    assert refused.code == "transfer_refused"
+    assert before == after
+    assert answered == request.request_id
+    assert direct.code == "transfer_refused"
 
 
 @pytest.mark.asyncio
