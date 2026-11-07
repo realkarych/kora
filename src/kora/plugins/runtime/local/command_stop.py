@@ -118,34 +118,37 @@ class CommandDomainStop:
     def _signal_member(
         self, identity: ProcessIdentity, requested: signal.Signals, cutoff: int
     ) -> bool:
-        descriptor: int | None = None
-        readiness: select.poll | None = None
         try:
-            if sys.platform == "linux":
-                descriptor = os.pidfd_open(identity.pid)
+            if sys.platform != "linux":
+                if not self._may_signal(identity, cutoff):
+                    return False
+                os.kill(identity.pid, requested)
+                return True
+            descriptor = os.pidfd_open(identity.pid)
+            try:
                 readiness = select.poll()
                 readiness.register(descriptor, select.POLLIN)
-                if readiness.poll(0):
+                if (
+                    readiness.poll(0)
+                    or not self._may_signal(identity, cutoff)
+                    or readiness.poll(0)
+                ):
                     return False
-            member, complete = self.reader.command_member(
-                identity.pid, self.group, self.marker
-            )
-            if (
-                not complete
-                or member is None
-                or not member.owned
-                or member.process.identity != identity
-                or self.clock.monotonic_ns() >= cutoff
-                or (readiness is not None and readiness.poll(0))
-            ):
-                return False
-            if descriptor is None:
-                os.kill(identity.pid, requested)
-            else:
                 signal.pidfd_send_signal(descriptor, requested)
+                return True
+            finally:
+                os.close(descriptor)
         except OSError:
             return False
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-        return True
+
+    def _may_signal(self, identity: ProcessIdentity, cutoff: int) -> bool:
+        member, complete = self.reader.command_member(
+            identity.pid, self.group, self.marker
+        )
+        return (
+            complete
+            and member is not None
+            and member.owned
+            and member.process.identity == identity
+            and self.clock.monotonic_ns() < cutoff
+        )
