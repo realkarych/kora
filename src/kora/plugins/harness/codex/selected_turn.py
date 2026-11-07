@@ -48,6 +48,10 @@ async def run_selected_turn(
     next_usage_stamp: Callable[[], UsageStamp],
     stop: asyncio.Event | None = None,
 ) -> TerminalResult:
+    def require_running() -> None:
+        if stop is not None and stop.is_set():
+            raise TurnError(TurnFailure.STOP_BEFORE_START)
+
     check_deadline = partial(rpc.check_deadline, deadline)
     messages = CodexTurnEvents(sink, registry=registry, check_deadline=check_deadline)
     usage = CodexUsageEvents(
@@ -57,7 +61,7 @@ async def run_selected_turn(
         check_deadline=check_deadline,
     )
     thread_id = await prepare_selected_thread(
-        rpc, identity, expected, bearer, deadline=deadline
+        rpc, identity, expected, bearer, deadline=deadline, before_write=require_running
     )
     session = AppServerTurnSession(
         thread_id, max_messages=inputs.max_messages, max_tools=inputs.max_tools
@@ -70,6 +74,7 @@ async def run_selected_turn(
         stop=stop,
         usage_observer=UsageObserver(source_time, usage.observe),
         on_message=messages.observe,
+        before_start_write=require_running,
     )
     check_deadline()
     result = project_terminal_result(

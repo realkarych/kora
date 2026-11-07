@@ -27,6 +27,7 @@ class TurnFailure(StrEnum):
     PREMATURE_COMPLETION = "turn_premature_completion"
     DUPLICATE_COMPLETION = "turn_duplicate_completion"
     INVALID_INTERRUPT = "turn_invalid_interrupt"
+    STOP_BEFORE_START = "turn_stop_before_start"
 
 
 class TurnError(Exception):
@@ -136,6 +137,7 @@ async def observe_app_server_turn(
     on_started: Callable[[str], None] | None = None,
     stop: asyncio.Event | None = None,
     output_schema: dict[str, object] | None = None,
+    before_start_write: Callable[[], None] | None = None,
 ) -> TurnCompletion:
     identifier(thread_id, TurnFailure.INVALID_START)
     params: dict[str, object] = {
@@ -171,6 +173,7 @@ async def observe_app_server_turn(
             deadline=deadline,
             observe=observe_pending,
             observe_before_send=observe_buffered,
+            before_write=before_start_write,
         )
     )
     if completion is not None and completion.turn_id != turn_id:

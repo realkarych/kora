@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import replace
+from itertools import count
 from typing import Literal
 
 import pytest
@@ -32,10 +33,12 @@ from tests.plugins.harness.codex.test_app_server_output import (
 )
 from tests.plugins.harness.codex.test_app_server_session import Clock
 from tests.plugins.harness.codex.test_app_server_turn import TURN, completed
+from tests.plugins.harness.codex.test_app_server_turn_stop import scheduled_barrier
 from tests.plugins.harness.codex.test_app_server_usage import FIRST, notice
 from tests.plugins.harness.codex.test_selected_startup import (
     BEARER,
     IDENTITY,
+    INITIALIZE,
     SELECTED,
     THREAD_ID,
     Exchange,
@@ -100,10 +103,14 @@ def selected_operation(
     )
 
 
-async def prepare_turn(connection: Wire) -> None:
+async def finish_selected_startup(connection: Wire) -> None:
     await initialize(connection)
     for index, exchange in enumerate(selected_exchanges(), 2):
         await answer(connection, index, exchange)
+
+
+async def prepare_turn(connection: Wire) -> None:
+    await finish_selected_startup(connection)
     await receive(connection, 7, TURN_START)
 
 
@@ -206,6 +213,94 @@ async def test_selected_turn_refused_startup_opens_no_turn_and_emits_nothing() -
         assert caught.value.reason is SelectedStartupFailure.LOCAL_STATUS
         assert trailing == b""
         assert sink.events == []
+
+
+async def stopped_wire(
+    connection: Wire, operation: asyncio.Task[TerminalResult]
+) -> bytes:
+    with pytest.raises(TurnError) as refused:
+        await operation
+    assert refused.value.reason is TurnFailure.STOP_BEFORE_START
+    assert not connection.writer.is_closing()
+    return await remaining_bytes(connection)
+
+
+@pytest.mark.asyncio
+async def test_selected_turn_stopped_before_initialize_writes_nothing() -> None:
+    sink = ConformanceSink(None, Trace())
+    stop = asyncio.Event()
+    stop.set()
+
+    async with wire() as connection:
+        operation = selected_operation(
+            connection, sink, SecretRegistry(), deadline=future_deadline(), stop=stop
+        )
+        trailing = await stopped_wire(connection, operation)
+
+    assert trailing == b""
+    assert sink.events == []
+
+
+@pytest.mark.parametrize(
+    "pending_id",
+    [
+        pytest.param(1, id="initialize"),
+        pytest.param(2, id="local-status"),
+        pytest.param(6, id="thread-start"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_selected_turn_stopped_during_setup_sends_no_followup(
+    pending_id: int,
+) -> None:
+    sink = ConformanceSink(None, Trace())
+    stop = asyncio.Event()
+    async with wire() as connection:
+        operation = selected_operation(
+            connection, sink, SecretRegistry(), deadline=future_deadline(), stop=stop
+        )
+        pending = INITIALIZE
+        if pending_id > 1:
+            await initialize(connection)
+            exchanges = selected_exchanges()
+            for index, exchange in enumerate(exchanges[: pending_id - 2], 2):
+                await answer(connection, index, exchange)
+            pending = exchanges[pending_id - 2]
+        await receive(connection, pending_id, pending)
+
+        stop.set()
+        await scheduled_barrier()
+        waiting = not operation.done()
+        await connection.send(frame({"id": pending_id, "result": pending.result}))
+        trailing = await stopped_wire(connection, operation)
+
+    assert waiting
+    assert trailing == b""
+    assert sink.events == []
+
+
+@pytest.mark.asyncio
+async def test_selected_turn_stop_at_request_id_blocks_write() -> None:
+    sink = ConformanceSink(None, Trace())
+    stop = asyncio.Event()
+    request_ids = count(1)
+
+    def next_request_id() -> int:
+        request_id = next(request_ids)
+        if request_id == 7:
+            stop.set()
+        return request_id
+
+    async with wire(request_id=next_request_id) as connection:
+        operation = selected_operation(
+            connection, sink, SecretRegistry(), deadline=future_deadline(), stop=stop
+        )
+        await finish_selected_startup(connection)
+        trailing = await stopped_wire(connection, operation)
+
+    assert stop.is_set()
+    assert trailing == b""
+    assert sink.events == []
 
 
 class PublicationClock(Clock):

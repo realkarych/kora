@@ -323,9 +323,16 @@ class AppServerRpc:
         self._remaining_messages -= 1
         return message
 
-    async def _send(self, message: dict[str, object], deadline: float) -> None:
+    async def _send(
+        self,
+        message: dict[str, object],
+        deadline: float,
+        before_write: Callable[[], None] | None = None,
+    ) -> None:
         frame = encode_frame(message, self._max_frame_bytes)
         self.check_deadline(deadline)
+        if before_write is not None:
+            before_write()
         try:
             self._writer.write(frame)
             await self._writer.drain()
@@ -333,7 +340,11 @@ class AppServerRpc:
             raise RpcError(RpcFailure.DISCONNECTED) from None
 
     async def _request(
-        self, method: str, params: dict[str, object], deadline: float
+        self,
+        method: str,
+        params: dict[str, object],
+        deadline: float,
+        before_write: Callable[[], None] | None = None,
     ) -> int:
         self._require_observation_capacity()
         request_id = self._next_request_id()
@@ -341,7 +352,9 @@ class AppServerRpc:
             raise RpcError(RpcFailure.REQUEST_ID)
         self._used_request_ids.add(request_id)
         await self._send(
-            {"id": request_id, "method": method, "params": params}, deadline
+            {"id": request_id, "method": method, "params": params},
+            deadline,
+            before_write,
         )
         return request_id
 
@@ -366,6 +379,7 @@ class AppServerRpc:
         deadline: float,
         observe: Callable[[Notification], bool | None],
         observe_before_send: Callable[[Notification], bool | None] | None = None,
+        before_write: Callable[[], None] | None = None,
     ) -> object:
         async with self._operation(deadline):
             observe_buffered = (
@@ -376,7 +390,7 @@ class AppServerRpc:
                     await self._receive(deadline)
                 )
                 self._dispatch(message_before_request, observe_buffered)
-            request_id = await self._request(method, params, deadline)
+            request_id = await self._request(method, params, deadline, before_write)
             while isinstance(message := await self._receive(deadline), Notification):
                 self._dispatch(message, observe)
             if message.request_id != request_id:
@@ -435,9 +449,15 @@ class AppServerRpc:
                     task.cancel()
                 await asyncio.gather(*owned, return_exceptions=True)
 
-    async def notify(self, method: str, *, deadline: float) -> None:
+    async def notify(
+        self,
+        method: str,
+        *,
+        deadline: float,
+        before_write: Callable[[], None] | None = None,
+    ) -> None:
         async with self._operation(deadline):
-            await self._send({"method": method}, deadline)
+            await self._send({"method": method}, deadline, before_write)
 
     async def receive(
         self,

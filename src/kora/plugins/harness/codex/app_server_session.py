@@ -122,6 +122,7 @@ class AppServerTurnSession:
         on_waiting: Callable[[], None] | None = None,
         usage_observer: UsageObserver | None = None,
         on_message: Callable[[int, CompletedMessage], None] | None = None,
+        before_start_write: Callable[[], None] | None = None,
     ) -> TurnCompletion:
         if self._used:
             raise SessionRefused(SessionFailure.ALREADY_USED)
@@ -214,6 +215,7 @@ class AppServerTurnSession:
                 observe_before_send=reject_premature,
                 on_started=started,
                 on_waiting=on_waiting,
+                before_start_write=before_start_write,
             )
         finally:
             pending_messages.clear()
