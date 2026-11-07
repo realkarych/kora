@@ -180,9 +180,13 @@ def opened_record(
             data.extend(chunk)
         if len(data) > RECORD_LIMIT:
             raise FilesystemError("spool_record_capacity")
-        record = SpoolRecord.model_validate_json(data)
+        try:
+            record = SpoolRecord.model_validate_json(data)
+            canonical = model_bytes(record)
+        except ValueError:
+            raise FilesystemError("spool_record_malformed") from None
         if (
-            bytes(data) != model_bytes(record)
+            bytes(data) != canonical
             or record.execution_domain_id != domain
             or record.directory.name != nonce
             or record.directory.device != parent.identity.device

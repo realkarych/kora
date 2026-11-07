@@ -381,6 +381,7 @@ class LocalRuntime:
         self._deliveries: set[asyncio.Task[None]] = set()
         self._spool = spool
         self._spool_admission = asyncio.Lock()
+        self._spool_allocations = 0
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -784,8 +785,14 @@ class LocalRuntime:
             write_transfer_bytes(spool, piece)
 
         try:
-            async with self._spool_admission:
-                await self.executor.run(acquire, after_uncertain_submission=dispose)
+            if self._spool_allocations >= self.executor.admitted:
+                raise refusal("registry_busy")
+            self._spool_allocations += 1
+            try:
+                async with self._spool_admission:
+                    await self.executor.run(acquire, after_uncertain_submission=dispose)
+            finally:
+                self._spool_allocations -= 1
             if lease is None:
                 raise RuntimeError("missing spool descriptor")
             spool = lease.descriptor

@@ -35,6 +35,7 @@ from kora.plugins.runtime.local.channel import (
     read_delivery,
 )
 from kora.plugins.runtime.local.command import INCOMING, CommandSession
+from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.control import attested, connected, transfer_input
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
@@ -760,13 +761,18 @@ SPOOL_CRASH = "\n".join(
         "from kora.plugins.runtime.local.spool import SpoolOwner",
         "from kora.protocols.time import SystemClock",
         "from kora.runner.filesystem import open_local_directory",
-        "from kora.runner.identity import NativeIdentityReader",
+        "from kora.runner.identity import SCAN_NS, NativeIdentityReader",
+        "class StartupClock(SystemClock):",
+        "    elapsed = 0",
+        "    def monotonic_ns(self):",
+        "        self.elapsed += SCAN_NS",
+        "        return self.elapsed",
         "reader = NativeIdentityReader()",
         "process = reader.read(os.getpid()).process",
         "assert process is not None",
         "root = open_local_directory(Path(sys.argv[1]))",
         "owner = SpoolOwner.open(root, sys.argv[2], process.identity, reader, "
-        "SystemClock())",
+        "StartupClock())",
         "flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL",
         "os.open('file-' + 'a' * 32, flags, 0o600, dir_fd=owner.directory.descriptor)",
         "print(owner.directory.identity.name, flush=True)",
@@ -900,11 +906,19 @@ class HoldingSpoolReader(NativeIdentityReader):
         return super().read(pid)
 
 
+class FrozenSpoolClock(SystemClock):
+    def __init__(self) -> None:
+        self.started = super().monotonic_ns()
+
+    def monotonic_ns(self) -> int:
+        return self.started
+
+
 @pytest.mark.asyncio
 async def test_cancelled_startup_retains_sweep_anchors_until_native_settles(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
-    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, root):
         stale = await asyncio.to_thread(killed_spool, root, runtime.execution_domain_id)
         record = stale.with_suffix(".json")
         owner = SpoolRecord.model_validate_json(record.read_bytes())
@@ -913,7 +927,12 @@ async def test_cancelled_startup_retains_sweep_anchors_until_native_settles(
 
         with short_directory() as second:
             opening = asyncio.create_task(
-                open_spawning(root, ctx, second / "sockets", identities=reader)
+                open_spawning(
+                    root,
+                    runtime_context(kora_capture, FrozenSpoolClock()),
+                    second / "sockets",
+                    identities=reader,
+                )
             )
             try:
                 assert await asyncio.to_thread(reader.entered.wait, 5)
@@ -944,13 +963,15 @@ class DeferredSpoolClock(SystemClock):
 
 
 def test_spool_cutoff_defers_cleanup_and_admits_valid_owner(tmp_path: Path) -> None:
-    root = open_local_directory(state_root(tmp_path))
+    path = state_root(tmp_path)
+    root = open_local_directory(path)
     reader = NativeIdentityReader()
     process = identity_of(os.getpid())
     clock = DeferredSpoolClock()
     try:
         retained = SpoolOwner.open(root, "domain", process, reader, SystemClock())
         try:
+            dead = tuple(killed_spool(path, "domain") for _ in range(2))
             owner = SpoolOwner.open(root, "domain", process, reader, clock)
             try:
                 structural = sweep_spools(
@@ -972,12 +993,37 @@ def test_spool_cutoff_defers_cleanup_and_admits_valid_owner(tmp_path: Path) -> N
             assert owner.outcome is SpoolSweepOutcome.DEFERRED
             assert clock.reads == 4
             assert structural is SpoolSweepOutcome.DEFERRED
+            assert any(directory.with_suffix(".json").exists() for directory in dead)
             assert stat_result.st_nlink == 0
             retained.directory.verify()
         finally:
             retained.close()
     finally:
         root.close()
+
+
+@pytest.mark.asyncio
+async def test_spool_close_preserves_corrupt_record_with_safe_refusal(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    root = state_root(tmp_path)
+    with short_directory() as base:
+        runtime = await open_spawning(
+            root, runtime_context(kora_capture), base / "sockets"
+        )
+        spool = sole_spool(root)
+        record = spool.with_suffix(".json")
+        raw = b'{"owner-private-canary":"private-value"}'
+        record.write_bytes(raw)
+
+        error = await protocol_error(runtime.close())
+
+    assert error.code == "registry_unavailable"
+    assert "private" not in error.message
+    assert error.details == {}
+    assert spool.is_dir()
+    assert record.read_bytes() == raw
+    assert runtime.registry.directory.closed
 
 
 @pytest.mark.asyncio
@@ -1106,6 +1152,86 @@ async def test_runtime_close_settles_parked_spool(
     assert stopped.is_set()
     assert remaining == ()
     assert not (attempt / "input").exists()
+
+
+class AdmissionSpoolClock(SystemClock):
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def monotonic_ns(self) -> int:
+        if threading.current_thread().name.startswith("kora-runtime-local"):
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("test spool allocation release")
+        return super().monotonic_ns()
+
+
+class SpoolAdmissionProbe(LocalRuntime):
+    def allocations(self) -> int:
+        return self._spool_allocations
+
+
+@pytest.mark.asyncio
+async def test_spool_allocation_wait_is_bounded_outside_native_pool(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    root = state_root(tmp_path)
+    ctx = runtime_context(kora_capture)
+    clock = AdmissionSpoolClock()
+    payload = b"admitted"
+    item = input_item("payload", payload)
+    with short_directory() as base:
+        runtime = await SpoolAdmissionProbe.open(
+            LocalRuntimeConfiguration(state_root=str(root)),
+            ctx,
+            socket_directory=base / "sockets",
+        )
+        assert isinstance(runtime, SpoolAdmissionProbe)
+        try:
+            handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
+            async with asyncio.TaskGroup() as tasks:
+                waiting = [
+                    tasks.create_task(
+                        runtime.transfer_in(
+                            handle,
+                            item,
+                            chunks(payload),
+                            runtime_context(kora_capture, clock),
+                        )
+                    )
+                ]
+                try:
+                    assert await asyncio.to_thread(clock.entered.wait, 5)
+                    waiting.extend(
+                        tasks.create_task(
+                            runtime.transfer_in(handle, item, chunks(payload), ctx)
+                        )
+                        for _ in range(runtime.executor.admitted - 1)
+                    )
+                    await until(
+                        lambda: runtime.allocations() == runtime.executor.admitted
+                    )
+                    async with asyncio.timeout(2):
+                        refused = await protocol_error(
+                            runtime.transfer_in(handle, item, chunks(payload), ctx)
+                        )
+                        status = await runtime.status(handle, ctx)
+                finally:
+                    for task in waiting:
+                        task.cancel()
+                    clock.release.set()
+            await runtime.transfer_in(handle, item, chunks(payload), ctx)
+            stored = (attempt / "input" / "payload").read_bytes()
+        finally:
+            await runtime.close()
+            release_commands(root)
+            reap_runners(root)
+
+    assert refused.code == "registry_busy"
+    assert refused.retryable
+    assert status.state == "starting"
+    assert stored == payload
 
 
 @pytest.mark.asyncio
