@@ -17,6 +17,8 @@ from sqlalchemy.types import TypeEngine
 
 from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
 from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
+from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
+from kora.db.storage_address_fence_v1 import storage_address_fence_elements_v1
 from kora.db.types import (
     DIGEST_LENGTH,
     IDENTIFIER_LENGTH,
@@ -194,6 +196,13 @@ graph_version_read_admission: Table = Table(
 
 graph_deployment_preparation: Table = Table(
     GRAPH_PREPARATION_TABLE, metadata, *graph_preparation_elements_v1()
+)
+
+storage_address_fence: Table = Table(
+    STORAGE_ADDRESS_FENCE_TABLE,
+    metadata,
+    *storage_address_fence_elements_v1(),
+    sqlite_autoincrement=True,
 )
 
 preset: Table = Table(
