@@ -2,6 +2,8 @@ import asyncio
 from typing import Literal
 
 import pytest
+from sqlalchemy import event
+from sqlalchemy.engine import ExecutionContext
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, Dialect
@@ -190,6 +192,47 @@ async def test_existing_address_uses_both_index_keys_and_a_fixed_projection(
             assert "Index Cond:" in plan
             assert "store_id =" in plan
             assert "payload_digest =" in plan
+
+
+@pytest.mark.asyncio
+async def test_address_lookup_binds_keys_only_at_execution(database: Database) -> None:
+    await seed_address(database)
+    engine = database.writer_engine.sync_engine
+    defaults: list[dict[str, object]] = []
+    inputs: list[tuple[object, ...]] = []
+    missing_store = "Missing-Private-Store"
+
+    def observe(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: tuple[object, ...],
+        context: ExecutionContext,
+        executemany: bool,
+    ) -> None:
+        if "FROM storage_address_fence" in statement:
+            compiled = context.compiled
+            assert compiled is not None
+            assert compiled.params is not None
+            defaults.append(dict(compiled.params))
+            inputs.append(parameters)
+
+    event.listen(engine, "before_cursor_execute", observe)
+    try:
+        await acquire_address(database, "present", STORE, DIGEST)
+        with pytest.raises(StorageAddressMissing):
+            await acquire_address(database, "missing", missing_store, OTHER_DIGEST)
+    finally:
+        event.remove(engine, "before_cursor_execute", observe)
+
+    assert len(defaults) == 2
+    assert STORE in inputs[0]
+    assert DIGEST in inputs[0]
+    assert missing_store in inputs[1]
+    assert OTHER_DIGEST in inputs[1]
+    for values in defaults:
+        for private in (STORE, DIGEST, missing_store, OTHER_DIGEST):
+            assert private not in values.values()
 
 
 async def acquire_address(

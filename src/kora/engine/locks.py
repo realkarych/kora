@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import literal, select, text
+from sqlalchemy import bindparam, literal, select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -76,7 +76,10 @@ async def _lock_existing_address(
     statement = (
         select(literal(1))
         .select_from(storage_address_fence)
-        .where(fields.store_id == store_id, fields.payload_digest == payload_digest)
+        .where(
+            fields.store_id == bindparam("store_id"),
+            fields.payload_digest == bindparam("payload_digest"),
+        )
         .limit(2)
     )
     try:
@@ -86,7 +89,9 @@ async def _lock_existing_address(
             )
             table_lock.close()
             statement = statement.with_for_update(nowait=True)
-        result = await connection.execute(statement)
+        result = await connection.execute(
+            statement, {"store_id": store_id, "payload_digest": payload_digest}
+        )
         try:
             return result.scalar_one_or_none() == 1
         finally:
