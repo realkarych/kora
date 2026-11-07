@@ -26,8 +26,12 @@ SelectedHookCase = (
     ]
     | SelectedPatchCase
 )
+SelectedSqliteHomeCase = Literal[
+    "selected-sqlite-home-default", "selected-sqlite-home-override"
+]
 SelectedLaunchCase = (
     SelectedHookCase
+    | SelectedSqliteHomeCase
     | Literal[
         "selected-command-metadata",
         "selected-allow",
@@ -60,11 +64,16 @@ SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
 SELECTED_HOOK_TIMEOUT_CASES: frozenset[SelectedHookCase] = frozenset(
     {"selected-hook-timeout", "selected-patch-timeout"}
 )
+SELECTED_SQLITE_HOME_CASES: frozenset[SelectedSqliteHomeCase] = frozenset(
+    {"selected-sqlite-home-default", "selected-sqlite-home-override"}
+)
+SQLITE_HOME_CANARY = "sqlite-home-canary"
 SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
 SELECTED_LAUNCH_CASES = frozenset(
     {
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
+        *SELECTED_SQLITE_HOME_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
@@ -78,6 +87,7 @@ SELECTED_AUTH_CASES = frozenset(
     {
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
+        *SELECTED_SQLITE_HOME_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
