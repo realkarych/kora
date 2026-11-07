@@ -506,10 +506,15 @@ class HeldJournalWrite(RunningJournal):
         self.release = threading.Event()
 
     def _write_line(self, descriptor: int, line: bytes, deadline: int) -> bool:
-        if b'"runner.outputs_sealed"' in line:
+        stored = super()._write_line(descriptor, line, deadline)
+        if stored and b'"runner.outputs_sealed"' in line:
             self.entered.set()
             assert self.release.wait(10)
-        return super()._write_line(descriptor, line, deadline)
+        return stored
+
+    def queued(self) -> bool:
+        with self._state:
+            return bool(self._jobs)
 
 
 @pytest.mark.asyncio
@@ -529,11 +534,16 @@ async def test_seal_append_close_keeps_inflight_outcome_uncertain(
             asyncio.to_thread(journal.append_outcome, "runner.outputs_sealed", {})
         )
         assert await asyncio.to_thread(journal.entered.wait, 5)
+        queued = asyncio.create_task(
+            asyncio.to_thread(journal.append_outcome, "transfer.rejected", {})
+        )
+        await until(journal.queued)
 
         journal.close()
         async with asyncio.timeout(5):
             outcome = await asyncio.shield(writing)
-        absent = journal.append_outcome("runner.outputs_sealed", {})
+            absent = await asyncio.shield(queued)
+        while_held = read_records(anchor)
         unfinished = descriptors_for(path)
         journal.release.set()
         await until(lambda: live_journal_writers() <= writers)
@@ -550,7 +560,8 @@ async def test_seal_append_close_keeps_inflight_outcome_uncertain(
     assert journal.not_durable == 1
     assert len(unfinished) == 1
     assert remaining == set()
-    assert records == ((0, "command_exited"),)
+    assert records == ((0, "command_exited"), (1, "runner.outputs_sealed"))
+    assert while_held == records
 
 
 @pytest.mark.asyncio
@@ -1508,9 +1519,11 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
             await session.settle_seal()
             status = session.status()
             records = read_records(directory)
+            tail = clock.path.read_bytes().rsplit(b"\n", 1)[1]
             manifest = sealed_manifest(clock.path)
             present = snapshot.exists()
             content = (snapshot / "a" / "payload").read_bytes() if present else None
+            mode = stat_mode(snapshot) if present else None
             original = (candidate / "a" / "payload").read_bytes()
         finally:
             await session.aclose()
@@ -1530,6 +1543,7 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
         (*expected, (2, "runner.outputs_sealed")) if retained else expected
     )
     assert present is retained
+    assert mode == (0o500 if retained else None)
     assert content == (b"payload" if retained else None)
     assert original == b"payload"
     if retained:
@@ -1543,6 +1557,10 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
         assert clock.modes is None
     else:
         assert clock.modes == (0o500, 0o500, 0o400)
+    if case == "disk-full":
+        assert tail.startswith(b"{")
+    else:
+        assert tail == b""
 
 
 @pytest.mark.asyncio
@@ -2240,15 +2258,20 @@ async def test_seal_follows_confirmed_stop_of_a_descendant(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("nested", [False, True], ids=["file", "directory"])
 async def test_undecodable_output_name_keeps_the_exit(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, nested: bool
 ) -> None:
     script = "\n".join(
         (
-            "import os",
+            "import os, sys",
             "flags = os.O_CREAT | os.O_WRONLY | os.O_EXCL",
+            "name = bytes([255])",
             "try:",
-            "    descriptor = os.open(bytes([255]), flags, 0o644)",
+            "    if sys.argv[1] == 'directory':",
+            "        os.mkdir(name, 0o700)",
+            "        name += b'/payload'",
+            "    descriptor = os.open(name, flags, 0o644)",
             "except OSError:",
             "    descriptor = os.open('rejected', flags, 0o644)",
             "os.close(descriptor)",
@@ -2256,7 +2279,11 @@ async def test_undecodable_output_name_keeps_the_exit(
     )
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle = await runtime.submit(
-            command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
+            command_workload(
+                runtime,
+                "attempt-1",
+                (sys.executable, "-c", script, "directory" if nested else "file"),
+            ),
             ctx,
         )
         await runtime.start(handle, ctx)
@@ -2274,6 +2301,7 @@ async def test_undecodable_output_name_keeps_the_exit(
         await until(lambda: seal_outcomes(log) == [expected])
         journal = (attempt / "journal.jsonl").read_text()
         outcomes = seal_outcomes(log)
+        snapshot_present = (attempt / "output-snapshot").exists()
 
     assert status.state == "exited"
     if encoded:
@@ -2281,3 +2309,4 @@ async def test_undecodable_output_name_keeps_the_exit(
     else:
         assert "runner.outputs_sealed" not in journal
         assert outcomes == ["refused"]
+        assert not snapshot_present

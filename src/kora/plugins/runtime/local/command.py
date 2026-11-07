@@ -477,6 +477,7 @@ class CommandSession:
                 if snapshot.identity.device != self._attempt.identity.device:
                     raise FilesystemError("snapshot_device_mismatch")
                 sealed = snapshot_regular_tree(source, snapshot)
+                payload = self._seal_payload(sealed)
                 self._finalize_snapshot(snapshot)
             except (SealCapacityError, RecursionError, MemoryError):
                 pass
@@ -487,7 +488,9 @@ class CommandSession:
             else:
                 retained = True
                 try:
-                    result = self._append_seal(sealed)
+                    result = self._journal.append_outcome(
+                        "runner.outputs_sealed", payload, reader_bounded=True
+                    )
                 except (JournalCapacityError, JsonShapeError, UnicodeEncodeError):
                     retained = False
                 else:
@@ -505,21 +508,21 @@ class CommandSession:
                 except OSError as error:
                     cleanup = error
             if snapshot is not None:
-                identity = snapshot.identity
                 try:
-                    snapshot.close()
-                except OSError as error:
-                    if cleanup is None:
-                        cleanup = error
-                if not retained:
-                    try:
+                    if not retained:
                         remove_directory(
                             self._attempt,
-                            identity,
+                            snapshot.identity,
                             max_entries=MAX_SEAL_ENTRIES,
                             restore_owner_write=True,
                         )
-                    except (OSError, FilesystemError) as error:
+                except (OSError, FilesystemError) as error:
+                    if cleanup is None:
+                        cleanup = error
+                finally:
+                    try:
+                        snapshot.close()
+                    except OSError as error:
                         if cleanup is None:
                             cleanup = error
             if cleanup is not None:
@@ -530,15 +533,12 @@ class CommandSession:
         freeze_private_tree(snapshot)
         synchronize(self._attempt.descriptor)
 
-    def _append_seal(self, sealed: SealedTree) -> JournalAppendOutcome:
+    def _seal_payload(self, sealed: SealedTree) -> JsonObject:
         files: list[JsonValue] = [
             {"name": item.name, "sha256": item.sha256} for item in sealed.files
         ]
         refused: list[JsonValue] = list(sealed.refused)
-        payload: JsonObject = {"files": files, "refused": refused}
-        return self._journal.append_outcome(
-            "runner.outputs_sealed", payload, reader_bounded=True
-        )
+        return {"files": files, "refused": refused}
 
     def _finish_seal(self, outcome: str, started: int) -> None:
         with self._lock:

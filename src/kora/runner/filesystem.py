@@ -491,6 +491,10 @@ def _collect(
 ) -> int:
     for name in _bounded_entry_names(parent, count):
         count = _count(count)
+        try:
+            name.encode("utf-8")
+        except UnicodeEncodeError:
+            raise FilesystemError("snapshot_name_encoding") from None
         relative = name if prefix == "" else f"{prefix}/{name}"
         try:
             metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
