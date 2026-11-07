@@ -54,7 +54,8 @@ def owner_layout(
 ) -> tuple[
     tuple[tuple[str, bool], ...],
     list[str] | None,
-    list[tuple[list[str], str, list[str]]],
+    list[tuple[list[str], str, list[str], bool]],
+    list[list[str]],
     list[tuple[str | None, list[str | None]]],
 ]:
     inspector = inspect(connection)
@@ -64,15 +65,23 @@ def owner_layout(
     )
     primary = inspector.get_pk_constraint(owner.name)["constrained_columns"]
     foreign = [
-        (key["constrained_columns"], key["referred_table"], key["referred_columns"])
+        (
+            key["constrained_columns"],
+            key["referred_table"],
+            key["referred_columns"],
+            bool(key.get("options")),
+        )
         for key in inspector.get_foreign_keys(owner.name)
+    ]
+    unique = [
+        key["column_names"] for key in inspector.get_unique_constraints(owner.name)
     ]
     indexes = [
         (index["name"], index["column_names"])
         for index in inspector.get_indexes(owner.name)
         if not index.get("duplicates_constraint")
     ]
-    return columns, primary, foreign, indexes
+    return columns, primary, foreign, unique, indexes
 
 
 def owner_values(version_id: str) -> dict[str, object]:
@@ -161,7 +170,8 @@ async def test_resource_owner_native_keys_preserve_exact_occurrences(
     assert layout == (
         tuple((name, name == "subgraph_name") for name in OWNER_TABLE_COLUMNS),
         ["graph_version_id", "ordinal"],
-        [(["graph_version_id"], "graph_version", ["id"])],
+        [(["graph_version_id"], "graph_version", ["id"], False)],
+        [],
         [
             (
                 REVERSE_INDEX,
