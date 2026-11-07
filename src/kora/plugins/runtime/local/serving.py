@@ -472,7 +472,7 @@ class ControlServer:
             output = read_output(payload)
             if output is not None:
                 await self._send_output(channel, submitter, observational, output)
-                continue
+                return
             header = parse_header(payload, ACCEPT_WORKLOAD)
             declaration = header.sections[0]
             refusal: KoraProtocolError | None = None
@@ -665,6 +665,14 @@ class ControlServer:
         opened: OpenedOutput | None = None
         outcome: str | None = None
         sent = False
+        owned = True
+
+        def dispose() -> None:
+            nonlocal opened
+            if opened is not None:
+                current, opened = opened, None
+                os.close(current.descriptor)
+
         try:
             try:
                 if command is None:
@@ -678,30 +686,34 @@ class ControlServer:
                 if cutoff is not None:
                     deadline = min(deadline, cutoff)
 
-                def authorize() -> None:
+                def active() -> None:
                     if self._closing is not None:
                         raise delivery_error("transfer_refused")
-                    self._authorized(submitter, cutoff)
                     if self._clock.monotonic_ns() >= deadline:
                         raise ChannelError(ChannelFailure.DEADLINE)
 
-                def close_opened(value: OpenedOutput) -> None:
-                    os.close(value.descriptor)
+                def authorize() -> None:
+                    self._authorized(submitter, cutoff)
+                    active()
 
-                opened = await self._transfer_native(
-                    lambda: session.open_output(request.name),
-                    on_cancel=close_opened,
-                )
-                current = opened
+                def open_file() -> OpenedOutput:
+                    nonlocal opened
+                    authorize()
+                    opened = session.open_output(submitter, request.name)
+                    return opened
+
+                current = await self._transfer_native(open_file, dispose)
                 await self._transfer_native(
                     lambda: session.confirm_output(
-                        current.descriptor, current.size, current.sha256
-                    )
+                        current.descriptor, current.size, current.sha256, active
+                    ),
+                    dispose,
                 )
-                await self._transfer_native(authorize)
-                await self._answer(
-                    channel,
+                await self._transfer_native(authorize, dispose)
+                await channel.write_typed_frame(
+                    FrameType.JSON,
                     output_envelope(request.request_id, current.size, current.sha256),
+                    min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS),
                 )
                 sent = True
                 offset = 0
@@ -711,16 +723,23 @@ class ControlServer:
 
                     def read(position: int = position, length: int = length) -> bytes:
                         authorize()
-                        return session.read_output(current, position, length)
+                        piece = session.read_output(current, position, length)
+                        authorize()
+                        return piece
 
-                    chunk = await self._transfer_native(read)
+                    chunk = await self._transfer_native(read, dispose)
                     await channel.write_typed_frame(
                         FrameType.BYTES,
                         chunk,
                         min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS),
                     )
                     offset += len(chunk)
-                await self._transfer_native(authorize)
+
+                def finish() -> None:
+                    authorize()
+                    dispose()
+
+                await self._transfer_native(finish, dispose)
                 await channel.write_typed_frame(
                     FrameType.JSON,
                     output_trailer(request.request_id, current.sha256),
@@ -735,9 +754,14 @@ class ControlServer:
                 await self._answer(
                     channel, self._transfer_answer(request.request_id, error)
                 )
+        except NativeIOSubmissionUncertain:
+            owned = False
+            channel.close()
+        except NativeIOUnresolved:
+            channel.close()
         finally:
-            if opened is not None:
-                os.close(opened.descriptor)
+            if owned:
+                dispose()
             if command is not None and outcome is not None:
                 command.note_output(outcome, started_ns)
 
@@ -745,17 +769,13 @@ class ControlServer:
         self,
         operation: Callable[[], Result],
         dispose: Callable[[], None] | None = None,
-        *,
-        on_cancel: Callable[[Result], None] | None = None,
     ) -> Result:
         def settled() -> None:
             self._transfer_native_settled = True
             if dispose is not None:
                 dispose()
 
-        return await self._executor.run(
-            operation, on_cancel, after_uncertain_submission=settled
-        )
+        return await self._executor.run(operation, after_uncertain_submission=settled)
 
     def _transfer_io(
         self, command: CommandSession, operation: Callable[[], Result]

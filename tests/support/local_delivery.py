@@ -96,6 +96,7 @@ async def delivery_server(
     decoder: Callable[[bytearray], Workload] = decoded_workload,
     identities: IdentityReader | None = None,
     command: CommandSession | None = None,
+    server_type: type[ControlServer] = ControlServer,
 ) -> AsyncGenerator[DeliveryServer]:
     ctx = runtime_context(capture, clock or SystemClock())
     with short_directory() as base:
@@ -123,7 +124,7 @@ async def delivery_server(
             socket_path=str(sockets / "delivery"),
         )
         await written(runtime, work.attempt_id, entry, ctx)
-        server = ControlServer(
+        server = server_type(
             bound,
             sockets,
             "delivery",

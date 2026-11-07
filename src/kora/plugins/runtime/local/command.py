@@ -262,7 +262,7 @@ class CommandSession:
         self._inputs: dict[str, str] = {}
         self._transferring = False
         self._transfer_ns = 0
-        self._sealed = False
+        self._seal_outcome: str | None = None
         self._output_seal: asyncio.Task[None] | None = None
         self._outputs: OutputAuthority | None = None
 
@@ -579,9 +579,9 @@ class CommandSession:
 
     def _finish_seal(self, outcome: str, started: int) -> None:
         with self._lock:
-            if self._sealed:
+            if self._seal_outcome is not None:
                 return
-            self._sealed = True
+            self._seal_outcome = outcome
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
         level = Level.INFO if outcome == "sealed" else Level.WARNING
         self._log.emit_at(level, SEAL, outcome=outcome, waited_ms=waited)
@@ -1036,9 +1036,19 @@ class CommandSession:
         self._append_transfer("transfer.rejected", item)
         self._emit_transfer("rejected")
 
-    def open_output(self, name: str) -> OpenedOutput:
+    def open_output(self, submitter: Submitter, name: str) -> OpenedOutput:
         with self._lock:
+            if self._execution != submitter:
+                raise delivery_error("execution_unauthorized")
+            if self._stop.is_set():
+                raise delivery_error("transfer_refused")
             authority = self._outputs
+            outcome = self._seal_outcome
+        if authority is None:
+            if outcome == "journal_unavailable" or self._journal.closed:
+                raise delivery_error("journal_unavailable")
+            if outcome is None:
+                raise delivery_error("workload_busy")
         if authority is None or "/" in name:
             raise delivery_error("transfer_refused")
         selected = next((item for item in authority.files if item.name == name), None)
@@ -1057,9 +1067,15 @@ class CommandSession:
             raise delivery_error("transfer_refused") from None
         return OpenedOutput(descriptor, size, selected.sha256, selected.identity)
 
-    def confirm_output(self, descriptor: int, size: int, expected: str) -> None:
+    def confirm_output(
+        self,
+        descriptor: int,
+        size: int,
+        expected: str,
+        active: Callable[[], None] | None = None,
+    ) -> None:
         try:
-            digest = read_sealed_digest(descriptor, size)
+            digest = read_sealed_digest(descriptor, size, active)
         except OSError as error:
             if space_error(error):
                 self.fence_transfer()

@@ -5,6 +5,7 @@ import os
 import platform
 import stat
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Final, Protocol, cast
@@ -873,12 +874,16 @@ def open_sealed_output(
         os.close(directory)
 
 
-def read_sealed_digest(descriptor: int, size: int) -> str:
+def read_sealed_digest(
+    descriptor: int, size: int, active: Callable[[], None] | None = None
+) -> str:
     if size > SNAPSHOT_LIMITS.file_bytes:
         raise FilesystemError("seal_capacity")
     hasher = hashlib.sha256()
     remaining = size
     while remaining:
+        if active is not None:
+            active()
         chunk = os.read(descriptor, min(SEAL_COPY_BYTES, remaining))
         if not chunk:
             raise FilesystemError("short_sealed_file")

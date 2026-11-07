@@ -4,14 +4,21 @@ import re
 import secrets
 import signal
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from pathlib import Path
 from threading import Event
-from typing import Final
+from typing import Final, TypeVar
 
 from kora.executor.digests import object_digest
 from kora.executor.launcher import ProcessLauncher, StepLauncher
@@ -183,13 +190,54 @@ def rejection(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, REJECTIONS[code], False, {})
 
 
-OUTPUT_ATTEMPTS: Final[int] = 3
+OUTPUT_ATTEMPTS: Final[int] = 4
+OUTPUT_PULLS: Final[int] = 4
+T = TypeVar("T")
 
 
-def output_exhausted() -> KoraProtocolError:
-    return KoraProtocolError(
-        "infrastructure", "the sealed output could not be transferred", False, {}
-    )
+class OutputPull:
+    def __init__(self) -> None:
+        self.lease: SpoolLease | None = None
+        self.pending: asyncio.Task[object] | None = None
+        self.uncertain = False
+
+    def dispose(self) -> None:
+        lease = self.lease
+        if lease is not None:
+            lease.close()
+            if lease.closed:
+                self.lease = None
+
+    def descriptor(self) -> int:
+        lease = self.lease
+        if lease is None or lease.closed:
+            raise RuntimeError("missing output spool")
+        return lease.descriptor
+
+    async def run(
+        self,
+        operation: Coroutine[object, object, T],
+        clock: Clock,
+        deadline: int | None = None,
+    ) -> T:
+        task = asyncio.create_task(operation)
+        self.pending = task
+        try:
+            if deadline is not None:
+                await wait_future(task, deadline, clock)
+            return await task
+        finally:
+            try:
+                if not task.done():
+                    task.cancel()
+                    if await observed(task):
+                        raise asyncio.CancelledError
+            finally:
+                if not task.cancelled() and isinstance(
+                    task.exception(), NativeIOSubmissionUncertain
+                ):
+                    self.uncertain = True
+                self.pending = None
 
 
 def default_state_root(
@@ -393,6 +441,7 @@ class LocalRuntime:
         self._spool = spool
         self._spool_admission = asyncio.Lock()
         self._spool_allocations = 0
+        self._output_pulls: set[OutputPull] = set()
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -754,151 +803,177 @@ class LocalRuntime:
             raise refusal("runner_unreachable") from None
         await self._check_transfer_deadline(key, entry, ctx, cutoff)
 
+    async def _acquire_spool(
+        self, acquire: Callable[[], None], dispose: Callable[[], None]
+    ) -> None:
+        if self._spool_allocations >= self.executor.admitted:
+            raise refusal("registry_busy")
+        self._spool_allocations += 1
+        try:
+            async with self._spool_admission:
+                await self.executor.run(acquire, after_uncertain_submission=dispose)
+        finally:
+            self._spool_allocations -= 1
+
+    def _output_entry(
+        self, key: AttemptKey, ctx: ProtocolContext, expected: Running | None = None
+    ) -> Running:
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        entry = self.registry.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        if entry.submitter.process != self._launch.identity:
+            raise delivery_error("execution_unauthorized")
+        if expected is not None and (
+            entry.runner != expected.runner
+            or entry.submitter != expected.submitter
+            or entry.socket_path != expected.socket_path
+        ):
+            raise delivery_error("submitter_superseded")
+        deadline = entry.deadline
+        if entry.gate_closed or (
+            deadline is not None
+            and ctx.clock.now() >= deadline.at - deadline.clock_uncertainty
+        ):
+            raise delivery_error("deadline_expired")
+        return entry
+
     def transfer_out(
         self, handle: Handle, name: str, ctx: ProtocolContext
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes]:
         return self._transfer_out(handle, checked_output_name(name), ctx)
 
     async def _transfer_out(
-        self, handle: Handle, name: str, ctx: ProtocolContext
-    ) -> AsyncIterator[bytes]:
+        self,
+        handle: Handle,
+        name: str,
+        ctx: ProtocolContext,
+    ) -> AsyncGenerator[bytes]:
+        key = self.key_of(handle, ctx)
         if self._closing is not None:
             raise refusal("runtime_closed")
-        key = self.key_of(handle, ctx)
-        lease: SpoolLease | None = None
-        for _attempt in range(OUTPUT_ATTEMPTS):
+        if len(self._output_pulls) >= OUTPUT_PULLS:
+            raise delivery_error("workload_busy")
+        deadline = ctx.clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        pull = OutputPull()
+        self._output_pulls.add(pull)
+
+        def read(entry: Running, length: int, offset: int) -> bytes:
+            try:
+                chunk = os.pread(pull.descriptor(), length, offset)
+            except OSError:
+                raise refusal("runner_unreachable") from None
+            self._output_entry(key, ctx, entry)
+            return chunk
+
+        try:
+            entry, size = await pull.run(
+                self._fetch_output(key, name, pull, ctx, deadline),
+                ctx.clock,
+                deadline,
+            )
             if self._closing is not None:
                 raise refusal("runtime_closed")
-            try:
-                lease = await self._tracked_pull(key, name, ctx)
-            except (ListenerRefused, ChannelError, OSError, FilesystemError):
-                lease = None
-                continue
-            except KoraProtocolError as error:
-                if error.code != "message_refused":
-                    raise
-                lease = None
-                continue
-            else:
-                break
-        if lease is None:
-            raise output_exhausted()
-        try:
             offset = 0
-            while True:
-                chunk = await self.executor.run(
-                    partial(self._read_output_chunk, lease, offset)
+            while offset < size:
+                if self._closing is not None:
+                    raise refusal("runtime_closed")
+                chunk = await pull.run(
+                    self.executor.run(
+                        partial(
+                            read, entry, min(size - offset, SECTION_FRAME_BYTES), offset
+                        ),
+                        after_uncertain_submission=pull.dispose,
+                    ),
+                    ctx.clock,
                 )
+                if self._closing is not None:
+                    raise refusal("runtime_closed")
                 if not chunk:
-                    break
+                    raise delivery_error("integrity_error")
                 offset += len(chunk)
                 yield chunk
+        except ChannelError:
+            raise refusal("runner_unreachable") from None
         finally:
-            lease.close()
+            if self._closing is None and not pull.uncertain:
+                try:
+                    pull.dispose()
+                except OSError:
+                    raise refusal("runner_unreachable") from None
+                if pull.lease is None:
+                    self._output_pulls.discard(pull)
 
-    async def _tracked_pull(
-        self, key: AttemptKey, name: str, ctx: ProtocolContext
-    ) -> SpoolLease:
-        found: list[SpoolLease] = []
-
-        async def pull() -> None:
-            found.append(await self._pull_output(key, name, ctx))
-
-        task = asyncio.create_task(pull())
-        self._deliveries.add(task)
-        try:
-            await task
-        finally:
-            self._deliveries.discard(task)
-            abandoned = sys.exc_info()[0] is not None or not task.done()
-            if not task.done():
-                task.cancel()
-                await observed(task)
-            if abandoned:
-                for lease in tuple(found):
-                    lease.close()
-        if not found:
-            raise RuntimeError("missing output spool")
-        return found[0]
-
-    async def _pull_output(
-        self, key: AttemptKey, name: str, ctx: ProtocolContext
-    ) -> SpoolLease:
-        clock = ctx.clock
-        deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
-        entry = await self.entry(key)
-        if not isinstance(entry, Running):
-            raise refusal("runner_starting")
-        if entry.gate_closed:
-            raise delivery_error("deadline_expired")
-        cutoff = transfer_cutoff(clock, entry.deadline)
+    async def _fetch_output(
+        self,
+        key: AttemptKey,
+        name: str,
+        pull: OutputPull,
+        ctx: ProtocolContext,
+        deadline: int,
+    ) -> tuple[Running, int]:
+        entry = await self.executor.run(
+            lambda: self._output_entry(key, ctx),
+            after_uncertain_submission=pull.dispose,
+        )
+        cutoff = transfer_cutoff(ctx.clock, entry.deadline)
         if cutoff is not None:
             deadline = min(deadline, cutoff)
-        if clock.monotonic_ns() >= deadline:
-            await self._check_transfer_deadline(key, entry, ctx, cutoff)
-            raise refusal("runner_unreachable")
-        lease: SpoolLease | None = None
-        handed = False
-
-        def dispose() -> None:
-            if lease is not None:
-                lease.close()
 
         def active() -> None:
             if self._closing is not None:
-                raise ChannelError(ChannelFailure.CLOSED)
-            if clock.monotonic_ns() >= deadline:
+                raise refusal("runtime_closed")
+            if ctx.clock.monotonic_ns() >= deadline:
                 raise ChannelError(ChannelFailure.DEADLINE)
 
-        def acquire() -> None:
-            nonlocal lease
-            active()
-            lease = self._spool.acquire(active)
-
-        try:
-            if self._spool_allocations >= self.executor.admitted:
-                raise refusal("registry_busy")
-            self._spool_allocations += 1
+        def open_spool() -> None:
             try:
-                async with self._spool_admission:
-                    await self.executor.run(acquire, after_uncertain_submission=dispose)
-            finally:
-                self._spool_allocations -= 1
-            held = lease
-            if held is None:
-                raise RuntimeError("missing spool descriptor")
-            await transfer_output(
-                entry.socket_path,
-                entry.runner,
-                entry.submitter.dispatcher_id,
-                self._peers,
-                self.executor,
-                clock,
-                self._new_identifier(),
-                held.descriptor,
-                name,
-                deadline,
-                close_spool=dispose,
-                active=active,
-            )
-            handed = True
-            return held
-        except NativeIOSubmissionUncertain:
-            handed = True
-            raise
-        finally:
-            if not handed:
-                dispose()
+                pull.lease = self._spool.acquire(active)
+            except (OSError, FilesystemError):
+                raise refusal("runner_unreachable") from None
 
-    def _read_output_chunk(self, lease: SpoolLease, offset: int) -> bytes:
-        if self._closing is not None:
-            raise refusal("runtime_closed")
-        try:
-            return os.pread(lease.descriptor, SECTION_FRAME_BYTES, offset)
-        except OSError:
-            if self._closing is not None:
-                raise refusal("runtime_closed") from None
-            raise
+        async def acquire() -> None:
+            await self._acquire_spool(open_spool, pull.dispose)
+
+        for _ in range(OUTPUT_ATTEMPTS):
+            active()
+            await self.executor.run(
+                lambda: self._output_entry(key, ctx, entry),
+                after_uncertain_submission=pull.dispose,
+            )
+            try:
+                await acquire()
+                size = await transfer_output(
+                    entry.socket_path,
+                    entry.runner,
+                    entry.submitter.dispatcher_id,
+                    self._peers,
+                    self.executor,
+                    ctx.clock,
+                    self._new_identifier(),
+                    pull.descriptor(),
+                    name,
+                    deadline,
+                    close_spool=pull.dispose,
+                    active=active,
+                )
+            except ListenerRefused:
+                raise delivery_error("execution_unauthorized") from None
+            except (ChannelError, OSError):
+                try:
+                    pull.dispose()
+                except OSError:
+                    raise refusal("runner_unreachable") from None
+                if pull.lease is not None:
+                    raise refusal("runner_unreachable") from None
+            else:
+                await self.executor.run(
+                    lambda: self._output_entry(key, ctx, entry),
+                    after_uncertain_submission=pull.dispose,
+                )
+                return entry, size
+        raise refusal("runner_unreachable")
 
     async def _check_transfer_deadline(
         self, key: AttemptKey, entry: Running, ctx: ProtocolContext, cutoff: int | None
@@ -942,14 +1017,7 @@ class LocalRuntime:
             write_transfer_bytes(spool, piece)
 
         try:
-            if self._spool_allocations >= self.executor.admitted:
-                raise refusal("registry_busy")
-            self._spool_allocations += 1
-            try:
-                async with self._spool_admission:
-                    await self.executor.run(acquire, after_uncertain_submission=dispose)
-            finally:
-                self._spool_allocations -= 1
+            await self._acquire_spool(acquire, dispose)
             if lease is None:
                 raise RuntimeError("missing spool descriptor")
             spool = lease.descriptor
@@ -1357,6 +1425,9 @@ class LocalRuntime:
                 delivery.cancel()
             for observation in self._observations:
                 observation.cancel()
+            for pull in self._output_pulls:
+                if pull.pending is not None:
+                    pull.pending.cancel()
             self.executor.closed = True
             self.sweeps.closed = True
             self._stopping.set_result(None)
@@ -1367,6 +1438,11 @@ class LocalRuntime:
         try:
             observations = tuple(self._observations)
             deliveries = tuple(self._deliveries)
+            outputs = tuple(
+                pull.pending for pull in self._output_pulls if pull.pending is not None
+            )
+            if outputs:
+                await asyncio.gather(*outputs, return_exceptions=True)
             if deliveries:
                 await asyncio.gather(*deliveries, return_exceptions=True)
             if observations:
@@ -1383,6 +1459,7 @@ class LocalRuntime:
                     if self.executor.joined:
                         try:
                             await close_spool(self._spool)
+                            self._output_pulls.clear()
                         finally:
                             try:
                                 self.registry.directory.close()

@@ -1702,7 +1702,7 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
             mode = stat_mode(snapshot) if present else None
             original = (candidate / "a" / "payload").read_bytes()
             if outcome == "sealed":
-                opened = session.open_output("z")
+                opened = session.open_output(submitter, "z")
                 try:
                     session.confirm_output(
                         opened.descriptor, opened.size, opened.sha256
@@ -1711,12 +1711,17 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
                 finally:
                     os.close(opened.descriptor)
                 with pytest.raises(KoraProtocolError) as missing:
-                    session.open_output("missing")
+                    session.open_output(submitter, "missing")
                 assert missing.value.code == "transfer_refused"
             else:
                 with pytest.raises(KoraProtocolError) as refused_output:
-                    session.open_output("z")
-                assert refused_output.value.code == "transfer_refused"
+                    session.open_output(submitter, "z")
+                expected = (
+                    "journal_unavailable"
+                    if outcome == "journal_unavailable"
+                    else "transfer_refused"
+                )
+                assert refused_output.value.code == expected
         finally:
             await session.aclose()
             directory.close()

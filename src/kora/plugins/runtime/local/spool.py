@@ -342,6 +342,7 @@ class SpoolLease:
         self.descriptor = descriptor
         self._owner = owner
         self._closing = False
+        self.closed = False
 
     def close(self) -> None:
         self._owner.release(self)
@@ -436,6 +437,7 @@ class SpoolOwner:
                 return
             os.close(lease.descriptor)
             self._leases.remove(lease)
+            lease.closed = True
 
     def acquire(self, active: Callable[[], None]) -> SpoolLease:
         active()

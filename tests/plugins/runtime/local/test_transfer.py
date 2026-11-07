@@ -12,16 +12,17 @@ import subprocess
 import sys
 import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal
 
 import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
 from kora.observability import ComponentLogger, LoggingSettings, configure_process
 from kora.plugins.runtime.local.channel import (
@@ -60,7 +61,7 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle
-from kora.protocols.runtime import TransferItem
+from kora.protocols.runtime import MAX_TRANSFER_BYTES, TransferItem
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
@@ -82,6 +83,7 @@ from kora.runner.peers import kernel_source
 from kora.runner.registry import (
     Registry,
     Running,
+    Submitter,
     TransitionExecutor,
     model_bytes,
     takeover_cell,
@@ -1784,6 +1786,9 @@ async def test_transfer_out_returns_the_sealed_file(
                 raise AssertionError
 
         refused_name = await protocol_error(invalid())
+        pending = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
         await runtime.start(handle, ctx)
         await until(lambda: seal_logged(attempt))
         parts, body = await output_bytes(runtime, handle, ctx, "payload")
@@ -1846,6 +1851,8 @@ async def test_transfer_out_returns_the_sealed_file(
         after = live_descriptors()
 
     assert refused_name.code == "transfer_refused"
+    assert pending.code == "workload_busy"
+    assert pending.retryable
     assert [len(part) for part in parts] == [SECTION_FRAME_BYTES, 17]
     assert body == payload
     assert empty_parts == ()
@@ -1858,8 +1865,8 @@ async def test_transfer_out_returns_the_sealed_file(
     assert link_name.code == "transfer_refused"
     assert any(item[0] == "transferred" for item in diagnostics)
     assert any(item[0] == "integrity" for item in diagnostics)
-    assert exhausted_error.code == "infrastructure"
-    assert exhausted_error.retryable is False
+    assert exhausted_error.code == "runner_unreachable"
+    assert exhausted_error.retryable
     assert after == before
 
 
@@ -1878,7 +1885,11 @@ async def test_superseded_submitter_receives_no_output(
         entry = await recorded(runtime, handle.attempt_id)
         assert isinstance(entry, Running)
         successor = entry.submitter.model_copy(update={"dispatcher_id": "dispatcher-2"})
-        async with transfer_channel(runtime, ctx, entry) as channel:
+        async with (
+            aclosing(runtime.transfer_out(handle, "payload", ctx)) as iterator,
+            transfer_channel(runtime, ctx, entry) as channel,
+        ):
+            first = await anext(iterator)
             await runtime.transition(
                 runtime.registry.key(handle.attempt_id),
                 lambda current: takeover_cell(current, entry, successor, False),
@@ -1898,10 +1909,15 @@ async def test_superseded_submitter_receives_no_output(
                 {FrameType.JSON.value: ENVELOPE_BYTES},
             )
             _, error = read_error_envelope(payload)
-        _, body = await output_bytes(runtime, handle, ctx, "payload")
+            resumed = await protocol_error(anext(iterator))
+        successor_error = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
 
+    assert first == b"y" * SECTION_FRAME_BYTES
     assert error.code == "submitter_superseded"
-    assert body == b"y" * (SECTION_FRAME_BYTES + 17)
+    assert resumed.code == "submitter_superseded"
+    assert successor_error.code == "execution_unauthorized"
 
 
 @pytest.mark.asyncio
@@ -1917,21 +1933,31 @@ async def test_output_shutdown_releases_the_spool(
         await runtime.start(handle, ctx)
         await until(lambda: seal_logged(attempt))
         before = live_descriptors()
-        iterator = cast(
-            "AsyncGenerator[bytes, None]",
-            runtime.transfer_out(handle, "payload", ctx),
-        )
-        first = await anext(iterator)
-        added = live_descriptors() - before
-        assert len(first) == SECTION_FRAME_BYTES
-        assert len(added) == 1
-        spool = added.pop()
-        assert os.fstat(spool).st_nlink == 0
-        await runtime.close()
-        released = live_descriptors()
-        await iterator.aclose()
+        iterators = [runtime.transfer_out(handle, "payload", ctx) for _ in range(4)]
 
-    assert spool not in released
+        try:
+            first = [await anext(iterator) for iterator in iterators]
+            held = live_descriptors() - before
+            links = [os.fstat(descriptor).st_nlink for descriptor in held]
+            blocked = await protocol_error(
+                anext(runtime.transfer_out(handle, "payload", ctx))
+            )
+            await iterators[0].aclose()
+            _, reused = await output_bytes(runtime, handle, ctx, "payload")
+            await runtime.close()
+            released = live_descriptors()
+            closed = await protocol_error(anext(iterators[1]))
+        finally:
+            for iterator in iterators:
+                await iterator.aclose()
+
+    assert first == [b"y" * SECTION_FRAME_BYTES] * 4
+    assert links == [0] * 4
+    assert blocked.code == "workload_busy"
+    assert blocked.retryable
+    assert reused == b"y" * (SECTION_FRAME_BYTES + 17)
+    assert held.isdisjoint(released)
+    assert closed.code == "runtime_closed"
 
 
 def unlinked_spool(before: set[int]) -> bool:
@@ -2031,7 +2057,7 @@ class HoldingOutput(CommandSession):
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    def open_output(self, name: str) -> OpenedOutput:
+    def open_output(self, submitter: Submitter, name: str) -> OpenedOutput:
         self.entered.set()
         if not self.release.wait(5):
             raise TimeoutError("the output open was not released")
@@ -2196,6 +2222,80 @@ async def test_invalid_output_trailer_returns_no_bytes(tmp_path: Path) -> None:
 
     assert refused.code == "integrity_error"
     assert stored == payload
+
+
+class OutputWireServer(ControlServer):
+    attempts: int = 0
+
+    async def _send_output(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+        request: OutputRequest,
+    ) -> None:
+        self.attempts += 1
+        deadline = self._clock.monotonic_ns() + FRAME_PROGRESS_NS
+        payload = b"wire"
+        size = MAX_TRANSFER_BYTES + 1 if request.name == "overbound" else len(payload)
+        digest = digest_of(payload)
+        header: JsonObject = {
+            "request_id": request.request_id,
+            "result": "output",
+            "value": {"size": size, "sha256": digest},
+        }
+        await channel.write_typed_frame(
+            FrameType.JSON, canonical_bytes(header), deadline
+        )
+        if request.name in {"overbound", "disconnect"} or (
+            request.name == "retry" and self.attempts == 1
+        ):
+            return
+        await channel.write_typed_frame(FrameType.BYTES, payload, deadline)
+        trailer_digest = digest_of(b"wrong") if request.name == "trailer" else digest
+        await channel.write_typed_frame(
+            FrameType.JSON, output_trailer(request.request_id, trailer_digest), deadline
+        )
+        if request.name == "extra":
+            await channel.write_typed_frame(FrameType.BYTES, b"extra", deadline)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "attempts", "code"),
+    [
+        ("overbound", 1, "integrity_error"),
+        ("trailer", 1, "integrity_error"),
+        ("extra", 1, "integrity_error"),
+        ("disconnect", 4, "runner_unreachable"),
+        ("retry", 2, None),
+    ],
+)
+async def test_output_wire_limits_retries_and_requires_terminal_eof(
+    tmp_path: Path, kora_capture: Capture, case: str, attempts: int, code: str | None
+) -> None:
+    async with delivery_server(
+        tmp_path, kora_capture, server_type=OutputWireServer
+    ) as live:
+        server = live.server
+        assert isinstance(server, OutputWireServer)
+        handle = live.runtime.registry.key(live.work.attempt_id).handle()
+        before = live_descriptors()
+
+        observed: str | bytes
+        if code is None:
+            _, observed = await output_bytes(live.runtime, handle, live.ctx, case)
+        else:
+            refused = await protocol_error(
+                anext(live.runtime.transfer_out(handle, case, live.ctx))
+            )
+            observed = refused.code
+        await until(lambda: server.connections == 0)
+        after = live_descriptors()
+
+    assert observed == (b"wire" if code is None else code)
+    assert server.attempts == attempts
+    assert after == before
 
 
 @pytest.mark.asyncio

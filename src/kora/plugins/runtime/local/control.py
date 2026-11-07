@@ -28,6 +28,7 @@ from kora.plugins.runtime.local.channel import (
     send_message,
     write_transfer_bytes,
 )
+from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import TransferItem, Workload
 from kora.protocols.time import Clock
@@ -40,7 +41,7 @@ from kora.runner.channels import (
 )
 from kora.runner.native_io import NativeIOSubmissionUncertain
 from kora.runner.peers import PeerRefused, PeerSource
-from kora.runner.registry import TransitionExecutor
+from kora.runner.registry import TransitionExecutor, refusal
 
 NOT_RUNNER: str = "not_runner"
 
@@ -226,7 +227,7 @@ async def transfer_output(
     *,
     close_spool: Callable[[], None],
     active: Callable[[], None] | None = None,
-) -> None:
+) -> int:
     deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
     endpoint = await connected(path, clock, deadline)
     channel = BoundedChannel(endpoint, clock)
@@ -265,7 +266,7 @@ async def transfer_output(
             canonical_bytes(header.model_dump(mode="json")),
             min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline),
         )
-        await receive_output(
+        return await receive_output(
             channel,
             clock,
             executor,
@@ -275,6 +276,14 @@ async def transfer_output(
             active,
             close_spool,
         )
+    except ChannelError as error:
+        if error.reason in (ChannelFailure.MALFORMED, ChannelFailure.CAPACITY):
+            raise delivery_error("integrity_error") from None
+        raise
+    except KoraProtocolError as error:
+        if error.code == "message_refused":
+            raise delivery_error("integrity_error") from None
+        raise
     finally:
         if endpoint_owned:
             channel.close()
@@ -289,7 +298,7 @@ async def receive_output(
     message_deadline: int,
     active: Callable[[], None] | None,
     close_spool: Callable[[], None],
-) -> None:
+) -> int:
     reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
     _, payload = await channel.read_typed_frame(message_deadline, reservations)
     declared = read_output_declaration(payload, request_id)
@@ -311,7 +320,10 @@ async def receive_output(
                 active()
             if clock.monotonic_ns() >= message_deadline:
                 raise ChannelError(ChannelFailure.DEADLINE)
-            write_transfer_bytes(descriptor, payload)
+            try:
+                write_transfer_bytes(descriptor, payload)
+            except OSError:
+                raise refusal("runner_unreachable") from None
 
         await executor.run(write, after_uncertain_submission=close_spool)
         digest.update(piece)
@@ -323,6 +335,10 @@ async def receive_output(
     computed = "sha256:" + digest.hexdigest()
     if computed != declared.sha256 or trailer != declared.sha256:
         raise delivery_error("integrity_error")
+    await channel.expect_eof(
+        min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
+    )
+    return declared.size
 
 
 async def _send_spool(
