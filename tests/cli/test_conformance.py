@@ -703,6 +703,42 @@ def test_installed_vcs_reports_git_deadline_with_timing(
     assert not list(home.rglob("journal"))
 
 
+def test_installed_vcs_refuses_to_seed_without_configured_git(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = private_home(tmp_path / "home")
+    tool_directory = tmp_path / "private-git-path-canary"
+    tool_directory.mkdir(mode=0o700)
+    configuration = vcs_configuration(Path("vcs"))
+    configuration["tool_path"] = [str(tool_directory)]
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(configuration))
+
+    with vcs_preparation_probe(tmp_path) as probe:
+        process = installed_conformance.run(
+            *conformance_arguments(
+                "vcs", "configured", config, "fixtures_vcs", probe.fixture_data
+            ),
+            environment={"HOME": str(home)},
+        )
+        preparation = probe.observed()
+        timing = probe.timing()
+
+    assert_undisclosed(process, b"private-git-path-canary", b"remote.git", b"git-trace")
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 1
+    assert outcome.outcome is OriginalOutcome.FAILED
+    assert outcome.reason == "refused"
+    assert outcome.completed == 0
+    assert outcome.expected == 13
+    assert outcome.cleanup is not None
+    assert outcome.cleanup.state is CleanupOutcome.CLOSED
+    assert outcome.cleanup.unresolved_count == 0
+    assert preparation == ("prepare_entered",)
+    assert not timing
+    assert not list(home.rglob("journal"))
+
+
 def test_installed_vcs_ignores_replaced_preparation_evidence_file(
     installed_conformance: InstalledTooling, tmp_path: Path
 ) -> None:

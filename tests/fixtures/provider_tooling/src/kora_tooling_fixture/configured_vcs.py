@@ -1,7 +1,6 @@
 import asyncio
 import os
 import re
-import shutil
 import socket
 import stat
 import subprocess
@@ -20,6 +19,7 @@ from kora.conformance.vcs import VcsBench, VcsBinding, VcsConformanceInputs, Vcs
 from kora.executor.authorization import TrustedBinding
 from kora.executor.entry import Executor
 from kora.executor.launcher import Ending, LaunchSpec, ProcessLauncher, StepOutcome
+from kora.executor.steps import resolve_tool
 from kora.ir.json import JsonObject
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
 from kora.protocols.boundary import BoundaryModel
@@ -131,13 +131,12 @@ class Heartbeat:
 
 
 def git(
+    executable: str,
     root: Path,
     *arguments: str,
     trace: Path | None = None,
     deadline: int = GIT_DEADLINE_SECONDS,
 ) -> str:
-    executable = shutil.which("git")
-    assert executable is not None
     environment = {
         "PATH": os.environ["PATH"],
         "HOME": str(root),
@@ -181,6 +180,7 @@ def milliseconds(seconds: float) -> int:
 
 
 def observed_git(
+    executable: str,
     root: Path,
     observation: PreparationObservation,
     step: PreparationStep,
@@ -193,6 +193,7 @@ def observed_git(
     try:
         with heartbeat:
             return git(
+                executable,
                 root,
                 *arguments,
                 trace=trace,
@@ -208,7 +209,9 @@ def observed_git(
         )
 
 
-def seed_repositories(root: Path, observation: PreparationObservation | None) -> str:
+def seed_repositories(
+    executable: str, root: Path, observation: PreparationObservation | None
+) -> str:
     def note_failure(step: PreparationStep, reason: PreparationFailure) -> None:
         if observation is not None:
             observation.append(f"git_{step}_{reason}\n".encode("ascii"))
@@ -216,8 +219,8 @@ def seed_repositories(root: Path, observation: PreparationObservation | None) ->
     def prepare_git(step: PreparationStep, *arguments: str) -> str:
         try:
             if observation is None:
-                return git(root, *arguments)
-            return observed_git(root, observation, step, arguments)
+                return git(executable, root, *arguments)
+            return observed_git(executable, root, observation, step, arguments)
         except subprocess.TimeoutExpired:
             note_failure(step, "deadline")
             raise
@@ -339,6 +342,7 @@ class Adapter:
             else None
         )
         parsed = configured_paths(config)
+        executable = resolve_tool("git", parsed.tool_path)
         root = Path(parsed.remotes["local"].path).parent
         assert root.parent == Path.cwd()
         assert not root.exists()
@@ -349,7 +353,7 @@ class Adapter:
         anchor.close()
         if evidence is not None and evidence.occupy_remote:
             (root / "remote.git").touch(mode=0o600, exist_ok=False)
-        revision = seed_repositories(root, observation)
+        revision = seed_repositories(executable, root, observation)
         remote = VcsRemote(
             repo="local",
             revision=revision,
