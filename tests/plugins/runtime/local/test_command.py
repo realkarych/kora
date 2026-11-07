@@ -1624,7 +1624,7 @@ class SealBoundaryProbe(CommandCloseProbe):
         assert isinstance(clock, SealBoundaryClock)
         if clock.case == "freeze-failure":
             root = clock.attempt / "output-snapshot"
-            (root / "z").chmod(0o400)
+            (root / "z").chmod(0o600)
             try:
                 super()._finalize_snapshot(snapshot)
             finally:
@@ -1701,6 +1701,25 @@ async def test_seal_prepares_snapshot_before_append_and_settles_acknowledgement(
             content = (snapshot / "a" / "payload").read_bytes() if present else None
             mode = stat_mode(snapshot) if present else None
             original = (candidate / "a" / "payload").read_bytes()
+            if outcome == "sealed":
+                opened = session.open_output(submitter, "z")
+                try:
+                    session.confirm_output(opened)
+                    assert os.pread(opened.descriptor, 1, 0) == b""
+                finally:
+                    os.close(opened.descriptor)
+                with pytest.raises(KoraProtocolError) as missing:
+                    session.open_output(submitter, "missing")
+                assert missing.value.code == "transfer_refused"
+            else:
+                with pytest.raises(KoraProtocolError) as refused_output:
+                    session.open_output(submitter, "z")
+                expected = (
+                    "journal_unavailable"
+                    if outcome == "journal_unavailable"
+                    else "transfer_refused"
+                )
+                assert refused_output.value.code == expected
         finally:
             await session.aclose()
             directory.close()

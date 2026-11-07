@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -22,8 +22,9 @@ import pytest
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
+from kora.ir.json import JsonObject
 from kora.ir.vcs_ref_json import canonical_bytes
-from kora.observability import LoggingSettings, configure_process
+from kora.observability import ComponentLogger, LoggingSettings, configure_process
 from kora.plugins.runtime.local.channel import (
     ENVELOPE_BYTES,
     FRAME_PROGRESS_NS,
@@ -31,12 +32,24 @@ from kora.plugins.runtime.local.channel import (
     SECTION_FRAME_BYTES,
     AttachRequest,
     FrameType,
+    OutputRequest,
     TransferRequest,
+    delivery_error,
+    error_envelope,
+    output_envelope,
+    output_trailer,
     read_delivery,
+    read_error_envelope,
 )
-from kora.plugins.runtime.local.command import INCOMING, CommandSession
+from kora.plugins.runtime.local.command import INCOMING, CommandSession, OpenedOutput
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
-from kora.plugins.runtime.local.control import attested, connected, transfer_input
+from kora.plugins.runtime.local.control import (
+    attested,
+    connected,
+    receive_output,
+    transfer_input,
+    transfer_output,
+)
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
 from kora.plugins.runtime.local.spool import (
@@ -50,11 +63,15 @@ from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle
-from kora.protocols.runtime import TransferItem
+from kora.protocols.runtime import MAX_TRANSFER_BYTES, TransferItem
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError
-from kora.runner.filesystem import open_local_directory
+from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+from kora.runner.filesystem import (
+    DirectoryAnchor,
+    file_identity,
+    open_local_directory,
+)
 from kora.runner.identity import (
     SCAN_NS,
     IdentityObservation,
@@ -68,6 +85,7 @@ from kora.runner.peers import kernel_source
 from kora.runner.registry import (
     Registry,
     Running,
+    Submitter,
     TransitionExecutor,
     model_bytes,
     takeover_cell,
@@ -90,6 +108,7 @@ from tests.support.local_runners import (
     open_spawning,
     runner_pids,
     short_directory,
+    written,
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
@@ -1714,3 +1733,723 @@ def test_failed_spool_publication_does_not_accumulate_directories() -> None:
     finally:
         root.close()
         shutil.rmtree(small)
+
+
+def output_script() -> str:
+    return "\n".join(
+        (
+            "from pathlib import Path",
+            f"Path('payload').write_bytes(b'y' * {SECTION_FRAME_BYTES + 17})",
+            "Path('empty').write_bytes(b'')",
+            "Path('link').symlink_to('payload')",
+        )
+    )
+
+
+def seal_logged(attempt: Path) -> bool:
+    log = attempt / "runner.log"
+    if not log.is_file():
+        return False
+    for line in log.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            record.get("event") == "runtime.local.seal"
+            and record.get("outcome") == "sealed"
+        ):
+            return True
+    return False
+
+
+async def output_bytes(
+    runtime: LocalRuntime, handle: Handle, ctx: ProtocolContext, name: str
+) -> tuple[tuple[bytes, ...], bytes]:
+    parts: list[bytes] = []
+    async for chunk in runtime.transfer_out(handle, name, ctx):
+        parts.append(chunk)
+    return tuple(parts), b"".join(parts)
+
+
+@pytest.mark.asyncio
+async def test_transfer_out_returns_the_sealed_file(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    payload = b"y" * (SECTION_FRAME_BYTES + 17)
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+        )
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+
+        async def invalid() -> None:
+            async for _chunk in runtime.transfer_out(handle, "..", ctx):
+                raise AssertionError
+
+        refused_name = await protocol_error(invalid())
+        pending = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
+        await runtime.start(handle, ctx)
+        await until(lambda: seal_logged(attempt))
+        parts, body = await output_bytes(runtime, handle, ctx, "payload")
+        empty_parts, empty = await output_bytes(runtime, handle, ctx, "empty")
+        candidate = attempt / "candidate" / "payload"
+        candidate.write_bytes(b"changed-by-the-candidate")
+        _, repeated = await output_bytes(runtime, handle, ctx, "payload")
+        snapshot = attempt / "output-snapshot" / "payload"
+        snapshot.chmod(0o600)
+        snapshot.write_bytes(payload)
+        snapshot.chmod(0o400)
+        changed_stamp = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
+        snapshot.chmod(0o600)
+        snapshot.write_bytes(b"changed-snapshot")
+        snapshot.chmod(0o400)
+        seen: list[bytes] = []
+
+        async def changed() -> None:
+            async for chunk in runtime.transfer_out(handle, "payload", ctx):
+                seen.append(chunk)
+
+        mismatch = await protocol_error(changed())
+        directory = snapshot.parent
+        previous = snapshot.stat().st_ino
+        directory.chmod(0o700)
+        holder = directory / "holder"
+        snapshot.rename(holder)
+        snapshot.write_bytes(payload)
+        snapshot.chmod(0o400)
+        replaced_inode = snapshot.stat().st_ino
+        holder.unlink()
+        directory.chmod(0o500)
+        assert replaced_inode != previous
+
+        async def replaced() -> None:
+            async for _chunk in runtime.transfer_out(handle, "payload", ctx):
+                raise AssertionError
+
+        replaced_name = await protocol_error(replaced())
+        directory.chmod(0o700)
+        snapshot.unlink()
+        os.mkfifo(snapshot, 0o400)
+        directory.chmod(0o500)
+        fifo = await protocol_error(anext(runtime.transfer_out(handle, "payload", ctx)))
+
+        async def missing() -> None:
+            async for _chunk in runtime.transfer_out(handle, "missing", ctx):
+                raise AssertionError
+
+        missing_name = await protocol_error(missing())
+
+        async def link() -> None:
+            async for _chunk in runtime.transfer_out(handle, "link", ctx):
+                raise AssertionError
+
+        link_name = await protocol_error(link())
+        diagnostics = transfer_diagnostics(attempt / "runner.log")
+        pid = await running_pid(runtime, "attempt-1")
+        before = live_descriptors()
+        os.kill(pid, signal.SIGKILL)
+        assert exited_within(pid, 5)
+
+        async def exhausted() -> None:
+            async for _chunk in runtime.transfer_out(handle, "empty", ctx):
+                raise AssertionError
+
+        exhausted_error = await protocol_error(exhausted())
+        after = live_descriptors()
+
+    assert refused_name.code == "transfer_refused"
+    assert pending.code == "workload_busy"
+    assert pending.retryable
+    assert [len(part) for part in parts] == [SECTION_FRAME_BYTES, 17]
+    assert body == payload
+    assert empty_parts == ()
+    assert empty == b""
+    assert repeated == payload
+    assert changed_stamp.code == "transfer_refused"
+    assert mismatch.code == "integrity_error"
+    assert seen == []
+    assert replaced_name.code == "transfer_refused"
+    assert fifo.code == "transfer_refused"
+    assert missing_name.code == "transfer_refused"
+    assert link_name.code == "transfer_refused"
+    assert any(item[0] == "transferred" for item in diagnostics)
+    assert any(item[0] == "integrity" for item in diagnostics)
+    assert exhausted_error.code == "runner_unreachable"
+    assert exhausted_error.retryable
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_superseded_submitter_receives_no_output(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+        )
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        await runtime.start(handle, ctx)
+        await until(lambda: seal_logged(attempt))
+        entry = await recorded(runtime, handle.attempt_id)
+        assert isinstance(entry, Running)
+        successor = entry.submitter.model_copy(update={"dispatcher_id": "dispatcher-2"})
+        async with (
+            aclosing(runtime.transfer_out(handle, "payload", ctx)) as iterator,
+            transfer_channel(runtime, ctx, entry) as channel,
+        ):
+            first = await anext(iterator)
+            await runtime.transition(
+                runtime.registry.key(handle.attempt_id),
+                lambda current: takeover_cell(current, entry, successor, False),
+                ctx,
+                "submit",
+            )
+            request = OutputRequest(
+                op="transfer_out", request_id="wire", name="payload"
+            )
+            await channel.write_typed_frame(
+                FrameType.JSON,
+                canonical_bytes(request.model_dump(mode="json")),
+                ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+            )
+            _, payload = await channel.read_typed_frame(
+                ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+                {FrameType.JSON.value: ENVELOPE_BYTES},
+            )
+            _, error = read_error_envelope(payload)
+            resumed = await protocol_error(anext(iterator))
+        successor_error = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
+
+    assert first == b"y" * SECTION_FRAME_BYTES
+    assert error.code == "submitter_superseded"
+    assert resumed.code == "submitter_superseded"
+    assert successor_error.code == "execution_unauthorized"
+
+
+@pytest.mark.asyncio
+async def test_output_shutdown_releases_the_spool(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+        )
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        await runtime.start(handle, ctx)
+        await until(lambda: seal_logged(attempt))
+        before = live_descriptors()
+        iterators = [runtime.transfer_out(handle, "payload", ctx) for _ in range(4)]
+
+        try:
+            first = [await anext(iterator) for iterator in iterators]
+            held = live_descriptors() - before
+            links = [os.fstat(descriptor).st_nlink for descriptor in held]
+            blocked = await protocol_error(
+                anext(runtime.transfer_out(handle, "payload", ctx))
+            )
+            await iterators[0].aclose()
+            _, reused = await output_bytes(runtime, handle, ctx, "payload")
+            await runtime.close()
+            released = live_descriptors()
+            closed = await protocol_error(anext(iterators[1]))
+        finally:
+            for iterator in iterators:
+                await iterator.aclose()
+
+    assert first == [b"y" * SECTION_FRAME_BYTES] * 4
+    assert links == [0] * 4
+    assert blocked.code == "workload_busy"
+    assert blocked.retryable
+    assert reused == b"y" * (SECTION_FRAME_BYTES + 17)
+    assert held.isdisjoint(released)
+    assert closed.code == "runtime_closed"
+
+
+def unlinked_spool(before: set[int]) -> bool:
+    for descriptor in live_descriptors() - before:
+        try:
+            metadata = os.fstat(descriptor)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+            continue
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 0:
+            return True
+    return False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_output_pull_releases_the_spool(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+        )
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        await runtime.start(handle, ctx)
+        await until(lambda: seal_logged(attempt))
+        pid = await running_pid(runtime, "attempt-1")
+        before = live_descriptors()
+        os.kill(pid, signal.SIGSTOP)
+
+        async def pull() -> None:
+            async for _chunk in runtime.transfer_out(handle, "payload", ctx):
+                raise AssertionError
+
+        task = asyncio.create_task(pull())
+        try:
+            await until(lambda: unlinked_spool(before))
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            released = live_descriptors()
+        finally:
+            os.kill(pid, signal.SIGCONT)
+
+    assert released == before
+
+
+def test_concurrent_spool_close_releases_one_lease(tmp_path: Path) -> None:
+    path = state_root(tmp_path)
+    root = open_local_directory(path)
+    owner = SpoolOwner.open(
+        root,
+        "domain",
+        identity_of(os.getpid()),
+        NativeIdentityReader(),
+        SystemClock(),
+    )
+    try:
+        lease = owner.acquire(lambda: None)
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+
+        def close_once() -> None:
+            barrier.wait(5)
+            try:
+                lease.close()
+            except (OSError, KeyError) as error:
+                errors.append(error)
+
+        threads = tuple(threading.Thread(target=close_once) for _ in range(2))
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+            assert not thread.is_alive()
+        assert errors == []
+    finally:
+        try:
+            owner.close()
+        finally:
+            root.close()
+
+
+class HoldingOutput(CommandSession):
+    def __init__(
+        self,
+        attempt: DirectoryAnchor,
+        candidate: str,
+        scope: SecretScope,
+        clock: SystemClock,
+        log: ComponentLogger,
+        descriptor: int,
+    ) -> None:
+        super().__init__(attempt, candidate, scope, clock, log)
+        self.descriptor = descriptor
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def open_output(self, submitter: Submitter, name: str) -> OpenedOutput:
+        self.entered.set()
+        if not self.release.wait(5):
+            raise TimeoutError("the output open was not released")
+        return OpenedOutput(
+            self.descriptor,
+            0,
+            digest_of(b""),
+            file_identity(self.descriptor, name),
+            os.fstat(self.descriptor).st_ctime_ns,
+        )
+
+
+class DeclarationClock(SystemClock):
+    def __init__(self) -> None:
+        self.deadlines: list[int] = []
+        self.waiting = asyncio.Event()
+        self.released = asyncio.Event()
+
+    def monotonic_ns(self) -> int:
+        return 10 * MESSAGE_PROGRESS_NS
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        self.deadlines.append(deadline_ns)
+        self.waiting.set()
+        await self.released.wait()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_output_open_closes_the_snapshot_descriptor(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    attempt = private_directory(tmp_path, "attempt")
+    anchor = open_local_directory(attempt)
+    held = os.open(
+        attempt / "held", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+    )
+    command = HoldingOutput(
+        anchor,
+        str(attempt / "candidate"),
+        SecretScope(kora_capture.diagnostics),
+        SystemClock(),
+        kora_capture.diagnostics.logger(COMPONENT),
+        held,
+    )
+    try:
+        async with delivery_server(tmp_path, kora_capture, command=command) as live:
+            channel = await live.attach()
+            handlers: tuple[asyncio.Task[None], ...] = ()
+            try:
+                request = OutputRequest(
+                    op="transfer_out", request_id="wire", name="payload"
+                )
+                await channel.write_typed_frame(
+                    FrameType.JSON,
+                    canonical_bytes(request.model_dump(mode="json")),
+                    live.ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+                )
+                assert await asyncio.to_thread(command.entered.wait, 5)
+                handlers = live.server.tracked_connections()
+                assert len(handlers) == 1
+                handlers[0].cancel()
+            finally:
+                command.release.set()
+                channel.close()
+            with pytest.raises(asyncio.CancelledError):
+                await handlers[0]
+            released = live_descriptors()
+    finally:
+        if held in live_descriptors():
+            os.close(held)
+        anchor.close()
+
+    assert held not in released
+
+
+@pytest.mark.asyncio
+async def test_output_declaration_uses_the_message_deadline(tmp_path: Path) -> None:
+    clock = DeclarationClock()
+    message_deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+    left, right = socket.socketpair()
+    left.setblocking(False)
+    right.setblocking(False)
+    client = BoundedChannel(right, clock)
+    executor = TransitionExecutor(1, 1)
+    descriptor = os.open(
+        tmp_path / "spool", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+    )
+    os.unlink(tmp_path / "spool")
+    try:
+        task = asyncio.create_task(
+            receive_output(
+                client,
+                clock,
+                executor,
+                descriptor,
+                "pull-1",
+                message_deadline,
+                None,
+                lambda: None,
+            )
+        )
+        await clock.waiting.wait()
+        recorded = clock.deadlines[0]
+        left.close()
+        clock.released.set()
+        with pytest.raises(ChannelError) as refused:
+            await task
+    finally:
+        client.close()
+        os.close(descriptor)
+        await executor.close()
+
+    assert recorded == message_deadline
+    assert refused.value.reason is ChannelFailure.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_invalid_output_trailer_returns_no_bytes(tmp_path: Path) -> None:
+    payload = b"abcd"
+    digest = digest_of(payload)
+    left, right = socket.socketpair()
+    left.setblocking(False)
+    right.setblocking(False)
+    clock = SystemClock()
+    server = BoundedChannel(left, clock)
+    client = BoundedChannel(right, clock)
+    executor = TransitionExecutor(1, 1)
+    descriptor = os.open(
+        tmp_path / "spool", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+    )
+    os.unlink(tmp_path / "spool")
+
+    async def speak() -> None:
+        deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        await server.write_typed_frame(
+            FrameType.JSON,
+            output_envelope("pull-1", len(payload), digest),
+            deadline,
+        )
+        await server.write_typed_frame(FrameType.BYTES, payload, deadline)
+        await server.write_typed_frame(
+            FrameType.JSON, output_trailer("pull-1", digest_of(b"zzzz")), deadline
+        )
+
+    try:
+        sender = asyncio.create_task(speak())
+        refused = await protocol_error(
+            receive_output(
+                client,
+                clock,
+                executor,
+                descriptor,
+                "pull-1",
+                clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
+                None,
+                lambda: None,
+            )
+        )
+        await sender
+        stored = os.pread(descriptor, 16, 0)
+    finally:
+        server.close()
+        client.close()
+        os.close(descriptor)
+        await executor.close()
+
+    assert refused.code == "integrity_error"
+    assert stored == payload
+
+
+class OutputWireServer(ControlServer):
+    attempts: int = 0
+
+    async def _send_output(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+        request: OutputRequest,
+    ) -> None:
+        self.attempts += 1
+        deadline = self._clock.monotonic_ns() + FRAME_PROGRESS_NS
+        payload = b"wire"
+        size = MAX_TRANSFER_BYTES + 1 if request.name == "overbound" else len(payload)
+        digest = digest_of(payload)
+        header: JsonObject = {
+            "request_id": request.request_id,
+            "result": "output",
+            "value": {"size": size, "sha256": digest},
+        }
+        await channel.write_typed_frame(
+            FrameType.JSON, canonical_bytes(header), deadline
+        )
+        if request.name == "superseded_retry":
+            entry = self._running()
+            successor = submitter.model_copy(update={"dispatcher_id": "successor"})
+            await self._transfer_native(
+                lambda: self._registry.try_transition(
+                    self._key,
+                    lambda current: takeover_cell(current, entry, successor, False),
+                )
+            )
+            return
+        if request.name == "refused":
+            await channel.write_typed_frame(
+                FrameType.JSON,
+                error_envelope(request.request_id, delivery_error("transfer_refused")),
+                deadline,
+            )
+            return
+        if request.name in {"overbound", "disconnect"} or (
+            request.name == "retry" and self.attempts == 1
+        ):
+            return
+        await channel.write_typed_frame(FrameType.BYTES, payload[:2], deadline)
+        await channel.write_typed_frame(FrameType.BYTES, payload[2:], deadline)
+        trailer_digest = digest_of(b"wrong") if request.name == "trailer" else digest
+        await channel.write_typed_frame(
+            FrameType.JSON, output_trailer(request.request_id, trailer_digest), deadline
+        )
+        if request.name == "extra":
+            await channel.write_typed_frame(FrameType.BYTES, b"extra", deadline)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "attempts", "code"),
+    [
+        ("overbound", 1, "integrity_error"),
+        ("trailer", 1, "integrity_error"),
+        ("extra", 1, "integrity_error"),
+        ("disconnect", 4, "runner_unreachable"),
+        ("retry", 2, None),
+        ("refused", 1, "transfer_refused"),
+        ("superseded_retry", 1, "submitter_superseded"),
+    ],
+)
+async def test_output_wire_limits_retries_and_requires_terminal_eof(
+    tmp_path: Path, kora_capture: Capture, case: str, attempts: int, code: str | None
+) -> None:
+    async with delivery_server(
+        tmp_path, kora_capture, server_type=OutputWireServer
+    ) as live:
+        server = live.server
+        assert isinstance(server, OutputWireServer)
+        handle = live.runtime.registry.key(live.work.attempt_id).handle()
+        before = live_descriptors()
+
+        observed: str | bytes
+        if code is None:
+            _, observed = await output_bytes(live.runtime, handle, live.ctx, case)
+        else:
+            refused = await protocol_error(
+                anext(live.runtime.transfer_out(handle, case, live.ctx))
+            )
+            observed = refused.code
+        await until(lambda: server.connections == 0)
+        after = live_descriptors()
+
+    assert observed == (b"wire" if code is None else code)
+    assert server.attempts == attempts
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_output_refuses_inherited_deadline_before_spool_or_source(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+        )
+        handle = await runtime.submit(workload, ctx)
+        attempt = attempt_directory(root, runtime, handle.attempt_id)
+        await runtime.start(handle, ctx)
+        await until(lambda: seal_logged(attempt))
+        entry = await recorded(runtime, handle.attempt_id)
+        assert isinstance(entry, Running)
+        deadline = ExecutionDeadline(
+            at=ctx.clock.now() + timedelta(minutes=5),
+            scope_kind="attempt",
+            scope_id=handle.attempt_id,
+            clock_uncertainty=timedelta(seconds=2),
+            grace=DEADLINE_GRACE,
+        )
+        scoped = entry.model_copy(update={"deadline": deadline})
+        await written(runtime, handle.attempt_id, scoped, ctx)
+        spool = sole_spool(root)
+        before = spool.stat().st_mtime_ns
+        request = OutputRequest(op="transfer_out", request_id="wire", name="payload")
+
+        refused = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
+        after = spool.stat().st_mtime_ns
+        async with transfer_channel(runtime, ctx, scoped) as channel:
+            wait = ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS
+            await channel.write_typed_frame(
+                FrameType.JSON, canonical_bytes(request.model_dump(mode="json")), wait
+            )
+            _, payload = await channel.read_typed_frame(
+                wait, {FrameType.JSON.value: ENVELOPE_BYTES}
+            )
+            answered, direct = read_error_envelope(payload)
+            await channel.expect_eof(wait)
+
+    assert refused.code == "transfer_refused"
+    assert before == after
+    assert answered == request.request_id
+    assert direct.code == "transfer_refused"
+
+
+@pytest.mark.asyncio
+async def test_observational_attach_cannot_pull_output(tmp_path: Path) -> None:
+    root = state_root(tmp_path)
+    with short_directory() as base:
+        sockets = base / "sockets"
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import asyncio\n"
+                "from tests.plugins.runtime.local.test_transfer import "
+                "transfer_worker\n"
+                "asyncio.run(transfer_worker())\n",
+            ],
+            env={
+                **os.environ,
+                "KORA_COMMAND_ROOT": str(root),
+                "KORA_COMMAND_SOCKETS": str(sockets),
+            },
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert process.stdout is not None
+            path = await asyncio.to_thread(process.stdout.readline)
+            runners = runner_pids(root)
+            assert len(runners) == 1
+            os.kill(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+            identity = identity_of(runners[0])
+            executor = TransitionExecutor()
+            clock = SystemClock()
+            descriptor = os.open(
+                base / "spool",
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+            )
+            os.unlink(base / "spool")
+            try:
+                refused = await protocol_error(
+                    transfer_output(
+                        path.strip(),
+                        identity,
+                        "dispatcher-2",
+                        kernel_source(NativeIdentityReader()),
+                        executor,
+                        clock,
+                        "pull-1",
+                        descriptor,
+                        "payload",
+                        clock.monotonic_ns() + MESSAGE_PROGRESS_NS,
+                        close_spool=lambda: None,
+                    )
+                )
+            finally:
+                os.close(descriptor)
+                await executor.close()
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            if process.stdout is not None:
+                process.stdout.close()
+            release_commands(root)
+            reap_runners(root)
+
+    assert path.strip()
+    assert refused.code == "execution_unauthorized"

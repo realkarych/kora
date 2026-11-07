@@ -11,6 +11,7 @@ from pydantic import Field, StrictBool, StringConstraints, ValidationError
 
 from kora.executor.digests import object_digest
 from kora.ir.json import JsonObjectField
+from kora.ir.scalars import Digest
 from kora.ir.vcs_ref_json import JsonRefusal, canonical_bytes, decode_strict_json
 from kora.protocols.common import BoundaryModel
 from kora.protocols.deadlines import (
@@ -20,7 +21,13 @@ from kora.protocols.deadlines import (
 )
 from kora.protocols.errors import ERROR_CODE, KoraProtocolError
 from kora.protocols.identity import Count, Identifier, Sha256
-from kora.protocols.runtime import RuntimeStatus, TransferItem, Workload
+from kora.protocols.runtime import (
+    MAX_TRANSFER_BYTES,
+    RuntimeStatus,
+    TransferItem,
+    TransferName,
+    Workload,
+)
 from kora.protocols.time import Clock
 from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
 from kora.runner.registry import TransitionExecutor
@@ -199,6 +206,32 @@ class TransferRequest(BoundaryModel):
     op: Literal["transfer_in"]
     request_id: Identifier
     item: TransferItem
+
+
+class OutputRequest(BoundaryModel):
+    op: Literal["transfer_out"]
+    request_id: Identifier
+    name: TransferName
+
+
+class OutputName(BoundaryModel):
+    name: TransferName
+
+
+class OutputValue(BoundaryModel):
+    size: Annotated[Count, Field(le=MAX_TRANSFER_BYTES)]
+    sha256: Digest
+
+
+class OutputEnvelope(BoundaryModel):
+    request_id: Identifier
+    result: Literal["output"]
+    value: OutputValue
+
+
+class OutputTrailer(BoundaryModel):
+    request_id: Identifier
+    sha256: Digest
 
 
 class EmptyValue(BoundaryModel):
@@ -442,6 +475,71 @@ def read_error_envelope(payload: bytes) -> tuple[str, KoraProtocolError]:
 def control_request(op: str, request_id: str) -> bytes:
     request = ControlRequest(op=op, request_id=request_id)
     return canonical_bytes(request.model_dump(mode="json"))
+
+
+def checked_output_name(name: str) -> str:
+    try:
+        return OutputName(name=name).name
+    except ValidationError:
+        raise delivery_error("transfer_refused") from None
+
+
+def output_envelope(request_id: str, size: int, digest: str) -> bytes:
+    envelope = OutputEnvelope(
+        request_id=request_id,
+        result="output",
+        value=OutputValue(size=size, sha256=digest),
+    )
+    return canonical_bytes(envelope.model_dump(mode="json"))
+
+
+def output_trailer(request_id: str, digest: str) -> bytes:
+    return canonical_bytes(
+        OutputTrailer(request_id=request_id, sha256=digest).model_dump(mode="json")
+    )
+
+
+def read_output(payload: bytes) -> OutputRequest | None:
+    if isinstance(
+        decode_strict_json(payload, PRE_ATTACH_BYTES, HEADER_DEPTH), JsonRefusal
+    ):
+        return None
+    request = json_model(OutputRequest, payload)
+    return None if request is None or request.op != "transfer_out" else request
+
+
+def read_output_declaration(payload: bytes, request_id: str) -> OutputValue:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    envelope = json_model(OutputEnvelope, payload)
+    if (
+        envelope is None
+        or envelope.request_id != request_id
+        or envelope.result != "output"
+    ):
+        raise message_refused(MessageRefusal.MALFORMED)
+    return envelope.value
+
+
+def read_output_trailer(payload: bytes, request_id: str) -> str:
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
+        raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
+    trailer = json_model(OutputTrailer, payload)
+    if trailer is None or trailer.request_id != request_id:
+        raise message_refused(MessageRefusal.MALFORMED)
+    return trailer.sha256
 
 
 def read_transfer(payload: bytes) -> TransferRequest | None:

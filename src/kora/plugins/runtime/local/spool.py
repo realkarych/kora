@@ -342,12 +342,16 @@ class SpoolLease:
         self.descriptor = descriptor
         self._owner = owner
         self._closing = False
+        self.closed = False
 
     def close(self) -> None:
-        if not self._closing:
-            self._closing = True
-            os.close(self.descriptor)
-            self._owner.settled(self)
+        self._owner.release(self)
+
+    def claim(self) -> bool:
+        if self._closing:
+            return False
+        self._closing = True
+        return True
 
 
 class SpoolOwner:
@@ -427,9 +431,13 @@ class SpoolOwner:
             parent.close()
             raise
 
-    def settled(self, lease: SpoolLease) -> None:
+    def release(self, lease: SpoolLease) -> None:
         with self._settling:
+            if not lease.claim():
+                return
+            os.close(lease.descriptor)
             self._leases.remove(lease)
+            lease.closed = True
 
     def acquire(self, active: Callable[[], None]) -> SpoolLease:
         active()
