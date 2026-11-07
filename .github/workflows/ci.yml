@@ -48,6 +48,14 @@ jobs:
     name: Scaffold tests (${{ matrix.os }}, Python ${{ matrix.python }}, ${{ matrix.lane }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    concurrency:
+      group: >-
+        ${{ matrix.os == 'macos-15'
+          && format('kora-ci-{0}-{1}-macos-{2}', github.run_id, github.run_attempt,
+            (matrix.lane == 'storage' || matrix.lane == 'local-runtime') && 'resources' || matrix.lane)
+          || format('kora-ci-{0}-{1}-scaffold-{2}-{3}-{4}', github.run_id, github.run_attempt,
+            matrix.os, matrix.python, matrix.lane) }}
+      queue: max
     strategy:
       fail-fast: false
       matrix:
@@ -559,6 +567,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     continue-on-error: true
+    concurrency:
+      group: >-
+        ${{ matrix.os == 'macos-15'
+          && format('kora-ci-{0}-{1}-macos-remainder', github.run_id, github.run_attempt)
+          || format('kora-ci-{0}-{1}-diagnostics-{2}-{3}', github.run_id, github.run_attempt,
+            matrix.os, matrix.python) }}
+      queue: max
     strategy:
       fail-fast: false
       matrix:
@@ -1703,6 +1718,12 @@ jobs:
     name: Mutation tooling (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    concurrency:
+      group: >-
+        ${{ matrix.os == 'macos-15'
+          && format('kora-ci-{0}-{1}-macos-conformance', github.run_id, github.run_attempt)
+          || format('kora-ci-{0}-{1}-mutation-{2}', github.run_id, github.run_attempt, matrix.os) }}
+      queue: max
     strategy:
       fail-fast: false
       matrix:
