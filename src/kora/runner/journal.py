@@ -99,10 +99,11 @@ class RunningJournal:
                     )
                     + b"\n"
                 )
+                next_index = self._next + 1
+                admitted_bytes = self._admitted_bytes + len(line)
                 if reader_bounded and (
                     self._prefix_bytes is None
-                    or self._prefix_bytes + self._admitted_bytes + len(line)
-                    > RECORD_LIMIT
+                    or self._prefix_bytes + admitted_bytes > RECORD_LIMIT
                 ):
                     raise JournalCapacityError
                 job = _Write(line, deadline)
@@ -111,8 +112,8 @@ class RunningJournal:
                 if reader_bounded:
                     raise JournalCapacityError from None
                 raise
-            self._next += 1
-            self._admitted_bytes += len(line)
+            self._next = next_index
+            self._admitted_bytes = admitted_bytes
             if self._thread is None:
                 try:
                     launch = self._prepare_writer()
