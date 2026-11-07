@@ -38,7 +38,7 @@ def named_check(name: str, predicate: str) -> CheckConstraint:
     return CheckConstraint(predicate, name=conv(f"ck_{TABLE_NAME}_{name}"))
 
 
-def ascii_check(
+def ascii_predicate(
     dialect: str,
     column: str,
     alphabet: str,
@@ -46,7 +46,7 @@ def ascii_check(
     leading: str | None = None,
     *,
     nullable: bool = False,
-) -> CheckConstraint:
+) -> str:
     if dialect == SQLITE:
         predicates = [
             f"typeof({column}) = 'text'",
@@ -66,7 +66,22 @@ def ascii_check(
     predicate = " AND ".join(predicates)
     if nullable:
         predicate = f"{column} IS NULL OR ({predicate})"
-    return named_check(f"{column}_domain", predicate)
+    return predicate
+
+
+def ascii_check(
+    dialect: str,
+    column: str,
+    alphabet: str,
+    width: str,
+    leading: str | None = None,
+    *,
+    nullable: bool = False,
+) -> CheckConstraint:
+    return named_check(
+        f"{column}_domain",
+        ascii_predicate(dialect, column, alphabet, width, leading, nullable=nullable),
+    )
 
 
 def domain_checks(dialect: str) -> tuple[CheckConstraint, ...]:

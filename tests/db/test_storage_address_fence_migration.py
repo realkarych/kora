@@ -5,7 +5,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
-from kora.db.migrations import current_revision, upgrade_database
+from kora.db.migrations import current_revision
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import graph_deployment_preparation, graph_version
 from kora.db.tables import storage_address_fence as fence
@@ -236,15 +236,21 @@ async def test_fence_migration_preserves_history_and_committed_incarnation(
     finally:
         await before.close()
 
-    report = await upgrade_database(empty_database_settings)
-    repeated = await upgrade_database(empty_database_settings)
     first = Database(empty_database_settings)
     try:
+        async with first.migration_connection() as connection:
+            await connection.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), REVISION)
+            )
         async with first.transaction() as connection:
             old = await insert_fence(connection, "store")
         async with first.transaction() as connection:
             await connection.execute(
                 fence.delete().where(fence.c.fence_incarnation == old)
+            )
+        async with first.migration_connection() as connection:
+            await connection.run_sync(
+                lambda sync: command.upgrade(alembic_config(sync), REVISION)
             )
         with pytest.raises(
             RuntimeError, match="storage address fence history cannot be downgraded"
@@ -271,12 +277,6 @@ async def test_fence_migration_preserves_history_and_committed_incarnation(
     finally:
         await reopened.close()
 
-    assert (report.from_revision, report.to_revision, report.steps) == (
-        PREDECESSOR,
-        REVISION,
-        1,
-    )
-    assert repeated.steps == 0
     assert revision == REVISION
     assert new > old > 0
     assert version_after == original

@@ -28,12 +28,12 @@ SQLITE_ADDRESS_CHECKS: tuple[tuple[str, str], ...] = (
         "AND length(payload_digest) = 71 AND substr(payload_digest, 1, 7) = 'sha256:' "
         "AND substr(payload_digest, 8) NOT GLOB '*[^0-9a-f]*'",
     ),
-    (
-        "generation_storage",
-        "typeof(last_deletion_generation) = 'integer' AND "
-        "(pending_deletion_generation IS NULL OR "
-        "typeof(pending_deletion_generation) = 'integer')",
-    ),
+)
+SQLITE_GENERATION_STORAGE: tuple[str, str] = (
+    "generation_storage",
+    "typeof(last_deletion_generation) = 'integer' AND "
+    "(pending_deletion_generation IS NULL OR "
+    "typeof(pending_deletion_generation) = 'integer')",
 )
 POSTGRESQL_ADDRESS_CHECKS: tuple[tuple[str, str], ...] = (
     (
@@ -59,7 +59,7 @@ def _backend_checks(dialect: str | None) -> tuple[CheckConstraint, ...]:
     return tuple(
         _check(name, predicate).ddl_if(dialect=backend)
         for backend, checks in (
-            (SQLITE, SQLITE_ADDRESS_CHECKS),
+            (SQLITE, (*SQLITE_ADDRESS_CHECKS, SQLITE_GENERATION_STORAGE)),
             (POSTGRESQL, POSTGRESQL_ADDRESS_CHECKS),
         )
         if dialect in (None, backend)

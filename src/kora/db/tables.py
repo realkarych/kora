@@ -15,6 +15,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.graph_deployment_stage_v1 import (
+    OCCURRENCE_TABLE,
+    STAGE_TABLE,
+    graph_deployment_stage_elements_v1,
+    graph_deployment_stage_occurrence_elements_v1,
+)
 from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
 from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
 from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
@@ -203,6 +209,14 @@ storage_address_fence: Table = Table(
     metadata,
     *storage_address_fence_elements_v1(),
     sqlite_autoincrement=True,
+)
+
+graph_deployment_stage: Table = Table(
+    STAGE_TABLE, metadata, *graph_deployment_stage_elements_v1()
+)
+
+graph_deployment_stage_occurrence: Table = Table(
+    OCCURRENCE_TABLE, metadata, *graph_deployment_stage_occurrence_elements_v1()
 )
 
 preset: Table = Table(
