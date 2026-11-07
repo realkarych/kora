@@ -10,6 +10,8 @@ The [separate raw-crash storage proposal](research/separate-raw-crash-storage-20
 
 The [installed VCS Git step timing record](research/installed-vcs-git-timing-2026-11-07.md) holds the source failures, timing format and reading rule for the hosted macOS preparation deadline under #887 and #895. It does not attribute the failure.
 
+The [aiosqlite failed-connect thread record](research/aiosqlite-failed-connect-thread-2026-11-07.md) holds the failed CI runs, the cause, the reproduction and the thread-count reading rule for the SQLite connection lifecycle under #918.
+
 The [macOS eject refusal record](research/storage-pressure-eject-refusal-2026-11-06.md) holds the failure table, Apple source citations, decision and reading rule for refused storage-pressure fixture releases under #302 and #886.
 
 ## Current contracts by task

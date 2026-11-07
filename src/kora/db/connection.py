@@ -1,12 +1,14 @@
 import asyncio
 import enum
 import os
+import sqlite3
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
+import aiosqlite
 from sqlalchemy import URL, Connection, event, make_url, text
 from sqlalchemy.engine.interfaces import DBAPIConnection, ExceptionContext
 from sqlalchemy.exc import ArgumentError
@@ -34,6 +36,7 @@ MEMORY_DATABASE: str = ":memory:"
 PRIVATE_FILE_MODE: int = 0o600
 SQLITE_BUSY_TIMEOUT_SECONDS: float = 5.0
 SQLITE_READERS: int = 4
+AIOSQLITE_ITER_CHUNK_SIZE: int = 64
 DEFAULT_POOL_SIZE: int = 5
 DEFAULT_MAX_OVERFLOW: int = 5
 DEFAULT_POOL_TIMEOUT_SECONDS: float = 5.0
@@ -158,11 +161,36 @@ def keep_connection_on_cancellation(context: ExceptionContext) -> None:
         context.is_disconnect = False
 
 
+class SqliteDriverConnection(aiosqlite.Connection):
+    def __init__(self, opened: sqlite3.Connection) -> None:
+        super().__init__(lambda: opened, AIOSQLITE_ITER_CHUNK_SIZE)
+        self._thread.daemon = True
+
+
+def open_sqlite_file(path: Path) -> sqlite3.Connection:
+    return sqlite3.connect(
+        path,
+        timeout=SQLITE_BUSY_TIMEOUT_SECONDS,
+        isolation_level=None,
+        check_same_thread=False,
+    )
+
+
+def sqlite_connector(
+    path: Path,
+) -> Callable[[], Awaitable[aiosqlite.Connection]]:
+    async def connect() -> aiosqlite.Connection:
+        opened = await asyncio.to_thread(open_sqlite_file, path)
+        return await SqliteDriverConnection(opened)
+
+    return connect
+
+
 def sqlite_engine(settings: DatabaseSettings, writer: bool) -> AsyncEngine:
-    connect_args = {"timeout": SQLITE_BUSY_TIMEOUT_SECONDS, "isolation_level": None}
+    connector = sqlite_connector(settings.sqlite_path.absolute())
     if writer:
         engine = create_async_engine(
-            settings.url, poolclass=StaticPool, connect_args=connect_args
+            settings.url, poolclass=StaticPool, async_creator=connector
         )
     else:
         engine = create_async_engine(
@@ -171,7 +199,7 @@ def sqlite_engine(settings: DatabaseSettings, writer: bool) -> AsyncEngine:
             pool_size=SQLITE_READERS,
             max_overflow=0,
             pool_timeout=settings.pool_timeout_seconds,
-            connect_args=connect_args,
+            async_creator=connector,
         )
     pragmas = WRITER_PRAGMAS if writer else READER_PRAGMAS
     event.listen(engine.sync_engine, "connect", apply_pragmas(pragmas))
