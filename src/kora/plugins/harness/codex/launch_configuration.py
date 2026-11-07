@@ -197,7 +197,12 @@ def build_launch_inputs(
         raise LaunchConfigurationError(
             LaunchConfigurationFailure.INVALID_ENVIRONMENT_NAMES
         )
-    owned = app_env.keys() | exec_env.keys() | {PROVIDER_KEY} | EXEC_METADATA_ENV_NAMES
+    owned = (
+        app_env.keys()
+        | exec_env.keys()
+        | {PROVIDER_KEY, "CODEX_SQLITE_HOME"}
+        | EXEC_METADATA_ENV_NAMES
+    )
     if not owned.isdisjoint(workload_names) or not owned.isdisjoint(
         workload_secret_names
     ):
