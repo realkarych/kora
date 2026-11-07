@@ -1,8 +1,9 @@
 import asyncio
 import enum
 import os
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
-from contextlib import asynccontextmanager, closing
+import sys
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
+from contextlib import asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
@@ -165,10 +166,23 @@ def apply_full_sync(cursor: DBAPICursor) -> None:
     verify_full_sync(cursor)
 
 
+def verify_macos_fullfsync(cursor: DBAPICursor) -> None:
+    cursor.execute("PRAGMA fullfsync")
+    if cursor.fetchone() != (1,):
+        raise SQLiteSynchronizationError("macOS SQLite connection requires fullfsync")
+
+
+def apply_platform_fullfsync(cursor: DBAPICursor) -> None:
+    if sys.platform == "darwin":
+        cursor.execute("PRAGMA fullfsync=ON")
+        verify_macos_fullfsync(cursor)
+
+
 def configure_full_sync_writer(
     raw_connection: DBAPIConnection, record: ConnectionPoolEntry
 ) -> None:
     with closing(raw_connection.cursor()) as cursor:
+        apply_platform_fullfsync(cursor)
         cursor.execute("PRAGMA main.journal_mode=WAL")
         if cursor.fetchone() != ("wal",):
             raise SQLiteSynchronizationError("SQLite writer requires WAL journal mode")
@@ -180,6 +194,7 @@ def configure_full_sync_reader(
     raw_connection: DBAPIConnection, record: ConnectionPoolEntry
 ) -> None:
     with closing(raw_connection.cursor()) as cursor:
+        apply_platform_fullfsync(cursor)
         apply_full_sync(cursor)
         cursor.execute("PRAGMA main.journal_mode")
         if cursor.fetchone() != ("wal",):
@@ -194,22 +209,35 @@ def begin_immediately(connection: Connection) -> None:
     cursor.close()
 
 
-def begin_verified_sqlite_write(connection: Connection) -> None:
+@contextmanager
+def guarded_sqlite_writer_cursor(
+    connection: Connection,
+) -> Generator[DBAPICursor, None, None]:
     raw_connection = connection.connection
     verified = False
     try:
         with closing(raw_connection.cursor()) as cursor:
-            cursor.execute(BEGIN_IMMEDIATE)
-            cursor.execute("PRAGMA main.journal_mode")
-            if cursor.fetchone() != ("wal",):
-                raise SQLiteSynchronizationError(
-                    "SQLite writer requires WAL journal mode"
-                )
-            verify_full_sync(cursor)
+            yield cursor
         verified = True
     finally:
         if not verified:
             raw_connection.rollback()
+
+
+def begin_verified_sqlite_write(connection: Connection) -> None:
+    with guarded_sqlite_writer_cursor(connection) as cursor:
+        cursor.execute(BEGIN_IMMEDIATE)
+        cursor.execute("PRAGMA main.journal_mode")
+        if cursor.fetchone() != ("wal",):
+            raise SQLiteSynchronizationError("SQLite writer requires WAL journal mode")
+        verify_full_sync(cursor)
+        if sys.platform == "darwin":
+            verify_macos_fullfsync(cursor)
+
+
+def verify_macos_sqlite_commit(connection: Connection) -> None:
+    with guarded_sqlite_writer_cursor(connection) as cursor:
+        verify_macos_fullfsync(cursor)
 
 
 def keep_connection_on_cancellation(context: ExceptionContext) -> None:
@@ -243,6 +271,8 @@ def sqlite_engine(
     if writer:
         begin = begin_verified_sqlite_write if require_full_sync else begin_immediately
         event.listen(engine.sync_engine, "begin", begin)
+        if require_full_sync and sys.platform == "darwin":
+            event.listen(engine.sync_engine, "commit", verify_macos_sqlite_commit)
         event.listen(
             engine.sync_engine, "handle_error", keep_connection_on_cancellation
         )

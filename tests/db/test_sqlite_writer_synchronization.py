@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import sys
 import threading
 from contextlib import AsyncExitStack, closing
 from pathlib import Path
@@ -27,12 +28,25 @@ from tests.db.closing import (
 )
 from tests.support.databases import sqlite_settings
 
+EXPECTED_DURABLE_FULLFSYNC: int = int(sys.platform == "darwin")
 
-async def writer_settings(connection: AsyncConnection) -> tuple[object, object, object]:
+
+def start_at_normal_without_fullfsync(
+    raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+) -> None:
+    with closing(raw_connection.cursor()) as cursor:
+        cursor.execute("PRAGMA main.synchronous=NORMAL")
+        cursor.execute("PRAGMA fullfsync=OFF")
+
+
+async def writer_settings(
+    connection: AsyncConnection,
+) -> tuple[object, object, object, object]:
     return (
         await connection.scalar(text("PRAGMA main.journal_mode")),
         await connection.scalar(text("PRAGMA main.synchronous")),
         await connection.scalar(text("PRAGMA foreign_keys")),
+        await connection.scalar(text("PRAGMA fullfsync")),
     )
 
 
@@ -41,12 +55,18 @@ async def test_ordinary_database_writer_keeps_its_existing_mode(
     database: Database,
 ) -> None:
     if database.dialect is Dialect.SQLITE:
+        event.listen(
+            database.writer_engine.sync_engine,
+            "connect",
+            start_at_normal_without_fullfsync,
+            insert=True,
+        )
         async with database.transaction() as writer:
             settings = await writer_settings(writer)
         async with database.read_transaction() as reader:
             query_only = await reader.scalar(text("PRAGMA query_only"))
 
-        assert settings == ("wal", 1, 1)
+        assert settings == ("wal", 1, 1, 0)
         assert query_only == 1
     else:
         async with database.transaction() as writer:
@@ -66,16 +86,10 @@ async def test_sqlite_full_sync_initializes_first_and_replacement_writer(
     database = Database(sqlite_settings(path), require_sqlite_full_sync=True)
     ledger = ConnectionLedger(database)
 
-    def start_writer_at_normal(
-        raw_connection: DBAPIConnection, record: ConnectionPoolEntry
-    ) -> None:
-        with closing(raw_connection.cursor()) as cursor:
-            cursor.execute("PRAGMA main.synchronous=NORMAL")
-
     event.listen(
         database.writer_engine.sync_engine,
         "connect",
-        start_writer_at_normal,
+        start_at_normal_without_fullfsync,
         insert=True,
     )
 
@@ -92,7 +106,7 @@ async def test_sqlite_full_sync_initializes_first_and_replacement_writer(
     finally:
         await database.close()
 
-    assert first == replacement == ("wal", 2, 1)
+    assert first == replacement == ("wal", 2, 1, EXPECTED_DURABLE_FULLFSYNC)
     assert restored_rollback_journal == ("delete",)
     assert ledger.opened == ledger.closed == ledger.checkouts == 2
     assert ledger.outstanding == 0
@@ -180,12 +194,12 @@ async def test_sqlite_wal_refusal_releases_driver_and_writer(
             await asyncio.gather(task, return_exceptions=True)
         await database.close()
 
-    assert recovered == ("wal", 2, 1)
+    assert recovered == ("wal", 2, 1, EXPECTED_DURABLE_FULLFSYNC)
 
 
 async def reader_settings(
     connection: AsyncConnection,
-) -> tuple[object, object, object, object]:
+) -> tuple[object, object, object, object, object]:
     return (
         *await writer_settings(connection),
         await connection.scalar(text("PRAGMA query_only")),
@@ -194,7 +208,7 @@ async def reader_settings(
 
 async def all_reader_settings(
     database: Database,
-) -> list[tuple[object, object, object, object]]:
+) -> list[tuple[object, object, object, object, object]]:
     async with AsyncExitStack() as readers:
         connections = [
             await readers.enter_async_context(database.read_transaction())
@@ -206,14 +220,20 @@ async def all_reader_settings(
 @pytest.mark.asyncio
 async def test_ordinary_sqlite_reader_can_open_before_writer(tmp_path: Path) -> None:
     database = Database(sqlite_settings(tmp_path / "metadata.db"))
+    event.listen(
+        database.reader_engine.sync_engine,
+        "connect",
+        start_at_normal_without_fullfsync,
+        insert=True,
+    )
 
     try:
         async with database.read_transaction() as reader:
-            journal_mode, _, foreign_keys, query_only = await reader_settings(reader)
+            settings = await reader_settings(reader)
     finally:
         await database.close()
 
-    assert (journal_mode, foreign_keys, query_only) == ("delete", 1, 1)
+    assert settings == ("delete", 1, 1, 0, 1)
 
 
 @pytest.mark.asyncio
@@ -225,16 +245,10 @@ async def test_checkpoint_reader_reinitializes_and_can_truncate_wal(
     database = Database(sqlite_settings(path), require_sqlite_full_sync=True)
     ledger = ConnectionLedger(database)
 
-    def start_reader_at_normal(
-        raw_connection: DBAPIConnection, record: ConnectionPoolEntry
-    ) -> None:
-        with closing(raw_connection.cursor()) as cursor:
-            cursor.execute("PRAGMA main.synchronous=NORMAL")
-
     event.listen(
         database.reader_engine.sync_engine,
         "connect",
-        start_reader_at_normal,
+        start_at_normal_without_fullfsync,
         insert=True,
     )
 
@@ -256,8 +270,11 @@ async def test_checkpoint_reader_reinitializes_and_can_truncate_wal(
     finally:
         await database.close()
 
-    assert initial_settings == [("wal", 2, 1, 1)] * SQLITE_READERS
-    assert replacement_settings == ("wal", 2, 1, 1)
+    assert (
+        initial_settings
+        == [("wal", 2, 1, EXPECTED_DURABLE_FULLFSYNC, 1)] * SQLITE_READERS
+    )
+    assert replacement_settings == ("wal", 2, 1, EXPECTED_DURABLE_FULLFSYNC, 1)
     assert before_checkpoint > 0
     assert tuple(result) == (0, 0, 0)
     assert after_checkpoint == 0
@@ -327,7 +344,7 @@ async def test_pre_wal_reader_refusal_releases_driver_and_all_pool_slots(
 
     assert not body_ran
     assert idle_after_refusal == 0
-    assert recovered == [("wal", 2, 1, 1)] * SQLITE_READERS
+    assert recovered == [("wal", 2, 1, EXPECTED_DURABLE_FULLFSYNC, 1)] * SQLITE_READERS
     assert ledger.opened == ledger.closed == ledger.checkouts == SQLITE_READERS + 1
     assert ledger.outstanding == ledger.closed_while_checked_out == 0
     assert database.units_in_flight() == 0

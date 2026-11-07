@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -245,4 +246,116 @@ async def test_cancelled_durable_writer_entry_releases_verified_native_transacti
     assert ledger.checkouts == 2
     assert ledger.outstanding == ledger.closed_while_checked_out == 0
     assert database.units_in_flight() == 0
+    assert sqlite_companions(database) == []
+
+
+@pytest.mark.parametrize("drift", ["before-entry", "before-commit", "readback-error"])
+@pytest.mark.asyncio
+async def test_durable_fullfsync_guards_the_live_macos_writer(
+    tmp_path: Path, drift: str
+) -> None:
+    database = Database(
+        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
+    )
+    ledger = ConnectionLedger(database)
+    observed: list[tuple[bool, bool]] = []
+    pre_reset_states: list[bool] = []
+    staged = False
+    macos = sys.platform == "darwin"
+
+    def observe_fullfsync(
+        action: int,
+        pragma: str | None,
+        argument: str | None,
+        schema: str | None,
+        origin: str | None,
+    ) -> int:
+        if (
+            action == sqlite3.SQLITE_PRAGMA
+            and pragma == "fullfsync"
+            and argument is None
+        ):
+            observed.append((staged, driver.in_transaction))
+            if drift == "readback-error" and staged:
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    def observe_reset(
+        raw_connection: DBAPIConnection,
+        record: ConnectionPoolEntry,
+        reset_state: PoolResetState,
+    ) -> None:
+        if record.driver_connection is driver:
+            pre_reset_states.append(driver.in_transaction)
+
+    async def write() -> None:
+        nonlocal staged
+        async with database.transaction() as writer:
+            await writer.execute(text("INSERT INTO probe VALUES (7)"))
+            staged = True
+            if drift == "before-commit":
+                await writer.execute(text("PRAGMA fullfsync=OFF"))
+            if drift == "readback-error":
+                await (await writer_driver(writer)).set_authorizer(observe_fullfsync)
+
+    try:
+        async with database.transaction() as writer:
+            await writer.execute(text("CREATE TABLE probe (id INTEGER)"))
+        async with database.writer_engine.connect() as connection:
+            driver = await writer_driver(connection)
+            if drift == "before-entry":
+                async with driver.execute("PRAGMA fullfsync=OFF") as cursor:
+                    await cursor.fetchone()
+            await driver.set_authorizer(observe_fullfsync)
+        event.listen(database.writer_engine.sync_engine, "reset", observe_reset)
+
+        if macos and drift == "readback-error":
+            with pytest.raises(sqlite3.DatabaseError) as refused:
+                await write()
+            assert refused.value.sqlite_errorcode == sqlite3.SQLITE_AUTH
+        elif macos:
+            with pytest.raises(SQLiteSynchronizationError, match="requires fullfsync"):
+                await write()
+        else:
+            await write()
+        observed_at_outcome = list(observed)
+        resets_at_outcome = list(pre_reset_states)
+        idle_after_outcome = (
+            database.writer_is_free() and database.units_in_flight() == 0
+        )
+        outstanding_at_outcome = ledger.outstanding
+
+        async with database.writer_engine.connect() as connection:
+            same_writer = await writer_driver(connection)
+            await same_writer.set_authorizer(None)
+            async with same_writer.execute("PRAGMA fullfsync") as cursor:
+                retained_request: object = await cursor.fetchone()
+        await database.writer_engine.dispose()
+        async with database.transaction() as writer:
+            replacement = await writer_driver(writer)
+            rows = (await writer.execute(text("SELECT id FROM probe"))).all()
+            new_request = await writer.scalar(text("PRAGMA fullfsync"))
+    finally:
+        await database.close()
+
+    if macos:
+        expected_observations = [(False, True)]
+        if drift != "before-entry":
+            expected_observations.append((True, True))
+        assert observed_at_outcome == expected_observations
+        assert staged == (drift != "before-entry")
+        assert rows == []
+    else:
+        assert observed_at_outcome == []
+        assert staged
+        assert rows == [(7,)]
+    assert resets_at_outcome == [False]
+    assert idle_after_outcome
+    assert outstanding_at_outcome == 0
+    assert same_writer is driver
+    assert replacement is not driver
+    assert retained_request == (int(macos and drift == "readback-error"),)
+    assert new_request == int(macos)
+    assert ledger.opened == ledger.closed == 2
+    assert ledger.outstanding == ledger.closed_while_checked_out == 0
     assert sqlite_companions(database) == []
