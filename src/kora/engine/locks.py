@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import bindparam, literal, select, text
+from sqlalchemy import and_, bindparam, case, func, literal, select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -21,6 +21,7 @@ from kora.db.tables import storage_address_fence
 from kora.db.transactions import raise_private_metadata_error, writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
+from kora.protocols.identity_records import MAX_COUNT
 
 COMPONENT: str = CATALOG.register_component("engine")
 ACQUIRED: EventSpec = CATALOG.register(
@@ -63,6 +64,16 @@ class StorageAddressContended(LockError):
 class StorageAddressLockFailed(LockError):
     def __init__(self) -> None:
         super().__init__("the storage address fence lock failed")
+
+
+class StorageAddressStageUnavailable(LockError):
+    def __init__(self) -> None:
+        super().__init__("the storage address fence is unavailable for staging")
+
+
+class StorageAddressStageReadFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the storage address staging check failed")
 
 
 class GraphPreparationLockRejected(LockError):
@@ -164,6 +175,45 @@ async def _lock_open_preparation(
             else GraphPreparationLockFailed()
         )
     raise_private_metadata_error(failure)
+
+
+async def _read_stage_fence_incarnation(
+    connection: AsyncConnection, dialect: str, store_id: str, payload_digest: str
+) -> tuple[int | None] | None:
+    fields = storage_address_fence.c
+    eligible = and_(
+        fields.fence_incarnation > 0,
+        fields.fence_incarnation <= MAX_COUNT,
+        fields.last_deletion_generation >= 0,
+        fields.last_deletion_generation < MAX_COUNT,
+        fields.pending_deletion_generation.is_(None),
+    )
+    if dialect == SQLITE:
+        eligible = and_(
+            func.typeof(fields.fence_incarnation) == "integer",
+            func.typeof(fields.last_deletion_generation) == "integer",
+            eligible,
+        )
+    statement = select(case((eligible, fields.fence_incarnation), else_=None)).where(
+        fields.store_id == bindparam("store_id"),
+        fields.payload_digest == bindparam("payload_digest"),
+    )
+    try:
+        result = await connection.execute(
+            statement, {"store_id": store_id, "payload_digest": payload_digest}
+        )
+        row = result.one_or_none()
+    except SQLAlchemyError:
+        pass
+    else:
+        if row is None:
+            return None
+        incarnation: object = row[0]
+        if incarnation is None or (
+            type(incarnation) is int and 0 < incarnation <= MAX_COUNT
+        ):
+            return (incarnation,)
+    raise_private_metadata_error(StorageAddressStageReadFailed())
 
 
 class ScopeKind(enum.IntEnum):
@@ -340,3 +390,26 @@ class TransitionLocks:
         require_graph_preparation_binding(binding)
         if self._graph_preparation != binding:
             raise LockError("the required open graph preparation lock is not held")
+
+    async def read_stage_fence_incarnation(
+        self,
+        connection: AsyncConnection,
+        store_id: str,
+        payload_digest: str,
+        binding: GraphPreparationBinding,
+    ) -> int:
+        self.require_open_graph_preparation(
+            connection, store_id, payload_digest, binding
+        )
+        self._usable = False
+        row = await _read_stage_fence_incarnation(
+            connection, self._dialect, store_id, payload_digest
+        )
+        self._lease.require_active()
+        if row is None:
+            raise_private_metadata_error(StorageAddressStageUnavailable())
+        self._usable = True
+        (incarnation,) = row
+        if incarnation is None:
+            raise_private_metadata_error(StorageAddressStageUnavailable())
+        return incarnation
