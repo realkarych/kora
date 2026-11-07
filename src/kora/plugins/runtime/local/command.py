@@ -443,16 +443,17 @@ class CommandSession:
             except NativeIOUnresolved:
                 self._finish_seal("refused", started)
 
+    def _snapshot_ready(self) -> bool:
+        return (
+            self._exit_recorded is not None
+            or self._stage not in (_Stage.LAUNCHING, _Stage.RUNNING)
+            or self._journal.closed
+            or self._stop.is_set()
+        )
+
     def _write_snapshot(self, started: int) -> None:
         with self._lock:
-            self._lock.wait_for(
-                lambda: (
-                    self._exit_recorded is not None
-                    or self._stage not in (_Stage.LAUNCHING, _Stage.RUNNING)
-                    or self._journal.closed
-                    or self._stop.is_set()
-                )
-            )
+            self._lock.wait_for(self._snapshot_ready)
             ran = self._stage is _Stage.RUNNING
             recorded = self._exit_recorded
         if not ran:

@@ -413,13 +413,29 @@ class JournalBoundaryClock(SystemClock):
 
 
 @pytest.mark.parametrize("overflow", [0, 1], ids=["exact-fit", "one-byte-over"])
+@pytest.mark.parametrize("existing_prefix", [False, True], ids=["fresh", "existing"])
 def test_seal_journal_admission_counts_the_exact_encoded_prefix(
-    tmp_path: Path, overflow: int
+    tmp_path: Path, overflow: int, existing_prefix: bool
 ) -> None:
     directory = private_directory(tmp_path, "attempt")
     anchor = open_local_directory(directory)
     path = directory / "journal.jsonl"
     clock = JournalBoundaryClock()
+    seed = b""
+    if existing_prefix:
+        seed = (
+            canonical_bytes(
+                {
+                    "i": 0,
+                    "at": instant_wire(clock.now()),
+                    "kind": "runner.started",
+                    "data": {},
+                }
+            )
+            + b"\n"
+        )
+        path.write_bytes(seed)
+        path.chmod(0o600)
     journal = RunningJournal(anchor, clock)
     kind = "runner.outputs_sealed"
     base = canonical_bytes(
@@ -445,16 +461,18 @@ def test_seal_journal_admission_counts_the_exact_encoded_prefix(
                 kind, {"refused": ["x" * length]}, reader_bounded=True
             )
         records = read_records(anchor)
-        total = path.stat().st_size
+        raw = path.read_bytes()
     finally:
         journal.close()
         anchor.close()
 
+    assert raw.startswith(seed)
+    assert len(records) == 2 + int(existing_prefix)
     if overflow:
-        assert records == ((0, "command_exited"), (1, "transfer.rejected"))
+        assert records[-2:] == ((0, "command_exited"), (1, "transfer.rejected"))
     else:
-        assert total == RECORD_LIMIT
-        assert records == ((0, "command_exited"), (1, kind))
+        assert len(raw) == RECORD_LIMIT
+        assert records[-2:] == ((0, "command_exited"), (1, kind))
 
 
 def descriptors_for(path: Path) -> set[int]:
@@ -1141,6 +1159,7 @@ class ExitAppendClock(SystemClock):
     def __init__(self) -> None:
         self.entered = threading.Event()
         self.release = threading.Event()
+        self.seal_waiting = threading.Event()
         self.calls = 0
 
     def monotonic_ns(self) -> int:
@@ -1303,13 +1322,23 @@ class CommandCloseProbe(CommandSession):
     def stopping(self) -> bool:
         return self._stop.is_set()
 
-    def seal_scheduled(self) -> bool:
-        return self._output_seal is not None
+    def _snapshot_ready(self) -> bool:
+        ready = super()._snapshot_ready()
+        if not ready and isinstance(self._clock, ExitAppendClock):
+            self._clock.seal_waiting.set()
+        return ready
+
+    async def settle_seal(self) -> None:
+        task = self._output_seal
+        assert task is not None
+        async with asyncio.timeout(5):
+            await asyncio.shield(task)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("close_while_held", [False, True], ids=["resume", "close"])
 async def test_seal_waits_for_terminal_journal_without_hiding_exit(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, close_while_held: bool
 ) -> None:
     clock = ExitAppendClock()
     scope = SecretScope(kora_capture.diagnostics)
@@ -1343,13 +1372,18 @@ async def test_seal_waits_for_terminal_journal_without_hiding_exit(
             )
             session.attach_drains()
             assert await asyncio.to_thread(clock.entered.wait, 5)
-            await until(session.seal_scheduled)
+            assert await asyncio.to_thread(clock.seal_waiting.wait, 5)
 
             status = session.status()
             while_held = journal_events(journal)
             snapshot_while_held = (attempt / "output-snapshot").exists()
+            if close_while_held:
+                session.close_journal()
+            else:
+                clock.release.set()
+            await session.settle_seal()
+            snapshot_after_settlement = (attempt / "output-snapshot").exists()
             clock.release.set()
-            await until(lambda: sealed_manifest(journal) is not None)
             await session.aclose()
             complete = journal_events(journal)
         finally:
@@ -1360,11 +1394,15 @@ async def test_seal_waits_for_terminal_journal_without_hiding_exit(
     assert status == ("exited", "failed", 23)
     assert not snapshot_while_held
     assert [event.kind for event in while_held] == ["runner.candidate_started"]
-    assert [event.kind for event in complete] == [
-        "runner.candidate_started",
-        "command_exited",
-        "runner.outputs_sealed",
-    ]
+    assert snapshot_after_settlement is not close_while_held
+    if close_while_held:
+        assert complete == while_held
+    else:
+        assert [event.kind for event in complete] == [
+            "runner.candidate_started",
+            "command_exited",
+            "runner.outputs_sealed",
+        ]
 
 
 @pytest.mark.asyncio
