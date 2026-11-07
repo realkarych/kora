@@ -22,12 +22,13 @@ from kora.db.migrations.environment import alembic_config
 from kora.db.reads import graph_version_by_number
 from kora.db.tables import (
     GRAPH_VERSION_SCOPE_INDEX,
+    graph_deployment_preparation,
     graph_version,
     graph_version_read_admission,
 )
 from tests.db.cancel_cause_support import migration_lock_count
 from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger
-from tests.db.seed import Seeder
+from tests.db.seed import DIGEST, Seeder
 
 ADMISSION = GraphVersionReadAdmission(101, 53)
 WIDE = "wide-legacy-value" * 16_384
@@ -348,7 +349,7 @@ async def test_graph_admission_uses_only_narrow_scope_on_a_wide_version(
 async def upgrade_predecessor(database: Database) -> None:
     async with database.migration_connection() as connection:
         await connection.run_sync(
-            lambda sync: command.upgrade(alembic_config(sync), "0007")
+            lambda sync: command.upgrade(alembic_config(sync), "0008")
         )
 
 
@@ -391,8 +392,22 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
             namespace_id = await seeder.namespace()
             graph_id = await seeder.graph(namespace_id)
             version_id = await seeder.graph_version(graph_id, ir={"legacy": WIDE})
+            preparation = {
+                "id": seeder.new_id(),
+                "namespace_id": namespace_id,
+                "graph_name": "pipeline",
+                "initial_graph_id": graph_id,
+                "deployment_digest": DIGEST,
+                "state": "open",
+                "result_graph_id": None,
+                "result_graph_version_id": None,
+            }
+            await connection.execute(
+                graph_deployment_preparation.insert().values(**preparation)
+            )
         async with database.read_transaction() as connection:
             before = (await connection.execute(select(graph_version))).all()
+        preparation_query = select(graph_deployment_preparation)
 
         with pytest.raises(
             AdmissionMigrationRefused, match="late graph admission stamp"
@@ -406,10 +421,16 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
             previous_indexes = await connection.run_sync(
                 lambda sync: inspect(sync).get_indexes("graph_version")
             )
+            rolled_back_preparation = (
+                (await connection.execute(preparation_query)).mappings().one()
+            )
         locks = await migration_lock_count(database)
         recovered = await upgrade_database(empty_database_settings)
         async with database.read_snapshot() as connection:
             after = (await connection.execute(select(graph_version))).all()
+            recovered_preparation = (
+                (await connection.execute(preparation_query)).mappings().one()
+            )
             indexes = await connection.run_sync(
                 lambda sync: inspect(sync).get_indexes("graph_version")
             )
@@ -439,17 +460,19 @@ async def test_graph_admission_migration_recovers_without_rewriting_history(
             == locks
             == 0
         )
-        assert rolled_back == "0007"
+        assert rolled_back == "0008"
         assert absent
         assert all(
             index["name"] != GRAPH_VERSION_SCOPE_INDEX for index in previous_indexes
         )
         assert (recovered.from_revision, recovered.to_revision, recovered.steps) == (
-            "0007",
             "0008",
+            "0009",
             1,
         )
         assert before == after
+        assert dict(rolled_back_preparation) == preparation
+        assert dict(recovered_preparation) == preparation
         assert witness is None
         assert admitted_count == 0
         assert primary["constrained_columns"] == ["graph_version_id"]
