@@ -10,6 +10,11 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, DatabaseSettings
+from kora.db.graph_preparation_reads import (
+    GraphPreparationBinding,
+    GraphPreparationSettlement,
+    read_graph_preparation_settlement,
+)
 from kora.db.migrations import current_revision, schema_differences, upgrade_database
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import (
@@ -200,6 +205,11 @@ async def test_preparation_migrates_native_sqlite_utf16_and_refuses_bad_text(
         await upgrade_predecessor(database)
         async with database.transaction() as connection:
             values = await preparation_values(connection)
+        namespace_id = values["namespace_id"]
+        assert namespace_id is not None
+        binding = GraphPreparationBinding(
+            MAX_ULID, namespace_id, MAX_NAME, None, "f" * 64
+        )
         invalid = ("valid\0suffix", "valid\ud800")
 
         report = await upgrade_database(settings)
@@ -226,6 +236,7 @@ async def test_preparation_migrates_native_sqlite_utf16_and_refuses_bad_text(
         async with database.read_transaction() as connection:
             actual_encoding = await connection.scalar(text("PRAGMA encoding"))
             result = await connection.execute(select(graph_deployment_preparation))
+            settlement = await read_graph_preparation_settlement(connection, binding)
 
         assert str(actual_encoding).lower() == encoding
         assert (report.from_revision, report.to_revision, report.steps) == (
@@ -234,6 +245,9 @@ async def test_preparation_migrates_native_sqlite_utf16_and_refuses_bad_text(
             2,
         )
         assert dict(result.mappings().one()) == values
+        assert settlement == GraphPreparationSettlement(
+            "published", values["result_graph_id"], values["result_graph_version_id"]
+        )
     finally:
         await database.close()
 
