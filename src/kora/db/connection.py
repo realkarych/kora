@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool, StaticPool
 from sqlalchemy.pool.base import ConnectionPoolEntry
+from sqlalchemy.sql.elements import TextClause
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
 from kora.db.transactions import managed_writer, raise_private_metadata_error
@@ -56,7 +57,7 @@ READER_PRAGMAS: tuple[str, ...] = (
 BEGIN_IMMEDIATE: str = "BEGIN IMMEDIATE"
 MIGRATION_LOCK_ID: int = 213_0002
 MIGRATION_LEASE: str = "kora_migration_lease"
-POSTGRESQL_WAL_SETTINGS_QUERY: str = (
+POSTGRESQL_WAL_SETTINGS_QUERY: TextClause = text(
     "SELECT pg_catalog.current_setting('fsync'), "
     "pg_catalog.current_setting('full_page_writes'), "
     "pg_catalog.current_setting('synchronous_commit')"
@@ -330,7 +331,7 @@ def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
 
 
 async def verify_postgresql_wal_settings(connection: AsyncConnection) -> None:
-    settings = await connection.execute(text(POSTGRESQL_WAL_SETTINGS_QUERY))
+    settings = await connection.execute(POSTGRESQL_WAL_SETTINGS_QUERY)
     observed: tuple[object, ...] = tuple(settings.one())
     fsync, full_page_writes, synchronous_commit = observed
     if (

@@ -105,7 +105,7 @@ async def test_postgres_entry_preserves_all_local_flush_modes_on_the_exact_backe
     def observe_guard(
         connection: Connection, cursor: object, statement: str, *args: object
     ) -> None:
-        if statement == POSTGRESQL_WAL_SETTINGS_QUERY:
+        if statement == POSTGRESQL_WAL_SETTINGS_QUERY.text:
             driver = postgres_driver(connection.connection.driver_connection)
             observed.append((driver.get_server_pid(), driver.is_in_transaction()))
 
@@ -217,7 +217,7 @@ async def test_durable_writer_owns_native_transaction_through_interrupted_entry(
     def pause_at_guard(
         connection: Connection, cursor: object, statement: str, *args: object
     ) -> None:
-        if statement != POSTGRESQL_WAL_SETTINGS_QUERY:
+        if statement != POSTGRESQL_WAL_SETTINGS_QUERY.text:
             return
         driver = postgres_driver(connection.connection.driver_connection)
         assert driver.is_in_transaction()
