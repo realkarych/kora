@@ -99,8 +99,12 @@ async def peer(
             await handle(reader, writer)
         finally:
             writer.close()
-            await writer.wait_closed()
-            writers.remove(writer)
+            try:
+                await writer.wait_closed()
+            except ConnectionResetError:
+                assert writer.is_closing()
+            finally:
+                writers.remove(writer)
 
     def accepted(reader: Reader, writer: Writer) -> None:
         writers.add(writer)

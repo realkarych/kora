@@ -96,6 +96,7 @@ async def test_client_closes_pool_with_active_and_queued_requests() -> None:
         owners = client.request_owners()
         closer = asyncio.create_task(client.aclose())
         other_closer = asyncio.create_task(client.aclose())
+        waiting.cancel()
         await asyncio.wait_for(other_closer, BOUND)
         await asyncio.wait_for(closer, BOUND)
         outcomes = await asyncio.wait_for(

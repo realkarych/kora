@@ -13,6 +13,7 @@ from kora.observability.context import current_context
 from tests.client.support import (
     BOUND,
     CREDENTIAL,
+    SCHEMA,
     ProbeClient,
     Reader,
     Writer,
@@ -28,6 +29,11 @@ ERROR_BODY: bytes = (
     b'"location":null,"retryable":false,"details":{"added":true},'
     b'"request_id":"req_saved","additional":"value"}, "future":[1] }'
 )
+AUTH_REFUSAL: bytes = (
+    b'{"error":{"code":"API009","message":"Authentication is required.",'
+    b'"location":null,"retryable":false,"details":{},"request_id":"req_refused"}}'
+)
+AUTH_STATUS: bytes = b"HTTP/1.1 401 Unauthorized"
 CORRELATION_HEADER: bytes = b"X-Request-ID: req_current"
 INVALID_PREFIX: bytes = (
     b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nX-Request-ID: req_partial\r\n\r\n{"
@@ -64,6 +70,19 @@ async def test_client_preserves_api_error_payload_and_additive_fields(
         (ERROR_STATUS, b'{"error":{"code":"API002"}}', (), Failure.STATUS_ENVELOPE),
         (b"HTTP/1.1 400 Bad Request", ERROR_BODY, (), Failure.STATUS_ENVELOPE),
         (ERROR_STATUS, b"<html>", (), Failure.STATUS_ENVELOPE),
+        (
+            AUTH_STATUS,
+            AUTH_REFUSAL.replace(b'"retryable":false', b'"retryable":true'),
+            (),
+            Failure.STATUS_ENVELOPE,
+        ),
+        (
+            AUTH_STATUS,
+            AUTH_REFUSAL.replace(b"Authentication is required.", b"Other message."),
+            (),
+            Failure.STATUS_ENVELOPE,
+        ),
+        (b"HTTP/1.1 206 Partial Content", SCHEMA, (), Failure.STATUS_ENVELOPE),
         (b"HTTP/1.1 200 OK", b"{", (), Failure.JSON),
         (b"HTTP/1.1 200 OK", b'{"paths":[]}', (), Failure.SCHEMA),
         (b"HTTP/1.1 200 OK", b'{"paths":{},"paths":[]}', (), Failure.JSON),
@@ -172,7 +191,9 @@ async def test_client_bounds_chunked_response_before_completion() -> None:
 
 
 @pytest.mark.asyncio
-async def test_client_diagnostics_are_content_free() -> None:
+async def test_client_diagnostics_are_content_free(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     poison = b"private-peer-content"
     call = 0
 
@@ -183,7 +204,14 @@ async def test_client_diagnostics_are_content_free() -> None:
         if call == 1:
             reply(writer, ERROR_BODY, ERROR_STATUS, (CORRELATION_HEADER,))
         elif call == 2:
-            reply(writer, poison, headers=(b"X-Request-ID: " + poison,))
+            reply(
+                writer,
+                poison,
+                headers=(
+                    b"X-Request-ID: " + poison,
+                    b"Set-Cookie: peer=" + CREDENTIAL.encode(),
+                ),
+            )
         else:
             writer.write(INVALID_PREFIX)
 
@@ -220,3 +248,6 @@ async def test_client_diagnostics_are_content_free() -> None:
     assert completions[2]["code"] == "CLT004"
     assert CREDENTIAL not in str(records)
     assert poison.decode() not in str(records)
+    assert any(record.name == "httpcore.http11" for record in caplog.records)
+    assert CREDENTIAL not in caplog.text
+    assert poison.decode() not in caplog.text

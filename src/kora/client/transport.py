@@ -3,7 +3,7 @@ import json
 import math
 import re
 import ssl
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,6 +15,7 @@ import certifi
 import httpx
 from anyio import CancelScope
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic_core import PydanticCustomError
 
 from kora.client.errors import (
     ApiError,
@@ -25,7 +26,7 @@ from kora.client.errors import (
     Outcome,
 )
 from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
-from kora.models.errors import HTTP_STATUSES
+from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
 
 OPENAPI_PATH: str = "/api/v1/openapi.json"
@@ -154,7 +155,7 @@ class Exchange:
         outcome = Outcome.UNKNOWN if self.sending else Outcome.NOT_SENT
         return ClientError(reason, outcome, Correlation(self.request_id))
 
-    async def observe(self, event: str, values: Mapping[str, object]) -> None:
+    async def observe(self, event: str, values: dict[str, object]) -> None:
         match event:
             case "connection.connect_tcp.complete":
                 stream = values.get("return_value")
@@ -170,6 +171,8 @@ class Exchange:
                 self.sending = True
             case _:
                 pass
+        if event.endswith((".complete", ".failed")):
+            values.clear()
 
     async def release_connecting(self) -> None:
         if self.connecting is not None:
@@ -268,9 +271,14 @@ class KoraClient:
         try:
             try:
                 async with asyncio.timeout_at(deadline):
-                    result = await asyncio.shield(task)
+                    try:
+                        await asyncio.shield(task)
+                    except (ApiError, ClientError):
+                        if loop.time() < deadline:
+                            raise
                     if loop.time() >= deadline:
-                        raise exchange.failure(Failure.DEADLINE)
+                        raise exchange.failure(Failure.DEADLINE) from None
+                    result = task.result()
             except TimeoutError:
                 exchange.scope.cancel()
                 await settle(asyncio.gather(task, return_exceptions=True))
@@ -360,14 +368,14 @@ class KoraClient:
                 parse_constant=reject_constant,
             )
         except (ValueError, RecursionError):
-            reason = Failure.JSON if 200 <= status < 300 else Failure.STATUS_ENVELOPE
+            reason = Failure.JSON if status == 200 else Failure.STATUS_ENVELOPE
             raise exchange.failure(reason) from None
         try:
             value = parse_json_object(
                 raw, max_depth=JSON_DEPTH, max_bytes=response_limit
             )
         except JsonShapeError:
-            reason = Failure.SCHEMA if 200 <= status < 300 else Failure.STATUS_ENVELOPE
+            reason = Failure.SCHEMA if status == 200 else Failure.STATUS_ENVELOPE
             raise exchange.failure(reason) from None
         if status >= 400:
             raise self._api_error(value, content, status, exchange)
@@ -381,10 +389,15 @@ class KoraClient:
     ) -> ApiError:
         try:
             error = ApiErrorFields.model_validate(value.get("error"))
-        except ValidationError:
+            expected_status = API_STATUSES.get(error.code)
+            if expected_status is not None:
+                if expected_status != status:
+                    raise exchange.failure(Failure.STATUS_ENVELOPE)
+                require_api_error_fields(
+                    ApiErrorCode(error.code), error.message, error.retryable
+                )
+        except (ValidationError, PydanticCustomError):
             raise exchange.failure(Failure.STATUS_ENVELOPE) from None
-        if API_STATUSES.get(error.code, status) != status:
-            raise exchange.failure(Failure.STATUS_ENVELOPE)
         original = self._safe_id(error.request_id)
         correlation = Correlation(
             exchange.request_id,
@@ -424,7 +437,7 @@ class KoraClient:
 
 async def read_body(response: httpx.Response, limit: int, exchange: Exchange) -> bytes:
     status = response.status_code
-    if not (200 <= status < 300 or 400 <= status < 600):
+    if status != 200 and not 400 <= status < 600:
         raise exchange.failure(Failure.STATUS_ENVELOPE)
     if response.headers.get("content-encoding", "identity").lower() != "identity":
         raise exchange.failure(Failure.STATUS_ENVELOPE)
