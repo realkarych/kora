@@ -30,9 +30,7 @@ class GraphPreparationReadFailed(RuntimeError):
         super().__init__("graph preparation settlement read failed")
 
 
-def _raise_private(
-    error: GraphPreparationRejected | GraphPreparationReadFailed,
-) -> Never:
+def raise_private_read_error(error: RuntimeError) -> Never:
     try:
         raise error from None
     finally:
@@ -63,7 +61,7 @@ def graph_preparation_settlement_statement(
         dialect not in (SQLITE, POSTGRESQL)
         or type(binding) is not GraphPreparationBinding
     ):
-        _raise_private(GraphPreparationRejected())
+        raise_private_read_error(GraphPreparationRejected())
     identifiers = (binding.preparation_id, binding.namespace_id)
     if binding.initial_graph_id is not None:
         identifiers = (*identifiers, binding.initial_graph_id)
@@ -74,7 +72,7 @@ def graph_preparation_settlement_statement(
         or type(binding.deployment_digest) is not str
         or DIGEST_PATTERN.fullmatch(binding.deployment_digest) is None
     ):
-        _raise_private(GraphPreparationRejected())
+        raise_private_read_error(GraphPreparationRejected())
 
     fields = graph_deployment_preparation.c
     selected = (fields.state, fields.result_graph_id, fields.result_graph_version_id)
@@ -123,7 +121,7 @@ async def read_graph_preparation_settlement(
     except StatementError:
         result = None
     if result is None:
-        _raise_private(GraphPreparationReadFailed())
+        raise_private_read_error(GraphPreparationReadFailed())
     row = result.first()
     if row is None:
         return None
@@ -132,7 +130,7 @@ async def read_graph_preparation_settlement(
     graph_id: object = row[1]
     version_id: object = row[2]
     if type(state) is not str:
-        _raise_private(GraphPreparationRejected())
+        raise_private_read_error(GraphPreparationRejected())
     if state == "open" or state == "closed_without_publication":
         if graph_id is None and version_id is None:
             return GraphPreparationSettlement(state, None, None)
@@ -147,4 +145,4 @@ async def read_graph_preparation_settlement(
             )
         ):
             return GraphPreparationSettlement(state, graph_id, version_id)
-    _raise_private(GraphPreparationRejected())
+    raise_private_read_error(GraphPreparationRejected())

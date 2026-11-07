@@ -22,6 +22,8 @@ from kora.db.types import POSTGRESQL, SQLITE
 STAGE_TABLE: str = "graph_deployment_stage"
 OCCURRENCE_TABLE: str = "graph_deployment_stage_occurrence"
 SCOPE_COLUMNS: tuple[str, ...] = ("namespace_id", "preparation_id", "stage_id")
+MAX_STAGE_OCCURRENCES: int = 64
+MAX_STAGE_FILE_BYTES: int = 262144
 SchemaElement = Column[str] | Column[int] | Constraint | Index
 
 
@@ -57,6 +59,45 @@ def _backend_checks(
     )
 
 
+def stage_checks(dialect: str | None) -> tuple[CheckConstraint, ...]:
+    return (
+        _check(STAGE_TABLE, "incarnation_positive", "fence_incarnation > 0"),
+        _check(
+            STAGE_TABLE,
+            "size_range",
+            f"total_size BETWEEN 0 AND {MAX_STAGE_FILE_BYTES}",
+        ),
+        *_backend_checks(
+            STAGE_TABLE,
+            dialect,
+            (
+                *SQLITE_ADDRESS_CHECKS,
+                (
+                    "integer_storage",
+                    "typeof(fence_incarnation) = 'integer' "
+                    "AND typeof(total_size) = 'integer'",
+                ),
+            ),
+            POSTGRESQL_ADDRESS_CHECKS,
+        ),
+    )
+
+
+def occurrence_checks(dialect: str | None) -> tuple[CheckConstraint, ...]:
+    return (
+        _check(
+            OCCURRENCE_TABLE,
+            "ordinal_range",
+            f"ordinal BETWEEN 0 AND {MAX_STAGE_OCCURRENCES - 1}",
+        ),
+        *_backend_checks(
+            OCCURRENCE_TABLE,
+            dialect,
+            (("integer_storage", "typeof(ordinal) = 'integer'"),),
+        ),
+    )
+
+
 def graph_deployment_stage_elements_v1(
     dialect: str | None = None,
 ) -> tuple[SchemaElement, ...]:
@@ -81,21 +122,7 @@ def graph_deployment_stage_elements_v1(
             (f"{PREPARATION_TABLE}.id",),
             name=f"fk_{STAGE_TABLE}_preparation",
         ),
-        _check(STAGE_TABLE, "incarnation_positive", "fence_incarnation > 0"),
-        _check(STAGE_TABLE, "size_range", "total_size BETWEEN 0 AND 262144"),
-        *_backend_checks(
-            STAGE_TABLE,
-            dialect,
-            (
-                *SQLITE_ADDRESS_CHECKS,
-                (
-                    "integer_storage",
-                    "typeof(fence_incarnation) = 'integer' "
-                    "AND typeof(total_size) = 'integer'",
-                ),
-            ),
-            POSTGRESQL_ADDRESS_CHECKS,
-        ),
+        *stage_checks(dialect),
     )
 
 
@@ -121,10 +148,5 @@ def graph_deployment_stage_occurrence_elements_v1(
             (f"{STAGE_TABLE}.stage_id",),
             name=f"fk_{OCCURRENCE_TABLE}_stage",
         ),
-        _check(OCCURRENCE_TABLE, "ordinal_range", "ordinal BETWEEN 0 AND 63"),
-        *_backend_checks(
-            OCCURRENCE_TABLE,
-            dialect,
-            (("integer_storage", "typeof(ordinal) = 'integer'"),),
-        ),
+        *occurrence_checks(dialect),
     )
