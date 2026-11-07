@@ -430,13 +430,22 @@ class SnapshotLimits:
 SNAPSHOT_LIMITS: Final[SnapshotLimits] = SnapshotLimits(1 << 30, 4 << 30)
 
 
+@dataclass(frozen=True)
+class CopiedFile:
+    sha256: str
+    size: int
+    identity: FileIdentity
+    changed_ns: int
+
+
 @dataclass
 class SnapshotBudget:
     file_bytes: int
     remaining: int
 
-    def store(self, source: int, destination: int, name: str) -> str | None:
+    def store(self, source: int, destination: int, name: str) -> CopiedFile | None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        result: CopiedFile | None = None
         try:
             target = os.open(name, flags, 0o600, dir_fd=destination)
         except OSError as error:
@@ -455,20 +464,28 @@ class SnapshotBudget:
                 if _blocks_snapshot(error):
                     raise
                 copied = None
+            if copied is not None:
+                digest, size = copied
+                os.fchmod(target, 0o400)
+                os.fsync(target)
+                identity, changed_ns = frozen_file_stamp(target, name)
+                result = CopiedFile(digest, size, identity, changed_ns)
         finally:
             os.close(target)
-        if copied is None:
+        if result is None:
             _discard_name(destination, name)
             return None
-        digest, size = copied
-        self.remaining -= size
-        return digest
+        self.remaining -= result.size
+        return result
 
 
 @dataclass(frozen=True)
 class SealedFile:
     name: str
     sha256: str
+    size: int
+    identity: FileIdentity
+    changed_ns: int
 
 
 @dataclass(frozen=True)
@@ -576,11 +593,15 @@ def _collect(
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             refused.append(relative)
             continue
-        digest = _copy_file(root, parent, destination, name, relative, device, budget)
-        if digest is None:
+        copied = _copy_file(root, parent, destination, name, relative, device, budget)
+        if copied is None:
             refused.append(relative)
             continue
-        files.append(SealedFile(relative, digest))
+        files.append(
+            SealedFile(
+                relative, copied.sha256, copied.size, copied.identity, copied.changed_ns
+            )
+        )
     return count
 
 
@@ -708,7 +729,7 @@ def _copy_file(
     relative: str,
     device: int,
     budget: SnapshotBudget,
-) -> str | None:
+) -> CopiedFile | None:
     try:
         if sys.platform == "linux":
             source = _open_beneath(root, relative)
@@ -787,11 +808,13 @@ def _freeze(directory: int, device: int) -> None:
             opened = os.fstat(descriptor)
             if (opened.st_dev, opened.st_ino) != (device, metadata.st_ino):
                 raise FilesystemError("identity_mismatch")
-            verify_private(descriptor, directory=nested)
             if nested:
+                verify_private(descriptor, directory=True)
                 _freeze(descriptor, device)
-            os.fchmod(descriptor, 0o500 if nested else 0o400)
-            os.fsync(descriptor)
+                os.fchmod(descriptor, 0o500)
+                os.fsync(descriptor)
+            else:
+                frozen_file_stamp(descriptor, name)
         finally:
             os.close(descriptor)
 
@@ -813,38 +836,9 @@ def _open_beneath(root: int, relative: str) -> int:
     return descriptor
 
 
-@dataclass(frozen=True)
-class SealedOutputFile:
-    name: str
-    sha256: str
-    identity: FileIdentity
-
-
-def bind_sealed_files(
-    snapshot: DirectoryAnchor, sealed: SealedTree
-) -> tuple[SealedOutputFile, ...]:
-    if (
-        snapshot.closed
-        or identity_of(snapshot.descriptor, snapshot.identity.name) != snapshot.identity
-    ):
-        raise FilesystemError("identity_mismatch")
-    device = os.fstat(snapshot.descriptor).st_dev
-    bound: list[SealedOutputFile] = []
-    for item in sealed.files:
-        descriptor = _open_frozen_relative(snapshot.descriptor, item.name, device)
-        try:
-            identity = frozen_file_identity(descriptor, item.name.rsplit("/", 1)[-1])
-            if identity.device != device:
-                raise FilesystemError("identity_mismatch")
-            bound.append(SealedOutputFile(item.name, item.sha256, identity))
-        finally:
-            os.close(descriptor)
-    return tuple(bound)
-
-
 def open_sealed_output(
-    attempt: DirectoryAnchor, root: DirectoryIdentity, item: SealedOutputFile
-) -> tuple[int, int]:
+    attempt: DirectoryAnchor, root: DirectoryIdentity, item: SealedFile
+) -> int:
     if "/" in item.name or item.name in ("", ".", ".."):
         raise FilesystemError("invalid_relative_name")
     attempt.verify()
@@ -853,25 +847,30 @@ def open_sealed_output(
         os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
         dir_fd=attempt.descriptor,
     )
+    descriptor: int | None = None
     try:
-        if identity_of(directory, root.name) != root:
-            raise FilesystemError("identity_mismatch")
-        _require_frozen_directory(directory, root.device)
-        descriptor = os.open(
-            item.name,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=directory,
-        )
         try:
-            identity = frozen_file_identity(descriptor, item.name)
+            if (
+                identity_of(directory, root.name) != root
+                or item.identity.device != root.device
+            ):
+                raise FilesystemError("identity_mismatch")
+            _require_frozen_directory(directory, root.device)
+            descriptor = os.open(
+                item.name,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                dir_fd=directory,
+            )
+            identity, _ = frozen_file_stamp(descriptor, item.name)
             if identity != item.identity:
                 raise FilesystemError("identity_mismatch")
-            return descriptor, os.fstat(descriptor).st_size
-        except (OSError, FilesystemError):
+            return descriptor
+        finally:
+            os.close(directory)
+    except (OSError, FilesystemError):
+        if descriptor is not None:
             os.close(descriptor)
-            raise
-    finally:
-        os.close(directory)
+        raise
 
 
 def read_sealed_digest(
@@ -895,9 +894,9 @@ def read_sealed_digest(
 
 
 def read_sealed_frame(
-    descriptor: int, identity: FileIdentity, offset: int, length: int
+    descriptor: int, identity: FileIdentity, changed_ns: int, offset: int, length: int
 ) -> bytes:
-    if frozen_file_identity(descriptor, identity.name) != identity:
+    if frozen_file_stamp(descriptor, identity.name) != (identity, changed_ns):
         raise FilesystemError("identity_mismatch")
     chunk = os.pread(descriptor, length, offset)
     if len(chunk) != length:
@@ -905,7 +904,7 @@ def read_sealed_frame(
     return chunk
 
 
-def frozen_file_identity(descriptor: int, name: str) -> FileIdentity:
+def frozen_file_stamp(descriptor: int, name: str) -> tuple[FileIdentity, int]:
     metadata = os.fstat(descriptor)
     if (
         not stat.S_ISREG(metadata.st_mode)
@@ -915,19 +914,15 @@ def frozen_file_identity(descriptor: int, name: str) -> FileIdentity:
         or metadata.st_size > SNAPSHOT_LIMITS.file_bytes
     ):
         raise FilesystemError("private_identity_required")
-    return FileIdentity(
-        name=name,
-        device=metadata.st_dev,
-        inode=metadata.st_ino,
-        owner_uid=metadata.st_uid,
+    return (
+        FileIdentity(
+            name=name,
+            device=metadata.st_dev,
+            inode=metadata.st_ino,
+            owner_uid=metadata.st_uid,
+        ),
+        metadata.st_ctime_ns,
     )
-
-
-def _sealed_parts(relative: str) -> tuple[str, ...]:
-    parts = tuple(relative.split("/"))
-    if not parts or any(part in ("", ".", "..") for part in parts):
-        raise FilesystemError("invalid_relative_name")
-    return parts
 
 
 def _require_frozen_directory(descriptor: int, device: int) -> None:
@@ -939,30 +934,6 @@ def _require_frozen_directory(descriptor: int, device: int) -> None:
         or stat.S_IMODE(metadata.st_mode) != 0o500
     ):
         raise FilesystemError("private_identity_required")
-
-
-def _open_frozen_relative(root: int, relative: str, device: int) -> int:
-    parts = _sealed_parts(relative)
-    parent = root
-    opened: list[int] = []
-    try:
-        for part in parts[:-1]:
-            descriptor = os.open(
-                part,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent,
-            )
-            opened.append(descriptor)
-            _require_frozen_directory(descriptor, device)
-            parent = descriptor
-        return os.open(
-            parts[-1],
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=parent,
-        )
-    finally:
-        for descriptor in reversed(opened):
-            os.close(descriptor)
 
 
 def read_private_file(directory: DirectoryAnchor, name: str, limit: int) -> bytes:

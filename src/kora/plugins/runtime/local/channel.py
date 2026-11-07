@@ -528,10 +528,14 @@ def read_output_declaration(payload: bytes, request_id: str) -> OutputValue:
 
 
 def read_output_trailer(payload: bytes, request_id: str) -> str:
-    if isinstance(
-        decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH), JsonRefusal
-    ):
+    decoded = decode_strict_json(payload, ENVELOPE_BYTES, ENVELOPE_DEPTH)
+    if isinstance(decoded, JsonRefusal):
         raise message_refused(MessageRefusal.MALFORMED)
+    if isinstance(decoded, dict) and "error" in decoded:
+        answered, error = read_error_envelope(payload)
+        if answered != request_id:
+            raise message_refused(MessageRefusal.MALFORMED)
+        raise error
     trailer = json_model(OutputTrailer, payload)
     if trailer is None or trailer.request_id != request_id:
         raise message_refused(MessageRefusal.MALFORMED)

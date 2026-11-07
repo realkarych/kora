@@ -306,28 +306,29 @@ async def receive_output(
     remaining = declared.size
     while remaining:
         length = min(SECTION_FRAME_BYTES, remaining)
-        view = memoryview(bytearray(length))
         frame_deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
-        received = await channel.read_typed_frame_into(
-            frame_deadline, FrameType.BYTES, view
+        kind, piece = await channel.read_typed_frame(
+            frame_deadline, {**reservations, FrameType.BYTES.value: length}
         )
-        if received != length:
+        if kind == FrameType.JSON:
+            read_output_trailer(piece, request_id)
             raise message_refused(MessageRefusal.MALFORMED)
-        piece = view[:received]
+        if not piece:
+            raise message_refused(MessageRefusal.MALFORMED)
 
-        def write(payload: memoryview = piece) -> None:
+        def write(payload: bytes = piece) -> None:
             if active is not None:
                 active()
             if clock.monotonic_ns() >= message_deadline:
                 raise ChannelError(ChannelFailure.DEADLINE)
             try:
-                write_transfer_bytes(descriptor, payload)
+                write_transfer_bytes(descriptor, memoryview(payload))
             except OSError:
                 raise refusal("runner_unreachable") from None
 
         await executor.run(write, after_uncertain_submission=close_spool)
         digest.update(piece)
-        remaining -= received
+        remaining -= len(piece)
     _, payload = await channel.read_typed_frame(
         min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline), reservations
     )

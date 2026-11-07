@@ -816,7 +816,11 @@ class LocalRuntime:
             self._spool_allocations -= 1
 
     def _output_entry(
-        self, key: AttemptKey, ctx: ProtocolContext, expected: Running | None = None
+        self,
+        key: AttemptKey,
+        ctx: ProtocolContext,
+        expected: Running | None = None,
+        cutoff: int | None = None,
     ) -> Running:
         if self._closing is not None:
             raise refusal("runtime_closed")
@@ -832,9 +836,13 @@ class LocalRuntime:
         ):
             raise delivery_error("submitter_superseded")
         deadline = entry.deadline
-        if entry.gate_closed or (
-            deadline is not None
-            and ctx.clock.now() >= deadline.at - deadline.clock_uncertainty
+        if (
+            entry.gate_closed
+            or (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff)
+            or (
+                deadline is not None
+                and ctx.clock.now() >= deadline.at - deadline.clock_uncertainty
+            )
         ):
             raise delivery_error("deadline_expired")
         return entry
@@ -859,16 +867,16 @@ class LocalRuntime:
         pull = OutputPull()
         self._output_pulls.add(pull)
 
-        def read(entry: Running, length: int, offset: int) -> bytes:
+        def read(entry: Running, cutoff: int | None, length: int, offset: int) -> bytes:
             try:
                 chunk = os.pread(pull.descriptor(), length, offset)
             except OSError:
                 raise refusal("runner_unreachable") from None
-            self._output_entry(key, ctx, entry)
+            self._output_entry(key, ctx, entry, cutoff)
             return chunk
 
         try:
-            entry, size = await pull.run(
+            entry, size, cutoff = await pull.run(
                 self._fetch_output(key, name, pull, ctx, deadline),
                 ctx.clock,
                 deadline,
@@ -882,7 +890,11 @@ class LocalRuntime:
                 chunk = await pull.run(
                     self.executor.run(
                         partial(
-                            read, entry, min(size - offset, SECTION_FRAME_BYTES), offset
+                            read,
+                            entry,
+                            cutoff,
+                            min(size - offset, SECTION_FRAME_BYTES),
+                            offset,
                         ),
                         after_uncertain_submission=pull.dispose,
                     ),
@@ -912,7 +924,7 @@ class LocalRuntime:
         pull: OutputPull,
         ctx: ProtocolContext,
         deadline: int,
-    ) -> tuple[Running, int]:
+    ) -> tuple[Running, int, int | None]:
         entry = await self.executor.run(
             lambda: self._output_entry(key, ctx),
             after_uncertain_submission=pull.dispose,
@@ -924,6 +936,8 @@ class LocalRuntime:
         def active() -> None:
             if self._closing is not None:
                 raise refusal("runtime_closed")
+            if cutoff is not None and ctx.clock.monotonic_ns() >= cutoff:
+                raise delivery_error("deadline_expired")
             if ctx.clock.monotonic_ns() >= deadline:
                 raise ChannelError(ChannelFailure.DEADLINE)
 
@@ -939,7 +953,7 @@ class LocalRuntime:
         for _ in range(OUTPUT_ATTEMPTS):
             active()
             await self.executor.run(
-                lambda: self._output_entry(key, ctx, entry),
+                lambda: self._output_entry(key, ctx, entry, cutoff),
                 after_uncertain_submission=pull.dispose,
             )
             try:
@@ -969,10 +983,11 @@ class LocalRuntime:
                     raise refusal("runner_unreachable") from None
             else:
                 await self.executor.run(
-                    lambda: self._output_entry(key, ctx, entry),
+                    lambda: self._output_entry(key, ctx, entry, cutoff),
                     after_uncertain_submission=pull.dispose,
                 )
-                return entry, size
+                return entry, size, cutoff
+        active()
         raise refusal("runner_unreachable")
 
     async def _check_transfer_deadline(

@@ -34,6 +34,8 @@ from kora.plugins.runtime.local.channel import (
     FrameType,
     OutputRequest,
     TransferRequest,
+    delivery_error,
+    error_envelope,
     output_envelope,
     output_trailer,
     read_delivery,
@@ -109,6 +111,7 @@ from tests.support.local_runners import (
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
+    NudgedClock,
     prepared,
     private_directory,
     protocol_error,
@@ -1825,6 +1828,11 @@ async def test_transfer_out_returns_the_sealed_file(
                 raise AssertionError
 
         replaced_name = await protocol_error(replaced())
+        directory.chmod(0o700)
+        snapshot.unlink()
+        os.mkfifo(snapshot, 0o400)
+        directory.chmod(0o500)
+        fifo = await protocol_error(anext(runtime.transfer_out(handle, "payload", ctx)))
 
         async def missing() -> None:
             async for _chunk in runtime.transfer_out(handle, "missing", ctx):
@@ -1861,6 +1869,7 @@ async def test_transfer_out_returns_the_sealed_file(
     assert mismatch.code == "integrity_error"
     assert seen == []
     assert replaced_name.code == "transfer_refused"
+    assert fifo.code == "transfer_refused"
     assert missing_name.code == "transfer_refused"
     assert link_name.code == "transfer_refused"
     assert any(item[0] == "transferred" for item in diagnostics)
@@ -2062,7 +2071,11 @@ class HoldingOutput(CommandSession):
         if not self.release.wait(5):
             raise TimeoutError("the output open was not released")
         return OpenedOutput(
-            self.descriptor, 0, digest_of(b""), file_identity(self.descriptor, name)
+            self.descriptor,
+            0,
+            digest_of(b""),
+            file_identity(self.descriptor, name),
+            os.fstat(self.descriptor).st_ctime_ns,
         )
 
 
@@ -2236,7 +2249,11 @@ class OutputWireServer(ControlServer):
     ) -> None:
         self.attempts += 1
         deadline = self._clock.monotonic_ns() + FRAME_PROGRESS_NS
-        payload = b"wire"
+        payload = (
+            b"p" * SECTION_FRAME_BYTES + b"wire"
+            if request.name == "parked"
+            else b"wire"
+        )
         size = MAX_TRANSFER_BYTES + 1 if request.name == "overbound" else len(payload)
         digest = digest_of(payload)
         header: JsonObject = {
@@ -2247,11 +2264,30 @@ class OutputWireServer(ControlServer):
         await channel.write_typed_frame(
             FrameType.JSON, canonical_bytes(header), deadline
         )
+        if request.name == "superseded_retry":
+            entry = self._running()
+            successor = submitter.model_copy(update={"dispatcher_id": "successor"})
+            await self._transfer_native(
+                lambda: self._registry.try_transition(
+                    self._key,
+                    lambda current: takeover_cell(current, entry, successor, False),
+                )
+            )
+            return
+        if request.name == "refused":
+            await channel.write_typed_frame(
+                FrameType.JSON,
+                error_envelope(request.request_id, delivery_error("transfer_refused")),
+                deadline,
+            )
+            return
         if request.name in {"overbound", "disconnect"} or (
             request.name == "retry" and self.attempts == 1
         ):
             return
-        await channel.write_typed_frame(FrameType.BYTES, payload, deadline)
+        split = SECTION_FRAME_BYTES if request.name == "parked" else 2
+        await channel.write_typed_frame(FrameType.BYTES, payload[:split], deadline)
+        await channel.write_typed_frame(FrameType.BYTES, payload[split:], deadline)
         trailer_digest = digest_of(b"wrong") if request.name == "trailer" else digest
         await channel.write_typed_frame(
             FrameType.JSON, output_trailer(request.request_id, trailer_digest), deadline
@@ -2269,6 +2305,8 @@ class OutputWireServer(ControlServer):
         ("extra", 1, "integrity_error"),
         ("disconnect", 4, "runner_unreachable"),
         ("retry", 2, None),
+        ("refused", 1, "transfer_refused"),
+        ("superseded_retry", 1, "submitter_superseded"),
     ],
 )
 async def test_output_wire_limits_retries_and_requires_terminal_eof(
@@ -2296,6 +2334,35 @@ async def test_output_wire_limits_retries_and_requires_terminal_eof(
     assert observed == (b"wire" if code is None else code)
     assert server.attempts == attempts
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_output_iterator_keeps_its_inherited_monotonic_cutoff(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = NudgedClock()
+    async with delivery_server(
+        tmp_path, kora_capture, clock=clock, server_type=OutputWireServer
+    ) as live:
+        deadline = ExecutionDeadline(
+            at=clock.now() + timedelta(seconds=32),
+            scope_kind="attempt",
+            scope_id=live.work.attempt_id,
+            clock_uncertainty=timedelta(seconds=2),
+            grace=DEADLINE_GRACE,
+        )
+        await live.write(live.entry.model_copy(update={"deadline": deadline}))
+        handle = live.runtime.registry.key(live.work.attempt_id).handle()
+        iterator = live.runtime.transfer_out(handle, "parked", live.ctx)
+
+        async with aclosing(iterator):
+            first = await anext(iterator)
+            clock.offset_ns += 31_000_000_000
+            refused = await protocol_error(anext(iterator))
+
+    assert first == b"p" * SECTION_FRAME_BYTES
+    assert clock.now() < deadline.at - deadline.clock_uncertainty
+    assert refused.code == "deadline_expired"
 
 
 @pytest.mark.asyncio

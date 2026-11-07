@@ -664,7 +664,6 @@ class ControlServer:
         command = self._command
         opened: OpenedOutput | None = None
         outcome: str | None = None
-        sent = False
         owned = True
 
         def dispose() -> None:
@@ -704,9 +703,7 @@ class ControlServer:
 
                 current = await self._transfer_native(open_file, dispose)
                 await self._transfer_native(
-                    lambda: session.confirm_output(
-                        current.descriptor, current.size, current.sha256, active
-                    ),
+                    lambda: session.confirm_output(current, active),
                     dispose,
                 )
                 await self._transfer_native(authorize, dispose)
@@ -715,7 +712,6 @@ class ControlServer:
                     output_envelope(request.request_id, current.size, current.sha256),
                     min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS),
                 )
-                sent = True
                 offset = 0
                 while offset < current.size:
                     length = min(SECTION_FRAME_BYTES, current.size - offset)
@@ -737,6 +733,7 @@ class ControlServer:
 
                 def finish() -> None:
                     authorize()
+                    session.read_output(current, current.size, 0)
                     dispose()
 
                 await self._transfer_native(finish, dispose)
@@ -748,9 +745,6 @@ class ControlServer:
                 outcome = "transferred"
             except KoraProtocolError as error:
                 outcome = "integrity" if error.code == "integrity_error" else "refused"
-                if sent:
-                    channel.close()
-                    return
                 await self._answer(
                     channel, self._transfer_answer(request.request_id, error)
                 )

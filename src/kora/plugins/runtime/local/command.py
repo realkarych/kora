@@ -34,9 +34,8 @@ from kora.runner.filesystem import (
     DirectoryIdentity,
     FileIdentity,
     FilesystemError,
-    SealedOutputFile,
+    SealedFile,
     SealedTree,
-    bind_sealed_files,
     create_directory,
     freeze_private_tree,
     open_private_directory,
@@ -210,7 +209,7 @@ class Incoming:
 @dataclass(frozen=True)
 class OutputAuthority:
     root: DirectoryIdentity
-    files: tuple[SealedOutputFile, ...]
+    files: tuple[SealedFile, ...]
 
 
 @dataclass(frozen=True)
@@ -219,6 +218,7 @@ class OpenedOutput:
     size: int
     sha256: str
     identity: FileIdentity
+    changed_ns: int
 
 
 class CommandSession:
@@ -500,7 +500,6 @@ class CommandSession:
                 sealed = self._copy_snapshot(source, snapshot)
                 payload = self._seal_payload(sealed)
                 self._finalize_snapshot(snapshot)
-                bindings = bind_sealed_files(snapshot, sealed)
             except (OSError, FilesystemError, RecursionError, MemoryError) as error:
                 if self._fence_snapshot_space_failure(error):
                     outcome = "journal_unavailable"
@@ -517,7 +516,9 @@ class CommandSession:
                     if result is JournalAppendOutcome.DURABLE:
                         outcome = "sealed"
                         with self._lock:
-                            self._outputs = OutputAuthority(snapshot.identity, bindings)
+                            self._outputs = OutputAuthority(
+                                snapshot.identity, sealed.files
+                            )
                     else:
                         outcome = "journal_unavailable"
         finally:
@@ -664,6 +665,9 @@ class CommandSession:
         self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
         if outcome is StopOutcome.CONFIRMED:
             self._output_seal = self._loop.create_task(self._seal_confirmed())
+        else:
+            with self._lock:
+                self._seal_outcome = "refused"
         return outcome
 
     def close_journal(self) -> None:
@@ -1044,10 +1048,11 @@ class CommandSession:
                 raise delivery_error("transfer_refused")
             authority = self._outputs
             outcome = self._seal_outcome
+            failed = self._stage is _Stage.FAILED
         if authority is None:
             if outcome == "journal_unavailable" or self._journal.closed:
                 raise delivery_error("journal_unavailable")
-            if outcome is None:
+            if outcome is None and not failed:
                 raise delivery_error("workload_busy")
         if authority is None or "/" in name:
             raise delivery_error("transfer_refused")
@@ -1055,9 +1060,7 @@ class CommandSession:
         if selected is None:
             raise delivery_error("transfer_refused")
         try:
-            descriptor, size = open_sealed_output(
-                self._attempt, authority.root, selected
-            )
+            descriptor = open_sealed_output(self._attempt, authority.root, selected)
         except OSError as error:
             if space_error(error):
                 self.fence_transfer()
@@ -1065,17 +1068,21 @@ class CommandSession:
             raise delivery_error("transfer_refused") from None
         except FilesystemError:
             raise delivery_error("transfer_refused") from None
-        return OpenedOutput(descriptor, size, selected.sha256, selected.identity)
+        return OpenedOutput(
+            descriptor,
+            selected.size,
+            selected.sha256,
+            selected.identity,
+            selected.changed_ns,
+        )
 
     def confirm_output(
         self,
-        descriptor: int,
-        size: int,
-        expected: str,
+        opened: OpenedOutput,
         active: Callable[[], None] | None = None,
     ) -> None:
         try:
-            digest = read_sealed_digest(descriptor, size, active)
+            digest = read_sealed_digest(opened.descriptor, opened.size, active)
         except OSError as error:
             if space_error(error):
                 self.fence_transfer()
@@ -1083,12 +1090,15 @@ class CommandSession:
             raise delivery_error("integrity_error") from None
         except FilesystemError:
             raise delivery_error("integrity_error") from None
-        if digest != expected:
+        if digest != opened.sha256:
             raise delivery_error("integrity_error")
+        self.read_output(opened, opened.size, 0)
 
     def read_output(self, opened: OpenedOutput, offset: int, length: int) -> bytes:
         try:
-            return read_sealed_frame(opened.descriptor, opened.identity, offset, length)
+            return read_sealed_frame(
+                opened.descriptor, opened.identity, opened.changed_ns, offset, length
+            )
         except FilesystemError:
             raise delivery_error("transfer_refused") from None
         except OSError as error:
