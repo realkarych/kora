@@ -998,6 +998,11 @@ def test_darwin_command_marker_requires_complete_environment() -> None:
     [
         (CommandPIDInventory(frozenset({101})), True, False),
         (CommandPIDInventory(frozenset({101}), frozenset({101})), False, True),
+        (
+            CommandPIDInventory(frozenset({101}), frozenset({101}), complete=False),
+            False,
+            True,
+        ),
         (CommandPIDInventory(frozenset({101, 102})), False, False),
         (None, False, False),
     ],

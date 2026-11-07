@@ -79,13 +79,14 @@ class CommandCensus:
 class CommandPIDInventory:
     listed: frozenset[int]
     original_group: frozenset[int] = frozenset()
+    complete: bool = True
 
     def confirm_empty(self, follow_up: "CommandPIDInventory | None") -> CommandCensus:
         if follow_up is None:
             return CommandCensus((), False)
         return CommandCensus(
             (),
-            self == follow_up and not self.original_group,
+            self.complete and self == follow_up and not self.original_group,
             bool(follow_up.original_group - self.original_group),
         )
 
@@ -578,7 +579,7 @@ class NativeIdentityReader:
             return CommandCensus((), False)
         original = census.original_group
         members: list[CommandMember] = []
-        complete = True
+        complete = census.complete
         ambiguous_group = False
         pending_group = set(original)
         for pid in (*original, *(census.listed - original)):
@@ -628,7 +629,7 @@ class NativeIdentityReader:
             group_pids = frozenset(original)
             combined = frozenset(listed) | group_pids
             if len(combined) > self._max_scan_entries:
-                return None
+                return CommandPIDInventory(group_pids, group_pids, complete=False)
             return CommandPIDInventory(combined, group_pids)
         except OSError:
             return None
