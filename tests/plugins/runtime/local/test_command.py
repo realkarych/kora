@@ -60,6 +60,7 @@ from kora.runner.identity import (
     CommandPIDInventory,
     IdentityState,
     NativeIdentityReader,
+    ProcPidInfo,
     Sysctl,
     darwin_environment,
 )
@@ -878,9 +879,23 @@ def runtime_outcomes(path: Path, event: str) -> list[str]:
     return found
 
 
+class DiagnosticDarwinUniqueInfo(ctypes.Structure):
+    _fields_ = [
+        ("image_uuid", ctypes.c_ubyte * 16),
+        ("unique_id", ctypes.c_uint64),
+        ("parent_unique_id", ctypes.c_uint64),
+        ("pid_version", ctypes.c_int32),
+        ("reserved2", ctypes.c_uint32),
+        ("reserved3", ctypes.c_uint64),
+        ("reserved4", ctypes.c_uint64),
+    ]
+    unique_id: int
+
+
 class HostedCommandCensusProbe(NativeIdentityReader):
-    def summary(self, group: int, marker: bytes) -> dict[str, int]:
+    def summary(self, group: int, runner: int, marker: bytes) -> dict[str, int]:
         deadline = self._clock.monotonic_ns() + SCAN_NS
+        runner_birth = self.birth(runner)
         counts: Counter[str] = Counter()
         inventory = self._command_pids(group, deadline)
         if inventory is None:
@@ -894,7 +909,14 @@ class HostedCommandCensusProbe(NativeIdentityReader):
                 break
             observation = self.read(pid)
             if observation.process is None:
-                counts[f"identity_{observation.state.value}"] += 1
+                library = self._library
+                owner = (
+                    self._darwin_owner(library, pid).value
+                    if library is not None
+                    else "unavailable"
+                )
+                relative = self.relative_birth(pid, runner_birth)
+                counts[f"identity_{observation.state.value}_{owner}_{relative}"] += 1
                 continue
             if observation.process.dead:
                 counts["dead"] += 1
@@ -905,7 +927,10 @@ class HostedCommandCensusProbe(NativeIdentityReader):
                 counts[f"marker_errno_{error.errno or ctypes.get_errno()}"] += 1
             else:
                 kind = (
-                    self.malformed_marker_kind(pid) if result is None else str(result)
+                    f"{self.malformed_marker_kind(pid)}_"
+                    f"{self.relative_birth(pid, runner_birth)}"
+                    if result is None
+                    else str(result)
                 )
                 counts[f"marker_{kind}"] += 1
             if self.read(pid) != observation:
@@ -918,6 +943,22 @@ class HostedCommandCensusProbe(NativeIdentityReader):
             counts["confirming_group_members"] = len(confirmation.original_group)
             counts["listing_difference"] = len(inventory.listed ^ confirmation.listed)
         return dict(counts)
+
+    def birth(self, pid: int) -> int | None:
+        library = self._library
+        if library is None:
+            return None
+        info = DiagnosticDarwinUniqueInfo()
+        query = cast(ProcPidInfo, library.proc_pidinfo)
+        size = ctypes.sizeof(info)
+        result = query(pid, 17, 0, ctypes.byref(info), size)
+        return info.unique_id if result == size and info.unique_id else None
+
+    def relative_birth(self, pid: int, runner_birth: int | None) -> str:
+        observed = self.birth(pid)
+        if runner_birth is None or observed is None:
+            return "unknown_birth"
+        return "older" if observed < runner_birth else "at_or_after"
 
     def malformed_marker_kind(self, pid: int) -> str:
         library = self._library
@@ -947,7 +988,12 @@ class HostedCommandCensusProbe(NativeIdentityReader):
             path_length = path_end + 1 - word
             start = word + -(-path_length // ARGUMENT_ALIGNMENT) * ARGUMENT_ALIGNMENT
             if any(data[path_end:start]):
-                return "nonzero_padding"
+                short_start = word + -(-path_length // word) * word
+                return (
+                    "nonzero_padding"
+                    if any(data[path_end:short_start])
+                    else "valid_four_byte_padding"
+                )
             if not 1 <= count <= len(data) - start:
                 return "argc_outside_capacity"
             if data.count(b"\0", start) < count:
@@ -993,7 +1039,9 @@ async def test_exited_command_settles_observed_descendants_without_status(
             group = int((children.parent / "group").read_text())
             token = (attempt / "attempt.token").read_bytes()
             diagnosis = HostedCommandCensusProbe().summary(
-                group, b"KORA_ATTEMPT_TOKEN=" + token
+                group,
+                await running_pid(runtime, "attempt-1"),
+                b"KORA_ATTEMPT_TOKEN=" + token,
             )
 
     assert len(pids) == 2
