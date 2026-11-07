@@ -152,13 +152,17 @@ def apply_pragmas(
     return on_connect
 
 
-def apply_full_sync(cursor: DBAPICursor) -> None:
-    cursor.execute("PRAGMA main.synchronous=FULL")
+def verify_full_sync(cursor: DBAPICursor) -> None:
     cursor.execute("PRAGMA main.synchronous")
     if cursor.fetchone() != (SQLITE_SYNCHRONOUS_FULL,):
         raise SQLiteSynchronizationError(
             "SQLite connection requires FULL synchronization"
         )
+
+
+def apply_full_sync(cursor: DBAPICursor) -> None:
+    cursor.execute("PRAGMA main.synchronous=FULL")
+    verify_full_sync(cursor)
 
 
 def configure_full_sync_writer(
@@ -190,6 +194,24 @@ def begin_immediately(connection: Connection) -> None:
     cursor.close()
 
 
+def begin_verified_sqlite_write(connection: Connection) -> None:
+    raw_connection = connection.connection
+    verified = False
+    try:
+        with closing(raw_connection.cursor()) as cursor:
+            cursor.execute(BEGIN_IMMEDIATE)
+            cursor.execute("PRAGMA main.journal_mode")
+            if cursor.fetchone() != ("wal",):
+                raise SQLiteSynchronizationError(
+                    "SQLite writer requires WAL journal mode"
+                )
+            verify_full_sync(cursor)
+        verified = True
+    finally:
+        if not verified:
+            raw_connection.rollback()
+
+
 def keep_connection_on_cancellation(context: ExceptionContext) -> None:
     if isinstance(context.original_exception, asyncio.CancelledError):
         context.is_disconnect = False
@@ -219,7 +241,8 @@ def sqlite_engine(
         pragmas = WRITER_PRAGMAS if writer else READER_PRAGMAS
         event.listen(engine.sync_engine, "connect", apply_pragmas(pragmas))
     if writer:
-        event.listen(engine.sync_engine, "begin", begin_immediately)
+        begin = begin_verified_sqlite_write if require_full_sync else begin_immediately
+        event.listen(engine.sync_engine, "begin", begin)
         event.listen(
             engine.sync_engine, "handle_error", keep_connection_on_cancellation
         )
