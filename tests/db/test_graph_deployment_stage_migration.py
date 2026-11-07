@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.migrations import current_revision, upgrade_database
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations.environment import alembic_config, pending_steps
 from kora.db.tables import (
     graph_deployment_preparation as preparation,
 )
@@ -389,6 +389,17 @@ async def insert_fence(connection: AsyncConnection, store: str) -> int:
     return incarnation
 
 
+def upgrade_stage_revision(
+    connection: Connection,
+) -> tuple[str | None, str | None, int]:
+    config = alembic_config(connection)
+    previous = current_revision(connection)
+    steps = pending_steps(config, previous, REVISION)
+    connection.commit()
+    command.upgrade(config, REVISION)
+    return previous, current_revision(connection), steps
+
+
 @pytest.mark.asyncio
 async def test_stage_migration_preserves_preparation_graph_and_fence_allocator(
     empty_database_settings: DatabaseSettings,
@@ -425,10 +436,12 @@ async def test_stage_migration_preserves_preparation_graph_and_fence_allocator(
     expected_stage = stage_values(scope, MAX_STAGE_ID, retained_id)
     expected_binding = occurrence_values(scope, MAX_STAGE_ID, 0)
 
-    report = await upgrade_database(empty_database_settings)
-    repeated = await upgrade_database(empty_database_settings)
     after = Database(empty_database_settings)
     try:
+        async with after.migration_connection() as connection:
+            report = await connection.run_sync(upgrade_stage_revision)
+        async with after.migration_connection() as connection:
+            repeated = await connection.run_sync(upgrade_stage_revision)
         async with after.transaction() as connection:
             initial_stage = (await connection.execute(select(stage))).all()
             initial_binding = (await connection.execute(select(occurrence))).all()
@@ -460,12 +473,8 @@ async def test_stage_migration_preserves_preparation_graph_and_fence_allocator(
     finally:
         await after.close()
 
-    assert (report.from_revision, report.to_revision, report.steps) == (
-        PREDECESSOR,
-        REVISION,
-        1,
-    )
-    assert repeated.steps == 0
+    assert report == (PREDECESSOR, REVISION, 1)
+    assert repeated == (REVISION, REVISION, 0)
     assert revision == REVISION
     assert initial_stage == initial_binding == []
     assert surviving == previous

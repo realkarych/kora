@@ -21,6 +21,10 @@ from kora.db.graph_deployment_stage_v1 import (
     graph_deployment_stage_elements_v1,
     graph_deployment_stage_occurrence_elements_v1,
 )
+from kora.db.graph_preparation_capacity_v1 import (
+    TABLE_NAME as PREPARATION_CAPACITY_TABLE,
+)
+from kora.db.graph_preparation_capacity_v1 import graph_preparation_capacity_elements_v1
 from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
 from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
 from kora.db.storage_address_fence_v1 import TABLE_NAME as STORAGE_ADDRESS_FENCE_TABLE
@@ -202,6 +206,10 @@ graph_version_read_admission: Table = Table(
 
 graph_deployment_preparation: Table = Table(
     GRAPH_PREPARATION_TABLE, metadata, *graph_preparation_elements_v1()
+)
+
+graph_deployment_preparation_capacity: Table = Table(
+    PREPARATION_CAPACITY_TABLE, metadata, *graph_preparation_capacity_elements_v1()
 )
 
 storage_address_fence: Table = Table(
