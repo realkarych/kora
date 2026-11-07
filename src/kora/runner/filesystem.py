@@ -473,7 +473,7 @@ def _collect(
         try:
             metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
         except OSError as error:
-            if error.errno == errno.EIO:
+            if _blocks_snapshot(error):
                 raise
             refused.append(relative)
             continue
@@ -499,7 +499,7 @@ def _collect(
         try:
             digest = _copy_file(root, parent, destination, name, relative, device)
         except OSError as error:
-            if error.errno == errno.EIO:
+            if _blocks_snapshot(error):
                 raise
             digest = None
         if digest is None:
@@ -528,8 +528,9 @@ def _copy_directory(
         try:
             copied = _make_directory(destination, name)
         except OSError as error:
-            if error.errno == errno.EIO:
+            if _blocks_snapshot(error):
                 raise
+            count = _refuse_visible(child, relative, refused, count)
             refused.append(relative)
             return count
         try:
@@ -541,6 +542,33 @@ def _copy_directory(
             os.close(copied)
     finally:
         os.close(child)
+    return count
+
+
+def _blocks_snapshot(error: OSError) -> bool:
+    return error.errno in (errno.EIO, errno.ENOSPC, errno.EDQUOT)
+
+
+def _refuse_visible(parent: int, prefix: str, refused: list[str], count: int) -> int:
+    for name in _bounded_entry_names(parent, count):
+        count = _count(count)
+        relative = name if prefix == "" else f"{prefix}/{name}"
+        refused.append(relative)
+        try:
+            metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except OSError as error:
+            if _blocks_snapshot(error):
+                raise
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            continue
+        child = _open_child_directory(parent, name)
+        if child is None:
+            continue
+        try:
+            count = _refuse_visible(child, relative, refused, count)
+        finally:
+            os.close(child)
     return count
 
 
@@ -571,22 +599,27 @@ def _open_child_directory(parent: int, name: str) -> int | None:
     try:
         return os.open(name, flags, dir_fd=parent)
     except OSError as error:
-        if error.errno == errno.EIO:
+        if _blocks_snapshot(error):
             raise
         return None
 
 
 def _make_directory(parent: int, name: str) -> int:
     os.mkdir(name, 0o700, dir_fd=parent)
-    descriptor = os.open(
-        name,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-        dir_fd=parent,
-    )
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
+        )
+    except OSError:
+        os.rmdir(name, dir_fd=parent)
+        raise
     try:
         os.fchmod(descriptor, 0o700)
     except OSError:
         os.close(descriptor)
+        os.rmdir(name, dir_fd=parent)
         raise
     return descriptor
 
@@ -617,7 +650,7 @@ def _store_copy(source: int, destination: int, name: str) -> str | None:
     try:
         target = os.open(name, flags, 0o600, dir_fd=destination)
     except OSError as error:
-        if error.errno == errno.EIO:
+        if _blocks_snapshot(error):
             raise
         return None
     try:
@@ -632,7 +665,7 @@ def _store_copy(source: int, destination: int, name: str) -> str | None:
             _write_all(target, chunk)
     except OSError as error:
         _discard_name(destination, name)
-        if error.errno == errno.EIO:
+        if _blocks_snapshot(error):
             raise
         return None
     finally:

@@ -125,6 +125,30 @@ def test_snapshot_accepts_one_thousand_directories(tmp_path: Path) -> None:
     parent.close()
 
 
+def test_unwritable_snapshot_refuses_listed_descendants(tmp_path: Path) -> None:
+    parent = DirectoryAnchor.open_path(tmp_path)
+    source = create_directory(parent, "source")
+    snapshot = create_directory(parent, "snapshot")
+    nested = create_directory(source, "nested")
+    descriptor = os.open(
+        "payload",
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+        dir_fd=nested.descriptor,
+    )
+    os.close(descriptor)
+    os.fchmod(snapshot.descriptor, 0o500)
+
+    sealed = snapshot_regular_tree(source, snapshot)
+
+    assert sealed.files == ()
+    assert sealed.refused == ("nested", "nested/payload")
+    nested.close()
+    source.close()
+    snapshot.close()
+    parent.close()
+
+
 def _names(descriptor: int) -> list[str]:
     with os.scandir(descriptor) as entries:
         return sorted(entry.name for entry in entries)

@@ -464,7 +464,11 @@ class CommandSession:
                 return
             if self._append_seal(sealed, started):
                 admitted = True
-                freeze_private_tree(snapshot)
+                try:
+                    freeze_private_tree(snapshot)
+                except (OSError, FilesystemError) as error:
+                    self._settle_seal(started, error)
+                    return
                 self._finish_seal("sealed", started)
         finally:
             cleanup: OSError | FilesystemError | None = None
