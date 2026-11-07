@@ -56,6 +56,17 @@ READER_PRAGMAS: tuple[str, ...] = (
 BEGIN_IMMEDIATE: str = "BEGIN IMMEDIATE"
 MIGRATION_LOCK_ID: int = 213_0002
 MIGRATION_LEASE: str = "kora_migration_lease"
+POSTGRESQL_WAL_SETTINGS_QUERY: str = (
+    "SELECT pg_catalog.current_setting('fsync'), "
+    "pg_catalog.current_setting('full_page_writes'), "
+    "pg_catalog.current_setting('synchronous_commit')"
+)
+POSTGRESQL_LOCAL_FLUSH_MODES: tuple[str, ...] = (
+    "local",
+    "remote_write",
+    "on",
+    "remote_apply",
+)
 
 Result = TypeVar("Result")
 
@@ -83,6 +94,10 @@ class DatabaseConfigurationError(ValueError):
 
 
 class SQLiteSynchronizationError(RuntimeError):
+    pass
+
+
+class PostgreSQLDurabilityError(RuntimeError):
     pass
 
 
@@ -314,6 +329,20 @@ def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
     return engine
 
 
+async def verify_postgresql_wal_settings(connection: AsyncConnection) -> None:
+    settings = await connection.execute(text(POSTGRESQL_WAL_SETTINGS_QUERY))
+    observed: tuple[object, ...] = tuple(settings.one())
+    fsync, full_page_writes, synchronous_commit = observed
+    if (
+        fsync != "on"
+        or full_page_writes != "on"
+        or synchronous_commit not in POSTGRESQL_LOCAL_FLUSH_MODES
+    ):
+        raise PostgreSQLDurabilityError(
+            "PostgreSQL writer requires durable WAL settings"
+        )
+
+
 async def wait_through_cancellations(task: asyncio.Future[Result]) -> None:
     while not task.done():
         try:
@@ -521,12 +550,22 @@ SNAPSHOT_NATIVE_ERRORS: tuple[type[Exception], ...] = (
 
 class Database:
     def __init__(
-        self, settings: DatabaseSettings, *, require_sqlite_full_sync: bool = False
+        self,
+        settings: DatabaseSettings,
+        *,
+        require_sqlite_full_sync: bool = False,
+        require_postgresql_wal_settings: bool = False,
     ) -> None:
         if require_sqlite_full_sync and settings.dialect is not Dialect.SQLITE:
             raise ValueError("the SQLite writer mode requires SQLite")
+        if (
+            require_postgresql_wal_settings
+            and settings.dialect is not Dialect.POSTGRESQL
+        ):
+            raise ValueError("the PostgreSQL writer mode requires PostgreSQL")
         self.settings = settings
         self.dialect = settings.dialect
+        self._require_postgresql_wal_settings = require_postgresql_wal_settings
         self._writer_lock = asyncio.Lock()
         if settings.dialect is Dialect.SQLITE:
             create_private_file(settings.sqlite_path)
@@ -662,6 +701,9 @@ class Database:
                         yield connection
             else:
                 async with self._unit(self._writer, transactional) as connection:
+                    if transactional and self._require_postgresql_wal_settings:
+                        await complete(verify_postgresql_wal_settings(connection))
+                        self._refuse_when_closed()
                     yield connection
         finally:
             await self._leave_unit_and_release()

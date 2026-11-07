@@ -4,7 +4,7 @@ import re
 import secrets
 import shutil
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Generator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,6 +45,11 @@ SQLITE_TEMPLATE_NAME: str = "template.db"
 class DatabaseKind(enum.StrEnum):
     SQLITE = "sqlite"
     POSTGRESQL = "postgresql"
+
+
+class DisabledPostgresWALSetting(enum.StrEnum):
+    FSYNC = "fsync"
+    FULL_PAGE_WRITES = "full_page_writes"
 
 
 def selected_databases(environ: Mapping[str, str]) -> tuple[DatabaseKind, ...]:
@@ -173,7 +178,11 @@ def quote(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def start_postgres(reaper_setting: str | None) -> Iterator[PostgresServer]:
+def start_postgres(
+    reaper_setting: str | None,
+    *,
+    disabled_wal_setting: DisabledPostgresWALSetting | None = None,
+) -> Generator[PostgresServer, None, None]:
     if reaper_setting is None:
         testcontainers_config.ryuk_disabled = True
     password = secrets.token_urlsafe(24)
@@ -185,6 +194,8 @@ def start_postgres(reaper_setting: str | None) -> Iterator[PostgresServer]:
         dbname=TEMPLATE_DATABASE,
         driver="asyncpg",
     )
+    if disabled_wal_setting is not None:
+        container.with_command(["postgres", "-c", f"{disabled_wal_setting}=off"])
     try:
         container.start()
         server = PostgresServer(
@@ -193,7 +204,8 @@ def start_postgres(reaper_setting: str | None) -> Iterator[PostgresServer]:
             password=password,
         )
         server.wait_ready()
-        asyncio.run(upgrade_database(server.settings_for(TEMPLATE_DATABASE)))
+        if disabled_wal_setting is None:
+            asyncio.run(upgrade_database(server.settings_for(TEMPLATE_DATABASE)))
         yield server
     finally:
         container.stop()
