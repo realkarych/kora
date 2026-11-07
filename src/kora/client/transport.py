@@ -8,12 +8,14 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
-from typing import Protocol, Self, TypeVar, runtime_checkable
+from typing import Self, TypeVar
 from urllib.parse import urlsplit
 
 import certifi
+import httpcore
 import httpx
 from anyio import CancelScope
+from anyio.lowlevel import checkpoint_if_cancelled
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_core import PydanticCustomError
 
@@ -25,6 +27,7 @@ from kora.client.errors import (
     Failure,
     Outcome,
 )
+from kora.client.network import DirectTransport
 from kora.ir.json import JsonObject, JsonShapeError, parse_json_object
 from kora.models.errors import HTTP_STATUSES, ApiErrorCode, require_api_error_fields
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, ProcessDiagnostics
@@ -137,17 +140,13 @@ async def settle(future: asyncio.Future[T]) -> T:
     return result
 
 
-@runtime_checkable
-class ConnectingSocket(Protocol):
-    async def aclose(self) -> None: ...
-
-
 @dataclass
 class Exchange:
+    tls: bool
     scope: CancelScope = field(default_factory=CancelScope)
+    handoff: CancelScope = field(default_factory=CancelScope)
     request_id: str | None = None
     status: int | None = None
-    connecting: ConnectingSocket | None = None
     tls_failed: bool = False
     sending: bool = False
 
@@ -157,26 +156,20 @@ class Exchange:
 
     async def observe(self, event: str, values: dict[str, object]) -> None:
         match event:
-            case "connection.connect_tcp.complete":
-                stream = values.get("return_value")
-                if not isinstance(stream, ConnectingSocket):
-                    raise RuntimeError(
-                        "The HTTP transport did not expose its TCP stream."
-                    )
-                self.connecting = stream
+            case "connection.connect_tcp.complete" if not self.tls:
+                self.handoff.shield = True
+            case "connection.start_tls.complete":
+                self.handoff.shield = True
             case "connection.start_tls.failed":
                 self.tls_failed = True
             case "http11.send_request_headers.started":
-                self.connecting = None
+                self.handoff.shield = False
+                await checkpoint_if_cancelled()
                 self.sending = True
             case _:
                 pass
         if event.endswith((".complete", ".failed")):
             values.clear()
-
-    async def release_connecting(self) -> None:
-        if self.connecting is not None:
-            await self.connecting.aclose()
 
 
 class KoraClient:
@@ -205,14 +198,7 @@ class KoraClient:
         self._logger = (
             diagnostics.logger(COMPONENT) if diagnostics is not None else None
         )
-        self._transport = httpx.AsyncHTTPTransport(
-            verify=verified_context(ca_bundle),
-            trust_env=False,
-            limits=httpx.Limits(
-                max_connections=max_connections,
-                max_keepalive_connections=max_connections,
-            ),
-        )
+        self._transport = DirectTransport(verified_context(ca_bundle), max_connections)
         self._active: dict[asyncio.Task[object], CancelScope] = {}
         self._closing: asyncio.Task[None] | None = None
 
@@ -261,7 +247,7 @@ class KoraClient:
             or any(char in path for char in "\\?#")
         ):
             raise ClientError(Failure.DESTINATION_POLICY, Outcome.NOT_SENT)
-        exchange = Exchange()
+        exchange = Exchange(tls=self._origin.scheme == "https")
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout
         task = asyncio.create_task(
@@ -321,14 +307,11 @@ class KoraClient:
             json=body,
             extensions={"trace": exchange.observe},
         )
-        try:
-            with exchange.scope:
-                status, content = await self._receive(request, response_limit, exchange)
-                return self._decode_response(
-                    content, status, decode, response_limit, exchange
-                )
-        finally:
-            await exchange.release_connecting()
+        with exchange.scope, exchange.handoff:
+            status, content = await self._receive(request, response_limit, exchange)
+            return self._decode_response(
+                content, status, decode, response_limit, exchange
+            )
         raise asyncio.CancelledError
 
     async def _receive(
@@ -345,12 +328,12 @@ class KoraClient:
             finally:
                 with CancelScope(shield=True):
                     await response.aclose()
-        except httpx.ConnectError:
+        except httpcore.ConnectError:
             reason = Failure.TLS if exchange.tls_failed else Failure.CONNECTION
             raise exchange.failure(reason) from None
-        except httpx.PoolTimeout:
+        except httpcore.PoolTimeout:
             raise exchange.failure(Failure.POOL) from None
-        except (httpx.NetworkError, httpx.ProtocolError):
+        except (httpcore.NetworkError, httpcore.ProtocolError):
             raise exchange.failure(Failure.STREAM) from None
 
     def _decode_response(

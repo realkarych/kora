@@ -1,9 +1,14 @@
 import asyncio
+import socket
 
+import httpx
 import pytest
+from typing_extensions import Buffer
 
 from kora.client import ClientError, KoraClient
 from kora.client.errors import Failure
+from kora.client.network import DirectTransport
+from kora.client.transport import Exchange, verified_context
 from kora.ir.json import JsonObject
 from tests.client.support import (
     BOUND,
@@ -177,3 +182,94 @@ async def test_client_releases_socket_during_tls_handshake(stop: str) -> None:
     assert handshake[0].startswith(b"\x16\x03")
     assert handshake[1] == b""
     assert request.done()
+
+
+class PausedConnectLoop(asyncio.SelectorEventLoop):
+    def __init__(self) -> None:
+        super().__init__()
+        self.connected = asyncio.Event()
+        self.resume_handoff = asyncio.Event()
+
+    async def sock_connect(
+        self,
+        sock: socket.socket,
+        address: str | Buffer | tuple[object, ...] | int,
+    ) -> None:
+        if isinstance(address, int):
+            raise TypeError("The loopback probe requires an IP socket address.")
+        await super().sock_connect(sock, address)
+        self.connected.set()
+        await self.resume_handoff.wait()
+
+
+def test_client_releases_connected_socket_before_pool_handoff() -> None:
+    loop = PausedConnectLoop()
+    accepted = asyncio.Event()
+    received: list[bytes] = []
+
+    async def handle(reader: Reader, _writer: Writer) -> None:
+        accepted.set()
+        received.append(await asyncio.wait_for(reader.read(), BOUND))
+
+    async def exercise() -> bool:
+        async with peer(handle) as origin, KoraClient(origin.url, CREDENTIAL) as client:
+            request = asyncio.create_task(client.openapi())
+            await asyncio.wait_for(loop.connected.wait(), BOUND)
+            await asyncio.wait_for(accepted.wait(), BOUND)
+            await client.aclose()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+        return request.done()
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        settled = runner.run(exercise())
+
+    assert settled
+    assert received == [b""]
+
+
+@pytest.mark.asyncio
+async def test_client_reclaims_pool_at_http_handoff() -> None:
+    eof = asyncio.Event()
+    accepted = 0
+
+    async def handle(reader: Reader, writer: Writer) -> None:
+        nonlocal accepted
+        accepted += 1
+        if accepted == 1:
+            assert await asyncio.wait_for(reader.read(), BOUND) == b""
+            eof.set()
+        else:
+            await read_request(reader)
+            reply(writer)
+
+    exchange = Exchange(tls=False)
+
+    async def cancel_at_handoff(event: str, values: dict[str, object]) -> None:
+        await exchange.observe(event, values)
+        if event == "connection.connect_tcp.complete":
+            exchange.scope.cancel()
+
+    async with (
+        peer(handle) as origin,
+        DirectTransport(verified_context(None), 1) as transport,
+    ):
+        async with asyncio.timeout(BOUND):
+            with exchange.scope, exchange.handoff:
+                await transport.handle_async_request(
+                    httpx.Request(
+                        "GET", origin.url, extensions={"trace": cancel_at_handoff}
+                    )
+                )
+            await eof.wait()
+            response = await transport.handle_async_request(
+                httpx.Request("GET", origin.url)
+            )
+            try:
+                content = await response.aread()
+            finally:
+                await response.aclose()
+
+    assert exchange.scope.cancelled_caught
+    assert accepted == 2
+    assert b'"openapi":"3.1.0"' in content
