@@ -31,11 +31,18 @@ from kora.runner.channels import CaptureDrain, cancel_task
 from kora.runner.filesystem import (
     MAX_SEAL_ENTRIES,
     DirectoryAnchor,
+    DirectoryIdentity,
+    FileIdentity,
     FilesystemError,
+    SealedOutputFile,
     SealedTree,
+    bind_sealed_files,
     create_directory,
     freeze_private_tree,
     open_private_directory,
+    open_sealed_output,
+    read_sealed_digest,
+    read_sealed_frame,
     remove_directory,
     rename_no_replace,
     snapshot_regular_tree,
@@ -68,7 +75,7 @@ TRANSFER: Final[EventSpec] = CATALOG.register(
         "runtime.local.transfer",
         COMPONENT,
         Level.INFO,
-        "the attempt runner handled an input transfer",
+        "the attempt runner handled a transfer",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -200,6 +207,20 @@ class Incoming:
     descriptor: int
 
 
+@dataclass(frozen=True)
+class OutputAuthority:
+    root: DirectoryIdentity
+    files: tuple[SealedOutputFile, ...]
+
+
+@dataclass(frozen=True)
+class OpenedOutput:
+    descriptor: int
+    size: int
+    sha256: str
+    identity: FileIdentity
+
+
 class CommandSession:
     def __init__(
         self,
@@ -243,6 +264,7 @@ class CommandSession:
         self._transfer_ns = 0
         self._sealed = False
         self._output_seal: asyncio.Task[None] | None = None
+        self._outputs: OutputAuthority | None = None
 
     def capture_prelaunch(
         self, baseline: dict[int, int], workload: Workload, deadline: int
@@ -478,6 +500,7 @@ class CommandSession:
                 sealed = self._copy_snapshot(source, snapshot)
                 payload = self._seal_payload(sealed)
                 self._finalize_snapshot(snapshot)
+                bindings = bind_sealed_files(snapshot, sealed)
             except (OSError, FilesystemError, RecursionError, MemoryError) as error:
                 if self._fence_snapshot_space_failure(error):
                     outcome = "journal_unavailable"
@@ -491,11 +514,12 @@ class CommandSession:
                     retained = False
                 else:
                     retained = result is not JournalAppendOutcome.ABSENT
-                    outcome = (
-                        "sealed"
-                        if result is JournalAppendOutcome.DURABLE
-                        else "journal_unavailable"
-                    )
+                    if result is JournalAppendOutcome.DURABLE:
+                        outcome = "sealed"
+                        with self._lock:
+                            self._outputs = OutputAuthority(snapshot.identity, bindings)
+                    else:
+                        outcome = "journal_unavailable"
         finally:
             cleanup: OSError | FilesystemError | None = None
             if source is not None:
@@ -1011,6 +1035,56 @@ class CommandSession:
     def _reject(self, item: TransferItem) -> None:
         self._append_transfer("transfer.rejected", item)
         self._emit_transfer("rejected")
+
+    def open_output(self, name: str) -> OpenedOutput:
+        with self._lock:
+            authority = self._outputs
+        if authority is None or "/" in name:
+            raise delivery_error("transfer_refused")
+        selected = next((item for item in authority.files if item.name == name), None)
+        if selected is None:
+            raise delivery_error("transfer_refused")
+        try:
+            descriptor, size = open_sealed_output(
+                self._attempt, authority.root, selected
+            )
+        except OSError as error:
+            if space_error(error):
+                self.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            raise delivery_error("transfer_refused") from None
+        except FilesystemError:
+            raise delivery_error("transfer_refused") from None
+        return OpenedOutput(descriptor, size, selected.sha256, selected.identity)
+
+    def confirm_output(self, descriptor: int, size: int, expected: str) -> None:
+        try:
+            digest = read_sealed_digest(descriptor, size)
+        except OSError as error:
+            if space_error(error):
+                self.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            raise delivery_error("integrity_error") from None
+        except FilesystemError:
+            raise delivery_error("integrity_error") from None
+        if digest != expected:
+            raise delivery_error("integrity_error")
+
+    def read_output(self, opened: OpenedOutput, offset: int, length: int) -> bytes:
+        try:
+            return read_sealed_frame(opened.descriptor, opened.identity, offset, length)
+        except FilesystemError:
+            raise delivery_error("transfer_refused") from None
+        except OSError as error:
+            if space_error(error):
+                self.fence_transfer()
+                raise delivery_error("journal_unavailable") from None
+            raise
+
+    def note_output(self, outcome: str, started: int) -> None:
+        waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
+        level = Level.INFO if outcome == "transferred" else Level.WARNING
+        self._log.emit_at(level, TRANSFER, outcome=outcome, waited_ms=waited)
 
     def _unlink_input(self, directory: DirectoryAnchor, name: str) -> None:
         try:

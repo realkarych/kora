@@ -812,6 +812,154 @@ def _open_beneath(root: int, relative: str) -> int:
     return descriptor
 
 
+@dataclass(frozen=True)
+class SealedOutputFile:
+    name: str
+    sha256: str
+    identity: FileIdentity
+
+
+def bind_sealed_files(
+    snapshot: DirectoryAnchor, sealed: SealedTree
+) -> tuple[SealedOutputFile, ...]:
+    if (
+        snapshot.closed
+        or identity_of(snapshot.descriptor, snapshot.identity.name) != snapshot.identity
+    ):
+        raise FilesystemError("identity_mismatch")
+    device = os.fstat(snapshot.descriptor).st_dev
+    bound: list[SealedOutputFile] = []
+    for item in sealed.files:
+        descriptor = _open_frozen_relative(snapshot.descriptor, item.name, device)
+        try:
+            identity = frozen_file_identity(descriptor, item.name.rsplit("/", 1)[-1])
+            if identity.device != device:
+                raise FilesystemError("identity_mismatch")
+            bound.append(SealedOutputFile(item.name, item.sha256, identity))
+        finally:
+            os.close(descriptor)
+    return tuple(bound)
+
+
+def open_sealed_output(
+    attempt: DirectoryAnchor, root: DirectoryIdentity, item: SealedOutputFile
+) -> tuple[int, int]:
+    if "/" in item.name or item.name in ("", ".", ".."):
+        raise FilesystemError("invalid_relative_name")
+    attempt.verify()
+    directory = os.open(
+        root.name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        dir_fd=attempt.descriptor,
+    )
+    try:
+        if identity_of(directory, root.name) != root:
+            raise FilesystemError("identity_mismatch")
+        _require_frozen_directory(directory, root.device)
+        descriptor = os.open(
+            item.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+        try:
+            identity = frozen_file_identity(descriptor, item.name)
+            if identity != item.identity:
+                raise FilesystemError("identity_mismatch")
+            return descriptor, os.fstat(descriptor).st_size
+        except (OSError, FilesystemError):
+            os.close(descriptor)
+            raise
+    finally:
+        os.close(directory)
+
+
+def read_sealed_digest(descriptor: int, size: int) -> str:
+    if size > SNAPSHOT_LIMITS.file_bytes:
+        raise FilesystemError("seal_capacity")
+    hasher = hashlib.sha256()
+    remaining = size
+    while remaining:
+        chunk = os.read(descriptor, min(SEAL_COPY_BYTES, remaining))
+        if not chunk:
+            raise FilesystemError("short_sealed_file")
+        hasher.update(chunk)
+        remaining -= len(chunk)
+    if os.read(descriptor, 1):
+        raise FilesystemError("long_sealed_file")
+    return f"sha256:{hasher.hexdigest()}"
+
+
+def read_sealed_frame(
+    descriptor: int, identity: FileIdentity, offset: int, length: int
+) -> bytes:
+    if frozen_file_identity(descriptor, identity.name) != identity:
+        raise FilesystemError("identity_mismatch")
+    chunk = os.pread(descriptor, length, offset)
+    if len(chunk) != length:
+        raise FilesystemError("short_sealed_file")
+    return chunk
+
+
+def frozen_file_identity(descriptor: int, name: str) -> FileIdentity:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o400
+        or metadata.st_size > SNAPSHOT_LIMITS.file_bytes
+    ):
+        raise FilesystemError("private_identity_required")
+    return FileIdentity(
+        name=name,
+        device=metadata.st_dev,
+        inode=metadata.st_ino,
+        owner_uid=metadata.st_uid,
+    )
+
+
+def _sealed_parts(relative: str) -> tuple[str, ...]:
+    parts = tuple(relative.split("/"))
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise FilesystemError("invalid_relative_name")
+    return parts
+
+
+def _require_frozen_directory(descriptor: int, device: int) -> None:
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_dev != device
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o500
+    ):
+        raise FilesystemError("private_identity_required")
+
+
+def _open_frozen_relative(root: int, relative: str, device: int) -> int:
+    parts = _sealed_parts(relative)
+    parent = root
+    opened: list[int] = []
+    try:
+        for part in parts[:-1]:
+            descriptor = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent,
+            )
+            opened.append(descriptor)
+            _require_frozen_directory(descriptor, device)
+            parent = descriptor
+        return os.open(
+            parts[-1],
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent,
+        )
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
 def read_private_file(directory: DirectoryAnchor, name: str, limit: int) -> bytes:
     descriptor = open_private_file(directory, name, os.O_RDONLY)
     try:

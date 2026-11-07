@@ -20,8 +20,10 @@ from kora.plugins.runtime.local.channel import (
     FRAME_PROGRESS_NS,
     MESSAGE_PROGRESS_NS,
     PRE_ATTACH_BYTES,
+    SECTION_FRAME_BYTES,
     AttachRequest,
     FrameType,
+    OutputRequest,
     StatusValue,
     TransferRequest,
     decode_section,
@@ -29,7 +31,10 @@ from kora.plugins.runtime.local.channel import (
     delivery_error,
     error_envelope,
     operation_unknown,
+    output_envelope,
+    output_trailer,
     parse_header,
+    read_output,
     read_request,
     read_transfer,
     read_transfer_bytes,
@@ -39,7 +44,7 @@ from kora.plugins.runtime.local.channel import (
     workload_digest,
     write_transfer_bytes,
 )
-from kora.plugins.runtime.local.command import CommandSession, Incoming
+from kora.plugins.runtime.local.command import CommandSession, Incoming, OpenedOutput
 from kora.plugins.runtime.local.spawn import open_socket_directory
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import ProcessIdentity
@@ -461,6 +466,10 @@ class ControlServer:
                     channel, submitter, observational, transfer, started
                 )
                 continue
+            output = read_output(payload)
+            if output is not None:
+                await self._send_output(channel, submitter, observational, output)
+                continue
             header = parse_header(payload, ACCEPT_WORKLOAD)
             declaration = header.sections[0]
             refusal: KoraProtocolError | None = None
@@ -640,6 +649,90 @@ class ControlServer:
         finally:
             if command is not None and claimed:
                 command.end_transfer()
+
+    async def _send_output(
+        self,
+        channel: BoundedChannel,
+        submitter: Submitter,
+        observational: bool,
+        request: OutputRequest,
+    ) -> None:
+        started_ns = self._clock.monotonic_ns()
+        command = self._command
+        opened: OpenedOutput | None = None
+        outcome: str | None = None
+        sent = False
+        try:
+            try:
+                if command is None:
+                    raise delivery_error("transfer_refused")
+                if observational:
+                    raise delivery_error("execution_unauthorized")
+                session = command
+                entry = await self._transfer_native(lambda: self._authorized(submitter))
+                cutoff = transfer_cutoff(self._clock, entry.deadline)
+                deadline = started_ns + MESSAGE_PROGRESS_NS
+                if cutoff is not None:
+                    deadline = min(deadline, cutoff)
+
+                def authorize() -> None:
+                    if self._closing is not None:
+                        raise delivery_error("transfer_refused")
+                    self._authorized(submitter, cutoff)
+                    if self._clock.monotonic_ns() >= deadline:
+                        raise ChannelError(ChannelFailure.DEADLINE)
+
+                opened = await self._transfer_native(
+                    lambda: session.open_output(request.name)
+                )
+                current = opened
+                await self._transfer_native(
+                    lambda: session.confirm_output(
+                        current.descriptor, current.size, current.sha256
+                    )
+                )
+                await self._transfer_native(authorize)
+                await self._answer(
+                    channel,
+                    output_envelope(request.request_id, current.size, current.sha256),
+                )
+                sent = True
+                offset = 0
+                while offset < current.size:
+                    length = min(SECTION_FRAME_BYTES, current.size - offset)
+                    position = offset
+
+                    def read(position: int = position, length: int = length) -> bytes:
+                        authorize()
+                        return session.read_output(current, position, length)
+
+                    chunk = await self._transfer_native(read)
+                    await channel.write_typed_frame(
+                        FrameType.BYTES,
+                        chunk,
+                        min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS),
+                    )
+                    offset += len(chunk)
+                await self._transfer_native(authorize)
+                await channel.write_typed_frame(
+                    FrameType.JSON,
+                    output_trailer(request.request_id, current.sha256),
+                    min(deadline, self._clock.monotonic_ns() + FRAME_PROGRESS_NS),
+                )
+                outcome = "transferred"
+            except KoraProtocolError as error:
+                outcome = "integrity" if error.code == "integrity_error" else "refused"
+                if sent:
+                    channel.close()
+                    return
+                await self._answer(
+                    channel, self._transfer_answer(request.request_id, error)
+                )
+        finally:
+            if opened is not None:
+                os.close(opened.descriptor)
+            if command is not None and outcome is not None:
+                command.note_output(outcome, started_ns)
 
     async def _transfer_native(
         self,

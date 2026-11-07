@@ -20,6 +20,7 @@ from kora.observability import CATALOG, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import (
     MESSAGE_PROGRESS_NS,
     SECTION_FRAME_BYTES,
+    checked_output_name,
     delivery_error,
     transfer_cutoff,
     workload_digest,
@@ -39,6 +40,7 @@ from kora.plugins.runtime.local.control import (
     runner_status,
     start_command,
     transfer_input,
+    transfer_output,
 )
 from kora.plugins.runtime.local.services import (
     SERVICE_REFUSED,
@@ -179,6 +181,15 @@ LISTENER_REFUSED: Final[EventSpec] = CATALOG.register(
 
 def rejection(code: str) -> KoraProtocolError:
     return KoraProtocolError(code, REJECTIONS[code], False, {})
+
+
+OUTPUT_ATTEMPTS: Final[int] = 3
+
+
+def output_exhausted() -> KoraProtocolError:
+    return KoraProtocolError(
+        "infrastructure", "the sealed output could not be transferred", False, {}
+    )
 
 
 def default_state_root(
@@ -742,6 +753,145 @@ class LocalRuntime:
             await self._check_transfer_deadline(key, entry, ctx, cutoff)
             raise refusal("runner_unreachable") from None
         await self._check_transfer_deadline(key, entry, ctx, cutoff)
+
+    def transfer_out(
+        self, handle: Handle, name: str, ctx: ProtocolContext
+    ) -> AsyncIterator[bytes]:
+        return self._transfer_out(handle, checked_output_name(name), ctx)
+
+    async def _transfer_out(
+        self, handle: Handle, name: str, ctx: ProtocolContext
+    ) -> AsyncIterator[bytes]:
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        key = self.key_of(handle, ctx)
+        lease: SpoolLease | None = None
+        for _attempt in range(OUTPUT_ATTEMPTS):
+            if self._closing is not None:
+                raise refusal("runtime_closed")
+            try:
+                lease = await self._tracked_pull(key, name, ctx)
+            except (ListenerRefused, ChannelError, OSError, FilesystemError):
+                lease = None
+                continue
+            except KoraProtocolError as error:
+                if error.code != "message_refused":
+                    raise
+                lease = None
+                continue
+            else:
+                break
+        if lease is None:
+            raise output_exhausted()
+        try:
+            offset = 0
+            while True:
+                chunk = await self.executor.run(
+                    partial(self._read_output_chunk, lease, offset)
+                )
+                if not chunk:
+                    break
+                offset += len(chunk)
+                yield chunk
+        finally:
+            lease.close()
+
+    async def _tracked_pull(
+        self, key: AttemptKey, name: str, ctx: ProtocolContext
+    ) -> SpoolLease:
+        found: list[SpoolLease] = []
+
+        async def pull() -> None:
+            found.append(await self._pull_output(key, name, ctx))
+
+        task = asyncio.create_task(pull())
+        self._deliveries.add(task)
+        try:
+            await task
+        finally:
+            self._deliveries.discard(task)
+        if not found:
+            raise RuntimeError("missing output spool")
+        return found[0]
+
+    async def _pull_output(
+        self, key: AttemptKey, name: str, ctx: ProtocolContext
+    ) -> SpoolLease:
+        clock = ctx.clock
+        deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+        entry = await self.entry(key)
+        if not isinstance(entry, Running):
+            raise refusal("runner_starting")
+        if entry.gate_closed:
+            raise delivery_error("deadline_expired")
+        cutoff = transfer_cutoff(clock, entry.deadline)
+        if cutoff is not None:
+            deadline = min(deadline, cutoff)
+        if clock.monotonic_ns() >= deadline:
+            await self._check_transfer_deadline(key, entry, ctx, cutoff)
+            raise refusal("runner_unreachable")
+        lease: SpoolLease | None = None
+        handed = False
+
+        def dispose() -> None:
+            if lease is not None:
+                lease.close()
+
+        def active() -> None:
+            if self._closing is not None:
+                raise ChannelError(ChannelFailure.CLOSED)
+            if clock.monotonic_ns() >= deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+
+        def acquire() -> None:
+            nonlocal lease
+            active()
+            lease = self._spool.acquire(active)
+
+        try:
+            if self._spool_allocations >= self.executor.admitted:
+                raise refusal("registry_busy")
+            self._spool_allocations += 1
+            try:
+                async with self._spool_admission:
+                    await self.executor.run(acquire, after_uncertain_submission=dispose)
+            finally:
+                self._spool_allocations -= 1
+            held = lease
+            if held is None:
+                raise RuntimeError("missing spool descriptor")
+            await transfer_output(
+                entry.socket_path,
+                entry.runner,
+                entry.submitter.dispatcher_id,
+                self._peers,
+                self.executor,
+                clock,
+                self._new_identifier(),
+                held.descriptor,
+                name,
+                deadline,
+                close_spool=dispose,
+                active=active,
+            )
+            handed = True
+            return held
+        except NativeIOSubmissionUncertain:
+            handed = True
+            raise
+        finally:
+            if not handed:
+                dispose()
+
+    def _read_output_chunk(self, lease: SpoolLease, offset: int) -> bytes:
+        if self._closing is not None:
+            raise refusal("runtime_closed")
+        try:
+            return os.pread(lease.descriptor, SECTION_FRAME_BYTES, offset)
+        except OSError:
+            if self._closing is not None:
+                raise refusal("runtime_closed") from None
+            raise
 
     async def _check_transfer_deadline(
         self, key: AttemptKey, entry: Running, ctx: ProtocolContext, cutoff: int | None

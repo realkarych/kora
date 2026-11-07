@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import socket
 from collections.abc import Callable
@@ -14,13 +15,18 @@ from kora.plugins.runtime.local.channel import (
     AttachRequest,
     FrameType,
     MessageRefusal,
+    OutputRequest,
     StatusValue,
     TransferRequest,
     control_request,
+    delivery_error,
     message_refused,
     read_delivery,
+    read_output_declaration,
+    read_output_trailer,
     read_status,
     send_message,
+    write_transfer_bytes,
 )
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import TransferItem, Workload
@@ -204,6 +210,120 @@ async def transfer_input(
     finally:
         if endpoint_owned:
             channel.close()
+
+
+async def transfer_output(
+    path: str,
+    runner: ProcessIdentity,
+    dispatcher_id: str,
+    source: PeerSource,
+    executor: TransitionExecutor,
+    clock: Clock,
+    request_id: str,
+    spool: int,
+    name: str,
+    message_deadline: int,
+    *,
+    close_spool: Callable[[], None],
+    active: Callable[[], None] | None = None,
+) -> None:
+    deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
+    endpoint = await connected(path, clock, deadline)
+    channel = BoundedChannel(endpoint, clock)
+    endpoint_owned = True
+
+    def dispose_attestation() -> None:
+        try:
+            endpoint.close()
+        finally:
+            close_spool()
+
+    try:
+        try:
+            await attested(
+                endpoint,
+                runner,
+                source,
+                executor,
+                after_uncertain_submission=dispose_attestation,
+            )
+        except NativeIOSubmissionUncertain:
+            endpoint_owned = False
+            raise
+        request = AttachRequest(
+            op="attach", request_id=request_id, dispatcher_id=dispatcher_id
+        )
+        await channel.write_typed_frame(
+            FrameType.JSON, canonical_bytes(request.model_dump(mode="json")), deadline
+        )
+        reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
+        _, payload = await channel.read_typed_frame(deadline, reservations)
+        read_delivery(payload, request_id, "attached")
+        header = OutputRequest(op="transfer_out", request_id=request_id, name=name)
+        await channel.write_typed_frame(
+            FrameType.JSON,
+            canonical_bytes(header.model_dump(mode="json")),
+            min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline),
+        )
+        await receive_output(
+            channel,
+            clock,
+            executor,
+            spool,
+            request_id,
+            message_deadline,
+            active,
+            close_spool,
+        )
+    finally:
+        if endpoint_owned:
+            channel.close()
+
+
+async def receive_output(
+    channel: BoundedChannel,
+    clock: Clock,
+    executor: TransitionExecutor,
+    descriptor: int,
+    request_id: str,
+    message_deadline: int,
+    active: Callable[[], None] | None,
+    close_spool: Callable[[], None],
+) -> None:
+    deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
+    reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
+    _, payload = await channel.read_typed_frame(deadline, reservations)
+    declared = read_output_declaration(payload, request_id)
+    digest = hashlib.sha256()
+    remaining = declared.size
+    while remaining:
+        length = min(SECTION_FRAME_BYTES, remaining)
+        view = memoryview(bytearray(length))
+        frame_deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
+        received = await channel.read_typed_frame_into(
+            frame_deadline, FrameType.BYTES, view
+        )
+        if received != length:
+            raise message_refused(MessageRefusal.MALFORMED)
+        piece = view[:received]
+
+        def write(payload: memoryview = piece) -> None:
+            if active is not None:
+                active()
+            if clock.monotonic_ns() >= message_deadline:
+                raise ChannelError(ChannelFailure.DEADLINE)
+            write_transfer_bytes(descriptor, payload)
+
+        await executor.run(write, after_uncertain_submission=close_spool)
+        digest.update(piece)
+        remaining -= received
+    _, payload = await channel.read_typed_frame(
+        min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline), reservations
+    )
+    trailer = read_output_trailer(payload, request_id)
+    computed = "sha256:" + digest.hexdigest()
+    if computed != declared.sha256 or trailer != declared.sha256:
+        raise delivery_error("integrity_error")
 
 
 async def _send_spool(
