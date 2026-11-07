@@ -20,6 +20,7 @@ from kora.ir.json import JsonObject, JsonShapeError, JsonValue
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
+from kora.plugins.runtime.local.command_stop import CommandDomainStop, StopOutcome
 from kora.plugins.runtime.local.environment import candidate_environment
 from kora.plugins.runtime.local.spawn import DEFAULT_SIGNALS
 from kora.protocols.errors import KoraProtocolError
@@ -32,12 +33,17 @@ from kora.runner.filesystem import (
     FilesystemError,
     SealCapacityError,
     SealedTree,
+    create_directory,
+    freeze_private_tree,
     open_private_directory,
+    remove_directory,
     rename_no_replace,
-    seal_regular_tree,
+    snapshot_regular_tree,
     verify_private,
 )
+from kora.runner.identity import PROCESS_SCAN_ENTRIES, SCAN_NS, NativeIdentityReader
 from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
+from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
 from kora.runner.registry import Submitter, synchronize
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
@@ -60,12 +66,21 @@ TRANSFER: Final[EventSpec] = CATALOG.register(
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
+COMMAND_STOP: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.command_stop",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner settled command-domain stop",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
 SEAL: Final[EventSpec] = CATALOG.register(
     EventSpec(
         "runtime.local.seal",
         COMPONENT,
         Level.INFO,
-        "the attempt runner sealed command files",
+        "the attempt runner sealed a command output snapshot",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -95,7 +110,9 @@ OPTIONAL: Final[tuple[str, ...]] = (
     "vcs",
 )
 TOKEN_BYTES: Final[int] = 32
+SNAPSHOT_NAME: Final[str] = "output-snapshot"
 GRACE_NS: Final[int] = 1_000_000_000
+ADOPTED_LIST_BYTES: Final[int] = PROCESS_SCAN_ENTRIES * 11 + 1
 PhaseName = Literal["preparation", "execution", "complete", "failed"]
 StateName = Literal["starting", "running", "exited"]
 
@@ -153,31 +170,21 @@ def observed_exit(status: int) -> int | None:
 
 
 def adopted_pids() -> tuple[int, ...] | None:
-    found: list[int] = []
+    found: set[int] = set()
     try:
-        tasks = os.listdir("/proc/self/task")
-    except OSError:
+        with os.scandir("/proc/self/task") as tasks:
+            for index, task in enumerate(tasks):
+                if index >= PROCESS_SCAN_ENTRIES:
+                    return None
+                with open(f"/proc/self/task/{task.name}/children", "rb") as source:
+                    children = source.read(ADOPTED_LIST_BYTES)
+                if len(children) >= ADOPTED_LIST_BYTES:
+                    return None
+                found.update(int(item) for item in children.split())
+                if len(found) > PROCESS_SCAN_ENTRIES:
+                    return None
+    except (OSError, ValueError):
         return None
-    for task in tasks:
-        try:
-            descriptor = os.open(
-                f"/proc/self/task/{task}/children", os.O_RDONLY | os.O_CLOEXEC
-            )
-        except OSError:
-            return None
-        try:
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(descriptor, 4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        finally:
-            os.close(descriptor)
-        try:
-            found.extend(int(item) for item in b"".join(chunks).split())
-        except ValueError:
-            return None
     return tuple(found)
 
 
@@ -216,6 +223,11 @@ class CommandSession:
         self._drains: list[CaptureDrain] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._reaper: threading.Thread | None = None
+        self._reap_stop = threading.Event()
+        self._reap_wake = threading.Event()
+        self._domain_stop: asyncio.Task[StopOutcome] | None = None
+        self._prelaunch: dict[int, int] | None = None
+        self._closing: asyncio.Task[None] | None = None
         self._reported_exit = False
         self._running_ns = 0
         self._warned = False
@@ -223,12 +235,26 @@ class CommandSession:
         self._transferring = False
         self._transfer_ns = 0
         self._sealed = False
-        self._sealing = False
+        self._output_seal: asyncio.Task[None] | None = None
 
-    def note(self, submitter: Submitter) -> None:
+    def capture_prelaunch(
+        self, baseline: dict[int, int], workload: Workload, deadline: int
+    ) -> None:
+        cutoff = min(deadline, self._clock.monotonic_ns() + SCAN_NS)
+        if (
+            self._clock.monotonic_ns() < cutoff
+            and command_argv(workload) is not None
+            and self._clock.monotonic_ns() < cutoff
+        ):
+            NativeIdentityReader(clock=self._clock).command_prelaunch(baseline, cutoff)
+
+    def note(
+        self, submitter: Submitter, prelaunch: dict[int, int] | None = None
+    ) -> None:
         with self._lock:
             if self._execution is None:
                 self._execution = submitter
+                self._prelaunch = prelaunch or None
 
     def decide_transfer(
         self, submitter: Submitter, observational: bool, item: TransferItem
@@ -338,6 +364,7 @@ class CommandSession:
             if self._stage is _Stage.FENCED:
                 return
             self._stage = _Stage.FENCED
+            self._discard_unlaunched_prelaunch()
             closed = self._journal.closed
         if not closed:
             self._journal.close()
@@ -397,56 +424,56 @@ class CommandSession:
         phase: PhaseName = "complete" if code == 0 else "failed"
         return "exited", phase, code
 
-    def seal_outputs(self) -> None:
+    async def _seal_confirmed(self) -> None:
         started = self._clock.monotonic_ns()
-        with self._lock:
-            while self._sealing:
-                self._lock.wait()
-            if self._sealed:
-                return
-            owner = self._owner
-            running = self._stage is _Stage.RUNNING
-            self._sealing = True
+        executor = NativeExecutor(1, 1)
         try:
-            if self._ready_to_seal(owner, running):
-                self._write_seal(started)
+            await executor.run(lambda: self._write_snapshot(started))
+        except NativeIOUnresolved:
+            self._finish_seal("refused", started)
         finally:
-            with self._lock:
-                self._sealing = False
-                self._lock.notify_all()
+            try:
+                await executor.close()
+            except NativeIOUnresolved:
+                self._finish_seal("refused", started)
 
-    def _ready_to_seal(self, owner: ChildOwner | None, running: bool) -> bool:
-        if owner is None or owner.pid is None or not running:
-            return False
-        if not owner.collected() or owner.status is None:
-            return False
-        if observed_exit(owner.status) is None:
-            return False
-        if sys.platform != "linux":
-            return True
-        listed = adopted_pids()
-        if listed is None:
-            return False
-        return not listed
-
-    def _write_seal(self, started: int) -> None:
-        try:
-            directory = open_private_directory(self._attempt, "candidate")
-        except (OSError, FilesystemError) as error:
-            self._settle_seal(started, error)
+    def _write_snapshot(self, started: int) -> None:
+        with self._lock:
+            self._lock.wait_for(
+                lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
+            )
+            ran = self._stage is _Stage.RUNNING
+        if not ran:
             return
+        if self._journal.closed:
+            self._finish_seal("journal_unavailable", started)
+            return
+        source: DirectoryAnchor | None = None
+        snapshot: DirectoryAnchor | None = None
+        admitted = False
         try:
             try:
-                sealed = seal_regular_tree(directory)
+                source = open_private_directory(self._attempt, "candidate")
+                snapshot = create_directory(self._attempt, SNAPSHOT_NAME)
+                sealed = snapshot_regular_tree(source, snapshot)
             except (SealCapacityError, RecursionError, MemoryError):
                 self._finish_seal("refused", started)
                 return
-            except OSError as error:
+            except (OSError, FilesystemError) as error:
                 self._settle_seal(started, error)
                 return
+            if self._append_seal(sealed, started):
+                admitted = True
+                freeze_private_tree(snapshot)
+                self._finish_seal("sealed", started)
         finally:
-            directory.close()
-        self._record_seal(sealed, started)
+            if source is not None:
+                source.close()
+            if snapshot is not None:
+                identity = snapshot.identity
+                snapshot.close()
+                if not admitted:
+                    remove_directory(self._attempt, identity)
 
     def _settle_seal(self, started: int, error: OSError | FilesystemError) -> None:
         if isinstance(error, OSError) and space_error(error):
@@ -455,7 +482,7 @@ class CommandSession:
             return
         self._finish_seal("refused", started)
 
-    def _record_seal(self, sealed: SealedTree, started: int) -> None:
+    def _append_seal(self, sealed: SealedTree, started: int) -> bool:
         files: list[JsonValue] = [
             {"name": item.name, "sha256": item.sha256} for item in sealed.files
         ]
@@ -465,14 +492,16 @@ class CommandSession:
             recorded = self._journal.append("runner.outputs_sealed", payload)
         except (JsonShapeError, UnicodeEncodeError):
             self._finish_seal("refused", started)
-            return
+            return False
         if not recorded:
             self._finish_seal("journal_unavailable", started)
-            return
-        self._finish_seal("sealed", started)
+            return False
+        return True
 
     def _finish_seal(self, outcome: str, started: int) -> None:
         with self._lock:
+            if self._sealed:
+                return
             self._sealed = True
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)
         level = Level.INFO if outcome == "sealed" else Level.WARNING
@@ -482,6 +511,13 @@ class CommandSession:
         code = observed_exit(status)
         if code is None:
             return
+        try:
+            self._loop.call_soon_threadsafe(
+                self._begin_domain_stop, self._clock.monotonic_ns()
+            )
+        except RuntimeError:
+            if not self._loop.is_closed():
+                raise
         with self._lock:
             self._lock.wait_for(
                 lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
@@ -494,17 +530,92 @@ class CommandSession:
                 if not self._stop.is_set():
                     self._emit("journal_unavailable", started)
 
-    async def aclose(self) -> None:
+    def _begin_domain_stop(self, started_ns: int) -> None:
+        owner = self._owner
+        token = self._token
+        if (
+            self._stop.is_set()
+            or self._domain_stop is not None
+            or owner is None
+            or token is None
+        ):
+            return
+        with owner.lock:
+            pid = owner.pid
+            status = owner.status
+        if pid is None or status is None or observed_exit(status) is None:
+            return
         with self._lock:
+            prelaunch, self._prelaunch = self._prelaunch, None
+        self._domain_stop = self._loop.create_task(
+            self._stop_domain(pid, token, started_ns, prelaunch)
+        )
+
+    async def _stop_domain(
+        self,
+        pid: int,
+        token: SecretValue,
+        started_ns: int,
+        prelaunch: dict[int, int] | None,
+    ) -> StopOutcome:
+        marker = b"KORA_ATTEMPT_TOKEN=" + token.reveal().encode("ascii")
+        executor = NativeExecutor(1, 1)
+        try:
+            outcome = await executor.run(
+                lambda: CommandDomainStop(
+                    pid, marker, self._clock, self._reap_wake.set, prelaunch
+                ).stop(started_ns)
+            )
+        except NativeIOUnresolved:
+            outcome = StopOutcome.UNRESOLVED
+        finally:
+            try:
+                await executor.close()
+            except NativeIOUnresolved:
+                outcome = StopOutcome.UNRESOLVED
+        waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
+        level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
+        self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
+        if outcome is StopOutcome.CONFIRMED:
+            self._output_seal = self._loop.create_task(self._seal_confirmed())
+        return outcome
+
+    def close_journal(self) -> None:
+        self._journal.close()
+
+    async def aclose(self) -> None:
+        if self._closing is None:
+            self._closing = self._loop.create_task(self._release())
+        cancelled = await observed(self._closing)
+        self._closing.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _release(self) -> None:
+        self.close_journal()
+        self._begin_domain_stop(self._clock.monotonic_ns())
+        with self._lock:
+            self._prelaunch = None
             self._stop.set()
-            self._journal.close()
             self._lock.notify_all()
-        for task in tuple(self._tasks):
-            await cancel_task(task)
-        for drain in self._drains:
-            drain.close()
-        self._close_pipes()
-        self._scope.release()
+        try:
+            if self._domain_stop is not None:
+                await self._domain_stop
+            if self._output_seal is not None:
+                await self._output_seal
+        finally:
+            self._reap_stop.set()
+            self._reap_wake.set()
+            try:
+                if self._reaper is not None:
+                    await self._loop.run_in_executor(None, self._reaper.join)
+            finally:
+                for task in tuple(self._tasks):
+                    await cancel_task(task)
+                for drain in self._drains:
+                    drain.close()
+                self._close_pipes()
+                self._scope.release()
 
     def _claim(
         self,
@@ -530,6 +641,7 @@ class CommandSession:
                 self._emit("refused", started)
                 raise delivery_error("workload_busy")
             if self._journal.closed:
+                self._discard_unlaunched_prelaunch()
                 self._emit("journal_unavailable", started)
                 raise delivery_error("journal_unavailable")
             if self._stage is _Stage.RUNNING:
@@ -553,7 +665,10 @@ class CommandSession:
         try:
             authorize()
             self._prepare_files()
-        except KoraProtocolError:
+        except KoraProtocolError as error:
+            if error.code == "deadline_expired":
+                with self._lock:
+                    self._discard_unlaunched_prelaunch()
             self._finish(_Stage.IDLE, "refused", started)
             raise
         except FilesystemError:
@@ -598,11 +713,18 @@ class CommandSession:
             if self._stage is not _Stage.LAUNCHING:
                 return
             self._stage = _Stage.FAILED
+            self._discard_unlaunched_prelaunch()
             self._lock.notify_all()
+
+    def _discard_unlaunched_prelaunch(self) -> None:
+        if self._owner is None or self._owner.pid is None:
+            self._prelaunch = None
 
     def _finish(self, stage: _Stage, outcome: str, started: int) -> None:
         with self._lock:
             self._stage = stage
+            if stage in (_Stage.FAILED, _Stage.FENCED):
+                self._discard_unlaunched_prelaunch()
             try:
                 self._emit(outcome, started)
             finally:
@@ -755,14 +877,18 @@ class CommandSession:
 
     def _reap(self, owner: ChildOwner) -> None:
         seen: dict[int, int] = {}
-        while not self._stop.wait(1.0):
+        while not self._reap_stop.is_set():
+            self._reap_wake.wait(1.0)
+            self._reap_wake.clear()
+            if self._reap_stop.is_set():
+                return
             listed = adopted_pids()
             if listed is None:
                 continue
             now = time.monotonic_ns()
-            for pid in listed:
-                if pid != owner.pid:
-                    seen.setdefault(pid, now)
+            with owner.lock:
+                leader = None if owner.reaped else owner.pid
+            seen = {pid: seen.get(pid, now) for pid in listed if pid != leader}
             for pid, first in tuple(seen.items()):
                 if now - first < GRACE_NS:
                     continue

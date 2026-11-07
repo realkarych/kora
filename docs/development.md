@@ -8,7 +8,7 @@ On 2026-11-06, the project owner approved the four-module placement and this wor
 
 Native fixture-release amendment dated 2026-11-05: the project owner approved the public DiskArbitration helper, its explicit pending/completed ownership rules and this wording under [issue #302](https://github.com/realkarych/kora/issues/302). Existing test coverage, evidence admission, supported environments and hard deadlines remain unchanged.
 
-Native dissenter amendment dated 2026-11-06: the project owner approved recording the process DiskArbitration reports for a refused fixture release, and this wording, under [issue #886](https://github.com/realkarych/kora/issues/886). Existing test coverage, evidence admission, supported environments and hard deadlines remain unchanged.
+Native dissenter amendment dated 2026-11-06: co-author `klukashka` approved recording the process DiskArbitration reports for a refused fixture release under [issue #886](https://github.com/realkarych/kora/issues/886); wording pending line-by-line owner review. Existing test coverage, evidence admission, supported environments and hard deadlines remain unchanged.
 
 Remainder headroom amendment dated 2026-11-05: the project owner approved the three-module transfer and this wording under [issue #726](https://github.com/realkarych/kora/issues/726). The existing test inventory, execution environments, evidence admission and hard deadlines remain unchanged.
 

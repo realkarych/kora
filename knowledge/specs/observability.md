@@ -1,10 +1,12 @@
 # Structured component diagnostics
 
+Command-domain stop amendment dated 2026-11-07, issue #913. `runtime.local.command_stop` records `outcome` (`confirmed` or `unresolved`) and `waited_ms` once per runner-owned stop. The event uses INFO for confirmation and WARNING for incomplete evidence. Native environment bytes, paths, identities and tokens remain with the stop owner. The command-stop cases in `tests/plugins/runtime/local/test_command.py` own the activation evidence. Stop and its private outcome are independent of diagnostic delivery.
+
 Command-execution amendment dated 2026-11-06, issue #809: `runtime.local.command` records `outcome` (`started`, `exited`, `refused` or `journal_unavailable`) and `waited_ms` only. It carries no argv, path, pid, token, workspace or attempt id. A failed diagnostic write does not block the journal or the stop. Journal closure emits one WARNING. The command tests in `tests/plugins/runtime/local/test_command.py` own the activation evidence. Wording pending line-by-line owner review.
 
 Input-transfer amendment dated 2026-11-06, issue #847: `runtime.local.transfer` records `outcome` (`materialised`, `rejected`, `refused` or `journal_unavailable`) and `waited_ms` only. It carries no name, digest, path, or attempt id. The transfer tests in `tests/plugins/runtime/local/test_transfer.py` own the activation evidence.
 
-Output-sealing amendment dated 2026-11-07, issue #904: `runtime.local.seal` records `outcome` (`sealed`, `refused` or `journal_unavailable`) and `waited_ms` only. It carries no name, digest, path, or attempt id. The command tests in `tests/plugins/runtime/local/test_command.py` own the activation evidence.
+Output-sealing amendment dated 2026-11-07, issue #904: `runtime.local.seal` records `outcome` (`sealed`, `refused` or `journal_unavailable`) and `waited_ms` only, once the snapshot job finishes. It carries no name, digest, path, or attempt id. `status` does not emit it. An unresolved command-domain stop does not emit it. The command tests in `tests/plugins/runtime/local/test_command.py` own the activation evidence.
 
 Workload-delivery amendment dated 2026-11-01, issue #611: existing counted `runtime.local.runner.auth_refused` adds fixed reasons `not_submitter` and `head_changed`; `exited` covers a dead recorded peer. New delivery refusals expose only allowlisted fixed error envelopes, never workload values, hashes, identities, pids or paths. The delivery/attach/deadline tests in `tests/plugins/runtime/local/test_delivery.py` and existing control logging tests own activation evidence. No per-frame INFO event, journal authority or new diagnostic sink is introduced.
 

@@ -1,11 +1,12 @@
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import stat
 import subprocess
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,20 +67,26 @@ def assert_undisclosed(process: ProcessResult, *markers: bytes) -> None:
         assert marker not in process.stdout + process.stderr
 
 
-MAX_VCS_PREPARATION_EVIDENCE: Final[int] = 128
+MAX_VCS_PREPARATION_EVIDENCE: Final[int] = 512
+VCS_PREPARATION_STEPS: Final[tuple[str, ...]] = (
+    "init_remote",
+    "init_gone",
+    "init_seed",
+    "add_seed",
+    "commit_seed",
+    "push_seed",
+    "read_revision",
+)
 VCS_PREPARATION_ENDINGS: Final[frozenset[bytes]] = frozenset(
     f"git_{step}_{reason}".encode("ascii")
-    for step in (
-        "init_remote",
-        "init_gone",
-        "init_seed",
-        "add_seed",
-        "commit_seed",
-        "push_seed",
-        "read_revision",
-    )
+    for step in VCS_PREPARATION_STEPS
     for reason in ("deadline", "nonzero", "signal", "io")
 ) | {b"prepare_complete"}
+VCS_TIMING_RECORD: Final[re.Pattern[bytes]] = re.compile(
+    rb"time:("
+    + "|".join(VCS_PREPARATION_STEPS).encode("ascii")
+    + rb"):(-1|\d{1,9}):\d{1,9}:\d{1,9}"
+)
 
 
 @dataclass(frozen=True)
@@ -91,6 +98,15 @@ class VcsPreparationProbe:
     inode: int
 
     def observed(self) -> tuple[str, ...]:
+        return self.read()[0]
+
+    def timing(self) -> tuple[str, ...]:
+        return self.read()[1]
+
+    def timed_steps(self) -> tuple[str, ...]:
+        return tuple(record.split(":")[1] for record in self.timing())
+
+    def read(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
         try:
             opened = os.fstat(self.descriptor)
             if (
@@ -100,27 +116,35 @@ class VcsPreparationProbe:
                 or opened.st_uid != os.getuid()
                 or opened.st_nlink != 1
             ):
-                return ("evidence_unavailable",)
+                return ("evidence_unavailable",), ()
             payload = os.pread(self.descriptor, MAX_VCS_PREPARATION_EVIDENCE + 1, 0)
         except OSError:
-            return ("evidence_unavailable",)
+            return ("evidence_unavailable",), ()
         if not payload:
-            return ("entry_not_observed",)
+            return ("entry_not_observed",), ()
         if len(payload) > MAX_VCS_PREPARATION_EVIDENCE or not payload.endswith(b"\n"):
-            return ("evidence_malformed",)
+            return ("evidence_malformed",), ()
         records = payload[:-1].split(b"\n")
+        timing = [record for record in records if record.startswith(b"time:")]
+        closure = [record for record in records if not record.startswith(b"time:")]
         if (
-            len(records) > 2
+            len(closure) > 2
             or records[0] != b"prepare_entered"
-            or (len(records) == 2 and records[1] not in VCS_PREPARATION_ENDINGS)
+            or (len(closure) == 2 and records[-1] != closure[1])
+            or (len(closure) == 2 and closure[1] not in VCS_PREPARATION_ENDINGS)
+            or len(timing) > len(VCS_PREPARATION_STEPS)
+            or not all(VCS_TIMING_RECORD.fullmatch(record) for record in timing)
         ):
-            return ("evidence_malformed",)
-        return tuple(record.decode("ascii") for record in records)
+            return ("evidence_malformed",), ()
+        return (
+            tuple(record.decode("ascii") for record in closure),
+            tuple(record.decode("ascii") for record in timing),
+        )
 
 
 @contextmanager
 def vcs_preparation_probe(
-    tmp_path: Path, *, occupy_remote: bool = False
+    tmp_path: Path, *, occupy_remote: bool = False, deadline_seconds: int | None = None
 ) -> Generator[VcsPreparationProbe]:
     root = private_home(tmp_path / "vcs-observation").resolve(strict=True)
     path = root / "preparation"
@@ -145,6 +169,11 @@ def vcs_preparation_probe(
                         "device": opened.st_dev,
                         "inode": opened.st_ino,
                         "occupy_remote": occupy_remote,
+                        **(
+                            {}
+                            if deadline_seconds is None
+                            else {"deadline_seconds": deadline_seconds}
+                        ),
                     }
                 }
             ),
@@ -548,6 +577,7 @@ def test_installed_provider_supports_local_tooling(
     plugin: str,
     configuration: JsonObject | None,
     expected: int,
+    record_testsuite_property: Callable[[str, object], None],
 ) -> None:
     installed = installed_conformance
     home = private_home(installed.outside / protocol.value)
@@ -580,6 +610,11 @@ def test_installed_provider_supports_local_tooling(
             },
         )
         preparation = probe.observed() if probe is not None else ()
+        timed_steps = probe.timed_steps() if probe is not None else ()
+        if probe is not None:
+            record_testsuite_property(
+                "vcs_preparation_timing_first", ";".join(probe.timing())
+            )
 
     outcome = CommandResult.model_validate_json(process.stdout)
     assert process.code == 0, (process.stdout, process.stderr, preparation)
@@ -593,10 +628,13 @@ def test_installed_provider_supports_local_tooling(
     assert not list(home.rglob("journal"))
     if protocol is ProtocolName.VCS:
         assert preparation == ("prepare_entered", "prepare_complete")
+        assert timed_steps == VCS_PREPARATION_STEPS
 
 
 def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
-    installed_conformance: InstalledTooling, tmp_path: Path
+    installed_conformance: InstalledTooling,
+    tmp_path: Path,
+    record_testsuite_property: Callable[[str, object], None],
 ) -> None:
     home = private_home(tmp_path / "home")
     config = tmp_path / "config.json"
@@ -610,9 +648,12 @@ def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
             environment={"HOME": str(home)},
         )
         preparation = probe.observed()
+        timing = probe.timing()
+        timed_steps = probe.timed_steps()
+    record_testsuite_property("vcs_preparation_timing_later", ";".join(timing))
     exposed = any(
         marker in process.stdout + process.stderr
-        for marker in (b"vcs-private-setup-canary", b"remote.git")
+        for marker in (b"vcs-private-setup-canary", b"remote.git", b"git-trace")
     )
 
     assert not exposed
@@ -626,6 +667,39 @@ def test_installed_vcs_reports_git_preparation_refusal_without_exposing_inputs(
     assert outcome.cleanup.state is CleanupOutcome.CLOSED
     assert outcome.cleanup.unresolved_count == 0
     assert preparation == ("prepare_entered", "git_init_remote_nonzero")
+    assert timed_steps == ("init_remote",)
+    assert not list(home.rglob("journal"))
+
+
+def test_installed_vcs_reports_git_deadline_with_timing(
+    installed_conformance: InstalledTooling, tmp_path: Path
+) -> None:
+    home = private_home(tmp_path / "home")
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps(vcs_configuration(Path("vcs"))))
+
+    with vcs_preparation_probe(tmp_path, deadline_seconds=0) as probe:
+        process = installed_conformance.run(
+            *conformance_arguments(
+                "vcs", "configured", config, "fixtures_vcs", probe.fixture_data
+            ),
+            environment={"HOME": str(home)},
+        )
+        preparation = probe.observed()
+        timed_steps = probe.timed_steps()
+
+    assert_undisclosed(process, b"remote.git", b"git-trace")
+    outcome = CommandResult.model_validate_json(process.stdout)
+    assert process.code == 1
+    assert outcome.outcome is OriginalOutcome.FAILED
+    assert outcome.reason == "refused"
+    assert outcome.completed == 0
+    assert outcome.expected == 13
+    assert outcome.cleanup is not None
+    assert outcome.cleanup.state is CleanupOutcome.CLOSED
+    assert outcome.cleanup.unresolved_count == 0
+    assert preparation == ("prepare_entered", "git_init_remote_deadline")
+    assert timed_steps == ("init_remote",)
     assert not list(home.rglob("journal"))
 
 

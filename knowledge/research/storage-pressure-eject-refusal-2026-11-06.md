@@ -44,7 +44,7 @@ No kora path opens `/dev/disk*` or `/dev/rdisk*` except the intentional test blo
 
 The refusal is not an owned-resource defect: no owned opener and no release-sequence defect exists on the traced path. It is also not native behaviour that the test may tolerate. `resources_closed=false` is the true report and the image stays attached. A real device-node holder reaches the same kernel EBUSY, so an exception for an eject refusal with zero visible holders would blind the fixture to the leak it exists to detect.
 
-The flake stays an unattributed foreign hold, and no cause-specific repair is supported yet. The fixture now records the process DiskArbitration reports through the helper's native call. This supersedes the earlier #302 owner decision to obtain the dissenter PID from a `diskutil` release: #753 already replaced `diskutil`, and retained `diskutil` refusals showed only "Volume failed to eject".
+The flake stays an unattributed foreign hold, and no cause-specific repair is supported yet. The fixture now records the process DiskArbitration reports through the helper's native call. Co-author `klukashka` approved superseding the earlier #302 owner decision to obtain the dissenter PID from a `diskutil` release, because #753 already replaced `diskutil` and retained `diskutil` refusals showed only "Volume failed to eject". The project owner's review is pending.
 
 ## Reading the next recurrence
 
@@ -66,7 +66,7 @@ Any wait or second release is retry-shaped and is not proposed here. It needs an
 
 ## Disclosure
 
-The PID and tokenized comm of any process DiskArbitration reports, including other-UID processes, reach CI logs and JUnit through the native note, including the `junit.xml` and `tests.stdout` in the `scaffold-tests` artifact of the macOS storage job on every pull request and `qualification.xml` in the storage workflow. They also reach the qualification artifact through `native.outcome` in the preserved manifest. Comm is at most 16 characters of `[A-Za-z0-9._+-]`, otherwise `unprintable`. The sensitivity is low, and the project owner accepted it under #886.
+The PID and tokenized comm of any process DiskArbitration reports, including other-UID processes, reach CI logs and JUnit through the native note, including the `junit.xml` and `tests.stdout` in the `scaffold-tests` artifact of the macOS storage job on every pull request and `qualification.xml` in the storage workflow. They also reach the qualification artifact through `native.outcome` in the preserved manifest. Comm is at most 16 characters of `[A-Za-z0-9._+-]`, otherwise `unprintable`. The sensitivity is low. Co-author `klukashka` accepted it under #886, and the project owner's review is pending.
 
 ## Limits
 

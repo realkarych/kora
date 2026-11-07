@@ -4,13 +4,14 @@ import errno
 import hashlib
 import json
 import os
+import select
 import shutil
 import signal
 import subprocess
 import sys
 import threading
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Generator
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,8 @@ from kora.plugins.runtime.local.channel import (
     control_request,
     read_delivery,
 )
+from kora.plugins.runtime.local.command import CommandSession
+from kora.plugins.runtime.local.command_stop import CommandDomainStop
 from kora.plugins.runtime.local.control import (
     attested,
     connected,
@@ -40,14 +43,23 @@ from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.identity import Handle
+from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import RawEvent, TransferItem, Workload
+from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import open_local_directory
-from kora.runner.identity import NativeIdentityReader
+from kora.runner.identity import (
+    SCAN_NS,
+    CommandPIDInventory,
+    CommandRead,
+    IdentityState,
+    NativeIdentityReader,
+    darwin_environment,
+)
 from kora.runner.journal import RunningJournal, read_records
 from kora.runner.peers import kernel_source
-from kora.runner.registry import Running, TransitionExecutor
+from kora.runner.registry import Running, Submitter, TransitionExecutor
 from tests.support.local_peers import identity_of, until
 from tests.support.local_runners import (
     exited_within,
@@ -59,6 +71,7 @@ from tests.support.local_runners import (
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
+    open_descriptors,
     prepared,
     private_directory,
     protocol_error,
@@ -89,11 +102,68 @@ PS = "/bin/ps"
 HOLD = "\n".join(
     (
         f"marker={HOLD_MARKER!r}",
-        "import os, time",
+        "import os, signal, time",
+        "reading, writing = os.pipe()",
         "if os.fork() == 0:",
+        "    os.close(reading)",
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+        "    os.write(writing, b'r')",
+        "    os.close(writing)",
         "    time.sleep(60)",
         "    os._exit(0)",
+        "os.close(writing)",
+        "assert os.read(reading, 1) == b'r'",
         "os._exit(0)",
+    )
+)
+STOPPED_DESCENDANTS = "\n".join(
+    (
+        f"marker={HOLD_MARKER!r}",
+        "import os, signal, sys",
+        "from pathlib import Path",
+        "def handoff(_number, _frame):",
+        "    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})",
+        "    if os.fork():",
+        "        os._exit(0)",
+        "    os.setsid()",
+        "    pending = Path('late.pending')",
+        "    pending.write_text(str(os.getpid()))",
+        "    pending.replace('late')",
+        "    signal.signal(signal.SIGTERM, signal.SIG_DFL)",
+        "    signal.pthread_sigmask(signal.SIG_SETMASK, mask)",
+        "    signal.pause()",
+        "    os._exit(1)",
+        "children = []",
+        "for name in ('grouped', 'detached'):",
+        "    reading, writing = os.pipe()",
+        "    pid = os.fork()",
+        "    if pid == 0:",
+        "        os.close(reading)",
+        "        if name == 'grouped' and sys.argv[2] == 'unmarked':",
+        "            os.set_inheritable(writing, True)",
+        '            gate = "import os,signal,sys; '
+        "os.write(int(sys.argv[1]), b'r'); signal.pause()\"",
+        "            args = [sys.executable, '-I', '-c', gate, str(writing), marker]",
+        "            os.execve(sys.executable, args, {})",
+        "        if name == 'detached':",
+        "            os.setsid()",
+        "            if sys.argv[2] == 'resistant':",
+        "                signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+        "            if sys.argv[2] == 'handoff':",
+        "                signal.signal(signal.SIGTERM, handoff)",
+        "        os.write(writing, b'r')",
+        "        os.close(writing)",
+        "        signal.pause()",
+        "        os._exit(1)",
+        "    os.close(writing)",
+        "    assert os.read(reading, 1) == b'r'",
+        "    os.close(reading)",
+        "    children.append(pid)",
+        "pending = Path('children.pending')",
+        "pending.write_text(' '.join(map(str, children)))",
+        "pending.replace('children')",
+        "if sys.argv[2] == 'hold': signal.pause()",
+        "sys.exit(int(sys.argv[1]))",
     )
 )
 
@@ -519,23 +589,19 @@ async def test_command_exit_is_journalled_without_status(
                 event.kind == "command_exited" for event in journal_events(journal)
             )
         )
-        recorded_events = journal_events(journal)
+        recorded_events = command_records(journal)
         await runtime.start(handle, ctx)
         status = await runtime.status(handle, ctx)
+        await until(lambda: sealed_manifest(journal) is not None)
         repeated = journal_events(journal)
 
-    assert [event.i for event in recorded_events] == [0, 1]
     assert [event.kind for event in recorded_events] == [
         "runner.candidate_started",
         "command_exited",
     ]
     assert recorded_events[1].data == {"exit_code": expected}
-    assert [event.kind for event in repeated] == [
-        "runner.candidate_started",
-        "command_exited",
-        "runner.outputs_sealed",
-    ]
-    assert repeated[1] == recorded_events[1]
+    assert command_records(journal) == recorded_events
+    assert sum(event.kind == "runner.outputs_sealed" for event in repeated) == 1
     assert status.state == "exited"
     assert status.exit_code == expected
 
@@ -687,8 +753,12 @@ async def test_disconnected_start_does_not_kill_the_command(
         journal = attempt_directory(root, runtime, "attempt-1") / "journal.jsonl"
         await until(lambda: len(journal_events(journal)) == 1)
         os.kill(leader, signal.SIGTERM)
-        await until(lambda: len(journal_events(journal)) == 2)
-        events = journal_events(journal)
+        await until(
+            lambda: any(
+                event.kind == "command_exited" for event in journal_events(journal)
+            )
+        )
+        events = command_records(journal)
 
     assert [event.kind for event in events] == [
         "runner.candidate_started",
@@ -735,8 +805,12 @@ async def test_leader_exit_capture_eof_and_descriptors_are_separate(
         await runtime.start(handle, ctx)
         runner = await running_pid(runtime, "attempt-1")
         journal = attempt_directory(root, runtime, "attempt-1") / "journal.jsonl"
-        await until(lambda: len(journal_events(journal)) == 2)
-        events = journal_events(journal)
+        await until(
+            lambda: any(
+                event.kind == "command_exited" for event in journal_events(journal)
+            )
+        )
+        events = command_records(journal)
         await until_exited(runtime, handle, ctx)
         status = await runtime.status(handle, ctx)
         holders = marker_pids(HOLD_MARKER)
@@ -786,6 +860,10 @@ async def test_command_token_is_redacted_before_launch(
 
 
 def command_outcomes(path: Path) -> list[str]:
+    return runtime_outcomes(path, "runtime.local.command")
+
+
+def runtime_outcomes(path: Path, event: str) -> list[str]:
     if not path.exists():
         return []
     found: list[str] = []
@@ -794,12 +872,440 @@ def command_outcomes(path: Path) -> list[str]:
             record = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if record.get("event") != "runtime.local.command":
+        if record.get("event") != event:
             continue
         outcome = record.get("outcome")
         if isinstance(outcome, str):
             found.append(outcome)
     return found
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["ordinary", "resistant", "handoff", "unmarked"])
+async def test_exited_command_settles_observed_descendants_without_status(
+    tmp_path: Path, kora_capture: Capture, mode: str
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        command = (sys.executable, "-I", "-c", STOPPED_DESCENDANTS, "23", mode)
+        handle = await runtime.submit(
+            command_workload(runtime, "attempt-1", command), ctx
+        )
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        children = attempt / "candidate" / "children"
+        log = attempt / "runner.log"
+
+        await runtime.start(handle, ctx)
+        await until(children.is_file)
+        pids = tuple(int(pid) for pid in children.read_text().split())
+        await until(lambda: bool(runtime_outcomes(log, "runtime.local.command_stop")))
+        late = (children.parent / "late").read_text() if mode == "handoff" else ""
+        settled = pids if not late else (*pids, int(late))
+        exited = await asyncio.gather(
+            *(asyncio.to_thread(exited_within, pid, 1) for pid in settled)
+        )
+        status = await runtime.status(handle, ctx)
+        outcomes = runtime_outcomes(log, "runtime.local.command_stop")
+        reader = NativeIdentityReader()
+        states = tuple(reader.read(pid).state for pid in settled)
+
+    assert len(pids) == 2
+    assert len(settled) == (3 if mode == "handoff" else 2)
+    if mode == "unmarked" and sys.platform == "darwin":
+        assert exited == [False, True]
+        assert outcomes == ["unresolved"]
+    else:
+        assert all(exited)
+        assert outcomes == ["confirmed"]
+    if sys.platform == "linux":
+        assert all(state is IdentityState.ABSENT for state in states)
+    assert (status.state, status.exit_code) == ("exited", 23)
+
+
+@pytest.mark.asyncio
+async def test_command_stop_leaves_foreign_token_lookalike_alive(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    token = bytes(range(16)).hex()
+    canary = "private-unrelated-native-environment"
+    with subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import os; os.read(0, 1)",
+            f"KORA_ATTEMPT_TOKEN={token}",
+        ],
+        stdin=subprocess.PIPE,
+        env={"KORA_ATTEMPT_TOKEN": f"{token}-other", "PRIVATE_CANARY": canary},
+        start_new_session=True,
+    ) as unrelated:
+        try:
+            async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+                handle = await runtime.submit(
+                    command_workload(runtime, "attempt-1", (binary("true"),)), ctx
+                )
+                attempt = attempt_directory(root, runtime, "attempt-1")
+                marker = attempt / "attempt.token"
+                marker.write_text(token)
+                marker.chmod(0o600)
+                log = attempt / "runner.log"
+
+                await runtime.start(handle, ctx)
+                await until(
+                    lambda: bool(runtime_outcomes(log, "runtime.local.command_stop"))
+                )
+                outcomes = runtime_outcomes(log, "runtime.local.command_stop")
+                alive = unrelated.poll() is None
+                contents = log.read_text()
+        finally:
+            if unrelated.stdin is not None:
+                unrelated.stdin.close()
+            if unrelated.poll() is None:
+                unrelated.kill()
+            unrelated.wait(timeout=5)
+
+    assert alive
+    assert outcomes == ["confirmed"]
+    assert token not in contents
+    assert canary not in contents
+
+
+@contextmanager
+def opaque_environment_process() -> Generator[subprocess.Popen[bytes], None, None]:
+    path = sys.executable
+    script = "import os; os.write(1, b'r'); os.read(0, 1)"
+    if sys.platform == "darwin":
+        parent, name = os.path.split(path)
+        candidates = (f"{parent}/{'./' * count}{name}" for count in range(4))
+        path = next(
+            candidate
+            for candidate in candidates
+            if len(os.fsencode(candidate)) % 8 in (2, 3)
+        )
+        script = "\n".join(
+            (
+                "import ctypes",
+                "argv = ctypes.CDLL(None)._NSGetArgv",
+                "argv.restype = ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))",
+                "ctypes.c_ubyte.from_address(argv()[0][0] - 1).value = 65",
+                script,
+            )
+        )
+    with subprocess.Popen(
+        [path, "-I", "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env={},
+        start_new_session=True,
+    ) as child:
+        try:
+            assert child.stdout is not None
+            assert select.select([child.stdout], [], [], 5)[0]
+            assert child.stdout.read(1) == b"r"
+            yield child
+        finally:
+            assert child.stdin is not None
+            child.stdin.close()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=5)
+                raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_present", [True, False], ids=["before", "after"])
+async def test_command_stop_confirms_only_prelaunch_opaque_processes(
+    tmp_path: Path, kora_capture: Capture, already_present: bool
+) -> None:
+    reader = NativeIdentityReader()
+    with ExitStack() as processes:
+        child = (
+            processes.enter_context(opaque_environment_process())
+            if already_present
+            else None
+        )
+        async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+            handle = await runtime.submit(
+                command_workload(runtime, "attempt-1", (binary("true"),)), ctx
+            )
+            log = attempt_directory(root, runtime, "attempt-1") / "runner.log"
+            if child is None:
+                child = processes.enter_context(opaque_environment_process())
+
+            member, observation = reader.command_member(
+                child.pid, os.getpgrp(), b"KORA_ATTEMPT_TOKEN=synthetic"
+            )
+            await runtime.start(handle, ctx)
+            await until(
+                lambda: bool(runtime_outcomes(log, "runtime.local.command_stop"))
+            )
+            outcomes = runtime_outcomes(log, "runtime.local.command_stop")
+            alive = child.poll() is None
+    absent, final_observation = reader.command_member(
+        child.pid, os.getpgrp(), b"KORA_ATTEMPT_TOKEN=synthetic"
+    )
+
+    assert alive
+    assert absent is None
+    assert final_observation is CommandRead.UNSTABLE
+    if sys.platform == "darwin":
+        assert member is None
+        assert observation is CommandRead.OPAQUE
+        assert outcomes == (["confirmed"] if already_present else ["unresolved"])
+    else:
+        assert member is not None
+        assert member.owned
+        assert observation is CommandRead.VERIFIED
+        assert outcomes == ["confirmed"]
+
+
+@pytest.mark.parametrize(
+    ("observation", "current", "accepted"),
+    [
+        (CommandRead.OPAQUE, 201, True),
+        (CommandRead.OPAQUE, 202, False),
+        (CommandRead.OPAQUE, None, False),
+        (CommandRead.UNSTABLE, 201, False),
+    ],
+    ids=["same-identity", "reused-pid", "missing-identity", "contradiction"],
+)
+def test_prelaunch_proof_requires_exact_identity_and_opaque_observation(
+    observation: CommandRead, current: int | None, accepted: bool
+) -> None:
+    captured = 201
+
+    verified = observation.matches_prelaunch(captured, current)
+
+    assert verified is accepted
+
+
+class ExitAppendClock(SystemClock):
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+
+    def monotonic_ns(self) -> int:
+        if threading.current_thread().name == "kora-child-reaper":
+            self.calls += 1
+            if self.calls == 2:
+                self.entered.set()
+                assert self.release.wait(15)
+        return super().monotonic_ns()
+
+
+def stop_workers() -> frozenset[threading.Thread]:
+    names = ("kora-runtime-local", "kora-child-reaper", "kora-adopted", "kora-journal")
+    return frozenset(
+        thread for thread in threading.enumerate() if thread.name.startswith(names)
+    )
+
+
+@pytest.mark.parametrize("alignment", [4, 8])
+def test_darwin_command_marker_requires_complete_environment(alignment: int) -> None:
+    marker = b"KORA_ATTEMPT_TOKEN=" + bytes(range(16)).hex().encode()
+    path = (2).to_bytes(4, sys.byteorder) + b"/x" + b"\0" * (alignment - 2)
+    arguments = path + b"command\0\0"
+    argument_only = path + b"command\0" + marker + b"\0"
+
+    accepted = darwin_environment(
+        arguments + marker + b"\0", marker, alignment=alignment
+    )
+    truncated = darwin_environment(
+        arguments + marker + b"\0INCOMPLETE", marker, alignment=alignment
+    )
+    rejected = darwin_environment(argument_only, marker, alignment=alignment)
+
+    assert accepted is True
+    assert truncated is None
+    assert rejected is False
+
+
+@pytest.mark.parametrize(
+    ("follow_up", "complete", "ambiguous"),
+    [
+        (CommandPIDInventory(frozenset({101})), True, False),
+        (CommandPIDInventory(frozenset({101}), frozenset({101})), False, True),
+        (
+            CommandPIDInventory(frozenset({101}), frozenset({101}), complete=False),
+            False,
+            True,
+        ),
+        (CommandPIDInventory(frozenset({101, 102})), False, False),
+        (None, False, False),
+    ],
+)
+def test_empty_command_confirmation_preserves_follow_up_group_evidence(
+    follow_up: CommandPIDInventory | None, complete: bool, ambiguous: bool
+) -> None:
+    first = CommandPIDInventory(frozenset({101}))
+
+    confirmation = first.confirm_empty(follow_up)
+
+    assert confirmation.complete is complete
+    assert confirmation.ambiguous_group is ambiguous
+    assert confirmation.members == ()
+
+
+class CommandSignalProbe(CommandDomainStop):
+    def send(self, identity: ProcessIdentity) -> bool:
+        return self._signal_member(
+            identity, signal.SIGTERM, self.clock.monotonic_ns() + SCAN_NS
+        )
+
+
+def test_command_stop_refuses_stale_identity_for_live_process() -> None:
+    value = bytes(range(16)).hex()
+    ready = "import os; os.write(1, b'r'); os.read(0, 1)"
+    with subprocess.Popen(
+        [sys.executable, "-I", "-c", ready],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env={"KORA_ATTEMPT_TOKEN": value},
+        start_new_session=True,
+    ) as child:
+        try:
+            assert child.stdout is not None
+            assert select.select([child.stdout], [], [], 5)[0]
+            assert child.stdout.read(1) == b"r"
+            identity = identity_of(child.pid)
+            stale = identity.model_copy(update={"start_time": identity.start_time + 1})
+            stop = CommandSignalProbe(
+                child.pid,
+                f"KORA_ATTEMPT_TOKEN={value}".encode(),
+                SystemClock(),
+                lambda: None,
+            )
+
+            delivered = stop.send(stale)
+            alive = child.poll() is None
+        finally:
+            if child.stdin is not None:
+                child.stdin.close()
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+
+    assert delivered is False
+    assert alive
+
+
+def test_census_retains_listed_group_member_after_detach() -> None:
+    command = "\n".join(
+        (
+            "import os",
+            "child = os.fork()",
+            "if child:",
+            "    os.waitpid(child, 0)",
+            "else:",
+            "    os.setsid()",
+            "    os.write(1, f'{os.getpid()}\\n'.encode())",
+            "    os.read(0, 1)",
+        )
+    )
+    marker = b"KORA_ATTEMPT_TOKEN=" + bytes(range(16)).hex().encode()
+    reader = NativeIdentityReader()
+    with subprocess.Popen(
+        [sys.executable, "-I", "-c", command],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        env={},
+    ) as parent:
+        pid = None
+        try:
+            assert parent.stdout is not None
+            assert select.select([parent.stdout], [], [], 5)[0]
+            pid = int(parent.stdout.readline())
+            identity = identity_of(pid)
+
+            member, observation = reader.command_member(
+                pid, os.getpgrp(), marker, listed_in_group=True
+            )
+            unrelated, _ = reader.command_member(pid, os.getpgrp(), marker)
+        finally:
+            if parent.stdin is not None:
+                parent.stdin.close()
+            try:
+                parent.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                if pid is not None:
+                    terminate(pid)
+                parent.kill()
+                parent.wait(timeout=5)
+                raise
+
+    assert observation is CommandRead.VERIFIED
+    assert member is not None
+    assert member.process.identity == identity
+    assert member.owned is False
+    assert unrelated is None
+
+
+class CommandCloseProbe(CommandSession):
+    def stopping(self) -> bool:
+        return self._stop.is_set()
+
+
+@pytest.mark.asyncio
+async def test_command_stop_settles_during_held_exit_append_and_cancelled_close(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = ExitAppendClock()
+    scope = SecretScope(kora_capture.diagnostics)
+    attempt = private_directory(tmp_path.resolve(), "attempt")
+    directory = open_local_directory(attempt)
+    candidate = attempt / "candidate"
+    children = candidate / "children"
+    journal = attempt / "journal.jsonl"
+    session = CommandCloseProbe(
+        directory,
+        str(candidate),
+        scope,
+        clock,
+        kora_capture.diagnostics.logger(COMPONENT),
+    )
+    submitter = Submitter(dispatcher_id="test", process=identity_of(os.getpid()))
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
+        command = (sys.executable, "-I", "-c", STOPPED_DESCENDANTS, "23", "resistant")
+        workload = command_workload(runtime, "attempt-1", command)
+        workers = stop_workers()
+        descriptors = open_descriptors()
+
+        try:
+            await asyncio.to_thread(
+                session.begin, submitter, False, workload, lambda: None
+            )
+            session.attach_drains()
+            assert await asyncio.to_thread(clock.entered.wait, 5)
+            pids = tuple(int(pid) for pid in children.read_text().split())
+            stopped_before_close = await asyncio.to_thread(exited_within, pids[0], 2)
+            closing = asyncio.create_task(session.aclose())
+            await until(session.stopping)
+            retained = not scope.released
+            closing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            exited = await asyncio.gather(
+                *(asyncio.to_thread(exited_within, pid, 1) for pid in pids)
+            )
+            still_held = not clock.release.is_set()
+            records = journal_events(journal)
+        finally:
+            clock.release.set()
+            await session.aclose()
+            await until(lambda: stop_workers() <= workers)
+            remaining = open_descriptors()
+            directory.close()
+
+    assert retained
+    assert stopped_before_close
+    assert scope.released
+    assert still_held
+    assert all(exited)
+    assert [event.kind for event in records] == ["runner.candidate_started"]
+    assert remaining == descriptors
 
 
 def stat_mode(path: Path) -> int:
@@ -877,7 +1383,8 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
     with short_directory() as base:
         runtime = await open_spawning(root, ctx, base / "sockets")
         try:
-            workload = command_workload(runtime, "attempt-1", (binary("sleep"), "60"))
+            command = (sys.executable, "-I", "-c", STOPPED_DESCENDANTS, "23", "hold")
+            workload = command_workload(runtime, "attempt-1", command)
             handle = await runtime.submit(workload, ctx)
             await runtime.start(handle, ctx)
             runner = await running_pid(runtime, "attempt-1")
@@ -885,6 +1392,9 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
             attempt = attempt_directory(root, runtime, "attempt-1")
             journal = attempt / "journal.jsonl"
             (started,) = journal_events(journal)
+            children = attempt / "candidate" / "children"
+            await until(children.is_file)
+            pids = tuple(int(pid) for pid in children.read_text().split())
             fill(attempt)
             with journal.open("ab", buffering=0) as filler:
                 fill_descriptor(filler.fileno())
@@ -909,6 +1419,9 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
                 anchor.close()
             persisted = journal_events(journal)
             size = journal.stat().st_size
+            exited = await asyncio.gather(
+                *(asyncio.to_thread(exited_within, pid, 5) for pid in pids)
+            )
         finally:
             release_commands(root)
             await runtime.close()
@@ -923,6 +1436,8 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
     assert start_error.retryable is True
     assert transfer_error.code == "journal_unavailable"
     assert transfer_error.retryable is True
+    assert len(pids) == 2
+    assert all(exited)
     assert (status.state, status.phase, status.exit_code) == (
         "exited",
         "failed",
@@ -997,6 +1512,12 @@ async def test_controller_process_death_keeps_the_same_command(tmp_path: Path) -
     assert still == leader
 
 
+def command_records(path: Path) -> tuple[RawEvent, ...]:
+    return tuple(
+        event for event in journal_events(path) if event.kind != "runner.outputs_sealed"
+    )
+
+
 def seal_outcomes(path: Path) -> list[str]:
     if not path.exists():
         return []
@@ -1047,7 +1568,13 @@ async def test_command_outputs_are_sealed_when_the_leader_exits(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     digest = f"sha256:{hashlib.sha256(b'payload').hexdigest()}"
-    script = "open('payload','wb').write(b'payload')"
+    script = "\n".join(
+        (
+            "from pathlib import Path",
+            "Path('nested').mkdir()",
+            "Path('nested/payload').write_bytes(b'payload')",
+        )
+    )
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle = await runtime.submit(
             command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
@@ -1057,17 +1584,26 @@ async def test_command_outputs_are_sealed_when_the_leader_exits(
         await until_exited(runtime, handle, ctx)
         attempt = attempt_directory(root, runtime, "attempt-1")
         journal = attempt / "journal.jsonl"
-        await until(lambda: "command_exited" in journal.read_text())
+        log = attempt / "runner.log"
+        await until(lambda: seal_outcomes(log) == ["sealed"])
+        snapshot = attempt / "output-snapshot"
+        copied = snapshot / "nested" / "payload"
+        assert copied.read_bytes() == b"payload"
+        assert stat_mode(copied) == 0o400
+        assert stat_mode(snapshot / "nested") == 0o500
+        assert stat_mode(snapshot) == 0o500
+        (attempt / "candidate" / "nested" / "payload").write_bytes(b"changed")
+        assert copied.read_bytes() == b"payload"
         first = journal.read_text()
         await runtime.status(handle, ctx)
         second = journal.read_text()
         runner = await running_pid(runtime, "attempt-1")
         os.kill(runner, signal.SIGKILL)
         retained = journal.read_text()
-        outcomes = seal_outcomes(attempt / "runner.log")
+        outcomes = seal_outcomes(log)
 
     manifest = sealed_manifest(journal)
-    assert manifest == ((("payload", digest),), ())
+    assert manifest == ((("nested/payload", digest),), ())
     assert first.count("runner.outputs_sealed") == 1
     assert second == first
     assert retained == first
@@ -1102,10 +1638,13 @@ async def test_seal_refuses_linked_and_special_files(
         attempt = attempt_directory(root, runtime, "attempt-1")
         journal = attempt / "journal.jsonl"
         log = attempt / "runner.log"
+        await until(lambda: seal_outcomes(log) == ["sealed"])
+        copied = sorted(path.name for path in (attempt / "output-snapshot").iterdir())
 
     digest = f"sha256:{hashlib.sha256(b'payload').hexdigest()}"
     manifest = sealed_manifest(journal)
     assert manifest == ((("payload", digest),), ("hard", "linked", "pipe"))
+    assert copied == ["payload"]
     assert seal_outcomes(log) == ["sealed"]
     assert outside.read_bytes() == b"outside"
 
@@ -1123,9 +1662,11 @@ async def test_running_command_is_not_sealed(
         status = await runtime.status(handle, ctx)
         attempt = attempt_directory(root, runtime, "attempt-1")
         journal = (attempt / "journal.jsonl").read_text()
+        snapshot = (attempt / "output-snapshot").exists()
 
-    assert status.state == "running"
-    assert "runner.outputs_sealed" not in journal
+        assert status.state == "running"
+        assert "runner.outputs_sealed" not in journal
+        assert not snapshot
 
 
 @pytest.mark.asyncio
@@ -1148,11 +1689,15 @@ async def test_seal_stops_at_one_thousand_entries(
         await runtime.start(handle, ctx)
         await until_exited(runtime, handle, ctx)
         attempt = attempt_directory(root, runtime, "attempt-1")
+        log = attempt / "runner.log"
+        await until(lambda: seal_outcomes(log) == ["refused"])
         journal = (attempt / "journal.jsonl").read_text()
-        outcomes = seal_outcomes(attempt / "runner.log")
+        outcomes = seal_outcomes(log)
+        snapshot = attempt / "output-snapshot"
 
     assert "runner.outputs_sealed" not in journal
     assert outcomes == ["refused"]
+    assert not snapshot.exists()
 
 
 @pytest.mark.asyncio
@@ -1183,9 +1728,12 @@ async def test_seal_journal_failure_keeps_the_files(
             runner = await running_pid(runtime, "attempt-1")
             os.kill(child_pids(runner)[0], signal.SIGTERM)
             await until_exited(runtime, handle, ctx)
+            log = attempt / "runner.log"
+            await until(lambda: seal_outcomes(log) == ["journal_unavailable"])
             journal = journal_path.read_bytes()
-            outcomes = seal_outcomes(attempt / "runner.log")
+            outcomes = seal_outcomes(log)
             retained = payload.read_bytes()
+            snapshot_present = (attempt / "output-snapshot").exists()
         finally:
             release_commands(root)
             await runtime.close()
@@ -1196,52 +1744,54 @@ async def test_seal_journal_failure_keeps_the_files(
     assert b"runner.candidate_started" in journal
     assert outcomes == ["journal_unavailable"]
     assert retained == b"kept"
+    assert not snapshot_present
 
 
 @pytest.mark.asyncio
-async def test_seal_waits_until_no_adopted_child_remains(
+async def test_seal_follows_confirmed_stop_of_a_descendant(
     tmp_path: Path, kora_capture: Capture
 ) -> None:
     script = "\n".join(
         (
-            "import os, subprocess, sys",
-            "pid = os.fork()",
-            "if pid == 0:",
-            "    child = subprocess.Popen([sys.argv[1], '30'], start_new_session=True)",
+            "import os, signal",
+            "reading, writing = os.pipe()",
+            "if os.fork() == 0:",
+            "    os.close(reading)",
+            "    os.setsid()",
             "    stream = open('child', 'w')",
-            "    stream.write(str(child.pid))",
+            "    stream.write(str(os.getpid()))",
             "    stream.close()",
-            "    raise SystemExit(0)",
-            "os.waitpid(pid, 0)",
+            "    os.write(writing, b'r')",
+            "    os.close(writing)",
+            "    signal.pause()",
+            "    os._exit(0)",
+            "os.close(writing)",
+            "os.read(reading, 1)",
+            "os._exit(0)",
         )
     )
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         handle = await runtime.submit(
-            command_workload(
-                runtime,
-                "attempt-1",
-                (sys.executable, "-c", script, binary("sleep")),
-            ),
+            command_workload(runtime, "attempt-1", (sys.executable, "-c", script)),
             ctx,
         )
         await runtime.start(handle, ctx)
         await until_exited(runtime, handle, ctx)
         attempt = attempt_directory(root, runtime, "attempt-1")
-        child = int((attempt / "candidate" / "child").read_text())
-        journal = (attempt / "journal.jsonl").read_text()
+        child_path = attempt / "candidate" / "child"
+        await until(lambda: child_path.exists())
+        child = int(child_path.read_text())
+        log = attempt / "runner.log"
+        await until(lambda: seal_outcomes(log) == ["sealed"])
         status = await runtime.status(handle, ctx)
-        if sys.platform == "linux":
-            assert "runner.outputs_sealed" not in journal
-            os.kill(child, signal.SIGKILL)
-            runner = await running_pid(runtime, "attempt-1")
-            await until(lambda: child not in child_pids(runner))
-            await runtime.status(handle, ctx)
-        else:
-            os.kill(child, signal.SIGKILL)
+        stopped = runtime_outcomes(log, "runtime.local.command_stop")
         sealed = (attempt / "journal.jsonl").read_text()
+        gone = await asyncio.to_thread(exited_within, child, 1)
 
-    assert status.state == "exited"
-    assert "runner.outputs_sealed" in sealed
+        assert status.state == "exited"
+        assert stopped == ["confirmed"]
+        assert gone
+        assert "runner.outputs_sealed" in sealed
 
 
 @pytest.mark.asyncio
@@ -1268,14 +1818,17 @@ async def test_undecodable_output_name_keeps_the_exit(
         await until_exited(runtime, handle, ctx)
         attempt = attempt_directory(root, runtime, "attempt-1")
         status = await runtime.status(handle, ctx)
-        journal = (attempt / "journal.jsonl").read_text()
-        outcomes = seal_outcomes(attempt / "runner.log")
+        log = attempt / "runner.log"
         encoded = True
         for name in os.listdir(attempt / "candidate"):
             try:
                 name.encode("utf-8")
             except UnicodeEncodeError:
                 encoded = False
+        expected = "sealed" if encoded else "refused"
+        await until(lambda: seal_outcomes(log) == [expected])
+        journal = (attempt / "journal.jsonl").read_text()
+        outcomes = seal_outcomes(log)
 
     assert status.state == "exited"
     if encoded:

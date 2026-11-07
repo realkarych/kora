@@ -3,6 +3,7 @@ import errno
 import os
 import socket
 import stat
+import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -372,7 +373,7 @@ class ControlServer:
                     return
                 self._observers += 1
                 observer = True
-            answer = status_envelope(request.request_id, await self._status_value())
+            answer = status_envelope(request.request_id, self._observed())
             await channel.write_typed_frame(
                 FrameType.JSON, answer, self._clock.monotonic_ns() + FRAME_PROGRESS_NS
             )
@@ -445,8 +446,7 @@ class ControlServer:
             request = read_request(payload)
             if request is not None:
                 if request.op == "status":
-                    observed = await self._status_value()
-                    answer = status_envelope(request.request_id, observed)
+                    answer = status_envelope(request.request_id, self._observed())
                 elif request.op == "start":
                     answer = await self._start(
                         submitter, request.request_id, observational
@@ -476,6 +476,7 @@ class ControlServer:
             sink = refusal is not None or repeated
             if not sink:
                 self._admitted = True
+            prelaunch: dict[int, int] | None = None
             try:
                 section = await receive_section(
                     channel,
@@ -513,17 +514,37 @@ class ControlServer:
                         ):
                             raise delivery_error("workload_conflict")
                         if self._workload is None:
+                            command = self._command
+                            if (
+                                sys.platform == "darwin"
+                                and command is not None
+                                and decoded.kind == "command"
+                            ):
+                                prelaunch = {}
+                                await self._executor.run(
+                                    partial(
+                                        command.capture_prelaunch,
+                                        prelaunch,
+                                        decoded,
+                                        started + MESSAGE_PROGRESS_NS,
+                                    )
+                                )
+                                await self._executor.run(
+                                    lambda: self._authorized(submitter)
+                                )
+                            if command is not None:
+                                command.note(submitter, prelaunch)
                             self._workload = decoded
                             self._workload_sha256 = declaration.sha256
-                            if self._command is not None:
-                                self._command.note(submitter)
                     answer = delivery_envelope(header.request_id, "accepted")
                 except KoraProtocolError as error:
                     if error.code not in ENVELOPE_ERRORS:
                         raise
                     answer = error_envelope(header.request_id, error)
+                prelaunch = None
                 await self._answer(channel, answer)
             finally:
+                prelaunch = None
                 section = bytearray()
                 decoded = None
                 if not sink:
@@ -749,19 +770,12 @@ class ControlServer:
             command.attach_drains()
         return delivery_envelope(request_id, "started")
 
-    async def _status_value(self) -> StatusValue:
+    def _observed(self) -> StatusValue:
         command = self._command
         if command is None:
             state, phase, code = "starting", "preparation", None
         else:
             state, phase, code = command.status()
-            if state == "exited":
-                try:
-                    await self._executor.run(command.seal_outputs)
-                except KoraProtocolError:
-                    pass
-                else:
-                    state, phase, code = command.status()
         status = RuntimeStatus(
             state=state,
             exit_code=code,
@@ -823,6 +837,8 @@ class ControlServer:
 
     async def _release(self) -> None:
         self._bound.listener.close()
+        if self._command is not None:
+            self._command.close_journal()
         tasks = [*self._connections]
         if self._accepting is not None:
             tasks.append(self._accepting)
@@ -839,18 +855,26 @@ class ControlServer:
                     raise outcome
         finally:
             settled = False
+            workers_joined = False
             try:
                 await self._executor.close()
+            except NativeIOUnresolved:
+                workers_joined = True
+                raise
+            else:
                 settled = True
+                workers_joined = True
             finally:
-                if (
-                    settled or self._transfer_native_settled
-                ) and self._unresolved_disposal is None:
-                    self._resources_settled = True
-                    try:
-                        if self._command is not None:
-                            await self._command.aclose()
-                    finally:
+                try:
+                    if self._command is not None and (
+                        workers_joined or self._transfer_native_settled
+                    ):
+                        await self._command.aclose()
+                finally:
+                    if (
+                        settled or self._transfer_native_settled
+                    ) and self._unresolved_disposal is None:
+                        self._resources_settled = True
                         self._workload = None
                         self._workload_sha256 = None
                         self._bound.directory.close()

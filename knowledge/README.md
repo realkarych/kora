@@ -8,6 +8,8 @@ This is the section-by-section reference behind [human-facing documentation](../
 
 The [separate raw-crash storage proposal](research/separate-raw-crash-storage-2026-11-06.md) records the diagnostic-only FSKit boundary, preserved state-root restrictions, qualification gaps and size/dependency blockers under #778. It is not an active storage contract or evidence of native support.
 
+The [installed VCS Git step timing record](research/installed-vcs-git-timing-2026-11-07.md) holds the source failures, timing format and reading rule for the hosted macOS preparation deadline under #887 and #895. It does not attribute the failure.
+
 The [macOS eject refusal record](research/storage-pressure-eject-refusal-2026-11-06.md) holds the failure table, Apple source citations, decision and reading rule for refused storage-pressure fixture releases under #302 and #886.
 
 ## Current contracts by task
