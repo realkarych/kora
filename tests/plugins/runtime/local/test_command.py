@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -120,6 +121,7 @@ STOPPED_DESCENDANTS = "\n".join(
         f"marker={HOLD_MARKER!r}",
         "import os, signal, sys",
         "from pathlib import Path",
+        "Path('group').write_text(str(os.getpgrp()))",
         "def handoff(_number, _frame):",
         "    mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})",
         "    if os.fork():",
@@ -870,6 +872,45 @@ def runtime_outcomes(path: Path, event: str) -> list[str]:
     return found
 
 
+class HostedCommandCensusProbe(NativeIdentityReader):
+    def summary(self, group: int, marker: bytes) -> dict[str, int]:
+        deadline = self._clock.monotonic_ns() + SCAN_NS
+        counts: Counter[str] = Counter()
+        inventory = self._command_pids(group, deadline)
+        if inventory is None:
+            return {"initial_inventory_unavailable": 1}
+        counts["initial_inventory_incomplete"] = int(not inventory.complete)
+        counts["initial_group_members"] = len(inventory.original_group)
+        counts["initial_listed"] = len(inventory.listed)
+        for pid in inventory.listed - {os.getpid()}:
+            if self._clock.monotonic_ns() >= deadline:
+                counts["deadline_reached"] += 1
+                break
+            observation = self.read(pid)
+            if observation.process is None:
+                counts[f"identity_{observation.state.value}"] += 1
+                continue
+            if observation.process.dead:
+                counts["dead"] += 1
+                continue
+            try:
+                result = self._darwin_marker(pid, marker)
+            except OSError as error:
+                counts[f"marker_errno_{error.errno or ctypes.get_errno()}"] += 1
+            else:
+                counts[f"marker_{result}"] += 1
+            if self.read(pid) != observation:
+                counts["identity_changed"] += 1
+        confirmation = self._command_pids(group, deadline)
+        if confirmation is None:
+            counts["confirming_inventory_unavailable"] += 1
+        else:
+            counts["confirming_inventory_incomplete"] = int(not confirmation.complete)
+            counts["confirming_group_members"] = len(confirmation.original_group)
+            counts["listing_difference"] = len(inventory.listed ^ confirmation.listed)
+        return dict(counts)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["ordinary", "resistant", "handoff", "unmarked"])
 async def test_exited_command_settles_observed_descendants_without_status(
@@ -897,6 +938,17 @@ async def test_exited_command_settles_observed_descendants_without_status(
         outcomes = runtime_outcomes(log, "runtime.local.command_stop")
         reader = NativeIdentityReader()
         states = tuple(reader.read(pid).state for pid in settled)
+        diagnosis: dict[str, int] = {}
+        if (
+            sys.platform == "darwin"
+            and mode == "ordinary"
+            and outcomes != ["confirmed"]
+        ):
+            group = int((children.parent / "group").read_text())
+            token = (attempt / "attempt.token").read_bytes()
+            diagnosis = HostedCommandCensusProbe().summary(
+                group, b"KORA_ATTEMPT_TOKEN=" + token
+            )
 
     assert len(pids) == 2
     assert len(settled) == (3 if mode == "handoff" else 2)
@@ -905,7 +957,7 @@ async def test_exited_command_settles_observed_descendants_without_status(
         assert outcomes == ["unresolved"]
     else:
         assert all(exited)
-        assert outcomes == ["confirmed"]
+        assert outcomes == ["confirmed"], diagnosis
     if sys.platform == "linux":
         assert all(state is IdentityState.ABSENT for state in states)
     assert (status.state, status.exit_code) == ("exited", 23)
