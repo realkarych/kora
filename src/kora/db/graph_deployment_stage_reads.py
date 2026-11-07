@@ -21,10 +21,10 @@ from kora.db.graph_deployment_stage_v1 import (
     occurrence_checks,
     stage_checks,
 )
-from kora.db.graph_preparation_reads import raise_private_read_error
 from kora.db.identifiers import IDENTIFIER_LENGTH, is_identifier
 from kora.db.tables import graph_deployment_stage as stage_table
 from kora.db.tables import graph_deployment_stage_occurrence as occurrence_table
+from kora.db.transactions import raise_private_metadata_error
 from kora.db.types import POSTGRESQL, SQLITE
 
 STORE_ID_WIDTH: int = 256
@@ -184,9 +184,9 @@ async def _rows(
     except StatementError:
         rows = None
     if rows is None:
-        raise_private_read_error(GraphStageInventoryReadFailed())
+        raise_private_metadata_error(GraphStageInventoryReadFailed())
     if len(rows) > allowance:
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     return rows
 
 
@@ -202,7 +202,7 @@ def _scope_fields(
         or type(preparation_id) is not str
         or preparation_id != scope.preparation_id
     ):
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     return stage_id, namespace_id, preparation_id
 
 
@@ -217,7 +217,7 @@ def _stage(row: tuple[object, ...], scope: GraphStageScope) -> GraphStage:
         or type(total_size) is not int
         or not 0 <= total_size <= MAX_STAGE_FILE_BYTES
     ):
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     return GraphStage(
         *scope_fields, store_id, payload_digest, fence_incarnation, total_size
     )
@@ -229,7 +229,7 @@ def _occurrence(
     scope_fields = _scope_fields(row, scope)
     ordinal = row[3]
     if type(ordinal) is not int or not 0 <= ordinal < MAX_STAGE_OCCURRENCES:
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     return GraphStageOccurrence(*scope_fields, ordinal)
 
 
@@ -245,14 +245,14 @@ async def read_graph_stage_inventory(
         or type(scope.namespace_id) is not str
         or not is_identifier(scope.namespace_id)
     ):
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     limit = MAX_STAGE_OCCURRENCES
     stage_rows = await _rows(connection, _stages_statement(dialect, scope), limit)
     stages = tuple(_stage(row, scope) for row in stage_rows)
     stage_ids = {stage.stage_id for stage in stages}
     addresses = {(stage.store_id, stage.payload_digest) for stage in stages}
     if len(stage_ids) != len(stages) or len(addresses) != len(stages):
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     preparation_rows = await _rows(
         connection, _occurrences_statement(dialect, scope, None, limit), limit
     )
@@ -262,7 +262,7 @@ async def read_graph_stage_inventory(
         len(expected) != len(occurrences)
         or {entry.stage_id for entry in occurrences} != stage_ids
     ):
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     independent: dict[int, GraphStageOccurrence] = {}
     for stage in stages:
         remaining = limit - len(independent)
@@ -272,12 +272,12 @@ async def read_graph_stage_inventory(
             remaining,
         )
         if not rows:
-            raise_private_read_error(GraphStageInventoryRejected())
+            raise_private_metadata_error(GraphStageInventoryRejected())
         for row in rows:
             entry = _occurrence(row, scope)
             if entry.stage_id != stage.stage_id or entry.ordinal in independent:
-                raise_private_read_error(GraphStageInventoryRejected())
+                raise_private_metadata_error(GraphStageInventoryRejected())
             independent[entry.ordinal] = entry
     if expected != independent:
-        raise_private_read_error(GraphStageInventoryRejected())
+        raise_private_metadata_error(GraphStageInventoryRejected())
     return GraphStageInventory(stages, occurrences)

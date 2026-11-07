@@ -1,13 +1,16 @@
 import enum
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
-from sqlalchemy import text
+from sqlalchemy import literal, select, text
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.identifiers import is_identifier
-from kora.db.transactions import writer_transaction
+from kora.db.tables import storage_address_fence
+from kora.db.transactions import raise_private_metadata_error, writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
 
@@ -31,10 +34,72 @@ CONTENDED: EventSpec = CATALOG.register(
     )
 )
 RUN_CLASS: int = 1
+STORE_ID_PATTERN: re.Pattern[str] = re.compile(r"[!-~]{1,256}")
+STORAGE_DIGEST_PATTERN: re.Pattern[str] = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class LockError(RuntimeError):
     pass
+
+
+class StorageAddressMissing(LockError):
+    def __init__(self) -> None:
+        super().__init__("the storage address fence is missing")
+
+
+class StorageAddressContended(LockError):
+    def __init__(self) -> None:
+        super().__init__("the storage address fence is contended")
+
+
+class StorageAddressLockFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the storage address fence lock failed")
+
+
+def _storage_key(store_id: str, payload_digest: str) -> tuple[str, str]:
+    if (
+        type(store_id) is not str
+        or STORE_ID_PATTERN.fullmatch(store_id) is None
+        or type(payload_digest) is not str
+        or STORAGE_DIGEST_PATTERN.fullmatch(payload_digest) is None
+    ):
+        raise_private_metadata_error(LockError("invalid storage address lock request"))
+    return store_id, payload_digest
+
+
+async def _lock_existing_address(
+    connection: AsyncConnection, dialect: str, address: tuple[str, str]
+) -> bool:
+    store_id, payload_digest = address
+    fields = storage_address_fence.c
+    statement = (
+        select(literal(1))
+        .select_from(storage_address_fence)
+        .where(fields.store_id == store_id, fields.payload_digest == payload_digest)
+        .limit(2)
+    )
+    try:
+        if dialect == POSTGRESQL:
+            table_lock = await connection.execute(
+                text("LOCK TABLE storage_address_fence IN ROW SHARE MODE NOWAIT")
+            )
+            table_lock.close()
+            statement = statement.with_for_update(nowait=True)
+        result = await connection.execute(statement)
+        try:
+            return result.scalar_one_or_none() == 1
+        finally:
+            result.close()
+    except SQLAlchemyError as error:
+        failure = (
+            StorageAddressContended()
+            if dialect == POSTGRESQL
+            and isinstance(error, DBAPIError)
+            and getattr(error.orig, "sqlstate", None) == "55P03"
+            else StorageAddressLockFailed()
+        )
+    raise_private_metadata_error(failure)
 
 
 class ScopeKind(enum.IntEnum):
@@ -84,6 +149,7 @@ class TransitionLocks:
         self._lease.claim_lock_context()
         self._run_id: str | None = None
         self._scopes: frozenset[Scope] | None = None
+        self._storage_address: tuple[str, str] | None = None
         self._usable: bool = True
         self._dialect: str = connection.dialect.name
         if self._dialect not in (POSTGRESQL, SQLITE):
@@ -158,3 +224,26 @@ class TransitionLocks:
         self._require_current()
         if self._lease.connection is not connection:
             raise LockError("the write connection does not own the locks")
+
+    async def acquire_existing_storage_address(
+        self, store_id: str, payload_digest: str
+    ) -> None:
+        self._require_current()
+        if self._scopes is None or self._storage_address is not None:
+            raise LockError("the storage address is acquired once after scopes")
+        self._usable = False
+        address = _storage_key(store_id, payload_digest)
+        if not await _lock_existing_address(
+            self._lease.connection, self._dialect, address
+        ):
+            raise_private_metadata_error(StorageAddressMissing())
+        self._lease.require_active()
+        self._storage_address = address
+        self._usable = True
+
+    def require_existing_storage_address(
+        self, connection: AsyncConnection, store_id: str, payload_digest: str
+    ) -> None:
+        self.require_connection(connection)
+        if self._storage_address != _storage_key(store_id, payload_digest):
+            raise LockError("the required storage address lock is not held")

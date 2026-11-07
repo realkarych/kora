@@ -1,4 +1,5 @@
 import asyncio
+from traceback import format_exception
 from typing import cast
 
 import pytest
@@ -13,6 +14,7 @@ from kora.db.connection import (
     Lifecycle,
 )
 from kora.db.migrations import upgrade_database
+from kora.engine.locks import StorageAddressLockFailed, TransitionLocks
 from kora.observability import Level, LoggingSettings
 from tests.db.closing import narrow_database, until
 from tests.db.seed import Seeder, seed_predecessor
@@ -150,6 +152,50 @@ async def test_body_faults_are_recorded_once_and_cancellations_never(
     assert len(records) == 1
     chain = cast(list[dict[str, object]], records[0]["exception"])
     assert chain[0]["type"] == "BodyFault"
+
+
+async def lock_address_in_transaction(
+    database: Database, store: str, digest: str
+) -> None:
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes(())
+        await locks.acquire_existing_storage_address(store, digest)
+
+
+@pytest.mark.asyncio
+async def test_address_lock_statement_failure_keeps_private_keys_out_of_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    store = "Private-Physical-Store"
+    digest = "sha256:" + "a" * 64
+    ambient = ValueError(store)
+    async with database.transaction() as connection:
+        await connection.exec_driver_sql(
+            "ALTER TABLE storage_address_fence RENAME COLUMN payload_digest "
+            "TO unavailable_payload_digest"
+        )
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
+
+    try:
+        raise ambient
+    except ValueError:
+        with pytest.raises(
+            StorageAddressLockFailed, match="fence lock failed"
+        ) as refused:
+            await lock_address_in_transaction(database, store, digest)
+    finished_output(diagnostics, pipe)
+    error = refused.value
+    rendered = "".join(format_exception(error))
+    records = pipe.reader.records()
+
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, ambient))
+    assert db_events(pipe) == ["db.transaction.failed"]
+    for private in (store, digest, "unavailable_payload_digest", "UndefinedColumn"):
+        assert private not in rendered
+        assert private not in repr(records)
 
 
 @pytest.mark.asyncio

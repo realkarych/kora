@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from typing import Literal, Never
+from typing import Literal
 
 from sqlalchemy import Executable, LargeBinary, and_, case, func, select
 from sqlalchemy import cast as sql_cast
@@ -11,6 +11,7 @@ from sqlalchemy.sql.elements import Grouping
 from kora.db.graph_preparation_v1 import domain_checks, result_checks
 from kora.db.identifiers import IDENTIFIER_LENGTH, is_identifier
 from kora.db.tables import graph_deployment_preparation
+from kora.db.transactions import raise_private_metadata_error
 from kora.db.types import POSTGRESQL, SQLITE
 
 GraphPreparationState = Literal[
@@ -28,14 +29,6 @@ class GraphPreparationRejected(RuntimeError):
 class GraphPreparationReadFailed(RuntimeError):
     def __init__(self) -> None:
         super().__init__("graph preparation settlement read failed")
-
-
-def raise_private_read_error(error: RuntimeError) -> Never:
-    try:
-        raise error from None
-    finally:
-        error.__cause__ = None
-        error.__context__ = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -61,7 +54,7 @@ def graph_preparation_settlement_statement(
         dialect not in (SQLITE, POSTGRESQL)
         or type(binding) is not GraphPreparationBinding
     ):
-        raise_private_read_error(GraphPreparationRejected())
+        raise_private_metadata_error(GraphPreparationRejected())
     identifiers = (binding.preparation_id, binding.namespace_id)
     if binding.initial_graph_id is not None:
         identifiers = (*identifiers, binding.initial_graph_id)
@@ -72,7 +65,7 @@ def graph_preparation_settlement_statement(
         or type(binding.deployment_digest) is not str
         or DIGEST_PATTERN.fullmatch(binding.deployment_digest) is None
     ):
-        raise_private_read_error(GraphPreparationRejected())
+        raise_private_metadata_error(GraphPreparationRejected())
 
     fields = graph_deployment_preparation.c
     selected = (fields.state, fields.result_graph_id, fields.result_graph_version_id)
@@ -121,7 +114,7 @@ async def read_graph_preparation_settlement(
     except StatementError:
         result = None
     if result is None:
-        raise_private_read_error(GraphPreparationReadFailed())
+        raise_private_metadata_error(GraphPreparationReadFailed())
     row = result.first()
     if row is None:
         return None
@@ -130,7 +123,7 @@ async def read_graph_preparation_settlement(
     graph_id: object = row[1]
     version_id: object = row[2]
     if type(state) is not str:
-        raise_private_read_error(GraphPreparationRejected())
+        raise_private_metadata_error(GraphPreparationRejected())
     if state == "open" or state == "closed_without_publication":
         if graph_id is None and version_id is None:
             return GraphPreparationSettlement(state, None, None)
@@ -145,4 +138,4 @@ async def read_graph_preparation_settlement(
             )
         ):
             return GraphPreparationSettlement(state, graph_id, version_id)
-    raise_private_read_error(GraphPreparationRejected())
+    raise_private_metadata_error(GraphPreparationRejected())
