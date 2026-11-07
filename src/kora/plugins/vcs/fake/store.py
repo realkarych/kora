@@ -7,7 +7,8 @@ import stat
 import sys
 import unicodedata
 from bisect import bisect_left
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
+from contextlib import closing, contextmanager
 from types import FrameType
 from typing import Final, NamedTuple, TypeGuard, cast
 
@@ -47,6 +48,23 @@ HEAD_NAME: Final[str] = "head"
 CHECKOUT_NAME: Final[str] = "checkout.json"
 REFUSED: Final[int] = 3
 FAILED: Final[int] = 4
+
+MAX_PREPARED_REVISIONS: Final[int] = 1
+MAX_ANCESTRY: Final[int] = 10_000
+MAX_ANCESTRY_TREE_BYTES: Final[int] = 256 * MIB
+MAX_INDEX_RECORDS: Final[int] = 100_000
+MAX_INDEX_BYTES: Final[int] = 128 * MIB
+SEALED_MODES: Final[dict[str, str]] = {
+    "100644": REGULAR,
+    "100755": EXECUTABLE,
+    "120000": SYMLINK,
+}
+EXCLUDED: Final[frozenset[str]] = frozenset({".git", ".kora"})
+PREPARED_STORE: Final[str] = "store"
+PREPARED_NAME: Final[str] = "prepared"
+INDEX_NAME: Final[str] = "index.jsonl"
+PREPARED_DIGEST_NAME: Final[str] = "prepared_digest"
+COMMIT_MESSAGE: Final[re.Pattern[str]] = re.compile(r"kora: [^\s{}]+ #[1-9][0-9]*")
 
 
 class Refused(Exception):
@@ -251,7 +269,12 @@ def make_directory(parent: int, name: str) -> int:
     return open_directory(parent, name)
 
 
-def read_limited(directory: int, name: str, limit: int) -> bytes:
+def read_limited(
+    directory: int,
+    name: str,
+    limit: int,
+    stopped: Callable[[], bool] = lambda: False,
+) -> bytes:
     descriptor = os.open(name, READ_FLAGS, dir_fd=directory)
     try:
         status = os.fstat(descriptor)
@@ -259,12 +282,15 @@ def read_limited(directory: int, name: str, limit: int) -> bytes:
             raise Refused
         chunks: list[bytes] = []
         size = 0
-        while block := os.read(descriptor, min(MIB, limit + 1 - size)):
+        while not stopped():
+            block = os.read(descriptor, min(MIB, limit + 1 - size))
             size += len(block)
             if size > limit:
                 raise Refused
+            if not block:
+                return b"".join(chunks)
             chunks.append(block)
-        return b"".join(chunks)
+        raise Failed
     finally:
         os.close(descriptor)
 
@@ -513,7 +539,9 @@ def is_branch(name: str) -> bool:
         part
         and part not in (".", "..")
         and not part.startswith((".", "-"))
-        and not any(ord(item) < 0x20 or ord(item) == 0x7F for item in part)
+        and not any(
+            ord(item) < 0x20 or ord(item) == 0x7F or item in "{}" for item in part
+        )
         for part in name.split("/")
     )
 
@@ -661,6 +689,521 @@ def changed_between(store: Store, base: str, revision: str) -> set[str]:
     return changes(before, after)[1]
 
 
+def ancestry(
+    store: Store, base: str, cancelled: Callable[[], bool] = lambda: False
+) -> list[Revision]:
+    found: list[Revision] = []
+    total = 0
+    current: str | None = base
+    while current is not None:
+        if cancelled():
+            raise Failed
+        revision = store.revision(current)
+        found.append(revision)
+        total += os.stat(
+            revision.tree, dir_fd=store.trees, follow_symlinks=False
+        ).st_size
+        if len(found) > MAX_ANCESTRY or total > MAX_ANCESTRY_TREE_BYTES:
+            raise Refused
+        current = revision.parent
+    return found
+
+
+def new_revisions(
+    store: Store,
+    head: str,
+    base: str,
+    limit: int,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> list[Revision]:
+    found: list[Revision] = []
+    current: str | None = head
+    while current != base:
+        if cancelled():
+            raise Failed
+        if current is None or len(found) >= limit:
+            raise Refused
+        revision = store.revision(current)
+        found.append(revision)
+        current = revision.parent
+    found.reverse()
+    return found
+
+
+def base_sizes(
+    store: Store,
+    lineage: Sequence[Revision],
+    wanted: set[str],
+    cancelled: Callable[[], bool] = lambda: False,
+) -> dict[str, int]:
+    held: dict[str, int] = {}
+    seen: set[str] = set()
+    for revision in lineage:
+        if cancelled():
+            raise Failed
+        if revision.tree in seen:
+            continue
+        seen.add(revision.tree)
+        for entry in store.tree(revision.tree):
+            if entry.sha256 in wanted:
+                held.setdefault(entry.sha256, entry.size)
+    return held
+
+
+def history(
+    store: Store, base: str, prepared: str
+) -> Iterator[tuple[Revision, list[Entry], set[str]]]:
+    before = store.tree(store.revision(base).tree)
+    for revision in new_revisions(store, prepared, base, MAX_PREPARED_REVISIONS):
+        after = store.tree(revision.tree)
+        introduced, paths = changes(before, after)
+        yield revision, introduced, paths
+        before = after
+
+
+def new_objects(
+    store: Store,
+    base: str,
+    prepared: str,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> tuple[list[Revision], set[str]]:
+    revisions = new_revisions(store, prepared, base, MAX_PREPARED_REVISIONS, cancelled)
+    named: set[str] = set()
+    for revision in revisions:
+        if cancelled():
+            raise Failed
+        named.update(entry.sha256 for entry in store.tree(revision.tree))
+    held = base_sizes(store, ancestry(store, base, cancelled), named, cancelled)
+    return revisions, named - held.keys()
+
+
+def read_text_file(directory: int, name: str) -> str:
+    return read_limited(directory, name, MAX_CONTROL_BYTES).decode("ascii").strip()
+
+
+def working_files(root: int) -> Iterator[str]:
+    pending = [""]
+    visited = 0
+    previous = ""
+    directory = os.dup(root)
+    try:
+        while pending:
+            prefix = pending.pop()
+            relative = prefix
+            if previous and prefix.startswith(previous + "/"):
+                relative = prefix[len(previous) + 1 :]
+            else:
+                os.close(directory)
+                directory = -1
+                directory = os.dup(root)
+            for component in relative.split("/") if relative else ():
+                following = open_directory(directory, component)
+                os.close(directory)
+                directory = following
+            previous = prefix
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if not prefix and entry.name in EXCLUDED:
+                        continue
+                    path = f"{prefix}/{entry.name}" if prefix else entry.name
+                    visited += 1
+                    if visited > MAX_TREE_ENTRIES or not path_allowed(path):
+                        raise Refused
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(path)
+                    else:
+                        yield path
+    finally:
+        if directory >= 0:
+            os.close(directory)
+
+
+def checkout_record(store_root: int) -> tuple[str, str]:
+    document: object = json.loads(
+        read_limited(store_root, CHECKOUT_NAME, MAX_CONTROL_BYTES)
+    )
+    if not isinstance(document, dict):
+        raise Refused
+    fields = cast("dict[str, object]", document)
+    return checked_id(fields.get("revision")), checked_id(fields.get("tree"))
+
+
+def fresh_output(root: int, path: str, opened: Opened) -> int:
+    parts = path.split("/")
+    parent = descend(root, parts[:-1], opened)
+    try:
+        status = os.stat(parts[-1], dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return opened.directory(parent, parts[-1], create=True)
+    if not stat.S_ISDIR(status.st_mode):
+        os.unlink(parts[-1], dir_fd=parent)
+    else:
+        output = opened.directory(parent, parts[-1])
+        with os.scandir(output) as entries:
+            for entry in entries:
+                os.unlink(entry.name, dir_fd=output)
+        return output
+    return opened.directory(parent, parts[-1], create=True)
+
+
+def export(checkout: str, out: str) -> None:
+    opened = Opened()
+    try:
+        root = opened.directory(None, ".")
+        store_root = descend(root, CANDIDATE_STORE, opened)
+        head = checked_id(read_text_file(store_root, HEAD_NAME))
+        if checkout_record(store_root)[0] != checkout or head != checkout:
+            raise Refused
+        output = fresh_output(root, out, opened)
+        scratch = scratch_file(output)
+        size = 0
+        for count, path in enumerate(working_files(root), 1):
+            data = (
+                json.dumps({"path": path, "gitlink": None}, ensure_ascii=False) + "\n"
+            ).encode("utf-8")
+            size += len(data)
+            if count > MAX_TREE_ENTRIES or size > MAX_TREE_BYTES:
+                raise Refused
+            write_all(scratch.descriptor, data)
+        settle(scratch, output, "manifest.jsonl", None)
+        put_bytes(
+            output,
+            "head.json",
+            json.dumps({"head": head, "bundle": False}).encode("ascii"),
+        )
+    finally:
+        opened.close()
+
+
+def check_ancestry(control: str, base: str) -> None:
+    opened = Opened()
+    try:
+        ancestry(opened.repository(control), base)
+    finally:
+        opened.close()
+
+
+def copy_base(control: str, base: str) -> None:
+    opened = Opened()
+    try:
+        repository = opened.repository(control)
+        root = opened.directory(None, ".")
+        prepared = opened.store(
+            opened.directory(root, PREPARED_STORE, create=True), create=True
+        )
+        for revision in ancestry(repository, base):
+            copy_object(
+                repository.revisions,
+                prepared.revisions,
+                revision.identifier,
+                MAX_REVISION_BYTES,
+            )
+            if not prepared.has(prepared.trees, revision.tree):
+                copy_object(
+                    repository.trees, prepared.trees, revision.tree, MAX_TREE_BYTES
+                )
+    finally:
+        opened.close()
+
+
+def read_head_document(sealed: int) -> tuple[str, bool]:
+    document: object = json.loads(read_limited(sealed, "head.json", MAX_CONTROL_BYTES))
+    if not isinstance(document, dict):
+        raise Refused
+    fields = cast("dict[str, object]", document)
+    bundle = fields.get("bundle")
+    if not isinstance(bundle, bool):
+        raise Refused
+    return checked_id(fields.get("head")), bundle
+
+
+class SealedRecord(NamedTuple):
+    entry: Entry
+    chunk: int
+    offset: int
+
+
+def sealed_record(line: bytes) -> SealedRecord:
+    document: object = json.loads(line)
+    if not isinstance(document, dict):
+        raise Refused
+    fields = cast("dict[str, object]", document)
+    path, mode = fields.get("path"), SEALED_MODES.get(str(fields.get("mode")))
+    size, chunk, offset = fields.get("size"), fields.get("chunk"), fields.get("offset")
+    if not isinstance(path, str) or mode is None or fields.get("object") is not None:
+        raise Refused
+    if not (is_count(size) and is_count(chunk) and is_count(offset)):
+        raise Refused
+    digest = fields.get("sha256")
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        raise Refused
+    entry = Entry(path, mode, size, checked_id(digest[len("sha256:") :]))
+    if entry.size > (MAX_SYMLINK_BYTES if mode == SYMLINK else MAX_BLOB_BYTES):
+        raise Refused
+    return SealedRecord(entry, chunk, offset)
+
+
+def sealed_records(sealed: int) -> list[SealedRecord]:
+    descriptor = open_regular(sealed, "tree.jsonl")
+    records: list[SealedRecord] = []
+    with os.fdopen(descriptor, "rb") as stream:
+        size = 0
+        while line := stream.readline(8 * MAX_PATH_BYTES + 1):
+            size += len(line)
+            if (
+                len(line) > 8 * MAX_PATH_BYTES
+                or size > MAX_TREE_BYTES
+                or len(records) >= MAX_TREE_ENTRIES
+            ):
+                raise Refused
+            records.append(sealed_record(line))
+    check_tree([item.entry for item in records])
+    return records
+
+
+def import_sealed(
+    sealed: int, item: SealedRecord, blobs: int, present: set[str]
+) -> None:
+    entry = item.entry
+    chunk = open_regular(sealed, f"tree.{item.chunk}.bin")
+    try:
+        scratch = None if entry.sha256 in present else scratch_file(blobs)
+        os.lseek(chunk, item.offset, os.SEEK_SET)
+        target = None if scratch is None else scratch.descriptor
+        digest, _ = pump(chunk, target, entry.size, entry.size)
+    finally:
+        os.close(chunk)
+    if digest != entry.sha256:
+        raise Refused
+    if scratch is not None:
+        settle(scratch, blobs, digest, digest)
+        present.add(digest)
+
+
+def build(input_location: str, base: str, message: str) -> None:
+    if COMMIT_MESSAGE.fullmatch(message) is None:
+        raise Refused
+    opened = Opened()
+    try:
+        root = opened.directory(None, ".")
+        store_root = opened.directory(root, PREPARED_STORE)
+        prepared = opened.store(store_root)
+        sealed = opened.directory(None, input_location)
+        head = checked_id(read_text_file(store_root, HEAD_NAME))
+        head_tree = prepared.revision(head).tree
+        records = sealed_records(sealed)
+        wanted = {item.entry.sha256 for item in records}
+        present = set(base_sizes(prepared, ancestry(prepared, base), wanted))
+        present.update(sha for sha in wanted if prepared.has(prepared.blobs, sha))
+        for item in records:
+            import_sealed(sealed, item, prepared.blobs, present)
+        tree_data = tree_document([item.entry for item in records])
+        if len(tree_data) > MAX_TREE_BYTES:
+            raise Refused
+        tree = digest_of(tree_data)
+        result = head
+        if tree != head_tree:
+            put_bytes(prepared.trees, tree, tree_data)
+            document = revision_document(head, message, tree)
+            result = digest_of(document)
+            put_bytes(prepared.revisions, result, document)
+        if result == base:
+            raise Refused
+        put_bytes(store_root, PREPARED_NAME, result.encode("ascii"))
+    finally:
+        opened.close()
+
+
+def prepared_head() -> None:
+    opened = Opened()
+    try:
+        store_root = opened.directory(opened.directory(None, "."), PREPARED_STORE)
+        emit(checked_id(read_text_file(store_root, PREPARED_NAME)))
+    finally:
+        opened.close()
+
+
+def opened_prepared(opened: Opened) -> Store:
+    return opened.store(opened.directory(opened.directory(None, "."), PREPARED_STORE))
+
+
+def index_line(
+    revision: str, path: str | None, kind: str, location: str, size: int
+) -> str:
+    return json.dumps(
+        {
+            "revision": revision,
+            "path": path,
+            "kind": kind,
+            "content_location": location,
+            "content_digest": "sha256:" + location,
+            "size_bytes": size,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def index_lines(store: Store, base: str, prepared: str) -> list[str]:
+    _, fresh = new_objects(store, base, prepared)
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for revision, introduced, _ in history(store, base, prepared):
+        lines.append(
+            index_line(
+                revision.identifier,
+                None,
+                "revision_metadata",
+                revision.identifier,
+                revision.size,
+            )
+        )
+        for entry in introduced:
+            key = (entry.sha256, entry.path)
+            if entry.sha256 not in fresh or key in seen:
+                continue
+            seen.add(key)
+            kind = "symlink" if entry.mode == SYMLINK else "file"
+            lines.append(
+                index_line(
+                    revision.identifier, entry.path, kind, entry.sha256, entry.size
+                )
+            )
+        if len(lines) > MAX_INDEX_RECORDS:
+            raise Refused
+    return lines
+
+
+def decode(base: str, prepared: str) -> None:
+    opened = Opened()
+    try:
+        root = opened.directory(None, ".")
+        lines = index_lines(opened_prepared(opened), base, prepared)
+        data = "".join(line + "\n" for line in lines).encode("utf-8")
+        if len(data) > MAX_INDEX_BYTES:
+            raise Refused
+        put_bytes(root, INDEX_NAME, data)
+        prepared_digest = read_text_file(root, PREPARED_DIGEST_NAME)
+    finally:
+        opened.close()
+    manifest = {
+        "prepared_digest": prepared_digest,
+        "revision": prepared,
+        "content_index_location": INDEX_NAME,
+        "content_index_digest": "sha256:" + digest_of(data),
+        "complete": True,
+    }
+    emit(json.dumps(manifest, sort_keys=True))
+
+
+def paths(base: str, prepared: str) -> None:
+    opened = Opened()
+    found: set[str] = set()
+    try:
+        for _, _, changed_paths in history(opened_prepared(opened), base, prepared):
+            found.update(changed_paths)
+    finally:
+        opened.close()
+    emit(json.dumps(sorted(found), ensure_ascii=False))
+
+
+def diff_stat(base: str, prepared: str) -> None:
+    opened = Opened()
+    try:
+        changed_paths = changed_between(opened_prepared(opened), base, prepared)
+    finally:
+        opened.close()
+    count = len(changed_paths)
+    emit(f" {count} file{'' if count == 1 else 's'} changed")
+
+
+def publish_objects(
+    prepared: Store, repository: Store, base: str, head: str
+) -> Generator[Scratch, None, None]:
+    revisions, fresh = new_objects(prepared, base, head)
+    objects = [
+        (prepared.blobs, repository.blobs, sha, MAX_BLOB_BYTES) for sha in sorted(fresh)
+    ]
+    objects.extend(
+        (prepared.trees, repository.trees, tree, MAX_TREE_BYTES)
+        for tree in dict.fromkeys(revision.tree for revision in revisions)
+    )
+    objects.extend(
+        (
+            prepared.revisions,
+            repository.revisions,
+            revision.identifier,
+            MAX_REVISION_BYTES,
+        )
+        for revision in revisions
+    )
+    for source, target, name, limit in objects:
+        with staged_copy(source, target, name, limit, durable=True) as scratch:
+            yield scratch
+
+
+def publication(
+    control: str, branch: str, base: str, prepared: str
+) -> Generator[Scratch, None, None]:
+    if not is_branch(branch):
+        raise Refused
+    opened = Opened()
+    try:
+        repository = opened.repository(control)
+        store = opened_prepared(opened)
+        yield from publish_objects(store, repository, base, prepared)
+        parts = branch.split("/")
+        heads = opened.directory(repository.root, "heads")
+        parent = descend(heads, parts[:-1], opened)
+        scratch = scratch_file(parent)
+        write_all(scratch.descriptor, prepared.encode("ascii"))
+        settle(scratch, parent, parts[-1], None, durable=True)
+    finally:
+        opened.close()
+
+
+def publish(control: str, branch: str, base: str, prepared: str) -> None:
+    with closing(publication(control, branch, base, prepared)) as stages:
+        for _ in stages:
+            continue
+
+
+@contextmanager
+def staged_copy(
+    source: int, target: int, name: str, limit: int, durable: bool = False
+) -> Generator[Scratch, None, None]:
+    scratch = scratch_file(target)
+    try:
+        yield scratch
+        descriptor = open_regular(source, name)
+        try:
+            digest, _ = pump(descriptor, scratch.descriptor, limit)
+        finally:
+            os.close(descriptor)
+        if digest != name:
+            raise Refused
+        settle(scratch, target, name, name, durable)
+    finally:
+        discard(scratch)
+
+
+def copy_object(source: int, target: int, name: str, limit: int) -> None:
+    with staged_copy(source, target, name, limit):
+        pass
+
+
+def import_base(input_location: str, base: str) -> None:
+    opened = Opened()
+    try:
+        sealed = opened.directory(None, input_location)
+        if read_head_document(sealed) != (base, False):
+            raise Refused
+        prepared = opened_prepared(opened)
+        put_bytes(prepared.root, HEAD_NAME, base.encode("ascii"))
+    finally:
+        opened.close()
+
+
 class Arguments:
     def __init__(self, options: dict[str, str], revisions: list[str]) -> None:
         self.options = options
@@ -703,6 +1246,48 @@ COMMANDS: Final[dict[str, tuple[tuple[str, ...], Handler]]] = {
     "changed": (
         ("repository", "base", "revision"),
         lambda a: changed(a.text("repository"), a.identifier("base"), a.revision()),
+    ),
+    "export": (
+        ("checkout", "out"),
+        lambda a: export(a.identifier("checkout"), a.text("out")),
+    ),
+    "ancestry": (
+        ("repository", "base"),
+        lambda a: check_ancestry(a.text("repository"), a.identifier("base")),
+    ),
+    "base": (
+        ("repository", "base"),
+        lambda a: copy_base(a.text("repository"), a.identifier("base")),
+    ),
+    "import": (
+        ("input", "base"),
+        lambda a: import_base(a.text("input"), a.identifier("base")),
+    ),
+    "build": (
+        ("input", "base", "message"),
+        lambda a: build(a.text("input"), a.identifier("base"), a.text("message")),
+    ),
+    "prepared": ((), lambda a: prepared_head()),
+    "decode": (
+        ("base", "prepared"),
+        lambda a: decode(a.identifier("base"), a.identifier("prepared")),
+    ),
+    "paths": (
+        ("base", "prepared"),
+        lambda a: paths(a.identifier("base"), a.identifier("prepared")),
+    ),
+    "stat": (
+        ("base", "prepared"),
+        lambda a: diff_stat(a.identifier("base"), a.identifier("prepared")),
+    ),
+    "publish": (
+        ("repository", "branch", "base", "prepared"),
+        lambda a: publish(
+            a.text("repository"),
+            a.branch(),
+            a.identifier("base"),
+            a.identifier("prepared"),
+        ),
     ),
 }
 

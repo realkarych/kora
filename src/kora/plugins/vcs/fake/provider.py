@@ -2,24 +2,31 @@ import os
 import stat
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Final
 
 from kora.executor.entry import Destinations, ReadsHeads
-from kora.executor.steps import AreaName
+from kora.executor.scan import InspectionSource, InspectionSources
+from kora.executor.seal import EXPORT_DIRECTORY
+from kora.executor.steps import AreaName, ToolMissing, resolve_tools
 from kora.ir import VcsRef
 from kora.ir.json import JsonObject, parse_json_object
 from kora.plugins.vcs.fake import store
+from kora.plugins.vcs.fake.source import DirInspectionSources
 from kora.plugins.vcs.local import (
     LocalConfiguration,
     LocalEvents,
     LocalVcs,
     Remote,
     RemoteRefused,
+    configuration_refused,
+    limited_argv,
     local_events,
     located_remote,
+    needs_prlimit,
     refusal,
 )
 from kora.protocols.common import ProtocolContext
@@ -29,6 +36,8 @@ from kora.protocols.vcs import (
     CheckoutRequest,
     PlanFile,
     PlanStep,
+    PublishPlan,
+    PublishRequest,
     StepFailureClass,
 )
 
@@ -36,6 +45,7 @@ PROVIDER_NAME: Final[str] = "fake"
 HELPER: Final[str] = store.__file__
 REPOSITORY_FILE: Final[str] = "repository.json"
 REPOSITORY_ARGUMENT: Final[str] = "{control_root}/" + REPOSITORY_FILE
+PUBLISH_PREFIX: Final[str] = "kora/"
 SHORT: Final[timedelta] = timedelta(minutes=1)
 WORK: Final[timedelta] = timedelta(minutes=30)
 EVENTS: Final[LocalEvents] = local_events("vcs.fake", PROVIDER_NAME)
@@ -47,9 +57,13 @@ CONFIG_SCHEMA: Final[JsonObject] = parse_json_object(
 @dataclass(frozen=True)
 class HelperTools:
     python: str
+    prlimit: str | None
 
     def mapping(self) -> dict[str, str]:
-        return {"python": self.python}
+        tools = {"python": self.python}
+        if self.prlimit is not None:
+            tools["prlimit"] = self.prlimit
+        return tools
 
 
 def check_store(path: str) -> None:
@@ -62,6 +76,10 @@ def check_store(path: str) -> None:
             raise RemoteRefused("remote_not_a_store")
 
 
+def is_publish_branch(name: str) -> bool:
+    return name.startswith(PUBLISH_PREFIX) and store.is_branch(name)
+
+
 class Steps:
     def __init__(self, tools: HelperTools) -> None:
         self.tools = tools
@@ -72,11 +90,13 @@ class Steps:
         cwd: AreaName,
         failure: StepFailureClass | None,
         capture: Capture | None = None,
+        limited: bool = False,
         timeout: timedelta = WORK,
     ) -> PlanStep:
         full = ("-I", HELPER, *arguments)
+        prlimit = self.tools.prlimit if limited else None
         return PlanStep(
-            argv=("python", *full),
+            argv=limited_argv(prlimit, "python", self.tools.python, full),
             cwd=cwd,
             env={},
             stdin=None,
@@ -92,6 +112,15 @@ class Steps:
         capture: Capture | None = None,
     ) -> PlanStep:
         return self.step(arguments, "control", failure, capture, timeout=SHORT)
+
+    def publisher(
+        self,
+        arguments: Sequence[str],
+        failure: StepFailureClass | None,
+        capture: Capture | None = None,
+        cwd: AreaName = "publication",
+    ) -> PlanStep:
+        return self.step(arguments, cwd, failure, capture, limited=True)
 
 
 def checkout_steps(steps: Steps, rev: str | VcsRef, branch: str) -> list[PlanStep]:
@@ -135,17 +164,62 @@ def checkout_steps(steps: Steps, rev: str | VcsRef, branch: str) -> list[PlanSte
     return found
 
 
-class DirVcs(LocalVcs, Destinations, ReadsHeads):
+def publish_steps(
+    steps: Steps, branch: str, message: str
+) -> tuple[tuple[PlanStep, ...], ...]:
+    repository = ("--repository", REPOSITORY_ARGUMENT)
+    base = ("--base", "{base_commit}")
+    revisions = (*base, "--prepared", "{commit}")
+    sealed = ("--input", "{input_location}")
+    export = (
+        steps.step(
+            ("export", "--checkout", "{commit}", "--out", EXPORT_DIRECTORY),
+            "candidate",
+            None,
+        ),
+    )
+    prepare = (
+        steps.publisher(
+            ("ancestry", *repository, *base), "config_error", cwd="control"
+        ),
+        steps.publisher(("base", *repository, *base), "infrastructure"),
+        steps.publisher(("import", *sealed, *base), "artifact_invalid"),
+        steps.publisher(
+            ("build", *sealed, *base, "--message", message), "artifact_invalid"
+        ),
+        steps.publisher(("prepared",), None, "commit"),
+    )
+    inspect = (
+        steps.publisher(("decode", *revisions), "artifact_invalid", "inspection"),
+        steps.publisher(("paths", *revisions), None, "changed_paths"),
+        steps.publisher(("stat", *revisions), None, "diff_stat"),
+    )
+    publish = (
+        steps.publisher(("publish", *repository, "--branch", branch, *revisions), None),
+    )
+    return export, prepare, inspect, publish
+
+
+class DirVcs(LocalVcs, Destinations, InspectionSources, ReadsHeads):
     config_schema: JsonObject = CONFIG_SCHEMA
 
     def __init__(self, configuration: LocalConfiguration) -> None:
-        self.helper_tools = HelperTools(os.path.realpath(sys.executable))
+        try:
+            resolved = resolve_tools(
+                ["prlimit"] if needs_prlimit() else [], configuration.tool_path
+            )
+        except ToolMissing:
+            resolved = {}
+        self.helper_tools = HelperTools(
+            os.path.realpath(sys.executable), resolved.get("prlimit")
+        )
         remotes = {
             repo: located_remote(remote, check_store, ())
             for repo, remote in configuration.remotes.items()
         }
         super().__init__(PROVIDER_NAME, EVENTS, remotes)
         self.steps = Steps(self.helper_tools)
+        self.sources = DirInspectionSources()
 
     @property
     def tools(self) -> Mapping[str, str]:
@@ -181,13 +255,45 @@ class DirVcs(LocalVcs, Destinations, ReadsHeads):
         if not valid or not store.is_branch(request.branch):
             self.refuse(ctx, "vcs_request_invalid")
         plan = CheckoutPlan(
-            required_tools=self.required_tools(),
+            required_tools=("python",),
             credentials={},
             files=(self.repository_file(remote),),
             steps=tuple(checkout_steps(self.steps, rev, request.branch)),
         )
         ctx.logger.emit(self.events.planned, kind="checkout")
         return plan
+
+    async def publish_plan(
+        self, request: PublishRequest, ctx: ProtocolContext
+    ) -> PublishPlan:
+        remote = self.remote(request.repo, ctx)
+        if (
+            not is_publish_branch(request.branch)
+            or store.COMMIT_MESSAGE.fullmatch(request.commit_message) is None
+        ):
+            self.refuse(ctx, "vcs_request_invalid")
+        if needs_prlimit() and self.helper_tools.prlimit is None:
+            configuration_refused("tool_missing")
+        export, prepare, inspect, publish = publish_steps(
+            self.steps, request.branch, request.commit_message
+        )
+        plan = PublishPlan(
+            repo=request.repo,
+            branch=request.branch,
+            required_tools=self.required_tools(),
+            files=(self.repository_file(remote),),
+            export=export,
+            prepare=prepare,
+            inspect=inspect,
+            publish=publish,
+        )
+        ctx.logger.emit(self.events.planned, kind="publish")
+        return plan
+
+    def open(
+        self, prepared_location: str
+    ) -> AbstractAsyncContextManager[InspectionSource]:
+        return self.sources.open(prepared_location)
 
     async def head_sha(self, ref: VcsRef, ctx: ProtocolContext) -> str:
         remote = self.remote(ref.repo, ctx)

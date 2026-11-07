@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import TracebackType
-from typing import Final, cast
+from typing import ClassVar, Final, Generic, Protocol, TypeVar, cast
 
 from kora.conformance.capture import Capture
 from kora.conformance.common import CONFORMANCE_COMPONENT
@@ -30,11 +30,13 @@ from kora.executor.authorization import TrustedBinding
 from kora.executor.entry import Executor, PublishOutcome
 from kora.executor.launcher import ProcessLauncher, StepLauncher
 from kora.plugins.vcs.git import GitConfiguration, GitVcs
+from kora.plugins.vcs.local import Remote
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ClockSample, ExecutionDeadline
 from kora.protocols.secret_value import SecretValue
 from kora.protocols.time import Clock
+from kora.protocols.vcs import Vcs
 
 REPO: Final[str] = "local"
 GONE_REPO: Final[str] = "gone"
@@ -161,14 +163,20 @@ class ManualClock(Clock):
         self.offset_ns = max(self.offset_ns, deadline_ns - self.origin_ns)
 
 
-@dataclass
-class World:
+class WorldProvider(Vcs, Protocol):
+    remotes: dict[str, Remote]
+
+
+ProviderT = TypeVar("ProviderT", bound=WorldProvider)
+
+
+@dataclass(kw_only=True)
+class BaseWorld(Generic[ProviderT]):
+    missing_revision: ClassVar[str] = MISSING_REVISION
     root: Path
-    home: Path
     remote: Path
-    seed: Path
     base: str
-    provider: GitVcs
+    provider: ProviderT
     executor: Executor
     capture: Capture
     clock: Clock
@@ -198,7 +206,7 @@ class World:
         return VcsRemote(
             repo=REPO,
             revision=self.base,
-            missing_revision=MISSING_REVISION,
+            missing_revision=self.missing_revision,
             unreachable_repo=GONE_REPO,
             publish_branch=PUBLISH_BRANCH,
             commit_message=COMMIT_MESSAGE,
@@ -232,30 +240,6 @@ class World:
         candidate = checkout.areas.candidate
         assert candidate is not None
         return candidate
-
-    def commit(
-        self,
-        checkout: Checkout,
-        files: Mapping[str, str | None],
-        message: str,
-        author: str = "Agent Author",
-    ) -> str:
-        candidate = self.candidate(checkout)
-        write(candidate, files)
-        git(self.home, "add", "-A", cwd=candidate)
-        git(
-            self.home,
-            "commit",
-            "-q",
-            "-m",
-            message,
-            cwd=candidate,
-            extra={
-                "GIT_AUTHOR_NAME": author,
-                "GIT_AUTHOR_EMAIL": "agent@example.invalid",
-            },
-        )
-        return git(self.home, "rev-parse", "HEAD", cwd=candidate)
 
     def prepare(
         self,
@@ -297,6 +281,36 @@ class World:
 
     def publish(self, prepared: Prepared) -> PublishOutcome:
         return run(published(self.executor, prepared, self.context()))
+
+
+@dataclass(kw_only=True)
+class World(BaseWorld[GitVcs]):
+    home: Path
+    seed: Path
+
+    def commit(
+        self,
+        checkout: Checkout,
+        files: Mapping[str, str | None],
+        message: str,
+        author: str = "Agent Author",
+    ) -> str:
+        candidate = self.candidate(checkout)
+        write(candidate, files)
+        git(self.home, "add", "-A", cwd=candidate)
+        git(
+            self.home,
+            "commit",
+            "-q",
+            "-m",
+            message,
+            cwd=candidate,
+            extra={
+                "GIT_AUTHOR_NAME": author,
+                "GIT_AUTHOR_EMAIL": "agent@example.invalid",
+            },
+        )
+        return git(self.home, "rev-parse", "HEAD", cwd=candidate)
 
     def remote_head(self, branch: str = PUBLISH_BRANCH) -> str | None:
         completed = subprocess.run(
@@ -397,13 +411,13 @@ def make_world(
         provider,
     )
     return World(
-        root,
-        home,
-        remote,
-        seed,
-        base,
-        provider,
-        executor,
-        capture,
-        clock or ManualClock(),
+        root=root,
+        home=home,
+        remote=remote,
+        seed=seed,
+        base=base,
+        provider=provider,
+        executor=executor,
+        capture=capture,
+        clock=clock or ManualClock(),
     )

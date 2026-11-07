@@ -20,12 +20,12 @@ Every kora fake is a module named `fake` in its plugin family and ships in the o
 - **Layer table.** The family rows and the `kora.testing` composition root of [ADR-0026](../../docs/decisions/0026-package-layers.md) already cover these modules, so the [package layer table](../architecture/detailed.md#package-layers) gains no row. Section 2 adds one import rule.
 - **The directory-backed VCS is a fake.** It has no remote, no review and no code host, so it is not production-eligible and is excluded with the others. "The fake VCS" in the specifications names `kora.plugins.vcs.fake`.
 
-### Directory VCS checkout foundation (#297)
+### Directory VCS checkout and uncommitted publication (#297/#298)
 
-The checkout-only foundation uses the shared local VCS configuration, principal,
-credential-binding and pinned repository rules. It is not a complete `Vcs`
-implementation: publication and inspection belong to #298, and candidate revision
-chains to #299. There is no provider entry point or serving-process activation.
+The directory provider uses the shared local VCS configuration, principal,
+credential-binding and pinned repository rules. Checkout and publication of
+uncommitted changes implement `Vcs`; candidate revision chains remain #299.
+There is no provider entry point or serving-process activation.
 
 A repository contains `revisions`, `trees`, `blobs` and `heads` directories.
 Revision and tree identifiers are SHA-256 digests of their exact canonical JSON
@@ -44,8 +44,8 @@ case-fold collisions or descendants beneath a file or symlink. Opens are
 descriptor-relative and no-follow; new candidate files are create-only.
 
 The candidate's `.kora/dirvcs` store contains only its checkout tree and checkout
-identity, not other heads or repository history. Candidate commits, export,
-preparation and publication are not activated by this foundation.
+identity, not other heads or repository history. Candidate commits remain
+unavailable; export requires the candidate head to equal the trusted checkout.
 
 Retained format limits are 80 KiB per revision document, 64 KiB per message,
 50,000 tree entries, 64 MiB per tree document, 256 MiB per blob, 4 KiB per path
@@ -56,9 +56,58 @@ deadline and child-closure rules; helper exit alone does not claim publication.
 
 Checkout evidence is `test_directory_checkout_runs_through_the_real_executor`;
 parser evidence is `test_dirvcs_path_rules_match_the_sealing_rules` and
-`test_dirvcs_tree_parsing_refuses_before_allocation`. Full VCS conformance remains
-pending the later slices. The reserved-loading and standard-library-only checks
-also cover this new module.
+`test_dirvcs_tree_parsing_refuses_before_allocation`. The directory provider runs
+every VCS conformance case in `tests/plugins/vcs/test_dirvcs_conformance.py`.
+The reserved-loading and standard-library-only checks also cover this module.
+
+Publication uses the unchanged shared `kora.git.v1` container without a bundle.
+The trusted helper copies bounded base ancestry, imports the sealed working tree,
+builds one content-addressed revision, emits its complete inspection index and
+publishes through create-only head settlement after the executor authorizes it.
+An existing head is never overwritten. The raw inspection source independently
+enumerates newly reachable objects; scanner digest, path and secret checks remain
+unchanged. Base ancestry is limited to 10,000 revisions and 256 MiB of tree data;
+the content index is limited to 100,000 records and 128 MiB. Linux publisher
+helpers retain the existing prlimit bounds; checkout alone does not require it.
+
+Export streams directory enumeration without recursive descriptor ownership.
+It accepts at most 50,000 visited entries, including directories and excluding
+reserved top-level `.git`/`.kora`; entry 50,001 is refused even when directories
+are empty. Existing path, manifest and content bounds also apply. Traversal cost
+is proportional to entries times depth for a deep chain with many sibling
+directories, so such a tree within these bounds can run until the step timeout; no
+separate work budget exists because this provider runs only in tests.
+
+A helper killed with SIGKILL can leave one `.tmp-*` file of up to 256 MiB in the
+repository store, which nothing sweeps; SIGTERM removes it.
+
+Each inspection source owns at most one background read operation, with no
+queued backlog. Cancellation stops further work and sets cooperative stop;
+the worker closes its own descriptors. Context exit waits for actual completion,
+including after repeated cancellation, before propagating cancellation and
+allowing prepared-directory cleanup. It does not close the shared thread pool.
+A stuck filesystem call can delay this drain; no physical I/O termination time
+is promised. Waiting yields the event loop and does not replace runtime escalation
+or extend useful-work, step or CI deadlines.
+
+`test_dirvcs_publication_releases_resources` retains two cycles of success,
+scan cancellation and cancellation after publication staging, before copy.
+The controlled driver uses the same staging, copy, settlement and cleanup as
+the ordinary helper; it is not evidence of interruption within a kernel copy.
+`test_inspection_context_owns_active_read_until_completion` verifies actual
+worker descriptor ownership, exception and repeated-cancellation paths.
+`test_directory_publication_destination_is_trusted`,
+`test_directory_uncommitted_changes_are_inspected` and
+`test_directory_decoder_faults_fail_before_authorization` cover the implemented
+trust and inspection legs. `test_published_revision_checks_out_completely` reads
+published objects back through a real checkout;
+`test_repository_replaced_after_prepare_writes_no_head` and
+`test_helper_refuses_a_mismatched_repository_pin` cover the pinned destination.
+A branch or commit message containing `{` or `}` is refused before planning,
+because the executor expands placeholders after validation. The fake keeps its own commit message pattern,
+`kora: <node path> #<commit number>` with no whitespace or brace in the node path, and does not apply the Git provider's
+`is_node_path` rule from protocols.md, so a test on the fake can accept a commit message the Git provider refuses.
+Candidate-commit/intermediate-history legs remain #299.
 
 ## 2. Fakes never reach a serving process
 
@@ -272,7 +321,7 @@ Each case below has one of three values for the fakes: **passes**, protocol evid
 | case | value |
 |---|---|
 | `test_publication_destination_is_trusted`, `test_publication_records_uncommitted_changes_once`, `test_finalize_recovers_prepared_revision` (crashes as `lose_worker`), `test_publication_authorization_is_late` | passes |
-| `test_non_git_inspection_stream_scans_intermediate_history` | passes, on the directory-backed fake VCS |
+| `test_non_git_inspection_stream_scans_intermediate_history` | Directory uncommitted secret-path and decoder-fault legs are implemented under #298; candidate intermediate-history legs remain #299. |
 | `test_publication_preserves_candidate_commits`, `test_publication_sealing_rejects_mutable_aliases` | passes for the protocol legs with real Git; the local process legs are not applicable |
 | `test_candidate_cannot_forge_runner_journal`, `test_candidate_git_configuration_cannot_execute_in_publisher`, `test_agent_descendants_cannot_access_publication_credentials` | never claimed |
 | `test_required_execution_protection_rejects_local`, `test_harness_launcher_preserves_control_boundary` | not applicable: a `local` case and a real-harness case |
