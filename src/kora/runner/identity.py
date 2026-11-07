@@ -75,6 +75,21 @@ class CommandCensus:
     ambiguous_group: bool = False
 
 
+@dataclass(frozen=True)
+class CommandPIDInventory:
+    listed: frozenset[int]
+    original_group: frozenset[int] = frozenset()
+
+    def confirm_empty(self, follow_up: "CommandPIDInventory | None") -> CommandCensus:
+        if follow_up is None:
+            return CommandCensus((), False)
+        return CommandCensus(
+            (),
+            self == follow_up and not self.original_group,
+            bool(follow_up.original_group - self.original_group),
+        )
+
+
 class ArgumentMatch(StrEnum):
     EQUAL = "equal"
     DIFFERENT = "different"
@@ -561,12 +576,12 @@ class NativeIdentityReader:
         census = self._command_pids(group, scan_deadline)
         if census is None:
             return CommandCensus((), False)
-        listed, original = census
+        original = census.original_group
         members: list[CommandMember] = []
         complete = True
         ambiguous_group = False
         pending_group = set(original)
-        for pid in (*original, *(listed - original)):
+        for pid in (*original, *(census.listed - original)):
             if self._clock.monotonic_ns() >= scan_deadline:
                 return CommandCensus(
                     tuple(members), False, ambiguous_group or bool(pending_group)
@@ -587,29 +602,34 @@ class NativeIdentityReader:
                 )
             complete = complete and verified
         if complete and not members:
-            complete = self._command_pids(group, scan_deadline) == census
+            complete = False
+            if not original:
+                confirmation = census.confirm_empty(
+                    self._command_pids(group, scan_deadline)
+                )
+                complete = confirmation.complete
+                ambiguous_group = ambiguous_group or confirmation.ambiguous_group
         return CommandCensus(
             tuple(members),
             complete and self._clock.monotonic_ns() < scan_deadline,
             ambiguous_group,
         )
 
-    def _command_pids(
-        self, group: int, deadline_ns: int
-    ) -> tuple[set[int], set[int]] | None:
+    def _command_pids(self, group: int, deadline_ns: int) -> CommandPIDInventory | None:
         try:
             listed = self._listed_pids(PROC_RUID_ONLY, os.getuid(), deadline_ns)
             if listed is None:
                 return None
             if sys.platform != "darwin":
-                return set(listed), set()
+                return CommandPIDInventory(frozenset(listed))
             original = self._listed_pids(PROC_PGRP_ONLY, group, deadline_ns)
             if original is None:
                 return None
-            combined = set(listed).union(original)
+            group_pids = frozenset(original)
+            combined = frozenset(listed) | group_pids
             if len(combined) > self._max_scan_entries:
                 return None
-            return combined, set(original)
+            return CommandPIDInventory(combined, group_pids)
         except OSError:
             return None
 

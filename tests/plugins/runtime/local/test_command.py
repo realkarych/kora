@@ -51,6 +51,7 @@ from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import (
     SCAN_NS,
+    CommandPIDInventory,
     IdentityState,
     NativeIdentityReader,
     darwin_environment,
@@ -990,6 +991,27 @@ def test_darwin_command_marker_requires_complete_environment() -> None:
 
     assert accepted is True
     assert truncated is None
+
+
+@pytest.mark.parametrize(
+    ("follow_up", "complete", "ambiguous"),
+    [
+        (CommandPIDInventory(frozenset({101})), True, False),
+        (CommandPIDInventory(frozenset({101}), frozenset({101})), False, True),
+        (CommandPIDInventory(frozenset({101, 102})), False, False),
+        (None, False, False),
+    ],
+)
+def test_empty_command_confirmation_preserves_follow_up_group_evidence(
+    follow_up: CommandPIDInventory | None, complete: bool, ambiguous: bool
+) -> None:
+    first = CommandPIDInventory(frozenset({101}))
+
+    confirmation = first.confirm_empty(follow_up)
+
+    assert confirmation.complete is complete
+    assert confirmation.ambiguous_group is ambiguous
+    assert confirmation.members == ()
 
 
 class CommandSignalProbe(CommandDomainStop):
