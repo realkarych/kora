@@ -18,6 +18,7 @@ from kora.db.migrations import upgrade_database
 from kora.engine.locks import (
     GraphPreparationLockFailed,
     LockError,
+    PreparationCapacityReadFailed,
     StorageAddressLockFailed,
     StorageAddressStageReadFailed,
     TransitionLocks,
@@ -27,6 +28,11 @@ from tests.db.closing import ConnectionLedger, narrow_database, until
 from tests.db.seed import Seeder, seed_predecessor
 from tests.db.test_graph_preparation_reads import seed_preparation
 from tests.db.test_pricing_migration import retained_index_progress, wait_for_index
+from tests.engine.test_preparation_capacity_lock import (
+    CAPACITY,
+    insert_ledger,
+    read_capacity,
+)
 from tests.engine.test_storage_address_lock import DIGEST, STORE, seed_address
 from tests.observability.conftest import (
     Configure,
@@ -327,6 +333,58 @@ async def test_stage_fence_read_failure_keeps_address_out_of_diagnostics(
         "unavailable_last_deletion_generation",
         "UndefinedColumn",
     ):
+        assert private not in rendered
+        assert private not in repr(records)
+
+
+async def fail_capacity_read(database: Database) -> None:
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes((CAPACITY,))
+        await connection.exec_driver_sql(
+            "ALTER TABLE graph_deployment_preparation_capacity "
+            "RENAME COLUMN occupied TO unavailable_occupied"
+        )
+        try:
+            await locks.read_preparation_capacity(connection)
+        except PreparationCapacityReadFailed:
+            with pytest.raises(LockError, match="cannot be used"):
+                locks.require(None, (CAPACITY,))
+            raise
+
+
+@pytest.mark.asyncio
+async def test_capacity_read_failure_keeps_private_count_out_of_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    occupied = 418377219
+    await insert_ledger(database, occupied)
+    ledger = ConnectionLedger(database)
+    ambient = ValueError(str(occupied))
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
+
+    try:
+        raise ambient
+    except ValueError:
+        with pytest.raises(
+            PreparationCapacityReadFailed, match="capacity read failed"
+        ) as refused:
+            await fail_capacity_read(database)
+    after = await read_capacity(database)
+    finished_output(diagnostics, pipe)
+    error = refused.value
+    rendered = "".join(format_exception(error))
+    records = pipe.reader.records()
+
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, ambient))
+    assert db_events(pipe) == ["db.transaction.failed"]
+    assert after == occupied
+    assert database.writer_is_free()
+    assert database.units_in_flight() == 0
+    assert ledger.outstanding == 0
+    for private in (str(occupied), "unavailable_occupied", "UndefinedColumn"):
         assert private not in rendered
         assert private not in repr(records)
 

@@ -501,6 +501,8 @@ Use one fixed-key scalar lookup for the capacity count and affect a bounded numb
 
 The [#948 migration](https://github.com/realkarych/kora/issues/948) creates the empty native capacity relation on SQLite and PostgreSQL. It preserves the existing preparation inventory and supplies no capacity witness. Initialization and verified restore remain guarded activation steps. Downgrade requires a compatible backup.
 
+The [#951 capacity read](https://github.com/realkarych/kora/issues/951) uses one fresh native lookup after the dedicated capacity scope on the same live writer connection, root transaction and task. Missing or malformed state refuses. It checks only the selected occupied count. Initialization, inventory coherence, installed limit, reservation and release retain their owning checks.
+
 ##### Interrupted graph deployment
 
 The project owner accepted this recovery boundary on 2026-11-06 under [#867](https://github.com/realkarych/kora/issues/867#issuecomment-6689824988). The live original request owns useful preparation under its operation deadline and the [storage-call admission rules](#authority-for-graph-staging-calls). Publication still requires its own current authority and request ownership. The single graph-ID correction remains part of that request. Recovery can determine the exact original publication outcome, reconcile issued storage operations and perform their authorized cleanup. It cannot take over useful preparation or promotion, consume new request bytes, publish a graph or version, or create a success receipt for interrupted precommit work. Saved request or actor information grants no publication authority.

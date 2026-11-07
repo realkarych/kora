@@ -17,7 +17,7 @@ from kora.db.graph_preparation_reads import (
     require_graph_preparation_binding,
 )
 from kora.db.identifiers import is_identifier
-from kora.db.tables import storage_address_fence
+from kora.db.tables import graph_deployment_preparation_capacity, storage_address_fence
 from kora.db.transactions import raise_private_metadata_error, writer_transaction
 from kora.db.types import POSTGRESQL, SQLITE
 from kora.observability import CATALOG, EventSpec, FieldKind, Level, current_diagnostics
@@ -89,6 +89,16 @@ class GraphPreparationLockContended(LockError):
 class GraphPreparationLockFailed(LockError):
     def __init__(self) -> None:
         super().__init__("the open graph preparation lock failed")
+
+
+class PreparationCapacityUnavailable(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph preparation capacity count is unavailable")
+
+
+class PreparationCapacityReadFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph preparation capacity read failed")
 
 
 def _postgres_lock_contended(dialect: str, error: SQLAlchemyError) -> bool:
@@ -216,7 +226,33 @@ async def _read_stage_fence_incarnation(
     raise_private_metadata_error(StorageAddressStageReadFailed())
 
 
+async def _read_preparation_capacity(connection: AsyncConnection, dialect: str) -> int:
+    fields = graph_deployment_preparation_capacity.c
+    valid = and_(fields.occupied >= 0, fields.occupied <= MAX_COUNT)
+    if dialect == SQLITE:
+        valid = and_(
+            func.typeof(fields.id) == "integer",
+            func.typeof(fields.occupied) == "integer",
+            valid,
+        )
+    statement = (
+        select(case((valid, fields.occupied), else_=None))
+        .where(fields.id == 1)
+        .limit(2)
+    )
+    try:
+        occupied: object = (await connection.execute(statement)).scalar_one_or_none()
+    except SQLAlchemyError:
+        pass
+    else:
+        if type(occupied) is int and 0 <= occupied <= MAX_COUNT:
+            return occupied
+        raise_private_metadata_error(PreparationCapacityUnavailable())
+    raise_private_metadata_error(PreparationCapacityReadFailed())
+
+
 class ScopeKind(enum.IntEnum):
+    PREPARATION_CAPACITY = 0
     GLOBAL = 2
     NAMESPACE = 3
     GRAPH = 4
@@ -238,7 +274,12 @@ class Scope:
     def __post_init__(self) -> None:
         if type(self.kind) is not ScopeKind or type(self.identity) is not tuple:
             raise LockError("invalid lock scope")
-        sizes = {ScopeKind.GLOBAL: 0, ScopeKind.FAN_OUT: 3, ScopeKind.TARGET: 2}
+        sizes = {
+            ScopeKind.PREPARATION_CAPACITY: 0,
+            ScopeKind.GLOBAL: 0,
+            ScopeKind.FAN_OUT: 3,
+            ScopeKind.TARGET: 2,
+        }
         if len(self.identity) != sizes.get(self.kind, 1) or any(
             type(part) is not str or not part for part in self.identity
         ):
@@ -339,6 +380,15 @@ class TransitionLocks:
         self._require_current()
         if self._lease.connection is not connection:
             raise LockError("the write connection does not own the locks")
+
+    async def read_preparation_capacity(self, connection: AsyncConnection) -> int:
+        self.require_connection(connection)
+        self.require(self._run_id, (Scope(ScopeKind.PREPARATION_CAPACITY),))
+        self._usable = False
+        occupied = await _read_preparation_capacity(connection, self._dialect)
+        self._lease.require_active()
+        self._usable = True
+        return occupied
 
     async def acquire_existing_storage_address(
         self, store_id: str, payload_digest: str
