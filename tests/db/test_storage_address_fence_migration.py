@@ -151,6 +151,7 @@ async def test_fence_rejects_malformed_native_address_and_generation(
     invalid = (
         ("store_id", ""),
         ("store_id", "x" * 257),
+        ("store_id", "x" * 256 + " "),
         ("store_id", "store "),
         ("store_id", "store\x7f"),
         ("store_id", "stör"),
@@ -158,6 +159,7 @@ async def test_fence_rejects_malformed_native_address_and_generation(
         ("store_id", "sto\0re"),
         ("store_id", None),
         ("digest", DIGEST + "a"),
+        ("digest", DIGEST + " "),
         ("digest", DIGEST[:-1]),
         ("digest", DIGEST.replace("sha256", "SHA256")),
         ("digest", DIGEST[:-1] + "A"),

@@ -5,15 +5,17 @@ from sqlalchemy import (
     Identity,
     Integer,
     PrimaryKeyConstraint,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.schema import Constraint, conv
 
-from kora.db.types import POSTGRESQL, SQLITE, collated_text
+from kora.db.types import BYTE_ORDER_COLLATION, POSTGRESQL, SQLITE
 
 TABLE_NAME: str = "storage_address_fence"
-STORE_ID_WIDTH: int = 256
-PAYLOAD_DIGEST_WIDTH: int = 71
+ADDRESS_TEXT: Text = Text(collation="BINARY").with_variant(
+    Text(collation=BYTE_ORDER_COLLATION), POSTGRESQL
+)
 SQLITE_ADDRESS_CHECKS: tuple[tuple[str, str], ...] = (
     (
         "store_id_domain",
@@ -75,8 +77,8 @@ def storage_address_fence_elements_v1(
             Identity(always=True, start=1, minvalue=1, cycle=False),
             nullable=False,
         ),
-        Column("store_id", collated_text(STORE_ID_WIDTH), nullable=False),
-        Column("payload_digest", collated_text(PAYLOAD_DIGEST_WIDTH), nullable=False),
+        Column("store_id", ADDRESS_TEXT, nullable=False),
+        Column("payload_digest", ADDRESS_TEXT, nullable=False),
         Column("last_deletion_generation", BigInteger(), nullable=False),
         Column("pending_deletion_generation", BigInteger(), nullable=True),
         PrimaryKeyConstraint("fence_incarnation", name=f"pk_{TABLE_NAME}"),
