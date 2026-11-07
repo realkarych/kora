@@ -14,6 +14,7 @@ from collections import Counter
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -51,10 +52,15 @@ from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import open_local_directory
 from kora.runner.identity import (
+    ARGUMENT_ALIGNMENT,
+    CTL_KERN,
+    KERN_PROCARGS2,
     SCAN_NS,
+    ArgumentMatch,
     CommandPIDInventory,
     IdentityState,
     NativeIdentityReader,
+    Sysctl,
     darwin_environment,
 )
 from kora.runner.journal import RunningJournal, read_records
@@ -898,7 +904,10 @@ class HostedCommandCensusProbe(NativeIdentityReader):
             except OSError as error:
                 counts[f"marker_errno_{error.errno or ctypes.get_errno()}"] += 1
             else:
-                counts[f"marker_{result}"] += 1
+                kind = (
+                    self.malformed_marker_kind(pid) if result is None else str(result)
+                )
+                counts[f"marker_{kind}"] += 1
             if self.read(pid) != observation:
                 counts["identity_changed"] += 1
         confirmation = self._command_pids(group, deadline)
@@ -909,6 +918,43 @@ class HostedCommandCensusProbe(NativeIdentityReader):
             counts["confirming_group_members"] = len(confirmation.original_group)
             counts["listing_difference"] = len(inventory.listed ^ confirmation.listed)
         return dict(counts)
+
+    def malformed_marker_kind(self, pid: int) -> str:
+        library = self._library
+        if library is None:
+            return "library_unavailable"
+        owner = self._darwin_owner(library, pid)
+        if owner is not ArgumentMatch.EQUAL:
+            return f"owner_{owner.value}"
+        capacity = os.sysconf("SC_ARG_MAX") + ctypes.sizeof(ctypes.c_int)
+        buffer = ctypes.create_string_buffer(capacity)
+        try:
+            length = ctypes.c_size_t(capacity)
+            name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+            call = cast(Sysctl, library.sysctl)
+            if call(name, 3, buffer, ctypes.byref(length), None, 0) != 0:
+                return f"repeat_errno_{ctypes.get_errno()}"
+            if not 0 < length.value < capacity:
+                return "length_outside_capacity"
+            data = ctypes.string_at(ctypes.addressof(buffer), length.value)
+            word = ctypes.sizeof(ctypes.c_int)
+            path_end = data.find(b"\0", word)
+            if path_end <= word:
+                return "missing_path"
+            count = int.from_bytes(data[:word], sys.byteorder, signed=True)
+            if count == 0:
+                return "zero_argc"
+            path_length = path_end + 1 - word
+            start = word + -(-path_length // ARGUMENT_ALIGNMENT) * ARGUMENT_ALIGNMENT
+            if any(data[path_end:start]):
+                return "nonzero_padding"
+            if not 1 <= count <= len(data) - start:
+                return "argc_outside_capacity"
+            if data.count(b"\0", start) < count:
+                return "unterminated_argv"
+            return "other_or_changed"
+        finally:
+            ctypes.memset(buffer, 0, capacity)
 
 
 @pytest.mark.asyncio
@@ -957,7 +1003,9 @@ async def test_exited_command_settles_observed_descendants_without_status(
         assert outcomes == ["unresolved"]
     else:
         assert all(exited)
-        assert outcomes == ["confirmed"], diagnosis
+        if diagnosis:
+            pytest.fail(json.dumps(diagnosis, sort_keys=True), pytrace=False)
+        assert outcomes == ["confirmed"]
     if sys.platform == "linux":
         assert all(state is IdentityState.ABSENT for state in states)
     assert (status.state, status.exit_code) == ("exited", 23)
