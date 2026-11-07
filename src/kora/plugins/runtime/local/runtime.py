@@ -836,16 +836,25 @@ class LocalRuntime:
         ):
             raise delivery_error("submitter_superseded")
         deadline = entry.deadline
-        if (
-            entry.gate_closed
-            or (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff)
-            or (
-                deadline is not None
-                and ctx.clock.now() >= deadline.at - deadline.clock_uncertainty
-            )
+        if entry.gate_closed:
+            raise delivery_error("deadline_expired")
+        if (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff) or (
+            deadline is not None
+            and ctx.clock.now() >= deadline.at - deadline.clock_uncertainty
         ):
+            self._close_output_gate(key, entry)
             raise delivery_error("deadline_expired")
         return entry
+
+    def _close_output_gate(self, key: AttemptKey, entry: Running) -> None:
+        applied = self.registry.try_transition(
+            key, lambda current: takeover_cell(current, entry, entry.submitter, True)
+        )
+        if isinstance(applied, LockOutcome):
+            raise refusal("registry_busy")
+        error = applied.transition.refusal
+        if error is not None and error != "deadline_expired":
+            raise refusal(error)
 
     def transfer_out(
         self, handle: Handle, name: str, ctx: ProtocolContext
@@ -867,6 +876,23 @@ class LocalRuntime:
         pull = OutputPull()
         self._output_pulls.add(pull)
 
+        async def before_disclosure(entry: Running, cutoff: int | None) -> None:
+            if self._closing is not None:
+                raise refusal("runtime_closed")
+            inherited = entry.deadline
+            if (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff) or (
+                inherited is not None
+                and ctx.clock.now() >= inherited.at - inherited.clock_uncertainty
+            ):
+                await pull.run(
+                    self.executor.run(
+                        partial(self._close_output_gate, key, entry),
+                        after_uncertain_submission=pull.dispose,
+                    ),
+                    ctx.clock,
+                )
+                raise delivery_error("deadline_expired")
+
         def read(entry: Running, cutoff: int | None, length: int, offset: int) -> bytes:
             try:
                 chunk = os.pread(pull.descriptor(), length, offset)
@@ -881,12 +907,10 @@ class LocalRuntime:
                 ctx.clock,
                 deadline,
             )
-            if self._closing is not None:
-                raise refusal("runtime_closed")
+            await before_disclosure(entry, cutoff)
             offset = 0
             while offset < size:
-                if self._closing is not None:
-                    raise refusal("runtime_closed")
+                await before_disclosure(entry, cutoff)
                 chunk = await pull.run(
                     self.executor.run(
                         partial(
@@ -900,8 +924,7 @@ class LocalRuntime:
                     ),
                     ctx.clock,
                 )
-                if self._closing is not None:
-                    raise refusal("runtime_closed")
+                await before_disclosure(entry, cutoff)
                 if not chunk:
                     raise delivery_error("integrity_error")
                 offset += len(chunk)
@@ -936,8 +959,6 @@ class LocalRuntime:
         def active() -> None:
             if self._closing is not None:
                 raise refusal("runtime_closed")
-            if cutoff is not None and ctx.clock.monotonic_ns() >= cutoff:
-                raise delivery_error("deadline_expired")
             if ctx.clock.monotonic_ns() >= deadline:
                 raise ChannelError(ChannelFailure.DEADLINE)
 
@@ -950,13 +971,16 @@ class LocalRuntime:
         async def acquire() -> None:
             await self._acquire_spool(open_spool, pull.dispose)
 
-        for _ in range(OUTPUT_ATTEMPTS):
-            active()
+        async def check_entry() -> None:
             await self.executor.run(
                 lambda: self._output_entry(key, ctx, entry, cutoff),
                 after_uncertain_submission=pull.dispose,
             )
+
+        for _ in range(OUTPUT_ATTEMPTS):
+            await check_entry()
             try:
+                active()
                 await acquire()
                 size = await transfer_output(
                     entry.socket_path,
@@ -972,6 +996,8 @@ class LocalRuntime:
                     close_spool=pull.dispose,
                     active=active,
                 )
+                await check_entry()
+                active()
             except ListenerRefused:
                 raise delivery_error("execution_unauthorized") from None
             except (ChannelError, OSError):
@@ -982,12 +1008,8 @@ class LocalRuntime:
                 if pull.lease is not None:
                     raise refusal("runner_unreachable") from None
             else:
-                await self.executor.run(
-                    lambda: self._output_entry(key, ctx, entry, cutoff),
-                    after_uncertain_submission=pull.dispose,
-                )
                 return entry, size, cutoff
-        active()
+        await check_entry()
         raise refusal("runner_unreachable")
 
     async def _check_transfer_deadline(

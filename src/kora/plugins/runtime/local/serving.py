@@ -744,6 +744,8 @@ class ControlServer:
                 )
                 outcome = "transferred"
             except KoraProtocolError as error:
+                if error.code == "registry_busy":
+                    error = delivery_error("workload_busy")
                 outcome = "integrity" if error.code == "integrity_error" else "refused"
                 await self._answer(
                     channel, self._transfer_answer(request.request_id, error)

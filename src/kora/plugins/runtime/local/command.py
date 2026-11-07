@@ -491,6 +491,7 @@ class CommandSession:
         snapshot: DirectoryAnchor | None = None
         retained = False
         outcome = "refused"
+        authority: OutputAuthority | None = None
         try:
             try:
                 source = open_private_directory(self._attempt, "candidate")
@@ -515,10 +516,7 @@ class CommandSession:
                     retained = result is not JournalAppendOutcome.ABSENT
                     if result is JournalAppendOutcome.DURABLE:
                         outcome = "sealed"
-                        with self._lock:
-                            self._outputs = OutputAuthority(
-                                snapshot.identity, sealed.files
-                            )
+                        authority = OutputAuthority(snapshot.identity, sealed.files)
                     else:
                         outcome = "journal_unavailable"
         finally:
@@ -550,7 +548,12 @@ class CommandSession:
                         if cleanup is None:
                             cleanup = error
             if cleanup is not None:
+                with self._lock:
+                    self._seal_outcome = "refused"
                 raise cleanup
+        if authority is not None:
+            with self._lock:
+                self._outputs = authority
         self._finish_seal(outcome, started)
 
     def _fence_snapshot_space_failure(self, error: BaseException) -> bool:
@@ -1105,7 +1108,7 @@ class CommandSession:
             if space_error(error):
                 self.fence_transfer()
                 raise delivery_error("journal_unavailable") from None
-            raise
+            raise delivery_error("integrity_error") from None
 
     def note_output(self, outcome: str, started: int) -> None:
         waited = max(0, (self._clock.monotonic_ns() - started) // 1_000_000)

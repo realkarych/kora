@@ -2359,10 +2359,17 @@ async def test_output_iterator_keeps_its_inherited_monotonic_cutoff(
             first = await anext(iterator)
             clock.offset_ns += 31_000_000_000
             refused = await protocol_error(anext(iterator))
+        persisted = await recorded(live.runtime, handle.attempt_id)
+        fresh = await protocol_error(
+            anext(live.runtime.transfer_out(handle, "parked", live.ctx))
+        )
 
     assert first == b"p" * SECTION_FRAME_BYTES
     assert clock.now() < deadline.at - deadline.clock_uncertainty
     assert refused.code == "deadline_expired"
+    assert isinstance(persisted, Running)
+    assert persisted.gate_closed
+    assert fresh.code == "deadline_expired"
 
 
 @pytest.mark.asyncio
