@@ -49,3 +49,12 @@ deny, and a decoder refusal before the Bash command could run. The
 observations and the local policy tests that verify trusted workspace
 selection. Production delivery and full selected-profile coverage retain
 their existing acceptance criteria.
+
+## Subsequent selected command correlation labels
+
+[#979](https://github.com/realkarych/kora/issues/979) verifies the native
+thread and tool-call environment labels in the selected Linux Bash path and
+adds the two exact names to private launch preflight. The
+[dated record](codex-executor-command-metadata-2026-11-08.md) separates
+initial command observations, source-based ownership and the remaining
+complete declaration requirements.
