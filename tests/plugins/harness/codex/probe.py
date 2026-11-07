@@ -2588,7 +2588,9 @@ def verify_command_metadata(workspace: Path, thread_id: str) -> None:
             contents.read(len(expected) + 1) == expected,
             "command_metadata_mismatch",
         )
-    diagnostic("INFO", "probe.selected_command_metadata_verified")
+    diagnostic(
+        "INFO", "probe.selected_command_metadata_verified", "selected-command-metadata"
+    )
 
 
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
