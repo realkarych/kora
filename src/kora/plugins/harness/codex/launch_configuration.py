@@ -15,6 +15,7 @@ CODEX_VERSION = "0.166.0"
 MODEL_PROVIDER = "kora_responses"
 PROVIDER_KEY = "CODEX_API_KEY"
 BUILTIN_EXECUTOR = "CODEX_EXEC_SERVER_URL"
+EXEC_METADATA_ENV_NAMES = frozenset({"CODEX_THREAD_ID", "CODEX_TOOL_CALL_ID"})
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 PROVIDER_URL = re.compile(
     r"https?://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])"
@@ -196,7 +197,7 @@ def build_launch_inputs(
         raise LaunchConfigurationError(
             LaunchConfigurationFailure.INVALID_ENVIRONMENT_NAMES
         )
-    owned = app_env.keys() | exec_env.keys() | {PROVIDER_KEY}
+    owned = app_env.keys() | exec_env.keys() | {PROVIDER_KEY} | EXEC_METADATA_ENV_NAMES
     if not owned.isdisjoint(workload_names) or not owned.isdisjoint(
         workload_secret_names
     ):

@@ -73,6 +73,9 @@ from kora.plugins.harness.codex.selected_startup import (
 )
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
+    METADATA_ENV_CONTROL,
+    METADATA_ENVIRONMENT,
+    METADATA_MARKER,
     PROJECT_DOC_CANARY,
     SELECTED_AUTH_CASES,
     SELECTED_COMMAND,
@@ -90,6 +93,7 @@ from tests.plugins.harness.codex.selected_launch import (
     plant_checkout_canaries,
     prepare_native_inputs,
     role_homes,
+    selected_command,
     workspace_remains_untrusted,
 )
 
@@ -814,7 +818,9 @@ class ResponsesFixture:
                 usage = (
                     FIRST_RESPONSE_USAGE if self.case in SELECTED_TURN_CASES else None
                 )
-                return command_response({"cmd": SELECTED_COMMAND}, usage=usage)
+                return command_response(
+                    {"cmd": selected_command(self.case)}, usage=usage
+                )
             if self.case in SHELL_ARGUMENTS:
                 command = (
                     EXECUTOR_COMMAND if self.case in EXECUTOR_CASES else SHELL_COMMAND
@@ -912,7 +918,10 @@ class ResponsesFixture:
                 bool(separator) and status == ["Process exited with code 0"],
                 "shell_command_failed",
             )
-            if self.case in SELECTED_HOOK_CASES:
+            if (
+                self.case in SELECTED_HOOK_CASES
+                or self.case == "selected-command-metadata"
+            ):
                 require(not body.strip(), "selected_fault_unexpected_command_output")
         else:
             require(
@@ -1015,7 +1024,7 @@ class ToolProbe:
         self, terminal: TurnCompletion, session: AppServerTurnSession | None
     ) -> None:
         expected: tuple[tuple[str, str, str, str | None, int | None], ...]
-        if self.case == "allow":
+        if self.case in ("allow", "selected-command-metadata"):
             expected = (
                 (
                     "commandExecution",
@@ -1423,6 +1432,8 @@ class Stdio:
         await self.run_turn(
             workspace, case, selected_executor=True, thread_id=thread_id
         )
+        if case == "selected-command-metadata":
+            verify_command_metadata(workspace, thread_id)
 
     async def register_executor(self, executor_url: str, bearer: str) -> None:
         await self.call(
@@ -1507,7 +1518,8 @@ class Stdio:
         self.outputs = outputs
         tools = (
             ToolProbe(case, thread_id)
-            if case in DIRECT_PATCH_CASES or case in ("allow", "deny", "decoder-refuse")
+            if case in DIRECT_PATCH_CASES
+            or case in ("allow", "deny", "decoder-refuse", "selected-command-metadata")
             else None
         )
         hook = (
@@ -2403,6 +2415,8 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 )
                 child_env = materialize_native_inputs(inputs.app_server)
                 exec_env = materialize_native_inputs(inputs.exec_server)
+                if fixture.case == "selected-command-metadata":
+                    exec_env.update(METADATA_ENVIRONMENT)
                 if fixture.case != "selected-key-absent":
                     child_env["CODEX_API_KEY"] = SYNTHETIC_BEARER
                 executor = await launch_executor(
@@ -2565,6 +2579,18 @@ async def close_selected_launch(
         diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
 
 
+def verify_command_metadata(workspace: Path, thread_id: str) -> None:
+    marker = workspace / METADATA_MARKER
+    expected = f"{thread_id}\n{CALL_ID}\n{METADATA_ENV_CONTROL}\n".encode()
+    require(marker.is_file() and not marker.is_symlink(), "command_metadata_missing")
+    with marker.open("rb") as contents:
+        require(
+            contents.read(len(expected) + 1) == expected,
+            "command_metadata_mismatch",
+        )
+    diagnostic("INFO", "probe.selected_command_metadata_verified")
+
+
 async def run_selected_launch(case: SelectedLaunchCase) -> None:
     if case in SELECTED_AUTH_CASES:
         decision = (
@@ -2598,7 +2624,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         elif case in SELECTED_PATCH_CASES:
             verify_patch_hook()
         else:
-            verify_shell_hook(SELECTED_COMMAND)
+            verify_shell_hook(selected_command(case))
         executes = case in SELECTED_AUTH_CASES and case not in {
             "selected-deny",
             "selected-hook-deny",

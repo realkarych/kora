@@ -12,11 +12,11 @@ from kora.plugins.harness.codex.pre_tool_use import (
 )
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
-    SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
     SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_PATCH_CASES,
+    selected_command,
 )
 
 CONTROL = Path("/var/lib/kora-hook-probe/control")
@@ -48,6 +48,7 @@ def main() -> int:
     decision = (CONTROL / "decision").read_text(encoding="utf-8")
     executor = decision in {"executor-allow", "executor-deny", "executor-stall"}
     selected = decision in SELECTED_HOOK_CASES or decision in {
+        "selected-command-metadata",
         "selected-allow",
         "selected-deny",
     }
@@ -83,7 +84,7 @@ def main() -> int:
         expected_command += f" && printf '%s\\n' {origin} >> kora-probe.marker"
 
     if selected:
-        expected_command = SELECTED_COMMAND
+        expected_command = selected_command(decision)
 
     allowance = 1 if decision == "decoder-refuse" else MAX_INPUT_BYTES
     try:
@@ -128,6 +129,7 @@ def main() -> int:
         "interactive",
         "shell_controls",
         "executor-allow",
+        "selected-command-metadata",
         "selected-allow",
         "selected-patch-allow",
         "patch-allow",

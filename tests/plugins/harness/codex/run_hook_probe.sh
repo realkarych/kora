@@ -184,7 +184,7 @@ case "${1:-}" in
         done
         ;;
     --check-selected-launch)
-        for probe_case in allow deny key-absent; do
+        for probe_case in allow deny key-absent command-metadata; do
             run_variant shell-controls "--selected-$probe_case"
             release_container
         done

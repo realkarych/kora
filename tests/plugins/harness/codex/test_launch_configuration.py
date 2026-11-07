@@ -59,7 +59,9 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
     executor = homes(root / "exec")
 
     inputs = construct(
-        root, workload=("WORKLOAD_VAR",), workload_secrets=("WORK_SECRET",)
+        root,
+        workload=("WORKLOAD_VAR", "CODEX_THREAD_ID_ALIAS"),
+        workload_secrets=("WORK_SECRET", "CODEX_TOOL_CALL_ID_ALIAS"),
     )
     app_config: object = tomllib.loads(inputs.app_server.config)
     exec_config: object = tomllib.loads(inputs.exec_server.config)
@@ -236,7 +238,16 @@ def test_codex_launch_refuses_raw_executor_bearer(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["HOME", "CODEX_HOME", "TMPDIR", "SHELL", "CODEX_EXEC_SERVER_URL", "CODEX_API_KEY"],
+    [
+        "HOME",
+        "CODEX_HOME",
+        "TMPDIR",
+        "SHELL",
+        "CODEX_EXEC_SERVER_URL",
+        "CODEX_API_KEY",
+        "CODEX_THREAD_ID",
+        "CODEX_TOOL_CALL_ID",
+    ],
 )
 @pytest.mark.parametrize("owner", ["workload", "secret"])
 def test_codex_launch_refuses_another_owner_of_native_names(
