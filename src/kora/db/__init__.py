@@ -3,6 +3,16 @@ from kora.observability import CATALOG, EventSpec, FieldKind, Level
 DB_COMPONENT: str = CATALOG.register_component("db")
 DB_LOGGER_NAME: str = "kora.db"
 
+BOOTSTRAP_COMPLETED: EventSpec = CATALOG.register(
+    EventSpec(
+        name="db.bootstrap.completed",
+        component=DB_COMPONENT,
+        level=Level.INFO,
+        message="bootstrap initialization completed",
+        fields={"outcome": FieldKind.STRING},
+    )
+)
+
 MIGRATION_STARTED: EventSpec = CATALOG.register(
     EventSpec(
         name="db.migration.started",
@@ -60,6 +70,7 @@ CLOSE_TIMED_OUT: EventSpec = CATALOG.register(
 )
 
 __all__ = [
+    "BOOTSTRAP_COMPLETED",
     "CLOSE_TIMED_OUT",
     "DB_COMPONENT",
     "DB_LOGGER_NAME",

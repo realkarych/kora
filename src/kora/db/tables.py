@@ -15,6 +15,12 @@ from sqlalchemy import (
 )
 from sqlalchemy.types import TypeEngine
 
+from kora.db.bootstrap_initialization_v1 import (
+    TABLE_NAME as BOOTSTRAP_INITIALIZATION_TABLE,
+)
+from kora.db.bootstrap_initialization_v1 import (
+    bootstrap_initialization_elements_v1,
+)
 from kora.db.graph_deployment_stage_v1 import (
     OCCURRENCE_TABLE,
     STAGE_TABLE,
@@ -271,6 +277,12 @@ api_token: Table = Table(
     timestamp("expires_at", nullable=True),
     *audit_columns(),
     UniqueConstraint("digest"),
+)
+
+bootstrap_initialization: Table = Table(
+    BOOTSTRAP_INITIALIZATION_TABLE,
+    metadata,
+    *bootstrap_initialization_elements_v1(),
 )
 
 worker: Table = Table(
