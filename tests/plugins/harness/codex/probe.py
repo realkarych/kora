@@ -78,6 +78,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
+    SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
     SELECTED_PATCH_CASES,
@@ -128,18 +129,22 @@ ProbeCase = (
 )
 
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
-SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, str, str]] = {
-    "selected-hook-deny": ("blocked", "feedback", SELECTED_DENIAL),
+SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None]] = {
+    "selected-hook-deny": ("blocked", ("feedback", SELECTED_DENIAL)),
     "selected-hook-no-reason": (
         "failed",
-        "error",
-        "PreToolUse hook exited with code 2 "
-        "but did not write a blocking reason to stderr",
+        (
+            "error",
+            "PreToolUse hook exited with code 2 "
+            "but did not write a blocking reason to stderr",
+        ),
     ),
-    "selected-hook-exit-one": ("failed", "error", "hook exited with code 1"),
-    "selected-hook-timeout": ("failed", "error", "hook timed out after 5s"),
-    "selected-patch-deny": ("blocked", "feedback", PATCH_DENIAL),
-    "selected-patch-exit-one": ("failed", "error", "hook exited with code 1"),
+    "selected-hook-exit-one": ("failed", ("error", "hook exited with code 1")),
+    "selected-hook-timeout": ("failed", ("error", "hook timed out after 5s")),
+    "selected-patch-allow": ("completed", None),
+    "selected-patch-deny": ("blocked", ("feedback", PATCH_DENIAL)),
+    "selected-patch-exit-one": ("failed", ("error", "hook exited with code 1")),
+    "selected-patch-timeout": ("failed", ("error", "hook timed out after 5s")),
 }
 
 CODEX = "/usr/local/bin/codex"
@@ -181,7 +186,14 @@ CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
 DIRECT_PATCH_CASES = PATCH_CASES | SELECTED_PATCH_CASES
-PATCH_WRITE_CASES = frozenset({"patch-allow", "selected-patch-exit-one"})
+PATCH_WRITE_CASES = frozenset(
+    {
+        "patch-allow",
+        "selected-patch-allow",
+        "selected-patch-exit-one",
+        "selected-patch-timeout",
+    }
+)
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
 INTERRUPT_COMMAND = "exec /usr/local/bin/python3 -I /opt/kora-probe/interrupt_child.py"
 INTERRUPT_PRIMER_ID = "kora-interrupt-primer"
@@ -1218,7 +1230,7 @@ class HookCompletionProbe:
             "selected_hook_completion_identity",
         )
         run = as_object(params.get("run"))
-        status, kind, reason = SELECTED_HOOK_OUTCOMES[self.case]
+        status, entry = SELECTED_HOOK_OUTCOMES[self.case]
         require(
             run.get("eventName") == "preToolUse"
             and run.get("handlerType") == "command"
@@ -1230,15 +1242,13 @@ class HookCompletionProbe:
             "selected_hook_handler_identity",
         )
         require(run.get("status") == status, "selected_hook_completion_status")
-        require(
-            run.get("entries") == [{"kind": kind, "text": reason}],
-            "selected_hook_completion_entry",
-        )
+        entries = [] if entry is None else [{"kind": entry[0], "text": entry[1]}]
+        require(run.get("entries") == entries, "selected_hook_completion_entry")
         self.turn_id = cast("str", turn_id)
 
     def verify(self, turn_id: str) -> None:
         require(self.turn_id == turn_id, "selected_hook_completion_turn")
-        status, _, _ = SELECTED_HOOK_OUTCOMES[self.case]
+        status, _ = SELECTED_HOOK_OUTCOMES[self.case]
         diagnostic("INFO", "probe.selected_hook_completion", f"{self.case}:{status}")
 
 
@@ -2297,6 +2307,7 @@ def startup_identity(case: ProbeCase, prepared_home: Path) -> StartupIdentity:
 
 async def observe_hook_timeout(
     stdio: Stdio,
+    case: SelectedLaunchCase,
     workspace: Path,
     endpoint: str,
     bearer: str,
@@ -2316,7 +2327,7 @@ async def observe_hook_timeout(
         listener.bind(str(CONTROL / HOOK_TIMEOUT_SOCKET))
         listener.listen(1)
         observation = asyncio.create_task(
-            stdio.observe_selected(workspace, "selected-hook-timeout", endpoint, bearer)
+            stdio.observe_selected(workspace, case, endpoint, bearer)
         )
         try:
             peer, _ = await loop.sock_accept(listener)
@@ -2325,7 +2336,11 @@ async def observe_hook_timeout(
             require(
                 await loop.sock_recv(peer, 1) == b"1", "selected_hook_timeout_ready"
             )
-            pid = verify_shell_hook(SELECTED_COMMAND)
+            pid = (
+                verify_patch_hook()
+                if case in SELECTED_PATCH_CASES
+                else verify_shell_hook(SELECTED_COMMAND)
+            )
             credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             require(
                 len(credentials) == 12
@@ -2448,10 +2463,15 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 )
             elif fixture.case in SELECTED_LAUNCH_CASES:
                 assert executor_url is not None
-                if fixture.case == "selected-hook-timeout":
+                if fixture.case in SELECTED_HOOK_TIMEOUT_CASES:
                     assert executor is not None
                     await observe_hook_timeout(
-                        stdio, workspace, executor_url, bearer, (process, executor)
+                        stdio,
+                        fixture.case,
+                        workspace,
+                        executor_url,
+                        bearer,
+                        (process, executor),
                     )
                     diagnostic(
                         "INFO",
@@ -2770,9 +2790,9 @@ def verify_hook_invocation() -> None:
         require(invocations.read(2) == b"1", "unexpected_hook_input_invocation_count")
 
 
-def verify_patch_hook() -> None:
+def verify_patch_hook() -> int:
     verify_hook_invocation()
-    hook_pid(PATCH, tool="apply_patch")
+    return hook_pid(PATCH, tool="apply_patch")
 
 
 def verify_patch_marker(marker: Path, *, writes: bool) -> None:

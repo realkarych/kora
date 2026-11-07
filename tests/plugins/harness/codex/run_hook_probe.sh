@@ -210,8 +210,8 @@ case "${1:-}" in
         release_container
         ;;
     --check-selected-patch-hook-failures)
-        for probe_case in deny exit-one; do
-            run_variant shell-controls "--selected-patch-$probe_case"
+        for probe_case in allow deny exit-one timeout; do
+            run_variant selected-hook-failures "--selected-patch-$probe_case"
             release_container
         done
         ;;

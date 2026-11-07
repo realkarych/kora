@@ -15,6 +15,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
+    SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_PATCH_CASES,
 )
 
@@ -128,6 +129,7 @@ def main() -> int:
         "shell_controls",
         "executor-allow",
         "selected-allow",
+        "selected-patch-allow",
         "patch-allow",
         "interrupt",
     }:
@@ -144,7 +146,7 @@ def main() -> int:
         return 2
     if decision in {"selected-hook-exit-one", "selected-patch-exit-one"}:
         return 1
-    if decision == "selected-hook-timeout":
+    if decision in SELECTED_HOOK_TIMEOUT_CASES:
         hold_for_native_timeout()
         return deny(INPUT_REFUSAL)
     if decision in {"patch-deny", "selected-patch-deny"}:

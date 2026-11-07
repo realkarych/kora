@@ -11,7 +11,12 @@ from kora.plugins.harness.codex.launch_configuration import (
     build_launch_inputs,
 )
 
-SelectedPatchCase = Literal["selected-patch-deny", "selected-patch-exit-one"]
+SelectedPatchCase = Literal[
+    "selected-patch-allow",
+    "selected-patch-deny",
+    "selected-patch-exit-one",
+    "selected-patch-timeout",
+]
 SelectedHookCase = (
     Literal[
         "selected-hook-deny",
@@ -35,7 +40,12 @@ SelectedLaunchCase = (
     ]
 )
 SELECTED_PATCH_CASES: frozenset[SelectedPatchCase] = frozenset(
-    {"selected-patch-deny", "selected-patch-exit-one"}
+    {
+        "selected-patch-allow",
+        "selected-patch-deny",
+        "selected-patch-exit-one",
+        "selected-patch-timeout",
+    }
 )
 SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     {
@@ -45,6 +55,9 @@ SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
         "selected-hook-exit-one",
         "selected-hook-timeout",
     }
+)
+SELECTED_HOOK_TIMEOUT_CASES: frozenset[SelectedHookCase] = frozenset(
+    {"selected-hook-timeout", "selected-patch-timeout"}
 )
 SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
 SELECTED_LAUNCH_CASES = frozenset(
