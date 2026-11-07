@@ -37,6 +37,7 @@ from kora.plugins.runtime.local.control import (
     connected,
     runner_status,
     start_command,
+    transfer_input,
 )
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT
@@ -1968,9 +1969,26 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
                     except KoraProtocolError as error:
                         start_error = error
                         break
-            transfer_error = await protocol_error(
-                runtime.transfer_in(handle, item, empty_transfer(), ctx)
-            )
+            entry = await recorded(runtime, handle.attempt_id)
+            assert isinstance(entry, Running)
+            empty = base / "empty-input"
+            empty.touch()
+            with empty.open("rb") as source:
+                transfer_error = await protocol_error(
+                    transfer_input(
+                        entry.socket_path,
+                        entry.runner,
+                        entry.submitter.dispatcher_id,
+                        kernel_source(NativeIdentityReader()),
+                        runtime.executor,
+                        ctx.clock,
+                        "fenced-transfer",
+                        source.fileno(),
+                        item,
+                        ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+                        close_spool=source.close,
+                    )
+                )
             status = await runtime.status(handle, ctx)
             anchor = open_local_directory(attempt)
             try:
@@ -1982,6 +2000,12 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
             exited = await asyncio.gather(
                 *(asyncio.to_thread(exited_within, pid, 5) for pid in pids)
             )
+            (attempt / "filler").unlink()
+            public_error = await protocol_error(
+                runtime.transfer_in(handle, item, empty_transfer(), ctx)
+            )
+            public_records = journal_events(journal)
+            public_size = journal.stat().st_size
         finally:
             release_commands(root)
             await runtime.close()
@@ -1996,6 +2020,10 @@ async def test_terminal_journal_enospc_fences_without_losing_exit(
     assert start_error.retryable is True
     assert transfer_error.code == "journal_unavailable"
     assert transfer_error.retryable is True
+    assert public_error.code == "journal_unavailable"
+    assert public_error.retryable is True
+    assert public_records == persisted
+    assert public_size == size
     assert len(pids) == 2
     assert all(exited)
     assert (status.state, status.phase, status.exit_code) == (
