@@ -1,7 +1,7 @@
 import asyncio
 import sqlite3
 import threading
-from contextlib import closing
+from contextlib import AsyncExitStack, closing
 from pathlib import Path
 
 import pytest
@@ -13,8 +13,18 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.pool.base import ConnectionPoolEntry
 from sqlalchemy.util import await_
 
-from kora.db.connection import Database, Dialect
-from tests.db.closing import CONDITION_DEADLINE_SECONDS, ConnectionLedger, until
+from kora.db.connection import (
+    SQLITE_READERS,
+    Database,
+    Dialect,
+    SQLiteSynchronizationError,
+)
+from tests.db.closing import (
+    CONDITION_DEADLINE_SECONDS,
+    ConnectionLedger,
+    sqlite_companions,
+    until,
+)
 from tests.support.databases import sqlite_settings
 
 
@@ -171,3 +181,154 @@ async def test_sqlite_wal_refusal_releases_driver_and_writer(
         await database.close()
 
     assert recovered == ("wal", 2, 1)
+
+
+async def reader_settings(
+    connection: AsyncConnection,
+) -> tuple[object, object, object, object]:
+    return (
+        *await writer_settings(connection),
+        await connection.scalar(text("PRAGMA query_only")),
+    )
+
+
+async def all_reader_settings(
+    database: Database,
+) -> list[tuple[object, object, object, object]]:
+    async with AsyncExitStack() as readers:
+        connections = [
+            await readers.enter_async_context(database.read_transaction())
+            for _ in range(SQLITE_READERS)
+        ]
+        return [await reader_settings(connection) for connection in connections]
+
+
+@pytest.mark.asyncio
+async def test_ordinary_sqlite_reader_can_open_before_writer(tmp_path: Path) -> None:
+    database = Database(sqlite_settings(tmp_path / "metadata.db"))
+
+    try:
+        async with database.read_transaction() as reader:
+            journal_mode, _, foreign_keys, query_only = await reader_settings(reader)
+    finally:
+        await database.close()
+
+    assert (journal_mode, foreign_keys, query_only) == ("delete", 1, 1)
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_reader_reinitializes_and_can_truncate_wal(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "metadata.db"
+    wal = path.with_name(f"{path.name}-wal")
+    database = Database(sqlite_settings(path), require_sqlite_full_sync=True)
+    ledger = ConnectionLedger(database)
+
+    def start_reader_at_normal(
+        raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+    ) -> None:
+        with closing(raw_connection.cursor()) as cursor:
+            cursor.execute("PRAGMA main.synchronous=NORMAL")
+
+    event.listen(
+        database.reader_engine.sync_engine,
+        "connect",
+        start_reader_at_normal,
+        insert=True,
+    )
+
+    try:
+        async with database.transaction() as writer:
+            await writer.execute(text("CREATE TABLE probe (id INTEGER)"))
+            await writer.execute(text("INSERT INTO probe VALUES (7)"))
+        initial_settings = await all_reader_settings(database)
+        await database.reader_engine.dispose()
+        async with database.read_transaction() as reader:
+            replacement_settings = await reader_settings(reader)
+            before_checkpoint = wal.stat().st_size
+            result = (
+                await reader.execute(text("PRAGMA main.wal_checkpoint(TRUNCATE)"))
+            ).one()
+            after_checkpoint = wal.stat().st_size
+            query_only = await reader.scalar(text("PRAGMA query_only"))
+            value = await reader.scalar(text("SELECT id FROM probe"))
+    finally:
+        await database.close()
+
+    assert initial_settings == [("wal", 2, 1, 1)] * SQLITE_READERS
+    assert replacement_settings == ("wal", 2, 1, 1)
+    assert before_checkpoint > 0
+    assert tuple(result) == (0, 0, 0)
+    assert after_checkpoint == 0
+    assert (query_only, value) == (1, 7)
+    assert ledger.opened == ledger.closed == SQLITE_READERS + 2
+    assert ledger.outstanding == 0
+    assert ledger.closed_while_checked_out == 0
+    assert sqlite_companions(database) == []
+
+
+@pytest.mark.asyncio
+async def test_pre_wal_reader_refusal_releases_driver_and_all_pool_slots(
+    tmp_path: Path,
+) -> None:
+    database = Database(
+        sqlite_settings(tmp_path / "metadata.db"), require_sqlite_full_sync=True
+    )
+    drivers: list[SQLiteDriverConnection] = []
+    workers: list[threading.Thread] = []
+
+    def observe_worker() -> int:
+        if not workers:
+            workers.append(threading.current_thread())
+        return 0
+
+    async def identify_worker(driver: SQLiteDriverConnection) -> None:
+        await driver.set_progress_handler(observe_worker, 1)
+        try:
+            async with driver.execute("SELECT 1") as statement:
+                await statement.fetchone()
+        finally:
+            await driver.set_progress_handler(observe_worker, 0)
+
+    def observe_refused_driver(
+        raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+    ) -> None:
+        if not drivers:
+            driver: object = record.driver_connection
+            assert isinstance(driver, SQLiteDriverConnection)
+            drivers.append(driver)
+            await_(identify_worker(driver))
+
+    event.listen(
+        database.reader_engine.sync_engine,
+        "connect",
+        observe_refused_driver,
+        insert=True,
+    )
+    body_ran = False
+
+    try:
+        with pytest.raises(SQLiteSynchronizationError, match="reader requires WAL"):
+            async with database.read_transaction():
+                body_ran = True
+        assert len(drivers) == len(workers) == 1
+        with pytest.raises(ValueError, match="no active connection"):
+            assert not drivers[0].in_transaction
+        await until(lambda: not workers[0].is_alive())
+        idle_after_refusal = database.units_in_flight()
+        ledger = ConnectionLedger(database)
+
+        async with database.transaction() as writer:
+            await writer.execute(text("CREATE TABLE probe (id INTEGER)"))
+        recovered = await all_reader_settings(database)
+    finally:
+        await database.close()
+
+    assert not body_ran
+    assert idle_after_refusal == 0
+    assert recovered == [("wal", 2, 1, 1)] * SQLITE_READERS
+    assert ledger.opened == ledger.closed == ledger.checkouts == SQLITE_READERS + 1
+    assert ledger.outstanding == ledger.closed_while_checked_out == 0
+    assert database.units_in_flight() == 0
+    assert sqlite_companions(database) == []

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from sqlalchemy import URL, Connection, event, make_url, text
-from sqlalchemy.engine.interfaces import DBAPIConnection, ExceptionContext
+from sqlalchemy.engine.interfaces import DBAPIConnection, DBAPICursor, ExceptionContext
 from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -66,7 +66,7 @@ class DatabaseConfigurationError(ValueError):
         self.reason = reason
 
 
-class SQLiteWriterSynchronizationError(RuntimeError):
+class SQLiteSynchronizationError(RuntimeError):
     pass
 
 
@@ -152,22 +152,36 @@ def apply_pragmas(
     return on_connect
 
 
+def apply_full_sync(cursor: DBAPICursor) -> None:
+    cursor.execute("PRAGMA main.synchronous=FULL")
+    cursor.execute("PRAGMA main.synchronous")
+    if cursor.fetchone() != (SQLITE_SYNCHRONOUS_FULL,):
+        raise SQLiteSynchronizationError(
+            "SQLite connection requires FULL synchronization"
+        )
+
+
 def configure_full_sync_writer(
     raw_connection: DBAPIConnection, record: ConnectionPoolEntry
 ) -> None:
     with closing(raw_connection.cursor()) as cursor:
         cursor.execute("PRAGMA main.journal_mode=WAL")
         if cursor.fetchone() != ("wal",):
-            raise SQLiteWriterSynchronizationError(
-                "SQLite writer requires WAL journal mode"
-            )
-        cursor.execute("PRAGMA main.synchronous=FULL")
-        cursor.execute("PRAGMA main.synchronous")
-        if cursor.fetchone() != (SQLITE_SYNCHRONOUS_FULL,):
-            raise SQLiteWriterSynchronizationError(
-                "SQLite writer requires FULL synchronization"
-            )
+            raise SQLiteSynchronizationError("SQLite writer requires WAL journal mode")
+        apply_full_sync(cursor)
         cursor.execute("PRAGMA foreign_keys=ON")
+
+
+def configure_full_sync_reader(
+    raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+) -> None:
+    with closing(raw_connection.cursor()) as cursor:
+        apply_full_sync(cursor)
+        cursor.execute("PRAGMA main.journal_mode")
+        if cursor.fetchone() != ("wal",):
+            raise SQLiteSynchronizationError("SQLite reader requires WAL journal mode")
+        for pragma in READER_PRAGMAS:
+            cursor.execute(pragma)
 
 
 def begin_immediately(connection: Connection) -> None:
@@ -198,8 +212,9 @@ def sqlite_engine(
             pool_timeout=settings.pool_timeout_seconds,
             connect_args=connect_args,
         )
-    if writer and require_full_sync:
-        event.listen(engine.sync_engine, "connect", configure_full_sync_writer)
+    if require_full_sync:
+        configure = configure_full_sync_writer if writer else configure_full_sync_reader
+        event.listen(engine.sync_engine, "connect", configure)
     else:
         pragmas = WRITER_PRAGMAS if writer else READER_PRAGMAS
         event.listen(engine.sync_engine, "connect", apply_pragmas(pragmas))
@@ -284,7 +299,9 @@ class Database:
             self._writer = sqlite_engine(
                 settings, writer=True, require_full_sync=require_sqlite_full_sync
             )
-            self._reader = sqlite_engine(settings, writer=False)
+            self._reader = sqlite_engine(
+                settings, writer=False, require_full_sync=require_sqlite_full_sync
+            )
         else:
             self._writer = postgresql_engine(settings)
             self._reader = self._writer
