@@ -26,6 +26,7 @@ from tests.db.closing import (
     narrow_settings,
     until,
 )
+from tests.db.test_read_snapshot import assert_native_closed, physical_handle
 from tests.db.test_sqlite_writer_entry import sqlite_driver
 from tests.support.databases import (
     RYUK_VARIABLE,
@@ -40,6 +41,7 @@ CREATE_PROBE: str = "CREATE TABLE probe (id INTEGER)"
 INSERT_PROBE: str = "INSERT INTO probe VALUES (7)"
 READ_PROBE: str = "SELECT id FROM probe"
 SHOW_COMMIT: str = "SHOW synchronous_commit"
+TIMED_ENTRY_SECONDS: float = 0.5
 
 
 @runtime_checkable
@@ -121,17 +123,20 @@ async def test_postgres_entry_preserves_all_local_flush_modes_on_the_exact_backe
     modes = ("local", "remote_write", "on", "remote_apply")
     expected_backends: list[tuple[int, bool]] = []
     preserved: list[object] = []
+    observations_at_entry: list[int] = []
 
     try:
         for mode in modes:
             driver = await set_session_commit_mode(database, mode)
             expected_backends.append((driver.get_server_pid(), True))
             async with database.transaction() as writer:
+                observations_at_entry.append(len(observed))
                 preserved.append(await writer.scalar(text(SHOW_COMMIT)))
     finally:
         await database.close()
 
-    assert observed == expected_backends
+    assert observations_at_entry == [1, 3, 5, 7]
+    assert observed == [backend for backend in expected_backends for _ in range(2)]
     assert preserved == list(modes)
     assert ledger.opened == ledger.closed == 1
     assert ledger.outstanding == ledger.closed_while_checked_out == 0
@@ -491,3 +496,270 @@ def test_writer_entry_checks_native_durability_settings(
                     server.settings_for(TEMPLATE_DATABASE), disabled_setting
                 )
             )
+
+
+@pytest.mark.parametrize("local_mode", ["off", "remote_apply"])
+@pytest.mark.parametrize("timed_admission", [False, True])
+@pytest.mark.asyncio
+async def test_durable_writer_checks_transaction_local_mode_before_commit(
+    empty_database_settings: DatabaseSettings, local_mode: str, timed_admission: bool
+) -> None:
+    settings = narrow_settings(empty_database_settings, pool_size=1)
+    postgres = settings.dialect is Dialect.POSTGRESQL
+    database = Database(
+        settings,
+        require_postgresql_wal_settings=postgres,
+        require_sqlite_full_sync=not postgres,
+    )
+    ledger = ConnectionLedger(database)
+    observations: list[tuple[PostgresDriverConnection, int, bool]] = []
+    commit_modes: list[object] = []
+    engine = database.writer_engine.sync_engine
+
+    def observe_guard(
+        connection: Connection, cursor: object, statement: str, *args: object
+    ) -> None:
+        if statement == POSTGRESQL_WAL_SETTINGS_QUERY.text:
+            driver = postgres_driver(connection.connection.driver_connection)
+            observations.append(
+                (driver, driver.get_server_pid(), driver.is_in_transaction())
+            )
+
+    def observe_commit(connection: Connection) -> None:
+        if postgres:
+            driver = postgres_driver(connection.connection.driver_connection)
+            assert driver is original_driver
+            assert driver.is_in_transaction()
+            commit_modes.append(connection.exec_driver_sql(SHOW_COMMIT).scalar_one())
+        else:
+            commit_modes.append(
+                connection.exec_driver_sql("PRAGMA synchronous").scalar_one()
+            )
+
+    async def stage_write() -> None:
+        loop = asyncio.get_running_loop()
+        cutoff = loop.time() + TIMED_ENTRY_SECONDS if timed_admission else None
+        elapsed = asyncio.Event()
+        barrier = loop.call_at(cutoff, elapsed.set) if cutoff is not None else None
+        try:
+            async with database.transaction(admission_deadline=cutoff) as writer:
+                if postgres:
+                    assert len(observations) == 1
+                    await writer.execute(
+                        text(
+                            "SELECT pg_catalog.set_config("
+                            "'synchronous_commit', :mode, true)"
+                        ),
+                        {"mode": local_mode},
+                    )
+                await writer.execute(text(INSERT_PROBE))
+                if cutoff is not None:
+                    await asyncio.wait_for(elapsed.wait(), CONDITION_DEADLINE_SECONDS)
+                    assert loop.time() >= cutoff
+                    assert len(observations) == int(postgres)
+        finally:
+            if barrier is not None:
+                barrier.cancel()
+
+    refused = postgres and local_mode == "off"
+    original_driver: PostgresDriverConnection | None = None
+    restored_mode: object = None
+
+    try:
+        async with database.transaction() as writer:
+            await writer.execute(text(CREATE_PROBE))
+        if postgres:
+            original_driver = await set_session_commit_mode(database, "on")
+        event.listen(engine, "after_cursor_execute", observe_guard)
+        event.listen(engine, "commit", observe_commit)
+        checkouts_before_write = ledger.checkouts
+
+        if refused:
+            with pytest.raises(
+                PostgreSQLDurabilityError, match="requires durable WAL settings"
+            ):
+                await stage_write()
+        else:
+            await stage_write()
+        event.remove(engine, "commit", observe_commit)
+        idle_after_write = (
+            original_driver is None or not original_driver.is_in_transaction()
+        )
+        outstanding_after_write = ledger.outstanding
+        assert ledger.checkouts == checkouts_before_write + 1
+        async with database.read_transaction() as reader:
+            if original_driver is not None:
+                raw = await reader.get_raw_connection()
+                assert raw.driver_connection is original_driver
+                restored_mode = await reader.scalar(text(SHOW_COMMIT))
+            ids = (await reader.execute(text(READ_PROBE))).scalars().all()
+    finally:
+        await database.close()
+
+    if original_driver is not None:
+        assert (
+            observations
+            == [(original_driver, original_driver.get_server_pid(), True)] * 2
+        )
+        assert restored_mode == "on"
+    else:
+        assert observations == []
+    assert commit_modes == ([] if refused else [local_mode if postgres else 2])
+    assert ids == ([] if refused else [7])
+    assert idle_after_write
+    assert outstanding_after_write == 0
+    assert ledger.opened == ledger.closed == (1 if postgres else 2)
+    assert ledger.outstanding == ledger.closed_while_checked_out == 0
+    assert database.units_in_flight() == 0
+
+
+@pytest.mark.parametrize("interrupt", ["cancel", "close"])
+@pytest.mark.parametrize("timed_admission", [False, True])
+@pytest.mark.asyncio
+async def test_durable_writer_owns_native_transaction_through_interrupted_commit(
+    empty_database_settings: DatabaseSettings, interrupt: str, timed_admission: bool
+) -> None:
+    settings = narrow_settings(empty_database_settings, pool_size=1)
+    postgres = settings.dialect is Dialect.POSTGRESQL
+    database = Database(
+        settings,
+        require_postgresql_wal_settings=postgres,
+        require_sqlite_full_sync=not postgres,
+    )
+    ledger = ConnectionLedger(database)
+    commit_started = asyncio.Event()
+    release = asyncio.Event()
+    guard_drivers: list[PostgresDriverConnection] = []
+    sqlite_handles: list[object] = []
+    commit_dispatches = 0
+    engine = database.writer_engine.sync_engine
+
+    def pause_at_final_guard(
+        connection: Connection, cursor: object, statement: str, *args: object
+    ) -> None:
+        if statement == POSTGRESQL_WAL_SETTINGS_QUERY.text:
+            driver = postgres_driver(connection.connection.driver_connection)
+            assert driver.is_in_transaction()
+            guard_drivers.append(driver)
+            if len(guard_drivers) == 2:
+                commit_started.set()
+                await_(release.wait())
+
+    def observe_commit_dispatch(connection: Connection) -> None:
+        nonlocal commit_dispatches
+        commit_dispatches += 1
+        if not postgres:
+            sqlite_handles.append(
+                physical_handle(database, connection.connection.driver_connection)
+            )
+            commit_started.set()
+            await_(release.wait())
+
+    async def stage_write() -> None:
+        cutoff = (
+            asyncio.get_running_loop().time() + CONDITION_DEADLINE_SECONDS
+            if timed_admission
+            else None
+        )
+        async with database.transaction(admission_deadline=cutoff) as writer:
+            await writer.execute(text(INSERT_PROBE))
+
+    task: asyncio.Task[None] | None = None
+    snapshot: asyncio.Task[SnapshotProbe] | None = None
+    try:
+        async with database.transaction() as writer:
+            await writer.execute(text(CREATE_PROBE))
+        event.listen(engine, "after_cursor_execute", pause_at_final_guard)
+        event.listen(engine, "commit", observe_commit_dispatch)
+        checkouts_before_write = ledger.checkouts
+
+        task = asyncio.create_task(stage_write())
+        await asyncio.wait_for(commit_started.wait(), CONDITION_DEADLINE_SECONDS)
+        assert ledger.checkouts == checkouts_before_write + 1
+        if interrupt == "cancel":
+            loop = asyncio.get_running_loop()
+            if postgres:
+                held_checkouts = ledger.checkouts
+                snapshot = asyncio.create_task(
+                    read_probe_snapshot(
+                        database, loop.time() + REFUSAL_DEADLINE_SECONDS
+                    )
+                )
+                await until(lambda: database.units_in_flight() == 2)
+                done, _ = await asyncio.wait(
+                    {snapshot}, timeout=CONDITION_DEADLINE_SECONDS
+                )
+                assert done == {snapshot}
+                with pytest.raises(DatabaseSnapshotRejected) as refused:
+                    await snapshot
+                assert refused.value.reason is DatabaseSnapshotFailure.DEADLINE
+                assert ledger.checkouts == held_checkouts
+            else:
+                _, snapshot_mode, before_commit = await read_probe_snapshot(
+                    database, loop.time() + CONDITION_DEADLINE_SECONDS
+                )
+                assert snapshot_mode == (1,)
+                assert before_commit == []
+            task.cancel()
+            cancellation_turn = asyncio.Event()
+            asyncio.get_running_loop().call_soon(cancellation_turn.set)
+            await asyncio.wait_for(cancellation_turn.wait(), CONDITION_DEADLINE_SECONDS)
+        else:
+            await database.close(deadline_seconds=0)
+        outstanding_during_interruption = ledger.outstanding
+        held_during_interruption = database.units_in_flight()
+        task_still_parked = not task.done()
+        dispatches_while_parked = commit_dispatches
+        native_still_active = all(
+            driver.is_in_transaction() for driver in guard_drivers
+        )
+        release.set()
+        if interrupt == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif postgres:
+            with pytest.raises(DatabaseClosedError):
+                await task
+        else:
+            await task
+        native_released = all(
+            not driver.is_in_transaction() for driver in guard_drivers
+        )
+    finally:
+        release.set()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        if snapshot is not None:
+            await asyncio.gather(snapshot, return_exceptions=True)
+        await database.close()
+
+    reader_database = Database(settings)
+    try:
+        async with reader_database.read_transaction() as reader:
+            ids = (await reader.execute(text(READ_PROBE))).scalars().all()
+    finally:
+        await reader_database.close()
+
+    assert task_still_parked
+    assert outstanding_during_interruption == held_during_interruption == 1
+    assert native_still_active
+    assert native_released
+    if postgres:
+        first, last = guard_drivers
+        assert first is last
+        assert_native_closed(last)
+    else:
+        assert guard_drivers == []
+        (sqlite_handle,) = sqlite_handles
+        assert_native_closed(sqlite_handle)
+    assert dispatches_while_parked == (0 if postgres else 1)
+    committed = interrupt == "cancel" or not postgres
+    assert commit_dispatches == int(committed)
+    assert ids == ([7] if committed else [])
+    assert (
+        ledger.opened
+        == ledger.closed
+        == (2 if not postgres and interrupt == "cancel" else 1)
+    )
+    assert ledger.outstanding == ledger.closed_while_checked_out == 0
+    assert database.units_in_flight() == 0

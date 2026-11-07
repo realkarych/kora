@@ -842,14 +842,16 @@ class Database:
                     ) as connection:
                         yield connection
             else:
+                verify_postgresql_writer = (
+                    transactional and self._require_postgresql_wal_settings
+                )
                 async with self._unit(
-                    self._writer, transactional, admission=admission
+                    self._writer,
+                    transactional,
+                    admission=admission,
+                    verify_postgresql_writer=verify_postgresql_writer,
                 ) as connection:
-                    if (
-                        admission is None
-                        and transactional
-                        and self._require_postgresql_wal_settings
-                    ):
+                    if admission is None and verify_postgresql_writer:
                         await complete(verify_postgresql_wal_settings(connection))
                         self._refuse_when_closed()
                     yield connection
@@ -1143,6 +1145,7 @@ class Database:
         *,
         deadline: float | None = None,
         admission: _WriterAdmission | None = None,
+        verify_postgresql_writer: bool = False,
     ) -> AsyncGenerator[AsyncConnection, None]:
         self._refuse_when_closed()
         connection = (
@@ -1160,7 +1163,9 @@ class Database:
             try:
                 yield connection
                 self._refuse_when_closed()
-                if transactional:
+                if verify_postgresql_writer:
+                    await complete(self._commit_verified_postgresql_writer(connection))
+                elif transactional:
                     await self._run_snapshot_phase(deadline, connection.commit)
             except BaseException as error:
                 if admission is not None and not admission.handed_off:
@@ -1232,6 +1237,13 @@ class Database:
                 raise
             if not connection.closed:
                 self._snapshot_admission.fence()
+
+    async def _commit_verified_postgresql_writer(
+        self, connection: AsyncConnection
+    ) -> None:
+        await verify_postgresql_wal_settings(connection)
+        self._refuse_when_closed()
+        await connection.commit()
 
     def _record_rollback(self, error: BaseException) -> None:
         if isinstance(error, asyncio.CancelledError):
