@@ -408,20 +408,12 @@ class ControlServer:
             raise AuthenticationRefused(Refusal.HEAD_CHANGED)
         return entry
 
-    def _authorized(
-        self,
-        submitter: Submitter,
-        cutoff: int | None = None,
-        *,
-        require_no_deadline: bool = False,
-    ) -> Running:
+    def _authorized(self, submitter: Submitter, cutoff: int | None = None) -> Running:
         entry = self._running()
         if entry.submitter != submitter:
             raise delivery_error("submitter_superseded")
         unchanged(self._identities, submitter.process)
         deadline = entry.deadline
-        if require_no_deadline and deadline is not None:
-            raise delivery_error("transfer_refused")
         if entry.gate_closed:
             self._deadline_closed = True
             raise delivery_error("deadline_expired")
@@ -688,6 +680,8 @@ class ControlServer:
                     raise delivery_error("execution_unauthorized")
                 session = command
                 deadline = started_ns + MESSAGE_PROGRESS_NS
+                cutoff: int | None = None
+                captured = False
 
                 def active() -> None:
                     if self._closing is not None:
@@ -696,7 +690,12 @@ class ControlServer:
                         raise ChannelError(ChannelFailure.DEADLINE)
 
                 def authorize() -> None:
-                    self._authorized(submitter, require_no_deadline=True)
+                    nonlocal cutoff, captured
+                    if not captured:
+                        entry = self._running()
+                        cutoff = transfer_cutoff(self._clock, entry.deadline)
+                        captured = True
+                    self._authorized(submitter, cutoff)
                     active()
 
                 def open_file() -> OpenedOutput:

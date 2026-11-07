@@ -112,12 +112,14 @@ from tests.support.local_runners import (
 )
 from tests.support.local_runtime import (
     PATH_MARKER,
+    NudgedClock,
     prepared,
     private_directory,
     protocol_error,
     recorded,
     runtime_context,
     state_root,
+    stopped_holder,
 )
 
 __all__ = ["kora_capture"]
@@ -2337,30 +2339,78 @@ async def test_output_wire_limits_retries_and_requires_terminal_eof(
     assert after == before
 
 
+class GatedClock(NudgedClock):
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = asyncio.Event()
+        self.released = asyncio.Event()
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        if self.offset_ns == 0 or deadline_ns - self.monotonic_ns() > 50_000_000:
+            await super().sleep_until(deadline_ns)
+            return
+        self.waiting.set()
+        await self.released.wait()
+
+
+async def sealed_command(
+    runtime: LocalRuntime, ctx: ProtocolContext, root: Path
+) -> tuple[Handle, Path]:
+    workload = command_workload(
+        runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
+    )
+    handle = await runtime.submit(workload, ctx)
+    attempt = attempt_directory(root, runtime, handle.attempt_id)
+    await runtime.start(handle, ctx)
+    await until(lambda: seal_logged(attempt))
+    return handle, attempt
+
+
+async def installed_deadline(
+    runtime: LocalRuntime, handle: Handle, ctx: ProtocolContext, seconds: int
+) -> Running:
+    entry = await recorded(runtime, handle.attempt_id)
+    assert isinstance(entry, Running)
+    deadline = ExecutionDeadline(
+        at=ctx.clock.now() + timedelta(seconds=seconds),
+        scope_kind="attempt",
+        scope_id=handle.attempt_id,
+        clock_uncertainty=timedelta(seconds=2),
+        grace=DEADLINE_GRACE,
+    )
+    scoped = entry.model_copy(update={"deadline": deadline})
+    await written(runtime, handle.attempt_id, scoped, ctx)
+    return scoped
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("seconds_until_deadline", [300, -60])
-async def test_output_refuses_inherited_deadline_before_spool_or_source(
-    tmp_path: Path, kora_capture: Capture, seconds_until_deadline: int
+async def test_output_before_expiry_returns_the_sealed_file(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    payload = b"y" * (SECTION_FRAME_BYTES + 17)
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle, _attempt = await sealed_command(runtime, ctx, root)
+        await installed_deadline(runtime, handle, ctx, 300)
+
+        parts, body = await output_bytes(runtime, handle, ctx, "payload")
+        empty_parts, empty = await output_bytes(runtime, handle, ctx, "empty")
+        persisted = await recorded(runtime, handle.attempt_id)
+
+    assert [len(part) for part in parts] == [SECTION_FRAME_BYTES, 17]
+    assert body == payload
+    assert empty_parts == ()
+    assert empty == b""
+    assert isinstance(persisted, Running)
+    assert not persisted.gate_closed
+
+
+@pytest.mark.asyncio
+async def test_output_expiry_closes_the_gate_before_spool_or_source(
+    tmp_path: Path, kora_capture: Capture
 ) -> None:
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
-        workload = command_workload(
-            runtime, "attempt-1", (sys.executable, "-I", "-c", output_script())
-        )
-        handle = await runtime.submit(workload, ctx)
-        attempt = attempt_directory(root, runtime, handle.attempt_id)
-        await runtime.start(handle, ctx)
-        await until(lambda: seal_logged(attempt))
-        entry = await recorded(runtime, handle.attempt_id)
-        assert isinstance(entry, Running)
-        deadline = ExecutionDeadline(
-            at=ctx.clock.now() + timedelta(seconds=seconds_until_deadline),
-            scope_kind="attempt",
-            scope_id=handle.attempt_id,
-            clock_uncertainty=timedelta(seconds=2),
-            grace=DEADLINE_GRACE,
-        )
-        scoped = entry.model_copy(update={"deadline": deadline})
-        await written(runtime, handle.attempt_id, scoped, ctx)
+        handle, _attempt = await sealed_command(runtime, ctx, root)
+        scoped = await installed_deadline(runtime, handle, ctx, -60)
         spool = sole_spool(root)
         before = spool.stat().st_mtime_ns
         request = OutputRequest(op="transfer_out", request_id="wire", name="payload")
@@ -2381,12 +2431,96 @@ async def test_output_refuses_inherited_deadline_before_spool_or_source(
             await channel.expect_eof(wait)
         persisted = await recorded(runtime, handle.attempt_id)
 
-    assert refused.code == "transfer_refused"
+    assert refused.code == "deadline_expired"
+    assert not refused.retryable
     assert before == after
     assert answered == request.request_id
-    assert direct.code == "transfer_refused"
+    assert direct.code == "deadline_expired"
     assert isinstance(persisted, Running)
-    assert not persisted.gate_closed
+    assert persisted.gate_closed
+
+
+@pytest.mark.asyncio
+async def test_busy_registry_still_closes_the_output_gate(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = GatedClock()
+    async with launched(tmp_path, kora_capture, clock) as (runtime, ctx, root):
+        handle, _attempt = await sealed_command(runtime, ctx, root)
+        await installed_deadline(runtime, handle, ctx, 300)
+        name = runtime.registry.key(handle.attempt_id).name
+        lock = root / "registry" / f"{name}.lock"
+        assert lock.is_file()
+        stream = runtime.transfer_out(handle, "payload", ctx)
+        first = await anext(stream)
+
+        with stopped_holder(lock):
+            clock.offset_ns = 600_000_000_000
+            observed = asyncio.create_task(anext(stream))
+            await until(lambda: clock.waiting.is_set())
+            assert not observed.done()
+        clock.released.set()
+        refused = await protocol_error(observed)
+        clock.offset_ns = 0
+        spool = sole_spool(root)
+        before = spool.stat().st_mtime_ns
+        fresh = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
+        after = spool.stat().st_mtime_ns
+        persisted = await recorded(runtime, handle.attempt_id)
+
+    assert len(first) == SECTION_FRAME_BYTES
+    assert refused.code == "deadline_expired"
+    assert fresh.code == "deadline_expired"
+    assert before == after
+    assert isinstance(persisted, Running)
+    assert persisted.gate_closed
+
+
+@pytest.mark.asyncio
+async def test_cancelled_observation_keeps_the_output_fence(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = GatedClock()
+    async with launched(tmp_path, kora_capture, clock) as (runtime, ctx, root):
+        handle, _attempt = await sealed_command(runtime, ctx, root)
+        await installed_deadline(runtime, handle, ctx, 300)
+        name = runtime.registry.key(handle.attempt_id).name
+        lock = root / "registry" / f"{name}.lock"
+        assert lock.is_file()
+        cancelled: BaseException | None = None
+        stream = runtime.transfer_out(handle, "payload", ctx)
+        first = await anext(stream)
+
+        with stopped_holder(lock):
+            clock.offset_ns = 600_000_000_000
+            observed = asyncio.create_task(anext(stream))
+            await until(lambda: clock.waiting.is_set())
+            observed.cancel()
+            try:
+                await observed
+            except asyncio.CancelledError as error:
+                cancelled = error
+        clock.released.set()
+        clock.offset_ns = 0
+        held = await recorded(runtime, handle.attempt_id)
+        spool = sole_spool(root)
+        before = spool.stat().st_mtime_ns
+        fresh = await protocol_error(
+            anext(runtime.transfer_out(handle, "payload", ctx))
+        )
+        after = spool.stat().st_mtime_ns
+        persisted = await recorded(runtime, handle.attempt_id)
+
+    assert len(first) == SECTION_FRAME_BYTES
+    assert isinstance(cancelled, asyncio.CancelledError)
+    assert isinstance(held, Running)
+    assert not held.gate_closed
+    assert fresh.code == "deadline_expired"
+    assert before == after
+    assert isinstance(persisted, Running)
+    assert persisted.gate_closed
 
 
 @pytest.mark.asyncio

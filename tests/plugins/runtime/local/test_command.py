@@ -48,7 +48,7 @@ from kora.protocols.identity import Handle, instant_wire
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import RawEvent, TransferItem, Workload
 from kora.protocols.secret_value import SecretScope
-from kora.protocols.time import SystemClock
+from kora.protocols.time import Clock, SystemClock
 from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import (
     DirectoryAnchor,
@@ -314,10 +314,10 @@ async def running_pid(runtime: LocalRuntime, attempt: str) -> int:
 
 @asynccontextmanager
 async def launched(
-    tmp_path: Path, capture: Capture
+    tmp_path: Path, capture: Capture, clock: Clock | None = None
 ) -> AsyncGenerator[tuple[LocalRuntime, ProtocolContext, Path]]:
     root = state_root(tmp_path)
-    ctx = runtime_context(capture)
+    ctx = runtime_context(capture, clock)
     with short_directory() as base:
         runtime = await open_spawning(root, ctx, base / "sockets")
         try:
