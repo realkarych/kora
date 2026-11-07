@@ -2,7 +2,7 @@ from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from functools import cmp_to_key
 from hashlib import sha256
-from typing import Never, cast
+from typing import Never, Self, cast
 from unicodedata import is_normalized
 
 from pydantic import MISSING
@@ -15,7 +15,7 @@ from kora.db.graph_value_json import (
     render_object,
 )
 from kora.engine.graph_types import read_document
-from kora.ir.config import CommandConfig
+from kora.ir.config import COMMAND_RESOURCE_MAX_BYTES, CommandConfig
 from kora.ir.document import GraphDocument
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.structured_json import encode_snapshot
@@ -25,6 +25,7 @@ INTERPRETATION = "kora.command-resources.v1"
 EMPTY_DIGEST = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 MAX_FILES = 64
 MAX_CONTENT_BYTES = 1_048_576
+SHA256_FIXED_WORK = 256
 _ABSENT = object()
 
 
@@ -54,6 +55,29 @@ class DeclaredCommandManifests:
 
     def __getstate__(self) -> Never:
         raise TypeError("command resource manifests require explicit access")
+
+
+class CommandResourceContent:
+    __slots__ = ("path", "name", "data")
+    path: tuple[str, ...]
+    name: str
+    data: bytes
+
+    def __new__(cls, path: tuple[str, ...], name: str, data: bytes) -> Self:
+        content = super().__new__(cls)
+        object.__setattr__(content, "path", path)
+        object.__setattr__(content, "name", name)
+        object.__setattr__(content, "data", data)
+        return content
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("command resource contents are immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("command resource contents are immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("command resource contents require explicit access")
 
 
 class ManifestAdmission:
@@ -266,4 +290,99 @@ def check_declared_command_manifests(
     if isinstance(result, DeclaredCommandManifests):
         return result
     del ir_text, saved
+    raise_safe(GraphValueRejected(result))
+
+
+def _admit_contents(
+    contents: tuple[CommandResourceContent, ...], admission: ManifestAdmission
+) -> int:
+    if type(contents) is not tuple or len(contents) > MAX_FILES:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    total = 0
+    for item in contents:
+        if type(item) is not CommandResourceContent:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        path, name, data = item.path, item.name, item.data
+        if (
+            type(path) is not tuple
+            or len(path) not in (3, 5)
+            or any(type(segment) is not str or not segment for segment in path)
+            or type(name) is not str
+            or not name
+            or type(data) is not bytes
+            or len(data) > COMMAND_RESOURCE_MAX_BYTES
+        ):
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        total += len(data)
+        if total > MAX_CONTENT_BYTES:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        name_width = len(name) + sum(len(segment) for segment in path)
+        admission.keep(1 + len(path) + 4 * name_width)
+    admission.keep(total + 6 * len(contents))
+    return total
+
+
+def _take_content(
+    pending: list[CommandResourceContent],
+    path: tuple[str, ...],
+    name: str,
+    admission: ManifestAdmission,
+) -> CommandResourceContent:
+    for index, item in enumerate(pending):
+        width = min(len(name), len(item.name)) + sum(
+            min(len(expected), len(supplied))
+            for expected, supplied in zip(path, item.path, strict=False)
+        )
+        admission.work.reserve(1 + len(path) + len(item.path) + 4 * width)
+        if item.path == path and item.name == name:
+            admission.work.reserve(len(pending) - index)
+            return pending.pop(index)
+    raise GraphValueRejected(GraphValueFailure.INVALID)
+
+
+def _contents_result(
+    ir_text: str,
+    contents: tuple[CommandResourceContent, ...],
+    limits: CommandManifestLimits,
+) -> tuple[CommandResourceContent, ...] | GraphValueFailure:
+    try:
+        admission = ManifestAdmission(limits)
+        total = _admit_contents(contents, admission)
+        expected = _derive(ir_text, admission)
+        if len(contents) != admission.files:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        pending = list(contents)
+        ordered: list[tuple[CommandResourceContent, str]] = []
+        for command in cast(list[JsonObject], expected["commands"]):
+            files = cast(list[JsonObject], command["resources"])
+            admission.work.reserve(1)
+            if not files:
+                continue
+            segments = cast(list[str], command["path"])
+            admission.keep(len(segments) + 1)
+            path = tuple(segments)
+            for file in files:
+                item = _take_content(pending, path, cast(str, file["name"]), admission)
+                if len(item.data) != file["size"]:
+                    raise GraphValueRejected(GraphValueFailure.INVALID)
+                ordered.append((item, cast(str, file["sha256"])))
+        admission.work.reserve(total + SHA256_FIXED_WORK * len(ordered))
+        for item, expected_digest in ordered:
+            if "sha256:" + sha256(item.data).hexdigest() != expected_digest:
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+        return tuple(item for item, _ in ordered)
+    except GraphValueRejected as rejected:
+        return rejected.reason
+
+
+def verify_graph_command_contents(
+    ir_text: str,
+    contents: tuple[CommandResourceContent, ...],
+    *,
+    limits: CommandManifestLimits,
+) -> tuple[CommandResourceContent, ...]:
+    result = _contents_result(ir_text, contents, limits)
+    if isinstance(result, tuple):
+        return result
+    del ir_text, contents
     raise_safe(GraphValueRejected(result))

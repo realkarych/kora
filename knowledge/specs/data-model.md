@@ -575,6 +575,8 @@ The [server engine work](https://github.com/realkarych/kora/issues/593) owns con
 
 The internal declaration helper under [#824](https://github.com/realkarych/kora/issues/824) derives this member from bounded canonical IR and compares it against freshly decoded saved data. It checks the declared JCS digests and exact logical shape under explicit source, work and scratch allowances. Its result establishes declaration consistency. Deployment bytes, retained references, complete interpretation and effect authority still require their own checks.
 
+The detached decoded-content verifier under [#857](https://github.com/realkarych/kora/issues/857) admits supplied immutable bytes by occurrence and verifies the complete set, sizes and SHA-256 against the independently derived manifest. It preserves the exact payload references in canonical occurrence order under the existing product and work limits. Request decoding, current authority and durable storage staging belong to the publishing path.
+
 #### Saved physical command-resource references
 
 The project owner accepted this representation on 2026-11-06 under [#828](https://github.com/realkarych/kora/issues/828#issuecomment-6681098805). The existing `graph_version.resources` column stores one closed native JSON object with `interpretation: "kora.graph-resource-refs.v1"` and `commands`. The array contains exactly the commands with nonempty [logical manifests](#saved-command-resource-manifests). A version without declared files has an explicit empty array. Empty logical command declarations remain in the execution contract.
