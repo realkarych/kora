@@ -32,7 +32,6 @@ from kora.runner.filesystem import (
     MAX_SEAL_ENTRIES,
     DirectoryAnchor,
     FilesystemError,
-    SealCapacityError,
     SealedTree,
     create_directory,
     freeze_private_tree,
@@ -479,11 +478,8 @@ class CommandSession:
                 sealed = self._copy_snapshot(source, snapshot)
                 payload = self._seal_payload(sealed)
                 self._finalize_snapshot(snapshot)
-            except (SealCapacityError, RecursionError, MemoryError):
-                pass
-            except (OSError, FilesystemError) as error:
-                if isinstance(error, OSError) and space_error(error):
-                    self._journal.close()
+            except (OSError, FilesystemError, RecursionError, MemoryError) as error:
+                if self._fence_snapshot_space_failure(error):
                     outcome = "journal_unavailable"
             else:
                 retained = True
@@ -506,6 +502,7 @@ class CommandSession:
                 try:
                     source.close()
                 except OSError as error:
+                    self._fence_snapshot_space_failure(error)
                     cleanup = error
             if snapshot is not None:
                 try:
@@ -517,17 +514,28 @@ class CommandSession:
                             restore_owner_write=True,
                         )
                 except (OSError, FilesystemError) as error:
+                    self._fence_snapshot_space_failure(error)
                     if cleanup is None:
                         cleanup = error
                 finally:
                     try:
                         snapshot.close()
                     except OSError as error:
+                        self._fence_snapshot_space_failure(error)
                         if cleanup is None:
                             cleanup = error
             if cleanup is not None:
                 raise cleanup
         self._finish_seal(outcome, started)
+
+    def _fence_snapshot_space_failure(self, error: BaseException) -> bool:
+        failure: BaseException | None = error
+        while failure is not None:
+            if isinstance(failure, OSError) and space_error(failure):
+                self._journal.close()
+                return True
+            failure = failure.__context__
+        return False
 
     def _copy_snapshot(
         self, source: DirectoryAnchor, snapshot: DirectoryAnchor

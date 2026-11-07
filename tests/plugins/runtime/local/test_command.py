@@ -1440,7 +1440,7 @@ class SealBudgetProbe(CommandCloseProbe):
     def _copy_snapshot(
         self, source: DirectoryAnchor, snapshot: DirectoryAnchor
     ) -> SealedTree:
-        if self.case == "disk-full":
+        if self.case.startswith("disk-full"):
             fill(self.attempt)
             filler = self.attempt / "filler"
             with filler.open("r+b") as opened:
@@ -1451,6 +1451,8 @@ class SealBudgetProbe(CommandCloseProbe):
                 if error.errno == errno.ENOSPC:
                     payload = self.attempt / "output-snapshot" / "a"
                     self.partial_size = payload.stat().st_size
+                    if self.case == "disk-full-shadowed":
+                        payload.parent.unlink()
                 raise
         try:
             return snapshot_regular_tree(source, snapshot, SnapshotLimits(4, 6))
@@ -1470,12 +1472,14 @@ class SealBudgetProbe(CommandCloseProbe):
         "aggregate",
         "close",
         pytest.param("disk-full", marks=pytest.mark.host_fixture),
+        pytest.param("disk-full-shadowed", marks=pytest.mark.host_fixture),
     ],
 )
 async def test_command_snapshot_budget_preserves_exit_and_cleanup(
     tmp_path: Path, kora_capture: Capture, case: str
 ) -> None:
-    parent = prepared("small-filesystem") if case == "disk-full" else tmp_path.resolve()
+    disk_pressure = case.startswith("disk-full")
+    parent = prepared("small-filesystem") if disk_pressure else tmp_path.resolve()
     attempt = private_directory(parent, f"{PATH_MARKER}-{os.getpid()}-seal-bytes")
     directory = open_local_directory(attempt)
     candidate = attempt / "candidate"
@@ -1485,7 +1489,7 @@ async def test_command_snapshot_budget_preserves_exit_and_cleanup(
     second = "abc" if case in ("aggregate", "close") else "ab"
     script = (
         "from pathlib import Path; Path('a').write_bytes(b'x' * (2 << 20))"
-        if case == "disk-full"
+        if disk_pressure
         else f"from pathlib import Path; Path('a').write_bytes(b'1234'); "
         f"Path('b').write_text({second!r}); Path('c').write_bytes(b'12345')"
     )
@@ -1528,7 +1532,7 @@ async def test_command_snapshot_budget_preserves_exit_and_cleanup(
             retained = snapshot.exists()
             original_size = (candidate / "a").stat().st_size
             original_refusal = (
-                (candidate / "c").read_bytes() if case != "disk-full" else None
+                (candidate / "c").read_bytes() if not disk_pressure else None
             )
             retained_contents = (
                 ((snapshot / "a").read_bytes(), (snapshot / "b").read_bytes())
@@ -1541,7 +1545,7 @@ async def test_command_snapshot_budget_preserves_exit_and_cleanup(
                 await closing
             await session.aclose()
             directory.close()
-            if case == "disk-full":
+            if disk_pressure:
                 shutil.rmtree(attempt)
 
     diagnostics = [
@@ -1553,7 +1557,7 @@ async def test_command_snapshot_budget_preserves_exit_and_cleanup(
     assert status == ("exited", "complete", 0)
     assert scope.released
     assert retained is (case == "file")
-    assert journal_closed is (case in ("disk-full", "close"))
+    assert journal_closed is (disk_pressure or case == "close")
     if case == "file":
         assert records == (*expected, (2, "runner.outputs_sealed"))
         assert manifest is not None
@@ -1569,10 +1573,8 @@ async def test_command_snapshot_budget_preserves_exit_and_cleanup(
     else:
         assert records == expected
         assert manifest is None
-        assert diagnostics == [
-            "journal_unavailable" if case == "disk-full" else "refused"
-        ]
-    if case == "disk-full":
+        assert diagnostics == ["journal_unavailable" if disk_pressure else "refused"]
+    if disk_pressure:
         assert original_size == 2 << 20
         assert session.partial_size is not None
         assert 0 < session.partial_size < original_size
