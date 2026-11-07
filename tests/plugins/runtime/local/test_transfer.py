@@ -1803,11 +1803,17 @@ async def test_transfer_out_returns_the_sealed_file(
 
         mismatch = await protocol_error(changed())
         directory = snapshot.parent
+        previous = snapshot.stat().st_ino
         directory.chmod(0o700)
         snapshot.unlink()
+        holder = directory / "holder"
+        holder.write_bytes(b"hold")
         snapshot.write_bytes(payload)
         snapshot.chmod(0o400)
+        replaced_inode = snapshot.stat().st_ino
+        holder.unlink()
         directory.chmod(0o500)
+        assert replaced_inode != previous
 
         async def replaced() -> None:
             async for _chunk in runtime.transfer_out(handle, "payload", ctx):
