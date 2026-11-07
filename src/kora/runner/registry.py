@@ -755,11 +755,17 @@ class TransitionExecutor(NativeExecutor):
         ctx: ProtocolContext,
         operation: str,
         on_cancel: Callable[[Result], None] | None = None,
+        *,
+        after_uncertain_submission: Callable[[], None] | None = None,
     ) -> Result:
         started = ctx.clock.monotonic_ns()
         deadline = started + LOCK_DEADLINE_NS
         while True:
-            outcome = await self.run(attempt, lambda value: release(value, on_cancel))
+            outcome = await self.run(
+                attempt,
+                lambda value: release(value, on_cancel),
+                after_uncertain_submission=after_uncertain_submission,
+            )
             if not isinstance(outcome, LockOutcome):
                 return outcome
             now = ctx.clock.monotonic_ns()

@@ -380,6 +380,7 @@ class LocalRuntime:
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
         self._deliveries: set[asyncio.Task[None]] = set()
         self._spool = spool
+        self._spool_admission = asyncio.Lock()
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -418,6 +419,24 @@ class LocalRuntime:
             nonlocal located
             located = anchored_root(configuration, environment, home)
             return located
+
+        def close_root() -> None:
+            nonlocal located
+            if located is not None:
+                owned, located = located, None
+                owned[1].close()
+
+        def close_registry() -> None:
+            nonlocal opened_registry
+            if opened_registry is not None:
+                owned, opened_registry = opened_registry, None
+                owned.close()
+
+        def close_spool_after_join() -> None:
+            nonlocal spool
+            if spool is not None:
+                owned, spool = spool, None
+                owned.close()
 
         try:
             reader = (
@@ -477,7 +496,7 @@ class LocalRuntime:
                 identity=identity,
                 clock=ctx.clock,
             )
-            result = await executor.run(locate)
+            result = await executor.run(locate, after_uncertain_submission=close_root)
             if result is None:
                 raise rejection("state_root_unsafe")
             path, root = result
@@ -489,7 +508,9 @@ class LocalRuntime:
                     opened_registry = registered[1]
                 return registered
 
-            domain, directory = await executor.locked(register, ctx, "open")
+            domain, directory = await executor.locked(
+                register, ctx, "open", after_uncertain_submission=close_registry
+            )
             started = ctx.clock.monotonic_ns()
 
             def open_spool() -> SpoolOwner:
@@ -502,7 +523,9 @@ class LocalRuntime:
                     raise refusal("registry_unavailable") from None
                 return spool
 
-            owner = await executor.run(open_spool)
+            owner = await executor.run(
+                open_spool, after_uncertain_submission=close_spool_after_join
+            )
             ctx.logger.emit_at(
                 Level.INFO
                 if owner.outcome is SpoolSweepOutcome.COMPLETE
@@ -534,11 +557,9 @@ class LocalRuntime:
                         await close_spool(spool)
                     finally:
                         try:
-                            if opened_registry is not None:
-                                opened_registry.close()
+                            close_registry()
                         finally:
-                            if located is not None:
-                                located[1].close()
+                            close_root()
             raise
         runtime.service_report = report
         return runtime
@@ -763,7 +784,8 @@ class LocalRuntime:
             write_transfer_bytes(spool, piece)
 
         try:
-            await self.executor.run(acquire, after_uncertain_submission=dispose)
+            async with self._spool_admission:
+                await self.executor.run(acquire, after_uncertain_submission=dispose)
             if lease is None:
                 raise RuntimeError("missing spool descriptor")
             spool = lease.descriptor

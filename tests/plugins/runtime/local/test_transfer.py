@@ -38,7 +38,12 @@ from kora.plugins.runtime.local.command import INCOMING, CommandSession
 from kora.plugins.runtime.local.control import attested, connected, transfer_input
 from kora.plugins.runtime.local.runtime import LocalRuntime
 from kora.plugins.runtime.local.serving import COMPONENT, ControlServer, rebound
-from kora.plugins.runtime.local.spool import SpoolOwner, SpoolSweepOutcome
+from kora.plugins.runtime.local.spool import (
+    SpoolOwner,
+    SpoolRecord,
+    SpoolSweepOutcome,
+    sweep_spools,
+)
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import DEADLINE_GRACE, ExecutionDeadline
@@ -49,11 +54,23 @@ from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel, ChannelError
 from kora.runner.filesystem import open_local_directory
-from kora.runner.identity import SCAN_NS, NativeIdentityReader
+from kora.runner.identity import (
+    SCAN_NS,
+    IdentityObservation,
+    IdentityState,
+    NativeIdentityReader,
+    ProcessSnapshot,
+)
 from kora.runner.journal import read_records
 from kora.runner.native_io import NativeIOSubmissionUncertain, NativeIOUnresolved
 from kora.runner.peers import kernel_source
-from kora.runner.registry import Registry, Running, TransitionExecutor, takeover_cell
+from kora.runner.registry import (
+    Registry,
+    Running,
+    TransitionExecutor,
+    model_bytes,
+    takeover_cell,
+)
 from tests.plugins.runtime.local.test_command import (
     attempt_directory,
     binary,
@@ -777,8 +794,23 @@ def killed_spool(root: Path, domain: str) -> Path:
     return root / "spools" / name
 
 
+class SpoolIdentityReader(NativeIdentityReader):
+    def __init__(self, pid: int, observation: IdentityObservation) -> None:
+        super().__init__()
+        self.pid = pid
+        self.observation = observation
+
+    def read(self, pid: int) -> IdentityObservation:
+        if pid == self.pid:
+            return self.observation
+        return super().read(pid)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["dead", "absent", "replaced"])
+@pytest.mark.parametrize(
+    "case",
+    ["dead", "absent", "replaced", "foreign", "unreadable", "reused", "too-many"],
+)
 async def test_spool_startup_replays_only_confirmed_dead_owner(
     tmp_path: Path, kora_capture: Capture, case: str
 ) -> None:
@@ -788,38 +820,127 @@ async def test_spool_startup_replays_only_confirmed_dead_owner(
         record = stale.with_suffix(".json")
         assert record.is_file()
         assert next(stale.iterdir()).stat().st_size == 0
+        registered = SpoolRecord.model_validate_json(record.read_bytes())
         ownerless = private_directory(root / "spools", "f" * 32)
         corrupt = root / "spools" / ("e" * 32 + ".json")
         corrupt.write_text("unresolved")
         corrupt.chmod(0o600)
+        identities: NativeIdentityReader | None = None
         if case == "absent":
             shutil.rmtree(stale)
         elif case == "replaced":
             stale.rename(stale.with_name("moved"))
             stale.mkdir(mode=0o700)
             (stale / "retain").write_text("replacement")
+        elif case == "foreign":
+            process = registered.process.model_copy(update={"host_id": "other"})
+            record.write_bytes(
+                model_bytes(registered.model_copy(update={"process": process}))
+            )
+        elif case == "unreadable":
+            identities = SpoolIdentityReader(
+                registered.process.pid, IdentityObservation(IdentityState.UNKNOWN)
+            )
+        elif case == "reused":
+            process = registered.process.model_copy(
+                update={"start_time": registered.process.start_time + 1}
+            )
+            identities = SpoolIdentityReader(
+                process.pid,
+                IdentityObservation(
+                    IdentityState.PRESENT, ProcessSnapshot(process, 1, 1, False)
+                ),
+            )
+        elif case == "too-many":
+            extra = stale / ("file-" + "b" * 32)
+            extra.touch(mode=0o600)
 
         with short_directory() as second:
-            opened = await open_spawning(root, ctx, second / "sockets")
+            opened = await open_spawning(
+                root, ctx, second / "sockets", identities=identities
+            )
             await opened.close()
 
         assert live.is_dir()
         assert live.with_suffix(".json").is_file()
         assert ownerless.is_dir()
         assert corrupt.read_text() == "unresolved"
-        assert record.exists() is (case == "replaced")
-        assert stale.exists() is (case == "replaced")
+        retained = case in ("replaced", "foreign", "unreadable", "too-many")
+        assert record.exists() is retained
+        assert stale.exists() is retained
         if case == "replaced":
             assert (stale / "retain").read_text() == "replacement"
+        elif case == "too-many":
+            assert len(tuple(stale.iterdir())) == 2
+
+    events = [
+        item
+        for item in kora_capture.finish()
+        if item.get("event") == "runtime.local.spool_sweep"
+    ]
+    assert [item.get("outcome") for item in events] == ["complete", "unresolved"]
+    assert all(
+        {"path", "pid", "name", "process", "directory"}.isdisjoint(item)
+        for item in events
+    )
+
+
+class HoldingSpoolReader(NativeIdentityReader):
+    def __init__(self, pid: int) -> None:
+        super().__init__()
+        self.pid = pid
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def read(self, pid: int) -> IdentityObservation:
+        if pid == self.pid:
+            self.entered.set()
+            if not self.release.wait(5):
+                raise TimeoutError("test startup sweep release")
+        return super().read(pid)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_retains_sweep_anchors_until_native_settles(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        stale = await asyncio.to_thread(killed_spool, root, runtime.execution_domain_id)
+        record = stale.with_suffix(".json")
+        owner = SpoolRecord.model_validate_json(record.read_bytes())
+        reader = HoldingSpoolReader(owner.process.pid)
+        before = descriptor_identities()
+
+        with short_directory() as second:
+            opening = asyncio.create_task(
+                open_spawning(root, ctx, second / "sockets", identities=reader)
+            )
+            try:
+                assert await asyncio.to_thread(reader.entered.wait, 5)
+                opened = descriptor_identities().keys() - before.keys()
+                assert opened
+                opening.cancel()
+                done, _ = await asyncio.wait({opening}, timeout=0)
+                assert not done
+                assert opened <= descriptor_identities().keys()
+            finally:
+                reader.release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await opening
+
+        assert opened.isdisjoint(descriptor_identities())
+        assert not stale.exists()
+        assert not record.exists()
+        assert len(tuple((root / "spools").iterdir())) == 2
 
 
 class DeferredSpoolClock(SystemClock):
     def __init__(self) -> None:
-        self.elapsed = 0
+        self.reads = 0
 
     def monotonic_ns(self) -> int:
-        self.elapsed += SCAN_NS
-        return self.elapsed
+        self.reads += 1
+        return 0 if self.reads < 4 else SCAN_NS
 
 
 def test_spool_cutoff_defers_cleanup_and_admits_valid_owner(tmp_path: Path) -> None:
@@ -832,6 +953,14 @@ def test_spool_cutoff_defers_cleanup_and_admits_valid_owner(tmp_path: Path) -> N
         try:
             owner = SpoolOwner.open(root, "domain", process, reader, clock)
             try:
+                structural = sweep_spools(
+                    owner.parent,
+                    "domain",
+                    process,
+                    reader,
+                    SystemClock(),
+                    max_entries=1,
+                )
                 lease = owner.acquire(lambda: None)
                 try:
                     stat_result = os.fstat(lease.descriptor)
@@ -841,6 +970,8 @@ def test_spool_cutoff_defers_cleanup_and_admits_valid_owner(tmp_path: Path) -> N
                 owner.close()
 
             assert owner.outcome is SpoolSweepOutcome.DEFERRED
+            assert clock.reads == 4
+            assert structural is SpoolSweepOutcome.DEFERRED
             assert stat_result.st_nlink == 0
             retained.directory.verify()
         finally:
@@ -959,6 +1090,11 @@ async def test_runtime_close_settles_parked_spool(
                 assert len(added) == 1
                 spool_fd = added.pop()
                 assert os.fstat(spool_fd).st_nlink == 0
+                with short_directory() as second:
+                    other = await open_spawning(root, ctx, second / "sockets")
+                    await other.close()
+                assert owner_record.is_file()
+                assert os.fstat(spool_fd).st_nlink == 0
                 await runtime.close()
         after = live_descriptors()
         remaining = tuple((root / "spools").iterdir())
@@ -1046,7 +1182,14 @@ async def test_uncertain_spool_is_released_during_runtime_shutdown(
         pool_stopped = False
         try:
             handle, attempt = await accepted(runtime, ctx, root, "attempt-1")
-            original = live_descriptors()
+            spool = sole_spool(root)
+            protected = {
+                (path.stat().st_dev, path.stat().st_ino)
+                for path in (spool, spool.parent)
+            }
+            before = descriptor_identities()
+            original = set(before)
+            assert protected <= set(before.values())
 
             async def transfer() -> None:
                 with pytest.raises(NativeIOSubmissionUncertain):
@@ -1077,10 +1220,13 @@ async def test_uncertain_spool_is_released_during_runtime_shutdown(
             finally:
                 release_commands(root)
                 reap_runners(root)
-        remaining = live_descriptors()
+        remaining = descriptor_identities()
 
     assert retained_inode == spool_inode
     assert spool_fd not in remaining
+    assert protected.isdisjoint(remaining.values())
+    assert not spool.exists()
+    assert not spool.with_suffix(".json").exists()
     assert runtime.registry.directory.closed
     assert runtime.sweeps.closing is not None
     assert runtime.sweeps.closing.done()
@@ -1407,3 +1553,38 @@ async def test_worker_spool_enospc_releases_its_unlinked_file(
     assert names == ()
     assert "transfer.materialised" not in refused_records
     assert accepted_bytes == payload
+
+
+@pytest.mark.host_fixture
+def test_failed_spool_publication_does_not_accumulate_directories() -> None:
+    small = private_directory(
+        prepared("small-filesystem"), f"{PATH_MARKER}-{os.getpid()}-spool-publication"
+    )
+    root_path = private_directory(small, "state")
+    root = open_local_directory(root_path)
+    reader = NativeIdentityReader()
+    process = identity_of(os.getpid())
+    clock = SystemClock()
+    try:
+        initial = SpoolOwner.open(root, "domain", process, reader, clock)
+        initial.close()
+        fill(small)
+        errors: list[OSError] = []
+
+        for _ in range(3):
+            with pytest.raises(OSError, match=rf"\[Errno {errno.ENOSPC}\]") as refused:
+                SpoolOwner.open(root, "domain", process, reader, clock)
+            errors.append(refused.value)
+        remaining = tuple((root_path / "spools").iterdir())
+        (small / "filler").unlink()
+        recovered = SpoolOwner.open(root, "domain", process, reader, clock)
+        recovered.close()
+
+        assert all(error.errno == errno.ENOSPC for error in errors)
+        if sys.platform == "linux":
+            assert all(error.filename is None for error in errors)
+        assert remaining == ()
+        assert tuple((root_path / "spools").iterdir()) == ()
+    finally:
+        root.close()
+        shutil.rmtree(small)

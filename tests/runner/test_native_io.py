@@ -444,6 +444,9 @@ async def test_deferred_cleanup_joins_borrower_outside_pool(tmp_path: Path) -> N
     release_thread = threading.Event()
     closed = threading.Event()
     owner = NativeOperation(borrower=BorrowedInvocation())
+    executor = NativeExecutor(1, 1)
+    executor.jobs.add(owner)
+    owner.settled.set()
 
     def native_thread() -> None:
         owner.invoke(lambda: os.fstat(descriptor))
@@ -460,11 +463,12 @@ async def test_deferred_cleanup_joins_borrower_outside_pool(tmp_path: Path) -> N
     worker.start()
     await reached(returned)
 
-    closing = asyncio.create_task(asyncio.to_thread(owner.release_deferred))
+    closing = asyncio.create_task(executor.close())
     try:
         await reached(worker.joined)
         descriptor_is_open = os.fstat(descriptor).st_ino == borrowed.stat().st_ino
         cleaned_during_join = closed.is_set()
+        joined_during_borrow = executor.joined
     finally:
         release_thread.set()
         await closing
@@ -473,6 +477,8 @@ async def test_deferred_cleanup_joins_borrower_outside_pool(tmp_path: Path) -> N
 
     assert descriptor_is_open
     assert not cleaned_during_join
+    assert not joined_during_borrow
+    assert executor.joined
     assert not worker.is_alive()
     assert closed.is_set()
 

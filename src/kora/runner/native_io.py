@@ -62,14 +62,18 @@ class NativeOperation:
         self.retained = result
         return result
 
+    def join_borrower(self) -> None:
+        if self.borrower is not None:
+            worker = self.borrower.seal()
+            if worker is not None:
+                worker.join()
+
     def release_deferred(self) -> None:
         cleanup = self.deferred_cleanup
         borrower = self.borrower
         if cleanup is None or borrower is None or self.cleanup_attempted:
             return
-        worker = borrower.seal()
-        if worker is not None:
-            worker.join()
+        self.join_borrower()
         self.cleanup_attempted = True
         cleanup()
         self.deferred_cleanup = None
@@ -111,8 +115,12 @@ class NativeExecutor:
         self.jobs: set[NativeOperation] = set()
         self.closed = False
         self.unresolved = False
-        self.joined = False
+        self._joined = False
         self.closing: asyncio.Task[None] | None = None
+
+    @property
+    def joined(self) -> bool:
+        return self._joined
 
     async def run(
         self,
@@ -229,7 +237,9 @@ class NativeExecutor:
 
     def join_workers(self) -> None:
         self.executor.shutdown(wait=True)
-        self.joined = True
+        for job in self.jobs:
+            job.join_borrower()
+        self._joined = True
         for job in self.jobs:
             job.release_deferred()
 

@@ -37,7 +37,13 @@ from kora.runner.identity import (
     complete_identity,
 )
 from kora.runner.native_io import observed
-from kora.runner.registry import COMPONENT, model_bytes, synchronize, write_atomically
+from kora.runner.registry import (
+    COMPONENT,
+    model_bytes,
+    refusal,
+    synchronize,
+    write_atomically,
+)
 
 NONCE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{32}")
 RECORD_LIMIT: Final[int] = 4096
@@ -227,11 +233,13 @@ def remove_spool_directory(
                 require_private_acl(descriptor)
                 check()
                 current_file(directory, file_identity(descriptor, first.name))
+                check()
                 os.unlink(first.name, dir_fd=directory.descriptor)
             finally:
                 os.close(descriptor)
         check()
         parent.open_child(expected).close()
+        check()
         os.rmdir(expected.name, dir_fd=parent.descriptor)
     finally:
         directory.close()
@@ -248,8 +256,17 @@ def remove_owner(
     synchronize(parent.descriptor)
     check()
     current_file(parent, identity)
+    check()
     os.unlink(identity.name, dir_fd=parent.descriptor)
     synchronize(parent.descriptor)
+
+
+def entry_exists(parent: DirectoryAnchor, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=parent.descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def inspect_entry(
@@ -262,8 +279,10 @@ def inspect_entry(
 ) -> bool:
     if NONCE.fullmatch(name):
         check()
-        os.stat(record_name(name), dir_fd=parent.descriptor, follow_symlinks=False)
-        return True
+        if entry_exists(parent, record_name(name)):
+            return True
+        check()
+        return not entry_exists(parent, name)
     nonce, suffix = os.path.splitext(name)
     if suffix != ".json" or not NONCE.fullmatch(nonce):
         return False
@@ -282,6 +301,8 @@ def sweep_spools(
     process: ProcessIdentity,
     reader: IdentityReader,
     clock: Clock,
+    *,
+    max_entries: int = PROCESS_SCAN_ENTRIES,
 ) -> SpoolSweepOutcome:
     deadline = clock.monotonic_ns() + SCAN_NS
 
@@ -293,7 +314,7 @@ def sweep_spools(
     try:
         check()
         with os.scandir(parent.descriptor) as entries:
-            for _ in range(PROCESS_SCAN_ENTRIES):
+            for _ in range(max_entries):
                 check()
                 entry = next(entries, None)
                 if entry is None:
@@ -337,7 +358,6 @@ class SpoolOwner:
         self.directory = directory
         self.record = record
         self.outcome = outcome
-        self._allocating = Lock()
         self._settling = Lock()
         self._leases: set[SpoolLease] = set()
         self._fenced = False
@@ -389,7 +409,9 @@ class SpoolOwner:
                 return cls(parent, directory, record, outcome)
             except BaseException:
                 try:
-                    if not publication_started:
+                    if not publication_started or not entry_exists(
+                        parent, record_name(nonce)
+                    ):
                         remove_spool_directory(
                             parent, directory.identity, directory.verify
                         )
@@ -406,35 +428,34 @@ class SpoolOwner:
             self._leases.remove(lease)
 
     def acquire(self, active: Callable[[], None]) -> SpoolLease:
-        with self._allocating:
-            active()
-            if self._fenced:
-                raise FilesystemError("spool_fenced")
-            verify_directory(self.directory, self.parent.identity.device)
-            self.parent.open_child(self.directory.identity).close()
-            name = f"file-{secrets.token_hex(16)}"
-            descriptor = os.open(
-                name,
-                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600,
-                dir_fd=self.directory.descriptor,
-            )
-            self._fenced = True
-            lease = SpoolLease(descriptor, self)
-            with self._settling:
-                self._leases.add(lease)
-            try:
-                verify_private(descriptor, directory=False)
-                if os.fstat(descriptor).st_dev != self.directory.identity.device:
-                    raise FilesystemError("spool_device_mismatch")
-                require_private_acl(descriptor)
-                os.unlink(name, dir_fd=self.directory.descriptor)
-                synchronize(self.directory.descriptor)
-            except BaseException:
-                lease.close()
-                raise
-            self._fenced = False
-            return lease
+        active()
+        if self._fenced:
+            raise FilesystemError("spool_fenced")
+        verify_directory(self.directory, self.parent.identity.device)
+        self.parent.open_child(self.directory.identity).close()
+        name = f"file-{secrets.token_hex(16)}"
+        descriptor = os.open(
+            name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=self.directory.descriptor,
+        )
+        self._fenced = True
+        lease = SpoolLease(descriptor, self)
+        with self._settling:
+            self._leases.add(lease)
+        try:
+            verify_private(descriptor, directory=False)
+            if os.fstat(descriptor).st_dev != self.directory.identity.device:
+                raise FilesystemError("spool_device_mismatch")
+            require_private_acl(descriptor)
+            os.unlink(name, dir_fd=self.directory.descriptor)
+            synchronize(self.directory.descriptor)
+        except BaseException:
+            lease.close()
+            raise
+        self._fenced = False
+        return lease
 
     def close(self) -> None:
         failure: OSError | None = None
@@ -468,6 +489,9 @@ async def close_spool(owner: SpoolOwner | None) -> None:
     if owner is not None:
         closing = asyncio.create_task(asyncio.to_thread(owner.close))
         cancelled = await observed(closing)
-        closing.result()
+        try:
+            closing.result()
+        except (OSError, FilesystemError):
+            raise refusal("registry_unavailable") from None
         if cancelled:
             raise asyncio.CancelledError
