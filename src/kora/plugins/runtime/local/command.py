@@ -476,7 +476,7 @@ class CommandSession:
                 snapshot = create_directory(self._attempt, SNAPSHOT_NAME)
                 if snapshot.identity.device != self._attempt.identity.device:
                     raise FilesystemError("snapshot_device_mismatch")
-                sealed = snapshot_regular_tree(source, snapshot)
+                sealed = self._copy_snapshot(source, snapshot)
                 payload = self._seal_payload(sealed)
                 self._finalize_snapshot(snapshot)
             except (SealCapacityError, RecursionError, MemoryError):
@@ -528,6 +528,11 @@ class CommandSession:
             if cleanup is not None:
                 raise cleanup
         self._finish_seal(outcome, started)
+
+    def _copy_snapshot(
+        self, source: DirectoryAnchor, snapshot: DirectoryAnchor
+    ) -> SealedTree:
+        return snapshot_regular_tree(source, snapshot)
 
     def _finalize_snapshot(self, snapshot: DirectoryAnchor) -> None:
         freeze_private_tree(snapshot)

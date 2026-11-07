@@ -51,7 +51,11 @@ from kora.protocols.time import SystemClock
 from kora.runner.channels import BoundedChannel
 from kora.runner.filesystem import (
     DirectoryAnchor,
+    SealCapacityError,
+    SealedTree,
+    SnapshotLimits,
     open_local_directory,
+    snapshot_regular_tree,
 )
 from kora.runner.identity import (
     SCAN_NS,
@@ -1406,6 +1410,175 @@ class CommandCloseProbe(CommandSession):
         assert task is not None
         async with asyncio.timeout(5):
             await asyncio.shield(task)
+
+
+class SealBudgetProbe(CommandCloseProbe):
+    def __init__(
+        self,
+        directory: DirectoryAnchor,
+        attempt: Path,
+        scope: SecretScope,
+        capture: Capture,
+        case: str,
+    ) -> None:
+        super().__init__(
+            directory,
+            str(attempt / "candidate"),
+            scope,
+            SystemClock(),
+            capture.diagnostics.logger(COMPONENT),
+        )
+        self.attempt = attempt
+        self.case = case
+        self.copy_failed = threading.Event()
+        self.release_copy = threading.Event()
+        self.partial_size: int | None = None
+
+    def journal_closed(self) -> bool:
+        return self._journal.closed
+
+    def _copy_snapshot(
+        self, source: DirectoryAnchor, snapshot: DirectoryAnchor
+    ) -> SealedTree:
+        if self.case == "disk-full":
+            fill(self.attempt)
+            filler = self.attempt / "filler"
+            with filler.open("r+b") as opened:
+                opened.truncate(filler.stat().st_size - 262144)
+            try:
+                return super()._copy_snapshot(source, snapshot)
+            except OSError as error:
+                if error.errno == errno.ENOSPC:
+                    payload = self.attempt / "output-snapshot" / "a"
+                    self.partial_size = payload.stat().st_size
+                raise
+        try:
+            return snapshot_regular_tree(source, snapshot, SnapshotLimits(4, 6))
+        except SealCapacityError:
+            if self.case == "close":
+                self.copy_failed.set()
+                if not self.release_copy.wait(5):
+                    raise TimeoutError("snapshot copy not released") from None
+            raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        "file",
+        "aggregate",
+        "close",
+        pytest.param("disk-full", marks=pytest.mark.host_fixture),
+    ],
+)
+async def test_command_snapshot_budget_preserves_exit_and_cleanup(
+    tmp_path: Path, kora_capture: Capture, case: str
+) -> None:
+    parent = prepared("small-filesystem") if case == "disk-full" else tmp_path.resolve()
+    attempt = private_directory(parent, f"{PATH_MARKER}-{os.getpid()}-seal-bytes")
+    directory = open_local_directory(attempt)
+    candidate = attempt / "candidate"
+    snapshot = attempt / "output-snapshot"
+    scope = SecretScope(kora_capture.diagnostics)
+    session = SealBudgetProbe(directory, attempt, scope, kora_capture, case)
+    second = "abc" if case in ("aggregate", "close") else "ab"
+    script = (
+        "from pathlib import Path; Path('a').write_bytes(b'x' * (2 << 20))"
+        if case == "disk-full"
+        else f"from pathlib import Path; Path('a').write_bytes(b'1234'); "
+        f"Path('b').write_text({second!r}); Path('c').write_bytes(b'12345')"
+    )
+    submitter = Submitter(dispatcher_id="test", process=identity_of(os.getpid()))
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
+        workload = command_workload(
+            runtime, "attempt-1", (sys.executable, "-I", "-c", script)
+        )
+        prelaunch: dict[int, int] = {}
+        if sys.platform == "darwin":
+            await asyncio.to_thread(
+                session.capture_prelaunch,
+                prelaunch,
+                workload,
+                SystemClock().monotonic_ns() + SCAN_NS,
+            )
+        session.note(submitter, prelaunch)
+        closing: asyncio.Task[None] | None = None
+        try:
+            await asyncio.to_thread(
+                session.begin, submitter, False, workload, lambda: None
+            )
+            session.attach_drains()
+            await until(session.seal_scheduled)
+            if case == "close":
+                assert await asyncio.to_thread(session.copy_failed.wait, 5)
+                closing = asyncio.create_task(session.aclose())
+                await until(session.stopping)
+                assert not closing.done()
+                assert not scope.released
+                assert (snapshot / "a").read_bytes() == b"1234"
+                session.release_copy.set()
+            await session.settle_seal()
+            if closing is not None:
+                await closing
+            status = session.status()
+            manifest = sealed_manifest(attempt / "journal.jsonl")
+            records = read_records(directory)
+            journal_closed = session.journal_closed()
+            retained = snapshot.exists()
+            original_size = (candidate / "a").stat().st_size
+            original_refusal = (
+                (candidate / "c").read_bytes() if case != "disk-full" else None
+            )
+            retained_contents = (
+                ((snapshot / "a").read_bytes(), (snapshot / "b").read_bytes())
+                if retained
+                else None
+            )
+        finally:
+            session.release_copy.set()
+            if closing is not None:
+                await closing
+            await session.aclose()
+            directory.close()
+            if case == "disk-full":
+                shutil.rmtree(attempt)
+
+    diagnostics = [
+        item.get("outcome")
+        for item in kora_capture.finish()
+        if item.get("event") == "runtime.local.seal"
+    ]
+    expected = ((0, "runner.candidate_started"), (1, "command_exited"))
+    assert status == ("exited", "complete", 0)
+    assert scope.released
+    assert retained is (case == "file")
+    assert journal_closed is (case in ("disk-full", "close"))
+    if case == "file":
+        assert records == (*expected, (2, "runner.outputs_sealed"))
+        assert manifest is not None
+        assert manifest == (
+            tuple(
+                (name, f"sha256:{hashlib.sha256(content).hexdigest()}")
+                for name, content in (("a", b"1234"), ("b", b"ab"))
+            ),
+            ("c",),
+        )
+        assert retained_contents == (b"1234", b"ab")
+        assert diagnostics == ["sealed"]
+    else:
+        assert records == expected
+        assert manifest is None
+        assert diagnostics == [
+            "journal_unavailable" if case == "disk-full" else "refused"
+        ]
+    if case == "disk-full":
+        assert original_size == 2 << 20
+        assert session.partial_size is not None
+        assert 0 < session.partial_size < original_size
+    else:
+        assert original_size == 4
+        assert original_refusal == b"12345"
 
 
 class SealBoundaryClock(SystemClock):

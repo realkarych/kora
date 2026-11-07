@@ -407,6 +407,7 @@ def open_private_file(directory: DirectoryAnchor, name: str, flags: int) -> int:
 
 
 MAX_SEAL_ENTRIES: Final[int] = 1000
+SEAL_COPY_BYTES: Final[int] = 65536
 RESOLVE_NO_SYMLINKS: Final[int] = 0x04
 RESOLVE_BENEATH: Final[int] = 0x08
 OPENAT2: Final[int] = 437
@@ -414,6 +415,50 @@ OPENAT2: Final[int] = 437
 
 class SealCapacityError(FilesystemError):
     pass
+
+
+@dataclass(frozen=True)
+class SnapshotLimits:
+    file_bytes: int
+    attempt_bytes: int
+
+
+SNAPSHOT_LIMITS: Final[SnapshotLimits] = SnapshotLimits(1 << 30, 4 << 30)
+
+
+@dataclass
+class SnapshotBudget:
+    file_bytes: int
+    remaining: int
+
+    def store(self, source: int, destination: int, name: str) -> str | None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            target = os.open(name, flags, 0o600, dir_fd=destination)
+        except OSError as error:
+            if _blocks_snapshot(error):
+                raise
+            return None
+        try:
+            try:
+                os.fchmod(target, 0o600)
+                copied = copy_sealed_payload(
+                    source, target, self.file_bytes, self.remaining
+                )
+                if copied is not None:
+                    os.fsync(target)
+            except OSError as error:
+                if _blocks_snapshot(error):
+                    raise
+                copied = None
+        finally:
+            os.close(target)
+        if copied is None:
+            _discard_name(destination, name)
+            return None
+        digest, size = copied
+        self.remaining -= size
+        return digest
 
 
 @dataclass(frozen=True)
@@ -451,7 +496,9 @@ OPEN_BENEATH = ctypes.CFUNCTYPE(
 
 
 def snapshot_regular_tree(
-    source: DirectoryAnchor, snapshot: DirectoryAnchor
+    source: DirectoryAnchor,
+    snapshot: DirectoryAnchor,
+    limits: SnapshotLimits = SNAPSHOT_LIMITS,
 ) -> SealedTree:
     device = os.fstat(source.descriptor).st_dev
     files: list[SealedFile] = []
@@ -465,6 +512,7 @@ def snapshot_regular_tree(
         files,
         refused,
         0,
+        SnapshotBudget(limits.file_bytes, limits.attempt_bytes),
     )
     os.fsync(snapshot.descriptor)
     files.sort(key=lambda item: item.name)
@@ -488,6 +536,7 @@ def _collect(
     files: list[SealedFile],
     refused: list[str],
     count: int,
+    budget: SnapshotBudget,
 ) -> int:
     for name in _bounded_entry_names(parent, count):
         count = _count(count)
@@ -517,17 +566,13 @@ def _collect(
                 files,
                 refused,
                 count,
+                budget,
             )
             continue
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             refused.append(relative)
             continue
-        try:
-            digest = _copy_file(root, parent, destination, name, relative, device)
-        except OSError as error:
-            if _blocks_snapshot(error):
-                raise
-            digest = None
+        digest = _copy_file(root, parent, destination, name, relative, device, budget)
         if digest is None:
             refused.append(relative)
             continue
@@ -545,6 +590,7 @@ def _copy_directory(
     files: list[SealedFile],
     refused: list[str],
     count: int,
+    budget: SnapshotBudget,
 ) -> int:
     child = _open_child_directory(parent, name)
     if child is None:
@@ -561,7 +607,7 @@ def _copy_directory(
             return count
         try:
             count = _collect(
-                root, child, copied, device, relative, files, refused, count
+                root, child, copied, device, relative, files, refused, count, budget
             )
             os.fsync(copied)
         finally:
@@ -651,51 +697,58 @@ def _make_directory(parent: int, name: str) -> int:
 
 
 def _copy_file(
-    root: int, parent: int, destination: int, name: str, relative: str, device: int
+    root: int,
+    parent: int,
+    destination: int,
+    name: str,
+    relative: str,
+    device: int,
+    budget: SnapshotBudget,
 ) -> str | None:
-    if sys.platform == "linux":
-        source = _open_beneath(root, relative)
-    else:
-        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-        source = os.open(name, flags, dir_fd=parent)
     try:
-        metadata = os.fstat(source)
+        if sys.platform == "linux":
+            source = _open_beneath(root, relative)
+        else:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+            source = os.open(name, flags, dir_fd=parent)
+    except OSError as error:
+        if _blocks_snapshot(error):
+            raise
+        return None
+    try:
+        try:
+            metadata = os.fstat(source)
+        except OSError as error:
+            if _blocks_snapshot(error):
+                raise
+            return None
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_nlink != 1
             or metadata.st_dev != device
+            or metadata.st_size > budget.file_bytes
         ):
             return None
-        return _store_copy(source, destination, name)
+        return budget.store(source, destination, name)
     finally:
         os.close(source)
 
 
-def _store_copy(source: int, destination: int, name: str) -> str | None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-    try:
-        target = os.open(name, flags, 0o600, dir_fd=destination)
-    except OSError as error:
-        if _blocks_snapshot(error):
-            raise
-        return None
-    try:
-        os.fchmod(target, 0o600)
-        hasher = hashlib.sha256()
-        while True:
-            chunk = os.read(source, 65536)
-            if not chunk:
-                os.fsync(target)
-                return f"sha256:{hasher.hexdigest()}"
-            hasher.update(chunk)
+def copy_sealed_payload(
+    source: int, target: int, file_bytes: int, remaining: int
+) -> tuple[str, int] | None:
+    hasher = hashlib.sha256()
+    size = 0
+    while chunk := os.read(source, min(SEAL_COPY_BYTES, file_bytes - size + 1)):
+        size += len(chunk)
+        if size > file_bytes:
+            return None
+        if size <= remaining:
             _write_all(target, chunk)
-    except OSError as error:
-        _discard_name(destination, name)
-        if _blocks_snapshot(error):
-            raise
-        return None
-    finally:
-        os.close(target)
+            hasher.update(chunk)
+    if size > remaining:
+        raise SealCapacityError("seal_capacity")
+    return f"sha256:{hasher.hexdigest()}", size
 
 
 def _write_all(descriptor: int, chunk: bytes) -> None:

@@ -4,9 +4,13 @@ from pathlib import Path
 import pytest
 
 from kora.runner.filesystem import (
+    SEAL_COPY_BYTES,
     DirectoryAnchor,
     FilesystemError,
     SealCapacityError,
+    SnapshotBudget,
+    SnapshotLimits,
+    copy_sealed_payload,
     create_directory,
     remove_directory,
     snapshot_regular_tree,
@@ -158,6 +162,93 @@ def test_unwritable_snapshot_refuses_listed_descendants(tmp_path: Path) -> None:
     source.close()
     snapshot.close()
     parent.close()
+
+
+@pytest.mark.parametrize("growth", [4, 5])
+def test_snapshot_classifies_source_growth_without_overwriting_budget(
+    tmp_path: Path, growth: int
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    prefix = b"x" * SEAL_COPY_BYTES
+    source.write_bytes(prefix)
+    with source.open("rb") as reading, target.open("wb") as writing:
+        file_limit = os.fstat(reading.fileno()).st_size + 4
+        with source.open("ab") as growing:
+            growing.write(b"y" * growth)
+
+        if growth == 4:
+            with pytest.raises(SealCapacityError):
+                copy_sealed_payload(
+                    reading.fileno(), writing.fileno(), file_limit, len(prefix)
+                )
+        else:
+            copied = copy_sealed_payload(
+                reading.fileno(), writing.fileno(), file_limit, len(prefix)
+            )
+            assert copied is None
+
+        assert os.fstat(writing.fileno()).st_size == len(prefix)
+        assert target.read_bytes() == prefix
+
+
+def test_snapshot_disposes_partial_file_before_reusing_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.write_bytes(b"x" * SEAL_COPY_BYTES)
+    sibling = tmp_path / "sibling"
+    sibling.write_bytes(b"z" * SEAL_COPY_BYTES)
+    destination = DirectoryAnchor.open_path(tmp_path)
+    try:
+        with source.open("rb") as reading, sibling.open("rb") as next_file:
+            file_limit = os.fstat(reading.fileno()).st_size
+            budget = SnapshotBudget(file_limit, file_limit)
+            with source.open("ab") as growing:
+                growing.write(b"y")
+
+            refused = budget.store(reading.fileno(), destination.descriptor, "refused")
+            retained = budget.store(next_file.fileno(), destination.descriptor, "kept")
+
+        assert refused is None
+        assert not (tmp_path / "refused").exists()
+        assert retained is not None
+        assert (tmp_path / "kept").read_bytes() == sibling.read_bytes()
+        assert budget.remaining == 0
+    finally:
+        destination.close()
+
+
+@pytest.mark.parametrize("overflow", [False, True])
+def test_snapshot_shares_exact_byte_limit_across_directories(
+    tmp_path: Path, overflow: bool
+) -> None:
+    parent = DirectoryAnchor.open_path(tmp_path)
+    source = create_directory(parent, "source")
+    snapshot = create_directory(parent, "snapshot")
+    original = tmp_path / "source"
+    copy = tmp_path / "snapshot"
+    (original / "a").write_bytes(b"1234")
+    (original / "b").mkdir()
+    (original / "b" / "payload").write_bytes(b"abc" if overflow else b"ab")
+    (original / "c").touch()
+    (original / "d").write_bytes(b"12345")
+    limits = SnapshotLimits(4, 6)
+    try:
+        if overflow:
+            with pytest.raises(SealCapacityError):
+                snapshot_regular_tree(source, snapshot, limits)
+        else:
+            sealed = snapshot_regular_tree(source, snapshot, limits)
+            assert tuple(item.name for item in sealed.files) == ("a", "b/payload", "c")
+            assert sealed.refused == ("d",)
+
+        assert (copy / "a").read_bytes() == b"1234"
+        assert (copy / "b" / "payload").read_bytes() == (b"" if overflow else b"ab")
+        assert not (copy / "d").exists()
+        assert (original / "d").read_bytes() == b"12345"
+    finally:
+        source.close()
+        snapshot.close()
+        parent.close()
 
 
 def _names(descriptor: int) -> list[str]:
