@@ -2338,8 +2338,9 @@ async def test_output_wire_limits_retries_and_requires_terminal_eof(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("seconds_until_deadline", [300, -60])
 async def test_output_refuses_inherited_deadline_before_spool_or_source(
-    tmp_path: Path, kora_capture: Capture
+    tmp_path: Path, kora_capture: Capture, seconds_until_deadline: int
 ) -> None:
     async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
         workload = command_workload(
@@ -2352,7 +2353,7 @@ async def test_output_refuses_inherited_deadline_before_spool_or_source(
         entry = await recorded(runtime, handle.attempt_id)
         assert isinstance(entry, Running)
         deadline = ExecutionDeadline(
-            at=ctx.clock.now() + timedelta(minutes=5),
+            at=ctx.clock.now() + timedelta(seconds=seconds_until_deadline),
             scope_kind="attempt",
             scope_id=handle.attempt_id,
             clock_uncertainty=timedelta(seconds=2),
@@ -2378,11 +2379,14 @@ async def test_output_refuses_inherited_deadline_before_spool_or_source(
             )
             answered, direct = read_error_envelope(payload)
             await channel.expect_eof(wait)
+        persisted = await recorded(runtime, handle.attempt_id)
 
     assert refused.code == "transfer_refused"
     assert before == after
     assert answered == request.request_id
     assert direct.code == "transfer_refused"
+    assert isinstance(persisted, Running)
+    assert not persisted.gate_closed
 
 
 @pytest.mark.asyncio
