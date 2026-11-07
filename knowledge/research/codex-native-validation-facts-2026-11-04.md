@@ -58,3 +58,12 @@ adds the two exact names to private launch preflight. The
 [dated record](codex-executor-command-metadata-2026-11-08.md) separates
 initial command observations, source-based ownership and the remaining
 complete declaration requirements.
+
+## Subsequent selected SQLite home reservation
+
+[#986](https://github.com/realkarych/kora/issues/986) observes the actual
+app-server state file in the selected private home and in a disposable
+environment override. The exact unset `CODEX_SQLITE_HOME` control now
+participates in private launch preflight. The [dated record](codex-sqlite-state-home-2026-11-08.md)
+keeps this Linux observation separate from complete declarations and
+production placement.
