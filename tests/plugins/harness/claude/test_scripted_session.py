@@ -368,6 +368,21 @@ def live_pid(launch_dir: Path) -> int:
     return found
 
 
+def environment_has(text: str, name: str, value: str) -> bool:
+    needle = f"{name}={value}"
+    start = 0
+    while True:
+        index = text.find(needle, start)
+        if index < 0:
+            return False
+        end = index + len(needle)
+        before = index == 0 or text[index - 1] in " \n"
+        after = end == len(text) or text[end] in " \n"
+        if before and after:
+            return True
+        start = index + 1
+
+
 def process_environment(pid: int) -> str:
     if sys.platform == "linux":
         raw = Path(f"/proc/{pid}/environ").read_bytes()
@@ -554,13 +569,24 @@ async def test_scripted_claude_write_changes_the_file_when_allowed(
     assert (work / "seeded.txt").read_text(encoding="utf-8") == SEEDED
     assert calls == ["Write"]
     assert observed
-    assert f"HOME={environment['HOME']}" in observed[0]
-    assert f"ANTHROPIC_BASE_URL={base_url}" in observed[0]
+    text = observed[0]
+    if not environment_has(text, "HOME", environment["HOME"]):
+        raise AssertionError("the harness home was absent")
+    if not environment_has(text, "ANTHROPIC_BASE_URL", base_url):
+        raise AssertionError("the loopback base URL was absent")
     parent_home = os.environ.get("HOME")
-    if parent_home is not None and parent_home != environment["HOME"]:
-        assert f"HOME={parent_home}" not in observed[0]
+    if (
+        parent_home is not None
+        and parent_home != environment["HOME"]
+        and environment_has(text, "HOME", parent_home)
+    ):
+        raise AssertionError("the parent home reached the CLI")
     parent_key = os.environ.get("ANTHROPIC_API_KEY")
-    if parent_key is not None and f"ANTHROPIC_API_KEY={parent_key}" in observed[0]:
+    if (
+        parent_key is not None
+        and parent_key != KEY
+        and environment_has(text, "ANTHROPIC_API_KEY", parent_key)
+    ):
         raise AssertionError("the parent API key reached the CLI")
     assert_exchange(state, peers)
     await assert_quiet(str(work), clock)
