@@ -1045,6 +1045,26 @@ async def test_command_stop_confirms_only_prelaunch_opaque_processes(
         assert outcomes == ["confirmed"]
 
 
+@pytest.mark.parametrize(
+    ("observation", "current", "accepted"),
+    [
+        (CommandRead.OPAQUE, 201, True),
+        (CommandRead.OPAQUE, 202, False),
+        (CommandRead.OPAQUE, None, False),
+        (CommandRead.UNSTABLE, 201, False),
+    ],
+    ids=["same-identity", "reused-pid", "missing-identity", "contradiction"],
+)
+def test_prelaunch_proof_requires_exact_identity_and_opaque_observation(
+    observation: CommandRead, current: int | None, accepted: bool
+) -> None:
+    captured = 201
+
+    verified = observation.matches_prelaunch(captured, current)
+
+    assert verified is accepted
+
+
 class ExitAppendClock(SystemClock):
     def __init__(self) -> None:
         self.entered = threading.Event()

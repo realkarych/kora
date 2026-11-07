@@ -34,7 +34,7 @@ from kora.runner.filesystem import (
     rename_no_replace,
     verify_private,
 )
-from kora.runner.identity import PROCESS_SCAN_ENTRIES, NativeIdentityReader
+from kora.runner.identity import PROCESS_SCAN_ENTRIES, SCAN_NS, NativeIdentityReader
 from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
 from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
 from kora.runner.registry import Submitter, synchronize
@@ -218,8 +218,16 @@ class CommandSession:
         self._transferring = False
         self._transfer_ns = 0
 
-    def capture_prelaunch(self, deadline: int) -> dict[int, int]:
-        return NativeIdentityReader(clock=self._clock).command_prelaunch(deadline)
+    def capture_prelaunch(
+        self, baseline: dict[int, int], workload: Workload, deadline: int
+    ) -> None:
+        cutoff = min(deadline, self._clock.monotonic_ns() + SCAN_NS)
+        if (
+            self._clock.monotonic_ns() < cutoff
+            and command_argv(workload) is not None
+            and self._clock.monotonic_ns() < cutoff
+        ):
+            NativeIdentityReader(clock=self._clock).command_prelaunch(baseline, cutoff)
 
     def note(
         self, submitter: Submitter, prelaunch: dict[int, int] | None = None
@@ -227,7 +235,7 @@ class CommandSession:
         with self._lock:
             if self._execution is None:
                 self._execution = submitter
-                self._prelaunch = prelaunch
+                self._prelaunch = prelaunch or None
 
     def decide_transfer(
         self, submitter: Submitter, observational: bool, item: TransferItem
@@ -337,6 +345,7 @@ class CommandSession:
             if self._stage is _Stage.FENCED:
                 return
             self._stage = _Stage.FENCED
+            self._discard_unlaunched_prelaunch()
             closed = self._journal.closed
         if not closed:
             self._journal.close()
@@ -526,6 +535,7 @@ class CommandSession:
                 self._emit("refused", started)
                 raise delivery_error("workload_busy")
             if self._journal.closed:
+                self._discard_unlaunched_prelaunch()
                 self._emit("journal_unavailable", started)
                 raise delivery_error("journal_unavailable")
             if self._stage is _Stage.RUNNING:
@@ -594,15 +604,18 @@ class CommandSession:
             if self._stage is not _Stage.LAUNCHING:
                 return
             self._stage = _Stage.FAILED
+            self._discard_unlaunched_prelaunch()
             self._lock.notify_all()
+
+    def _discard_unlaunched_prelaunch(self) -> None:
+        if self._owner is None or self._owner.pid is None:
+            self._prelaunch = None
 
     def _finish(self, stage: _Stage, outcome: str, started: int) -> None:
         with self._lock:
             self._stage = stage
-            if stage in (_Stage.FAILED, _Stage.FENCED) and (
-                self._owner is None or self._owner.pid is None
-            ):
-                self._prelaunch = None
+            if stage in (_Stage.FAILED, _Stage.FENCED):
+                self._discard_unlaunched_prelaunch()
             try:
                 self._emit(outcome, started)
             finally:

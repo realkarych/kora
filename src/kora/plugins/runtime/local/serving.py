@@ -476,6 +476,7 @@ class ControlServer:
             sink = refusal is not None or repeated
             if not sink:
                 self._admitted = True
+            prelaunch: dict[int, int] | None = None
             try:
                 section = await receive_section(
                     channel,
@@ -514,15 +515,17 @@ class ControlServer:
                             raise delivery_error("workload_conflict")
                         if self._workload is None:
                             command = self._command
-                            prelaunch = None
                             if (
                                 sys.platform == "darwin"
                                 and command is not None
                                 and decoded.kind == "command"
                             ):
-                                prelaunch = await self._executor.run(
+                                prelaunch = {}
+                                await self._executor.run(
                                     partial(
                                         command.capture_prelaunch,
+                                        prelaunch,
+                                        decoded,
                                         started + MESSAGE_PROGRESS_NS,
                                     )
                                 )
@@ -540,6 +543,7 @@ class ControlServer:
                     answer = error_envelope(header.request_id, error)
                 await self._answer(channel, answer)
             finally:
+                prelaunch = None
                 section = bytearray()
                 decoded = None
                 if not sink:

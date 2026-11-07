@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Set
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import BinaryIO, Final, Protocol, cast
+from typing import BinaryIO, Final, Literal, Protocol, cast
 
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.time import Clock, SystemClock
@@ -75,6 +75,9 @@ class CommandRead(StrEnum):
     VERIFIED = "verified"
     OPAQUE = "opaque"
     UNSTABLE = "unstable"
+
+    def matches_prelaunch(self, expected: int, current: int | None) -> bool:
+        return self is CommandRead.OPAQUE and expected == current
 
 
 @dataclass(frozen=True)
@@ -587,11 +590,9 @@ class NativeIdentityReader:
         count = size // ctypes.sizeof(ctypes.c_int)
         return tuple(pid for pid in buffer[:count] if pid > 0)
 
-    def command_prelaunch(self, deadline_ns: int) -> dict[int, int]:
-        deadline = min(deadline_ns, self._clock.monotonic_ns() + SCAN_NS)
-        baseline: dict[int, int] = {}
+    def command_prelaunch(self, baseline: dict[int, int], deadline: int) -> None:
         if self._library is None or os.getpid() != self._owner:
-            return baseline
+            return
         listed = self._listed_pids(PROC_UID_ONLY, os.getuid(), deadline)
         for pid in listed or ():
             if self._clock.monotonic_ns() >= deadline:
@@ -599,7 +600,6 @@ class NativeIdentityReader:
             unique = self._darwin_unique_id(pid)
             if unique is not None and self._clock.monotonic_ns() < deadline:
                 baseline[pid] = unique
-        return baseline
 
     def _darwin_unique_id(self, pid: int) -> int | None:
         library = self._library
@@ -660,9 +660,12 @@ class NativeIdentityReader:
                 observation is CommandRead.OPAQUE
                 and prelaunch is not None
                 and pid not in known_pids
+                and self._clock.monotonic_ns() < scan_deadline
             ):
                 unique = prelaunch.get(pid)
-                if unique is not None and self._darwin_unique_id(pid) == unique:
+                if unique is not None and observation.matches_prelaunch(
+                    unique, self._darwin_unique_id(pid)
+                ):
                     opaque[pid] = unique
                     verified = True
             complete = complete and verified
@@ -705,7 +708,10 @@ class NativeIdentityReader:
     def command_member(
         self, pid: int, group: int, marker: bytes, *, listed_in_group: bool = False
     ) -> tuple[CommandMember | None, CommandRead]:
-        current = self.read(pid).process
+        first = self.read(pid)
+        if first.state is IdentityState.ABSENT:
+            return None, CommandRead.UNSTABLE
+        current = first.process
         if current is None or not complete_identity(current.identity):
             return None, CommandRead.OPAQUE
         adopted = sys.platform == "linux" and current.parent_pid == self._owner
@@ -727,10 +733,14 @@ class NativeIdentityReader:
             member = CommandMember(current, False) if relevant else None
             return member, CommandRead.UNSTABLE
         member = CommandMember(current, owned is True) if relevant else None
+        if owned is CommandRead.UNSTABLE:
+            return member, CommandRead.UNSTABLE
         observation = CommandRead.OPAQUE if owned is None else CommandRead.VERIFIED
         return member, observation
 
-    def _command_marker(self, pid: int, marker: bytes) -> bool | None:
+    def _command_marker(
+        self, pid: int, marker: bytes
+    ) -> bool | None | Literal[CommandRead.UNSTABLE]:
         try:
             if sys.platform == "linux":
                 return self._linux_marker(pid, marker)
@@ -758,13 +768,17 @@ class NativeIdentityReader:
         finally:
             os.close(directory)
 
-    def _darwin_marker(self, pid: int, marker: bytes) -> bool | None:
+    def _darwin_marker(
+        self, pid: int, marker: bytes
+    ) -> bool | None | Literal[CommandRead.UNSTABLE]:
         library = self._library
         if library is None:
             return None
         owner, alignment = self._darwin_owner(library, pid)
         if owner is ArgumentMatch.DIFFERENT:
             return False
+        if owner is ArgumentMatch.ABSENT:
+            return CommandRead.UNSTABLE
         if owner is not ArgumentMatch.EQUAL or alignment is None:
             return None
         buffer = self._marker_buffer
@@ -777,11 +791,14 @@ class NativeIdentityReader:
         call = cast(Sysctl, library.sysctl)
         try:
             if call(name, 3, buffer, ctypes.byref(length), None, 0) != 0:
-                raise OSError(ctypes.get_errno())
+                failure = ctypes.get_errno()
+                if failure == errno.ESRCH:
+                    return CommandRead.UNSTABLE
+                raise OSError(failure)
             if not 0 < length.value < capacity:
                 return None
             if self._darwin_owner(library, pid) != (owner, alignment):
-                return None
+                return CommandRead.UNSTABLE
             data = ctypes.string_at(ctypes.addressof(buffer), length.value)
             return darwin_environment(data, marker, alignment=alignment)
         finally:
