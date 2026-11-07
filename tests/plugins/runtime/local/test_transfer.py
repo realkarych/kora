@@ -23,7 +23,7 @@ import pytest
 from kora.conformance.capture import Capture
 from kora.conformance.common import kora_capture
 from kora.ir.vcs_ref_json import canonical_bytes
-from kora.observability import LoggingSettings, configure_process
+from kora.observability import ComponentLogger, LoggingSettings, configure_process
 from kora.plugins.runtime.local.channel import (
     ENVELOPE_BYTES,
     FRAME_PROGRESS_NS,
@@ -38,7 +38,7 @@ from kora.plugins.runtime.local.channel import (
     read_delivery,
     read_error_envelope,
 )
-from kora.plugins.runtime.local.command import INCOMING, CommandSession
+from kora.plugins.runtime.local.command import INCOMING, CommandSession, OpenedOutput
 from kora.plugins.runtime.local.configuration import LocalRuntimeConfiguration
 from kora.plugins.runtime.local.control import (
     attested,
@@ -63,8 +63,12 @@ from kora.protocols.identity import Handle
 from kora.protocols.runtime import TransferItem
 from kora.protocols.secret_value import SecretScope
 from kora.protocols.time import SystemClock
-from kora.runner.channels import BoundedChannel, ChannelError
-from kora.runner.filesystem import open_local_directory
+from kora.runner.channels import BoundedChannel, ChannelError, ChannelFailure
+from kora.runner.filesystem import (
+    DirectoryAnchor,
+    file_identity,
+    open_local_directory,
+)
 from kora.runner.identity import (
     SCAN_NS,
     IdentityObservation,
@@ -2004,6 +2008,134 @@ def test_concurrent_spool_close_releases_one_lease(tmp_path: Path) -> None:
             owner.close()
         finally:
             root.close()
+
+
+class HoldingOutput(CommandSession):
+    def __init__(
+        self,
+        attempt: DirectoryAnchor,
+        candidate: str,
+        scope: SecretScope,
+        clock: SystemClock,
+        log: ComponentLogger,
+        descriptor: int,
+    ) -> None:
+        super().__init__(attempt, candidate, scope, clock, log)
+        self.descriptor = descriptor
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def open_output(self, name: str) -> OpenedOutput:
+        self.entered.set()
+        if not self.release.wait(5):
+            raise TimeoutError("the output open was not released")
+        return OpenedOutput(
+            self.descriptor, 0, digest_of(b""), file_identity(self.descriptor, name)
+        )
+
+
+class DeclarationClock(SystemClock):
+    def __init__(self) -> None:
+        self.deadlines: list[int] = []
+        self.waiting = asyncio.Event()
+        self.released = asyncio.Event()
+
+    def monotonic_ns(self) -> int:
+        return 10 * MESSAGE_PROGRESS_NS
+
+    async def sleep_until(self, deadline_ns: int) -> None:
+        self.deadlines.append(deadline_ns)
+        self.waiting.set()
+        await self.released.wait()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_output_open_closes_the_snapshot_descriptor(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    attempt = private_directory(tmp_path, "attempt")
+    anchor = open_local_directory(attempt)
+    held = os.open(
+        attempt / "held", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+    )
+    command = HoldingOutput(
+        anchor,
+        str(attempt / "candidate"),
+        SecretScope(kora_capture.diagnostics),
+        SystemClock(),
+        kora_capture.diagnostics.logger(COMPONENT),
+        held,
+    )
+    try:
+        async with delivery_server(tmp_path, kora_capture, command=command) as live:
+            channel = await live.attach()
+            handlers: tuple[asyncio.Task[None], ...] = ()
+            try:
+                request = OutputRequest(
+                    op="transfer_out", request_id="wire", name="payload"
+                )
+                await channel.write_typed_frame(
+                    FrameType.JSON,
+                    canonical_bytes(request.model_dump(mode="json")),
+                    live.ctx.clock.monotonic_ns() + FRAME_PROGRESS_NS,
+                )
+                assert await asyncio.to_thread(command.entered.wait, 5)
+                handlers = live.server.tracked_connections()
+                assert len(handlers) == 1
+                handlers[0].cancel()
+            finally:
+                command.release.set()
+                channel.close()
+            with pytest.raises(asyncio.CancelledError):
+                await handlers[0]
+            released = live_descriptors()
+    finally:
+        if held in live_descriptors():
+            os.close(held)
+        anchor.close()
+
+    assert held not in released
+
+
+@pytest.mark.asyncio
+async def test_output_declaration_uses_the_message_deadline(tmp_path: Path) -> None:
+    clock = DeclarationClock()
+    message_deadline = clock.monotonic_ns() + MESSAGE_PROGRESS_NS
+    left, right = socket.socketpair()
+    left.setblocking(False)
+    right.setblocking(False)
+    client = BoundedChannel(right, clock)
+    executor = TransitionExecutor(1, 1)
+    descriptor = os.open(
+        tmp_path / "spool", os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600
+    )
+    os.unlink(tmp_path / "spool")
+    try:
+        task = asyncio.create_task(
+            receive_output(
+                client,
+                clock,
+                executor,
+                descriptor,
+                "pull-1",
+                message_deadline,
+                None,
+                lambda: None,
+            )
+        )
+        await clock.waiting.wait()
+        recorded = clock.deadlines[0]
+        left.close()
+        clock.released.set()
+        with pytest.raises(ChannelError) as refused:
+            await task
+    finally:
+        client.close()
+        os.close(descriptor)
+        await executor.close()
+
+    assert recorded == message_deadline
+    assert refused.value.reason is ChannelFailure.CLOSED
 
 
 @pytest.mark.asyncio

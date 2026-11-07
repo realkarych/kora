@@ -290,9 +290,8 @@ async def receive_output(
     active: Callable[[], None] | None,
     close_spool: Callable[[], None],
 ) -> None:
-    deadline = min(clock.monotonic_ns() + FRAME_PROGRESS_NS, message_deadline)
     reservations = {FrameType.JSON.value: ENVELOPE_BYTES}
-    _, payload = await channel.read_typed_frame(deadline, reservations)
+    _, payload = await channel.read_typed_frame(message_deadline, reservations)
     declared = read_output_declaration(payload, request_id)
     digest = hashlib.sha256()
     remaining = declared.size

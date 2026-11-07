@@ -281,6 +281,9 @@ class ControlServer:
     def connections(self) -> int:
         return len(self._connections)
 
+    def tracked_connections(self) -> tuple[asyncio.Task[None], ...]:
+        return tuple(self._connections)
+
     @property
     def resources_settled(self) -> bool:
         return self._resources_settled
@@ -682,8 +685,12 @@ class ControlServer:
                     if self._clock.monotonic_ns() >= deadline:
                         raise ChannelError(ChannelFailure.DEADLINE)
 
+                def close_opened(value: OpenedOutput) -> None:
+                    os.close(value.descriptor)
+
                 opened = await self._transfer_native(
-                    lambda: session.open_output(request.name)
+                    lambda: session.open_output(request.name),
+                    on_cancel=close_opened,
                 )
                 current = opened
                 await self._transfer_native(
@@ -738,13 +745,17 @@ class ControlServer:
         self,
         operation: Callable[[], Result],
         dispose: Callable[[], None] | None = None,
+        *,
+        on_cancel: Callable[[Result], None] | None = None,
     ) -> Result:
         def settled() -> None:
             self._transfer_native_settled = True
             if dispose is not None:
                 dispose()
 
-        return await self._executor.run(operation, after_uncertain_submission=settled)
+        return await self._executor.run(
+            operation, on_cancel, after_uncertain_submission=settled
+        )
 
     def _transfer_io(
         self, command: CommandSession, operation: Callable[[], Result]
