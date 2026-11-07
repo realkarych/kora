@@ -815,6 +815,8 @@ class ControlServer:
 
     async def _release(self) -> None:
         self._bound.listener.close()
+        if self._command is not None:
+            self._command.close_journal()
         tasks = [*self._connections]
         if self._accepting is not None:
             tasks.append(self._accepting)
@@ -831,18 +833,26 @@ class ControlServer:
                     raise outcome
         finally:
             settled = False
+            workers_joined = False
             try:
                 await self._executor.close()
+            except NativeIOUnresolved:
+                workers_joined = True
+                raise
+            else:
                 settled = True
+                workers_joined = True
             finally:
-                if (
-                    settled or self._transfer_native_settled
-                ) and self._unresolved_disposal is None:
-                    self._resources_settled = True
-                    try:
-                        if self._command is not None:
-                            await self._command.aclose()
-                    finally:
+                try:
+                    if self._command is not None and (
+                        workers_joined or self._transfer_native_settled
+                    ):
+                        await self._command.aclose()
+                finally:
+                    if (
+                        settled or self._transfer_native_settled
+                    ) and self._unresolved_disposal is None:
+                        self._resources_settled = True
                         self._workload = None
                         self._workload_sha256 = None
                         self._bound.directory.close()

@@ -15,6 +15,7 @@ from kora.protocols.time import Clock, SystemClock
 STATUS_CAPACITY_BYTES: Final[int] = 4096
 OWNER_STATUS_BYTES: Final[int] = 16384
 SCAN_NS: Final[int] = 1_000_000_000
+PROCESS_SCAN_ENTRIES: Final[int] = 65536
 UNKNOWN_READ_PAUSE_SECONDS: Final[float] = 0.001
 PROC_PGRP_ONLY: Final[int] = 2
 PROC_RUID_ONLY: Final[int] = 5
@@ -46,6 +47,7 @@ class ProcessSnapshot:
     process_group_id: int
     session_id: int
     dead: bool
+    parent_pid: int | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,19 @@ class IdentityObservation:
 class GroupObservation:
     state: IdentityState
     members: tuple[tuple[int, IdentityObservation], ...] = ()
+
+
+@dataclass(frozen=True)
+class CommandMember:
+    process: ProcessSnapshot
+    owned: bool
+
+
+@dataclass(frozen=True)
+class CommandCensus:
+    members: tuple[CommandMember, ...]
+    complete: bool
+    ambiguous_group: bool = False
 
 
 class ArgumentMatch(StrEnum):
@@ -268,6 +283,32 @@ def darwin_arguments(
     return ArgumentMatch.EQUAL if window == wanted else ArgumentMatch.DIFFERENT
 
 
+def environment_contains(environment: bytes, marker: bytes) -> bool:
+    entry = marker + b"\0"
+    return environment.startswith(entry) or b"\0" + entry in environment
+
+
+def darwin_environment(data: bytes, marker: bytes) -> bool | None:
+    word = ctypes.sizeof(ctypes.c_int)
+    path_end = data.find(b"\0", word)
+    if path_end <= word:
+        return None
+    count = int.from_bytes(data[:word], sys.byteorder, signed=True)
+    length = path_end + 1 - word
+    start = word + -(-length // ARGUMENT_ALIGNMENT) * ARGUMENT_ALIGNMENT
+    if not 1 <= count <= len(data) - start or any(data[path_end:start]):
+        return None
+    for _ in range(count):
+        end = data.find(b"\0", start)
+        if end < 0:
+            return None
+        start = end + 1
+    environment = data[start:]
+    if environment and not environment.endswith(b"\0"):
+        return None
+    return environment_contains(environment, marker)
+
+
 def open_status(pid: int) -> BinaryIO:
     return open(f"/proc/{pid}/stat", "rb", buffering=0)
 
@@ -285,11 +326,14 @@ class NativeIdentityReader:
         self,
         *,
         clock: Clock | None = None,
-        max_scan_entries: int = 65536,
+        max_scan_entries: int = PROCESS_SCAN_ENTRIES,
         status_opener: Callable[[int], BinaryIO] = open_status,
         match_reader: Callable[[int, tuple[bytes, ...]], ArgumentMatch] | None = None,
     ) -> None:
-        if isinstance(max_scan_entries, bool) or not 1 <= max_scan_entries <= 65536:
+        if (
+            isinstance(max_scan_entries, bool)
+            or not 1 <= max_scan_entries <= PROCESS_SCAN_ENTRIES
+        ):
             raise ValueError("native process scan capacity must be between 1 and 65536")
         self._clock = clock if clock is not None else SystemClock()
         self._max_scan_entries = max_scan_entries
@@ -301,6 +345,7 @@ class NativeIdentityReader:
         self._namespace: str | None = None
         self._owner = os.getpid()
         self._arguments: ctypes.Array[ctypes.c_char] | None = None
+        self._marker_buffer: ctypes.Array[ctypes.c_char] | None = None
         if sys.platform == "darwin":
             self._library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
             library = self._library
@@ -381,7 +426,9 @@ class NativeIdentityReader:
         )
         return IdentityObservation(
             IdentityState.PRESENT,
-            ProcessSnapshot(identity, group, session, fields[0] in (b"Z", b"X")),
+            ProcessSnapshot(
+                identity, group, session, fields[0] in (b"Z", b"X"), int(fields[1])
+            ),
         )
 
     def _darwin_read(self, pid: int) -> IdentityObservation:
@@ -412,6 +459,7 @@ class NativeIdentityReader:
                 info.process_group_id,
                 os.getsid(pid),
                 info.status == DARWIN_ZOMBIE,
+                info.parent_pid,
             ),
         )
 
@@ -467,6 +515,8 @@ class NativeIdentityReader:
     def _listed_pids(
         self, kind: int, value: int, scan_deadline: int
     ) -> tuple[int, ...] | None:
+        if self._clock.monotonic_ns() >= scan_deadline:
+            return None
         if sys.platform == "linux":
             pids: list[int] = []
             with os.scandir("/proc") as entries:
@@ -497,6 +547,153 @@ class NativeIdentityReader:
             return None
         count = size // ctypes.sizeof(ctypes.c_int)
         return tuple(pid for pid in buffer[:count] if pid > 0)
+
+    def command_census(
+        self, group: int, marker: bytes, deadline_ns: int
+    ) -> CommandCensus:
+        scan_deadline = min(deadline_ns, self._clock.monotonic_ns() + SCAN_NS)
+        if os.getpid() != self._owner or None in (
+            self._host,
+            self._boot,
+            self._namespace,
+        ):
+            return CommandCensus((), False)
+        census = self._command_pids(group, scan_deadline)
+        if census is None:
+            return CommandCensus((), False)
+        listed, original = census
+        members: list[CommandMember] = []
+        complete = True
+        ambiguous_group = False
+        pending_group = set(original)
+        for pid in (*original, *(listed - original)):
+            if self._clock.monotonic_ns() >= scan_deadline:
+                return CommandCensus(
+                    tuple(members), False, ambiguous_group or bool(pending_group)
+                )
+            pending_group.discard(pid)
+            if pid == self._owner:
+                continue
+            member, verified = self.command_member(
+                pid, group, marker, listed_in_group=pid in original
+            )
+            if member is not None:
+                members.append(member)
+            elif pid in original and not verified:
+                ambiguous_group = (
+                    ambiguous_group
+                    or self._clock.monotonic_ns() >= scan_deadline
+                    or self.read(pid).state is not IdentityState.ABSENT
+                )
+            complete = complete and verified
+        if complete and not members:
+            complete = self._command_pids(group, scan_deadline) == census
+        return CommandCensus(
+            tuple(members),
+            complete and self._clock.monotonic_ns() < scan_deadline,
+            ambiguous_group,
+        )
+
+    def _command_pids(
+        self, group: int, deadline_ns: int
+    ) -> tuple[set[int], set[int]] | None:
+        try:
+            listed = self._listed_pids(PROC_RUID_ONLY, os.getuid(), deadline_ns)
+            if listed is None:
+                return None
+            if sys.platform != "darwin":
+                return set(listed), set()
+            original = self._listed_pids(PROC_PGRP_ONLY, group, deadline_ns)
+            if original is None:
+                return None
+            combined = set(listed).union(original)
+            if len(combined) > self._max_scan_entries:
+                return None
+            return combined, set(original)
+        except OSError:
+            return None
+
+    def command_member(
+        self, pid: int, group: int, marker: bytes, *, listed_in_group: bool = False
+    ) -> tuple[CommandMember | None, bool]:
+        current = self.read(pid).process
+        if current is None or not complete_identity(current.identity):
+            return None, False
+        adopted = sys.platform == "linux" and current.parent_pid == self._owner
+        if current.dead:
+            return None, not adopted
+        owned = True if adopted else self._command_marker(pid, marker)
+        relevant = owned is True or listed_in_group or current.process_group_id == group
+        observed = self.read(pid).process
+        if observed != current:
+            if (
+                observed is not None
+                and not observed.dead
+                and (
+                    observed.process_group_id == group
+                    or (sys.platform == "linux" and observed.parent_pid == self._owner)
+                )
+            ):
+                return CommandMember(observed, False), False
+            return (CommandMember(current, False) if relevant else None), False
+        if relevant:
+            return CommandMember(current, owned is True), owned is not None
+        return None, owned is not None
+
+    def _command_marker(self, pid: int, marker: bytes) -> bool | None:
+        try:
+            if sys.platform == "linux":
+                return self._linux_marker(pid, marker)
+            return self._darwin_marker(pid, marker)
+        except PermissionError:
+            return False
+        except (OSError, ValueError):
+            return None
+
+    def _linux_marker(self, pid: int, marker: bytes) -> bool | None:
+        directory = os.open(f"/proc/{pid}", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            status = read_bounded(directory, "status", OWNER_STATUS_BYTES)
+            if len(status) >= OWNER_STATUS_BYTES:
+                return None
+            if not owned_by(linux_uids(status), os.getuid()):
+                return False
+            limit = os.sysconf("SC_ARG_MAX") + 1
+            environment = read_bounded(directory, "environ", limit)
+            if len(environment) >= limit or (
+                environment and not environment.endswith(b"\0")
+            ):
+                return None
+            return environment_contains(environment, marker)
+        finally:
+            os.close(directory)
+
+    def _darwin_marker(self, pid: int, marker: bytes) -> bool | None:
+        library = self._library
+        if library is None:
+            return None
+        owner = self._darwin_owner(library, pid)
+        if owner is ArgumentMatch.DIFFERENT:
+            return False
+        if owner is not ArgumentMatch.EQUAL:
+            return None
+        buffer = self._marker_buffer
+        if buffer is None:
+            capacity = os.sysconf("SC_ARG_MAX") + ctypes.sizeof(ctypes.c_int)
+            self._marker_buffer = buffer = ctypes.create_string_buffer(capacity)
+        capacity = len(buffer)
+        length = ctypes.c_size_t(capacity)
+        name = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+        call = cast(Sysctl, library.sysctl)
+        try:
+            if call(name, 3, buffer, ctypes.byref(length), None, 0) != 0:
+                raise OSError(ctypes.get_errno())
+            if not 0 < length.value < capacity:
+                return None
+            data = ctypes.string_at(ctypes.addressof(buffer), length.value)
+            return darwin_environment(data, marker)
+        finally:
+            ctypes.memset(buffer, 0, capacity)
 
     def processes_carrying(
         self, argv: tuple[str, ...], deadline_ns: int

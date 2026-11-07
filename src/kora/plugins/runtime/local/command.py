@@ -19,6 +19,7 @@ from kora.ir.config import CommandConfig
 from kora.observability import CATALOG, ComponentLogger, EventSpec, FieldKind, Level
 from kora.plugins.runtime.local.channel import delivery_error
 from kora.plugins.runtime.local.child_owner import ChildOwner
+from kora.plugins.runtime.local.command_stop import CommandDomainStop, StopOutcome
 from kora.plugins.runtime.local.environment import candidate_environment
 from kora.plugins.runtime.local.spawn import DEFAULT_SIGNALS
 from kora.protocols.errors import KoraProtocolError
@@ -33,7 +34,9 @@ from kora.runner.filesystem import (
     rename_no_replace,
     verify_private,
 )
+from kora.runner.identity import PROCESS_SCAN_ENTRIES
 from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
+from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
 from kora.runner.registry import Submitter, synchronize
 
 COMPONENT: Final[str] = CATALOG.register_component("runtime.local.runner")
@@ -53,6 +56,15 @@ TRANSFER: Final[EventSpec] = CATALOG.register(
         COMPONENT,
         Level.INFO,
         "the attempt runner handled an input transfer",
+        {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
+    )
+)
+COMMAND_STOP: Final[EventSpec] = CATALOG.register(
+    EventSpec(
+        "runtime.local.command_stop",
+        COMPONENT,
+        Level.INFO,
+        "the attempt runner settled command-domain stop",
         {"outcome": FieldKind.STRING, "waited_ms": FieldKind.INTEGER},
     )
 )
@@ -83,6 +95,7 @@ OPTIONAL: Final[tuple[str, ...]] = (
 )
 TOKEN_BYTES: Final[int] = 32
 GRACE_NS: Final[int] = 1_000_000_000
+ADOPTED_LIST_BYTES: Final[int] = PROCESS_SCAN_ENTRIES * 11 + 1
 PhaseName = Literal["preparation", "execution", "complete", "failed"]
 StateName = Literal["starting", "running", "exited"]
 
@@ -140,31 +153,21 @@ def observed_exit(status: int) -> int | None:
 
 
 def adopted_pids() -> tuple[int, ...] | None:
-    found: list[int] = []
+    found: set[int] = set()
     try:
-        tasks = os.listdir("/proc/self/task")
-    except OSError:
+        with os.scandir("/proc/self/task") as tasks:
+            for index, task in enumerate(tasks):
+                if index >= PROCESS_SCAN_ENTRIES:
+                    return None
+                with open(f"/proc/self/task/{task.name}/children", "rb") as source:
+                    children = source.read(ADOPTED_LIST_BYTES)
+                if len(children) >= ADOPTED_LIST_BYTES:
+                    return None
+                found.update(int(item) for item in children.split())
+                if len(found) > PROCESS_SCAN_ENTRIES:
+                    return None
+    except (OSError, ValueError):
         return None
-    for task in tasks:
-        try:
-            descriptor = os.open(
-                f"/proc/self/task/{task}/children", os.O_RDONLY | os.O_CLOEXEC
-            )
-        except OSError:
-            return None
-        try:
-            chunks: list[bytes] = []
-            while True:
-                chunk = os.read(descriptor, 4096)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-        finally:
-            os.close(descriptor)
-        try:
-            found.extend(int(item) for item in b"".join(chunks).split())
-        except ValueError:
-            return None
     return tuple(found)
 
 
@@ -203,6 +206,10 @@ class CommandSession:
         self._drains: list[CaptureDrain] = []
         self._tasks: set[asyncio.Task[None]] = set()
         self._reaper: threading.Thread | None = None
+        self._reap_stop = threading.Event()
+        self._reap_wake = threading.Event()
+        self._domain_stop: asyncio.Task[StopOutcome] | None = None
+        self._closing: asyncio.Task[None] | None = None
         self._reported_exit = False
         self._running_ns = 0
         self._warned = False
@@ -386,6 +393,13 @@ class CommandSession:
         code = observed_exit(status)
         if code is None:
             return
+        try:
+            self._loop.call_soon_threadsafe(
+                self._begin_domain_stop, self._clock.monotonic_ns()
+            )
+        except RuntimeError:
+            if not self._loop.is_closed():
+                raise
         with self._lock:
             self._lock.wait_for(
                 lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
@@ -398,17 +412,81 @@ class CommandSession:
                 if not self._stop.is_set():
                     self._emit("journal_unavailable", started)
 
+    def _begin_domain_stop(self, started_ns: int) -> None:
+        owner = self._owner
+        token = self._token
+        if (
+            self._stop.is_set()
+            or self._domain_stop is not None
+            or owner is None
+            or token is None
+        ):
+            return
+        with owner.lock:
+            pid = owner.pid
+            status = owner.status
+        if pid is None or status is None or observed_exit(status) is None:
+            return
+        self._domain_stop = self._loop.create_task(
+            self._stop_domain(pid, token, started_ns)
+        )
+
+    async def _stop_domain(
+        self, pid: int, token: SecretValue, started_ns: int
+    ) -> StopOutcome:
+        marker = b"KORA_ATTEMPT_TOKEN=" + token.reveal().encode("ascii")
+        executor = NativeExecutor(1, 1)
+        try:
+            outcome = await executor.run(
+                lambda: CommandDomainStop(
+                    pid, marker, self._clock, self._reap_wake.set
+                ).stop(started_ns)
+            )
+        except NativeIOUnresolved:
+            outcome = StopOutcome.UNRESOLVED
+        finally:
+            try:
+                await executor.close()
+            except NativeIOUnresolved:
+                outcome = StopOutcome.UNRESOLVED
+        waited = max(0, (self._clock.monotonic_ns() - started_ns) // 1_000_000)
+        level = Level.INFO if outcome is StopOutcome.CONFIRMED else Level.WARNING
+        self._log.emit_at(level, COMMAND_STOP, outcome=outcome, waited_ms=waited)
+        return outcome
+
+    def close_journal(self) -> None:
+        self._journal.close()
+
     async def aclose(self) -> None:
+        if self._closing is None:
+            self._closing = self._loop.create_task(self._release())
+        cancelled = await observed(self._closing)
+        self._closing.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _release(self) -> None:
+        self.close_journal()
+        self._begin_domain_stop(self._clock.monotonic_ns())
         with self._lock:
             self._stop.set()
-            self._journal.close()
             self._lock.notify_all()
-        for task in tuple(self._tasks):
-            await cancel_task(task)
-        for drain in self._drains:
-            drain.close()
-        self._close_pipes()
-        self._scope.release()
+        try:
+            if self._domain_stop is not None:
+                await self._domain_stop
+        finally:
+            self._reap_stop.set()
+            self._reap_wake.set()
+            try:
+                if self._reaper is not None:
+                    await self._loop.run_in_executor(None, self._reaper.join)
+            finally:
+                for task in tuple(self._tasks):
+                    await cancel_task(task)
+                for drain in self._drains:
+                    drain.close()
+                self._close_pipes()
+                self._scope.release()
 
     def _claim(
         self,
@@ -659,14 +737,18 @@ class CommandSession:
 
     def _reap(self, owner: ChildOwner) -> None:
         seen: dict[int, int] = {}
-        while not self._stop.wait(1.0):
+        while not self._reap_stop.is_set():
+            self._reap_wake.wait(1.0)
+            self._reap_wake.clear()
+            if self._reap_stop.is_set():
+                return
             listed = adopted_pids()
             if listed is None:
                 continue
             now = time.monotonic_ns()
-            for pid in listed:
-                if pid != owner.pid:
-                    seen.setdefault(pid, now)
+            with owner.lock:
+                leader = None if owner.reaped else owner.pid
+            seen = {pid: seen.get(pid, now) for pid in listed if pid != leader}
             for pid, first in tuple(seen.items()):
                 if now - first < GRACE_NS:
                     continue

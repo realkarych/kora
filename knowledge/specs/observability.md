@@ -1,5 +1,7 @@
 # Structured component diagnostics
 
+Command-domain stop amendment dated 2026-11-07, issue #913. `runtime.local.command_stop` records `outcome` (`confirmed` or `unresolved`) and `waited_ms` once per runner-owned stop. The event uses INFO for confirmation and WARNING for incomplete evidence. Native environment bytes, paths, identities and tokens remain with the stop owner. The command-stop cases in `tests/plugins/runtime/local/test_command.py` own the activation evidence. Stop and its private outcome are independent of diagnostic delivery.
+
 Command-execution amendment dated 2026-11-06, issue #809: `runtime.local.command` records `outcome` (`started`, `exited`, `refused` or `journal_unavailable`) and `waited_ms` only. It carries no argv, path, pid, token, workspace or attempt id. A failed diagnostic write does not block the journal or the stop. Journal closure emits one WARNING. The command tests in `tests/plugins/runtime/local/test_command.py` own the activation evidence. Wording pending line-by-line owner review.
 
 Input-transfer amendment dated 2026-11-06, issue #847: `runtime.local.transfer` records `outcome` (`materialised`, `rejected`, `refused` or `journal_unavailable`) and `waited_ms` only. It carries no name, digest, path, or attempt id. The transfer tests in `tests/plugins/runtime/local/test_transfer.py` own the activation evidence.
