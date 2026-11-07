@@ -33,7 +33,7 @@ def _raise_private(
     error: GraphPreparationRejected | GraphPreparationReadFailed,
 ) -> Never:
     try:
-        raise error
+        raise error from None
     finally:
         error.__cause__ = None
         error.__context__ = None

@@ -1,4 +1,5 @@
 from dataclasses import replace
+from traceback import format_exception
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -199,7 +200,7 @@ async def test_preparation_projects_no_values_for_malformed_settlement(
 
 
 @pytest.mark.asyncio
-async def test_preparation_refuses_statement_failure_without_private_context(
+async def test_preparation_refuses_statement_failure_without_private_error_text(
     database: Database,
 ) -> None:
     async with database.transaction() as connection:
@@ -207,9 +208,10 @@ async def test_preparation_refuses_statement_failure_without_private_context(
         await connection.exec_driver_sql(
             "ALTER TABLE graph_deployment_preparation RENAME TO unqueryable_preparation"
         )
+    caller_error = ValueError(binding.deployment_digest)
 
     try:
-        raise ValueError(binding.deployment_digest)
+        raise caller_error
     except ValueError:
         with pytest.raises(
             GraphPreparationReadFailed,
@@ -218,6 +220,10 @@ async def test_preparation_refuses_statement_failure_without_private_context(
             async with database.read_snapshot() as connection:
                 await read_graph_preparation_settlement(connection, binding)
 
-    assert refused.value.__context__ is None
-    assert refused.value.__cause__ is None
-    assert binding.preparation_id not in repr(refused.value)
+    error = refused.value
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, caller_error))
+    rendered = "".join(format_exception(error))
+    assert binding.deployment_digest not in rendered
+    assert binding.preparation_id not in rendered
