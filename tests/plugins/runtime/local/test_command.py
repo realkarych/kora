@@ -12,6 +12,7 @@ import sys
 import threading
 from collections.abc import AsyncGenerator, Generator
 from contextlib import ExitStack, asynccontextmanager, contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,7 @@ from kora.plugins.runtime.local.serving import COMPONENT
 from kora.protocols.activity import NoActivity
 from kora.protocols.common import ProtocolContext
 from kora.protocols.errors import KoraProtocolError
-from kora.protocols.identity import Handle
+from kora.protocols.identity import Handle, instant_wire
 from kora.protocols.identity_records import ProcessIdentity
 from kora.protocols.runtime import RawEvent, TransferItem, Workload
 from kora.protocols.secret_value import SecretScope
@@ -57,7 +58,12 @@ from kora.runner.identity import (
     NativeIdentityReader,
     darwin_environment,
 )
-from kora.runner.journal import RunningJournal, read_records
+from kora.runner.journal import (
+    RECORD_LIMIT,
+    JournalCapacityError,
+    RunningJournal,
+    read_records,
+)
 from kora.runner.peers import kernel_source
 from kora.runner.registry import Running, Submitter, TransitionExecutor
 from tests.support.local_peers import identity_of, until
@@ -399,6 +405,56 @@ def test_command_journal_ignores_torn_tail(tmp_path: Path) -> None:
 
     assert complete == ((0, "runner.candidate_started"),)
     assert torn == complete
+
+
+class JournalBoundaryClock(SystemClock):
+    def now(self) -> datetime:
+        return datetime(2026, 11, 7, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("overflow", [0, 1], ids=["exact-fit", "one-byte-over"])
+def test_seal_journal_admission_counts_the_exact_encoded_prefix(
+    tmp_path: Path, overflow: int
+) -> None:
+    directory = private_directory(tmp_path, "attempt")
+    anchor = open_local_directory(directory)
+    path = directory / "journal.jsonl"
+    clock = JournalBoundaryClock()
+    journal = RunningJournal(anchor, clock)
+    kind = "runner.outputs_sealed"
+    base = canonical_bytes(
+        {
+            "i": 1,
+            "at": instant_wire(clock.now()),
+            "kind": kind,
+            "data": {"refused": [""]},
+        }
+    )
+    try:
+        assert journal.append("command_exited", {"exit_code": 0})
+        prefix_bytes = path.stat().st_size
+        length = RECORD_LIMIT - prefix_bytes - len(base) - 1 + overflow
+
+        if overflow:
+            with pytest.raises(JournalCapacityError):
+                journal.append(kind, {"refused": ["x" * length]}, reader_bounded=True)
+            assert path.stat().st_size == prefix_bytes
+            assert journal.append("transfer.rejected", {})
+        else:
+            assert journal.append(
+                kind, {"refused": ["x" * length]}, reader_bounded=True
+            )
+        records = read_records(anchor)
+        total = path.stat().st_size
+    finally:
+        journal.close()
+        anchor.close()
+
+    if overflow:
+        assert records == ((0, "command_exited"), (1, "transfer.rejected"))
+    else:
+        assert total == RECORD_LIMIT
+        assert records == ((0, "command_exited"), (1, kind))
 
 
 def descriptors_for(path: Path) -> set[int]:
@@ -1247,6 +1303,69 @@ class CommandCloseProbe(CommandSession):
     def stopping(self) -> bool:
         return self._stop.is_set()
 
+    def seal_scheduled(self) -> bool:
+        return self._output_seal is not None
+
+
+@pytest.mark.asyncio
+async def test_seal_waits_for_terminal_journal_without_hiding_exit(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = ExitAppendClock()
+    scope = SecretScope(kora_capture.diagnostics)
+    attempt = private_directory(tmp_path.resolve(), "attempt")
+    directory = open_local_directory(attempt)
+    candidate = attempt / "candidate"
+    journal = attempt / "journal.jsonl"
+    session = CommandCloseProbe(
+        directory,
+        str(candidate),
+        scope,
+        clock,
+        kora_capture.diagnostics.logger(COMPONENT),
+    )
+    submitter = Submitter(dispatcher_id="test", process=identity_of(os.getpid()))
+    async with launched(tmp_path, kora_capture) as (runtime, _ctx, _root):
+        command = (sys.executable, "-I", "-c", STOPPED_DESCENDANTS, "23", "ordinary")
+        workload = command_workload(runtime, "attempt-1", command)
+        prelaunch: dict[int, int] = {}
+        if sys.platform == "darwin":
+            await asyncio.to_thread(
+                session.capture_prelaunch,
+                prelaunch,
+                workload,
+                clock.monotonic_ns() + SCAN_NS,
+            )
+        session.note(submitter, prelaunch)
+        try:
+            await asyncio.to_thread(
+                session.begin, submitter, False, workload, lambda: None
+            )
+            session.attach_drains()
+            assert await asyncio.to_thread(clock.entered.wait, 5)
+            await until(session.seal_scheduled)
+
+            status = session.status()
+            while_held = journal_events(journal)
+            snapshot_while_held = (attempt / "output-snapshot").exists()
+            clock.release.set()
+            await until(lambda: sealed_manifest(journal) is not None)
+            await session.aclose()
+            complete = journal_events(journal)
+        finally:
+            clock.release.set()
+            await session.aclose()
+            directory.close()
+
+    assert status == ("exited", "failed", 23)
+    assert not snapshot_while_held
+    assert [event.kind for event in while_held] == ["runner.candidate_started"]
+    assert [event.kind for event in complete] == [
+        "runner.candidate_started",
+        "command_exited",
+        "runner.outputs_sealed",
+    ]
+
 
 @pytest.mark.asyncio
 async def test_command_stop_settles_during_held_exit_append_and_cancelled_close(
@@ -1698,6 +1817,53 @@ async def test_seal_stops_at_one_thousand_entries(
     assert "runner.outputs_sealed" not in journal
     assert outcomes == ["refused"]
     assert not snapshot.exists()
+
+
+@pytest.mark.asyncio
+async def test_seal_refuses_oversized_encoded_manifest(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    script = "\n".join(
+        (
+            "from pathlib import Path",
+            "leaf = Path('.')",
+            "for index in range(6):",
+            "    leaf = leaf / (str(index) + chr(34) * 144)",
+            "    leaf.mkdir()",
+            "for index in range(994):",
+            "    (leaf / f'{index:04}').touch()",
+        )
+    )
+    async with launched(tmp_path, kora_capture) as (runtime, ctx, root):
+        handle = await runtime.submit(
+            command_workload(
+                runtime, "attempt-1", (sys.executable, "-I", "-c", script)
+            ),
+            ctx,
+        )
+        attempt = attempt_directory(root, runtime, "attempt-1")
+        log = attempt / "runner.log"
+
+        await runtime.start(handle, ctx)
+        await until(lambda: bool(seal_outcomes(log)))
+        status = await runtime.status(handle, ctx)
+        outcomes = seal_outcomes(log)
+        anchor = open_local_directory(attempt)
+        try:
+            records = read_records(anchor)
+        finally:
+            anchor.close()
+        candidate_entries = sum(
+            len(directories) + len(files)
+            for _, directories, files, _ in os.fwalk(attempt / "candidate")
+        )
+        snapshot_present = (attempt / "output-snapshot").exists()
+
+    assert (status.state, status.exit_code) == ("exited", 0)
+    assert outcomes == ["refused"]
+    assert records == ((0, "runner.candidate_started"), (1, "command_exited"))
+    assert candidate_entries == 1000
+    assert not snapshot_present
 
 
 @pytest.mark.asyncio

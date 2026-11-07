@@ -24,6 +24,10 @@ RECORD_LIMIT: Final[int] = 1_048_576
 RECORD_DEPTH: Final[int] = 8
 
 
+class JournalCapacityError(Exception):
+    pass
+
+
 class _Write:
     def __init__(self, line: bytes, deadline: int) -> None:
         self.line = line
@@ -41,6 +45,8 @@ class RunningJournal:
         self._state = threading.Condition()
         self._jobs: deque[_Write] = deque()
         self._next = 0
+        self._prefix_bytes: int | None = None
+        self._admitted_bytes = 0
         self._closed = False
         self._not_durable = 0
         self._thread: threading.Thread | None = None
@@ -56,7 +62,9 @@ class RunningJournal:
         with self._state:
             return self._closed
 
-    def append(self, kind: str, data: JsonObject) -> bool:
+    def append(
+        self, kind: str, data: JsonObject, *, reader_bounded: bool = False
+    ) -> bool:
         deadline = self._clock.monotonic_ns() + SYNC_DEADLINE_NS
         launch: tuple[threading.Thread, DirectoryAnchor, BorrowedInvocation] | None = (
             None
@@ -72,9 +80,16 @@ class RunningJournal:
                     "data": data,
                 }
             )
-            job = _Write(line + b"\n", deadline)
+            line += b"\n"
+            if reader_bounded and (
+                self._prefix_bytes is None
+                or self._prefix_bytes + self._admitted_bytes + len(line) > RECORD_LIMIT
+            ):
+                raise JournalCapacityError
+            job = _Write(line, deadline)
             self._jobs.append(job)
             self._next += 1
+            self._admitted_bytes += len(line)
             if self._thread is None:
                 try:
                     launch = self._prepare_writer()
@@ -160,6 +175,9 @@ class RunningJournal:
                 descriptor = open_private_file(
                     directory, JOURNAL_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND
                 )
+                prefix_bytes = os.fstat(descriptor).st_size
+                with self._state:
+                    self._prefix_bytes = prefix_bytes
                 if not self._available(deadline):
                     return
                 synchronize(directory.descriptor)

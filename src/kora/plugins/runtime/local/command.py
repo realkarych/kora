@@ -42,7 +42,12 @@ from kora.runner.filesystem import (
     verify_private,
 )
 from kora.runner.identity import PROCESS_SCAN_ENTRIES, SCAN_NS, NativeIdentityReader
-from kora.runner.journal import SYNC_DEADLINE_NS, RunningJournal, space_error
+from kora.runner.journal import (
+    SYNC_DEADLINE_NS,
+    JournalCapacityError,
+    RunningJournal,
+    space_error,
+)
 from kora.runner.native_io import NativeExecutor, NativeIOUnresolved, observed
 from kora.runner.registry import Submitter, synchronize
 
@@ -229,6 +234,7 @@ class CommandSession:
         self._prelaunch: dict[int, int] | None = None
         self._closing: asyncio.Task[None] | None = None
         self._reported_exit = False
+        self._exit_recorded: bool | None = None
         self._running_ns = 0
         self._warned = False
         self._inputs: dict[str, str] = {}
@@ -440,12 +446,18 @@ class CommandSession:
     def _write_snapshot(self, started: int) -> None:
         with self._lock:
             self._lock.wait_for(
-                lambda: self._stage is not _Stage.LAUNCHING or self._stop.is_set()
+                lambda: (
+                    self._exit_recorded is not None
+                    or self._stage not in (_Stage.LAUNCHING, _Stage.RUNNING)
+                    or self._journal.closed
+                    or self._stop.is_set()
+                )
             )
             ran = self._stage is _Stage.RUNNING
+            recorded = self._exit_recorded
         if not ran:
             return
-        if self._journal.closed:
+        if not recorded or self._journal.closed:
             self._finish_seal("journal_unavailable", started)
             return
         source: DirectoryAnchor | None = None
@@ -462,14 +474,18 @@ class CommandSession:
             except (OSError, FilesystemError) as error:
                 self._settle_seal(started, error)
                 return
-            if self._append_seal(sealed, started):
-                admitted = True
-                try:
-                    freeze_private_tree(snapshot)
-                except (OSError, FilesystemError) as error:
-                    self._settle_seal(started, error)
-                    return
-                self._finish_seal("sealed", started)
+            if not self._append_seal(sealed, started):
+                return
+            admitted = True
+            try:
+                freeze_private_tree(snapshot)
+            except (OSError, FilesystemError) as error:
+                self._settle_seal(started, error)
+                return
+            self._finish_seal("sealed", started)
+            return
+        except JournalCapacityError:
+            pass
         finally:
             cleanup: OSError | FilesystemError | None = None
             if source is not None:
@@ -492,6 +508,7 @@ class CommandSession:
                             cleanup = error
             if cleanup is not None:
                 raise cleanup
+        self._finish_seal("refused", started)
 
     def _settle_seal(self, started: int, error: OSError | FilesystemError) -> None:
         if isinstance(error, OSError) and space_error(error):
@@ -507,7 +524,9 @@ class CommandSession:
         refused: list[JsonValue] = list(sealed.refused)
         payload: JsonObject = {"files": files, "refused": refused}
         try:
-            recorded = self._journal.append("runner.outputs_sealed", payload)
+            recorded = self._journal.append(
+                "runner.outputs_sealed", payload, reader_bounded=True
+            )
         except (JsonShapeError, UnicodeEncodeError):
             self._finish_seal("refused", started)
             return False
@@ -543,7 +562,14 @@ class CommandSession:
             if self._stage is not _Stage.RUNNING or self._stop.is_set():
                 return
             started = self._running_ns
-        if not self._journal.append("command_exited", {"exit_code": code}):
+        recorded = False
+        try:
+            recorded = self._journal.append("command_exited", {"exit_code": code})
+        finally:
+            with self._lock:
+                self._exit_recorded = recorded
+                self._lock.notify_all()
+        if not recorded:
             with self._lock:
                 if not self._stop.is_set():
                     self._emit("journal_unavailable", started)
@@ -600,6 +626,8 @@ class CommandSession:
 
     def close_journal(self) -> None:
         self._journal.close()
+        with self._lock:
+            self._lock.notify_all()
 
     async def aclose(self) -> None:
         if self._closing is None:
