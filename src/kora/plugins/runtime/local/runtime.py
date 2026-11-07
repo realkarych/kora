@@ -836,25 +836,49 @@ class LocalRuntime:
         ):
             raise delivery_error("submitter_superseded")
         deadline = entry.deadline
-        if entry.gate_closed:
-            raise delivery_error("deadline_expired")
-        if (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff) or (
+        expired = (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff) or (
             deadline is not None
             and ctx.clock.now() >= deadline.at - deadline.clock_uncertainty
-        ):
-            self._close_output_gate(key, entry)
+        )
+        if entry.gate_closed or expired:
             raise delivery_error("deadline_expired")
         return entry
 
-    def _close_output_gate(self, key: AttemptKey, entry: Running) -> None:
-        applied = self.registry.try_transition(
-            key, lambda current: takeover_cell(current, entry, entry.submitter, True)
+    async def _observed_output_expiry(
+        self, key: AttemptKey, entry: Running, ctx: ProtocolContext
+    ) -> None:
+        await self.transition(
+            key,
+            lambda current: takeover_cell(current, entry, entry.submitter, True),
+            ctx,
+            "transfer_out",
         )
-        if isinstance(applied, LockOutcome):
-            raise refusal("registry_busy")
-        error = applied.transition.refusal
-        if error is not None and error != "deadline_expired":
-            raise refusal(error)
+        raise refusal("deadline_expired")
+
+    async def _current_output(
+        self,
+        key: AttemptKey,
+        ctx: ProtocolContext,
+        pull: OutputPull,
+        expected: Running | None = None,
+        cutoff: int | None = None,
+    ) -> Running:
+        try:
+            return await self.executor.run(
+                lambda: self._output_entry(key, ctx, expected, cutoff),
+                after_uncertain_submission=pull.dispose,
+            )
+        except KoraProtocolError as error:
+            if error.code != "deadline_expired":
+                raise
+            persisted = expected
+            if persisted is None:
+                loaded = await self.entry(key)
+                if not isinstance(loaded, Running):
+                    raise
+                persisted = loaded
+            await self._observed_output_expiry(key, persisted, ctx)
+            raise
 
     def transfer_out(
         self, handle: Handle, name: str, ctx: ProtocolContext
@@ -880,18 +904,12 @@ class LocalRuntime:
             if self._closing is not None:
                 raise refusal("runtime_closed")
             inherited = entry.deadline
-            if (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff) or (
+            expired = (cutoff is not None and ctx.clock.monotonic_ns() >= cutoff) or (
                 inherited is not None
                 and ctx.clock.now() >= inherited.at - inherited.clock_uncertainty
-            ):
-                await pull.run(
-                    self.executor.run(
-                        partial(self._close_output_gate, key, entry),
-                        after_uncertain_submission=pull.dispose,
-                    ),
-                    ctx.clock,
-                )
-                raise delivery_error("deadline_expired")
+            )
+            if expired:
+                await self._observed_output_expiry(key, entry, ctx)
 
         def read(entry: Running, cutoff: int | None, length: int, offset: int) -> bytes:
             try:
@@ -900,6 +918,23 @@ class LocalRuntime:
                 raise refusal("runner_unreachable") from None
             self._output_entry(key, ctx, entry, cutoff)
             return chunk
+
+        async def frame(
+            entry: Running, cutoff: int | None, length: int, offset: int
+        ) -> bytes:
+            try:
+                return await pull.run(
+                    self.executor.run(
+                        partial(read, entry, cutoff, length, offset),
+                        after_uncertain_submission=pull.dispose,
+                    ),
+                    ctx.clock,
+                )
+            except KoraProtocolError as error:
+                if error.code != "deadline_expired":
+                    raise
+                await self._observed_output_expiry(key, entry, ctx)
+                raise
 
         try:
             entry, size, cutoff = await pull.run(
@@ -911,18 +946,8 @@ class LocalRuntime:
             offset = 0
             while offset < size:
                 await before_disclosure(entry, cutoff)
-                chunk = await pull.run(
-                    self.executor.run(
-                        partial(
-                            read,
-                            entry,
-                            cutoff,
-                            min(size - offset, SECTION_FRAME_BYTES),
-                            offset,
-                        ),
-                        after_uncertain_submission=pull.dispose,
-                    ),
-                    ctx.clock,
+                chunk = await frame(
+                    entry, cutoff, min(size - offset, SECTION_FRAME_BYTES), offset
                 )
                 await before_disclosure(entry, cutoff)
                 if not chunk:
@@ -948,10 +973,7 @@ class LocalRuntime:
         ctx: ProtocolContext,
         deadline: int,
     ) -> tuple[Running, int, int | None]:
-        entry = await self.executor.run(
-            lambda: self._output_entry(key, ctx),
-            after_uncertain_submission=pull.dispose,
-        )
+        entry = await self._current_output(key, ctx, pull)
         cutoff = transfer_cutoff(ctx.clock, entry.deadline)
         if cutoff is not None:
             deadline = min(deadline, cutoff)
@@ -972,10 +994,7 @@ class LocalRuntime:
             await self._acquire_spool(open_spool, pull.dispose)
 
         async def check_entry() -> None:
-            await self.executor.run(
-                lambda: self._output_entry(key, ctx, entry, cutoff),
-                after_uncertain_submission=pull.dispose,
-            )
+            await self._current_output(key, ctx, pull, entry, cutoff)
 
         for _ in range(OUTPUT_ATTEMPTS):
             await check_entry()
