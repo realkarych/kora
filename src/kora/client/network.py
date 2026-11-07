@@ -9,6 +9,7 @@ import httpcore
 import httpx
 from anyio import BrokenResourceError, EndOfStream
 from anyio.abc import ByteStream
+from anyio.lowlevel import checkpoint
 from anyio.streams.tls import TLSStream
 
 
@@ -17,12 +18,14 @@ class SocketBytes(ByteStream):
         self.connection = connection
 
     async def receive(self, max_bytes: int = 65536) -> bytes:
+        await checkpoint()
         data = await asyncio.get_running_loop().sock_recv(self.connection, max_bytes)
         if not data:
             raise EndOfStream
         return data
 
     async def send(self, item: bytes) -> None:
+        await checkpoint()
         await asyncio.get_running_loop().sock_sendall(self.connection, item)
 
     async def send_eof(self) -> None:
@@ -121,6 +124,7 @@ class DirectBackend(httpcore.AsyncNetworkBackend):
                     )
                     connection.setblocking(False)
                     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    await checkpoint()
                     await loop.sock_connect(connection, address)
                     stream = DirectStream(connection)
                     ownership.pop_all()

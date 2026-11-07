@@ -29,12 +29,17 @@ Writer = asyncio.StreamWriter
 
 class ProbeClient(KoraClient):
     async def probe(
-        self, method: str, *, response_limit: int, body: JsonObject | None = None
+        self,
+        method: str,
+        *,
+        response_limit: int,
+        body: JsonObject | None = None,
+        decode: Callable[[JsonObject], JsonObject] = openapi_document,
     ) -> JsonObject:
         return await self._request_json(
             method,
             "/api/v1/probe",
-            openapi_document,
+            decode,
             response_limit=response_limit,
             body=body,
         )

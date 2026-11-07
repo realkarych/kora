@@ -3,12 +3,13 @@ import socket
 
 import httpx
 import pytest
+from anyio import CancelScope
 from typing_extensions import Buffer
 
 from kora.client import ClientError, KoraClient
 from kora.client.errors import Failure
-from kora.client.network import DirectTransport
-from kora.client.transport import Exchange, verified_context
+from kora.client.network import DirectTransport, SocketBytes
+from kora.client.transport import Exchange, openapi_document, verified_context
 from kora.ir.json import JsonObject
 from tests.client.support import (
     BOUND,
@@ -273,3 +274,76 @@ async def test_client_reclaims_pool_at_http_handoff() -> None:
     assert exchange.scope.cancelled_caught
     assert accepted == 2
     assert b'"openapi":"3.1.0"' in content
+
+
+class DeadlineLoop(asyncio.SelectorEventLoop):
+    def __init__(self) -> None:
+        super().__init__()
+        self.advance: float = 0.0
+
+    def time(self) -> float:
+        return super().time() + self.advance
+
+
+def test_client_applies_deadline_to_validation_failure() -> None:
+    loop = DeadlineLoop()
+
+    async def handle(reader: Reader, writer: Writer) -> None:
+        await read_request(reader)
+        reply(writer, b"{}")
+
+    def advance_clock() -> None:
+        loop.advance = 6.0
+
+    def advance_before_waiter_resumes() -> None:
+        loop.call_soon(advance_clock)
+
+    def decode(document: JsonObject) -> JsonObject:
+        loop.call_soon(advance_before_waiter_resumes)
+        return openapi_document(document)
+
+    async def exercise() -> ClientError:
+        async with (
+            peer(handle) as origin,
+            ProbeClient(origin.url, CREDENTIAL, request_timeout=5.0) as client,
+        ):
+            with pytest.raises(ClientError) as refusal:
+                await client.probe("GET", response_limit=1024, decode=decode)
+            return refusal.value
+
+    with asyncio.Runner(loop_factory=lambda: loop) as runner:
+        result = runner.run(exercise())
+
+    assert loop.advance == 6.0
+    assert result.reason is Failure.DEADLINE
+    assert result.outcome == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_socket_read_delivers_cancellation_with_buffered_bytes() -> None:
+    ready = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    async def handle(reader: Reader, writer: Writer) -> None:
+        writer.write(b"x")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.read(), BOUND) == b""
+
+    async with peer(handle) as origin:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.setblocking(False)
+            await loop.sock_connect(connection, ("127.0.0.1", origin.port))
+            loop.add_reader(connection, ready.set)
+            try:
+                await asyncio.wait_for(ready.wait(), BOUND)
+            finally:
+                loop.remove_reader(connection)
+            stream = SocketBytes(connection)
+
+            with CancelScope() as cancellation:
+                loop.call_soon(cancellation.cancel)
+                await stream.receive(1)
+            remaining = await asyncio.wait_for(stream.receive(1), BOUND)
+
+    assert cancellation.cancelled_caught
+    assert remaining == b"x"
