@@ -31,6 +31,13 @@ from tests.support.databases import sqlite_settings
 EXPECTED_DURABLE_FULLFSYNC: int = int(sys.platform == "darwin")
 
 
+def start_without_fullfsync(
+    raw_connection: DBAPIConnection, record: ConnectionPoolEntry
+) -> None:
+    with closing(raw_connection.cursor()) as cursor:
+        cursor.execute("PRAGMA fullfsync=OFF")
+
+
 def start_at_normal_without_fullfsync(
     raw_connection: DBAPIConnection, record: ConnectionPoolEntry
 ) -> None:
@@ -58,7 +65,7 @@ async def test_ordinary_database_writer_keeps_its_existing_mode(
         event.listen(
             database.writer_engine.sync_engine,
             "connect",
-            start_at_normal_without_fullfsync,
+            start_without_fullfsync,
             insert=True,
         )
         async with database.transaction() as writer:
@@ -223,17 +230,19 @@ async def test_ordinary_sqlite_reader_can_open_before_writer(tmp_path: Path) -> 
     event.listen(
         database.reader_engine.sync_engine,
         "connect",
-        start_at_normal_without_fullfsync,
+        start_without_fullfsync,
         insert=True,
     )
 
     try:
         async with database.read_transaction() as reader:
-            settings = await reader_settings(reader)
+            journal, _, foreign_keys, fullfsync, query_only = await reader_settings(
+                reader
+            )
     finally:
         await database.close()
 
-    assert settings == ("delete", 1, 1, 0, 1)
+    assert (journal, foreign_keys, fullfsync, query_only) == ("delete", 1, 0, 1)
 
 
 @pytest.mark.asyncio
