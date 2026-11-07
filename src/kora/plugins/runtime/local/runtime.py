@@ -58,6 +58,13 @@ from kora.plugins.runtime.local.spawn import (
     runner_environment,
     spawn_runner,
 )
+from kora.plugins.runtime.local.spool import (
+    SWEEP,
+    SpoolLease,
+    SpoolOwner,
+    SpoolSweepOutcome,
+    close_spool,
+)
 from kora.protocols.common import ProtocolContext
 from kora.protocols.deadlines import ExecutionDeadline, duration_ns
 from kora.protocols.errors import KoraProtocolError
@@ -76,7 +83,6 @@ from kora.runner.filesystem import (
     DirectoryAnchor,
     FilesystemError,
     open_local_directory,
-    open_private_directory,
 )
 from kora.runner.identity import (
     SCAN_NS,
@@ -95,6 +101,7 @@ from kora.runner.registry import (
     RUNTIME_NAME,
     Applied,
     AttemptKey,
+    DomainRecord,
     Entry,
     Fence,
     LockOutcome,
@@ -198,11 +205,6 @@ def anchored_root(
         return path, open_local_directory(path)
     except (OSError, FilesystemError, ValueError, RuntimeError):
         return None
-
-
-def release_root(located: tuple[Path, DirectoryAnchor] | None) -> None:
-    if located is not None:
-        located[1].close()
 
 
 def safe_socket_directory(path: Path) -> bool:
@@ -364,6 +366,7 @@ class LocalRuntime:
         identities: IdentityReader,
         scanner: NativeIdentityReader,
         peers: PeerSource,
+        spool: SpoolOwner,
     ) -> None:
         self._configuration: LocalRuntimeConfiguration = configuration
         self.execution_domain_id = registry.execution_domain_id
@@ -376,7 +379,7 @@ class LocalRuntime:
         self._peers = peers
         self._observations: set[asyncio.Task[RuntimeStatus]] = set()
         self._deliveries: set[asyncio.Task[None]] = set()
-        self._transfer_native_settled = False
+        self._spool = spool
         self._sweeping = 0
         self._swept = asyncio.Event()
         self._swept.set()
@@ -407,6 +410,15 @@ class LocalRuntime:
         service_launcher: StepLauncher | None = None,
     ) -> "LocalRuntime":
         executor = TransitionExecutor()
+        located: tuple[Path, DirectoryAnchor] | None = None
+        opened_registry: DirectoryAnchor | None = None
+        spool: SpoolOwner | None = None
+
+        def locate() -> tuple[Path, DirectoryAnchor] | None:
+            nonlocal located
+            located = anchored_root(configuration, environment, home)
+            return located
+
         try:
             reader = (
                 identities
@@ -465,38 +477,69 @@ class LocalRuntime:
                 identity=identity,
                 clock=ctx.clock,
             )
-            located = await executor.run(
-                lambda: anchored_root(configuration, environment, home), release_root
-            )
-            if located is None:
+            result = await executor.run(locate)
+            if result is None:
                 raise rejection("state_root_unsafe")
-            path, root = located
-            try:
-                domain, directory = await executor.locked(
-                    lambda: open_domain(root, lineage, new_identifier, new_identifier),
-                    ctx,
-                    "open",
-                    lambda opened: opened[1].close(),
-                )
-            except BaseException:
-                root.close()
-                raise
+            path, root = result
+
+            def register() -> tuple[DomainRecord, DirectoryAnchor] | LockOutcome:
+                nonlocal opened_registry
+                registered = open_domain(root, lineage, new_identifier, new_identifier)
+                if not isinstance(registered, LockOutcome):
+                    opened_registry = registered[1]
+                return registered
+
+            domain, directory = await executor.locked(register, ctx, "open")
+            started = ctx.clock.monotonic_ns()
+
+            def open_spool() -> SpoolOwner:
+                nonlocal spool
+                try:
+                    spool = SpoolOwner.open(
+                        root, domain.execution_domain_id, identity, reader, ctx.clock
+                    )
+                except (OSError, FilesystemError):
+                    raise refusal("registry_unavailable") from None
+                return spool
+
+            owner = await executor.run(open_spool)
+            ctx.logger.emit_at(
+                Level.INFO
+                if owner.outcome is SpoolSweepOutcome.COMPLETE
+                else Level.WARNING,
+                SWEEP,
+                outcome=owner.outcome.value,
+                waited_ms=max(0, ctx.clock.monotonic_ns() - started) / 1_000_000,
+            )
+            registry = Registry(directory, domain.execution_domain_id, new_identifier)
+            runtime = cls(
+                configuration,
+                path,
+                root,
+                registry,
+                executor,
+                new_identifier,
+                launch,
+                reader,
+                scanner,
+                source,
+                owner,
+            )
         except BaseException:
-            await executor.close()
+            try:
+                await executor.close()
+            finally:
+                if executor.joined:
+                    try:
+                        await close_spool(spool)
+                    finally:
+                        try:
+                            if opened_registry is not None:
+                                opened_registry.close()
+                        finally:
+                            if located is not None:
+                                located[1].close()
             raise
-        registry = Registry(directory, domain.execution_domain_id, new_identifier)
-        runtime = cls(
-            configuration,
-            path,
-            root,
-            registry,
-            executor,
-            new_identifier,
-            launch,
-            reader,
-            scanner,
-            source,
-        )
         runtime.service_report = report
         return runtime
 
@@ -689,31 +732,6 @@ class LocalRuntime:
                 "transfer_in",
             )
 
-    def _open_spool(self) -> int:
-        root = open_socket_directory(self._launch.socket_directory)
-        try:
-            try:
-                os.mkdir("spool", mode=0o700, dir_fd=root.descriptor)
-            except FileExistsError:
-                pass
-            directory = open_private_directory(root, "spool")
-            try:
-                name = secrets.token_hex(16)
-                flags = (
-                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-                )
-                descriptor = os.open(name, flags, 0o600, dir_fd=directory.descriptor)
-                try:
-                    os.unlink(name, dir_fd=directory.descriptor)
-                except OSError:
-                    os.close(descriptor)
-                    raise
-                return descriptor
-            finally:
-                directory.close()
-        finally:
-            root.close()
-
     async def _spool_and_send(
         self,
         entry: Running,
@@ -723,18 +741,12 @@ class LocalRuntime:
         deadline: int,
         stopped: Event,
     ) -> None:
-        descriptor: int | None = None
+        lease: SpoolLease | None = None
         caller_owned = True
 
         def dispose() -> None:
-            nonlocal descriptor
-            if descriptor is not None:
-                owned, descriptor = descriptor, None
-                os.close(owned)
-
-        def dispose_deferred() -> None:
-            self._transfer_native_settled = True
-            dispose()
+            if lease is not None:
+                lease.close()
 
         def active() -> None:
             if stopped.is_set() or self._closing is not None:
@@ -743,21 +755,18 @@ class LocalRuntime:
                 raise ChannelError(ChannelFailure.DEADLINE)
 
         def acquire() -> None:
-            nonlocal descriptor
-            active()
-            descriptor = self._open_spool()
+            nonlocal lease
+            lease = self._spool.acquire(active)
 
         def write(spool: int, piece: memoryview) -> None:
             active()
             write_transfer_bytes(spool, piece)
 
         try:
-            await self.executor.run(
-                acquire, after_uncertain_submission=dispose_deferred
-            )
-            spool = descriptor
-            if spool is None:
+            await self.executor.run(acquire, after_uncertain_submission=dispose)
+            if lease is None:
                 raise RuntimeError("missing spool descriptor")
+            spool = lease.descriptor
             total = 0
             async for chunk in chunks:
                 total += len(chunk)
@@ -772,7 +781,7 @@ class LocalRuntime:
                     piece = view[offset : offset + SECTION_FRAME_BYTES]
                     await self.executor.run(
                         partial(write, spool, piece),
-                        after_uncertain_submission=dispose_deferred,
+                        after_uncertain_submission=dispose,
                     )
             if total != item.size:
                 raise delivery_error("integrity_error")
@@ -787,7 +796,7 @@ class LocalRuntime:
                 spool,
                 item,
                 deadline,
-                close_spool=dispose_deferred,
+                close_spool=dispose,
                 active=active,
             )
         except NativeIOSubmissionUncertain:
@@ -1178,13 +1187,18 @@ class LocalRuntime:
                 await asyncio.gather(*observations, return_exceptions=True)
             await self.launchers.drain(self._launch.clock)
         finally:
-            settled = False
             try:
                 await self.executor.close()
-                settled = True
             finally:
-                await self._swept.wait()
-                await self.sweeps.close()
-                if settled or self._transfer_native_settled:
-                    self.registry.directory.close()
-                    self._root.close()
+                try:
+                    await self._swept.wait()
+                    await self.sweeps.close()
+                finally:
+                    if self.executor.joined:
+                        try:
+                            await close_spool(self._spool)
+                        finally:
+                            try:
+                                self.registry.directory.close()
+                            finally:
+                                self._root.close()

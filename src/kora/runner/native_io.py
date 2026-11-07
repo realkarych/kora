@@ -111,6 +111,7 @@ class NativeExecutor:
         self.jobs: set[NativeOperation] = set()
         self.closed = False
         self.unresolved = False
+        self.joined = False
         self.closing: asyncio.Task[None] | None = None
 
     async def run(
@@ -228,6 +229,7 @@ class NativeExecutor:
 
     def join_workers(self) -> None:
         self.executor.shutdown(wait=True)
+        self.joined = True
         for job in self.jobs:
             job.release_deferred()
 

@@ -296,10 +296,13 @@ class LinuxStatfs(ctypes.Structure):
 
 class DarwinStatfs(ctypes.Structure):
     _fields_ = [
-        ("head", ctypes.c_byte * 72),
+        ("head", ctypes.c_byte * 64),
+        ("flags", ctypes.c_uint32),
+        ("subtype", ctypes.c_uint32),
         ("type_name", ctypes.c_char * 16),
         ("rest", ctypes.c_byte * 2080),
     ]
+    flags: int
     type_name: bytes
 
 
