@@ -13,12 +13,19 @@ from kora.db.connection import (
     Dialect,
     Lifecycle,
 )
+from kora.db.graph_preparation_reads import GraphPreparationBinding
 from kora.db.migrations import upgrade_database
-from kora.engine.locks import StorageAddressLockFailed, TransitionLocks
+from kora.engine.locks import (
+    GraphPreparationLockFailed,
+    StorageAddressLockFailed,
+    TransitionLocks,
+)
 from kora.observability import Level, LoggingSettings
 from tests.db.closing import narrow_database, until
 from tests.db.seed import Seeder, seed_predecessor
+from tests.db.test_graph_preparation_reads import seed_preparation
 from tests.db.test_pricing_migration import retained_index_progress, wait_for_index
+from tests.engine.test_storage_address_lock import DIGEST, STORE, seed_address
 from tests.observability.conftest import (
     Configure,
     Pipe,
@@ -194,6 +201,60 @@ async def test_address_lock_statement_failure_keeps_private_keys_out_of_diagnost
     assert any(error.__context__ is context for context in (None, ambient))
     assert db_events(pipe) == ["db.transaction.failed"]
     for private in (store, digest, "unavailable_payload_digest", "UndefinedColumn"):
+        assert private not in rendered
+        assert private not in repr(records)
+
+
+async def lock_preparation_in_transaction(
+    database: Database, binding: GraphPreparationBinding
+) -> None:
+    async with database.transaction() as connection:
+        locks = TransitionLocks(connection)
+        await locks.acquire_scopes(())
+        await locks.acquire_existing_storage_address(STORE, DIGEST)
+        await locks.acquire_open_graph_preparation(connection, STORE, DIGEST, binding)
+
+
+@pytest.mark.asyncio
+async def test_preparation_guard_sql_failure_keeps_bindings_out_of_diagnostics(
+    configure: Configure, pipe: Pipe, database: Database
+) -> None:
+    await seed_address(database)
+    async with database.transaction() as connection:
+        binding, _ = await seed_preparation(connection, "open", bound=True)
+        await connection.exec_driver_sql(
+            "ALTER TABLE graph_deployment_preparation RENAME COLUMN deployment_digest "
+            "TO unavailable_deployment_digest"
+        )
+    assert binding.initial_graph_id is not None
+    ambient = ValueError(binding.preparation_id)
+    diagnostics = configured_with_reader(configure, pipe, DB_DEBUG)
+
+    try:
+        raise ambient
+    except ValueError:
+        with pytest.raises(
+            GraphPreparationLockFailed, match="preparation lock failed"
+        ) as refused:
+            await lock_preparation_in_transaction(database, binding)
+    finished_output(diagnostics, pipe)
+    error = refused.value
+    rendered = "".join(format_exception(error))
+    records = pipe.reader.records()
+
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+    assert any(error.__context__ is context for context in (None, ambient))
+    assert db_events(pipe) == ["db.transaction.failed"]
+    for private in (
+        binding.preparation_id,
+        binding.namespace_id,
+        binding.graph_name,
+        binding.initial_graph_id,
+        binding.deployment_digest,
+        "unavailable_deployment_digest",
+        "UndefinedColumn",
+    ):
         assert private not in rendered
         assert private not in repr(records)
 

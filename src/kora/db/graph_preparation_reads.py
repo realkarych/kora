@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from sqlalchemy import Executable, LargeBinary, and_, case, func, select
+from sqlalchemy import LargeBinary, Select, and_, bindparam, case, func, select
 from sqlalchemy import cast as sql_cast
 from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -47,13 +47,8 @@ class GraphPreparationSettlement:
     result_graph_version_id: str | None
 
 
-def graph_preparation_settlement_statement(
-    dialect: str, binding: GraphPreparationBinding
-) -> Executable:
-    if (
-        dialect not in (SQLITE, POSTGRESQL)
-        or type(binding) is not GraphPreparationBinding
-    ):
+def require_graph_preparation_binding(binding: GraphPreparationBinding) -> None:
+    if type(binding) is not GraphPreparationBinding:
         raise_private_metadata_error(GraphPreparationRejected())
     identifiers = (binding.preparation_id, binding.namespace_id)
     if binding.initial_graph_id is not None:
@@ -67,6 +62,25 @@ def graph_preparation_settlement_statement(
     ):
         raise_private_metadata_error(GraphPreparationRejected())
 
+
+def graph_preparation_parameters(
+    binding: GraphPreparationBinding,
+) -> dict[str, str | None]:
+    require_graph_preparation_binding(binding)
+    return {
+        "preparation_id": binding.preparation_id,
+        "namespace_id": binding.namespace_id,
+        "graph_name": binding.graph_name,
+        "initial_graph_id": binding.initial_graph_id,
+        "deployment_digest": binding.deployment_digest,
+    }
+
+
+def graph_preparation_settlement_statement(
+    dialect: str,
+) -> Select[object, object, object]:
+    if dialect not in (SQLITE, POSTGRESQL):
+        raise_private_metadata_error(GraphPreparationRejected())
     fields = graph_deployment_preparation.c
     selected = (fields.state, fields.result_graph_id, fields.result_graph_version_id)
     valid = and_(
@@ -93,28 +107,31 @@ def graph_preparation_settlement_statement(
             ),
         )
     return (
-        select(*(case((valid, field), else_=None) for field in selected))
+        select(
+            case((valid, fields.state), else_=None),
+            case((valid, fields.result_graph_id), else_=None),
+            case((valid, fields.result_graph_version_id), else_=None),
+        )
         .select_from(graph_deployment_preparation)
         .where(
-            fields.id == binding.preparation_id,
-            fields.namespace_id == binding.namespace_id,
-            fields.graph_name == binding.graph_name,
-            fields.initial_graph_id.is_not_distinct_from(binding.initial_graph_id),
-            fields.deployment_digest == binding.deployment_digest,
+            fields.id == bindparam("preparation_id"),
+            fields.namespace_id == bindparam("namespace_id"),
+            fields.graph_name == bindparam("graph_name"),
+            fields.initial_graph_id.is_not_distinct_from(
+                bindparam("initial_graph_id", type_=fields.initial_graph_id.type)
+            ),
+            fields.deployment_digest == bindparam("deployment_digest"),
         )
     )
 
 
-async def read_graph_preparation_settlement(
-    connection: AsyncConnection, binding: GraphPreparationBinding
+async def execute_graph_preparation_settlement(
+    connection: AsyncConnection,
+    statement: Select[object, object, object],
+    parameters: dict[str, str | None],
 ) -> GraphPreparationSettlement | None:
-    statement = graph_preparation_settlement_statement(connection.dialect.name, binding)
-    try:
-        result = await connection.execute(statement)
-    except StatementError:
-        result = None
-    if result is None:
-        raise_private_metadata_error(GraphPreparationReadFailed())
+    initial_graph_id = parameters["initial_graph_id"]
+    result = await connection.execute(statement, parameters)
     row = result.first()
     if row is None:
         return None
@@ -133,9 +150,21 @@ async def read_graph_preparation_settlement(
             and is_identifier(graph_id)
             and type(version_id) is str
             and is_identifier(version_id)
-            and (
-                binding.initial_graph_id is None or graph_id == binding.initial_graph_id
-            )
+            and (initial_graph_id is None or graph_id == initial_graph_id)
         ):
             return GraphPreparationSettlement(state, graph_id, version_id)
     raise_private_metadata_error(GraphPreparationRejected())
+
+
+async def read_graph_preparation_settlement(
+    connection: AsyncConnection, binding: GraphPreparationBinding
+) -> GraphPreparationSettlement | None:
+    statement = graph_preparation_settlement_statement(connection.dialect.name)
+    parameters = graph_preparation_parameters(binding)
+    try:
+        return await execute_graph_preparation_settlement(
+            connection, statement, parameters
+        )
+    except StatementError:
+        pass
+    raise_private_metadata_error(GraphPreparationReadFailed())

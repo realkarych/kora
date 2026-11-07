@@ -11,6 +11,7 @@ from kora.db.graph_preparation_reads import (
     GraphPreparationRejected,
     GraphPreparationSettlement,
     GraphPreparationState,
+    graph_preparation_parameters,
     graph_preparation_settlement_statement,
     read_graph_preparation_settlement,
 )
@@ -24,9 +25,10 @@ async def seed_preparation(
     state: GraphPreparationState,
     *,
     bound: bool,
+    namespace_name: str = "default",
 ) -> tuple[GraphPreparationBinding, GraphPreparationSettlement]:
     seeder = Seeder(connection)
-    namespace_id = await seeder.namespace()
+    namespace_id = await seeder.namespace(namespace_name)
     graph_id = await seeder.graph(namespace_id, "pipeline")
     version_id = await seeder.graph_version(graph_id)
     binding = GraphPreparationBinding(
@@ -186,11 +188,11 @@ async def test_preparation_projects_no_values_for_malformed_settlement(
         finally:
             if sqlite:
                 await connection.exec_driver_sql("PRAGMA ignore_check_constraints=OFF")
-        statement = graph_preparation_settlement_statement(
-            connection.dialect.name, binding
-        )
+        statement = graph_preparation_settlement_statement(connection.dialect.name)
 
-        projection = (await connection.execute(statement)).one()
+        projection = (
+            await connection.execute(statement, graph_preparation_parameters(binding))
+        ).one()
         with pytest.raises(
             GraphPreparationRejected, match="^graph preparation settlement rejected$"
         ):

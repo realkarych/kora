@@ -8,6 +8,14 @@ from sqlalchemy import bindparam, literal, select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from kora.db.graph_preparation_reads import (
+    GraphPreparationBinding,
+    GraphPreparationRejected,
+    execute_graph_preparation_settlement,
+    graph_preparation_parameters,
+    graph_preparation_settlement_statement,
+    require_graph_preparation_binding,
+)
 from kora.db.identifiers import is_identifier
 from kora.db.tables import storage_address_fence
 from kora.db.transactions import raise_private_metadata_error, writer_transaction
@@ -57,6 +65,29 @@ class StorageAddressLockFailed(LockError):
         super().__init__("the storage address fence lock failed")
 
 
+class GraphPreparationLockRejected(LockError):
+    def __init__(self) -> None:
+        super().__init__("the open graph preparation lock was rejected")
+
+
+class GraphPreparationLockContended(LockError):
+    def __init__(self) -> None:
+        super().__init__("the open graph preparation lock is contended")
+
+
+class GraphPreparationLockFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the open graph preparation lock failed")
+
+
+def _postgres_lock_contended(dialect: str, error: SQLAlchemyError) -> bool:
+    return (
+        dialect == POSTGRESQL
+        and isinstance(error, DBAPIError)
+        and getattr(error.orig, "sqlstate", None) == "55P03"
+    )
+
+
 def _storage_key(store_id: str, payload_digest: str) -> tuple[str, str]:
     if (
         type(store_id) is not str
@@ -99,10 +130,38 @@ async def _lock_existing_address(
     except SQLAlchemyError as error:
         failure = (
             StorageAddressContended()
-            if dialect == POSTGRESQL
-            and isinstance(error, DBAPIError)
-            and getattr(error.orig, "sqlstate", None) == "55P03"
+            if _postgres_lock_contended(dialect, error)
             else StorageAddressLockFailed()
+        )
+    raise_private_metadata_error(failure)
+
+
+async def _lock_open_preparation(
+    connection: AsyncConnection, dialect: str, binding: GraphPreparationBinding
+) -> None:
+    failure: LockError
+    try:
+        parameters = graph_preparation_parameters(binding)
+        statement = graph_preparation_settlement_statement(dialect)
+        if dialect == POSTGRESQL:
+            table_lock = await connection.execute(
+                text("LOCK TABLE graph_deployment_preparation IN ROW SHARE MODE NOWAIT")
+            )
+            table_lock.close()
+            statement = statement.with_for_update(nowait=True)
+        settlement = await execute_graph_preparation_settlement(
+            connection, statement, parameters
+        )
+        if settlement is not None and settlement.state == "open":
+            return
+        failure = GraphPreparationLockRejected()
+    except GraphPreparationRejected:
+        failure = GraphPreparationLockRejected()
+    except SQLAlchemyError as error:
+        failure = (
+            GraphPreparationLockContended()
+            if _postgres_lock_contended(dialect, error)
+            else GraphPreparationLockFailed()
         )
     raise_private_metadata_error(failure)
 
@@ -155,6 +214,7 @@ class TransitionLocks:
         self._run_id: str | None = None
         self._scopes: frozenset[Scope] | None = None
         self._storage_address: tuple[str, str] | None = None
+        self._graph_preparation: GraphPreparationBinding | None = None
         self._usable: bool = True
         self._dialect: str = connection.dialect.name
         if self._dialect not in (POSTGRESQL, SQLITE):
@@ -252,3 +312,31 @@ class TransitionLocks:
         self.require_connection(connection)
         if self._storage_address != _storage_key(store_id, payload_digest):
             raise LockError("the required storage address lock is not held")
+
+    async def acquire_open_graph_preparation(
+        self,
+        connection: AsyncConnection,
+        store_id: str,
+        payload_digest: str,
+        binding: GraphPreparationBinding,
+    ) -> None:
+        self.require_existing_storage_address(connection, store_id, payload_digest)
+        if self._graph_preparation is not None:
+            raise LockError("the graph preparation is acquired once")
+        self._usable = False
+        await _lock_open_preparation(connection, self._dialect, binding)
+        self._lease.require_active()
+        self._graph_preparation = binding
+        self._usable = True
+
+    def require_open_graph_preparation(
+        self,
+        connection: AsyncConnection,
+        store_id: str,
+        payload_digest: str,
+        binding: GraphPreparationBinding,
+    ) -> None:
+        self.require_existing_storage_address(connection, store_id, payload_digest)
+        require_graph_preparation_binding(binding)
+        if self._graph_preparation != binding:
+            raise LockError("the required open graph preparation lock is not held")
