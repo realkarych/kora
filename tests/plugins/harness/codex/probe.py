@@ -3006,6 +3006,9 @@ def verify_shell_patch_output(case: ProbeCase, output: str) -> None:
             == [
                 "Wall time: 0.0000 seconds",
                 "Output:",
+                "Exit code: 0",
+                "Wall time: 0 seconds",
+                "Output:",
                 "Success. Updated the following files:",
                 f"A {MARKER}",
             ],
