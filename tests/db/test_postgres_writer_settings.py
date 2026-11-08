@@ -164,13 +164,22 @@ async def refuse_weak_postgres_session(
     async with database.read_transaction() as reader:
         retained_mode: object = await reader.scalar(text(SHOW_COMMIT))
         rows_before_recovery = (await reader.execute(text(READ_PROBE))).all()
-    async with database.migration_connection() as migration:
-        migration_mode: object = await migration.scalar(text(SHOW_COMMIT))
+    migration_lent = False
+    with pytest.raises(
+        PostgreSQLDurabilityError, match="requires durable WAL settings"
+    ):
+        async with database.migration_connection():
+            migration_lent = True
+    migration_idle = not driver.is_in_transaction()
+    outstanding_after_migration = ledger.outstanding
     recovered = await set_session_commit_mode(database, "on")
 
     assert idle_after_refusal
     assert outstanding_after_refusal == 0
-    assert retained_mode == migration_mode == "off"
+    assert retained_mode == "off"
+    assert not migration_lent
+    assert migration_idle
+    assert outstanding_after_migration == 0
     assert rows_before_recovery == []
     assert recovered is driver
     assert not body_ran

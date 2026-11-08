@@ -5,7 +5,14 @@ import os
 import sqlite3
 import sys
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    Awaitable,
+    Callable,
+    Generator,
+    Iterable,
+    Mapping,
+)
 from contextlib import AsyncExitStack, asynccontextmanager, closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,8 +31,11 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import AsyncAdaptedQueuePool, Pool, StaticPool
 from sqlalchemy.pool.base import ConnectionPoolEntry, PoolProxiedConnection
 from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.util import await_, greenlet_spawn
 
 from kora.db import CLOSE_TIMED_OUT, DB_COMPONENT, DB_LOGGER_NAME, TRANSACTION_FAILED
+from kora.db.maintenance import PostgreSQLDurabilityError as PostgreSQLDurabilityError
+from kora.db.maintenance import postgresql_transaction_active
 from kora.db.transactions import (
     WriterTransactionError,
     managed_writer,
@@ -118,10 +128,6 @@ class DatabaseConfigurationError(ValueError):
 
 
 class SQLiteSynchronizationError(RuntimeError):
-    pass
-
-
-class PostgreSQLDurabilityError(RuntimeError):
     pass
 
 
@@ -403,18 +409,42 @@ def postgresql_engine(settings: DatabaseSettings) -> AsyncEngine:
     return engine
 
 
-async def verify_postgresql_wal_settings(connection: AsyncConnection) -> None:
-    settings = await connection.execute(POSTGRESQL_WAL_SETTINGS_QUERY)
-    observed: tuple[object, ...] = tuple(settings.one())
-    fsync, full_page_writes, synchronous_commit = observed
+def require_postgresql_wal_settings(observed: tuple[object, ...]) -> None:
     if (
-        fsync != "on"
-        or full_page_writes != "on"
-        or synchronous_commit not in POSTGRESQL_LOCAL_FLUSH_MODES
+        len(observed) != 3
+        or observed[:2] != ("on", "on")
+        or observed[2] not in POSTGRESQL_LOCAL_FLUSH_MODES
     ):
         raise PostgreSQLDurabilityError(
             "PostgreSQL writer requires durable WAL settings"
         )
+
+
+async def verify_postgresql_wal_settings(connection: AsyncConnection) -> None:
+    settings = await connection.execute(POSTGRESQL_WAL_SETTINGS_QUERY)
+    require_postgresql_wal_settings(tuple(settings.one()))
+
+
+def verify_postgresql_wal_cursor(cursor: DBAPICursor) -> None:
+    cursor.execute(POSTGRESQL_WAL_SETTINGS_QUERY.text)
+    observed: Iterable[object] | None = cursor.fetchone()
+    require_postgresql_wal_settings(tuple(observed) if observed is not None else ())
+
+
+def postgresql_autocommit(connection: Connection) -> bool:
+    return connection.get_execution_options().get("isolation_level") == "AUTOCOMMIT"
+
+
+def rollback_postgresql_migration_commit(connection: Connection) -> None:
+    try:
+        connection.connection.rollback()
+        if postgresql_transaction_active(connection):
+            raise PostgreSQLDurabilityError(
+                "PostgreSQL migration rollback did not settle"
+            )
+    except BaseException as error:
+        connection.invalidate(error)
+        raise
 
 
 async def wait_through_cancellations(task: asyncio.Future[Result]) -> None:
@@ -788,20 +818,54 @@ class Database:
         async with self._lease(transactional=False) as connection:
             previous_timeout = str(await connection.scalar(text("SHOW lock_timeout")))
             connection.info[MIGRATION_LEASE] = True
-            event.listen(connection.sync_connection, "commit", self._migration_commit)
+            native = connection.sync_connection
+            event.listen(native, "commit", self._migration_commit)
+            if self._require_postgresql_wal_settings:
+                event.listen(native, "before_cursor_execute", self._migration_dispatch)
             try:
                 await complete(self._lock_migration(connection))
                 yield connection
             finally:
-                event.remove(
-                    connection.sync_connection, "commit", self._migration_commit
-                )
+                if self._require_postgresql_wal_settings:
+                    event.remove(
+                        native, "before_cursor_execute", self._migration_dispatch
+                    )
+                event.remove(native, "commit", self._migration_commit)
                 await complete(self._release_migration(connection, previous_timeout))
 
     def _migration_commit(self, connection: Connection) -> None:
-        if self._lifecycle is Lifecycle.CLOSED:
-            connection.connection.rollback()
-        self._refuse_when_closed()
+        try:
+            self._refuse_when_closed()
+            if (
+                self._require_postgresql_wal_settings
+                and not postgresql_autocommit(connection)
+                and postgresql_transaction_active(connection)
+            ):
+                with closing(
+                    connection.execute(POSTGRESQL_WAL_SETTINGS_QUERY)
+                ) as settings:
+                    require_postgresql_wal_settings(tuple(settings.one()))
+                self._refuse_when_closed()
+        except BaseException:
+            if not connection.closed and not connection.invalidated:
+                if self._require_postgresql_wal_settings:
+                    await_(
+                        complete(
+                            greenlet_spawn(
+                                rollback_postgresql_migration_commit, connection
+                            )
+                        )
+                    )
+                else:
+                    connection.connection.rollback()
+            raise
+
+    def _migration_dispatch(self, connection: Connection, *arguments: object) -> None:
+        if postgresql_autocommit(connection):
+            self._refuse_when_closed()
+            with closing(connection.connection.cursor()) as cursor:
+                verify_postgresql_wal_cursor(cursor)
+            self._refuse_when_closed()
 
     async def _lock_migration(self, connection: AsyncConnection) -> None:
         await connection.execute(text("SELECT set_config('lock_timeout', '5s', false)"))

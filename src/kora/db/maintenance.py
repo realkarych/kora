@@ -1,8 +1,9 @@
 import sqlite3
 from collections.abc import Callable
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 
 from aiosqlite import Connection as SQLiteDriver
+from sqlalchemy import Connection
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from kora.db.graph_deployment_stage_reads import PAYLOAD_DIGEST_WIDTH, STORE_ID_WIDTH
@@ -93,3 +94,24 @@ async def observe_sqlite_promotion_intent(
     if type(value) is not _SQLiteIntentWidthRow:
         raise PromotionIntentScalarsRejected()
     return True
+
+
+class PostgreSQLDurabilityError(RuntimeError):
+    pass
+
+
+@runtime_checkable
+class _PostgreSQLTransactionState(Protocol):
+    def is_in_transaction(self) -> bool: ...
+
+
+def postgresql_transaction_active(connection: Connection) -> bool:
+    if connection.closed or connection.invalidated:
+        raise PostgreSQLDurabilityError("PostgreSQL migration backend is unavailable")
+    driver: object = connection.connection.driver_connection
+    if not isinstance(driver, _PostgreSQLTransactionState):
+        raise PostgreSQLDurabilityError("PostgreSQL migration backend is unavailable")
+    active = driver.is_in_transaction()
+    if type(active) is not bool:
+        raise PostgreSQLDurabilityError("PostgreSQL migration backend is unavailable")
+    return active
