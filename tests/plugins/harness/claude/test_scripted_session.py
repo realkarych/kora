@@ -22,6 +22,8 @@ from kora.plugins.harness.claude.session import (
     COMPONENT,
     SessionOutcome,
     close_recorded_processes,
+    interpreter,
+    launcher_text,
     process_rows,
     run_scripted_session,
 )
@@ -42,6 +44,7 @@ PROMPT: Final[str] = "apply the tool"
 KEY: Final[str] = "fixture-key-value"
 SCRIPTED: Final[str] = "scripted-bytes\n"
 SEEDED: Final[str] = "seeded-bytes\n"
+DECISION_FAILURE: Final[str] = "decision-failure-token"
 BOUND: Final[timedelta] = timedelta(seconds=45)
 BODY_LIMIT: Final[int] = 8_000_000
 LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset(
@@ -504,7 +507,8 @@ def assert_records(
     assert failed == []
     rendered = "\n".join(json.dumps(record, sort_keys=True) for record in records)
     for secret in secrets:
-        assert secret not in rendered
+        if secret in rendered:
+            raise AssertionError("session content reached a diagnostic record")
 
 
 def assert_exchange(state: ScriptedState, peers: set[str]) -> None:
@@ -642,6 +646,68 @@ async def test_scripted_claude_write_leaves_the_file_untouched_when_denied(
 
 
 @pytest.mark.asyncio
+async def test_scripted_claude_decision_failure_leaves_the_file_untouched(
+    tmp_path: Path, claude_capture: Capture
+) -> None:
+    clock = SystemClock()
+    work, environment = prepare_workspace(tmp_path)
+    target = work / "failed.txt"
+    launch_dir = tmp_path / "launch"
+    state = ScriptedState("Write", {"file_path": str(target), "content": SCRIPTED})
+    server, thread, base_url = serve(state)
+
+    def decide(_name: str) -> Decision:
+        raise RuntimeError(DECISION_FAILURE)
+
+    try:
+        with pytest.raises(KoraProtocolError) as caught:
+            await run_scripted_session(
+                context_for(claude_capture, clock),
+                cwd=work,
+                launch_dir=launch_dir,
+                base_url=base_url,
+                api_key=KEY,
+                environment=environment,
+                prompt=PROMPT,
+                tools=("Write",),
+                decide=decide,
+                stop=None,
+                bound=BOUND,
+            )
+    finally:
+        stop_server(server, thread)
+
+    assert caught.value.code == "harness_error"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    if DECISION_FAILURE in str(caught.value):
+        raise AssertionError("the decision exception reached the error text")
+    assert not target.exists()
+    assert (work / "seeded.txt").read_text(encoding="utf-8") == SEEDED
+    await assert_quiet(str(work), clock)
+    await assert_quiet(str(launch_dir), clock)
+    assert not (launch_dir / "environment.json").exists()
+
+    records = claude_capture.finish()
+    failed = [
+        record
+        for record in records
+        if record.get("event") == "harness.claude.session_failed"
+    ]
+    finished = [
+        record
+        for record in records
+        if record.get("event") == "harness.claude.session_finished"
+    ]
+    assert finished == []
+    assert len(failed) == 1
+    assert failed[0].get("reason") == "session_failed"
+    rendered = "\n".join(json.dumps(record, sort_keys=True) for record in records)
+    if DECISION_FAILURE in rendered or KEY in rendered or SCRIPTED in rendered:
+        raise AssertionError("session content reached a diagnostic record")
+
+
+@pytest.mark.asyncio
 async def test_scripted_claude_cancellation_closes_the_tool_child(
     tmp_path: Path, claude_capture: Capture
 ) -> None:
@@ -712,6 +778,7 @@ def deny_tool(_name: str) -> Decision:
         "http://localhost:9",
         "http://[::1]:9",
         "https://127.0.0.1:9",
+        "http://127.0.0.1:notaport",
     ],
 )
 async def test_scripted_claude_session_refuses_a_non_loopback_endpoint(
@@ -737,6 +804,10 @@ async def test_scripted_claude_session_refuses_a_non_loopback_endpoint(
         )
 
     assert caught.value.code == "launch_rejected"
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    if base_url in str(caught.value):
+        raise AssertionError("the refused endpoint reached the error text")
     assert not launch_dir.exists()
     assert str(launch_dir) not in process_text()
 
@@ -749,8 +820,8 @@ async def test_scripted_claude_session_refuses_a_non_loopback_endpoint(
     assert len(failed) == 1
     assert failed[0].get("reason") == "launch_rejected"
     rendered = "\n".join(json.dumps(record, sort_keys=True) for record in records)
-    assert KEY not in rendered
-    assert base_url not in rendered
+    if KEY in rendered or base_url in rendered:
+        raise AssertionError("session content reached a diagnostic record")
 
 
 @pytest.mark.asyncio
@@ -778,9 +849,7 @@ async def test_scripted_claude_session_kills_a_child_that_ignores_termination(
     (launch_dir / "pids").write_text(f"{process.pid}\n", encoding="ascii")
 
     try:
-        closed = await close_recorded_processes(
-            launch_dir, (str(launch_dir),), sys.executable, clock
-        )
+        closed = await close_recorded_processes(launch_dir, sys.executable, clock)
         finished = process.wait(timeout=2)
     finally:
         if process.poll() is None:
@@ -790,3 +859,92 @@ async def test_scripted_claude_session_kills_a_child_that_ignores_termination(
     assert closed is True
     assert finished == -signal.SIGKILL
     assert process.returncode == -signal.SIGKILL
+
+
+def test_scripted_launcher_starts_isolated_and_skips_the_version_probe(
+    tmp_path: Path,
+) -> None:
+    executable = interpreter()
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    marker = tmp_path / "poisoned"
+    (poison / "json.py").write_text(
+        "import pathlib\npathlib.Path("
+        + repr(str(marker))
+        + ").write_text('x', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    ran = tmp_path / "ran"
+    child = tmp_path / "child.py"
+    child.write_text(
+        f"#!{executable}\nimport pathlib\nimport sys\n"
+        "pathlib.Path(sys.argv[1]).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    child.chmod(0o700)
+    (launch / "binary").write_text(f"{child}\n", encoding="utf-8")
+    (launch / "environment.json").write_text(
+        '{"PATH": "/usr/bin:/bin"}\n', encoding="utf-8"
+    )
+    launcher = tmp_path / "launcher"
+    launcher.write_text(launcher_text(executable), encoding="utf-8")
+    launcher.chmod(0o700)
+    inherited = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": str(poison),
+        "KORA_CLAUDE_LAUNCH_DIR": str(launch),
+    }
+
+    version = subprocess.run(
+        [str(launcher), "-v"],
+        check=False,
+        capture_output=True,
+        env=inherited,
+        shell=False,
+    )
+    assert version.returncode == 0
+    assert not (launch / "pids").exists()
+    assert not marker.exists()
+
+    completed = subprocess.run(
+        [str(launcher), str(ran)],
+        check=False,
+        capture_output=True,
+        env=inherited,
+        shell=False,
+    )
+    assert completed.returncode == 0
+    assert ran.read_text(encoding="utf-8") == "ran"
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_scripted_cleanup_leaves_a_process_that_only_names_the_workspace(
+    tmp_path: Path,
+) -> None:
+    clock = SystemClock()
+    launch_dir = tmp_path / "launch"
+    launch_dir.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
+    hold = work / "hold.py"
+    hold.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    process = subprocess.Popen(
+        [sys.executable, str(hold)],
+        cwd=work,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    try:
+        closed = await close_recorded_processes(launch_dir, "/bundled/claude", clock)
+        assert closed is True
+        assert process.poll() is None
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=2)

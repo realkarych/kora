@@ -161,7 +161,11 @@ async def run_scripted_client(
             if name == "":
                 failures.append("unnamed")
             else:
-                selected: object = decide(name)
+                try:
+                    selected: object = decide(name)
+                except Exception:
+                    failures.append("decision")
+                    selected = "deny"
                 if selected == "allow":
                     decision = "allow"
                 elif selected == "deny":

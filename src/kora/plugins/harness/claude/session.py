@@ -105,10 +105,18 @@ def session_failed() -> NoReturn:
 
 def require_loopback(base_url: str) -> None:
     parsed = urlsplit(base_url)
+    invalid_port = False
+    port: int | None
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+        invalid_port = True
     if (
-        parsed.scheme != "http"
+        invalid_port
+        or parsed.scheme != "http"
         or parsed.hostname != "127.0.0.1"
-        or parsed.port is None
+        or port is None
         or parsed.username is not None
         or parsed.password is not None
         or parsed.path not in ("", "/")
@@ -207,9 +215,11 @@ def interpreter() -> str:
 
 def launcher_text(executable: str) -> str:
     lines = (
+        "import sys",
+        "if sys.argv[1:] == ['-v']:",
+        "    raise SystemExit(0)",
         "import json",
         "import os",
-        "import sys",
         "from pathlib import Path",
         "os.setsid()",
         "root = Path(os.environ['KORA_CLAUDE_LAUNCH_DIR'])",
@@ -222,7 +232,7 @@ def launcher_text(executable: str) -> str:
         "os.closerange(3, limit)",
         "os.execve(binary, [binary, *sys.argv[1:]], environment)",
     )
-    return f"#!{executable}\n" + "\n".join(lines) + "\n"
+    return f"#!{executable} -I\n" + "\n".join(lines) + "\n"
 
 
 def write_exclusive(path: Path, data: bytes, mode: int) -> None:
@@ -419,9 +429,8 @@ async def pause_until(
             watch.close()
 
 
-async def close_recorded_processes(
-    launch_dir: Path, markers: tuple[str, ...], binary: str, clock: Clock
-) -> bool:
+async def close_recorded_processes(launch_dir: Path, binary: str, clock: Clock) -> bool:
+    markers = (str(launch_dir),)
     own = os.getpgrp()
     for number in (signal.SIGTERM, signal.SIGKILL):
         rows = eligible_rows(launch_dir, markers, binary)
@@ -504,7 +513,6 @@ async def run_scripted_session(
             try:
                 closed = await close_recorded_processes(
                     launch_dir,
-                    (str(cwd), str(launch_dir)),
                     str(prepared.binary),
                     context.clock,
                 )
