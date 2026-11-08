@@ -102,10 +102,17 @@ def complete_inputs(
     parameter_reference: bool = False,
     graph_settings: JsonObject | None = None,
     runtime_settings: JsonObject | None = None,
+    enabled_schema: JsonObject | None = None,
+    enabled_predicate: str = "params.enabled",
 ) -> tuple[JsonObject, JsonObject, JsonObject, tuple[GraphResourceOwner, ...]]:
     raw = output_document("command")
     graph = child(raw, "graph")
-    graph["params"] = {"type": "object", "properties": {"enabled": {"type": "boolean"}}}
+    graph["params"] = {
+        "type": "object",
+        "properties": {
+            "enabled": {"type": "boolean"} if enabled_schema is None else enabled_schema
+        },
+    }
     if graph_settings is not None:
         graph.update(graph_settings)
     if runtime_settings is not None:
@@ -128,7 +135,7 @@ def complete_inputs(
         )
         schema["required"] = ["enabled", "dormant"]
         child(approval, "config")["approve_when"] = (
-            f"params.enabled && has(params.{PARAMETER_MARKER}) && "
+            f"({enabled_predicate}) && has(params.{PARAMETER_MARKER}) && "
             "response.decision == 'approve'"
         )
         child(raw, "runtime")["infrastructure_retry"] = {

@@ -81,6 +81,30 @@ def expression_schema_roots(
     }
 
 
+def map_parameter_variable(
+    schemas: SchemaTypes, parameters: JsonObject | MISSING
+) -> Variable | None:
+    effective: JsonObject = (
+        {"type": "object", "properties": {}, "additionalProperties": False}
+        if parameters is MISSING
+        else parameters
+    )
+    try:
+        return schemas.variable(effective)
+    except SchemaError:
+        return None
+
+
+def prepare_parameter_variable(
+    contracts: dict[str, TypeContract],
+    parameters: JsonObject | MISSING,
+    admission: CheckedInventoryAdmission,
+) -> Variable | None:
+    roots = expression_schema_roots(contracts, admission)
+    schemas = SchemaTypes(roots.get, inventory_meter(admission))
+    return map_parameter_variable(schemas, parameters)
+
+
 class InputParameterContexts:
     def __init__(
         self,
@@ -101,15 +125,9 @@ class InputParameterContexts:
 
     def parameter_context(self) -> Variable | None:
         if self.parameter_variable is MISSING:
-            parameters: JsonObject = (
-                {"type": "object", "properties": {}, "additionalProperties": False}
-                if self.parameters is MISSING
-                else self.parameters
+            self.parameter_variable = map_parameter_variable(
+                self.schemas, self.parameters
             )
-            try:
-                self.parameter_variable = self.schemas.variable(parameters)
-            except SchemaError:
-                self.parameter_variable = None
         return self.parameter_variable
 
     def context(

@@ -66,7 +66,12 @@ class CheckedCandidate:
 
 
 async def candidate_for(
-    database: Database, params: JsonObject, *, parameter_reads: bool
+    database: Database,
+    params: JsonObject,
+    *,
+    parameter_reads: bool,
+    enabled_schema: JsonObject | None = None,
+    enabled_predicate: str = "params.enabled",
 ) -> CheckedCandidate:
     async with database.transaction() as connection:
         seeder = Seeder(connection)
@@ -84,7 +89,11 @@ async def candidate_for(
             runtime=None,
         )
     raw, envelope, refs, owners = complete_inputs(
-        scope, resources=False, parameter_reads=parameter_reads
+        scope,
+        resources=False,
+        parameter_reads=parameter_reads,
+        enabled_schema=enabled_schema,
+        enabled_predicate=enabled_predicate,
     )
     prepared, pin = prepared_case(raw, envelope, scope)
     async with database.transaction() as connection:
