@@ -22,6 +22,7 @@ from kora.plugins.harness.codex.selected_startup import (
 )
 from tests.plugins.harness.codex import probe
 from tests.plugins.harness.codex.guarded_executor import (
+    MALFORMED_HEADER_CANARY,
     REFUSAL,
     ExecutorGuard,
     GuardAction,
@@ -282,6 +283,9 @@ async def run_guard(root: Path, scenario: Scenario) -> None:
                 await verify_upgrade_refused(endpoint, None, 401)
                 await verify_upgrade_refused(endpoint, "wrong", 401)
                 await verify_non_upgrade_refused(endpoint, token)
+                await verify_upgrade_refused(
+                    endpoint, token, 400, subprotocol=f"{MALFORMED_HEADER_CANARY}-ws"
+                )
                 await verify_malformed_header_refused(endpoint)
                 environment = materialize_native_inputs(recipe.app_server)
                 environment["CODEX_API_KEY"] = probe.SYNTHETIC_BEARER

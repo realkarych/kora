@@ -208,7 +208,11 @@ class ExecutorGuard:
 
     def _matches_process(self, values: dict[str, object]) -> bool:
         process_id = values.get("processId")
-        if not isinstance(process_id, str) or not 0 < len(process_id) <= 64:
+        if (
+            not isinstance(process_id, str)
+            or not process_id.isascii()
+            or not 0 < len(process_id) <= 64
+        ):
             return False
         self._process_id = process_id
         return exact_fields(
@@ -301,12 +305,14 @@ class ExecutorGuard:
             )
         if method == "fs/watchMissing":
             missing = values.get("missing")
+            watch_id = values.get("watchId")
             if not isinstance(missing, list):
                 return False
             paths = cast("list[object]", missing)
             return (
                 values.keys() == {"watchId", "missing", "present"}
-                and rpc_integer(values["watchId"])
+                and type(watch_id) is int
+                and 0 <= watch_id < 1 << 64
                 and values["present"] is None
                 and len(paths) == len(self._watched_paths)
                 and all(
@@ -408,7 +414,10 @@ class ExecutorGuard:
         ws = web.WebSocketResponse(
             max_msg_size=self._max_frame_bytes, compress=False, timeout=1
         )
-        if not ws.can_prepare(request).ok:
+        if (
+            "Sec-WebSocket-Protocol" in request.headers
+            or not ws.can_prepare(request).ok
+        ):
             return web.Response(status=400)
         self._admitted = True
         try:
@@ -499,8 +508,12 @@ async def verify_malformed_header_refused(endpoint: str) -> None:
         await writer.wait_closed()
 
 
-async def verify_upgrade_refused(endpoint: str, token: str | None, status: int) -> None:
+async def verify_upgrade_refused(
+    endpoint: str, token: str | None, status: int, *, subprotocol: str | None = None
+) -> None:
     headers = {} if token is None else {"Authorization": f"Bearer {token}"}
+    if subprotocol is not None:
+        headers["Sec-WebSocket-Protocol"] = subprotocol
     async with ClientSession() as client:
         try:
             async with client.ws_connect(endpoint, headers=headers):
