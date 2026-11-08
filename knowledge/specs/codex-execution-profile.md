@@ -107,6 +107,22 @@ exec-server. The private stream prerequisite leaves bound slot admission,
 production grant delivery, the harness host and Policy activation with
 their existing owners.
 
+## Local bound role environments
+
+Under [#1058](https://github.com/realkarych/kora/issues/1058), the selected
+Linux fixture gives the provider constructor the exact names from one
+immutable authored snapshot. The local runtime binder uses that snapshot
+and both returned recipes. The binder validates both roles before revealing
+any secret. The app-server receives the sole provider key grant. The
+exec-server and the Bash command run without that key.
+
+The [native evidence](../research/codex-bound-environment-2026-11-08.md)
+checks the complete initial environments of both pinned roles, their own
+gate streams, managed hook and marker, and observed cleanup. The preflight
+cases cover a late role collision, an attempted reassignment of the key
+and an unset provider reservation. Production launch authority, physical
+identity and the required before-effect Policy gate remain separate.
+
 ## Resource owner and stopping
 
 One invocation's existing runtime/runner owner retains both native roles and every acquired stream, reader/writer/control task, listener, active connection/session, process/output/filesystem handle, native filesystem helper, HTTP request/body stream, descendant and per-attempt tree. Internal state requires explicit finite admission/retention and actual settlement; two top-level processes do not bound this state by themselves.
