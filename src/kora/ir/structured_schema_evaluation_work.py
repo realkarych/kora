@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 
 from kora.ir.structured_schema_evaluation_policy import PARAMETERS, refuse
 
@@ -7,19 +8,56 @@ def _limbs(bits: int) -> int:
     return max(1, (bits + 29) // 30)
 
 
-def _admit_bits(bits: int) -> None:
-    if bits > PARAMETERS["max_numeric_intermediate_bits"]:
-        refuse("evaluation_exhausted")
+@dataclass(frozen=True, slots=True)
+class EvaluationLimits:
+    max_work: int
+    max_auxiliary_bytes: int
+    max_auxiliary_entries: int
+    max_integer_bits: int
+    max_intermediate_bits: int
+
+    def __post_init__(self) -> None:
+        if any(
+            type(limit) is not int or not 0 <= limit <= sys.maxsize
+            for limit in (
+                self.max_work,
+                self.max_auxiliary_bytes,
+                self.max_auxiliary_entries,
+                self.max_integer_bits,
+                self.max_intermediate_bits,
+            )
+        ):
+            raise ValueError("invalid evaluation limits")
+
+
+_STRUCTURED_OUTPUT_LIMITS = EvaluationLimits(
+    max_work=PARAMETERS["max_evaluation_work"],
+    max_auxiliary_bytes=PARAMETERS["max_auxiliary_bytes"],
+    max_auxiliary_entries=PARAMETERS["max_auxiliary_entries"],
+    max_integer_bits=PARAMETERS["max_numeric_bits"],
+    max_intermediate_bits=PARAMETERS["max_numeric_intermediate_bits"],
+)
 
 
 @dataclass(slots=True)
-class EvaluationMeter:
+class BoundedEvaluationMeter:
     work: int = 0
     auxiliary_bytes: int = 0
     auxiliary_entries: int = 0
+    limits: EvaluationLimits = field(kw_only=True, repr=False)
 
     def __post_init__(self) -> None:
+        if type(self.limits) is not EvaluationLimits:
+            raise ValueError("invalid evaluation limits")
         self.reserve(0)
+
+    def admit_integer_operand(self, bits: int) -> None:
+        if bits > self.limits.max_integer_bits:
+            refuse("evaluation_exhausted")
+
+    def _admit_bits(self, bits: int) -> None:
+        if bits > self.limits.max_intermediate_bits:
+            refuse("evaluation_exhausted")
 
     def reserve(self, work: int = 1, byte_count: int = 0, entries: int = 0) -> None:
         values = (
@@ -33,9 +71,9 @@ class EvaluationMeter:
         if any(type(value) is not int or value < 0 for value in values):
             raise ValueError("invalid evaluation reservation")
         if (
-            self.work + work > PARAMETERS["max_evaluation_work"]
-            or self.auxiliary_bytes + byte_count > PARAMETERS["max_auxiliary_bytes"]
-            or self.auxiliary_entries + entries > PARAMETERS["max_auxiliary_entries"]
+            self.work + work > self.limits.max_work
+            or self.auxiliary_bytes + byte_count > self.limits.max_auxiliary_bytes
+            or self.auxiliary_entries + entries > self.limits.max_auxiliary_entries
         ):
             refuse("evaluation_exhausted")
         self.work += work
@@ -57,7 +95,7 @@ class EvaluationMeter:
 
     def integer_compare(self, left: int, right: int) -> int:
         left_bits, right_bits = left.bit_length(), right.bit_length()
-        _admit_bits(max(left_bits, right_bits))
+        self._admit_bits(max(left_bits, right_bits))
         self.reserve(1 + _limbs(left_bits) + _limbs(right_bits))
         return (left > right) - (left < right)
 
@@ -65,21 +103,21 @@ class EvaluationMeter:
         if self.integer_zero(value):
             return 0
         bits = value.bit_length()
-        _admit_bits(bits)
+        self._admit_bits(bits)
         self.reserve(_limbs(bits), (bits + 7) // 8)
         return -value
 
     def integer_add(self, left: int, right: int) -> int:
         left_bits, right_bits = left.bit_length(), right.bit_length()
         bits = max(left_bits, right_bits) + 1
-        _admit_bits(bits)
+        self._admit_bits(bits)
         self.reserve(1 + _limbs(left_bits) + _limbs(right_bits), (bits + 7) // 8)
         return left + right
 
     def integer_subtract(self, left: int, right: int) -> int:
         left_bits, right_bits = left.bit_length(), right.bit_length()
         bits = max(left_bits, right_bits) + 1
-        _admit_bits(bits)
+        self._admit_bits(bits)
         self.reserve(1 + _limbs(left_bits) + _limbs(right_bits), (bits + 7) // 8)
         return left - right
 
@@ -88,7 +126,7 @@ class EvaluationMeter:
             return 0
         left_bits, right_bits = left.bit_length(), right.bit_length()
         bits = left_bits + right_bits
-        _admit_bits(bits)
+        self._admit_bits(bits)
         self.reserve(
             (_limbs(left_bits) + _limbs(right_bits)) ** 2 - 1,
             (bits + 7) // 8,
@@ -97,7 +135,7 @@ class EvaluationMeter:
 
     def integer_divmod(self, left: int, right: int) -> tuple[int, int]:
         left_bits, right_bits = left.bit_length(), right.bit_length()
-        _admit_bits(max(left_bits, right_bits))
+        self._admit_bits(max(left_bits, right_bits))
         self.reserve(
             1 + (_limbs(left_bits) + _limbs(right_bits) + 1) ** 2,
             (left_bits + 7) // 8 + (right_bits + 7) // 8,
@@ -115,7 +153,7 @@ class EvaluationMeter:
             return 0
         self.reserve(2)
         bits = value.bit_length()
-        if exponent > (PARAMETERS["max_numeric_intermediate_bits"] - bits - 1) // 4:
+        if exponent > (self.limits.max_intermediate_bits - bits - 1) // 4:
             refuse("evaluation_exhausted")
         self.reserve()
         while exponent:
@@ -129,8 +167,19 @@ class EvaluationMeter:
         if count < 1 or count > 21:
             raise RuntimeError("invalid numerical spelling")
         bits = 4 * count + 1
-        _admit_bits(bits)
+        self._admit_bits(bits)
         self.reserve(1 + count * count, (bits + 7) // 8)
         if not value.isascii() or not value.isdigit():
             raise RuntimeError("invalid numerical spelling")
         return int(value)
+
+
+@dataclass(slots=True)
+class EvaluationMeter(BoundedEvaluationMeter):
+    limits: EvaluationLimits = field(
+        default=_STRUCTURED_OUTPUT_LIMITS, init=False, repr=False
+    )
+
+    def admit_integer_operand(self, bits: int) -> None:
+        if bits > self.limits.max_integer_bits:
+            refuse()

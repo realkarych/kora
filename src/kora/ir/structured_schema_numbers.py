@@ -2,8 +2,8 @@ import math
 from dataclasses import dataclass
 from typing import Literal
 
-from kora.ir.structured_schema_evaluation_policy import PARAMETERS, refuse
-from kora.ir.structured_schema_evaluation_work import EvaluationMeter
+from kora.ir.structured_schema_evaluation_policy import refuse
+from kora.ir.structured_schema_evaluation_work import BoundedEvaluationMeter
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -15,7 +15,7 @@ class DecimalNumber:
         return "DecimalNumber()"
 
 
-def _float_number(value: float, meter: EvaluationMeter) -> DecimalNumber:
+def _float_number(value: float, meter: BoundedEvaluationMeter) -> DecimalNumber:
     meter.reserve(2)
     if not math.isfinite(value):
         refuse()
@@ -78,12 +78,11 @@ def _float_number(value: float, meter: EvaluationMeter) -> DecimalNumber:
     return DecimalNumber(coefficient, exponent)
 
 
-def decimal_number(value: object, meter: EvaluationMeter) -> DecimalNumber:
+def decimal_number(value: object, meter: BoundedEvaluationMeter) -> DecimalNumber:
     meter.reserve(2)
     if type(value) is int:
         meter.reserve(2)
-        if value.bit_length() > PARAMETERS["max_numeric_bits"]:
-            refuse()
+        meter.admit_integer_operand(value.bit_length())
         meter.reserve(entries=1)
         return DecimalNumber(value, 0)
     meter.reserve(2)
@@ -92,7 +91,7 @@ def decimal_number(value: object, meter: EvaluationMeter) -> DecimalNumber:
     refuse()
 
 
-def numeric_is_integer(value: object, meter: EvaluationMeter) -> bool:
+def numeric_is_integer(value: object, meter: BoundedEvaluationMeter) -> bool:
     number = decimal_number(value, meter)
     meter.reserve()
     coefficient = number.coefficient
@@ -109,7 +108,7 @@ def numeric_is_integer(value: object, meter: EvaluationMeter) -> bool:
 
 
 def numeric_compare(
-    left: object, right: object, meter: EvaluationMeter
+    left: object, right: object, meter: BoundedEvaluationMeter
 ) -> Literal[-1, 0, 1]:
     first = decimal_number(left, meter)
     second = decimal_number(right, meter)
@@ -141,13 +140,15 @@ def numeric_compare(
     return 1 if result > 0 else 0
 
 
-def numeric_equal(left: object, right: object, meter: EvaluationMeter) -> bool:
+def numeric_equal(left: object, right: object, meter: BoundedEvaluationMeter) -> bool:
     result = numeric_compare(left, right, meter)
     meter.reserve()
     return result == 0
 
 
-def numeric_multiple_of(left: object, right: object, meter: EvaluationMeter) -> bool:
+def numeric_multiple_of(
+    left: object, right: object, meter: BoundedEvaluationMeter
+) -> bool:
     first = decimal_number(left, meter)
     second = decimal_number(right, meter)
     meter.reserve()
