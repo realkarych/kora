@@ -125,9 +125,9 @@ def runner_deadline(deadline: float, clock: SystemClock) -> int:
 async def close_gated(
     owner: GatedProcess, cutoff: int, clock: SystemClock, *, natural: bool = False
 ) -> None:
+    owner.close_gate()
     if owner.closed:
         return
-    owner.close_gate()
     if natural:
         await owner.settle(cutoff)
     else:

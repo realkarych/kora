@@ -3116,6 +3116,8 @@ async def drive(
             raise ProbeFailure(fixture.failure) from None
         raise
     finally:
+        if bound_launch is not None:
+            bound_launch.fence.stop()
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
         if gated_executor_identity is not None:
             os.close(gated_executor_identity)

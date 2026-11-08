@@ -115,6 +115,25 @@ async def test_control_close_revokes_a_suspended_write_before_socket_disposal() 
         assert first.fileno() == -1
 
 
+async def test_control_write_keeps_deadline_if_automatic_close_fails() -> None:
+    first, second = socket.socketpair()
+    with first, second:
+        clock = StepClock()
+        channel = BoundedChannel(first, clock)
+        os.close(first.fileno())
+
+        with pytest.raises(ChannelError) as refused:
+            await channel.write_frame(b"activate", clock.monotonic_ns())
+        unconfirmed = not channel.closed
+        channel.close()
+
+        assert refused.value.reason is ChannelFailure.DEADLINE
+        assert unconfirmed
+        assert channel.close_failed
+        assert channel.closed
+        assert first.fileno() == -1
+
+
 async def test_typed_frame_is_read_within_its_reservation() -> None:
     async with channel_pair(SystemClock()) as pair:
         await send_raw(pair.raw, frame(FrameType.JSON, b"x" * PRE_ATTACH_BYTES))

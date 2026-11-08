@@ -95,7 +95,6 @@ class BoundLaunch:
         natural_app_refusal: bool,
     ) -> None:
         cutoff = runner_deadline(deadline, self.clock)
-        self.fence.stop()
         gates = self.fence.gates
         natural_gate = gates[-1] if natural_app_refusal and len(gates) == 2 else None
         outcomes = await asyncio.gather(
