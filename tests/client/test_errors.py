@@ -156,13 +156,30 @@ async def test_client_classifies_disconnect_after_send_and_never_resends() -> No
 
 @pytest.mark.asyncio
 async def test_client_classifies_connect_failure_before_send() -> None:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+    loop = asyncio.get_running_loop()
+    with (
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupant,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as control,
+    ):
+        listener.setblocking(False)
+        occupant.setblocking(False)
+        control.setblocking(False)
         listener.bind(("127.0.0.1", 0))
-        address = f"http://127.0.0.1:{listener.getsockname()[1]}"
+        listener.listen()
+        address = ("127.0.0.1", listener.getsockname()[1])
+        await asyncio.wait_for(loop.sock_connect(occupant, address), BOUND)
+        established, _ = await asyncio.wait_for(loop.sock_accept(listener), BOUND)
+        with established:
+            listener.close()
+            with pytest.raises(ConnectionRefusedError):
+                await asyncio.wait_for(loop.sock_connect(control, address), BOUND)
 
-        async with KoraClient(address, CREDENTIAL) as client:
-            with pytest.raises(ClientError) as refusal:
-                await client.openapi()
+            async with KoraClient(
+                f"http://127.0.0.1:{address[1]}", CREDENTIAL
+            ) as client:
+                with pytest.raises(ClientError) as refusal:
+                    await client.openapi()
 
     assert refusal.value.reason is Failure.CONNECTION
     assert refusal.value.outcome is Outcome.NOT_SENT

@@ -105,17 +105,25 @@ class DirectBackend(httpcore.AsyncNetworkBackend):
                 "The client requires direct TCP and one request deadline."
             )
         loop = asyncio.get_running_loop()
-        try:
-            flags = socket.AI_NUMERICHOST if host == "127.0.0.1" else 0
-            addresses = await loop.getaddrinfo(
-                host,
-                port,
-                type=socket.SOCK_STREAM,
-                proto=socket.IPPROTO_TCP,
-                flags=flags,
-            )
-        except OSError:
-            raise httpcore.ConnectError("The origin could not be resolved.") from None
+        if host == "127.0.0.1":
+            addresses = [
+                (
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    "",
+                    (host, port),
+                )
+            ]
+        else:
+            try:
+                addresses = await loop.getaddrinfo(
+                    host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
+                )
+            except OSError:
+                raise httpcore.ConnectError(
+                    "The origin could not be resolved."
+                ) from None
         for family, kind, protocol, _, address in addresses:
             try:
                 with ExitStack() as ownership:
