@@ -30,7 +30,7 @@ from kora.ir.structured_schema_numbers import (
 TypeName = Kind | Literal["integer"]
 
 
-def _type_name(name: str, meter: EvaluationMeter) -> TypeName:
+def _type_name(name: str, meter: BoundedEvaluationMeter) -> TypeName:
     same = string_equal(name, "array", meter)
     meter.reserve()
     if same:
@@ -63,7 +63,7 @@ def _type_name(name: str, meter: EvaluationMeter) -> TypeName:
 
 
 def _matches_type(
-    name: TypeName, kind: Kind, instance: NativeCursor, meter: EvaluationMeter
+    name: TypeName, kind: Kind, instance: Cursor, meter: BoundedEvaluationMeter
 ) -> bool:
     meter.reserve()
     if name == "integer":
@@ -76,7 +76,7 @@ def _matches_type(
 
 
 def type_matches(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> bool:
     kind = cursor_kind(instance, meter)
     argument_kind = cursor_kind(argument, meter)
@@ -231,7 +231,7 @@ def check_enum_membership(
 
 
 def _string_length_compare(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> Literal[-1, 0, 1] | None:
     kind = cursor_kind(instance, meter)
     meter.reserve()
@@ -249,7 +249,7 @@ def _string_length_compare(
 
 
 def min_length_matches(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> bool:
     result = _string_length_compare(instance, argument, meter)
     meter.reserve()
@@ -260,7 +260,7 @@ def min_length_matches(
 
 
 def max_length_matches(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> bool:
     result = _string_length_compare(instance, argument, meter)
     meter.reserve()
@@ -271,10 +271,10 @@ def max_length_matches(
 
 
 def _container_count_compare(
-    instance: NativeCursor,
+    instance: Cursor,
     argument: ArenaCursor,
     required_kind: Literal["array", "object"],
-    meter: EvaluationMeter,
+    meter: BoundedEvaluationMeter,
 ) -> Literal[-1, 0, 1] | None:
     kind = cursor_kind(instance, meter)
     meter.reserve()
@@ -290,7 +290,7 @@ def _container_count_compare(
 
 
 def min_items_matches(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> bool:
     result = _container_count_compare(instance, argument, "array", meter)
     meter.reserve()
@@ -301,7 +301,7 @@ def min_items_matches(
 
 
 def max_items_matches(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> bool:
     result = _container_count_compare(instance, argument, "array", meter)
     meter.reserve()
@@ -312,7 +312,7 @@ def max_items_matches(
 
 
 def min_properties_matches(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> bool:
     result = _container_count_compare(instance, argument, "object", meter)
     meter.reserve()
@@ -323,7 +323,7 @@ def min_properties_matches(
 
 
 def max_properties_matches(
-    instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+    instance: Cursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
 ) -> bool:
     result = _container_count_compare(instance, argument, "object", meter)
     meter.reserve()

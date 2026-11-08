@@ -9,11 +9,11 @@ from kora.engine.graph_parameters import (
     build_graph_parameter_binding,
     read_graph_parameter_binding,
 )
-from kora.engine.parameter_equality_predicates import (
-    ParameterEqualityFailure,
-    ParameterEqualityPredicate,
-    ParameterEqualityRejected,
-    check_parameter_equality_predicate,
+from kora.engine.parameter_arena_predicates import (
+    ParameterArenaFailure,
+    ParameterArenaPredicate,
+    ParameterArenaRejected,
+    check_parameter_arena_predicate,
 )
 from kora.engine.start_records import prepare_manual_start_request
 from kora.ir.json import JsonObject
@@ -38,7 +38,7 @@ def literal_cursor(value: object) -> ArenaCursor:
 
 
 def checked_pair(
-    predicate: ParameterEqualityPredicate, value: object, operand: object
+    predicate: ParameterArenaPredicate, value: object, operand: object
 ) -> tuple[ArenaCursor, ArenaCursor]:
     request = prepare_manual_start_request(NAMESPACE, GRAPH, {"value": value})
     document = parameter_document({"properties": {"value": {predicate.value: operand}}})
@@ -71,11 +71,11 @@ def checked_pair(
 def test_parameter_const_checks_ordered_structural_equality(
     value: object, operand: object, expected: bool
 ) -> None:
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     left, right = checked_pair(predicate, value, operand)
     meter = BoundedEvaluationMeter(limits=LIMITS)
 
-    matches = check_parameter_equality_predicate(
+    matches = check_parameter_arena_predicate(
         predicate, left, right, meter=meter, max_pair_frames=8
     )
 
@@ -83,11 +83,11 @@ def test_parameter_const_checks_ordered_structural_equality(
 
 
 def test_parameter_const_compares_all_object_keys_before_values() -> None:
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     left, right = checked_pair(predicate, {"a": 0.3, "z": True}, {"a": 0.3, "y": True})
     meter = BoundedEvaluationMeter(limits=replace(LIMITS, max_work=400))
 
-    matches = check_parameter_equality_predicate(
+    matches = check_parameter_arena_predicate(
         predicate, left, right, meter=meter, max_pair_frames=8
     )
 
@@ -97,9 +97,9 @@ def test_parameter_const_compares_all_object_keys_before_values() -> None:
 @pytest.mark.parametrize(
     ("predicate", "value", "operand", "expected"),
     [
-        pytest.param(ParameterEqualityPredicate.ENUM, 1, [1, 1.0], True, id="enum"),
+        pytest.param(ParameterArenaPredicate.ENUM, 1, [1, 1.0], True, id="enum"),
         pytest.param(
-            ParameterEqualityPredicate.UNIQUE_ITEMS,
+            ParameterArenaPredicate.UNIQUE_ITEMS,
             [1, 1, 1.0],
             True,
             False,
@@ -108,7 +108,7 @@ def test_parameter_const_compares_all_object_keys_before_values() -> None:
     ],
 )
 def test_parameter_equality_stops_after_first_decisive_pair(
-    predicate: ParameterEqualityPredicate,
+    predicate: ParameterArenaPredicate,
     value: object,
     operand: object,
     expected: bool,
@@ -116,7 +116,7 @@ def test_parameter_equality_stops_after_first_decisive_pair(
     left, right = checked_pair(predicate, value, operand)
     meter = BoundedEvaluationMeter(limits=replace(LIMITS, max_work=400))
 
-    matches = check_parameter_equality_predicate(
+    matches = check_parameter_arena_predicate(
         predicate, left, right, meter=meter, max_pair_frames=8
     )
 
@@ -126,9 +126,9 @@ def test_parameter_equality_stops_after_first_decisive_pair(
 @pytest.mark.parametrize(
     ("predicate", "value", "operand"),
     [
-        pytest.param(ParameterEqualityPredicate.ENUM, 1, [1.0, 1], id="enum"),
+        pytest.param(ParameterArenaPredicate.ENUM, 1, [1.0, 1], id="enum"),
         pytest.param(
-            ParameterEqualityPredicate.UNIQUE_ITEMS,
+            ParameterArenaPredicate.UNIQUE_ITEMS,
             [1, 1.0, 1],
             True,
             id="unique",
@@ -136,32 +136,32 @@ def test_parameter_equality_stops_after_first_decisive_pair(
     ],
 )
 def test_parameter_equality_cannot_skip_an_incomplete_entered_pair(
-    predicate: ParameterEqualityPredicate, value: object, operand: object
+    predicate: ParameterArenaPredicate, value: object, operand: object
 ) -> None:
     left, right = checked_pair(predicate, value, operand)
     meter = BoundedEvaluationMeter(limits=replace(LIMITS, max_work=400))
 
-    with pytest.raises(ParameterEqualityRejected) as refusal:
-        check_parameter_equality_predicate(
+    with pytest.raises(ParameterArenaRejected) as refusal:
+        check_parameter_arena_predicate(
             predicate, left, right, meter=meter, max_pair_frames=8
         )
 
-    assert refusal.value.reason is ParameterEqualityFailure.CAPACITY
+    assert refusal.value.reason is ParameterArenaFailure.CAPACITY
 
 
 @pytest.mark.parametrize(
     ("predicate", "value", "operand", "expected"),
     [
-        (ParameterEqualityPredicate.ENUM, {"x": [1]}, [{"x": [2]}, {"x": [1.0]}], True),
-        (ParameterEqualityPredicate.ENUM, 1, [True, 2], False),
-        (ParameterEqualityPredicate.UNIQUE_ITEMS, [True, 1], True, True),
-        (ParameterEqualityPredicate.UNIQUE_ITEMS, [{"a": -0.0}, {"a": 0}], True, False),
-        (ParameterEqualityPredicate.UNIQUE_ITEMS, [1, 1.0], False, True),
-        (ParameterEqualityPredicate.UNIQUE_ITEMS, {"a": 1}, "unentered", True),
+        (ParameterArenaPredicate.ENUM, {"x": [1]}, [{"x": [2]}, {"x": [1.0]}], True),
+        (ParameterArenaPredicate.ENUM, 1, [True, 2], False),
+        (ParameterArenaPredicate.UNIQUE_ITEMS, [True, 1], True, True),
+        (ParameterArenaPredicate.UNIQUE_ITEMS, [{"a": -0.0}, {"a": 0}], True, False),
+        (ParameterArenaPredicate.UNIQUE_ITEMS, [1, 1.0], False, True),
+        (ParameterArenaPredicate.UNIQUE_ITEMS, {"a": 1}, "unentered", True),
     ],
 )
 def test_parameter_collection_equality_respects_predicate_applicability(
-    predicate: ParameterEqualityPredicate,
+    predicate: ParameterArenaPredicate,
     value: object,
     operand: object,
     expected: bool,
@@ -169,7 +169,7 @@ def test_parameter_collection_equality_respects_predicate_applicability(
     left, right = checked_pair(predicate, value, operand)
     meter = BoundedEvaluationMeter(limits=LIMITS)
 
-    matches = check_parameter_equality_predicate(
+    matches = check_parameter_arena_predicate(
         predicate, left, right, meter=meter, max_pair_frames=8
     )
 
@@ -177,30 +177,30 @@ def test_parameter_collection_equality_respects_predicate_applicability(
 
 
 def test_parameter_equality_uses_caller_pair_depth_above_artifact_default() -> None:
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     value = nested(18)
     left, right = checked_pair(predicate, value, value)
     exact = BoundedEvaluationMeter(limits=LIMITS)
     short = BoundedEvaluationMeter(limits=LIMITS)
 
-    matches = check_parameter_equality_predicate(
+    matches = check_parameter_arena_predicate(
         predicate, left, right, meter=exact, max_pair_frames=19
     )
-    with pytest.raises(ParameterEqualityRejected) as refusal:
-        check_parameter_equality_predicate(
+    with pytest.raises(ParameterArenaRejected) as refusal:
+        check_parameter_arena_predicate(
             predicate, left, right, meter=short, max_pair_frames=18
         )
 
     assert matches is True
-    assert refusal.value.reason is ParameterEqualityFailure.CAPACITY
+    assert refusal.value.reason is ParameterArenaFailure.CAPACITY
 
 
 def test_parameter_equality_admits_exact_float_pair_work_bytes_and_entries() -> None:
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     left, right = checked_pair(predicate, 0.3, 0.3)
     meter = BoundedEvaluationMeter(limits=EXACT_FLOAT_PAIR)
 
-    matches = check_parameter_equality_predicate(
+    matches = check_parameter_arena_predicate(
         predicate, left, right, meter=meter, max_pair_frames=1
     )
 
@@ -215,23 +215,23 @@ def test_parameter_equality_admits_exact_float_pair_work_bytes_and_entries() -> 
 def test_parameter_equality_shares_allowance_across_completed_and_refused_calls() -> (
     None
 ):
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     left, right = checked_pair(predicate, None, None)
     meter = BoundedEvaluationMeter(limits=replace(LIMITS, max_work=103))
 
-    first = check_parameter_equality_predicate(
+    first = check_parameter_arena_predicate(
         predicate, left, right, meter=meter, max_pair_frames=1
     )
     paid = meter.work
-    with pytest.raises(ParameterEqualityRejected) as refusal:
-        check_parameter_equality_predicate(
+    with pytest.raises(ParameterArenaRejected) as refusal:
+        check_parameter_arena_predicate(
             predicate, left, right, meter=meter, max_pair_frames=1
         )
 
     assert first is True
     assert paid == 52
     assert meter.work == 103
-    assert refusal.value.reason is ParameterEqualityFailure.CAPACITY
+    assert refusal.value.reason is ParameterArenaFailure.CAPACITY
 
 
 @pytest.mark.parametrize(
@@ -242,44 +242,44 @@ def test_parameter_equality_refuses_independently_short_float_pair_allowance(
     dimension: Literal["max_work", "max_auxiliary_bytes", "max_auxiliary_entries"],
     allowance: int,
 ) -> None:
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     left, right = checked_pair(predicate, 0.3, 0.3)
     meter = BoundedEvaluationMeter(
         limits=replace(EXACT_FLOAT_PAIR, **{dimension: allowance})
     )
 
-    with pytest.raises(ParameterEqualityRejected) as refusal:
-        check_parameter_equality_predicate(
+    with pytest.raises(ParameterArenaRejected) as refusal:
+        check_parameter_arena_predicate(
             predicate, left, right, meter=meter, max_pair_frames=1
         )
 
-    assert refusal.value.reason is ParameterEqualityFailure.CAPACITY
+    assert refusal.value.reason is ParameterArenaFailure.CAPACITY
 
 
 def test_parameter_equality_refuses_negative_cursor_index() -> None:
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     left, right = checked_pair(predicate, PRIVATE, PRIVATE)
     invalid = replace(right, node=-1)
     meter = BoundedEvaluationMeter(limits=LIMITS)
 
-    with pytest.raises(ParameterEqualityRejected) as refusal:
-        check_parameter_equality_predicate(
+    with pytest.raises(ParameterArenaRejected) as refusal:
+        check_parameter_arena_predicate(
             predicate, left, invalid, meter=meter, max_pair_frames=1
         )
 
-    assert refusal.value.reason is ParameterEqualityFailure.INVALID
+    assert refusal.value.reason is ParameterArenaFailure.INVALID
 
 
 def test_parameter_equality_clears_active_pair_and_private_exception_context() -> None:
-    predicate = ParameterEqualityPredicate.CONST
+    predicate = ParameterArenaPredicate.CONST
     left, right = checked_pair(predicate, [PRIVATE], [PRIVATE])
     meter = BoundedEvaluationMeter(limits=LIMITS)
 
     try:
         raise RuntimeError(PRIVATE)
     except RuntimeError:
-        with pytest.raises(ParameterEqualityRejected) as refusal:
-            check_parameter_equality_predicate(
+        with pytest.raises(ParameterArenaRejected) as refusal:
+            check_parameter_arena_predicate(
                 predicate, left, right, meter=meter, max_pair_frames=1
             )
 
@@ -287,10 +287,10 @@ def test_parameter_equality_clears_active_pair_and_private_exception_context() -
         frame.f_code.co_name: frame.f_locals
         for frame, _ in walk_tb(refusal.value.__traceback__)
     }
-    assert refusal.value.reason is ParameterEqualityFailure.CAPACITY
+    assert refusal.value.reason is ParameterArenaFailure.CAPACITY
     assert refusal.value.__cause__ is refusal.value.__context__ is None
-    assert frames["check_parameter_equality_predicate"] == {
-        "reason": ParameterEqualityFailure.CAPACITY
+    assert frames["check_parameter_arena_predicate"] == {
+        "reason": ParameterArenaFailure.CAPACITY
     }
     assert {"_check", "_push", "compare_json_cursors"}.isdisjoint(frames)
     assert PRIVATE not in "".join(format_exception(refusal.value))
