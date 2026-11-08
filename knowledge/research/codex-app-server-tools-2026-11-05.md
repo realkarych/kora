@@ -153,6 +153,10 @@ supported-platform reconciliation belong to the implementing PR and issue.
 
 ## Remaining activation
 
+The [confirmed completion handoff](codex-confirmed-tool-completions-2026-11-08.md)
+delivers each admitted native result through the private session. The handoff
+keeps the distinction between native observations and shared tool result events.
+
 The stdlib native image exercises actual native metadata/session behavior.
 Full-package socketpair tests separately exercise host protocol/output consumers;
 no complete production native-to-core path or native macOS compatibility is
