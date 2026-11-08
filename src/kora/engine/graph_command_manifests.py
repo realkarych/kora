@@ -118,6 +118,13 @@ class PreparedCommandStageGroup:
         raise TypeError("command stage groups require explicit access")
 
 
+@dataclass(slots=True, repr=False)
+class _StageGroupParts:
+    key: bytes
+    data: bytes
+    ordinals: list[int]
+
+
 class ManifestAdmission:
     def __init__(self, limits: CommandManifestLimits) -> None:
         self.source: TextBudget = TextBudget(limits.ir_bytes)
@@ -136,15 +143,17 @@ class ManifestAdmission:
         if self.files > MAX_FILES or self.content > MAX_CONTENT_BYTES:
             raise GraphValueRejected(GraphValueFailure.INVALID)
 
-    def ordered(self, values: Collection[bytes]) -> list[bytes]:
-        def compare(left: bytes, right: bytes) -> int:
-            self.work.reserve(2 * min(len(left), len(right)) + 1)
-            return int(left > right) - int(left < right)
+    def compare_keys(self, left: bytes, right: bytes) -> int:
+        self.work.reserve(2 * min(len(left), len(right)) + 1)
+        return int(left > right) - int(left < right)
 
-        count = len(values)
+    def admit_sort(self, count: int) -> None:
         self.keep(3 * count)
         self.work.reserve(count * (64 + 4 * count.bit_length()))
-        return sorted(values, key=cmp_to_key(compare))
+
+    def ordered(self, values: Collection[bytes]) -> list[bytes]:
+        self.admit_sort(len(values))
+        return sorted(values, key=cmp_to_key(self.compare_keys))
 
 
 class ManifestTextBudget(TextBudget):
@@ -462,31 +471,38 @@ def _group_verified_contents(
     admission: ManifestAdmission,
 ) -> tuple[PreparedCommandStageGroup, ...]:
     admission.keep(1)
-    groups: dict[bytes, tuple[bytes, list[int]]] = {}
+    groups: list[_StageGroupParts] = []
     for ordinal, (item, digest) in enumerate(verified):
         admission.keep(1 + len(digest))
-        admission.work.reserve(len(digest) * (3 + 2 * len(groups)))
         key = digest.encode("ascii")
-        found = groups.get(key)
-        if found is None:
+        for group in groups:
+            admission.work.reserve(1 + len(key))
+            if group.key != key:
+                continue
+            admission.work.reserve(
+                1 + len(group.ordinals) + min(len(group.data), len(item.data))
+            )
+            if group.data != item.data:
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+            group.ordinals.append(ordinal)
+            break
+        else:
             admission.keep(4)
-            groups[key] = (item.data, [ordinal])
-            continue
-        representative, ordinals = found
-        admission.work.reserve(1 + min(len(representative), len(item.data)))
-        if representative != item.data:
-            raise GraphValueRejected(GraphValueFailure.INVALID)
-        ordinals.append(ordinal)
+            admission.work.reserve(len(groups))
+            groups.append(_StageGroupParts(key, item.data, [ordinal]))
 
+    admission.admit_sort(len(groups))
+    groups.sort(
+        key=cmp_to_key(lambda left, right: admission.compare_keys(left.key, right.key))
+    )
     admission.keep(1 + len(groups))
     result: list[PreparedCommandStageGroup] = []
-    for key in admission.ordered(groups.keys()):
-        admission.work.reserve(len(key) * (1 + len(groups)))
-        data, ordinals = groups[key]
-        admission.keep(len(key) + 4 + len(ordinals))
+    for group in groups:
+        admission.keep(len(group.key) + 4 + len(group.ordinals))
+        admission.work.reserve(len(result))
         result.append(
             PreparedCommandStageGroup(
-                store_id, key.decode("ascii"), data, tuple(ordinals)
+                store_id, group.key.decode("ascii"), group.data, tuple(group.ordinals)
             )
         )
     admission.keep(1 + len(result))

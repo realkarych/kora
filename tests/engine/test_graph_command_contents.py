@@ -309,6 +309,28 @@ def test_stage_groups_preserve_exact_address_order_and_canonical_ordinals() -> N
     assert groups[2].data is root_empty.data
 
 
+def test_stage_groups_cover_the_full_distinct_address_inventory() -> None:
+    files = tuple(
+        CommandResourceContent(ROOT, f"file-{index:02d}", bytes((index,)))
+        for index in range(MAX_FILES)
+    )
+    ir_text = source_for(files)
+
+    groups = prepare_graph_command_stage_groups(
+        ir_text, tuple(reversed(files)), storage_identity=STAGE_STORE, limits=LIMITS
+    )
+
+    assert len(groups) == MAX_FILES
+    assert [group.payload_digest for group in groups] == sorted(
+        "sha256:" + sha256(file.data).hexdigest() for file in files
+    )
+    assert sorted(group.ordinals for group in groups) == [
+        (ordinal,) for ordinal in range(MAX_FILES)
+    ]
+    for group in groups:
+        assert group.data is files[group.ordinals[0]].data
+
+
 def test_stage_group_storage_identity_is_required_for_even_an_empty_file() -> None:
     empty = source_for(())
     occurrence = CommandResourceContent(ROOT, "empty", b"")
