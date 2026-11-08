@@ -440,12 +440,12 @@ class TransitionLocks:
         self._usable = True
         return occupied
 
-    async def read_graph_publication_target(
+    def require_graph_publication_scope(
         self,
         connection: AsyncConnection,
         binding: GraphPreparationBinding,
         selected_graph_id: str,
-    ) -> str | None:
+    ) -> None:
         self.require_connection(connection)
         require_graph_preparation_binding(binding)
         if type(selected_graph_id) is not str or not is_identifier(selected_graph_id):
@@ -464,6 +464,14 @@ class TransitionLocks:
         )
         if self._storage_address is not None:
             raise LockError("the graph publication target precedes storage addresses")
+
+    async def read_graph_publication_target(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> str | None:
+        self.require_graph_publication_scope(connection, binding, selected_graph_id)
         self._usable = False
         graph_id = await _read_graph_publication_target(
             connection, self._dialect, binding
