@@ -75,9 +75,9 @@ WITHOUT_FIXTURES = {"PREPARATION_OUTCOME": "skipped", "TEARDOWN_OUTCOME": "skipp
 WITHOUT_BUILDS = {"STATIC_OUTCOME": "skipped", "DISTRIBUTIONS_OUTCOME": "skipped"}
 LANE_OUTCOMES = {
     "conformance": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "remainder": {**WITHOUT_FIXTURES, "STATIC_OUTCOME": "skipped"},
+    "remainder": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
     "storage": {**WITHOUT_FIXTURES, **WITHOUT_BUILDS},
-    "local-runtime": {"DISTRIBUTIONS_OUTCOME": "skipped"},
+    "local-runtime": {},
 }
 
 
@@ -599,9 +599,9 @@ def lane_completion_cases() -> dict[str, LaneCompletionCase]:
         expected_outcomes("conformance"),
         False,
     )
-    cases["unknown-reduced-profile"] = (
+    cases["unknown-local-runtime-profile"] = (
         "unknown",
-        expected_outcomes("remainder"),
+        expected_outcomes("local-runtime"),
         False,
     )
     cases["empty-conformance-profile"] = ("", expected_outcomes("conformance"), False)

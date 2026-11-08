@@ -67,7 +67,10 @@ def test_scaffold_protected_names_belong_only_to_complete_joins() -> None:
     for name, condition in (
         ("Install locked frontend dependencies", None),
         ("Check Python and frontend sources", "${{ matrix.lane == 'local-runtime' }}"),
-        ("Build isolated distributions offline", "${{ matrix.lane == 'remainder' }}"),
+        (
+            "Build isolated distributions offline",
+            "${{ matrix.lane == 'local-runtime' }}",
+        ),
     ):
         selected = next(step for step in entries if step.get("name") == name)
         assert selected.get("if") == condition
@@ -128,6 +131,44 @@ def test_source_checks_finish_before_host_fixture_acquisition() -> None:
         < entries.index(by_id["unit_collisions"])
         < entries.index(by_id["preparation"])
         < entries.index(by_id["tests"])
+    )
+
+
+def test_distribution_build_uses_locked_inputs_after_host_fixture_teardown() -> None:
+    job = table(workflow_jobs()["scaffold-tests"])
+    entries = [table(value) for value in cast(list[object], job["steps"])]
+    by_id = {str(step["id"]): step for step in entries if "id" in step}
+    distribution = by_id["distributions"]
+    guard = entries[-1]
+
+    commands = command_lines(distribution["run"])
+
+    assert commands == [
+        (
+            "KORA_BUILD_OFFLINE=1",
+            "uv",
+            "build",
+            "--offline",
+            "--python",
+            "$PWD/.venv/bin/python",
+            "--build-constraints",
+            "$KORA_BUILD_CONSTRAINT_DIR/constraints.txt",
+            "--require-hashes",
+            "--clear",
+        )
+    ]
+    assert (
+        entries.index(by_id["dependencies"])
+        < entries.index(by_id["frontend_dependencies"])
+        < entries.index(by_id["tests"])
+        < entries.index(by_id["teardown"])
+        < entries.index(distribution)
+        < entries.index(by_id["final_sync"])
+        < entries.index(guard)
+    )
+    assert (
+        table(guard["env"])["DISTRIBUTIONS_OUTCOME"]
+        == "${{ steps.distributions.outcome }}"
     )
 
 
