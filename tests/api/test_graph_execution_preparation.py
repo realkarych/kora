@@ -4,6 +4,7 @@ import json
 import pickle
 from collections.abc import Generator
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from traceback import walk_tb
 from typing import Literal, cast
@@ -290,6 +291,7 @@ def check_logical_roundtrip() -> None:
     assert isinstance(alternative, PreparedExecutionContract)
     original_resources = original.resources
     original_digests = original.digests
+    copied_digests = deepcopy(logical.digests)
     with pytest.raises(AttributeError, match="immutable"):
         logical.canonical_ir = MARKER
     with pytest.raises(AttributeError, match="immutable"):
@@ -309,6 +311,10 @@ def check_logical_roundtrip() -> None:
             alternative.resources,
             alternative.owners,
         )
+    with pytest.raises(AttributeError, match="immutable"):
+        logical.digests.__init__(MARKER, MARKER, MARKER)
+    with pytest.raises(AttributeError, match="immutable"):
+        logical.digests.__setstate__([MARKER, MARKER, MARKER])
     with pytest.raises(TypeError, match="explicit access") as pickling:
         pickle.dumps(logical)
     with pytest.raises(ValueError, match="not iterable") as encoder:
@@ -330,6 +336,7 @@ def check_logical_roundtrip() -> None:
         == alternative.canonical_contract
     )
     assert logical.digests == original.digests == alternative.digests
+    assert copied_digests == logical.digests
     assert logical.digests.ir_digest == digest(ir_text)
     assert logical.digests.execution_contract_digest == digest(
         logical.canonical_contract
