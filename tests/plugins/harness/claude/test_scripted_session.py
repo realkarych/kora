@@ -983,7 +983,10 @@ async def test_scripted_cleanup_kills_an_unmarked_member_that_ignores_terminatio
     child_script.write_text(
         "import os\nimport pathlib\nimport signal\nimport sys\nimport time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii')\n"
+        "ready = pathlib.Path(sys.argv[1])\n"
+        "staged = ready.with_suffix('.pending')\n"
+        "staged.write_text(str(os.getpid()), encoding='ascii')\n"
+        "staged.replace(ready)\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
