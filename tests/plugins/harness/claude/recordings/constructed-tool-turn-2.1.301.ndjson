@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","session_id":"sess-replay-1","apiKeySource":"ANTHROPIC_API_KEY","claude_code_version":"2.1.301","plugins":[],"mcp_servers":[],"tools":["Write"],"model":"claude-sonnet-4-5","permissionMode":"bypassPermissions","uuid":"init-1","cwd":"/work","slash_commands":[],"output_style":"default","skills":[]}
+{"type":"stream_event","uuid":"stream-1","session_id":"sess-replay-1","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hidden-delta"}}}
+{"type":"assistant","uuid":"asst-1","session_id":"sess-replay-1","message":{"id":"msg-turn-1","model":"claude-sonnet-4-5","content":[{"type":"text","text":"hel"}]}}
+{"type":"assistant","uuid":"asst-2","session_id":"sess-replay-1","message":{"id":"msg-turn-1","model":"claude-sonnet-4-5","content":[{"type":"text","text":"lo"},{"type":"tool_use","id":"toolu-write-1","name":"Write","input":{"file_path":"/tmp/out","content":"hidden-tool-input"}}]}}
+{"type":"user","uuid":"user-1","session_id":"sess-replay-1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu-write-1","content":"wrote","is_error":false}]}}
+{"type":"result","subtype":"success","duration_ms":1,"duration_api_ms":1,"is_error":false,"num_turns":1,"session_id":"sess-replay-1","uuid":"result-1"}

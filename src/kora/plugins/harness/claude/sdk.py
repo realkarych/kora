@@ -3,14 +3,22 @@ import sys
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
 from claude_agent_sdk import (
+    AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ClaudeSDKError,
     HookMatcher,
+    Message,
     ResultMessage,
+    StreamEvent,
+    SystemMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
     __version__,
 )
 from claude_agent_sdk._cli_version import __cli_version__
@@ -23,6 +31,12 @@ from claude_agent_sdk.types import (
 )
 
 from kora.plugins.harness.claude.configuration import CLI_VERSION, SDK_VERSION
+from kora.plugins.harness.claude.events import (
+    ClaudeEvents,
+    TextPiece,
+    ToolPiece,
+    refused,
+)
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import LaunchInputs
 from kora.protocols.time import Clock
@@ -221,3 +235,139 @@ async def run_scripted_client(
     if failures:
         raise KoraProtocolError("harness_error", "the Claude session failed", False, {})
     return outcome
+
+
+def text_item(item: object) -> str:
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        block = cast("dict[object, object]", item)
+        kind = block.get("type")
+        text = block.get("text")
+        if kind == "text" and isinstance(text, str):
+            return text
+    refused()
+
+
+def result_text(content: object) -> str | None:
+    if content is None:
+        return None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        refused()
+    items = list[object].copy(cast("list[object]", content))
+    return "".join(text_item(item) for item in items)
+
+
+def feed_assistant(events: ClaudeEvents, message: AssistantMessage) -> None:
+    message_id = message.message_id
+    if not isinstance(message_id, str):
+        events.drop("assistant")
+        return
+    pieces: list[TextPiece | ToolPiece] = []
+    for block in message.content:
+        if isinstance(block, TextBlock):
+            pieces.append(TextPiece(block.text))
+        elif isinstance(block, ToolUseBlock):
+            pieces.append(ToolPiece(block.name, block.id))
+    events.assistant(message_id, message.parent_tool_use_id, tuple(pieces))
+
+
+def feed_user(events: ClaudeEvents, message: UserMessage) -> None:
+    content = message.content
+    if isinstance(content, str):
+        events.drop("user")
+        return
+    for block in content:
+        if isinstance(block, ToolResultBlock):
+            events.tool_result(
+                block.tool_use_id,
+                block.is_error is True,
+                result_text(block.content),
+            )
+            continue
+        events.drop("user")
+
+
+def feed(events: ClaudeEvents, message: Message) -> None:
+    if isinstance(message, SystemMessage):
+        if message.subtype == "init":
+            events.observe_init(message.data)
+            return
+        events.drop("system")
+        return
+    if isinstance(message, AssistantMessage):
+        feed_assistant(events, message)
+        return
+    if isinstance(message, UserMessage):
+        feed_user(events, message)
+        return
+    if isinstance(message, ResultMessage):
+        events.drop("result")
+        return
+    if isinstance(message, StreamEvent):
+        events.drop("stream_event")
+        return
+    events.drop("message")
+
+
+async def read_replay(client: ClaudeSDKClient, events: ClaudeEvents) -> None:
+    async for message in client.receive_messages():
+        feed(events, message)
+    events.finish()
+
+
+async def run_replayed_client(
+    events: ClaudeEvents,
+    *,
+    cwd: Path,
+    launcher: Path,
+    launch_dir: Path,
+    prompt: str,
+    tools: tuple[str, ...],
+    clock: Clock,
+    deadline_ns: int,
+) -> None:
+    sources: list[SettingSource] = []
+    prompt_preset: SystemPromptPreset = {"type": "preset", "preset": "claude_code"}
+    options = ClaudeAgentOptions(
+        cwd=cwd,
+        cli_path=launcher,
+        env={LAUNCH_DIRECTORY: str(launch_dir)},
+        setting_sources=sources,
+        strict_mcp_config=True,
+        permission_mode="bypassPermissions",
+        tools=list(tools),
+        max_turns=TURN_LIMIT,
+        model=MODEL,
+        extra_args={"no-session-persistence": None},
+        system_prompt=prompt_preset,
+        stderr=discard_stderr,
+        include_partial_messages=True,
+    )
+    client = ClaudeSDKClient(options=options)
+    try:
+        connect = asyncio.create_task(client.connect(prompt))
+        try:
+            await wait_task(connect, clock, deadline_ns)
+        finally:
+            await drop(connect)
+        read = asyncio.create_task(read_replay(client, events))
+        try:
+            await wait_task(read, clock, deadline_ns)
+        finally:
+            await drop(read)
+    except KoraProtocolError:
+        raise
+    except (ClaudeSDKError, OSError):
+        raise KoraProtocolError(
+            "harness_error", "the Claude session failed", False, {}
+        ) from None
+    finally:
+        try:
+            await client.disconnect()
+        except (ClaudeSDKError, OSError):
+            raise KoraProtocolError(
+                "harness_error", "the Claude session failed", False, {}
+            ) from None
