@@ -163,6 +163,7 @@ select = [
 "src/kora/observability/bootstrap.py" = ["BLE001"]
 "src/kora/cel_eval/thread.py" = ["BLE001"]
 "src/kora/observability/sink.py" = ["BLE001"]
+"src/kora/plugins/harness/claude/sdk.py" = ["BLE001"]
 "src/kora/runner/gate.py" = ["S606"]
 "tests/support/warning_filters.py" = ["TID251"]
 "tests/fixtures/provider_tooling/src/kora_tooling_fixture/adverse_outcomes.py" = ["TID251"]

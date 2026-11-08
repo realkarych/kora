@@ -149,7 +149,7 @@ jobs:
       - name: Install locked dependencies
         id: dependencies
         run: |
-          uv sync --locked --no-build --group build --extra postgres --extra cel --no-install-project
+          uv sync --locked --no-build --group build --extra postgres --extra cel --extra claude --no-install-project
           KORA_BUILD_CONSTRAINT_DIR="$(mktemp -d)"
           uv export --locked --only-group build --no-emit-project \
             --format requirements.txt \
