@@ -327,6 +327,8 @@ The first sync installs the locked dependencies without the project; the editabl
 
 The documentation jobs use pinned Markdown and Mermaid tools through npx, lychee as recorded in the [dated research](../knowledge/research/repository-scaffold-and-ci-2026-10-18.md#ci-and-documentation-check-record), and a pinned schema checker through uvx. Install that lychee release using its [official installation instructions](https://lychee.cli.rs/installation/). These tool setups may download dependencies; the link check itself uses the repository's offline configuration.
 
+On 2026-11-08, the project owner approved acquiring the pinned Linux Lychee archive from the public GitHub release asset API under [issue #1073](https://github.com/realkarych/kora/issues/1073). The workflow verifies the archive and executable before use. Acquisition and offline validation run without a GitHub token. The required job retains its deadline and Markdown report.
+
 Run this block in Bash. Git discovers tracked and non-ignored untracked Markdown, so installed dependencies, generated assets and ignored scratch work are excluded. NUL-delimited paths preserve spaces and newlines. The Markdown linter retains the research exclusion in [`.markdownlintignore`](../.markdownlintignore); links and Mermaid diagrams still cover research.
 
 ```bash
@@ -354,7 +356,7 @@ uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-forms .github/I
 uvx check-jsonschema@0.38.2 --builtin-schema vendor.github-issue-config .github/ISSUE_TEMPLATE/config.yml
 ```
 
-Mermaid rendering uses Puppeteer and its downloaded browser. `rg` (ripgrep) selects Markdown files containing a Mermaid fence; CI installs it explicitly before discovery. Empty discovery fails. In CI, the pinned lychee action receives the same discovered filenames after Bash escaping because its entrypoint evaluates its arguments.
+Mermaid rendering uses Puppeteer and its downloaded browser. `rg` (ripgrep) selects Markdown files containing a Mermaid fence; CI installs it explicitly before discovery. Empty discovery fails. In CI, the link check reads the same NUL-delimited Markdown paths and passes each as a literal local input to the pinned Lychee executable. It checks links and anchors offline and requires a report with at least one link.
 
 ## Local and native review
 

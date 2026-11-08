@@ -21,7 +21,6 @@ ACTION_COMMITS = {
     "astral-sh/setup-uv": "c18668ad3cf93ea998bef934396af7bb5c839dc7",
     "github/codeql-action": "6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee",
     "google/osv-scanner-action": "b1d267aea5211fa648d9d442fa64b90dbdcbdd36",
-    "lycheeverse/lychee-action": "e7477775783ea5526144ba13e8db5eec57747ce8",
     "pnpm/action-setup": "ea17c68df8912ef543352723c149a84f56e3d413",
 }
 FAILURE_HANDLERS = frozenset({"||", "trap"})
@@ -414,3 +413,26 @@ def test_every_gating_status_context_is_produced() -> None:
         location: job["if"] for location, job in gating if "if" in job
     } == GATING_JOB_CONDITIONS
     assert all("continue-on-error" not in job for _, job in gating)
+
+
+def test_link_job_retains_its_required_credential_free_entrypoint() -> None:
+    workflow = workflow_document("ci.yml")
+
+    job = table(table(workflow["jobs"])["links"])
+    checkout, checker = step_list(job)
+
+    assert job == {
+        "name": "Links and anchors",
+        "runs-on": "ubuntu-latest",
+        "timeout-minutes": 10,
+        "steps": [checkout, checker],
+    }
+    assert checkout == {
+        "uses": f"actions/checkout@{ACTION_COMMITS['actions/checkout']}",
+        "with": {"persist-credentials": False},
+    }
+    assert checker == {
+        "name": "Check repository links and anchors offline",
+        "run": "python3 scripts/ci/link_check.py",
+    }
+    assert workflow["permissions"] == {"contents": "read"}

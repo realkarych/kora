@@ -1590,26 +1590,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Discover repository Markdown
-        id: markdown-files
-        shell: bash
-        run: |
-          set -euo pipefail
-          KORA_DOC_FILES="$(mktemp)"
-          git ls-files --cached --others --exclude-standard -z -- '*.md' > "$KORA_DOC_FILES"
-          test -s "$KORA_DOC_FILES"
-          args='--config lychee.toml --'
-          while IFS= read -r -d '' file; do
-            printf -v escaped '%q' "$file"
-            args+=" $escaped"
-          done < "$KORA_DOC_FILES"
-          printf 'args=%s\n' "$args" >> "$GITHUB_OUTPUT"
-      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
-        with:
-          lycheeVersion: v0.24.2
-          args: ${{ steps.markdown-files.outputs.args }}
-          jobSummary: false
-          output: ${{ runner.temp }}/lychee.md
+      - name: Check repository links and anchors offline
+        run: python3 scripts/ci/link_check.py
 
   mermaid:
     name: Mermaid diagrams
