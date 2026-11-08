@@ -5,7 +5,7 @@ from hashlib import sha256
 from typing import Never, Self, cast
 from unicodedata import is_normalized
 
-from pydantic import MISSING
+from pydantic import MISSING, TypeAdapter, ValidationError
 
 from kora.cel_eval.errors import raise_safe
 from kora.db.graph_value_json import (
@@ -20,12 +20,15 @@ from kora.ir.document import GraphDocument
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.structured_json import encode_snapshot
 from kora.ir.topology import CommandNode
+from kora.protocols.identity_records import Identifier
+from kora.protocols.storage_models import StorageIdentity
 
 INTERPRETATION = "kora.command-resources.v1"
 EMPTY_DIGEST = "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
 MAX_FILES = 64
 MAX_CONTENT_BYTES = 1_048_576
 SHA256_FIXED_WORK = 256
+STORE_IDENTIFIER: TypeAdapter[str] = TypeAdapter(Identifier)
 _ABSENT = object()
 
 
@@ -78,6 +81,41 @@ class CommandResourceContent:
 
     def __getstate__(self) -> Never:
         raise TypeError("command resource contents require explicit access")
+
+
+class PreparedCommandStageGroup:
+    __slots__ = ("store_id", "payload_digest", "data", "ordinals")
+    store_id: str
+    payload_digest: str
+    data: bytes
+    ordinals: tuple[int, ...]
+
+    def __new__(
+        cls,
+        store_id: str,
+        payload_digest: str,
+        data: bytes,
+        ordinals: tuple[int, ...],
+    ) -> Self:
+        group = super().__new__(cls)
+        object.__setattr__(group, "store_id", store_id)
+        object.__setattr__(group, "payload_digest", payload_digest)
+        object.__setattr__(group, "data", data)
+        object.__setattr__(group, "ordinals", ordinals)
+        return group
+
+    @property
+    def total_size(self) -> int:
+        return len(self.data)
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("command stage groups are immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("command stage groups are immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("command stage groups require explicit access")
 
 
 class ManifestAdmission:
@@ -340,6 +378,37 @@ def _take_content(
     raise GraphValueRejected(GraphValueFailure.INVALID)
 
 
+def _verified_contents(
+    ir_text: str,
+    contents: tuple[CommandResourceContent, ...],
+    admission: ManifestAdmission,
+) -> list[tuple[CommandResourceContent, str]]:
+    total = _admit_contents(contents, admission)
+    expected = _derive(ir_text, admission)
+    if len(contents) != admission.files:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    pending = list(contents)
+    ordered: list[tuple[CommandResourceContent, str]] = []
+    for command in cast(list[JsonObject], expected["commands"]):
+        files = cast(list[JsonObject], command["resources"])
+        admission.work.reserve(1)
+        if not files:
+            continue
+        segments = cast(list[str], command["path"])
+        admission.keep(len(segments) + 1)
+        path = tuple(segments)
+        for file in files:
+            item = _take_content(pending, path, cast(str, file["name"]), admission)
+            if len(item.data) != file["size"]:
+                raise GraphValueRejected(GraphValueFailure.INVALID)
+            ordered.append((item, cast(str, file["sha256"])))
+    admission.work.reserve(total + SHA256_FIXED_WORK * len(ordered))
+    for item, expected_digest in ordered:
+        if "sha256:" + sha256(item.data).hexdigest() != expected_digest:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+    return ordered
+
+
 def _contents_result(
     ir_text: str,
     contents: tuple[CommandResourceContent, ...],
@@ -347,29 +416,7 @@ def _contents_result(
 ) -> tuple[CommandResourceContent, ...] | GraphValueFailure:
     try:
         admission = ManifestAdmission(limits)
-        total = _admit_contents(contents, admission)
-        expected = _derive(ir_text, admission)
-        if len(contents) != admission.files:
-            raise GraphValueRejected(GraphValueFailure.INVALID)
-        pending = list(contents)
-        ordered: list[tuple[CommandResourceContent, str]] = []
-        for command in cast(list[JsonObject], expected["commands"]):
-            files = cast(list[JsonObject], command["resources"])
-            admission.work.reserve(1)
-            if not files:
-                continue
-            segments = cast(list[str], command["path"])
-            admission.keep(len(segments) + 1)
-            path = tuple(segments)
-            for file in files:
-                item = _take_content(pending, path, cast(str, file["name"]), admission)
-                if len(item.data) != file["size"]:
-                    raise GraphValueRejected(GraphValueFailure.INVALID)
-                ordered.append((item, cast(str, file["sha256"])))
-        admission.work.reserve(total + SHA256_FIXED_WORK * len(ordered))
-        for item, expected_digest in ordered:
-            if "sha256:" + sha256(item.data).hexdigest() != expected_digest:
-                raise GraphValueRejected(GraphValueFailure.INVALID)
+        ordered = _verified_contents(ir_text, contents, admission)
         return tuple(item for item, _ in ordered)
     except GraphValueRejected as rejected:
         return rejected.reason
@@ -385,4 +432,94 @@ def verify_graph_command_contents(
     if isinstance(result, tuple):
         return result
     del ir_text, contents
+    raise_safe(GraphValueRejected(result))
+
+
+def _stage_store_id(
+    storage_identity: StorageIdentity | None, admission: ManifestAdmission
+) -> str:
+    if type(storage_identity) is not StorageIdentity:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    version: object = getattr(storage_identity, "version", None)
+    store_id: object = getattr(storage_identity, "store_id", None)
+    if (
+        type(version) is not int
+        or version != 1
+        or type(store_id) is not str
+        or not 1 <= len(store_id) <= 256
+    ):
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    admission.keep(4 * len(store_id))
+    try:
+        return STORE_IDENTIFIER.validate_python(store_id)
+    except ValidationError:
+        raise GraphValueRejected(GraphValueFailure.INVALID) from None
+
+
+def _group_verified_contents(
+    verified: list[tuple[CommandResourceContent, str]],
+    store_id: str,
+    admission: ManifestAdmission,
+) -> tuple[PreparedCommandStageGroup, ...]:
+    admission.keep(1)
+    groups: dict[bytes, tuple[bytes, list[int]]] = {}
+    for ordinal, (item, digest) in enumerate(verified):
+        admission.keep(1 + len(digest))
+        admission.work.reserve(len(digest) * (3 + 2 * len(groups)))
+        key = digest.encode("ascii")
+        found = groups.get(key)
+        if found is None:
+            admission.keep(4)
+            groups[key] = (item.data, [ordinal])
+            continue
+        representative, ordinals = found
+        admission.work.reserve(1 + min(len(representative), len(item.data)))
+        if representative != item.data:
+            raise GraphValueRejected(GraphValueFailure.INVALID)
+        ordinals.append(ordinal)
+
+    admission.keep(1 + len(groups))
+    result: list[PreparedCommandStageGroup] = []
+    for key in admission.ordered(groups.keys()):
+        admission.work.reserve(len(key) * (1 + len(groups)))
+        data, ordinals = groups[key]
+        admission.keep(len(key) + 4 + len(ordinals))
+        result.append(
+            PreparedCommandStageGroup(
+                store_id, key.decode("ascii"), data, tuple(ordinals)
+            )
+        )
+    admission.keep(1 + len(result))
+    return tuple(result)
+
+
+def _stage_groups_result(
+    ir_text: str,
+    contents: tuple[CommandResourceContent, ...],
+    storage_identity: StorageIdentity | None,
+    limits: CommandManifestLimits,
+) -> tuple[PreparedCommandStageGroup, ...] | GraphValueFailure:
+    try:
+        admission = ManifestAdmission(limits)
+        verified = _verified_contents(ir_text, contents, admission)
+        if not verified:
+            return ()
+        return _group_verified_contents(
+            verified, _stage_store_id(storage_identity, admission), admission
+        )
+    except GraphValueRejected as rejected:
+        return rejected.reason
+
+
+def prepare_graph_command_stage_groups(
+    ir_text: str,
+    contents: tuple[CommandResourceContent, ...],
+    *,
+    storage_identity: StorageIdentity | None,
+    limits: CommandManifestLimits,
+) -> tuple[PreparedCommandStageGroup, ...]:
+    result = _stage_groups_result(ir_text, contents, storage_identity, limits)
+    if isinstance(result, tuple):
+        return result
+    del ir_text, contents, storage_identity
     raise_safe(GraphValueRejected(result))

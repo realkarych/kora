@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from hashlib import sha256
 from traceback import walk_tb
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 from fastapi.encoders import jsonable_encoder
@@ -11,12 +11,16 @@ from fastapi.encoders import jsonable_encoder
 from kora.db.graph_value_json import GraphValueFailure, GraphValueRejected
 from kora.engine.graph_command_manifests import (
     MAX_FILES,
+    CommandManifestLimits,
     CommandResourceContent,
+    PreparedCommandStageGroup,
     build_declared_command_manifests,
+    prepare_graph_command_stage_groups,
     verify_graph_command_contents,
 )
 from kora.ir.config import COMMAND_RESOURCE_MAX_BYTES
 from kora.ir.json import JsonObject
+from kora.protocols.storage_models import StorageIdentity
 from tests.engine.test_graph_command_manifests import (
     LIMITS,
     MARKER,
@@ -30,6 +34,7 @@ from tests.engine.test_graph_command_manifests import (
 
 ROOT = ("graph", "nodes", "producer")
 BODY = ("graph", "subgraphs", "body", "nodes", "producer")
+STAGE_STORE = StorageIdentity(version=1, store_id="Selected-Store")
 
 
 def source_for(
@@ -276,3 +281,268 @@ def test_command_contents_protect_bytes_and_failure_frames() -> None:
         assert set(frames["verify_graph_command_contents"]) == {"limits", "result"}
         assert "_contents_result" not in frames
         assert "_admit_contents" not in frames
+
+
+def test_stage_groups_preserve_exact_address_order_and_canonical_ordinals() -> None:
+    shared = b"private-stage-bytes"
+    separate = b"separate content"
+    root_first = CommandResourceContent(ROOT, "A.txt", shared)
+    root_case = CommandResourceContent(ROOT, "a.txt", separate)
+    root_empty = CommandResourceContent(ROOT, "é.txt", b"")
+    body_shared = CommandResourceContent(BODY, "A.txt", bytes(bytearray(shared)))
+    ir_text = source_for((root_empty, root_case, root_first), (body_shared,))
+    supplied = (body_shared, root_empty, root_case, root_first)
+
+    groups = prepare_graph_command_stage_groups(
+        ir_text, supplied, storage_identity=STAGE_STORE, limits=LIMITS
+    )
+
+    assert body_shared.data is not root_first.data
+    assert [group.ordinals for group in groups] == [(1,), (0, 3), (2,)]
+    assert [group.store_id for group in groups] == [STAGE_STORE.store_id] * 3
+    assert [group.payload_digest for group in groups] == [
+        "sha256:" + sha256(data).hexdigest() for data in (separate, shared, b"")
+    ]
+    assert [group.total_size for group in groups] == [len(separate), len(shared), 0]
+    assert groups[0].data is root_case.data
+    assert groups[1].data is root_first.data
+    assert groups[2].data is root_empty.data
+
+
+def test_stage_group_storage_identity_is_required_for_even_an_empty_file() -> None:
+    empty = source_for(())
+    occurrence = CommandResourceContent(ROOT, "empty", b"")
+    declared_empty_file = source_for((occurrence,))
+
+    fileless = prepare_graph_command_stage_groups(
+        empty, (), storage_identity=None, limits=LIMITS
+    )
+    with pytest.raises(GraphValueRejected) as refused:
+        prepare_graph_command_stage_groups(
+            declared_empty_file, (occurrence,), storage_identity=None, limits=LIMITS
+        )
+
+    assert fileless == ()
+    assert_content_free(refused.value, GraphValueFailure.INVALID)
+
+
+@pytest.mark.parametrize("mismatch", ["missing", "duplicate", "extra", "case", "bytes"])
+def test_stage_groups_reject_inexact_occurrences(mismatch: str) -> None:
+    first = CommandResourceContent(ROOT, "A.txt", b"one")
+    second = CommandResourceContent(BODY, "B.txt", b"two")
+    ir_text = source_for((first,), (second,))
+    candidates = {
+        "missing": (first,),
+        "duplicate": (first, first),
+        "extra": (first, second, CommandResourceContent(ROOT, "extra", b"")),
+        "case": (CommandResourceContent(ROOT, "a.txt", first.data), second),
+        "bytes": (first, CommandResourceContent(BODY, second.name, b"bad")),
+    }
+
+    with pytest.raises(GraphValueRejected) as refused:
+        prepare_graph_command_stage_groups(
+            ir_text, candidates[mismatch], storage_identity=STAGE_STORE, limits=LIMITS
+        )
+
+    assert_content_free(refused.value, GraphValueFailure.INVALID)
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        StorageIdentity.model_construct(),
+        StorageIdentity.model_construct(version=True, store_id=MARKER),
+        StorageIdentity.model_construct(version=2, store_id=MARKER),
+        StorageIdentity.model_construct(version=1, store_id=f"{MARKER} invalid"),
+        StorageIdentity.model_construct(version=1, store_id=MARKER * 1000),
+    ],
+)
+def test_stage_groups_refuse_malformed_selected_identity(
+    identity: StorageIdentity,
+) -> None:
+    file = CommandResourceContent(ROOT, MARKER, MARKER.encode())
+    ir_text = source_for((file,))
+
+    with pytest.raises(GraphValueRejected) as refused:
+        prepare_graph_command_stage_groups(
+            ir_text, (file,), storage_identity=identity, limits=LIMITS
+        )
+
+    assert_content_free(refused.value, GraphValueFailure.INVALID)
+
+
+@pytest.mark.parametrize("limit", ["file", "aggregate", "occurrences"])
+def test_stage_group_path_preserves_occurrence_and_byte_limits(limit: str) -> None:
+    full_file = b"x" * COMMAND_RESOURCE_MAX_BYTES
+    files = tuple(
+        CommandResourceContent(ROOT, f"file-{index}", full_file) for index in range(4)
+    )
+    empty_files = tuple(
+        CommandResourceContent(ROOT, f"empty-{index}", b"")
+        for index in range(MAX_FILES)
+    )
+    cases = {
+        "file": (
+            (files[0],),
+            (CommandResourceContent(ROOT, files[0].name, full_file + b"x"),),
+        ),
+        "aggregate": (files, (*files, CommandResourceContent(ROOT, "tail", b"x"))),
+        "occurrences": (
+            empty_files,
+            (*empty_files, CommandResourceContent(ROOT, "tail", b"")),
+        ),
+    }
+    exact, candidate = cases[limit]
+    ir_text = source_for(exact)
+
+    groups = prepare_graph_command_stage_groups(
+        ir_text, exact, storage_identity=STAGE_STORE, limits=LIMITS
+    )
+    with pytest.raises(GraphValueRejected) as refused:
+        prepare_graph_command_stage_groups(
+            ir_text, candidate, storage_identity=STAGE_STORE, limits=LIMITS
+        )
+
+    assert len(groups) == 1
+    assert groups[0].ordinals == tuple(range(len(exact)))
+    assert_content_free(refused.value, GraphValueFailure.INVALID)
+
+
+BudgetDimension = Literal["scratch", "work"]
+
+
+def with_budget(
+    limits: CommandManifestLimits, dimension: BudgetDimension, amount: int
+) -> CommandManifestLimits:
+    return (
+        replace(limits, scratch=amount)
+        if dimension == "scratch"
+        else replace(limits, work=amount)
+    )
+
+
+def required_budget(
+    operation: Callable[[CommandManifestLimits], object],
+    dimension: BudgetDimension,
+) -> int:
+    low = 0
+    high = LIMITS.scratch if dimension == "scratch" else LIMITS.work
+    while low + 1 < high:
+        middle = (low + high) // 2
+        try:
+            operation(with_budget(LIMITS, dimension, middle))
+        except GraphValueRejected as refused:
+            if refused.reason is not GraphValueFailure.BUDGET:
+                raise
+            low = middle
+        else:
+            high = middle
+    return high
+
+
+@pytest.mark.parametrize("dimension", ["scratch", "work"])
+def test_stage_group_cumulative_budget_extends_the_existing_verification(
+    dimension: BudgetDimension,
+) -> None:
+    first = CommandResourceContent(ROOT, "first", b"x" * 8_192)
+    second = CommandResourceContent(BODY, "second", bytes(bytearray(first.data)))
+    ir_text = source_for((first,), (second,))
+    supplied = (first, second)
+
+    def verify(limits: CommandManifestLimits) -> tuple[CommandResourceContent, ...]:
+        return verify_graph_command_contents(ir_text, supplied, limits=limits)
+
+    def prepare(limits: CommandManifestLimits) -> tuple[PreparedCommandStageGroup, ...]:
+        return prepare_graph_command_stage_groups(
+            ir_text, supplied, storage_identity=STAGE_STORE, limits=limits
+        )
+
+    verified_limit = required_budget(verify, dimension)
+    group_limit = required_budget(prepare, dimension)
+
+    verified = verify(with_budget(LIMITS, dimension, verified_limit))
+    groups = prepare(with_budget(LIMITS, dimension, group_limit))
+    with pytest.raises(GraphValueRejected) as grouping_at_verifier_limit:
+        prepare(with_budget(LIMITS, dimension, verified_limit))
+    with pytest.raises(GraphValueRejected) as one_below:
+        prepare(with_budget(LIMITS, dimension, group_limit - 1))
+
+    assert first.data is not second.data
+    assert verified == supplied
+    assert len(groups) == 1
+    assert group_limit > verified_limit
+    assert_content_free(grouping_at_verifier_limit.value, GraphValueFailure.BUDGET)
+    assert_content_free(one_below.value, GraphValueFailure.BUDGET)
+
+
+def test_stage_group_work_charges_each_duplicate_comparison_width() -> None:
+    small, large = 16, 16_384
+
+    def grouping_overhead(width: int) -> int:
+        first = CommandResourceContent(ROOT, "first", b"x" * width)
+        second = CommandResourceContent(BODY, "second", bytes(bytearray(first.data)))
+        source = source_for((first,), (second,))
+        supplied = (first, second)
+        original = required_budget(
+            lambda limits: verify_graph_command_contents(
+                source, supplied, limits=limits
+            ),
+            "work",
+        )
+        grouped = required_budget(
+            lambda limits: prepare_graph_command_stage_groups(
+                source, supplied, storage_identity=STAGE_STORE, limits=limits
+            ),
+            "work",
+        )
+        return grouped - original
+
+    difference = grouping_overhead(large) - grouping_overhead(small)
+
+    assert difference == large - small
+
+
+def test_stage_group_values_and_refusals_protect_private_data() -> None:
+    file = CommandResourceContent(ROOT, MARKER, MARKER.encode())
+    ir_text = source_for((file,))
+    invalid_identity = StorageIdentity.model_construct(
+        version=1, store_id=f"{MARKER} invalid"
+    )
+    tiny_budget = replace(LIMITS, scratch=1)
+
+    groups = prepare_graph_command_stage_groups(
+        ir_text, (file,), storage_identity=STAGE_STORE, limits=LIMITS
+    )
+    with pytest.raises(AttributeError, match="immutable"):
+        groups[0].ordinals = ()
+    with pytest.raises(TypeError, match="explicit access"):
+        pickle.dumps(groups)
+    with pytest.raises(ValueError, match="not iterable") as encoder:
+        jsonable_encoder(groups)
+    try:
+        raise RuntimeError(MARKER)
+    except RuntimeError:
+        with pytest.raises(GraphValueRejected) as invalid:
+            prepare_graph_command_stage_groups(
+                ir_text, (file,), storage_identity=invalid_identity, limits=LIMITS
+            )
+        with pytest.raises(GraphValueRejected) as budget:
+            prepare_graph_command_stage_groups(
+                ir_text, (file,), storage_identity=STAGE_STORE, limits=tiny_budget
+            )
+
+    assert groups[0].data is file.data
+    assert groups[0].ordinals == (0,)
+    assert MARKER not in repr(groups)
+    assert STAGE_STORE.store_id not in repr(groups)
+    assert MARKER not in repr(encoder.value)
+    assert_content_free(invalid.value, GraphValueFailure.INVALID)
+    assert_content_free(budget.value, GraphValueFailure.BUDGET)
+    for refusal in (invalid.value, budget.value):
+        frames = {
+            frame.f_code.co_name: frame.f_locals
+            for frame, _ in walk_tb(refusal.__traceback__)
+        }
+        assert set(frames["prepare_graph_command_stage_groups"]) == {"limits", "result"}
+        assert "_stage_groups_result" not in frames
+        assert "_stage_store_id" not in frames
