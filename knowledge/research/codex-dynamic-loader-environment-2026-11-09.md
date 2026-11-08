@@ -26,6 +26,8 @@ The initial audit object lacked a linked libc dependency. Its adverse run failed
 
 The selected launch control passed all five cases on constructor revision `c4ac8b1ff2bb086a82ee6837503451bb1785adab` using `--check-selected-launch`. It confirmed the ordinary allow, denial, missing key, command metadata and exit-seven outcomes, reaped both roles in each case and removed all five exact containers. Before and after inventories were empty. Wall time was 42 seconds and the log SHA-256 was `224e6d80db27b9d33a2625d739ab7dc2efe0771fe84a1a154957fef2505ff24d`.
 
+The complete five-case launch control also passed after rebasing onto the merged executor fixture. The exact executable revision is `e3e6caea4991507fd9f083cb8d798c65c1cf99eb`, with fixture tree `9cee1bfcc14df92cc342100af5cfbc01fb1572dd` and provider tree `0a9f1d0daf1e42b707f3e71e4a7ab127e3382bed`. All five direct pairs were reaped and all five exact containers were removed. Both inventories were empty. The run took 43 seconds and the log SHA-256 was `224e6d80db27b9d33a2625d739ab7dc2efe0771fe84a1a154957fef2505ff24d`.
+
 ## Scratch reproduction
 
 Use a disposable directory and the existing probe prerequisites. The compiler step uses Apple clang 21 or a clang with the Linux x86-64 target, and GNU ld in a disposable Linux amd64 container. The compiler image may fetch binutils. The [native probe](../../tests/plugins/harness/codex/Dockerfile) pins the same official Codex archive and Python base. The two loader assignments belong only to the scratch executor environment.
