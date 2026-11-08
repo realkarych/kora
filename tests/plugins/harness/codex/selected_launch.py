@@ -33,7 +33,9 @@ SelectedNoiseRegistryCase = Literal[
     "selected-noise-registry-default", "selected-noise-registry-override"
 ]
 SelectedToolInventoryCase = Literal[
-    "selected-tool-inventory-allow", "selected-tool-inventory-disabled"
+    "selected-tool-inventory-allow",
+    "selected-tool-inventory-disabled",
+    "selected-tool-search",
 ]
 SelectedLaunchCase = (
     SelectedToolInventoryCase
@@ -81,7 +83,11 @@ SELECTED_NOISE_REGISTRY_CASES: frozenset[SelectedNoiseRegistryCase] = frozenset(
     {"selected-noise-registry-default", "selected-noise-registry-override"}
 )
 SELECTED_TOOL_INVENTORY_CASES = frozenset(
-    {"selected-tool-inventory-allow", "selected-tool-inventory-disabled"}
+    {
+        "selected-tool-inventory-allow",
+        "selected-tool-inventory-disabled",
+        "selected-tool-search",
+    }
 )
 SELECTED_LAUNCH_CASES = frozenset(
     {

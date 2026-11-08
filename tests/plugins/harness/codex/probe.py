@@ -534,8 +534,10 @@ def tool_inventory_name(value: object) -> str:
     return value
 
 
-def verify_selected_tool_inventory(tools: list[dict[str, object]]) -> None:
-    require(0 < len(tools) <= 64, "invalid_tool_inventory_size")
+def tool_inventory(
+    tools: list[dict[str, object]],
+) -> tuple[tuple[str, str, str], ...]:
+    require(len(tools) <= 64, "invalid_tool_inventory_size")
     entries: list[tuple[str, str, str]] = []
     for tool in tools:
         kind = tool.get("type")
@@ -565,20 +567,57 @@ def verify_selected_tool_inventory(tools: list[dict[str, object]]) -> None:
                 )
     require(len(entries) <= 64, "invalid_tool_inventory_size")
     require(len(set(entries)) == len(entries), "duplicate_tool_inventory_entry")
+    return tuple(sorted(entries))
+
+
+def verify_selected_tool_inventory(tools: list[dict[str, object]]) -> None:
+    require(bool(tools), "invalid_tool_inventory_size")
+    inventory = tool_inventory(tools)
     require(
-        ("", "function", "exec_command") in entries
-        and ("", "custom", "apply_patch") in entries
+        ("", "function", "exec_command") in inventory
+        and ("", "custom", "apply_patch") in inventory
         and not any(
             name in {"web_search", "write_stdin", "update_plan"}
-            for _, _, name in entries
+            for _, _, name in inventory
         ),
         "unexpected_tool_inventory_exposure",
     )
-    inventory = tuple(sorted(entries))
     require(
         inventory == EXPECTED_SELECTED_TOOL_INVENTORY, "selected_tool_inventory_drift"
     )
     diagnostic("INFO", "probe.selected_tool_inventory", json.dumps(inventory))
+
+
+SEARCH_CALL_ID = "kora-selected-tool-search-call"
+SEARCH_RESPONSE = sse(
+    "kora-selected-tool-search-response",
+    {
+        "type": "tool_search_call",
+        "call_id": SEARCH_CALL_ID,
+        "execution": "client",
+        "arguments": {"query": "spawn agent", "limit": 8},
+    },
+)
+
+
+def verify_selected_tool_search(request: dict[str, object]) -> None:
+    items = [
+        as_object(item)
+        for item in as_list(request.get("input"), "responses_input_missing")
+    ]
+    outputs = [item for item in items if item.get("type") == "tool_search_output"]
+    require(
+        len(outputs) == 1
+        and outputs[0].get("call_id") == SEARCH_CALL_ID
+        and outputs[0].get("execution") == "client"
+        and outputs[0].get("status") == "completed",
+        "unexpected_selected_tool_search_result",
+    )
+    tools = [
+        as_object(tool)
+        for tool in as_list(outputs[0].get("tools"), "missing_selected_search_tools")
+    ]
+    diagnostic("INFO", "probe.selected_tool_search", json.dumps(tool_inventory(tools)))
 
 
 DISABLED_PLAN_RESPONSE = sse(
@@ -948,6 +987,8 @@ class ResponsesFixture:
                     return stdin_response(1)
             if self.case == "selected-tool-inventory-disabled":
                 return DISABLED_PLAN_RESPONSE
+            if self.case == "selected-tool-search":
+                return SEARCH_RESPONSE
             if self.case in SELECTED_LAUNCH_CASES:
                 usage = (
                     FIRST_RESPONSE_USAGE if self.case in SELECTED_TURN_CASES else None
@@ -1012,6 +1053,10 @@ class ResponsesFixture:
                     ),
                     "direct_patch_refusal_missing",
                 )
+            return FINAL_RESPONSE
+
+        if self.case == "selected-tool-search":
+            verify_selected_tool_search(request)
             return FINAL_RESPONSE
 
         output = tool_output(request, CALL_ID)
@@ -1663,6 +1708,8 @@ class Stdio:
         prompt = "Run the probe marker command."
         if case in DIRECT_PATCH_CASES:
             prompt = "Apply the probe marker patch."
+        elif case == "selected-tool-search":
+            prompt = "Search for a native agent tool."
         elif (
             case in PROVIDER_CASES
             or case in CLIENT_CASES
@@ -2825,7 +2872,14 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             fixture.connections == fixture.requests == fixture.request_limit,
             "unexpected_selected_launch_request_count",
         )
-        if case in SELECTED_REFUSALS or case == "selected-tool-inventory-disabled":
+        if case == "selected-tool-search":
+            require(
+                not os.path.lexists(CONTROL / "invocations")
+                and not os.path.lexists(RECEIPTS),
+                "selected_tool_search_reached_hook",
+            )
+            diagnostic("INFO", "probe.selected_tool_search_hook", "absent")
+        elif case in SELECTED_REFUSALS or case == "selected-tool-inventory-disabled":
             require(
                 not os.path.lexists(RECEIPTS)
                 and not os.path.lexists(CONTROL / "invocations"),
@@ -2837,6 +2891,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             verify_shell_hook(selected_command(case))
         executes = case in SELECTED_AUTH_CASES and case not in {
             "selected-tool-inventory-disabled",
+            "selected-tool-search",
             "selected-deny",
             "selected-hook-deny",
             "selected-patch-deny",
