@@ -11,6 +11,7 @@ from kora.api.graph_deployment_attachment import (
     AttachedGraphDeployment,
     GraphDeploymentAttachmentLimits,
     attach_graph_deployment_references,
+    is_checked_graph_attachment,
 )
 from kora.api.graph_execution_preparation import (
     PreparedExecutionContract,
@@ -229,21 +230,45 @@ def test_attachment_preserves_exact_pair_and_detaches_nested_reference_aliases()
     )
     owners[2].__init__(scope, ROOT_PATH, "substituted.sh", owners[0].reference)
     scope.__init__("changed-namespace", "changed-graph", "changed-version")
-    with pytest.raises(TypeError, match="requires the checked producer"):
+    with pytest.raises(
+        TypeError, match="requires the checked producer"
+    ) as wrong_issuer:
         AttachedGraphDeployment(
             object(),
             prior_scope,
             prepared.logical,
             PreparedGraphResourceReferences(expected_text, finished.owners),
         )
-    with pytest.raises(AttributeError, match="immutable"):
+    with pytest.raises(AttributeError, match="immutable") as reassigned_text:
         finished.resources.__init__(MARKER)
+    forged = object.__new__(AttachedGraphDeployment)
+    PreparedExecutionContract.__init__(
+        forged,
+        prior_scope,
+        finished.canonical_ir,
+        finished.canonical_contract,
+        finished.digests,
+        finished.resources,
+        finished.owners,
+    )
     with pytest.raises(TypeError, match="explicit access"):
         pickle.dumps(finished)
     with pytest.raises(ValueError, match="not iterable") as encoder:
         jsonable_encoder(finished)
 
     assert type(finished) is AttachedGraphDeployment
+    assert is_checked_graph_attachment(finished)
+    assert not is_checked_graph_attachment(legacy)
+    assert not is_checked_graph_attachment(forged)
+    for refusal, allowed in (
+        (wrong_issuer, {"__class__": AttachedGraphDeployment}),
+        (reassigned_text, {}),
+    ):
+        frames = {
+            frame.f_code.co_name: frame.f_locals
+            for frame, _ in walk_tb(refusal.value.__traceback__)
+        }
+        assert frames["__init__"] == allowed
     assert finished.scope == prior_scope
     assert finished.scope is not scope
     assert finished.canonical_ir is prepared.logical.canonical_ir

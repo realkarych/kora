@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import TypeGuard
 
 from pydantic import ValidationError
 
@@ -52,7 +53,8 @@ class GraphDeploymentAttachmentLimits:
 
 
 class AttachedGraphDeployment(PreparedExecutionContract):
-    __slots__ = ()
+    __slots__ = ("_issuer",)
+    _issuer: object
 
     def __init__(
         self,
@@ -62,7 +64,7 @@ class AttachedGraphDeployment(PreparedExecutionContract):
         physical: PreparedGraphResourceReferences,
     ) -> None:
         if issuer is not _ATTACHMENT_ISSUER:
-            del issuer, scope, logical, physical
+            del self, issuer, scope, logical, physical
             raise TypeError("graph deployment attachment requires the checked producer")
         super().__init__(
             scope,
@@ -72,6 +74,16 @@ class AttachedGraphDeployment(PreparedExecutionContract):
             GraphResourceReferences(physical.text),
             physical.owners,
         )
+        object.__setattr__(self, "_issuer", issuer)
+
+
+def is_checked_graph_attachment(
+    candidate: object,
+) -> TypeGuard[AttachedGraphDeployment]:
+    return (
+        type(candidate) is AttachedGraphDeployment
+        and getattr(candidate, "_issuer", None) is _ATTACHMENT_ISSUER
+    )
 
 
 def _bounded_text(value: object, maximum: int) -> str:
