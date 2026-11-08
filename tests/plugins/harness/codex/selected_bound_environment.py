@@ -371,7 +371,7 @@ class BoundEnvironmentProbe:
                     not slot_refusal(error)
                     or self._clock.observed_cutoff is None
                     or not launch.native.stopped
-                    or launch.native.failure is not GateAcquisitionFailure.REJECTED
+                    or launch.native.failure is not ChannelFailure.DEADLINE
                     or len(gates) != 2
                     or any(gate.registration is None for gate in gates)
                 ):

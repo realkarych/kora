@@ -407,6 +407,33 @@ async def test_bound_context_maps_preflight_deadline_without_private_context(
 
 
 @pytest.mark.asyncio
+async def test_bound_context_keeps_expired_slot_refusal_without_consumption(
+    native_inputs: NativeInputs, kora_capture: Capture
+) -> None:
+    clock = ExpiryClock()
+    cutoff = clock.monotonic_ns() + 10_000_000_000
+    owner = native_inputs.acquire_owner(
+        native_inputs.bind(kora_capture),
+        native_inputs.roles,
+        clock=clock,
+        cutoff_ns=cutoff,
+    )
+    context = BoundNativeLaunchContext(owner, {})
+    clock.expired_at = cutoff
+
+    with pytest.raises(KoraProtocolError) as refused:
+        await context.start_bound("app")
+
+    assert type(refused.value) is KoraProtocolError
+    assert refused.value.code == "launch_rejected"
+    assert refused.value.message == "the bound native role is unavailable"
+    assert refused.value.__context__ is None
+    assert owner.failure is None
+    assert owner.gates == ()
+    assert not owner.stopped
+
+
+@pytest.mark.asyncio
 async def test_bound_context_borrows_narrow_real_stdio(
     native_inputs: NativeInputs, kora_capture: Capture
 ) -> None:

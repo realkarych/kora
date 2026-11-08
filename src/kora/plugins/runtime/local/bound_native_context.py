@@ -14,6 +14,7 @@ from kora.plugins.runtime.local.bound_role_configuration import (
     BoundRoleConfigurationError,
     RoleConfigurationFailure,
 )
+from kora.plugins.runtime.local.bound_slots import SLOT_UNAVAILABLE, BoundSlotDeadline
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.harness import Launch, LaunchInputs, NativeLaunch, Placement
 from kora.protocols.secret_value import SecretRevealRefused
@@ -48,6 +49,7 @@ class _BorrowedWriter:
 
 class _Refusal(StrEnum):
     INVALID = "the bound native launch inputs are invalid"
+    UNAVAILABLE = SLOT_UNAVAILABLE
     DEADLINE = "the bound native start reached its deadline"
     FAILED = "the bound native start failed"
 
@@ -86,6 +88,8 @@ class BoundNativeLaunchContext:
             )
         except SecretRevealRefused:
             reason = _Refusal.INVALID
+        except BoundSlotDeadline:
+            reason = _Refusal.UNAVAILABLE
         except ChannelError as error:
             reason = (
                 _Refusal.DEADLINE
@@ -103,5 +107,9 @@ class BoundNativeLaunchContext:
 
 
 def _public_error(reason: _Refusal) -> KoraProtocolError:
-    code = "launch_rejected" if reason is _Refusal.INVALID else "launch_failed"
+    code = (
+        "launch_rejected"
+        if reason in (_Refusal.INVALID, _Refusal.UNAVAILABLE)
+        else "launch_failed"
+    )
     return KoraProtocolError(code, reason.value, False, {})

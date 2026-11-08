@@ -19,7 +19,7 @@ from kora.plugins.runtime.local.bound_role_configuration import (
     BoundRoleConfiguration,
     BoundRoleConfigurationError,
 )
-from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
+from kora.plugins.runtime.local.bound_slots import BoundRoleSlots, BoundSlotDeadline
 from kora.plugins.runtime.local.environment import (
     BoundCandidateEnvironments,
     CandidateRoleEnvironment,
@@ -307,6 +307,8 @@ def _acquisition_cause(error: BaseException) -> BoundGateFailure:
         return error.condition
     if isinstance(error, SecretRevealRefused):
         return GateAcquisitionFailure.GRANT_UNAVAILABLE
+    if isinstance(error, BoundSlotDeadline):
+        return ChannelFailure.DEADLINE
     if isinstance(error, KoraProtocolError):
         return GateAcquisitionFailure.REJECTED
     if isinstance(error, OSError):
