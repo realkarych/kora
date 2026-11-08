@@ -71,6 +71,14 @@ def outstanding_limit(policy: object) -> int:
     return limit
 
 
+def manual_start_scopes(namespace_id: str, graph_id: str) -> tuple[Scope, ...]:
+    return (
+        Scope(ScopeKind.GLOBAL),
+        Scope(ScopeKind.NAMESPACE, (namespace_id,)),
+        Scope(ScopeKind.GRAPH, (graph_id,)),
+    )
+
+
 async def check_manual_start_capacity(
     connection: AsyncConnection,
     locks: TransitionLocks,
@@ -87,14 +95,7 @@ async def check_manual_start_capacity(
         or not all(is_identifier(value) for value in (namespace_id, graph_id, run_id))
     ):
         return capacity_result(CapacityOutcome.REFUSED)
-    locks.require(
-        run_id,
-        (
-            Scope(ScopeKind.GLOBAL),
-            Scope(ScopeKind.NAMESPACE, (namespace_id,)),
-            Scope(ScopeKind.GRAPH, (graph_id,)),
-        ),
-    )
+    locks.require(run_id, manual_start_scopes(namespace_id, graph_id))
     if type(overlap) is not str or overlap not in ("allow", "skip", "queue"):
         raise ValueError("the manual start overlap is invalid")
     graph_result = await connection.execute(
