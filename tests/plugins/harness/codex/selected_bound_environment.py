@@ -14,6 +14,7 @@ from kora.plugins.harness.codex.launch_configuration import (
     CodexLaunchInputs,
     LaunchConfigurationError,
     LaunchConfigurationFailure,
+    NativeProcessInputs,
 )
 from kora.plugins.runtime.local.bound_checkout import (
     BoundCheckout,
@@ -21,6 +22,13 @@ from kora.plugins.runtime.local.bound_checkout import (
     CheckoutFailure,
 )
 from kora.plugins.runtime.local.bound_gate_fence import BoundGateFence
+from kora.plugins.runtime.local.bound_role_configuration import (
+    CONFIG_NAME,
+    BoundRoleConfiguration,
+    BoundRoleConfigurationError,
+    RoleConfigurationFailure,
+    RoleDirectories,
+)
 from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
     CandidateRoleEnvironment,
@@ -44,10 +52,7 @@ from tests.plugins.harness.codex.selected_gated_stdio import (
     close_gated,
     runner_deadline,
 )
-from tests.plugins.harness.codex.selected_launch import (
-    prepare_native_inputs,
-    write_native_configuration,
-)
+from tests.plugins.harness.codex.selected_launch import prepare_native_inputs
 
 BoundCase = Literal[
     "ready",
@@ -65,6 +70,10 @@ BoundCase = Literal[
     "checkout-before-app",
     "bash-live",
     "bash-pin",
+    "configuration-ready",
+    "configuration-exec-edit",
+    "configuration-app-file",
+    "configuration-app-placement",
 ]
 BoundRole = Literal["app", "exec"]
 SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
@@ -80,6 +89,15 @@ CHECKOUT_REFUSALS: Mapping[str, BoundRole] = MappingProxyType(
         "checkout-before-exec": "exec",
         "checkout-before-app": "app",
     }
+)
+CONFIGURATION_REFUSALS: Mapping[str, tuple[BoundRole, RoleConfigurationFailure]] = (
+    MappingProxyType(
+        {
+            "configuration-exec-edit": ("exec", RoleConfigurationFailure.BYTES),
+            "configuration-app-file": ("app", RoleConfigurationFailure.FILE),
+            "configuration-app-placement": ("app", RoleConfigurationFailure.PLACEMENT),
+        }
+    )
 )
 SELECTED_EXECUTABLE_PIN = ExecutablePin(
     319_346_888, "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
@@ -107,6 +125,7 @@ class BoundLaunch:
     executable: InstalledExecutable
     bash: InstalledExecutable
     checkout: BoundCheckout
+    configurations: Mapping[BoundRole, BoundRoleConfiguration]
     clock: SystemClock
     cutoff_ns: int
     expected_app: dict[str, str]
@@ -119,7 +138,10 @@ class BoundLaunch:
         def preflight() -> None:
             try:
                 self.checkout.verify(recipe.cwd, self.cutoff_ns, self.clock)
-            except BoundCheckoutError:
+                self.configurations[role].verify(
+                    role_directories(recipe), self.cutoff_ns, self.clock
+                )
+            except (BoundCheckoutError, BoundRoleConfigurationError):
                 self.fence.stop()
                 raise
 
@@ -212,6 +234,7 @@ class BoundEnvironmentProbe:
     case: BoundCase
     attempt_scope: SecretScope
     app_scope: SecretScope
+    retention_scope: SecretScope
     starts: int = field(default=0, init=False)
     unix_sockets: int = field(default=0, init=False)
     cwd_opens: int = field(default=0, init=False)
@@ -219,6 +242,20 @@ class BoundEnvironmentProbe:
     bash_path: Path | None = field(default=None, init=False)
     _cwd: str | None = field(default=None, init=False)
     settled: bool = field(default=False, init=False)
+    configuration_refused: RoleConfigurationFailure | None = field(
+        default=None, init=False
+    )
+    _configurations: dict[BoundRole, BoundRoleConfiguration] = field(
+        default_factory=dict[BoundRole, BoundRoleConfiguration], init=False
+    )
+
+    @property
+    def configuration_case(self) -> bool:
+        return self.case == "configuration-ready" or self.case in CONFIGURATION_REFUSALS
+
+    @property
+    def late_configuration_case(self) -> bool:
+        return self.case in ("configuration-app-file", "configuration-app-placement")
 
     def install_witness(self) -> None:
         sys.addaudithook(self.observe_acquisition)
@@ -245,14 +282,30 @@ class BoundEnvironmentProbe:
         checkout_refusal = CHECKOUT_REFUSALS.get(self.case) == role
         if checkout_refusal:
             self.replace_checkout(launch.checkout)
+        configuration_refusal = CONFIGURATION_REFUSALS.get(self.case)
+        expected_configuration = (
+            configuration_refusal[1]
+            if configuration_refusal is not None and configuration_refusal[0] == role
+            else None
+        )
+        if expected_configuration is not None:
+            self.change_configuration(launch, role)
         try:
             started = launch.start(role, frame_limit)
+            if expected_configuration is not None:
+                raise BoundEnvironmentError("selected_bound_configuration_not_refused")
             if checkout_refusal:
                 raise BoundEnvironmentError("selected_bound_checkout_not_refused")
             return started
         except BoundCheckoutError as error:
             if not checkout_refusal or error.reason is not CheckoutFailure.IDENTITY:
                 raise BoundEnvironmentError("selected_bound_checkout_failed") from None
+        except BoundRoleConfigurationError as error:
+            if error.reason is not expected_configuration or not launch.slots.stopped:
+                raise BoundEnvironmentError(
+                    "selected_bound_configuration_failed"
+                ) from None
+            self.configuration_refused = error.reason
         except KoraProtocolError as error:
             if (
                 self.case not in SLOT_REFUSALS
@@ -271,6 +324,67 @@ class BoundEnvironmentProbe:
                     "selected_bound_secret_reveal_refused"
                 ) from None
         return None
+
+    def change_configuration(self, launch: BoundLaunch, role: BoundRole) -> None:
+        if self.late_configuration_case:
+            self.retention_scope.register(ATTEMPT_CANARY)
+            self.retention_scope.register(WORKLOAD_HANDLE_VALUE)
+        self.attempt_scope.release()
+        self.app_scope.release()
+        recipe = (
+            launch.inputs.app_server if role == "app" else launch.inputs.exec_server
+        )
+        home = role_directories(recipe).codex_home
+        config = home / CONFIG_NAME
+        expected = recipe.config.encode()
+        try:
+            original_identity = entry_identity(config)
+            if self.case == "configuration-exec-edit":
+                with config.open("ab") as target:
+                    target.write(b"\n")
+                valid_control = (
+                    entry_identity(config) == original_identity
+                    and config.read_bytes() == expected + b"\n"
+                )
+            else:
+                if self.case == "configuration-app-placement":
+                    original_home_identity = entry_identity(home)
+                    original_home = home.with_name("original-codex")
+                    home.rename(original_home)
+                    home.mkdir(mode=0o700)
+                    valid_placement = (
+                        entry_identity(original_home) == original_home_identity
+                        and entry_identity(home) != original_home_identity
+                    )
+                    original = original_home / CONFIG_NAME
+                else:
+                    original = config.with_name("original-config.toml")
+                    config.rename(original)
+                    valid_placement = True
+                with open(config, "xb", opener=private_config_file) as target:
+                    target.write(expected)
+                valid_control = (
+                    valid_placement
+                    and entry_identity(original) == original_identity
+                    and entry_identity(config) != original_identity
+                    and original.read_bytes() == config.read_bytes() == expected
+                )
+        except OSError:
+            raise BoundEnvironmentError(
+                "selected_bound_configuration_control_failed"
+            ) from None
+        if not valid_control:
+            raise BoundEnvironmentError("selected_bound_configuration_control_identity")
+
+    def close_configurations(self) -> None:
+        failed = False
+        for configuration in self._configurations.values():
+            try:
+                configuration.close()
+            except BoundRoleConfigurationError:
+                failed = True
+        if failed:
+            raise BoundEnvironmentError("selected_bound_configuration_cleanup_failed")
 
     def replace_checkout(self, checkout: BoundCheckout) -> None:
         workspace = checkout.path
@@ -436,8 +550,7 @@ class BoundEnvironmentProbe:
             for recipe in (inputs.app_server, inputs.exec_server)
         ):
             raise BoundEnvironmentError("selected_bound_executable_recipe_mismatch")
-        write_native_configuration(inputs.app_server)
-        write_native_configuration(inputs.exec_server)
+        self.prepare_configurations(inputs, cutoff_ns, clock)
         slots = BoundRoleSlots(binding, clock, cutoff_ns)
         if self.case == "duplicate":
             slots.claim("exec")
@@ -465,11 +578,58 @@ class BoundEnvironmentProbe:
             executable,
             bash,
             checkout,
+            MappingProxyType(self._configurations),
             clock,
             cutoff_ns,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},
             {**common, **inputs.exec_server.environment},
         )
+
+    def prepare_configurations(
+        self, inputs: CodexLaunchInputs, cutoff_ns: int, clock: SystemClock
+    ) -> None:
+        recipes: tuple[tuple[BoundRole, NativeProcessInputs], ...] = (
+            ("app", inputs.app_server),
+            ("exec", inputs.exec_server),
+        )
+        try:
+            for role, recipe in recipes:
+                directories = role_directories(recipe)
+                configuration = BoundRoleConfiguration(
+                    directories, recipe.config.encode()
+                )
+                self._configurations[role] = configuration
+                for path in directories.paths:
+                    path.mkdir(mode=0o700, parents=True)
+                configuration.prepare(cutoff_ns, clock)
+        except (OSError, BoundRoleConfigurationError):
+            raise BoundEnvironmentError(
+                "selected_bound_configuration_capture_failed"
+            ) from None
+        identities = {
+            identity
+            for configuration in self._configurations.values()
+            for identity in configuration.placement_identities
+        }
+        if len(identities) != 6:
+            raise BoundEnvironmentError("selected_bound_configuration_shared_placement")
+
+
+def role_directories(recipe: NativeProcessInputs) -> RoleDirectories:
+    return RoleDirectories(
+        Path(recipe.environment["HOME"]),
+        Path(recipe.environment["CODEX_HOME"]),
+        Path(recipe.environment["TMPDIR"]),
+    )
+
+
+def entry_identity(path: Path) -> tuple[int, int]:
+    metadata = path.stat(follow_symlinks=False)
+    return metadata.st_dev, metadata.st_ino
+
+
+def private_config_file(path: str, flags: int) -> int:
+    return os.open(path, flags | os.O_NOFOLLOW, 0o600)
 
 
 def replaceable_executable(binary: Path, workspace: Path) -> Path:

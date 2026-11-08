@@ -21,7 +21,9 @@ def fail_after_workspace_disappears(root: Path) -> NoReturn:
 
 
 def test_unsettled_bound_workspace_stays_with_the_container() -> None:
-    bound = BoundEnvironmentProbe("ready", SecretScope(None), SecretScope(None))
+    bound = BoundEnvironmentProbe(
+        "ready", SecretScope(None), SecretScope(None), SecretScope(None)
+    )
     root: Path | None = None
 
     try:
@@ -40,7 +42,9 @@ def test_unsettled_bound_workspace_stays_with_the_container() -> None:
 def test_settled_bound_workspace_cleanup_preserves_original_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    bound = BoundEnvironmentProbe("ready", SecretScope(None), SecretScope(None))
+    bound = BoundEnvironmentProbe(
+        "ready", SecretScope(None), SecretScope(None), SecretScope(None)
+    )
     bound.settled = True
 
     with (
