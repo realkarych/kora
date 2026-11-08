@@ -513,6 +513,18 @@ def verify_one_shot_schema(command_tool: dict[str, object]) -> None:
     )
 
 
+EXPECTED_SELECTED_TOOL_INVENTORY = (
+    ("", "custom", "apply_patch"),
+    ("", "function", "create_goal"),
+    ("", "function", "exec_command"),
+    ("", "function", "get_goal"),
+    ("", "function", "request_user_input"),
+    ("", "function", "update_goal"),
+    ("", "function", "view_image"),
+    ("", "tool_search", "tool_search"),
+)
+
+
 def tool_inventory_name(value: object) -> str:
     if (
         not isinstance(value, str)
@@ -562,7 +574,11 @@ def verify_selected_tool_inventory(tools: list[dict[str, object]]) -> None:
         ),
         "unexpected_tool_inventory_exposure",
     )
-    diagnostic("INFO", "probe.selected_tool_inventory", json.dumps(sorted(entries)))
+    inventory = tuple(sorted(entries))
+    require(
+        inventory == EXPECTED_SELECTED_TOOL_INVENTORY, "selected_tool_inventory_drift"
+    )
+    diagnostic("INFO", "probe.selected_tool_inventory", json.dumps(inventory))
 
 
 DISABLED_PLAN_RESPONSE = sse(
