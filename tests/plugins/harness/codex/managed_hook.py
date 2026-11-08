@@ -12,6 +12,7 @@ from kora.plugins.harness.codex.pre_tool_use import (
 )
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
+    SELECTED_BASH_TRACE_CASES,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
     SELECTED_HOOK_TIMEOUT_CASES,
@@ -47,11 +48,11 @@ def hold_for_native_timeout() -> None:
 def main() -> int:
     decision = (CONTROL / "decision").read_text(encoding="utf-8")
     executor = decision in {"executor-allow", "executor-deny", "executor-stall"}
-    selected = decision in SELECTED_HOOK_CASES or decision in {
-        "selected-command-metadata",
-        "selected-allow",
-        "selected-deny",
-    }
+    selected = (
+        decision in SELECTED_HOOK_CASES
+        or decision in SELECTED_BASH_TRACE_CASES
+        or decision in {"selected-command-metadata", "selected-allow", "selected-deny"}
+    )
     patch = (
         decision in {"patch-allow", "patch-deny"} or decision in SELECTED_PATCH_CASES
     )
@@ -130,7 +131,7 @@ def main() -> int:
             )
             + "\n"
         )
-    if decision in {
+    if decision in SELECTED_BASH_TRACE_CASES or decision in {
         "allow",
         "interactive",
         "shell_controls",

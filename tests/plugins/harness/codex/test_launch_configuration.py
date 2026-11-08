@@ -65,11 +65,13 @@ def test_codex_recipes_bind_distinct_roles_and_exact_native_controls(
             "CODEX_THREAD_ID_ALIAS",
             "CODEX_SQLITE_HOME_ALIAS",
             "BASH_ENV_ALIAS",
+            "SHELLOPTS_ALIAS",
         ),
         workload_secrets=(
             "WORK_SECRET",
             "CODEX_TOOL_CALL_ID_ALIAS",
             "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL_ALIAS",
+            "PS4_ALIAS",
         ),
     )
     app_config: object = tomllib.loads(inputs.app_server.config)
@@ -260,6 +262,8 @@ def test_codex_launch_refuses_raw_executor_bearer(tmp_path: Path) -> None:
         "CODEX_API_KEY",
         "CODEX_SQLITE_HOME",
         "BASH_ENV",
+        "SHELLOPTS",
+        "PS4",
         "CODEX_THREAD_ID",
         "CODEX_TOOL_CALL_ID",
     ],

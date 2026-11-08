@@ -79,6 +79,7 @@ from tests.plugins.harness.codex.selected_launch import (
     PROJECT_DOC_CANARY,
     SELECTED_AUTH_CASES,
     SELECTED_BASH_STARTUP_CASES,
+    SELECTED_BASH_TRACE_CASES,
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
@@ -219,8 +220,9 @@ CONTROL = Path("/var/lib/kora-hook-probe/control")
 RECEIPTS = CONTROL / "receipts.jsonl"
 MARKER = "kora-probe.marker"
 BASH_STARTUP_SCRIPT = "fixture-startup.sh"
-BASH_STARTUP_MARKER = "kora-probe.startup"
-BASH_STARTUP_TEXT = "shell startup marker"
+BASH_EXTRA_EFFECT_MARKER = "kora-probe.startup"
+BASH_EXTRA_EFFECT_TEXT = "shell startup marker"
+BASH_TRACE_PREFIX = "kora-fixture-trace:"
 COMMAND = f"touch {MARKER}"
 CALL_ID = "kora-hook-probe-call"
 PATCH_MARKER = b"direct patch marker\n"
@@ -1125,6 +1127,8 @@ class ResponsesFixture:
                 or self.case == "selected-command-metadata"
             ):
                 require(not body.strip(), "selected_fault_unexpected_command_output")
+            if self.case in SELECTED_BASH_TRACE_CASES:
+                verify_bash_trace_output(self.case, body)
         else:
             require(
                 (DENIAL in output) == (self.case == "deny"),
@@ -2677,6 +2681,14 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                     child_env["CODEX_SQLITE_HOME"] = str(root / SQLITE_HOME_CANARY)
                 if fixture.case == "selected-bash-startup-override":
                     exec_env["BASH_ENV"] = str(workspace / BASH_STARTUP_SCRIPT)
+                if fixture.case == "selected-bash-trace-shellopts":
+                    exec_env["SHELLOPTS"] = "xtrace"
+                if fixture.case == "selected-bash-trace-ps4":
+                    exec_env["PS4"] = (
+                        f"$(if [ ! -e {MARKER} ] && [ ! -L {MARKER} ]; then "
+                        f"printf '%s\\n' '{BASH_EXTRA_EFFECT_TEXT}'"
+                        f" > {BASH_EXTRA_EFFECT_MARKER}; fi){BASH_TRACE_PREFIX} "
+                    )
                 if fixture.case in SELECTED_NOISE_REGISTRY_CASES:
                     require(
                         child_env.get("CODEX_EXEC_SERVER_URL") == "none",
@@ -2889,17 +2901,31 @@ def verify_sqlite_home(root: Path, *, override: bool) -> None:
         )
 
 
-def verify_bash_startup(workspace: Path, *, override: bool) -> None:
-    marker = workspace / BASH_STARTUP_MARKER
-    if not override:
-        require(not os.path.lexists(marker), "unexpected_bash_startup_marker")
+def verify_bash_trace_output(case: ProbeCase, body: str) -> None:
+    custom = case == "selected-bash-trace-ps4"
+    require(custom == (BASH_TRACE_PREFIX in body), "unexpected_bash_trace_prefix")
+    if case == "selected-bash-trace-default":
+        require(not body.strip(), "unexpected_bash_trace")
+    else:
+        prefix = BASH_TRACE_PREFIX if custom else "+"
+        require(
+            body.splitlines().count(f"{prefix} shopt -q login_shell") == 1,
+            "bash_trace_witness_missing",
+        )
+    diagnostic("INFO", "probe.selected_bash_trace_output_verified", case)
+
+
+def verify_bash_extra_effect(workspace: Path, *, expected_effect: bool) -> None:
+    marker = workspace / BASH_EXTRA_EFFECT_MARKER
+    if not expected_effect:
+        require(not os.path.lexists(marker), "unexpected_bash_extra_effect")
         return
-    require(marker.is_file() and not marker.is_symlink(), "bash_startup_marker_missing")
-    expected = f"{BASH_STARTUP_TEXT}\n".encode()
+    require(marker.is_file() and not marker.is_symlink(), "bash_extra_effect_missing")
+    expected = f"{BASH_EXTRA_EFFECT_TEXT}\n".encode()
     with marker.open("rb") as contents:
         require(
             contents.read(len(expected) + 1) == expected,
-            "bash_startup_marker_mismatch",
+            "bash_extra_effect_mismatch",
         )
 
 
@@ -2926,8 +2952,8 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         if case in SELECTED_BASH_STARTUP_CASES:
             (workspace / BASH_STARTUP_SCRIPT).write_text(
                 f"if [ -e {MARKER} ] || [ -L {MARKER} ]; then exit 1; fi\n"
-                f"printf '%s\\n' '{BASH_STARTUP_TEXT}'"
-                f" > {BASH_STARTUP_MARKER} || exit 1\n",
+                f"printf '%s\\n' '{BASH_EXTRA_EFFECT_TEXT}'"
+                f" > {BASH_EXTRA_EFFECT_MARKER} || exit 1\n",
                 encoding="utf-8",
             )
         if case == "selected-startup-ready":
@@ -2991,10 +3017,15 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             verify_sqlite_home(root, override=case == "selected-sqlite-home-override")
             diagnostic("INFO", "probe.selected_sqlite_home_verified", case)
         if case in SELECTED_BASH_STARTUP_CASES:
-            verify_bash_startup(
-                workspace, override=case == "selected-bash-startup-override"
+            verify_bash_extra_effect(
+                workspace, expected_effect=case == "selected-bash-startup-override"
             )
             diagnostic("INFO", "probe.selected_bash_startup_verified", case)
+        if case in SELECTED_BASH_TRACE_CASES:
+            verify_bash_extra_effect(
+                workspace, expected_effect=case == "selected-bash-trace-ps4"
+            )
+            diagnostic("INFO", "probe.selected_bash_trace_effect_verified", case)
         if case == "selected-startup-ready":
             require(
                 workspace_remains_untrusted(

@@ -32,6 +32,12 @@ SelectedSqliteHomeCase = Literal[
 SelectedBashStartupCase = Literal[
     "selected-bash-startup-default", "selected-bash-startup-override"
 ]
+SelectedBashTraceCase = Literal[
+    "selected-bash-trace-default",
+    "selected-bash-trace-shellopts",
+    "selected-bash-trace-command",
+    "selected-bash-trace-ps4",
+]
 SelectedNoiseRegistryCase = Literal[
     "selected-noise-registry-default", "selected-noise-registry-override"
 ]
@@ -46,6 +52,7 @@ SelectedLaunchCase = (
     | SelectedHookCase
     | SelectedSqliteHomeCase
     | SelectedBashStartupCase
+    | SelectedBashTraceCase
     | Literal[
         "selected-command-metadata",
         "selected-allow",
@@ -85,6 +92,16 @@ SQLITE_HOME_CANARY = "sqlite-home-canary"
 SELECTED_BASH_STARTUP_CASES: frozenset[SelectedBashStartupCase] = frozenset(
     {"selected-bash-startup-default", "selected-bash-startup-override"}
 )
+SELECTED_EXPLICIT_TRACE_CASES: frozenset[SelectedBashTraceCase] = frozenset(
+    {"selected-bash-trace-command", "selected-bash-trace-ps4"}
+)
+SELECTED_BASH_TRACE_CASES: frozenset[SelectedBashTraceCase] = frozenset(
+    {
+        *SELECTED_EXPLICIT_TRACE_CASES,
+        "selected-bash-trace-default",
+        "selected-bash-trace-shellopts",
+    }
+)
 SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
 SELECTED_NOISE_REGISTRY_CASES: frozenset[SelectedNoiseRegistryCase] = frozenset(
     {"selected-noise-registry-default", "selected-noise-registry-override"}
@@ -104,6 +121,7 @@ SELECTED_LAUNCH_CASES = frozenset(
         *SELECTED_TURN_CASES,
         *SELECTED_SQLITE_HOME_CASES,
         *SELECTED_BASH_STARTUP_CASES,
+        *SELECTED_BASH_TRACE_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
@@ -120,6 +138,7 @@ SELECTED_AUTH_CASES = frozenset(
         *SELECTED_TURN_CASES,
         *SELECTED_SQLITE_HOME_CASES,
         *SELECTED_BASH_STARTUP_CASES,
+        *SELECTED_BASH_TRACE_CASES,
         "selected-command-metadata",
         "selected-allow",
         "selected-deny",
@@ -160,6 +179,8 @@ METADATA_COMMAND = (
 
 
 def selected_command(case: str) -> str:
+    if case in SELECTED_EXPLICIT_TRACE_CASES:
+        return "set -x; " + SELECTED_COMMAND
     return METADATA_COMMAND if case == "selected-command-metadata" else SELECTED_COMMAND
 
 

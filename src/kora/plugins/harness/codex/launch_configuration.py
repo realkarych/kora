@@ -24,6 +24,7 @@ NOISE_REGISTRY_ENV_NAMES = frozenset(
     }
 )
 EXEC_METADATA_ENV_NAMES = frozenset({"CODEX_THREAD_ID", "CODEX_TOOL_CALL_ID"})
+BASH_CONTROL_ENV_NAMES = frozenset({"BASH_ENV", "SHELLOPTS", "PS4"})
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 PROVIDER_URL = re.compile(
     r"https?://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])"
@@ -208,7 +209,8 @@ def build_launch_inputs(
     owned = (
         app_env.keys()
         | exec_env.keys()
-        | {PROVIDER_KEY, "CODEX_SQLITE_HOME", "BASH_ENV"}
+        | {PROVIDER_KEY, "CODEX_SQLITE_HOME"}
+        | BASH_CONTROL_ENV_NAMES
         | EXEC_METADATA_ENV_NAMES
         | NOISE_REGISTRY_ENV_NAMES
     )
