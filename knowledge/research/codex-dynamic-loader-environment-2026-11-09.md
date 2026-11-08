@@ -70,10 +70,10 @@ unsigned int la_version(unsigned int version) {
 AUDIT
 clang --target=x86_64-linux-gnu -fPIC -O2 -c loader.c -o loader.o
 clang --target=x86_64-linux-gnu -fPIC -O2 -c audit.c -o audit.o
-timeout -k 5s 125s docker run --rm --platform linux/amd64 \
+timeout -k 5s 125s docker run --rm --init --platform linux/amd64 \
   --mount "type=bind,source=$scratch,target=/fixture" \
   ubuntu@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 \
-  bash -euc '
+  timeout -k 5s 100s bash -euc '
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends binutils >/dev/null
     ld -shared -o /fixture/preload.so /fixture/loader.o
@@ -89,13 +89,15 @@ From the repository, archive the recorded revision's `tests/plugins/harness/code
 3. Run this command from the scratch checkout for each pair, comparing the probe container inventory before and after.
 
 ```sh
-docker ps -aq --filter 'name=^/kora-hook-probe-' | sort > before
+set -eu
+docker ps -aq --filter 'name=^/kora-hook-probe-' > before
 probe_status=0
 timeout -k 20s 350s sh tests/plugins/harness/codex/run_hook_probe.sh \
   --check-selected-bash-startup || probe_status=$?
-docker ps -aq --filter 'name=^/kora-hook-probe-' | sort > after
+docker ps -aq --filter 'name=^/kora-hook-probe-' > after
 diff -u before after
-test ! -s before && test ! -s after
+test ! -s before
+test ! -s after
 test "$probe_status" -eq 0
 ```
 
