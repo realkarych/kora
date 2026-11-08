@@ -118,7 +118,7 @@ prepare_locked_probe() {
 }
 
 probe_context() {
-    set -- -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py selected_launch.py selected_proxy.py selected_tls.py \
+    set -- -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py owned_loopback.py selected_launch.py selected_proxy.py selected_tls.py \
         -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_session.py app_server_tools.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py launch_configuration.py selected_startup.py
     case "$variant" in
         selected-turn|selected-shell-patch-policy)

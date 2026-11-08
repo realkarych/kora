@@ -1,11 +1,14 @@
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import cast
 
-MAX_PROXY_CONNECTIONS = 16
-MAX_PROXY_HEADERS = 16_384
+from tests.plugins.harness.codex.owned_loopback import (
+    STREAM_LIMIT,
+    OwnedLoopback,
+    loopback_port,
+)
+
 MAX_TUNNEL_BYTES = 1_048_576
 
 
@@ -59,16 +62,8 @@ PROXY_NAMES = frozenset(
 )
 ProxyRequest = tuple[bytes, bytes]
 ModelReceiver = Callable[
-    [asyncio.StreamReader, asyncio.StreamWriter, ProxyRequest], None
+    [asyncio.StreamReader, asyncio.StreamWriter, ProxyRequest], Awaitable[None]
 ]
-
-
-def loopback_port(address: object) -> int:
-    if isinstance(address, tuple):
-        fields = cast("tuple[object, ...]", address)
-        if len(fields) == 2 and fields[0] == "127.0.0.1" and type(fields[1]) is int:
-            return fields[1]
-    raise SelectedProxyError("selected_proxy_unexpected_socket")
 
 
 async def copy_tunnel(
@@ -98,36 +93,16 @@ class SelectedProxy:
         self._deadline: float = deadline
         self._synthetic_key: bytes = synthetic_key
         self._receive_model: ModelReceiver = receive_model
-        self._server: asyncio.Server | None = None
-        self._clients: dict[asyncio.StreamWriter, asyncio.Task[None]] = {}
-        self._delegated: set[asyncio.StreamWriter] = set()
-        self._overflow: asyncio.StreamWriter | None = None
+        self._upstreams: list[asyncio.StreamWriter] = []
+        self._closing: bool = False
         self._tunnel_ports: set[int] = set()
         self._direct: int = 0
         self._http: int = 0
         self._connect: int = 0
         self._tunneled: int = 0
         self.refused_connects: int = 0
-
-    @property
-    def port(self) -> int:
-        server = self._server
-        if server is None or not server.sockets:
-            raise SelectedProxyError("selected_proxy_not_listening")
-        return loopback_port(server.sockets[0].getsockname())
-
-    async def start(self) -> None:
-        try:
-            async with asyncio.timeout_at(self._deadline):
-                self._server = await asyncio.start_server(
-                    self._accept,
-                    "127.0.0.1",
-                    0,
-                    limit=MAX_PROXY_HEADERS,
-                    backlog=MAX_PROXY_CONNECTIONS,
-                )
-        except (OSError, TimeoutError):
-            raise SelectedProxyError("selected_proxy_listen_failed") from None
+        self._listener: OwnedLoopback = OwnedLoopback(self._handle, deadline)
+        self.port: int = self._listener.port
 
     def observe_origin(self, writer: asyncio.StreamWriter) -> None:
         port = loopback_port(writer.get_extra_info("peername"))
@@ -149,33 +124,20 @@ class SelectedProxy:
         ]:
             raise SelectedProxyError("selected_proxy_unexpected_model_route")
 
-    def _accept(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        if len(self._clients) >= MAX_PROXY_CONNECTIONS:
-            writer.close()
-            if self._overflow is None:
-                self._overflow = writer
-            if self._server is not None:
-                self._server.close()
-            return
-        self._clients[writer] = asyncio.create_task(self._handle(reader, writer))
-
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
             async with asyncio.timeout_at(self._deadline):
                 headers = await reader.readuntil(b"\r\n\r\n")
-                if len(headers) > MAX_PROXY_HEADERS:
+                if len(headers) > STREAM_LIMIT:
                     raise SelectedProxyError("selected_proxy_header_capacity")
                 line = headers.partition(b"\r\n")[0]
                 origin = f"http://127.0.0.1:{self._origin}"
                 route = f"POST {origin}/v1/responses HTTP/1.1".encode()
                 if not self._case.tls and line == route:
-                    self._receive_model(reader, writer, (route, headers))
-                    self._delegated.add(writer)
                     self._http += 1
+                    await self._receive_model(reader, writer, (route, headers))
                     return
                 if not line.startswith(b"CONNECT "):
                     raise SelectedProxyError("selected_proxy_unexpected_request")
@@ -198,19 +160,20 @@ class SelectedProxy:
             asyncio.IncompleteReadError,
             asyncio.LimitOverrunError,
         ):
-            raise SelectedProxyError("selected_proxy_invalid_stream") from None
-        finally:
-            if writer not in self._delegated:
-                writer.close()
+            if not self._closing:
+                raise SelectedProxyError("selected_proxy_invalid_stream") from None
 
     async def _tunnel(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         upstream_reader, upstream = await asyncio.open_connection(
-            "127.0.0.1", self._origin, limit=MAX_PROXY_HEADERS
+            "127.0.0.1", self._origin, limit=STREAM_LIMIT
         )
+        self._upstreams.append(upstream)
         port: int | None = None
         try:
+            if self._closing:
+                return
             port = loopback_port(upstream.get_extra_info("sockname"))
             self._tunnel_ports.add(port)
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -219,7 +182,10 @@ class SelectedProxy:
                 async with asyncio.TaskGroup() as tasks:
                     tasks.create_task(copy_tunnel(reader, upstream))
                     tasks.create_task(copy_tunnel(upstream_reader, writer))
-            except* (OSError, SelectedProxyError):
+            except* OSError:
+                if not self._closing:
+                    raise SelectedProxyError("selected_proxy_tunnel_failed") from None
+            except* SelectedProxyError:
                 raise SelectedProxyError("selected_proxy_tunnel_failed") from None
         finally:
             if port is not None:
@@ -228,32 +194,19 @@ class SelectedProxy:
             await upstream.wait_closed()
 
     async def close(self, deadline: float) -> None:
-        server = self._server
-        if server is None:
-            return
-        server.close()
-        owned = self._clients.keys() - self._delegated
-        for writer in owned:
-            writer.close()
-            self._clients[writer].cancel()
-        if self._overflow is not None:
-            owned.add(self._overflow)
+        self._closing = True
+        for upstream in self._upstreams:
+            upstream.close()
         try:
-            async with asyncio.timeout_at(deadline):
-                outcomes = await asyncio.gather(
-                    *self._clients.values(),
-                    *(writer.wait_closed() for writer in owned),
-                    server.wait_closed(),
-                    return_exceptions=True,
-                )
-        except TimeoutError:
-            raise SelectedProxyError("selected_proxy_cleanup_deadline") from None
-        for outcome in outcomes:
-            if isinstance(outcome, OSError):
-                raise SelectedProxyError("selected_proxy_cleanup_failed") from None
-            if isinstance(outcome, BaseException) and not isinstance(
-                outcome, asyncio.CancelledError
-            ):
-                raise outcome
-        if self._overflow is not None:
-            raise SelectedProxyError("selected_proxy_connection_capacity")
+            await self._listener.close(deadline)
+        finally:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    outcomes = await asyncio.gather(
+                        *(upstream.wait_closed() for upstream in self._upstreams),
+                        return_exceptions=True,
+                    )
+            except TimeoutError:
+                raise SelectedProxyError("selected_proxy_cleanup_deadline") from None
+            if any(isinstance(outcome, BaseException) for outcome in outcomes):
+                raise SelectedProxyError("selected_proxy_cleanup_failed")

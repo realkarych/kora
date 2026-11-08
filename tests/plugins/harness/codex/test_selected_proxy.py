@@ -1,15 +1,16 @@
 import asyncio
+import ssl
 from collections.abc import AsyncGenerator
 from contextlib import AsyncExitStack, asynccontextmanager
 
 import pytest
 
+from tests.plugins.harness.codex.owned_loopback import OwnedLoopback, loopback_port
 from tests.plugins.harness.codex.selected_proxy import (
     ModelRoute,
     ProxyRequest,
     SelectedProxy,
     SelectedProxyCase,
-    loopback_port,
 )
 
 
@@ -29,7 +30,7 @@ async def connect_loopback(
         await close_stream(writer)
 
 
-def unexpected_model_request(
+async def unexpected_model_request(
     reader: asyncio.StreamReader, writer: asyncio.StreamWriter, request: ProxyRequest
 ) -> None:
     raise AssertionError("a CONNECT test sent a model request")
@@ -68,8 +69,6 @@ async def test_selected_proxy_refuses_and_settles_interrupted_tunnel() -> None:
             b"synthetic-provider-key",
             unexpected_model_request,
         )
-        await proxy.start()
-
         try:
             async with connect_loopback(proxy.port) as (denied_reader, denied_writer):
                 denied_writer.write(
@@ -99,3 +98,33 @@ async def test_selected_proxy_refuses_and_settles_interrupted_tunnel() -> None:
         assert connected == b"HTTP/1.1 200 Connection Established\r\n\r\n"
         assert proxy.refused_connects == 1
         assert client_eof == upstream_eof == b""
+
+
+@pytest.mark.asyncio
+async def test_owned_loopback_settles_socket_before_tls_handshake() -> None:
+    deadline = asyncio.get_running_loop().time() + 5
+    called = asyncio.Event()
+
+    async def receive(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        called.set()
+
+    async with asyncio.timeout_at(deadline), AsyncExitStack() as resources:
+        server = OwnedLoopback(
+            receive, deadline, ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        )
+
+        try:
+            reader, writer = await resources.enter_async_context(
+                connect_loopback(server.port)
+            )
+            writer.write(b"\x16\x03\x03\x00\x10\x01")
+            await writer.drain()
+            await server.transport_started.wait()
+        finally:
+            await server.close(deadline)
+        received = await reader.read()
+
+        assert received == b""
+        assert not called.is_set()

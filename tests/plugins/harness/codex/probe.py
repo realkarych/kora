@@ -72,6 +72,7 @@ from kora.plugins.harness.codex.selected_startup import (
     SelectedStartupFailure,
     prepare_selected_thread,
 )
+from tests.plugins.harness.codex.owned_loopback import LoopbackError, OwnedLoopback
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
     METADATA_ENV_CONTROL,
@@ -791,21 +792,20 @@ class ResponsesFixture:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         deadline: float,
-        proxy_request: ProxyRequest | None = None,
     ) -> None:
-        self.connections += 1
-        if len(self.clients) >= self.request_limit:
-            self.failure = "unexpected_responses_connection"
+        if not self.admit():
             writer.close()
             return
         self.clients.append(
-            (
-                writer,
-                asyncio.create_task(
-                    self.handle(reader, writer, deadline, proxy_request)
-                ),
-            )
+            (writer, asyncio.create_task(self.handle(reader, writer, deadline, None)))
         )
+
+    def admit(self) -> bool:
+        self.connections += 1
+        if self.connections > self.request_limit:
+            self.failure = "unexpected_responses_connection"
+            return False
+        return True
 
     async def handle(
         self,
@@ -2758,37 +2758,54 @@ async def drive(
 ) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     proxy: SelectedProxy | None = None
+    server: asyncio.Server | None = None
+    model: OwnedLoopback | None = None
 
     def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        if proxy is not None:
-            proxy.observe_origin(writer)
         fixture.accept(reader, writer, deadline)
 
-    def accept_proxied(
+    async def accept_proxied(
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         request: ProxyRequest,
     ) -> None:
-        fixture.accept(reader, writer, deadline, proxy_request=request)
+        if fixture.admit():
+            await fixture.handle(reader, writer, deadline, request)
 
-    async with asyncio.timeout_at(deadline):
-        if tls is None:
-            server = await asyncio.start_server(accept, "127.0.0.1", 0, limit=16_384)
-        else:
-            server = await start_selected_tls_server(
-                tls.context, accept, handshake_timeout=CLEANUP_SECONDS
-            )
+    async def accept_proxy_origin(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        assert proxy is not None
+        proxy.observe_origin(writer)
+        if fixture.admit():
+            await fixture.handle(reader, writer, deadline, None)
+
+    if proxy_case is None:
+        async with asyncio.timeout_at(deadline):
+            if tls is None:
+                server = await asyncio.start_server(
+                    accept, "127.0.0.1", 0, limit=16_384
+                )
+            else:
+                server = await start_selected_tls_server(
+                    tls.context, accept, handshake_timeout=CLEANUP_SECONDS
+                )
     process: asyncio.subprocess.Process | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
     bearer = SYNTHETIC_EXECUTOR_BEARER
     try:
-        port = int(server.sockets[0].getsockname()[1])
-        if proxy_case is not None:
+        if proxy_case is None:
+            assert server is not None
+            port = int(server.sockets[0].getsockname()[1])
+        else:
+            model = OwnedLoopback(
+                accept_proxy_origin, deadline, tls.context if tls is not None else None
+            )
+            port = model.port
             proxy = SelectedProxy(
                 proxy_case, port, deadline, SYNTHETIC_BEARER.encode(), accept_proxied
             )
-            await proxy.start()
         args = ["app-server", "--listen", "stdio://"]
         if (
             fixture.case in PROVIDER_CASES
@@ -2989,20 +3006,19 @@ async def drive(
             native_cleanup = close_selected_launch(
                 fixture, server, process, executor, cleanup_deadline
             )
-            if proxy is None:
-                await native_cleanup
-            else:
-                outcomes = await asyncio.gather(
-                    native_cleanup,
-                    proxy.close(cleanup_deadline),
-                    return_exceptions=True,
-                )
-                for outcome in outcomes:
-                    if isinstance(outcome, BaseException):
-                        raise outcome
+            selected_cleanup = [native_cleanup]
+            if model is not None:
+                selected_cleanup.append(model.close(cleanup_deadline))
+            if proxy is not None:
+                selected_cleanup.append(proxy.close(cleanup_deadline))
+            outcomes = await asyncio.gather(*selected_cleanup, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
         elif process is not None and (
             fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
         ):
+            assert server is not None
             try:
                 async with asyncio.timeout_at(cleanup_deadline):
                     await stop_native_process(process)
@@ -3010,6 +3026,7 @@ async def drive(
                 async with asyncio.timeout_at(cleanup_deadline):
                     await fixture.close(server)
         else:
+            assert server is not None
             async with asyncio.timeout_at(cleanup_deadline):
                 pending = [fixture.close(server)]
                 for child in (process, executor):
@@ -3028,7 +3045,7 @@ async def drive(
 
 async def close_selected_launch(
     fixture: ResponsesFixture,
-    server: asyncio.Server,
+    server: asyncio.Server | None,
     app: asyncio.subprocess.Process | None,
     executor: asyncio.subprocess.Process | None,
     deadline: float,
@@ -3048,8 +3065,9 @@ async def close_selected_launch(
                 "selected_native_children_not_reaped",
             )
     finally:
-        async with asyncio.timeout_at(deadline):
-            await fixture.close(server)
+        if server is not None:
+            async with asyncio.timeout_at(deadline):
+                await fixture.close(server)
     if len(children) == 2:
         diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
 
@@ -3641,7 +3659,7 @@ def report_connection_failure(
 def main() -> int:
     try:
         asyncio.run(run())
-    except (ProbeFailure, SelectedProxyError, SelectedTlsError) as error:
+    except (LoopbackError, ProbeFailure, SelectedProxyError, SelectedTlsError) as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
     except (
