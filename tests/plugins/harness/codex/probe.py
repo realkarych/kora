@@ -2852,6 +2852,12 @@ async def drive(
                     deadline,
                 )
                 if bound_launch is None:
+                    from tests.plugins.harness.codex.selected_bound_environment import (
+                        INSTALLATION_REFUSALS,
+                    )
+
+                    if bound.case in INSTALLATION_REFUSALS:
+                        raise BoundProbeRefusal("selected_bound_executable_refused")
                     raise BoundProbeRefusal("selected_bound_environment_refused")
                 inputs = bound_launch.inputs
                 child_env = dict(inputs.app_server.environment)
@@ -3079,6 +3085,15 @@ async def drive(
                     gated_executor,
                     bound_launch.expected_app,
                     bound_launch.expected_executor,
+                )
+                gated_app.verify_executable(
+                    bound_launch.executable, bound_launch.inputs.app_server.argv
+                )
+                gated_executor.verify_executable(
+                    bound_launch.executable, bound_launch.inputs.exec_server.argv
+                )
+                diagnostic(
+                    "INFO", "probe.selected_bound_executable_verified", fixture.case
                 )
                 diagnostic("INFO", "probe.selected_bound_roles_verified", fixture.case)
             elif gated_app is not None:
@@ -3866,6 +3881,8 @@ async def run_selected_bound(name: str) -> None:
         "partial",
         "before-activation",
         "before-delivery",
+        "executable-pin",
+        "executable-path",
     ):
         raise ProbeFailure("selected_bound_unexpected_case")
     diagnostics = configure_process(

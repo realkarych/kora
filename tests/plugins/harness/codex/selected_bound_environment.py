@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import socket
 import sys
 from collections.abc import Mapping
@@ -24,6 +25,13 @@ from kora.protocols.errors import KoraProtocolError
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.installed_executable import (
+    ExecutableFailure,
+    ExecutablePin,
+    ExecutableVerificationError,
+    InstalledExecutable,
+    verify_installed_executable,
+)
 from kora.runner.processes import ProcessCondition, ProcessError
 from tests.plugins.harness.codex.selected_gated_stdio import (
     GateBoundary,
@@ -46,10 +54,21 @@ BoundCase = Literal[
     "partial",
     "before-activation",
     "before-delivery",
+    "executable-pin",
+    "executable-path",
 ]
 BoundRole = Literal["app", "exec"]
 SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
 ENVIRONMENT_REFUSALS = frozenset({"path", "grant", "reserved"})
+INSTALLATION_REFUSALS: Mapping[str, ExecutableFailure] = MappingProxyType(
+    {
+        "executable-pin": ExecutableFailure.DIGEST,
+        "executable-path": ExecutableFailure.PROTECTION,
+    }
+)
+SELECTED_EXECUTABLE_PIN = ExecutablePin(
+    319_346_888, "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
+)
 ATTEMPT_CANARY = "bound-environment-attempt-token"
 TEXT_NAME = "KORA_BOUND_AUTHORED_TEXT"
 TEXT_VALUE = "bound-environment-authored-text"
@@ -66,6 +85,7 @@ class BoundLaunch:
     inputs: CodexLaunchInputs
     slots: BoundRoleSlots
     fence: BoundGateFence
+    executable: InstalledExecutable
     clock: SystemClock
     cutoff_ns: int
     expected_app: dict[str, str]
@@ -73,10 +93,11 @@ class BoundLaunch:
 
     def start(self, role: BoundRole, frame_limit: int) -> SelectedGatedApp:
         recipe = self.inputs.app_server if role == "app" else self.inputs.exec_server
+        argv = (str(self.executable.path), *recipe.argv[1:])
 
         def acquire(environment: dict[str, str]) -> SelectedGatedApp:
             return SelectedGatedApp(
-                recipe.argv,
+                argv,
                 recipe.cwd,
                 environment,
                 self.clock,
@@ -209,6 +230,28 @@ class BoundEnvironmentProbe:
                 ) from None
         return None
 
+    def verify_executable(
+        self, binary: Path, cutoff_ns: int, clock: SystemClock
+    ) -> InstalledExecutable | None:
+        expected_failure = INSTALLATION_REFUSALS.get(self.case)
+        pin = SELECTED_EXECUTABLE_PIN
+        if self.case == "executable-pin":
+            pin = ExecutablePin(pin.size, "0" * 64)
+        if expected_failure is not None:
+            self.attempt_scope.release()
+            self.app_scope.release()
+        try:
+            verified = verify_installed_executable(binary, pin, cutoff_ns, clock)
+        except ExecutableVerificationError as error:
+            if error.reason is expected_failure:
+                return None
+            raise BoundEnvironmentError(
+                "selected_bound_unexpected_executable_refusal"
+            ) from None
+        if expected_failure is not None:
+            raise BoundEnvironmentError("selected_bound_executable_not_refused")
+        return verified
+
     def prepare(
         self,
         root: Path,
@@ -222,6 +265,8 @@ class BoundEnvironmentProbe:
         self._cwd = str(workspace)
         clock = SystemClock()
         cutoff_ns = runner_deadline(deadline, clock)
+        if self.case == "executable-path":
+            binary = replaceable_executable(binary, workspace)
         workload: Mapping[str, str] = MappingProxyType({TEXT_NAME: TEXT_VALUE})
         secret_name = "BASH_ENV" if self.case == "reserved" else WORKLOAD_HANDLE_NAME
         authored_scope = (
@@ -283,6 +328,14 @@ class BoundEnvironmentProbe:
             ):
                 raise BoundEnvironmentError("selected_bound_ownership_failed") from None
             return None
+        executable = self.verify_executable(binary, cutoff_ns, clock)
+        if executable is None:
+            return None
+        if any(
+            recipe.argv[0] != str(executable.path)
+            for recipe in (inputs.app_server, inputs.exec_server)
+        ):
+            raise BoundEnvironmentError("selected_bound_executable_recipe_mismatch")
         write_native_configuration(inputs.app_server)
         write_native_configuration(inputs.exec_server)
         slots = BoundRoleSlots(binding, clock, cutoff_ns)
@@ -303,8 +356,25 @@ class BoundEnvironmentProbe:
             inputs,
             slots,
             BoundGateFence(slots),
+            executable,
             clock,
             cutoff_ns,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},
             {**common, **inputs.exec_server.environment},
         )
+
+
+def replaceable_executable(binary: Path, workspace: Path) -> Path:
+    staged = workspace / "executable-copy"
+    selected = workspace / "candidate-executable"
+    try:
+        shutil.copyfile(binary, staged)
+        staged.chmod(0o755)
+        staged.rename(selected)
+        if selected.stat().st_size != SELECTED_EXECUTABLE_PIN.size:
+            raise BoundEnvironmentError("selected_bound_executable_control_size")
+    except OSError:
+        raise BoundEnvironmentError(
+            "selected_bound_executable_control_failed"
+        ) from None
+    return selected

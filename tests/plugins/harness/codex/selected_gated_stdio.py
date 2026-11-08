@@ -18,6 +18,7 @@ from kora.protocols.lifetime import (
 )
 from kora.protocols.time import SystemClock
 from kora.runner.channels import ChannelError, ChannelFailure
+from kora.runner.installed_executable import InstalledExecutable
 from kora.runner.process_stdio import StdioStreams
 from kora.runner.processes import (
     GatedProcess,
@@ -28,6 +29,7 @@ from kora.runner.processes import (
 
 MAX_DESCRIPTORS = 256
 MAX_ENVIRONMENT = 65_536
+MAX_PROCESS_MAPS = 1_048_576
 GateBoundary = Literal["before-activation", "before-delivery"]
 
 
@@ -73,6 +75,22 @@ def live_pid(pid: int) -> Generator[int]:
             raise GatedObservationError("selected_gated_child_exited")
     finally:
         os.close(identity)
+
+
+def maps_executable(pid: int, executable: InstalledExecutable) -> bool:
+    with Path(f"/proc/{pid}/maps").open("rb") as source:
+        mappings = source.read(MAX_PROCESS_MAPS + 1)
+    if len(mappings) > MAX_PROCESS_MAPS:
+        raise GatedObservationError("selected_bound_maps_limit")
+    device = (
+        f"{os.major(executable.device):02x}:{os.minor(executable.device):02x}".encode()
+    )
+    inode = str(executable.inode).encode()
+    for line in mappings.splitlines():
+        fields = line.split(maxsplit=5)
+        if len(fields) >= 5 and fields[3:5] == [device, inode]:
+            return True
+    return False
 
 
 def verify_role(
@@ -261,6 +279,29 @@ class SelectedGatedApp:
                 or native_environment(self._pid) != expected.union((b"",))
             ):
                 raise GatedObservationError("selected_bound_role_identity")
+
+    def verify_executable(
+        self, executable: InstalledExecutable, argv: tuple[str, ...]
+    ) -> None:
+        assert self._pid is not None
+        expected = b"\0".join(os.fsencode(value) for value in argv) + b"\0"
+        if len(expected) > MAX_ENVIRONMENT:
+            raise GatedObservationError("selected_bound_argv_limit")
+        try:
+            with live_pid(self._pid):
+                with Path(f"/proc/{self._pid}/cmdline").open("rb") as source:
+                    if source.read(len(expected) + 1) != expected:
+                        raise GatedObservationError("selected_bound_argv_mismatch")
+                entry = os.stat(f"/proc/{self._pid}/exe")
+                if (entry.st_dev, entry.st_ino) != (
+                    executable.device,
+                    executable.inode,
+                ) and not maps_executable(self._pid, executable):
+                    raise GatedObservationError("selected_bound_executable_mismatch")
+        except OSError:
+            raise GatedObservationError(
+                "selected_bound_executable_observation_failed"
+            ) from None
 
     async def close(self, deadline: float) -> None:
         await close_gated(
