@@ -32,8 +32,12 @@ SelectedSqliteHomeCase = Literal[
 SelectedNoiseRegistryCase = Literal[
     "selected-noise-registry-default", "selected-noise-registry-override"
 ]
+SelectedToolInventoryCase = Literal[
+    "selected-tool-inventory-allow", "selected-tool-inventory-disabled"
+]
 SelectedLaunchCase = (
-    SelectedNoiseRegistryCase
+    SelectedToolInventoryCase
+    | SelectedNoiseRegistryCase
     | SelectedHookCase
     | SelectedSqliteHomeCase
     | Literal[
@@ -76,9 +80,13 @@ SELECTED_TURN_CASES = frozenset({"selected-turn-complete", "selected-turn-cut"})
 SELECTED_NOISE_REGISTRY_CASES: frozenset[SelectedNoiseRegistryCase] = frozenset(
     {"selected-noise-registry-default", "selected-noise-registry-override"}
 )
+SELECTED_TOOL_INVENTORY_CASES = frozenset(
+    {"selected-tool-inventory-allow", "selected-tool-inventory-disabled"}
+)
 SELECTED_LAUNCH_CASES = frozenset(
     {
         *SELECTED_NOISE_REGISTRY_CASES,
+        *SELECTED_TOOL_INVENTORY_CASES,
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
         *SELECTED_SQLITE_HOME_CASES,
@@ -93,6 +101,7 @@ SELECTED_LAUNCH_CASES = frozenset(
 )
 SELECTED_AUTH_CASES = frozenset(
     {
+        *SELECTED_TOOL_INVENTORY_CASES,
         *SELECTED_HOOK_CASES,
         *SELECTED_TURN_CASES,
         *SELECTED_SQLITE_HOME_CASES,

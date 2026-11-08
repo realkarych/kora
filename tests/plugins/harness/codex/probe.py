@@ -88,6 +88,7 @@ from tests.plugins.harness.codex.selected_launch import (
     SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
     SELECTED_SQLITE_HOME_CASES,
+    SELECTED_TOOL_INVENTORY_CASES,
     SELECTED_TURN_CASES,
     SQLITE_HOME_CANARY,
     SelectedHookCase,
@@ -512,6 +513,69 @@ def verify_one_shot_schema(command_tool: dict[str, object]) -> None:
     )
 
 
+def tool_inventory_name(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", value) is None
+    ):
+        raise ProbeFailure("invalid_tool_inventory_name")
+    return value
+
+
+def verify_selected_tool_inventory(tools: list[dict[str, object]]) -> None:
+    require(0 < len(tools) <= 64, "invalid_tool_inventory_size")
+    entries: list[tuple[str, str, str]] = []
+    for tool in tools:
+        kind = tool.get("type")
+        if not isinstance(kind, str):
+            raise ProbeFailure("invalid_tool_inventory_type")
+        if kind in ("tool_search", "web_search"):
+            require("name" not in tool, "unexpected_tool_inventory_name")
+            entries.append(("", kind, kind))
+            continue
+        if kind not in ("function", "custom", "namespace"):
+            raise ProbeFailure("invalid_tool_inventory_type")
+        name = tool_inventory_name(tool.get("name"))
+        entries.append(("", kind, name))
+        if kind == "namespace":
+            members = as_list(tool.get("tools"), "missing_tool_inventory_namespace")
+            require(len(entries) + len(members) <= 64, "invalid_tool_inventory_size")
+            for item in members:
+                member = as_object(item)
+                member_kind = member.get("type")
+                if not isinstance(member_kind, str) or member_kind not in (
+                    "function",
+                    "custom",
+                ):
+                    raise ProbeFailure("invalid_tool_inventory_member_type")
+                entries.append(
+                    (name, member_kind, tool_inventory_name(member.get("name")))
+                )
+    require(len(entries) <= 64, "invalid_tool_inventory_size")
+    require(len(set(entries)) == len(entries), "duplicate_tool_inventory_entry")
+    require(
+        ("", "function", "exec_command") in entries
+        and ("", "custom", "apply_patch") in entries
+        and not any(
+            name in {"web_search", "write_stdin", "update_plan"}
+            for _, _, name in entries
+        ),
+        "unexpected_tool_inventory_exposure",
+    )
+    diagnostic("INFO", "probe.selected_tool_inventory", json.dumps(sorted(entries)))
+
+
+DISABLED_PLAN_RESPONSE = sse(
+    "kora-probe-response-1",
+    {
+        "type": "function_call",
+        "call_id": CALL_ID,
+        "name": "update_plan",
+        "arguments": json.dumps(
+            {"plan": [{"step": "Fixture step", "status": "pending"}]}
+        ),
+    },
+)
 TOOL_RESPONSE = command_response({"cmd": COMMAND, "login": False})
 PATCH_RESPONSE = sse(
     "kora-probe-response-1",
@@ -828,6 +892,11 @@ class ResponsesFixture:
                 as_object(tool)
                 for tool in as_list(request.get("tools"), "responses_tools_missing")
             ]
+            if self.case in SELECTED_TOOL_INVENTORY_CASES:
+                require(
+                    request.get("model") == SELECTED_MODEL, "inventory_model_mismatch"
+                )
+                verify_selected_tool_inventory(tools)
             if self.case in DIRECT_PATCH_CASES:
                 patch_tools = [
                     tool for tool in tools if tool.get("name") == "apply_patch"
@@ -861,6 +930,8 @@ class ResponsesFixture:
                 verify_one_shot_schema(command_tools[0])
                 if self.case == "allow":
                     return stdin_response(1)
+            if self.case == "selected-tool-inventory-disabled":
+                return DISABLED_PLAN_RESPONSE
             if self.case in SELECTED_LAUNCH_CASES:
                 usage = (
                     FIRST_RESPONSE_USAGE if self.case in SELECTED_TURN_CASES else None
@@ -928,7 +999,11 @@ class ResponsesFixture:
             return FINAL_RESPONSE
 
         output = tool_output(request, CALL_ID)
-        if self.case == "decoder-refuse":
+        if self.case == "selected-tool-inventory-disabled":
+            require(
+                output == "unsupported call: update_plan", "disabled_plan_not_refused"
+            )
+        elif self.case == "decoder-refuse":
             require(
                 output
                 == (
@@ -1599,6 +1674,10 @@ class Stdio:
         )
 
         def observe(notification: Notification) -> None:
+            if case == "selected-tool-inventory-disabled":
+                require(
+                    notification.method != "turn/plan/updated", "disabled_plan_executed"
+                )
             if usage is not None:
                 usage.observe(notification)
             if errors is not None:
@@ -2708,6 +2787,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             if case == "selected-startup-ready"
             or case in SELECTED_TURN_CASES
             or case in SELECTED_SQLITE_HOME_CASES
+            or case in SELECTED_TOOL_INVENTORY_CASES
             else case
         )
         (CONTROL / "decision").write_text(decision, encoding="utf-8")
@@ -2729,7 +2809,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             fixture.connections == fixture.requests == fixture.request_limit,
             "unexpected_selected_launch_request_count",
         )
-        if case in SELECTED_REFUSALS:
+        if case in SELECTED_REFUSALS or case == "selected-tool-inventory-disabled":
             require(
                 not os.path.lexists(RECEIPTS)
                 and not os.path.lexists(CONTROL / "invocations"),
@@ -2740,6 +2820,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         else:
             verify_shell_hook(selected_command(case))
         executes = case in SELECTED_AUTH_CASES and case not in {
+            "selected-tool-inventory-disabled",
             "selected-deny",
             "selected-hook-deny",
             "selected-patch-deny",
