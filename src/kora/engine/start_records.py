@@ -1,10 +1,12 @@
 import hashlib
+import json
 import math
 from dataclasses import dataclass
-from typing import Annotated, Literal, Never, TypeAlias, cast
+from typing import Annotated, Literal, Never, Self, TypeAlias, cast
 
 from pydantic import AfterValidator, ConfigDict, Field, StrictInt, StrictStr
 
+from kora.cel_eval.errors import raise_safe
 from kora.db.identifiers import is_identifier
 from kora.ir.json import JsonObject, JsonValue
 from kora.ir.vcs_ref_json import canonical_bytes
@@ -17,6 +19,8 @@ MAX_IDENTITY_BYTES: int = MAX_PARAMS_BYTES + 1024
 MAX_RECEIPT_BYTES: int = 4096
 MIN_INTEGER: int = -(2**63)
 MAX_INTEGER: int = 2**63 - 1
+PARAMETERS_MEMBER = b',"params":'
+_PREPARED_MANUAL_START = object()
 
 
 class StartRecordRejected(ValueError):
@@ -48,6 +52,72 @@ class StartScope(StartRecord):
 
 class ManualStartIdentity(StartScope):
     request_digest: Sha256
+
+
+class PreparedManualStartRequest:
+    __slots__ = (
+        "_identity",
+        "_parameter_bytes",
+        "_graph_version_id",
+        "_allow_unenforced_secrets",
+    )
+    _identity: ManualStartIdentity
+    _parameter_bytes: bytes
+    _graph_version_id: str | None
+    _allow_unenforced_secrets: bool
+
+    def __new__(
+        cls,
+        issuer: object,
+        identity: ManualStartIdentity,
+        parameter_bytes: bytes,
+        graph_version_id: str | None,
+        allow_unenforced_secrets: bool,
+    ) -> Self:
+        if issuer is not _PREPARED_MANUAL_START:
+            del (
+                issuer,
+                identity,
+                parameter_bytes,
+                graph_version_id,
+                allow_unenforced_secrets,
+            )
+            raise TypeError("manual start request requires checked preparation")
+        request = super().__new__(cls)
+        object.__setattr__(request, "_identity", identity)
+        object.__setattr__(request, "_parameter_bytes", parameter_bytes)
+        object.__setattr__(request, "_graph_version_id", graph_version_id)
+        object.__setattr__(
+            request, "_allow_unenforced_secrets", allow_unenforced_secrets
+        )
+        return request
+
+    @property
+    def identity(self) -> ManualStartIdentity:
+        return self._identity.model_copy()
+
+    @property
+    def graph_version_id(self) -> str | None:
+        return self._graph_version_id
+
+    @property
+    def allow_unenforced_secrets(self) -> bool:
+        return self._allow_unenforced_secrets
+
+    def parameters(self) -> JsonObject:
+        decoded: object = json.loads(self._parameter_bytes)
+        if type(decoded) is not dict:
+            refuse()
+        return cast(JsonObject, decoded)
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("prepared manual start request is immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("prepared manual start request is immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("prepared manual start request requires explicit access")
 
 
 class AcceptedStart(StartRecord):
@@ -145,6 +215,70 @@ def bounded_object(value: object, max_bytes: int, max_depth: int) -> JsonObject:
     return cast(JsonObject, value)
 
 
+def _prepare_manual_start_request(
+    namespace_id: str,
+    graph_id: str,
+    params: object,
+    graph_version_id: str | None,
+    allow_unenforced_secrets: bool,
+) -> PreparedManualStartRequest:
+    scope = StartScope(namespace_id=namespace_id, graph_id=graph_id)
+    if type(allow_unenforced_secrets) is not bool:
+        refuse()
+    selector: JsonObject = {"kind": "latest"}
+    if graph_version_id is not None:
+        if type(graph_version_id) is not str:
+            refuse()
+        selector = {"kind": "version", "id": identifier(graph_version_id)}
+    admitted = bounded_object(params, MAX_PARAMS_BYTES, MAX_PARAMS_DEPTH)
+    parameter_bytes = canonical_bytes(admitted)
+    fixed_envelope: JsonObject = {
+        "format": "manual-start/1",
+        "namespace_id": scope.namespace_id,
+        "graph_id": scope.graph_id,
+        "graph_version": selector,
+        "allow_unenforced_secrets": allow_unenforced_secrets,
+    }
+    prefix = canonical_bytes(fixed_envelope)[:-1] + PARAMETERS_MEMBER
+    if (
+        len(parameter_bytes) > MAX_PARAMS_BYTES
+        or len(prefix) + len(parameter_bytes) + 1 > MAX_IDENTITY_BYTES
+    ):
+        refuse()
+    digest = hashlib.sha256(prefix)
+    digest.update(parameter_bytes)
+    digest.update(b"}")
+    identity = ManualStartIdentity(
+        namespace_id=scope.namespace_id,
+        graph_id=scope.graph_id,
+        request_digest=digest.hexdigest(),
+    )
+    return PreparedManualStartRequest(
+        _PREPARED_MANUAL_START,
+        identity,
+        parameter_bytes,
+        graph_version_id,
+        allow_unenforced_secrets,
+    )
+
+
+def prepare_manual_start_request(
+    namespace_id: str,
+    graph_id: str,
+    params: object,
+    *,
+    graph_version_id: str | None = None,
+    allow_unenforced_secrets: bool = False,
+) -> PreparedManualStartRequest:
+    try:
+        return _prepare_manual_start_request(
+            namespace_id, graph_id, params, graph_version_id, allow_unenforced_secrets
+        )
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        del namespace_id, graph_id, params, graph_version_id, allow_unenforced_secrets
+    raise_safe(StartRecordRejected())
+
+
 def prepare_manual_start(
     namespace_id: str,
     graph_id: str,
@@ -154,33 +288,16 @@ def prepare_manual_start(
     allow_unenforced_secrets: bool = False,
 ) -> ManualStartIdentity:
     try:
-        scope = StartScope(namespace_id=namespace_id, graph_id=graph_id)
-        if type(allow_unenforced_secrets) is not bool:
-            refuse()
-        selector: JsonObject = {"kind": "latest"}
-        if graph_version_id is not None:
-            if type(graph_version_id) is not str:
-                refuse()
-            selector = {"kind": "version", "id": identifier(graph_version_id)}
-        admitted = bounded_object(params, MAX_PARAMS_BYTES, MAX_PARAMS_DEPTH)
-        envelope: JsonObject = {
-            "format": "manual-start/1",
-            "namespace_id": scope.namespace_id,
-            "graph_id": scope.graph_id,
-            "graph_version": selector,
-            "params": admitted,
-            "allow_unenforced_secrets": allow_unenforced_secrets,
-        }
-        encoded = canonical_bytes(envelope)
-        if len(encoded) > MAX_IDENTITY_BYTES:
-            refuse()
-        return ManualStartIdentity(
-            namespace_id=scope.namespace_id,
-            graph_id=scope.graph_id,
-            request_digest=hashlib.sha256(encoded).hexdigest(),
-        )
-    except (ValueError, TypeError, RecursionError, OverflowError):
-        raise StartRecordRejected() from None
+        return prepare_manual_start_request(
+            namespace_id,
+            graph_id,
+            params,
+            graph_version_id=graph_version_id,
+            allow_unenforced_secrets=allow_unenforced_secrets,
+        ).identity
+    except StartRecordRejected:
+        del namespace_id, graph_id, params, graph_version_id, allow_unenforced_secrets
+        raise
 
 
 def decode_start_receipt(value: object) -> StartReceipt:
