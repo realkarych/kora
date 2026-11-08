@@ -25,6 +25,8 @@ CALL_ID = "codex-call-1"
 PRIVATE_COMMAND = "private-command-canary"
 PRIVATE_ID = "private-id-canary"
 PRIVATE_METADATA = "private-metadata-canary"
+PRIVATE_SESSION = " private-session-café "
+PRIVATE_TURN = " private-turn-résumé "
 
 
 def native_payload(
@@ -60,6 +62,8 @@ def encode(payload: dict[str, object]) -> bytes:
 def test_codex_pre_tool_use_decodes_pinned_inputs(tool: str, command: str) -> None:
     payload = native_payload(tool=tool, command=command)
     payload["transcript_path"] = "/reported/session.jsonl"
+    payload["session_id"] = PRIVATE_SESSION
+    payload["turn_id"] = PRIVATE_TURN
     raw = encode(payload)
 
     parsed = decode_pre_tool_use(raw, max_bytes=len(raw))
@@ -67,7 +71,11 @@ def test_codex_pre_tool_use_decodes_pinned_inputs(tool: str, command: str) -> No
     assert parsed.tool == tool
     assert parsed.tool_use_id == CALL_ID
     assert parsed.command == command
+    assert parsed.session_id == PRIVATE_SESSION
+    assert parsed.turn_id == PRIVATE_TURN
     assert CALL_ID not in repr(parsed)
+    assert PRIVATE_SESSION not in repr(parsed)
+    assert PRIVATE_TURN not in repr(parsed)
     assert "reported" not in repr(parsed)
     if command:
         assert command not in repr(parsed)
@@ -168,6 +176,8 @@ def test_codex_hook_input_failure_is_content_free(
 ) -> None:
     payload = native_payload(command=PRIVATE_COMMAND)
     payload["tool_use_id"] = PRIVATE_ID
+    payload["session_id"] = PRIVATE_SESSION
+    payload["turn_id"] = PRIVATE_TURN
     payload["transcript_path"] = {"invalid": PRIVATE_METADATA}
     raw = encode(payload)
 
@@ -182,6 +192,8 @@ def test_codex_hook_input_failure_is_content_free(
     assert PRIVATE_COMMAND not in rendered
     assert PRIVATE_ID not in rendered
     assert PRIVATE_METADATA not in rendered
+    assert PRIVATE_SESSION not in rendered
+    assert PRIVATE_TURN not in rendered
 
 
 def test_codex_hook_request_uses_trusted_workspace(
@@ -199,6 +211,8 @@ def test_codex_hook_request_uses_trusted_workspace(
     payload = native_payload(
         tool="apply_patch", command=update_patch("alias"), cwd=str(reported)
     )
+    payload["session_id"] = PRIVATE_SESSION
+    payload["turn_id"] = PRIVATE_TURN
 
     parsed = decode_pre_tool_use(encode(payload), max_bytes=LIMIT)
     request = policy_request(
@@ -216,6 +230,8 @@ def test_codex_hook_request_uses_trusted_workspace(
     assert request.harness == "codex"
     assert request.tool_use_id == CALL_ID
     assert request.arguments == {"command": update_patch("alias")}
+    assert PRIVATE_SESSION not in repr(request)
+    assert PRIVATE_TURN not in repr(request)
     assert trusted_reason == "protected_path"
     assert reported_reason == "allowed"
 

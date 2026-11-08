@@ -1,9 +1,15 @@
 import pytest
 
 from kora.db.connection import Database
-from kora.engine.locks import Scope, ScopeKind, TransitionLocks
+from kora.engine.locks import (
+    GraphPublicationDigestReadFailed,
+    Scope,
+    ScopeKind,
+    TransitionLocks,
+)
 from kora.observability import Level, LoggingSettings
 from tests.engine.lock_support import RUN_A, lock_inventory
+from tests.engine.test_graph_publication_target import publication_locks, seed_target
 from tests.observability.conftest import (
     Configure,
     Pipe,
@@ -80,4 +86,44 @@ async def test_engine_locks_release_with_unavailable_sink(
     assert not diagnostics.writer_is_alive()
     assert database.writer_is_free()
     assert database.units_in_flight() == 0
+    assert await lock_inventory(database) == []
+
+
+@pytest.mark.asyncio
+async def test_graph_publication_digest_failure_is_content_free_at_debug(
+    database: Database, configure: Configure, pipe: Pipe
+) -> None:
+    binding, selected = await seed_target(database)
+    diagnostics = configured_with_reader(
+        configure, pipe, LoggingSettings(level=Level.DEBUG)
+    )
+
+    async def fail_digest_read() -> None:
+        async with database.transaction() as writer:
+            locks = await publication_locks(writer, binding, selected)
+            assert (
+                await locks.read_graph_publication_target(writer, binding, selected)
+                == selected
+            )
+            await writer.exec_driver_sql(
+                "ALTER TABLE graph_version RENAME TO unavailable_graph_version"
+            )
+            await locks.read_graph_publication_digest_match(writer, binding, selected)
+
+    with pytest.raises(GraphPublicationDigestReadFailed):
+        await fail_digest_read()
+    output = finished_output(diagnostics, pipe)
+
+    assert '"event":"engine.locks.acquired"' in output
+    assert '"event":"db.transaction.failed"' in output
+    for private in (
+        selected,
+        binding.namespace_id,
+        binding.preparation_id,
+        binding.graph_name,
+        binding.deployment_digest,
+        "SELECT",
+        "unavailable_graph_version",
+    ):
+        assert private not in output
     assert await lock_inventory(database) == []

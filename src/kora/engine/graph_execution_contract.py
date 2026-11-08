@@ -168,6 +168,14 @@ def execution_contract_read_reservation(
     return retained, work
 
 
+def check_execution_contract_projection_members(
+    canonical_ir: str, saved: JsonObject, limits: ExecutionContractReadLimits
+) -> None:
+    if len(saved) != len(MEMBERS) or tuple(saved) != MEMBERS:
+        raise GraphValueRejected(GraphValueFailure.INVALID)
+    read_graph_cel_projection_paths(canonical_ir, saved, limits=limits.projection)
+
+
 def check_execution_contract_members(
     canonical_ir: str,
     saved: JsonObject,
@@ -176,9 +184,7 @@ def check_execution_contract_members(
     owners: tuple[GraphResourceOwner, ...],
     limits: ExecutionContractReadLimits,
 ) -> GraphResourceReferences:
-    if len(saved) != len(MEMBERS) or tuple(saved) != MEMBERS:
-        raise GraphValueRejected(GraphValueFailure.INVALID)
-    read_graph_cel_projection_paths(canonical_ir, saved, limits=limits.projection)
+    check_execution_contract_projection_members(canonical_ir, saved, limits)
     return check_graph_resource_references(
         canonical_ir,
         saved["command_resources"],

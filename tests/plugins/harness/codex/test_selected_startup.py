@@ -11,6 +11,7 @@ from kora.plugins.harness.codex.app_server_startup import StartupIdentity
 from kora.plugins.harness.codex.app_server_turn import TurnError, TurnFailure
 from kora.plugins.harness.codex.selected_startup import (
     SelectedEnvironment,
+    SelectedManagedHook,
     SelectedStartupError,
     SelectedStartupFailure,
     prepare_selected_thread,
@@ -18,12 +19,19 @@ from kora.plugins.harness.codex.selected_startup import (
 from tests.plugins.harness.codex.wire_fixture import Wire, future_deadline, wire
 
 IDENTITY = StartupIdentity("0.166.0", "linux", Path("/fixture/codex"), "kora-test", "1")
+HOOK_FINGERPRINT = "sha256:" + "a" * 64
 SELECTED = SelectedEnvironment(
     "exec-fixture",
     "ws://127.0.0.1:12345",
     Path("/bin/bash"),
     Path("/fixture/work :@"),
     "fixture-model",
+    SelectedManagedHook(
+        Path("/fixture/managed"),
+        "/fixture/managed/receive",
+        60,
+        HOOK_FINGERPRINT,
+    ),
 )
 BEARER = "z" * 43
 THREAD_ID = "018f0302-3491-7b42-92c0-9d15c2933393"
@@ -81,6 +89,64 @@ def thread_fields() -> dict[str, object]:
     }
 
 
+def managed_hook_fields() -> dict[str, object]:
+    return {
+        "key": "/fixture/managed:pre_tool_use:0:0",
+        "eventName": "preToolUse",
+        "handlerType": "command",
+        "command": "/fixture/managed/receive",
+        "async": False,
+        "matcher": ".*",
+        "timeoutSec": 60,
+        "statusMessage": None,
+        "additionalContextLimit": None,
+        "sourcePath": "/fixture/managed",
+        "source": "system",
+        "pluginId": None,
+        "environmentId": None,
+        "displayOrder": 0,
+        "enabled": True,
+        "isManaged": True,
+        "currentHash": HOOK_FINGERPRINT,
+        "trustStatus": "managed",
+    }
+
+
+def hook_inventory() -> dict[str, object]:
+    return {
+        "data": [
+            {
+                "cwd": str(SELECTED.workspace),
+                "hooks": [managed_hook_fields()],
+                "warnings": [],
+                "errors": [],
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("source", "command", "timeout", "fingerprint"),
+    [
+        (Path("relative"), "run", 60, HOOK_FINGERPRINT),
+        (Path("/fixture/managed"), "", 60, HOOK_FINGERPRINT),
+        (Path("/fixture/managed"), "bad\ncommand", 60, HOOK_FINGERPRINT),
+        (Path("/fixture/managed"), "é" * 2049, 60, HOOK_FINGERPRINT),
+        (Path("/fixture/managed"), "run", 0, HOOK_FINGERPRINT),
+        (Path("/fixture/managed"), "run", True, HOOK_FINGERPRINT),
+        (Path("/fixture/managed"), "run", 60, "sha256:bad"),
+    ],
+)
+def test_selected_managed_hook_refuses_invalid_trusted_expectation(
+    source: Path, command: str, timeout: int, fingerprint: str
+) -> None:
+    with pytest.raises(SelectedStartupError) as caught:
+        SelectedManagedHook(source, command, timeout, fingerprint)
+
+    assert caught.value.reason is SelectedStartupFailure.INVALID_EXPECTATION
+    assert str(caught.value) == SelectedStartupFailure.INVALID_EXPECTATION.value
+
+
 def selected_exchanges() -> tuple[Exchange, ...]:
     environment: dict[str, object] = {"environmentId": SELECTED.environment_id}
     cwd = str(SELECTED.workspace)
@@ -118,6 +184,7 @@ def selected_exchanges() -> tuple[Exchange, ...]:
             },
             thread_fields(),
         ),
+        Exchange("hooks/list", {"threadId": THREAD_ID}, hook_inventory()),
     )
 
 
@@ -358,14 +425,85 @@ async def test_selected_startup_refuses_conflicting_thread_acknowledgements(
         )
 
         await initialize(connection)
-        for index, exchange in enumerate(exchanges[:-1], 2):
+        for index, exchange in enumerate(exchanges[:-2], 2):
             await answer(connection, index, exchange)
-        await answer(connection, 6, replace(exchanges[-1], result=payload))
+        await answer(connection, 6, replace(exchanges[-2], result=payload))
         with pytest.raises(SelectedStartupError) as caught:
             await startup
         trailing = await remaining_bytes(connection)
 
         assert caught.value.reason is SelectedStartupFailure.THREAD_ACKNOWLEDGEMENT
+        assert trailing == b""
+
+
+@pytest.mark.parametrize(
+    ("scope", "key", "value"),
+    [
+        ("response", "data", []),
+        ("response", "unexpected", PRIVATE_CANARY),
+        ("entry", "cwd", PRIVATE_CANARY),
+        ("entry", "hooks", []),
+        ("entry", "hooks", [managed_hook_fields(), managed_hook_fields()]),
+        ("entry", "warnings", [PRIVATE_CANARY]),
+        ("entry", "errors", [{"path": PRIVATE_CANARY, "message": PRIVATE_CANARY}]),
+        ("entry", "errors", None),
+        ("hook", "key", PRIVATE_CANARY),
+        ("hook", "eventName", "postToolUse"),
+        ("hook", "handlerType", "mcpTool"),
+        ("hook", "command", PRIVATE_CANARY),
+        ("hook", "async", True),
+        ("hook", "async", 0),
+        ("hook", "matcher", "^Bash$"),
+        ("hook", "timeoutSec", 5),
+        ("hook", "timeoutSec", 60.0),
+        ("hook", "statusMessage", OMITTED),
+        ("hook", "additionalContextLimit", 0),
+        ("hook", "sourcePath", PRIVATE_CANARY),
+        ("hook", "source", "user"),
+        ("hook", "pluginId", OMITTED),
+        ("hook", "environmentId", SELECTED.environment_id),
+        ("hook", "environmentId", OMITTED),
+        ("hook", "displayOrder", False),
+        ("hook", "enabled", False),
+        ("hook", "enabled", 1),
+        ("hook", "isManaged", False),
+        ("hook", "isManaged", 1),
+        ("hook", "currentHash", "sha256:" + "b" * 64),
+        ("hook", "trustStatus", "trusted"),
+        ("hook", "additional", PRIVATE_CANARY),
+    ],
+)
+@pytest.mark.asyncio
+async def test_selected_startup_refuses_unexpected_hook_inventory(
+    scope: str, key: str, value: object
+) -> None:
+    payload = hook_inventory()
+    entry = cast("list[dict[str, object]]", payload["data"])[0]
+    hook = cast("list[dict[str, object]]", entry["hooks"])[0]
+    target = {"response": payload, "entry": entry, "hook": hook}[scope]
+    if value is OMITTED:
+        del target[key]
+    else:
+        target[key] = value
+    exchanges = selected_exchanges()
+    async with wire() as connection:
+        startup = connection.start(
+            prepare_selected_thread(
+                connection.rpc, IDENTITY, SELECTED, BEARER, deadline=future_deadline()
+            )
+        )
+        await initialize(connection)
+        for index, exchange in enumerate(exchanges[:-1], 2):
+            await answer(connection, index, exchange)
+
+        await answer(connection, 7, replace(exchanges[-1], result=payload))
+        with pytest.raises(SelectedStartupError) as caught:
+            await startup
+        trailing = await remaining_bytes(connection)
+
+        assert caught.value.reason is SelectedStartupFailure.HOOK_INVENTORY
+        assert str(caught.value) == SelectedStartupFailure.HOOK_INVENTORY.value
+        assert PRIVATE_CANARY not in repr(caught.value)
         assert trailing == b""
 
 

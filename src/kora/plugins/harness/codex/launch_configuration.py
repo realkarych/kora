@@ -15,7 +15,31 @@ CODEX_VERSION = "0.166.0"
 MODEL_PROVIDER = "kora_responses"
 PROVIDER_KEY = "CODEX_API_KEY"
 BUILTIN_EXECUTOR = "CODEX_EXEC_SERVER_URL"
+NOISE_REGISTRY_ENV_NAMES = frozenset(
+    {
+        "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL",
+        "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID",
+        "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN",
+        "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID",
+    }
+)
 EXEC_METADATA_ENV_NAMES = frozenset({"CODEX_THREAD_ID", "CODEX_TOOL_CALL_ID"})
+MODEL_TLS_ENV_NAMES = frozenset(
+    {"CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+)
+MODEL_PROXY_ENV_NAMES = frozenset(
+    {
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    }
+)
+BASH_CONTROL_ENV_NAMES = frozenset({"BASH_ENV", "SHELLOPTS", "PS4"})
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 PROVIDER_URL = re.compile(
     r"https?://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])"
@@ -201,7 +225,11 @@ def build_launch_inputs(
         app_env.keys()
         | exec_env.keys()
         | {PROVIDER_KEY, "CODEX_SQLITE_HOME"}
+        | BASH_CONTROL_ENV_NAMES
+        | MODEL_TLS_ENV_NAMES
+        | MODEL_PROXY_ENV_NAMES
         | EXEC_METADATA_ENV_NAMES
+        | NOISE_REGISTRY_ENV_NAMES
     )
     if not owned.isdisjoint(workload_names) or not owned.isdisjoint(
         workload_secret_names

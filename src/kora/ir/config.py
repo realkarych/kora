@@ -145,10 +145,17 @@ class McpServer(IrRecord):
     digest: Digest | MISSING = MISSING
 
 
+COMMAND_RESOURCE_MAX_BYTES: int = 262_144
+
+
 class CommandResource(IrRecord):
     name: ResourceName
     sha256: Digest
-    size: Annotated[StrictInt, Field(ge=0, le=262144), BeforeValidator(require_integer)]
+    size: Annotated[
+        StrictInt,
+        Field(ge=0, le=COMMAND_RESOURCE_MAX_BYTES),
+        BeforeValidator(require_integer),
+    ]
     executable: StrictBool
 
 

@@ -49,6 +49,18 @@ class GraphVersionDigests:
     execution_contract_digest: str
     deployment_digest: str
 
+    def __init__(
+        self, ir_digest: str, execution_contract_digest: str, deployment_digest: str
+    ) -> None:
+        if hasattr(self, "ir_digest"):
+            raise AttributeError("graph version digests are immutable")
+        object.__setattr__(self, "ir_digest", ir_digest)
+        object.__setattr__(self, "execution_contract_digest", execution_contract_digest)
+        object.__setattr__(self, "deployment_digest", deployment_digest)
+
+    def __setstate__(self, state: list[str]) -> None:
+        self.__init__(*state)
+
 
 @dataclass(frozen=True, slots=True)
 class GraphVersionPin:

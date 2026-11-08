@@ -14,6 +14,7 @@ from kora.plugins.harness.codex.app_server_startup import (
 from kora.plugins.harness.codex.app_server_turn import reject_premature_completion
 from kora.plugins.harness.codex.launch_configuration import (
     CODEX_VERSION,
+    CONTROL_CHARACTER,
     MODEL_NAME,
     MODEL_PROVIDER,
     valid_path,
@@ -27,6 +28,8 @@ THREAD_ID = re.compile(
 )
 FILE_URI_PATH = re.compile(r"/[!-~]*")
 INVALID_FILE_URI_PATH = re.compile(r"""[?#"<>\`{}\\]|%(?![0-9A-Fa-f]{2})|%2[fF]""")
+HOOK_FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
+MAX_HOOK_TEXT_BYTES = 4096
 
 
 class SelectedStartupFailure(StrEnum):
@@ -39,12 +42,62 @@ class SelectedStartupFailure(StrEnum):
     EXECUTOR_CWD = "selected_startup_executor_cwd"
     EXECUTOR_STATUS = "selected_startup_executor_status"
     THREAD_ACKNOWLEDGEMENT = "selected_startup_thread_acknowledgement"
+    HOOK_INVENTORY = "selected_startup_hook_inventory"
 
 
 class SelectedStartupError(ValueError):
     def __init__(self, reason: SelectedStartupFailure) -> None:
         self.reason = reason
         super().__init__(reason.value)
+
+
+@dataclass(frozen=True, repr=False)
+class SelectedManagedHook:
+    source: Path
+    command: str
+    timeout_seconds: int
+    fingerprint: str
+
+    def __post_init__(self) -> None:
+        try:
+            command_size = len(self.command.encode("utf-8"))
+            source_size = len(str(self.source).encode("utf-8"))
+        except UnicodeEncodeError:
+            raise SelectedStartupError(
+                SelectedStartupFailure.INVALID_EXPECTATION
+            ) from None
+        if (
+            not valid_path(self.source)
+            or source_size > MAX_HOOK_TEXT_BYTES
+            or not 0 < command_size <= MAX_HOOK_TEXT_BYTES
+            or CONTROL_CHARACTER.search(self.command) is not None
+            or type(self.timeout_seconds) is not int
+            or not 0 < self.timeout_seconds < 2**64
+            or HOOK_FINGERPRINT.fullmatch(self.fingerprint) is None
+        ):
+            raise SelectedStartupError(SelectedStartupFailure.INVALID_EXPECTATION)
+
+    def metadata(self) -> dict[str, object]:
+        return {
+            "key": f"{self.source}:pre_tool_use:0:0",
+            "eventName": "preToolUse",
+            "handlerType": "command",
+            "command": self.command,
+            "async": False,
+            "matcher": ".*",
+            "timeoutSec": self.timeout_seconds,
+            "statusMessage": None,
+            "additionalContextLimit": None,
+            "sourcePath": str(self.source),
+            "source": "system",
+            "pluginId": None,
+            "environmentId": None,
+            "displayOrder": 0,
+            "enabled": True,
+            "isManaged": True,
+            "currentHash": self.fingerprint,
+            "trustStatus": "managed",
+        }
 
 
 @dataclass(frozen=True)
@@ -54,6 +107,7 @@ class SelectedEnvironment:
     bash: Path = field(repr=False)
     workspace: Path = field(repr=False)
     model: str = field(repr=False)
+    hook: SelectedManagedHook = field(repr=False)
 
     def __post_init__(self) -> None:
         endpoint = LOOPBACK_ENDPOINT.fullmatch(self.endpoint)
@@ -71,6 +125,33 @@ class SelectedEnvironment:
 
 def fields(value: object) -> dict[str, object]:
     return cast("dict[str, object]", value) if isinstance(value, dict) else {}
+
+
+def single_entry(value: object) -> dict[str, object]:
+    if not isinstance(value, list):
+        return {}
+    entries = cast("list[object]", value)
+    return fields(entries[0]) if len(entries) == 1 else {}
+
+
+def verify_hook_inventory(value: object, expected: SelectedEnvironment) -> None:
+    response = fields(value)
+    entry = single_entry(response.get("data"))
+    hook = single_entry(entry.get("hooks"))
+    metadata = expected.hook.metadata()
+    if (
+        response.keys() != {"data"}
+        or entry.keys() != {"cwd", "hooks", "warnings", "errors"}
+        or entry["cwd"] != str(expected.workspace)
+        or entry["warnings"] != []
+        or entry["errors"] != []
+        or hook.keys() != metadata.keys()
+        or any(
+            type(hook[key]) is not type(wanted) or hook[key] != wanted
+            for key, wanted in metadata.items()
+        )
+    ):
+        raise SelectedStartupError(SelectedStartupFailure.HOOK_INVENTORY)
 
 
 def matches_file_uri(uri: object, expected: Path) -> bool:
@@ -195,5 +276,12 @@ async def prepare_selected_thread(
         },
     )
     thread_id = verify_thread(response, expected)
+    try:
+        inventory = await call("hooks/list", {"threadId": thread_id})
+    except RpcError as error:
+        if error.reason is RpcFailure.REMOTE_ERROR:
+            raise SelectedStartupError(SelectedStartupFailure.HOOK_INVENTORY) from None
+        raise
+    verify_hook_inventory(inventory, expected)
     rpc.check_deadline(deadline)
     return thread_id

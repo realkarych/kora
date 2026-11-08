@@ -27,7 +27,7 @@ from kora.db.tables import metadata
 from kora.db.types import OutcomePayloadText
 from tests.support.warning_filters import expression_index_warnings_ignored
 
-HEAD_REVISION: str = "0014"
+HEAD_REVISION: str = "0015"
 
 
 def differences_ignoring_expression_indexes(connection: Connection) -> list[str]:
@@ -66,7 +66,7 @@ async def test_migration_reaches_head_and_matches_the_tables(
     assert (report.from_revision, report.to_revision, report.steps) == (
         None,
         HEAD_REVISION,
-        14,
+        15,
     )
     assert revision == HEAD_REVISION
     assert differences == []
@@ -81,7 +81,7 @@ async def test_migration_rerun_is_a_no_op(
 
     second = await upgrade_database(empty_database_settings)
 
-    assert (first.steps, second.steps) == (14, 0)
+    assert (first.steps, second.steps) == (15, 0)
     assert second.from_revision == HEAD_REVISION
     assert second.to_revision == HEAD_REVISION
 
@@ -136,7 +136,7 @@ def test_script_template_renders_without_comments(tmp_path: Path) -> None:
     config.set_main_option("prepend_sys_path", "")
 
     script = ScriptDirectory.from_config(config).generate_revision(
-        "0015", "template probe", head=HEAD_REVISION
+        "0016", "template probe", head=HEAD_REVISION
     )
 
     assert script is not None

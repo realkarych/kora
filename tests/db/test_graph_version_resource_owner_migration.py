@@ -5,8 +5,14 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.graph_version_resource_owner_v1 import REVERSE_INDEX
-from kora.db.migrations import MigrationReport, current_revision
-from kora.db.migrations.environment import alembic_config, pending_steps
+from kora.db.migrations import (
+    current_revision,
+)
+from kora.db.migrations.environment import (
+    MigrationReport,
+    alembic_config,
+    pending_steps,
+)
 from kora.db.tables import (
     graph_deployment_preparation_capacity,
     graph_version,
@@ -26,17 +32,6 @@ from tests.engine.test_graph_resource_references import expected_ref
 
 PREDECESSOR: str = "0012"
 REVISION: str = "0013"
-
-
-def upgrade_owner_revision(connection: Connection) -> MigrationReport:
-    config = alembic_config(connection)
-    started = current_revision(connection)
-    steps = pending_steps(config, started, REVISION)
-    connection.commit()
-    command.upgrade(config, REVISION)
-    return MigrationReport(connection.dialect.name, started, REVISION, steps)
-
-
 OWNER_TABLE_COLUMNS: tuple[str, ...] = (
     "graph_version_id",
     "ordinal",
@@ -289,6 +284,16 @@ async def retained_predecessor_rows(
             selected = (await connection.execute(select(table))).mappings().all()
             rows.append(tuple(dict(row) for row in selected))
     return tuple(rows)
+
+
+def upgrade_owner_revision(connection: Connection) -> MigrationReport:
+    config = alembic_config(connection)
+    predecessor = current_revision(connection)
+    steps = pending_steps(config, predecessor, REVISION)
+    if connection.dialect.name == "postgresql":
+        connection.commit()
+    command.upgrade(config, REVISION)
+    return MigrationReport(connection.dialect.name, predecessor, REVISION, steps)
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from asyncio import CancelledError
+from collections.abc import Awaitable
 from dataclasses import dataclass
-from typing import Never
+from typing import Never, Self
 
 from kora.api.graph_cel import GraphCelChecks, GraphCelResult, verify_graph_cel
 from kora.cel.limits import MAX_CODE_POINTS
@@ -14,10 +15,18 @@ from kora.db.graph_value_json import (
 )
 from kora.db.graph_values import DecodedGraphValues, read_graph_values
 from kora.engine.graph_cel_facts import EXECUTION_SEMANTICS, GraphCelFacts
-from kora.engine.graph_command_manifests import build_declared_command_manifests
+from kora.engine.graph_command_manifests import (
+    CommandManifestLimits,
+    CommandResourceContent,
+    PreparedCommandStageGroup,
+    build_declared_command_manifests,
+    check_declared_command_manifests,
+    prepare_graph_command_stage_groups,
+)
 from kora.engine.graph_execution_contract import (
     ExecutionContractReadLimits,
     check_execution_contract_members,
+    check_execution_contract_projection_members,
     execution_contract_read_reservation,
     structured_output_preparation_reservation,
 )
@@ -40,11 +49,14 @@ from kora.engine.graph_types import build_graph_type_contracts, read_document
 from kora.engine.graph_version_identity import (
     HASH_CHUNK_BYTES,
     GraphVersionDigests,
+    PreparedGraphVersionIdentity,
     graph_version_hash_bytes,
     prepare_graph_version_identity,
 )
 from kora.ir.diagnostic_collection import MAX_DIAGNOSTIC_BYTES
+from kora.ir.document import GraphDocument
 from kora.ir.json import JsonObject
+from kora.protocols.storage_models import StorageIdentity
 
 SOURCE_COPIES = 4
 SECTION_COPIES = 6
@@ -53,6 +65,7 @@ NATIVE_FACT_COPIES = 3
 PREPARED_OWNER_SLOT = 1
 PATTERN_COPIES = 4
 MAX_PATTERN_PROBE = 10 * MAX_CODE_POINTS + len('"".matches("")')
+DEPLOYMENT_COMPOSITION_OVERHEAD = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,19 +78,45 @@ class ExecutionPreparationLimits:
     max_work: int
 
 
-class PreparedExecutionContract:
-    __slots__ = (
-        "scope",
-        "canonical_ir",
-        "canonical_contract",
-        "digests",
-        "resources",
-        "owners",
-    )
-    scope: GraphResourceScope
+@dataclass(frozen=True, slots=True)
+class GraphDeploymentPreparationLimits:
+    execution: ExecutionPreparationLimits
+    contents: CommandManifestLimits
+    max_retained_bytes: int
+    max_work: int
+
+
+class PreparedLogicalExecutionContract:
+    __slots__ = ("canonical_ir", "canonical_contract", "digests")
     canonical_ir: str
     canonical_contract: str
     digests: GraphVersionDigests
+
+    def __init__(
+        self,
+        canonical_ir: str,
+        canonical_contract: str,
+        digests: GraphVersionDigests,
+    ) -> None:
+        if hasattr(self, "canonical_ir"):
+            raise AttributeError("prepared execution contract is immutable")
+        object.__setattr__(self, "canonical_ir", canonical_ir)
+        object.__setattr__(self, "canonical_contract", canonical_contract)
+        object.__setattr__(self, "digests", digests)
+
+    def __setattr__(self, name: str, value: object) -> Never:
+        raise AttributeError("prepared execution contract is immutable")
+
+    def __delattr__(self, name: str) -> Never:
+        raise AttributeError("prepared execution contract is immutable")
+
+    def __getstate__(self) -> Never:
+        raise TypeError("prepared execution contract requires explicit access")
+
+
+class PreparedExecutionContract(PreparedLogicalExecutionContract):
+    __slots__ = ("scope", "resources", "owners")
+    scope: GraphResourceScope
     resources: GraphResourceReferences
     owners: tuple[GraphResourceOwner, ...]
 
@@ -90,21 +129,83 @@ class PreparedExecutionContract:
         resources: GraphResourceReferences,
         owners: tuple[GraphResourceOwner, ...],
     ) -> None:
+        super().__init__(canonical_ir, canonical_contract, digests)
         object.__setattr__(self, "scope", scope)
-        object.__setattr__(self, "canonical_ir", canonical_ir)
-        object.__setattr__(self, "canonical_contract", canonical_contract)
-        object.__setattr__(self, "digests", digests)
         object.__setattr__(self, "resources", resources)
         object.__setattr__(self, "owners", owners)
 
+
+class _ProtectedGraphDeploymentPreparation:
+    __slots__ = ()
+
     def __setattr__(self, name: str, value: object) -> Never:
-        raise AttributeError("prepared execution contract is immutable")
+        raise AttributeError("graph deployment preparation is immutable")
 
     def __delattr__(self, name: str) -> Never:
-        raise AttributeError("prepared execution contract is immutable")
+        raise AttributeError("graph deployment preparation is immutable")
 
     def __getstate__(self) -> Never:
-        raise TypeError("prepared execution contract requires explicit access")
+        raise TypeError("graph deployment preparation requires explicit access")
+
+
+class PreparedGraphDeploymentInputs(_ProtectedGraphDeploymentPreparation):
+    __slots__ = ("logical", "groups")
+    logical: PreparedLogicalExecutionContract
+    groups: tuple[PreparedCommandStageGroup, ...]
+
+    def __new__(
+        cls,
+        logical: PreparedLogicalExecutionContract,
+        groups: tuple[PreparedCommandStageGroup, ...],
+    ) -> Self:
+        prepared = super().__new__(cls)
+        object.__setattr__(prepared, "logical", logical)
+        object.__setattr__(prepared, "groups", groups)
+        return prepared
+
+
+class GraphDeploymentCelRefusal(_ProtectedGraphDeploymentPreparation):
+    __slots__ = ("result",)
+    result: GraphCelResult
+
+    def __new__(cls, result: GraphCelResult) -> Self:
+        refusal = super().__new__(cls)
+        object.__setattr__(refusal, "result", result)
+        return refusal
+
+
+def _admit_deployment(limits: GraphDeploymentPreparationLimits) -> None:
+    if (
+        type(limits) is not GraphDeploymentPreparationLimits
+        or type(limits.execution) is not ExecutionPreparationLimits
+        or type(limits.contents) is not CommandManifestLimits
+        or any(
+            type(value) is not int or value <= 0
+            for value in (
+                limits.max_retained_bytes,
+                limits.max_work,
+                limits.execution.max_retained_bytes,
+                limits.execution.max_work,
+                limits.contents.ir_bytes,
+                limits.contents.scratch,
+                limits.contents.work,
+            )
+        )
+    ):
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
+    retained = (
+        limits.execution.max_retained_bytes
+        + limits.contents.ir_bytes
+        + limits.contents.scratch
+        + DEPLOYMENT_COMPOSITION_OVERHEAD
+    )
+    work = (
+        limits.execution.max_work
+        + limits.contents.work
+        + DEPLOYMENT_COMPOSITION_OVERHEAD
+    )
+    if retained > limits.max_retained_bytes or work > limits.max_work:
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
 
 
 def _admit(limits: ExecutionPreparationLimits) -> None:
@@ -224,14 +325,9 @@ def _contract(
     return contract
 
 
-def _draft(
-    ir_text: str,
-    facts: GraphCelFacts,
-    physical: PreparedGraphResourceReferences,
-    scope: GraphResourceScope,
-    owners: tuple[GraphResourceOwner, ...],
-    limits: ExecutionPreparationLimits,
-) -> PreparedExecutionContract:
+def _checked_pair(
+    ir_text: str, facts: GraphCelFacts, limits: ExecutionPreparationLimits
+) -> tuple[PreparedGraphVersionIdentity, DecodedGraphValues]:
     reader = limits.reader
     prepared = prepare_graph_version_identity(
         ObjectReader(ir_text).object(),
@@ -249,13 +345,26 @@ def _draft(
     )
     if not isinstance(saved, DecodedGraphValues):
         raise GraphValueRejected(GraphValueFailure.VERSION)
+    return prepared, saved
+
+
+def _draft(
+    ir_text: str,
+    facts: GraphCelFacts,
+    physical: PreparedGraphResourceReferences,
+    scope: GraphResourceScope,
+    owners: tuple[GraphResourceOwner, ...],
+    limits: ExecutionPreparationLimits,
+) -> PreparedExecutionContract:
+    prepared, saved = _checked_pair(ir_text, facts, limits)
+    values = prepared.values
     resources = check_execution_contract_members(
         values.ir,
         saved.execution_contract,
         ObjectReader(physical.text).object(),
         scope,
         owners,
-        reader,
+        limits.reader,
     )
     return PreparedExecutionContract(
         scope,
@@ -267,13 +376,9 @@ def _draft(
     )
 
 
-async def _prepare(
-    ir_text: str,
-    scope: GraphResourceScope,
-    owners: tuple[GraphResourceOwner, ...],
-    evaluator: Evaluator,
-    limits: ExecutionPreparationLimits,
-) -> PreparedExecutionContract | GraphCelResult:
+def _prepare_document(
+    ir_text: str, limits: ExecutionPreparationLimits
+) -> GraphDocument:
     _admit(limits)
     reader = limits.reader
     cel = reader.projection.cel
@@ -290,13 +395,14 @@ async def _prepare(
     ):
         raise GraphValueRejected(GraphValueFailure.BUDGET)
     admit_graph_projection_source(ir_text, reader.projection)
-    document = read_document(ir_text, TextBudget(source_bytes))
-    physical = build_graph_resource_references(
-        ir_text, scope, owners, limits=reader.resources
-    )
-    if len(physical.text) > reader.physical_input_bytes:
-        raise GraphValueRejected(GraphValueFailure.BUDGET)
-    verification = verify_graph_cel(
+    return read_document(ir_text, TextBudget(source_bytes))
+
+
+def _verification(
+    document: GraphDocument, evaluator: Evaluator, limits: ExecutionPreparationLimits
+) -> Awaitable[GraphCelResult]:
+    cel = limits.reader.projection.cel
+    return verify_graph_cel(
         document,
         evaluator,
         max_declarations=cel.declarations,
@@ -307,13 +413,110 @@ async def _prepare(
         max_typed_work=cel.typed_work,
         max_typed_bytes=cel.typed_bytes,
     )
-    del document
-    result = await verification
+
+
+def _complete_facts(result: GraphCelResult) -> GraphCelFacts | None:
     if not isinstance(result, GraphCelChecks) or not result.diagnostics.valid:
-        return result
+        return None
     if result.facts is None:
         raise GraphValueRejected(GraphValueFailure.INVALID)
-    return _draft(ir_text, result.facts, physical, scope, owners, limits)
+    return result.facts
+
+
+async def _prepare(
+    ir_text: str,
+    scope: GraphResourceScope,
+    owners: tuple[GraphResourceOwner, ...],
+    evaluator: Evaluator,
+    limits: ExecutionPreparationLimits,
+) -> PreparedExecutionContract | GraphCelResult:
+    document = _prepare_document(ir_text, limits)
+    reader = limits.reader
+    physical = build_graph_resource_references(
+        ir_text, scope, owners, limits=reader.resources
+    )
+    if len(physical.text) > reader.physical_input_bytes:
+        raise GraphValueRejected(GraphValueFailure.BUDGET)
+    verification = _verification(document, evaluator, limits)
+    del document
+    result = await verification
+    facts = _complete_facts(result)
+    if facts is None:
+        return result
+    return _draft(ir_text, facts, physical, scope, owners, limits)
+
+
+async def _prepare_logical(
+    ir_text: str, evaluator: Evaluator, limits: ExecutionPreparationLimits
+) -> PreparedLogicalExecutionContract | GraphCelResult:
+    result = await _verification(_prepare_document(ir_text, limits), evaluator, limits)
+    facts = _complete_facts(result)
+    if facts is None:
+        return result
+    prepared, saved = _checked_pair(ir_text, facts, limits)
+    values = prepared.values
+    reader = limits.reader
+    check_execution_contract_projection_members(
+        values.ir, saved.execution_contract, reader
+    )
+    check_declared_command_manifests(
+        values.ir,
+        saved.execution_contract["command_resources"],
+        limits=reader.resources.logical,
+    )
+    return PreparedLogicalExecutionContract(
+        values.ir, values.execution_contract, prepared.digests
+    )
+
+
+async def prepare_logical_execution_contract(
+    ir_text: str,
+    evaluator: Evaluator,
+    *,
+    limits: ExecutionPreparationLimits,
+) -> PreparedLogicalExecutionContract | GraphCelResult:
+    error: BaseException
+    try:
+        return await _prepare_logical(ir_text, evaluator, limits)
+    except GraphValueRejected as rejected:
+        error = GraphValueRejected(rejected.reason)
+    except EvaluatorUnavailable as unavailable:
+        error = EvaluatorUnavailable(unavailable.reason)
+    except CancelledError:
+        error = CancelledError()
+    del ir_text, evaluator
+    raise_safe(error)
+
+
+async def prepare_graph_deployment_inputs(
+    ir_text: str,
+    contents: tuple[CommandResourceContent, ...],
+    evaluator: Evaluator,
+    *,
+    storage_identity: StorageIdentity | None,
+    limits: GraphDeploymentPreparationLimits,
+) -> PreparedGraphDeploymentInputs | GraphDeploymentCelRefusal:
+    groups: tuple[PreparedCommandStageGroup, ...] = ()
+    error: BaseException
+    try:
+        _admit_deployment(limits)
+        groups = prepare_graph_command_stage_groups(
+            ir_text, contents, storage_identity=storage_identity, limits=limits.contents
+        )
+        contents = ()
+        storage_identity = None
+        result = await _prepare_logical(ir_text, evaluator, limits.execution)
+        if isinstance(result, PreparedLogicalExecutionContract):
+            return PreparedGraphDeploymentInputs(result, groups)
+        return GraphDeploymentCelRefusal(result)
+    except GraphValueRejected as rejected:
+        error = GraphValueRejected(rejected.reason)
+    except EvaluatorUnavailable as unavailable:
+        error = EvaluatorUnavailable(unavailable.reason)
+    except CancelledError:
+        error = CancelledError()
+    del ir_text, contents, storage_identity, evaluator, groups, limits
+    raise_safe(error)
 
 
 async def prepare_execution_contract(

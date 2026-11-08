@@ -22,7 +22,7 @@ The one-shot recipe is a candidate for the production launch profile. Its select
 | Authentication, provider and destination controls — Codex provider for the reservation and admitted credential owner for insertion | The [DD-30 mapping](../specs/protocols.md#14-harness-mapping-tables-fr-33-dd-27) assigns the Codex harness credential to `CODEX_API_KEY`. OpenAI Docs also describes `CODEX_ACCESS_TOKEN` and provider-specific `env_key` inputs. The probes use a local provider with no credential. [Environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables) | Audit the pinned implementation for every applicable authentication and destination branch. Test native rejection before secret revelation or process start and verify a single assignment owner. Declarations and diagnostics carry names only as authorized by the contract, with no secret values or raw configuration. |
 | Shell, loader, proxy, TLS and diagnostic controls — Codex provider or runtime according to actual ownership | The prior probe tested Docker proxy isolation. OpenAI Docs identifies native controls such as `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE` and `RUST_LOG`. These are inputs for the audit of the pin. [Environment variables](https://learn.chatgpt.com/docs/config-file/environment-variables) | Establish the exact owners, conditional branches and required case spellings. Compare both complete native inventories with their launch inputs and ensure inherited supervisor values and forwarded workload values do not become reservations by inference. Exercise an actual launch handoff and the distinct duplicate-owner and forbidden-name refusal paths. |
 | Direct shell and continuations — Codex provider | Direct Bash allow/deny and the interactive versus one-shot `write_stdin` comparison are observed above. | Prove the selected production profile, including allowed shell and login behavior, modes, protected paths and supported execution platforms. Verify the actual binary and effective managed controls at launch. |
-| File edits and shell-routed edit guards — Codex provider | The [pinned hook input record](codex-pre-tool-use-2026-11-05.md) observes managed direct `apply_patch` allow and deny on Linux and exercises the existing shell-routed patch guard with the real policy provider. [Hook input research](codex-hook-tool-input-2026-10-23.md) describes the earlier upstream source. | Verify the selected production tool list, managed binding and enforcement, supported execution platforms, and the shell-routed guard's native allow/deny side effects. |
+| File edits and shell-routed edit guards — Codex provider | The [pinned hook input record](codex-pre-tool-use-2026-11-05.md) observes managed direct `apply_patch` allow and deny on Linux. The [selected shell-routed patch record](codex-shell-routed-patch-policy-2026-11-08.md) verifies native allow/deny side effects with the real Policy provider and the failure controls. | Verify the selected production tool list, before-effect binding and enforcement, and supported execution platforms. |
 | MCP, hosted tools, residual calls and subagent context — Codex provider | The [policy contract](../specs/protocols.md#12-policy-dd-29) describes the intended native mapping and the hosted-search limit. [Validation facts §9](../specs/validation-facts.md#9-complete-policy-coverage-requirements) defines the complete vocabulary and conservative obligations. | Verify native classification and normalization and the applicable real-interface interception matrix. Disabled tools supply no coverage credit. Verify both covered and uncovered kinds and subagent context for the selected profile, including native macOS evidence where applicable. |
 | Detached same-call projection and admission — server composition | The existing [same-call](../specs/validation-facts.md#1-scope-and-lifetime) and [operation failure](../specs/validation-facts.md#7-public-disposition-of-incomplete-trusted-facts) contracts define binding, ownership and disposition. | Exercise selection and site mismatch, independent unavailability and complete-empty values, and preserve the existing fail-closed disposition when a required native guarantee is unresolved. Canonical start remains a separate consumer under [#593](https://github.com/realkarych/kora/issues/593). |
 
@@ -67,3 +67,57 @@ environment override. The exact unset `CODEX_SQLITE_HOME` control now
 participates in private launch preflight. The [dated record](codex-sqlite-state-home-2026-11-08.md)
 keeps this Linux observation separate from complete declarations and
 production placement.
+
+## Subsequent alternate executor registry reservation
+
+[#992](https://github.com/realkarych/kora/issues/992) observes a refused
+alternate registry connection on the pinned selected Linux app-server.
+The four exact unset controls now participate in private launch preflight.
+The [dated record](codex-alternate-executor-registry-2026-11-08.md) separates
+native discovery evidence from production executor binding and complete
+declarations.
+
+## Subsequent selected tool inventory
+
+[#996](https://github.com/realkarych/kora/issues/996) records eight
+model-visible identities in the first request from the selected official
+Linux profile and verifies that injected `update_plan` is refused. The
+[dated record](codex-selected-tool-inventory-2026-11-08.md) distinguishes
+the observed inventory and residual candidates from complete Policy
+coverage.
+
+## Subsequent selected Bash startup reservation
+
+[#1016](https://github.com/realkarych/kora/issues/1016) reserves the exact
+unset `BASH_ENV` name in private launch preflight. The [dated record](codex-bash-startup-environment-2026-11-08.md)
+observes the extra script effect before an approved non-login Bash command
+in the selected Linux executor. Complete declarations and production
+environment assembly retain their existing acceptance criteria.
+
+## Subsequent selected Bash trace reservations
+
+[#1022](https://github.com/realkarych/kora/issues/1022) reserves the exact
+unset `SHELLOPTS` and `PS4` names in private launch preflight. The
+[dated record](codex-bash-trace-environment-2026-11-08.md) verifies that an
+inherited option can expose trace to the model and that an inherited
+trace prefix can produce an extra effect even when the approved command
+enables trace itself. Complete declarations and production environment
+assembly retain their existing acceptance criteria.
+
+## Subsequent selected model TLS reservations
+
+[#1026](https://github.com/realkarych/kora/issues/1026) reserves the exact
+unset `CODEX_CA_CERTIFICATE`, `SSL_CERT_FILE`, and `SSL_CERT_DIR` names
+in private launch preflight. The [dated record](codex-model-tls-roots-2026-11-08.md)
+shows that each independently changes selected app-server trust on
+loopback HTTPS. Complete declarations, installation trust and production
+environment assembly retain their existing acceptance criteria.
+
+## Subsequent selected model proxy reservations
+
+[#1049](https://github.com/realkarych/kora/issues/1049) reserves the exact
+uppercase and lowercase spellings of the four model proxy controls in private
+launch preflight. The [dated record](codex-model-proxy-2026-11-08.md) separates
+cleartext delivery to an alternate listener, TLS routing through CONNECT, and
+explicit bypass. Complete declarations and installation-owned routing retain
+their existing acceptance criteria.

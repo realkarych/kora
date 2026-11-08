@@ -2,9 +2,9 @@
 set -eu
 
 case "$#:${1:-}" in
-    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-startup|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
+    0:|1:--check-cleanup|1:--check-write-stdin|1:--check-provider-env-key|1:--check-shell-controls|1:--check-executor-shell|1:--check-selected-launch|1:--check-selected-sqlite-home|1:--check-selected-bash-startup|1:--check-selected-bash-trace|1:--check-selected-tls-roots|1:--check-selected-proxy|1:--check-selected-noise-registry|1:--check-selected-tool-inventory|1:--check-selected-tool-search|1:--check-selected-startup|1:--check-selected-hook-inventory|1:--check-selected-turn|1:--check-selected-hook-failures|1:--check-selected-patch-hook-failures|1:--check-selected-shell-patch-policy|1:--check-app-server-rpc|1:--check-app-server-startup|1:--check-pre-tool-use|1:--check-app-server-usage|1:--check-app-server-interrupt|1:--check-app-server-errors|1:--check-app-server-messages|1:--check-app-server-output) ;;
     *)
-        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-startup|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
+        printf '%s\n' 'usage: sh run_hook_probe.sh [--check-cleanup|--check-write-stdin|--check-provider-env-key|--check-shell-controls|--check-executor-shell|--check-selected-launch|--check-selected-sqlite-home|--check-selected-bash-startup|--check-selected-bash-trace|--check-selected-tls-roots|--check-selected-proxy|--check-selected-noise-registry|--check-selected-tool-inventory|--check-selected-tool-search|--check-selected-startup|--check-selected-hook-inventory|--check-selected-turn|--check-selected-hook-failures|--check-selected-patch-hook-failures|--check-selected-shell-patch-policy|--check-app-server-rpc|--check-app-server-startup|--check-pre-tool-use|--check-app-server-usage|--check-app-server-interrupt|--check-app-server-errors|--check-app-server-messages|--check-app-server-output]' >&2
         exit 2
         ;;
 esac
@@ -88,7 +88,7 @@ cleanup() {
     exit "$status"
 }
 
-prepare_selected_turn() {
+prepare_locked_probe() {
     mkdir "$reservation/source" "$reservation/uv-home" "$reservation/uv-tmp"
     fixture_revision=$(env -i PATH="$PATH" HOME="$reservation/uv-home" git -C "$repo_dir" rev-parse HEAD)
     set -- src/kora tests/plugins/harness/codex pyproject.toml uv.lock .python-version README.md
@@ -118,10 +118,15 @@ prepare_selected_turn() {
 }
 
 probe_context() {
-    set -- -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py selected_launch.py \
+    set -- -C "$probe_dir" Dockerfile requirements.toml probe.py managed_hook.py interrupt_child.py owned_loopback.py selected_launch.py selected_proxy.py selected_tls.py \
         -C "$rpc_dir" app_server_rpc.py app_server_startup.py app_server_turn.py app_server_session.py app_server_tools.py app_server_usage.py app_server_errors.py app_server_messages.py pre_tool_use.py launch_configuration.py selected_startup.py
-    if [ "$variant" = selected-turn ]; then
-        set -- "$@" -C "$reservation/source/src" kora -C "$reservation" linux-packages
+    case "$variant" in
+        selected-turn|selected-shell-patch-policy)
+            set -- "$@" -C "$reservation/source/src" kora -C "$reservation" linux-packages
+            ;;
+    esac
+    if [ "$variant" = selected-shell-patch-policy ]; then
+        set -- "$@" -C "$probe_dir" selected_shell_patch.py
     fi
     env -i PATH="$PATH" tar -cf - "$@"
 }
@@ -184,7 +189,7 @@ case "${1:-}" in
         done
         ;;
     --check-selected-launch)
-        for probe_case in allow deny key-absent command-metadata; do
+        for probe_case in allow deny key-absent command-metadata command-exit-seven; do
             run_variant shell-controls "--selected-$probe_case"
             release_container
         done
@@ -195,8 +200,50 @@ case "${1:-}" in
             release_container
         done
         ;;
+    --check-selected-bash-startup)
+        for probe_case in default override; do
+            run_variant shell-controls "--selected-bash-startup-$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-bash-trace)
+        for probe_case in default shellopts command ps4; do
+            run_variant shell-controls "--selected-bash-trace-$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-tls-roots)
+        for probe_case in default codex-ca cert-file cert-dir; do
+            run_variant shell-controls "--selected-tls-$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-proxy)
+        for proxy_case in http-control upper-http lower-http upper-all lower-all \
+            upper-bypass lower-bypass https-control upper-https lower-https; do
+            run_variant shell-controls "--selected-proxy-$proxy_case"
+            release_container
+        done
+        ;;
+    --check-selected-noise-registry)
+        for probe_case in default override; do
+            run_variant shell-controls "--selected-noise-registry-$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-tool-inventory)
+        for probe_case in allow disabled; do
+            run_variant shell-controls "--selected-tool-inventory-$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-tool-search)
+        run_variant shell-controls --selected-tool-inventory-allow
+        release_container
+        run_variant shell-controls --selected-tool-search
+        ;;
     --check-selected-turn)
-        prepare_selected_turn
+        prepare_locked_probe
         run_variant selected-turn --selected-turn-complete
         release_container
         run_variant selected-turn --selected-turn-cut
@@ -206,6 +253,14 @@ case "${1:-}" in
             run_variant shell-controls "--selected-startup-$probe_case"
             release_container
         done
+        ;;
+    --check-selected-hook-inventory)
+        run_variant shell-controls --selected-startup-ready
+        release_container
+        run_variant missing-managed-hook --selected-startup-hook-missing
+        release_container
+        run_variant wrong-managed-matcher --selected-startup-hook-matcher
+        release_container
         ;;
     --check-selected-hook-failures)
         for probe_case in deny no-reason exit-one; do
@@ -218,6 +273,13 @@ case "${1:-}" in
     --check-selected-patch-hook-failures)
         for probe_case in allow deny exit-one timeout; do
             run_variant selected-hook-failures "--selected-patch-$probe_case"
+            release_container
+        done
+        ;;
+    --check-selected-shell-patch-policy)
+        prepare_locked_probe
+        for probe_case in allow protected exit-one timeout; do
+            run_variant selected-shell-patch-policy "--selected-shell-patch-$probe_case"
             release_container
         done
         ;;

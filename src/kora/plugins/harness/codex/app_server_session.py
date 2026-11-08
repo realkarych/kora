@@ -122,14 +122,16 @@ class AppServerTurnSession:
         on_waiting: Callable[[], None] | None = None,
         usage_observer: UsageObserver | None = None,
         on_message: Callable[[int, CompletedMessage], None] | None = None,
+        on_tool_completed: Callable[[ToolObservation], None] | None = None,
         before_start_write: Callable[[], None] | None = None,
     ) -> TurnCompletion:
         if self._used:
+            on_tool_completed = None
             raise SessionRefused(SessionFailure.ALREADY_USED)
         self._used = True
         source_time: datetime | None = None
         usage_pending = False
-        pending_messages: list[CompletedMessage] = []
+        pending_publications: list[CompletedMessage | ToolObservation] = []
         pending_bytes = 0
 
         def publish_message(ordinal: int, message: CompletedMessage) -> None:
@@ -137,6 +139,15 @@ class AppServerTurnSession:
                 rpc.check_deadline(deadline)
                 on_message(ordinal, message)
                 rpc.check_deadline(deadline)
+
+        def publish_tool(tool: ToolObservation) -> None:
+            try:
+                if on_tool_completed is not None:
+                    rpc.check_deadline(deadline)
+                    on_tool_completed(tool)
+                    rpc.check_deadline(deadline)
+            finally:
+                del tool
 
         def publish_usage() -> None:
             nonlocal usage_pending
@@ -165,12 +176,17 @@ class AppServerTurnSession:
                         usage_pending = True
             message = self._messages.accept(notification)
             self._errors.accept(notification)
-            self._tools.accept(notification)
+            tool = self._tools.accept(notification)
+            completed_tool = (
+                tool if tool is not None and tool.phase == "completed" else None
+            )
             turn_id = self._snapshot.turn_id
             if turn_id is not None:
                 self._snapshot = self._confirmed(turn_id)
                 if message is not None:
                     publish_message(self._snapshot.message_count, message)
+                if completed_tool is not None:
+                    publish_tool(completed_tool)
                 publish_usage()
             elif message is not None and on_message is not None:
                 pending_bytes += sum(
@@ -184,7 +200,9 @@ class AppServerTurnSession:
                 )
                 if pending_bytes > MAX_FINAL_MESSAGE_BYTES:
                     raise SessionRefused(SessionFailure.PENDING_MESSAGE_LIMIT)
-                pending_messages.append(message)
+                pending_publications.append(message)
+            elif completed_tool is not None and on_tool_completed is not None:
+                pending_publications.append(completed_tool)
             return observe(notification) if observe is not None else None
 
         def reject_premature(notification: Notification) -> bool | None:
@@ -198,9 +216,17 @@ class AppServerTurnSession:
             self._snapshot = self._confirmed(turn_id)
             if on_started is not None:
                 on_started(turn_id)
-            for ordinal, message in enumerate(pending_messages, 1):
-                publish_message(ordinal, message)
-            pending_messages.clear()
+            ordinal = 0
+            for observation in pending_publications:
+                try:
+                    if isinstance(observation, CompletedMessage):
+                        ordinal += 1
+                        publish_message(ordinal, observation)
+                    else:
+                        publish_tool(observation)
+                finally:
+                    del observation
+            pending_publications.clear()
             publish_usage()
 
         try:
@@ -218,6 +244,7 @@ class AppServerTurnSession:
                 before_start_write=before_start_write,
             )
         finally:
-            pending_messages.clear()
+            on_tool_completed = None
+            pending_publications.clear()
         self._snapshot = self._confirmed(completion.turn_id, completion)
         return completion

@@ -9,6 +9,8 @@ import pytest
 from kora.plugins.harness.codex.app_server_rpc import Notification, RpcError, RpcFailure
 from kora.plugins.harness.codex.app_server_session import (
     AppServerTurnSession,
+    SessionFailure,
+    SessionRefused,
     TurnObservations,
 )
 from kora.plugins.harness.codex.app_server_tools import (
@@ -16,12 +18,14 @@ from kora.plugins.harness.codex.app_server_tools import (
     ToolCounts,
     ToolFailure,
     ToolKind,
+    ToolObservation,
     ToolPhase,
     ToolRefused,
     ToolStatus,
     TurnTools,
     decode_tool,
 )
+from kora.plugins.harness.codex.app_server_turn import TurnError, TurnFailure
 from tests.plugins.harness.codex.test_app_server_messages import encoded
 from tests.plugins.harness.codex.test_app_server_turn import (
     PROMPT,
@@ -381,12 +385,16 @@ async def test_session_confirms_tool_state_only_after_matching_start_reply(
     async with wire() as connection:
         session = AppServerTurnSession(THREAD, max_messages=1, max_tools=2)
         observed: list[TurnObservations] = []
+        delivered: list[tuple[str | None, ToolObservation]] = []
         operation = connection.start(
             session.run(
                 connection.rpc,
                 prompt=PROMPT,
                 deadline=future_deadline(),
                 observe=lambda _notice: observed.append(session.snapshot()),
+                on_tool_completed=lambda tool: delivered.append(
+                    (session.snapshot().turn_id, tool)
+                ),
             )
         )
         await connection.peer_reader.readline()
@@ -401,6 +409,7 @@ async def test_session_confirms_tool_state_only_after_matching_start_reply(
         assert state.latest_tool is not None
         assert state.latest_tool.phase == "completed"
         assert state.latest_tool.item_id == ITEM
+        assert delivered == [(TURN, state.latest_tool)]
         assert state.turn_id == TURN
         assert state.terminal_status == "completed"
         assert state.final_message is None
@@ -408,6 +417,162 @@ async def test_session_confirms_tool_state_only_after_matching_start_reply(
             assert observed == [TurnObservations(), TurnObservations()]
         else:
             assert observed[0].tool_counts == ToolCounts(1, 1, 0, 1, 0)
+        assert owned_tasks() == set()
+
+
+@pytest.mark.parametrize(
+    ("ending", "expected"),
+    [
+        ("wrong-rpc-id", RpcFailure.UNEXPECTED_REPLY),
+        ("wrong-turn", ToolFailure.IDENTITY_MISMATCH),
+        ("malformed", TurnFailure.INVALID_START),
+        ("remote-error", RpcFailure.REMOTE_ERROR),
+        ("expiry", RpcFailure.DEADLINE),
+        ("disconnect", RpcFailure.DISCONNECTED),
+        ("duplicate", ToolFailure.DUPLICATE),
+        ("overflow", ToolFailure.ITEM_LIMIT),
+        ("cancel", None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_pending_tool_completion_releases_borrowed_callback_on_failed_ack(
+    ending: str, expected: RpcFailure | ToolFailure | TurnFailure | None
+) -> None:
+    instant = 0.0
+    deadline = future_deadline()
+    async with wire(clock=lambda: instant) as connection:
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=1)
+        observed = asyncio.Event()
+        delivered: list[ToolObservation] = []
+
+        def callback(tool: ToolObservation) -> None:
+            delivered.append(tool)
+
+        reference = weakref.ref(callback)
+        operation = connection.start(
+            session.run(
+                connection.rpc,
+                prompt=PROMPT,
+                deadline=deadline,
+                observe=lambda _notice: observed.set(),
+                on_tool_completed=callback,
+            )
+        )
+        del callback
+        await connection.peer_reader.readline()
+        notice = encoded(tool_notice(phase="completed"))
+        replies = {
+            "wrong-rpc-id": frame({"id": 99, "result": {}}),
+            "wrong-turn": started({"turn": {"id": "other", "status": "inProgress"}}),
+            "malformed": started({}),
+            "remote-error": frame({"id": 1, "error": {"code": -1, "message": PRIVATE}}),
+            "duplicate": notice,
+            "overflow": encoded(tool_notice(phase="completed", identity="overflow")),
+            "expiry": started(),
+        }
+
+        await connection.send(notice)
+        await observed.wait()
+        if ending == "cancel":
+            operation.cancel()
+        elif ending == "disconnect":
+            connection.peer_writer.close()
+        else:
+            if ending == "expiry":
+                instant = deadline
+            await connection.send(replies[ending])
+        with pytest.raises(
+            (RpcError, ToolRefused, TurnError, asyncio.CancelledError)
+        ) as failure:
+            await operation
+        gc.collect()
+
+        assert delivered == []
+        assert session.snapshot() == TurnObservations()
+        assert reference() is None
+        if expected is None:
+            assert isinstance(failure.value, asyncio.CancelledError)
+        else:
+            assert isinstance(failure.value, (RpcError, ToolRefused, TurnError))
+            assert failure.value.reason is expected
+        assert owned_tasks() == set()
+
+
+@pytest.mark.asyncio
+async def test_ack_releases_prior_tool_completion_before_turn_ends() -> None:
+    async with wire() as connection:
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=2)
+        waiting = asyncio.Event()
+        delivered: list[str] = []
+        references: list[weakref.ReferenceType[ToolObservation]] = []
+
+        def publish(observation: ToolObservation) -> None:
+            delivered.append(observation.item_id)
+            references.append(weakref.ref(observation))
+
+        operation = connection.start(
+            session.run(
+                connection.rpc,
+                prompt=PROMPT,
+                deadline=future_deadline(),
+                on_waiting=waiting.set,
+                on_tool_completed=publish,
+            )
+        )
+        await connection.peer_reader.readline()
+        first = encoded(tool_notice(phase="completed"))
+        second = encoded(tool_notice(phase="completed", identity="second"))
+
+        await connection.send(first, second, started())
+        await waiting.wait()
+        gc.collect()
+        live = not operation.done()
+        previous_released = references[0]() is None
+        snapshot_before_duplicate = session.snapshot()
+        await connection.send(second)
+        with pytest.raises(ToolRefused) as failure:
+            await operation
+
+        assert live
+        assert previous_released
+        assert delivered == [ITEM, "second"]
+        assert references[1]() is session.snapshot().latest_tool
+        assert session.snapshot() is snapshot_before_duplicate
+        assert failure.value.reason is ToolFailure.DUPLICATE
+        assert owned_tasks() == set()
+
+
+@pytest.mark.asyncio
+async def test_reused_session_refuses_and_drops_borrowed_tool_callback() -> None:
+    async with wire() as connection:
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=1)
+        operation = connection.start(
+            session.run(connection.rpc, prompt=PROMPT, deadline=future_deadline())
+        )
+        await connection.peer_reader.readline()
+        await connection.send(started(), completed())
+        await operation
+        delivered: list[ToolObservation] = []
+
+        def callback(tool: ToolObservation) -> None:
+            delivered.append(tool)
+
+        reference = weakref.ref(callback)
+        reuse = session.run(
+            connection.rpc,
+            prompt=PROMPT,
+            deadline=future_deadline(),
+            on_tool_completed=callback,
+        )
+        del callback
+
+        with pytest.raises(SessionRefused) as failure:
+            await reuse
+        gc.collect()
+
+        assert failure.value.reason is SessionFailure.ALREADY_USED
+        assert delivered == []
+        assert reference() is None
         assert owned_tasks() == set()
 
 

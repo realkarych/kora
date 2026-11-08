@@ -78,6 +78,9 @@ class GraphResourceReferences(_ProtectedGraphResources):
     _text: str
 
     def __init__(self, text: str) -> None:
+        if hasattr(self, "_text"):
+            del self, text
+            raise AttributeError("graph resource references are immutable")
         object.__setattr__(self, "_text", text)
 
     @property
@@ -113,8 +116,10 @@ class ReferenceAdmission:
             raise GraphValueRejected(GraphValueFailure.INVALID)
         self.inspect(4 * len(text) + 1)
 
-    def render(self, value: JsonObject) -> str:
+    def render(self, value: JsonObject, max_output_bytes: int | None = None) -> str:
         available = min(self.scratch.remaining, self.work.remaining) // RENDER_COPIES
+        if max_output_bytes is not None:
+            available = min(available, TextBudget(max_output_bytes).remaining)
         return render_object(value, TextBudget(available))
 
 
@@ -290,6 +295,7 @@ def _references_result(
     scope: GraphResourceScope,
     owners: tuple[GraphResourceOwner, ...],
     limits: GraphResourceReferenceLimits,
+    max_output_bytes: int | None = None,
 ) -> GraphResourceReferences | GraphValueFailure:
     try:
         admission = ReferenceAdmission(limits)
@@ -307,7 +313,7 @@ def _references_result(
             expected, saved_physical, admission
         ):
             raise GraphValueRejected(GraphValueFailure.INVALID)
-        rendered = admission.render(expected)
+        rendered = admission.render(expected, max_output_bytes)
         if ordered is None:
             return GraphResourceReferences(rendered)
         return PreparedGraphResourceReferences(rendered, tuple(ordered))
@@ -321,14 +327,17 @@ def build_graph_resource_references(
     owners: tuple[GraphResourceOwner, ...],
     *,
     limits: GraphResourceReferenceLimits,
+    max_output_bytes: int | None = None,
 ) -> PreparedGraphResourceReferences:
-    result = _references_result(ir_text, _BUILD, _BUILD, scope, owners, limits)
+    result = _references_result(
+        ir_text, _BUILD, _BUILD, scope, owners, limits, max_output_bytes
+    )
     if isinstance(result, PreparedGraphResourceReferences):
         return result
     reason = (
         result if isinstance(result, GraphValueFailure) else GraphValueFailure.INVALID
     )
-    del ir_text, scope, owners
+    del ir_text, scope, owners, max_output_bytes
     raise_safe(GraphValueRejected(reason))
 
 

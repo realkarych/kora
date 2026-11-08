@@ -45,6 +45,7 @@ from kora.plugins.harness.codex.app_server_startup import (
 )
 from kora.plugins.harness.codex.app_server_tools import (
     ToolCounts,
+    ToolObservation,
     ToolRefused,
     reject_premature_tool,
 )
@@ -71,6 +72,7 @@ from kora.plugins.harness.codex.selected_startup import (
     SelectedStartupFailure,
     prepare_selected_thread,
 )
+from tests.plugins.harness.codex.owned_loopback import LoopbackError, OwnedLoopback
 from tests.plugins.harness.codex.selected_launch import (
     HOOK_TIMEOUT_SOCKET,
     METADATA_ENV_CONTROL,
@@ -78,25 +80,54 @@ from tests.plugins.harness.codex.selected_launch import (
     METADATA_MARKER,
     PROJECT_DOC_CANARY,
     SELECTED_AUTH_CASES,
+    SELECTED_BASH_STARTUP_CASES,
+    SELECTED_BASH_TRACE_CASES,
     SELECTED_COMMAND,
     SELECTED_DENIAL,
     SELECTED_HOOK_CASES,
+    SELECTED_HOOK_INVENTORY_REFUSALS,
     SELECTED_HOOK_TIMEOUT_CASES,
     SELECTED_LAUNCH_CASES,
     SELECTED_MODEL,
+    SELECTED_NOISE_REGISTRY_CASES,
     SELECTED_PATCH_CASES,
     SELECTED_REFUSALS,
+    SELECTED_SHELL_PATCH_CASES,
     SELECTED_SQLITE_HOME_CASES,
+    SELECTED_TLS_CASES,
+    SELECTED_TLS_OVERRIDES,
+    SELECTED_TOOL_INVENTORY_CASES,
     SELECTED_TURN_CASES,
+    SHELL_PATCH_DENIAL,
+    SHELL_PATCH_POLICY_OUTCOMES,
+    SHELL_PATCH_POLICY_RECEIPT,
+    SHELL_PATCH_WORKSPACE,
     SQLITE_HOME_CANARY,
     SelectedHookCase,
     SelectedLaunchCase,
+    SelectedNoiseRegistryCase,
     materialize_native_inputs,
     plant_checkout_canaries,
     prepare_native_inputs,
     role_homes,
     selected_command,
+    selected_managed_hook,
     workspace_remains_untrusted,
+)
+from tests.plugins.harness.codex.selected_proxy import (
+    PROXY_NAMES,
+    SELECTED_PROXY_CASES,
+    ProxyRequest,
+    SelectedProxy,
+    SelectedProxyCase,
+    SelectedProxyError,
+)
+from tests.plugins.harness.codex.selected_tls import (
+    SelectedTls,
+    SelectedTlsError,
+    UnknownCaAlert,
+    create_selected_tls,
+    start_selected_tls_server,
 )
 
 Case = Literal["allow", "deny", "stall", "interactive", "usage"]
@@ -136,6 +167,7 @@ ProbeCase = (
 
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None]] = {
+    "selected-command-exit-seven": ("completed", None),
     "selected-hook-deny": ("blocked", ("feedback", SELECTED_DENIAL)),
     "selected-hook-no-reason": (
         "failed",
@@ -151,6 +183,10 @@ SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None
     "selected-patch-deny": ("blocked", ("feedback", PATCH_DENIAL)),
     "selected-patch-exit-one": ("failed", ("error", "hook exited with code 1")),
     "selected-patch-timeout": ("failed", ("error", "hook timed out after 5s")),
+    "selected-shell-patch-allow": ("completed", None),
+    "selected-shell-patch-protected": ("blocked", ("feedback", SHELL_PATCH_DENIAL)),
+    "selected-shell-patch-exit-one": ("failed", ("error", "hook exited with code 1")),
+    "selected-shell-patch-timeout": ("failed", ("error", "hook timed out after 5s")),
 }
 
 CODEX = "/usr/local/bin/codex"
@@ -192,12 +228,16 @@ CLIENT_CASES = frozenset({"client-complete", "client-exit"})
 PATCH_CASES = frozenset({"patch-allow", "patch-deny"})
 HOOK_INPUT_CASES = PATCH_CASES | {"decoder-refuse"}
 DIRECT_PATCH_CASES = PATCH_CASES | SELECTED_PATCH_CASES
+SELECTED_FILE_CHANGE_CASES = SELECTED_PATCH_CASES | SELECTED_SHELL_PATCH_CASES
 PATCH_WRITE_CASES = frozenset(
     {
         "patch-allow",
         "selected-patch-allow",
         "selected-patch-exit-one",
         "selected-patch-timeout",
+        "selected-shell-patch-allow",
+        "selected-shell-patch-exit-one",
+        "selected-shell-patch-timeout",
     }
 )
 INTERRUPT_CASES = frozenset({"interrupt-model", "interrupt-command", "interrupt-kill"})
@@ -214,6 +254,10 @@ MISSING_PROVIDER_KEY = "Missing environment variable: `CODEX_API_KEY`."
 CONTROL = Path("/var/lib/kora-hook-probe/control")
 RECEIPTS = CONTROL / "receipts.jsonl"
 MARKER = "kora-probe.marker"
+BASH_STARTUP_SCRIPT = "fixture-startup.sh"
+BASH_EXTRA_EFFECT_MARKER = "kora-probe.startup"
+BASH_EXTRA_EFFECT_TEXT = "shell startup marker"
+BASH_TRACE_PREFIX = "kora-fixture-trace:"
 COMMAND = f"touch {MARKER}"
 CALL_ID = "kora-hook-probe-call"
 PATCH_MARKER = b"direct patch marker\n"
@@ -510,6 +554,137 @@ def verify_one_shot_schema(command_tool: dict[str, object]) -> None:
     )
 
 
+EXPECTED_SELECTED_TOOL_INVENTORY = (
+    ("", "custom", "apply_patch"),
+    ("", "function", "create_goal"),
+    ("", "function", "exec_command"),
+    ("", "function", "get_goal"),
+    ("", "function", "request_user_input"),
+    ("", "function", "update_goal"),
+    ("", "function", "view_image"),
+    ("", "tool_search", "tool_search"),
+)
+
+
+def tool_inventory_name(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", value) is None
+    ):
+        raise ProbeFailure("invalid_tool_inventory_name")
+    return value
+
+
+def tool_inventory(
+    tools: list[dict[str, object]],
+) -> tuple[tuple[str, str, str], ...]:
+    require(len(tools) <= 64, "invalid_tool_inventory_size")
+    entries: list[tuple[str, str, str]] = []
+    for tool in tools:
+        kind = tool.get("type")
+        if not isinstance(kind, str):
+            raise ProbeFailure("invalid_tool_inventory_type")
+        if kind in ("tool_search", "web_search"):
+            require("name" not in tool, "unexpected_tool_inventory_name")
+            entries.append(("", kind, kind))
+            continue
+        if kind not in ("function", "custom", "namespace"):
+            raise ProbeFailure("invalid_tool_inventory_type")
+        name = tool_inventory_name(tool.get("name"))
+        entries.append(("", kind, name))
+        if kind == "namespace":
+            members = as_list(tool.get("tools"), "missing_tool_inventory_namespace")
+            require(len(entries) + len(members) <= 64, "invalid_tool_inventory_size")
+            for item in members:
+                member = as_object(item)
+                member_kind = member.get("type")
+                if not isinstance(member_kind, str) or member_kind not in (
+                    "function",
+                    "custom",
+                ):
+                    raise ProbeFailure("invalid_tool_inventory_member_type")
+                entries.append(
+                    (name, member_kind, tool_inventory_name(member.get("name")))
+                )
+    require(len(entries) <= 64, "invalid_tool_inventory_size")
+    require(len(set(entries)) == len(entries), "duplicate_tool_inventory_entry")
+    return tuple(sorted(entries))
+
+
+def verify_selected_tool_inventory(tools: list[dict[str, object]]) -> None:
+    require(bool(tools), "invalid_tool_inventory_size")
+    inventory = tool_inventory(tools)
+    require(
+        ("", "function", "exec_command") in inventory
+        and ("", "custom", "apply_patch") in inventory
+        and not any(
+            name in {"web_search", "write_stdin", "update_plan"}
+            for _, _, name in inventory
+        ),
+        "unexpected_tool_inventory_exposure",
+    )
+    require(
+        inventory == EXPECTED_SELECTED_TOOL_INVENTORY, "selected_tool_inventory_drift"
+    )
+    diagnostic("INFO", "probe.selected_tool_inventory", json.dumps(inventory))
+
+
+SEARCH_CALL_ID = "kora-selected-tool-search-call"
+SEARCH_RESPONSE = sse(
+    "kora-selected-tool-search-response",
+    {
+        "type": "tool_search_call",
+        "call_id": SEARCH_CALL_ID,
+        "execution": "client",
+        "arguments": {"query": "spawn agent", "limit": 8},
+    },
+)
+EXPECTED_SELECTED_SEARCH_INVENTORY = (
+    ("", "namespace", "multi_agent_v1"),
+    ("multi_agent_v1", "function", "close_agent"),
+    ("multi_agent_v1", "function", "resume_agent"),
+    ("multi_agent_v1", "function", "send_input"),
+    ("multi_agent_v1", "function", "spawn_agent"),
+    ("multi_agent_v1", "function", "wait_agent"),
+)
+
+
+def verify_selected_tool_search(request: dict[str, object]) -> None:
+    items = [
+        as_object(item)
+        for item in as_list(request.get("input"), "responses_input_missing")
+    ]
+    outputs = [item for item in items if item.get("type") == "tool_search_output"]
+    require(
+        len(outputs) == 1
+        and outputs[0].get("call_id") == SEARCH_CALL_ID
+        and outputs[0].get("execution") == "client"
+        and outputs[0].get("status") == "completed",
+        "unexpected_selected_tool_search_result",
+    )
+    tools = [
+        as_object(tool)
+        for tool in as_list(outputs[0].get("tools"), "missing_selected_search_tools")
+    ]
+    inventory = tool_inventory(tools)
+    require(
+        inventory == EXPECTED_SELECTED_SEARCH_INVENTORY,
+        "selected_tool_search_inventory_drift",
+    )
+    diagnostic("INFO", "probe.selected_tool_search", json.dumps(inventory))
+
+
+DISABLED_PLAN_RESPONSE = sse(
+    "kora-probe-response-1",
+    {
+        "type": "function_call",
+        "call_id": CALL_ID,
+        "name": "update_plan",
+        "arguments": json.dumps(
+            {"plan": [{"step": "Fixture step", "status": "pending"}]}
+        ),
+    },
+)
 TOOL_RESPONSE = command_response({"cmd": COMMAND, "login": False})
 PATCH_RESPONSE = sse(
     "kora-probe-response-1",
@@ -572,12 +747,22 @@ USAGE_SOURCE_TIME = datetime(2026, 1, 1, tzinfo=UTC)
 EXPECTED_USAGE = (TokenCounts(100, 20, 30, 10, 4), TokenCounts(160, 25, 40, 30, 10))
 
 
+REGISTRY_ID = "kora-probe-registry"
+REGISTRY_BEARER = "synthetic-noise-registry-token"
+NOISE_ACCOUNT = "synthetic-noise-registry-account"
+NOISE_REGISTRY_ROUTE = (
+    f"POST /cloud/environment/{REGISTRY_ID}/connect HTTP/1.1".encode()
+)
+
+
 class ResponsesFixture:
     def __init__(self, case: ProbeCase, one_shot: bool) -> None:
         self.case: ProbeCase = case
         self.one_shot = one_shot
         self.request_limit: int
-        if case in SELECTED_REFUSALS:
+        if case == "selected-noise-registry-override":
+            self.request_limit = 1
+        elif case in SELECTED_REFUSALS:
             self.request_limit = 0
         elif case in PROVIDER_CASES:
             self.request_limit = int(case == "provider_key_present")
@@ -608,28 +793,45 @@ class ResponsesFixture:
         writer: asyncio.StreamWriter,
         deadline: float,
     ) -> None:
-        self.connections += 1
-        if len(self.clients) >= self.request_limit:
-            self.failure = "unexpected_responses_connection"
+        if not self.admit():
             writer.close()
             return
         self.clients.append(
-            (writer, asyncio.create_task(self.handle(reader, writer, deadline)))
+            (writer, asyncio.create_task(self.handle(reader, writer, deadline, None)))
         )
+
+    def admit(self) -> bool:
+        self.connections += 1
+        if self.connections > self.request_limit:
+            self.failure = "unexpected_responses_connection"
+            return False
+        return True
 
     async def handle(
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         deadline: float,
+        proxy_request: ProxyRequest | None,
     ) -> None:
         try:
             async with asyncio.timeout_at(deadline):
-                raw_headers = await reader.readuntil(b"\r\n\r\n")
+                registry = self.case == "selected-noise-registry-override"
+                if proxy_request is None:
+                    raw_headers = await reader.readuntil(b"\r\n\r\n")
+                    expected_route = (
+                        NOISE_REGISTRY_ROUTE
+                        if registry
+                        else b"POST /v1/responses HTTP/1.1"
+                    )
+                else:
+                    expected_route, raw_headers = proxy_request
                 request_line, *headers = raw_headers[:-4].split(b"\r\n")
                 require(
-                    request_line == b"POST /v1/responses HTTP/1.1",
-                    "unexpected_responses_route",
+                    request_line == expected_route,
+                    "unexpected_registry_route"
+                    if registry
+                    else "unexpected_responses_route",
                 )
                 fields = self.verify_headers(headers)
                 size = int(fields.get(b"content-length", b"0"))
@@ -640,6 +842,22 @@ class ResponsesFixture:
                         PROJECT_DOC_CANARY not in body, "project_instructions_applied"
                     )
                 request = parse_object(body)
+                if registry:
+                    require(
+                        request.keys() == {"harness_public_key"}
+                        and isinstance(request["harness_public_key"], dict),
+                        "unexpected_registry_connect_body",
+                    )
+                    self.requests += 1
+                    writer.write(
+                        b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n"
+                        b"Content-Length: 0\r\n\r\n"
+                    )
+                    await writer.drain()
+                    diagnostic(
+                        "INFO", "probe.selected_noise_registry_request_refused", "403"
+                    )
+                    return
                 if self.case == "selected-startup-ready":
                     require(
                         request.get("model") == SELECTED_MODEL,
@@ -714,6 +932,7 @@ class ResponsesFixture:
     def verify_headers(self, headers: list[bytes]) -> dict[bytes, bytes]:
         fields: dict[bytes, bytes] = {}
         authorization_count = 0
+        account_count = 0
         for header in headers:
             key, separator, value = header.partition(b":")
             require(
@@ -723,6 +942,8 @@ class ResponsesFixture:
             name = key.lower()
             if name == b"authorization":
                 authorization_count += 1
+            if name == b"chatgpt-account-id":
+                account_count += 1
             fields[name] = value.strip(b" \t")
         require(
             not {
@@ -735,7 +956,15 @@ class ResponsesFixture:
             & fields.keys(),
             "unexpected_responses_credentials",
         )
-        if self.case == "provider_key_present" or self.case in SELECTED_AUTH_CASES:
+        if self.case == "selected-noise-registry-override":
+            require(
+                authorization_count == 1
+                and fields[b"authorization"] == f"Bearer {REGISTRY_BEARER}".encode()
+                and account_count == 1
+                and fields[b"chatgpt-account-id"] == NOISE_ACCOUNT.encode(),
+                "unexpected_registry_authorization",
+            )
+        elif self.case == "provider_key_present" or self.case in SELECTED_AUTH_CASES:
             require(
                 authorization_count == 1
                 and fields[b"authorization"] == f"Bearer {SYNTHETIC_BEARER}".encode(),
@@ -783,6 +1012,11 @@ class ResponsesFixture:
                 as_object(tool)
                 for tool in as_list(request.get("tools"), "responses_tools_missing")
             ]
+            if self.case in SELECTED_TOOL_INVENTORY_CASES:
+                require(
+                    request.get("model") == SELECTED_MODEL, "inventory_model_mismatch"
+                )
+                verify_selected_tool_inventory(tools)
             if self.case in DIRECT_PATCH_CASES:
                 patch_tools = [
                     tool for tool in tools if tool.get("name") == "apply_patch"
@@ -816,6 +1050,10 @@ class ResponsesFixture:
                 verify_one_shot_schema(command_tools[0])
                 if self.case == "allow":
                     return stdin_response(1)
+            if self.case == "selected-tool-inventory-disabled":
+                return DISABLED_PLAN_RESPONSE
+            if self.case == "selected-tool-search":
+                return SEARCH_RESPONSE
             if self.case in SELECTED_LAUNCH_CASES:
                 usage = (
                     FIRST_RESPONSE_USAGE if self.case in SELECTED_TURN_CASES else None
@@ -882,8 +1120,18 @@ class ResponsesFixture:
                 )
             return FINAL_RESPONSE
 
+        if self.case == "selected-tool-search":
+            verify_selected_tool_search(request)
+            return FINAL_RESPONSE
+
         output = tool_output(request, CALL_ID)
-        if self.case == "decoder-refuse":
+        if self.case in SELECTED_SHELL_PATCH_CASES:
+            verify_shell_patch_output(self.case, output)
+        elif self.case == "selected-tool-inventory-disabled":
+            require(
+                output == "unsupported call: update_plan", "disabled_plan_not_refused"
+            )
+        elif self.case == "decoder-refuse":
             require(
                 output
                 == (
@@ -909,6 +1157,7 @@ class ResponsesFixture:
             )
         elif self.case in SHELL_ARGUMENTS or self.case in SELECTED_AUTH_CASES:
             header, separator, body = output.partition("\nOutput:\n")
+            exit_code = 7 if self.case == "selected-command-exit-seven" else 0
             status = [
                 line
                 for line in header.splitlines()
@@ -917,15 +1166,18 @@ class ResponsesFixture:
                 )
             ]
             require(
-                bool(separator) and status == ["Process exited with code 0"],
+                bool(separator) and status == [f"Process exited with code {exit_code}"],
                 "shell_command_failed",
             )
             if (
                 self.case in SELECTED_HOOK_CASES
                 or self.case in SELECTED_SQLITE_HOME_CASES
+                or self.case in SELECTED_BASH_STARTUP_CASES
                 or self.case == "selected-command-metadata"
             ):
                 require(not body.strip(), "selected_fault_unexpected_command_output")
+            if self.case in SELECTED_BASH_TRACE_CASES:
+                verify_bash_trace_output(self.case, body)
         else:
             require(
                 (DENIAL in output) == (self.case == "deny"),
@@ -969,6 +1221,11 @@ class ToolProbe:
         self.thread_id = thread_id
         self.turn_id: str | None = None
         self.events: list[tuple[str, str, str, str | None, int | None]] = []
+        self.confirmed: list[ToolObservation] = []
+
+    def confirm_completion(self, tool: ToolObservation) -> None:
+        require(not self.confirmed, "tool_completion_handoff_overflow")
+        self.confirmed.append(tool)
 
     def observe(self, notification: Notification) -> None:
         if notification.method not in ("item/started", "item/completed"):
@@ -1027,7 +1284,13 @@ class ToolProbe:
         self, terminal: TurnCompletion, session: AppServerTurnSession | None
     ) -> None:
         expected: tuple[tuple[str, str, str, str | None, int | None], ...]
-        if self.case in ("allow", "selected-command-metadata"):
+        if self.case in (
+            "allow",
+            "selected-command-metadata",
+            "selected-command-exit-seven",
+        ):
+            exit_code = 7 if self.case == "selected-command-exit-seven" else 0
+            status = "failed" if exit_code else "completed"
             expected = (
                 (
                     "commandExecution",
@@ -1036,7 +1299,13 @@ class ToolProbe:
                     "unifiedExecStartup",
                     None,
                 ),
-                ("commandExecution", "completed", "completed", "unifiedExecStartup", 0),
+                (
+                    "commandExecution",
+                    "completed",
+                    status,
+                    "unifiedExecStartup",
+                    exit_code,
+                ),
             )
         elif self.case in PATCH_WRITE_CASES:
             expected = (
@@ -1047,6 +1316,7 @@ class ToolProbe:
             "deny",
             "patch-deny",
             "selected-patch-deny",
+            "selected-shell-patch-protected",
             "decoder-refuse",
         ):
             expected = ()
@@ -1054,8 +1324,9 @@ class ToolProbe:
             raise ProbeFailure("tool_fixture_case_unknown")
         require(tuple(self.events) == expected, "tool_native_lifecycle_mismatch")
         require(self.turn_id in (None, terminal.turn_id), "tool_native_turn_mismatch")
-        if session is not None:
-            self.verify_session(session)
+        if session is None:
+            raise ProbeFailure("tool_completion_session_missing")
+        self.verify_session(session)
         diagnostic(
             "INFO", "probe.tool_lifecycle_verified", f"{self.case}:{len(self.events)}"
         )
@@ -1091,6 +1362,32 @@ class ToolProbe:
             )
         else:
             require(latest is None, "tool_session_observation_invented")
+        require(
+            [
+                (
+                    tool.thread_id,
+                    tool.turn_id,
+                    tool.item_id,
+                    tool.kind,
+                    tool.phase,
+                    tool.status,
+                    tool.source,
+                    tool.exit_code,
+                )
+                for tool in self.confirmed
+            ]
+            == [
+                (self.thread_id, self.turn_id, CALL_ID, *event)
+                for event in self.events
+                if event[1] == "completed"
+            ],
+            "tool_completion_handoff_mismatch",
+        )
+        diagnostic(
+            "INFO",
+            "probe.tool_completion_handoff_verified",
+            f"{self.case}:{completions}",
+        )
 
 
 class OutputProbe:
@@ -1244,7 +1541,8 @@ class HookCompletionProbe:
         run = as_object(params.get("run"))
         status, entry = SELECTED_HOOK_OUTCOMES[self.case]
         require(
-            run.get("eventName") == "preToolUse"
+            run.get("id") == f"pre-tool-use:0:/opt/kora-probe:{CALL_ID}"
+            and run.get("eventName") == "preToolUse"
             and run.get("handlerType") == "command"
             and run.get("executionMode") == "sync"
             and run.get("scope") == "turn"
@@ -1260,6 +1558,12 @@ class HookCompletionProbe:
 
     def verify(self, turn_id: str) -> None:
         require(self.turn_id == turn_id, "selected_hook_completion_turn")
+        receipt = read_hook_receipt()
+        require(
+            receipt.get("session_id") == self.thread_id
+            and receipt.get("turn_id") == turn_id,
+            "selected_hook_input_identity",
+        )
         status, _ = SELECTED_HOOK_OUTCOMES[self.case]
         diagnostic("INFO", "probe.selected_hook_completion", f"{self.case}:{status}")
 
@@ -1398,6 +1702,28 @@ class Stdio:
             await self.register_executor(executor_url, executor_bearer)
         await self.run_turn(workspace, case, selected_executor=executor_url is not None)
 
+    async def observe_noise_registry(self, case: SelectedNoiseRegistryCase) -> None:
+        await initialize_app_server(
+            self.rpc, self.identity, deadline=self.deadline, experimental_api=True
+        )
+        local = await self.call("environment/status", {"environmentId": "local"})
+        require(local.get("status") == "unknown", "local_executor_available")
+        alternate: dict[str, object] = {"environmentId": "remote"}
+        try:
+            await self.call("environment/info", alternate)
+        except RpcError as error:
+            require(error.reason is RpcFailure.REMOTE_ERROR, "registry_lookup_failed")
+        else:
+            raise ProbeFailure("registry_lookup_unexpectedly_accepted")
+        status = await self.call("environment/status", alternate)
+        expected = (
+            "disconnected" if case == "selected-noise-registry-override" else "unknown"
+        )
+        require(
+            status.get("status") == expected, "unexpected_registry_environment_status"
+        )
+        diagnostic("INFO", "probe.selected_noise_registry_lookup_refused", case)
+
     async def observe_selected(
         self, workspace: Path, case: ProbeCase, endpoint: str, bearer: str
     ) -> None:
@@ -1408,6 +1734,8 @@ class Stdio:
             if case == "selected-startup-bash"
             else None
         )
+        if case in SELECTED_HOOK_INVENTORY_REFUSALS:
+            expected_failure = SelectedStartupFailure.HOOK_INVENTORY
         if case == "selected-startup-bearer":
             bearer = ("b" if bearer.startswith("a") else "a") + bearer[1:]
         expected = SelectedEnvironment(
@@ -1420,6 +1748,7 @@ class Stdio:
             ),
             workspace,
             SELECTED_MODEL,
+            selected_managed_hook(case),
         )
         try:
             thread_id = await prepare_selected_thread(
@@ -1505,6 +1834,8 @@ class Stdio:
         prompt = "Run the probe marker command."
         if case in DIRECT_PATCH_CASES:
             prompt = "Apply the probe marker patch."
+        elif case == "selected-tool-search":
+            prompt = "Search for a native agent tool."
         elif (
             case in PROVIDER_CASES
             or case in CLIENT_CASES
@@ -1522,7 +1853,15 @@ class Stdio:
         tools = (
             ToolProbe(case, thread_id)
             if case in DIRECT_PATCH_CASES
-            or case in ("allow", "deny", "decoder-refuse", "selected-command-metadata")
+            or case in SELECTED_SHELL_PATCH_CASES
+            or case
+            in (
+                "allow",
+                "deny",
+                "decoder-refuse",
+                "selected-command-metadata",
+                "selected-command-exit-seven",
+            )
             else None
         )
         hook = (
@@ -1532,6 +1871,15 @@ class Stdio:
         )
 
         def observe(notification: Notification) -> None:
+            if case == "selected-tool-inventory-disabled":
+                require(
+                    notification.method != "turn/plan/updated", "disabled_plan_executed"
+                )
+            if case == "selected-tool-search":
+                require(
+                    notification.method != "hook/completed",
+                    "selected_tool_search_reported_hook",
+                )
             if usage is not None:
                 usage.observe(notification)
             if errors is not None:
@@ -1568,7 +1916,7 @@ class Stdio:
             if outputs is not None:
                 outputs.started(turn_id)
 
-        if case not in SELECTED_PATCH_CASES and any(
+        if any(
             value is not None for value in (usage, errors, messages, outputs, tools)
         ):
             self.session = AppServerTurnSession(
@@ -1582,6 +1930,9 @@ class Stdio:
                 on_waiting=self.waiting_terminal.set,
                 on_started=observe_started,
                 on_message=messages.confirmed if messages is not None else None,
+                on_tool_completed=tools.confirm_completion
+                if tools is not None
+                else None,
                 output_schema=OUTPUT_SCHEMA if outputs is not None else None,
                 usage_observer=(
                     UsageObserver(lambda: USAGE_SOURCE_TIME, usage.confirmed)
@@ -2004,16 +2355,30 @@ async def read_executor_url(process: asyncio.subprocess.Process) -> str:
     return line[:-1].decode("ascii")
 
 
-def hook_pid(
-    command: str = COMMAND, *, nested_input: bool = False, tool: str = "Bash"
-) -> int:
+def read_hook_receipt() -> dict[str, object]:
     require(RECEIPTS.is_file(), "hook_receipt_missing")
     with RECEIPTS.open("rb") as file:
         raw = file.read(4097)
     require(len(raw) <= 4096, "hook_receipt_size_limit")
     lines = raw.splitlines()
     require(len(lines) == 1, "hook_receipt_count")
-    receipt = parse_object(lines[0])
+    return parse_object(lines[0])
+
+
+def hook_pid(
+    command: str = COMMAND,
+    *,
+    nested_input: bool = False,
+    tool: str = "Bash",
+    selected_binding: bool = False,
+) -> int:
+    receipt = read_hook_receipt()
+    if selected_binding:
+        require(
+            isinstance(receipt.pop("session_id", None), str)
+            and isinstance(receipt.pop("turn_id", None), str),
+            "selected_hook_input_identity",
+        )
     pid = receipt.pop("pid", None)
     expected_input = (
         {"tool_input": {"command": command}} if nested_input else {"command": command}
@@ -2352,9 +2717,9 @@ async def observe_hook_timeout(
                 await loop.sock_recv(peer, 1) == b"1", "selected_hook_timeout_ready"
             )
             pid = (
-                verify_patch_hook()
+                verify_patch_hook(selected_binding=True)
                 if case in SELECTED_PATCH_CASES
-                else verify_shell_hook(SELECTED_COMMAND)
+                else verify_shell_hook(selected_command(case), selected_binding=True)
             )
             credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             require(
@@ -2382,21 +2747,65 @@ async def observe_hook_timeout(
             await asyncio.gather(observation, return_exceptions=True)
 
 
-async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
+async def drive(
+    fixture: ResponsesFixture,
+    root: Path,
+    workspace: Path,
+    *,
+    tls: SelectedTls | None = None,
+    unknown_ca: UnknownCaAlert | None = None,
+    proxy_case: SelectedProxyCase | None = None,
+) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
-    async with asyncio.timeout_at(deadline):
-        server = await asyncio.start_server(
-            lambda reader, writer: fixture.accept(reader, writer, deadline),
-            "127.0.0.1",
-            0,
-            limit=16_384,
-        )
+    proxy: SelectedProxy | None = None
+    server: asyncio.Server | None = None
+    model: OwnedLoopback | None = None
+
+    def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        fixture.accept(reader, writer, deadline)
+
+    async def accept_proxied(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        request: ProxyRequest,
+    ) -> None:
+        if fixture.admit():
+            await fixture.handle(reader, writer, deadline, request)
+
+    async def accept_proxy_origin(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        assert proxy is not None
+        proxy.observe_origin(writer)
+        if fixture.admit():
+            await fixture.handle(reader, writer, deadline, None)
+
+    if proxy_case is None:
+        async with asyncio.timeout_at(deadline):
+            if tls is None:
+                server = await asyncio.start_server(
+                    accept, "127.0.0.1", 0, limit=16_384
+                )
+            else:
+                server = await start_selected_tls_server(
+                    tls.context, accept, handshake_timeout=CLEANUP_SECONDS
+                )
     process: asyncio.subprocess.Process | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
     bearer = SYNTHETIC_EXECUTOR_BEARER
     try:
-        port = int(server.sockets[0].getsockname()[1])
+        if proxy_case is None:
+            assert server is not None
+            port = int(server.sockets[0].getsockname()[1])
+        else:
+            model = OwnedLoopback(
+                accept_proxy_origin, deadline, tls.context if tls is not None else None
+            )
+            port = model.port
+            proxy = SelectedProxy(
+                proxy_case, port, deadline, SYNTHETIC_BEARER.encode(), accept_proxied
+            )
         args = ["app-server", "--listen", "stdio://"]
         if (
             fixture.case in PROVIDER_CASES
@@ -2414,14 +2823,67 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
             if fixture.case in SELECTED_LAUNCH_CASES:
                 bearer = secrets.token_urlsafe(32)
                 inputs = prepare_native_inputs(
-                    root, workspace, binary=Path(CODEX), port=port, bearer=bearer
+                    root,
+                    workspace,
+                    binary=Path(CODEX),
+                    port=port,
+                    bearer=bearer,
+                    https=tls is not None,
                 )
                 child_env = materialize_native_inputs(inputs.app_server)
                 exec_env = materialize_native_inputs(inputs.exec_server)
+                if proxy is not None and proxy_case is not None:
+                    require(
+                        PROXY_NAMES.isdisjoint(child_env)
+                        and PROXY_NAMES.isdisjoint(exec_env),
+                        "selected_proxy_inherited_override",
+                    )
+                    child_env.update(proxy_case.environment(proxy.port))
+                if tls is not None:
+                    names = SELECTED_TLS_OVERRIDES.values()
+                    require(
+                        not any(
+                            name in child_env or name in exec_env for name in names
+                        ),
+                        "selected_tls_inherited_override",
+                    )
+                    tls_name = (
+                        "SSL_CERT_FILE"
+                        if proxy_case is not None
+                        else SELECTED_TLS_OVERRIDES.get(fixture.case)
+                    )
+                    if tls_name is not None:
+                        child_env[tls_name] = str(
+                            tls.roots if tls_name == "SSL_CERT_DIR" else tls.bundle
+                        )
                 if fixture.case == "selected-command-metadata":
                     exec_env.update(METADATA_ENVIRONMENT)
                 if fixture.case == "selected-sqlite-home-override":
                     child_env["CODEX_SQLITE_HOME"] = str(root / SQLITE_HOME_CANARY)
+                if fixture.case == "selected-bash-startup-override":
+                    exec_env["BASH_ENV"] = str(workspace / BASH_STARTUP_SCRIPT)
+                if fixture.case == "selected-bash-trace-shellopts":
+                    exec_env["SHELLOPTS"] = "xtrace"
+                if fixture.case == "selected-bash-trace-ps4":
+                    exec_env["PS4"] = (
+                        f"$(if [ ! -e {MARKER} ] && [ ! -L {MARKER} ]; then "
+                        f"printf '%s\\n' '{BASH_EXTRA_EFFECT_TEXT}'"
+                        f" > {BASH_EXTRA_EFFECT_MARKER}; fi){BASH_TRACE_PREFIX} "
+                    )
+                if fixture.case in SELECTED_NOISE_REGISTRY_CASES:
+                    require(
+                        child_env.get("CODEX_EXEC_SERVER_URL") == "none",
+                        "selected_default_executor_not_disabled",
+                    )
+                if fixture.case == "selected-noise-registry-override":
+                    child_env.update(
+                        {
+                            "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL": f"http://127.0.0.1:{port}",
+                            "CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID": REGISTRY_ID,
+                            "CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN": REGISTRY_BEARER,
+                            "CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID": NOISE_ACCOUNT,
+                        }
+                    )
                 if fixture.case != "selected-key-absent":
                     child_env["CODEX_API_KEY"] = SYNTHETIC_BEARER
                 executor = await launch_executor(
@@ -2463,6 +2925,8 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 await stdio.interrupt_turn(workspace, fixture, process)
             elif fixture.case in {"client-exit", "messages-kill", "output-kill"}:
                 await observe_client_exit(process, fixture, stdio, workspace)
+            elif fixture.case in SELECTED_NOISE_REGISTRY_CASES:
+                await stdio.observe_noise_registry(fixture.case)
             elif fixture.case in SELECTED_TURN_CASES:
                 assert executor_url is not None
                 await observe_selected_event_turn(
@@ -2475,6 +2939,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                         Path("/bin/bash"),
                         workspace,
                         SELECTED_MODEL,
+                        selected_managed_hook(fixture.case),
                     ),
                     bearer,
                     process,
@@ -2482,7 +2947,13 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 )
             elif fixture.case in SELECTED_LAUNCH_CASES:
                 assert executor_url is not None
-                if fixture.case in SELECTED_HOOK_TIMEOUT_CASES:
+                if unknown_ca is not None:
+                    await unknown_ca.wait_for_refusal(
+                        stdio.observe_selected(
+                            workspace, fixture.case, executor_url, bearer
+                        )
+                    )
+                elif fixture.case in SELECTED_HOOK_TIMEOUT_CASES:
                     assert executor is not None
                     await observe_hook_timeout(
                         stdio,
@@ -2532,12 +3003,22 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
         if fixture.case in SELECTED_LAUNCH_CASES:
-            await close_selected_launch(
+            native_cleanup = close_selected_launch(
                 fixture, server, process, executor, cleanup_deadline
             )
+            selected_cleanup = [native_cleanup]
+            if model is not None:
+                selected_cleanup.append(model.close(cleanup_deadline))
+            if proxy is not None:
+                selected_cleanup.append(proxy.close(cleanup_deadline))
+            outcomes = await asyncio.gather(*selected_cleanup, return_exceptions=True)
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
         elif process is not None and (
             fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
         ):
+            assert server is not None
             try:
                 async with asyncio.timeout_at(cleanup_deadline):
                     await stop_native_process(process)
@@ -2545,6 +3026,7 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 async with asyncio.timeout_at(cleanup_deadline):
                     await fixture.close(server)
         else:
+            assert server is not None
             async with asyncio.timeout_at(cleanup_deadline):
                 pending = [fixture.close(server)]
                 for child in (process, executor):
@@ -2554,11 +3036,16 @@ async def drive(fixture: ResponsesFixture, root: Path, workspace: Path) -> None:
                 for outcome in outcomes:
                     if isinstance(outcome, BaseException):
                         raise outcome
+    if proxy is not None:
+        proxy.verify(fixture.request_limit)
+        diagnostic(
+            "INFO", "probe.selected_proxy_refused_connects", str(proxy.refused_connects)
+        )
 
 
 async def close_selected_launch(
     fixture: ResponsesFixture,
-    server: asyncio.Server,
+    server: asyncio.Server | None,
     app: asyncio.subprocess.Process | None,
     executor: asyncio.subprocess.Process | None,
     deadline: float,
@@ -2578,8 +3065,9 @@ async def close_selected_launch(
                 "selected_native_children_not_reaped",
             )
     finally:
-        async with asyncio.timeout_at(deadline):
-            await fixture.close(server)
+        if server is not None:
+            async with asyncio.timeout_at(deadline):
+                await fixture.close(server)
     if len(children) == 2:
         diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
 
@@ -2618,13 +3106,83 @@ def verify_sqlite_home(root: Path, *, override: bool) -> None:
         )
 
 
-async def run_selected_launch(case: SelectedLaunchCase) -> None:
-    if case in SELECTED_AUTH_CASES:
+def verify_bash_trace_output(case: ProbeCase, body: str) -> None:
+    custom = case == "selected-bash-trace-ps4"
+    require(custom == (BASH_TRACE_PREFIX in body), "unexpected_bash_trace_prefix")
+    if case == "selected-bash-trace-default":
+        require(not body.strip(), "unexpected_bash_trace")
+    else:
+        prefix = BASH_TRACE_PREFIX if custom else "+"
+        require(
+            body.splitlines().count(f"{prefix} shopt -q login_shell") == 1,
+            "bash_trace_witness_missing",
+        )
+    diagnostic("INFO", "probe.selected_bash_trace_output_verified", case)
+
+
+def verify_bash_extra_effect(workspace: Path, *, expected_effect: bool) -> None:
+    marker = workspace / BASH_EXTRA_EFFECT_MARKER
+    if not expected_effect:
+        require(not os.path.lexists(marker), "unexpected_bash_extra_effect")
+        return
+    require(marker.is_file() and not marker.is_symlink(), "bash_extra_effect_missing")
+    expected = f"{BASH_EXTRA_EFFECT_TEXT}\n".encode()
+    with marker.open("rb") as contents:
+        require(
+            contents.read(len(expected) + 1) == expected,
+            "bash_extra_effect_mismatch",
+        )
+
+
+def verify_shell_patch_output(case: ProbeCase, output: str) -> None:
+    if case == "selected-shell-patch-protected":
+        require(
+            output
+            == (
+                f"Command blocked by PreToolUse hook: {SHELL_PATCH_DENIAL}. "
+                f"Command: {selected_command(case)}"
+            ),
+            "shell_patch_policy_denial_missing",
+        )
+    else:
+        lines = output.splitlines()
+        require(
+            len(lines) == 7
+            and lines[:3] == ["Wall time: 0.0000 seconds", "Output:", "Exit code: 0"]
+            and re.fullmatch(r"Wall time: [0-9]+(?:\.[0-9])? seconds", lines[3])
+            is not None
+            and lines[4:]
+            == ["Output:", "Success. Updated the following files:", f"A {MARKER}"],
+            "shell_patch_function_result_missing",
+        )
+
+
+def verify_shell_patch_policy(case: SelectedLaunchCase) -> None:
+    receipt = CONTROL / SHELL_PATCH_POLICY_RECEIPT
+    expected = SHELL_PATCH_POLICY_OUTCOMES.get(case)
+    if expected is None:
+        require(not os.path.lexists(receipt), "unexpected_shell_patch_policy_receipt")
+        return
+    with receipt.open("rb") as contents:
+        require(
+            contents.read(len(expected) + 1) == expected, "shell_patch_policy_receipt"
+        )
+    diagnostic("INFO", "probe.shell_patch_policy_verified", expected.decode().strip())
+
+
+async def run_selected_launch(
+    case: SelectedLaunchCase, proxy_case: SelectedProxyCase | None = None
+) -> None:
+    if case in SELECTED_AUTH_CASES or case in SELECTED_HOOK_INVENTORY_REFUSALS:
         decision = (
             "selected-allow"
             if case == "selected-startup-ready"
             or case in SELECTED_TURN_CASES
             or case in SELECTED_SQLITE_HOME_CASES
+            or case in SELECTED_BASH_STARTUP_CASES
+            or case in SELECTED_TLS_CASES
+            or case in SELECTED_TOOL_INVENTORY_CASES
+            or case in SELECTED_HOOK_INVENTORY_REFUSALS
             else case
         )
         (CONTROL / "decision").write_text(decision, encoding="utf-8")
@@ -2634,34 +3192,69 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             "workspace :@" if case == "selected-startup-ready" else "workspace"
         )
         workspace.mkdir()
+        if case in SHELL_PATCH_POLICY_OUTCOMES:
+            with (CONTROL / SHELL_PATCH_WORKSPACE).open("xb") as binding:
+                binding.write(os.fsencode(workspace))
         if case in SELECTED_SQLITE_HOME_CASES:
             (root / SQLITE_HOME_CANARY).mkdir(mode=0o700)
+        if case in SELECTED_BASH_STARTUP_CASES:
+            (workspace / BASH_STARTUP_SCRIPT).write_text(
+                f"if [ -e {MARKER} ] || [ -L {MARKER} ]; then exit 1; fi\n"
+                f"printf '%s\\n' '{BASH_EXTRA_EFFECT_TEXT}'"
+                f" > {BASH_EXTRA_EFFECT_MARKER} || exit 1\n",
+                encoding="utf-8",
+            )
         if case == "selected-startup-ready":
             plant_checkout_canaries(workspace)
         marker = workspace / MARKER
         fixture = ResponsesFixture(case, one_shot=True)
-        await drive(fixture, root, workspace)
+        tls = (
+            create_selected_tls(root / "model-tls")
+            if case in SELECTED_TLS_CASES or (proxy_case is not None and proxy_case.tls)
+            else None
+        )
+        if case == "selected-tls-default":
+            assert tls is not None
+            unknown_ca = UnknownCaAlert(tls.context)
+            async with unknown_ca.capture():
+                await drive(fixture, root, workspace, tls=tls, unknown_ca=unknown_ca)
+            unknown_ca.verify()
+            diagnostic("INFO", "probe.selected_tls_unknown_ca_verified", case)
+        else:
+            await drive(fixture, root, workspace, tls=tls, proxy_case=proxy_case)
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
         require(
             fixture.connections == fixture.requests == fixture.request_limit,
             "unexpected_selected_launch_request_count",
         )
-        if case in SELECTED_REFUSALS:
+        if case == "selected-tool-search":
+            require(
+                not os.path.lexists(CONTROL / "invocations")
+                and not os.path.lexists(RECEIPTS),
+                "selected_tool_search_reached_hook",
+            )
+            diagnostic("INFO", "probe.selected_tool_search_hook", "absent")
+        elif case in SELECTED_REFUSALS or case == "selected-tool-inventory-disabled":
             require(
                 not os.path.lexists(RECEIPTS)
                 and not os.path.lexists(CONTROL / "invocations"),
                 "refused_selected_startup_reached_hook",
             )
         elif case in SELECTED_PATCH_CASES:
-            verify_patch_hook()
+            verify_patch_hook(selected_binding=True)
         else:
-            verify_shell_hook(selected_command(case))
-        executes = case in SELECTED_AUTH_CASES and case not in {
+            verify_shell_hook(
+                selected_command(case), selected_binding=case in SELECTED_HOOK_CASES
+            )
+        executes = case in SELECTED_AUTH_CASES and case not in SELECTED_REFUSALS | {
+            "selected-tool-inventory-disabled",
+            "selected-tool-search",
             "selected-deny",
             "selected-hook-deny",
             "selected-patch-deny",
+            "selected-shell-patch-protected",
         }
-        if case in SELECTED_PATCH_CASES:
+        if case in SELECTED_FILE_CHANGE_CASES:
             verify_patch_marker(marker, writes=executes)
         elif executes:
             bash = Path("/bin/bash").resolve(strict=True)
@@ -2677,6 +3270,8 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
                 )
         else:
             require(not os.path.lexists(marker), "refused_selected_marker_exists")
+        if case in SELECTED_SHELL_PATCH_CASES:
+            verify_shell_patch_policy(case)
         if case in SELECTED_HOOK_CASES:
             effect = "executed" if executes else "blocked"
             diagnostic(
@@ -2685,6 +3280,16 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         if case in SELECTED_SQLITE_HOME_CASES:
             verify_sqlite_home(root, override=case == "selected-sqlite-home-override")
             diagnostic("INFO", "probe.selected_sqlite_home_verified", case)
+        if case in SELECTED_BASH_STARTUP_CASES:
+            verify_bash_extra_effect(
+                workspace, expected_effect=case == "selected-bash-startup-override"
+            )
+            diagnostic("INFO", "probe.selected_bash_startup_verified", case)
+        if case in SELECTED_BASH_TRACE_CASES:
+            verify_bash_extra_effect(
+                workspace, expected_effect=case == "selected-bash-trace-ps4"
+            )
+            diagnostic("INFO", "probe.selected_bash_trace_effect_verified", case)
         if case == "selected-startup-ready":
             require(
                 workspace_remains_untrusted(
@@ -2850,9 +3455,9 @@ def verify_hook_invocation() -> None:
         require(invocations.read(2) == b"1", "unexpected_hook_input_invocation_count")
 
 
-def verify_patch_hook() -> int:
+def verify_patch_hook(*, selected_binding: bool = False) -> int:
     verify_hook_invocation()
-    return hook_pid(PATCH, tool="apply_patch")
+    return hook_pid(PATCH, tool="apply_patch", selected_binding=selected_binding)
 
 
 def verify_patch_marker(marker: Path, *, writes: bool) -> None:
@@ -2909,10 +3514,10 @@ async def run_startup_refusal(case: StartupCase) -> None:
     diagnostic("INFO", "probe.case_verified", case)
 
 
-def verify_shell_hook(command: str) -> int:
+def verify_shell_hook(command: str, *, selected_binding: bool = False) -> int:
     with (CONTROL / "invocations").open("rb") as invocations:
         require(invocations.read(2) == b"1", "shell_hook_invocation_count")
-    return hook_pid(command, nested_input=True)
+    return hook_pid(command, nested_input=True, selected_binding=selected_binding)
 
 
 async def run_shell_case(case: ShellCase | ExecutorCase) -> None:
@@ -3017,6 +3622,17 @@ async def run() -> None:
         await run_hook_input_case("decoder-refuse")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
+    elif len(sys.argv) == 2 and sys.argv[1].startswith("--selected-proxy-"):
+        name = sys.argv[1].removeprefix("--selected-proxy-")
+        proxy_case = SELECTED_PROXY_CASES.get(name)
+        if proxy_case is None:
+            raise ProbeFailure("selected_proxy_unexpected_case")
+        await run_selected_launch("selected-startup-ready", proxy_case)
+        diagnostic(
+            "INFO",
+            "probe.selected_proxy_case_verified",
+            f"{name}:{proxy_case.route.value}",
+        )
     elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in SELECTED_LAUNCH_CASES:
         await run_selected_launch(
             cast("SelectedLaunchCase", sys.argv[1].removeprefix("--"))
@@ -3043,7 +3659,7 @@ def report_connection_failure(
 def main() -> int:
     try:
         asyncio.run(run())
-    except ProbeFailure as error:
+    except (LoopbackError, ProbeFailure, SelectedProxyError, SelectedTlsError) as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
     except (

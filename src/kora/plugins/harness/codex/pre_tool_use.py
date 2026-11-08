@@ -40,6 +40,8 @@ class HookCall:
     tool: HookTool
     tool_use_id: str
     command: str
+    session_id: str
+    turn_id: str
 
 
 def unicode_text(value: object) -> bool:
@@ -84,7 +86,9 @@ def decode_pre_tool_use(raw: bytes, *, max_bytes: int) -> HookCall:
     if tool != "Bash" and tool != "apply_patch":
         raise HookInputRefused(HookInputFailure.UNSUPPORTED_TOOL)
     return HookCall(
-        cast("HookTool", tool),
-        cast("str", fields["tool_use_id"]),
-        native_command(fields["tool_input"]),
+        tool=cast("HookTool", tool),
+        tool_use_id=cast("str", fields["tool_use_id"]),
+        command=native_command(fields["tool_input"]),
+        session_id=cast("str", fields["session_id"]),
+        turn_id=cast("str", fields["turn_id"]),
     )
