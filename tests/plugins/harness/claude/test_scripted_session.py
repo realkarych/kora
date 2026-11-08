@@ -832,9 +832,11 @@ async def test_scripted_claude_session_kills_a_child_that_ignores_termination(
     launch_dir = tmp_path / "launch"
     launch_dir.mkdir()
     hold = launch_dir / "hold.py"
+    ready = launch_dir / "ready"
     hold.write_text(
-        "import signal\nimport time\n"
+        "import pathlib\nimport signal\nimport time\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(" + repr(str(ready)) + ").write_text('ready', encoding='ascii')\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
@@ -849,6 +851,11 @@ async def test_scripted_claude_session_kills_a_child_that_ignores_termination(
     (launch_dir / "pids").write_text(f"{process.pid}\n", encoding="ascii")
 
     try:
+        deadline = clock.monotonic_ns() + 2 * NANOSECONDS_PER_SECOND
+        while not ready.is_file() and clock.monotonic_ns() < deadline:
+            await clock.sleep_until(min(deadline, clock.monotonic_ns() + 50_000_000))
+        if not ready.is_file():
+            raise AssertionError("the child did not ignore termination")
         closed = await close_recorded_processes(launch_dir, sys.executable, clock)
         finished = process.wait(timeout=2)
     finally:
