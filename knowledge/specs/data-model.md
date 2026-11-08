@@ -771,6 +771,8 @@ The metadata layer provides an opt-in [`read_snapshot` unit](scheduler.md#10-sta
 
 The [narrow metadata foundation](https://github.com/realkarych/kora/issues/861) adds the relation and its exact scoped lookup on a caller-owned snapshot. SQLite uses a covering graph/version index and checks native field types before transferring admission values. PostgreSQL reads only the scope keys and the fixed-width witness fields. The migration preserves historical values and creates no witnesses for existing versions. Publication, authenticated representation and restore verification, and the combined physical loader remain pending.
 
+The [SQLite layout observation](https://github.com/realkarych/kora/issues/1112) checks the ordinary 17-column rowid layout of `main.graph_version` and returns its supported page size and encoding on a healthy managed writer. It inspects the trusted migration-owned catalog without reading graph rows. The caller must abort on refusal before any dependent write or commit. The publisher must bind the observation to the same writer and actual main relation with stable schema, and independently verify its fixed value domains, storage bounds and authentic admission record. Restore and publication qualification remain separate.
+
 #### Graph version digest inputs
 
 The project owner accepted these preimages on 2026-11-06 under [#805](https://github.com/realkarych/kora/issues/805). For the paired physical encoding, let I and C be the exact compact ASCII canonical object texts accepted by the codec for the compiled IR and execution contract. Each text preserves its saved object's member order. The complete producer owns normalization of resolved contract maps before encoding.
