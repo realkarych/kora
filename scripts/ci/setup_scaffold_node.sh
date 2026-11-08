@@ -71,7 +71,8 @@ curl --disable --fail --location --proto '=https' --proto-redir '=https' \
   --silent --show-error --connect-timeout 15 --max-time 60 --max-filesize 67108864 \
   --output "$staging/$archive" "https://nodejs.org/dist/v$version/$archive"
 
-if (( $(wc -c < "$staging/$archive") != bytes )); then
+archive_size=$(wc -c < "$staging/$archive")
+if (( archive_size != bytes )); then
   printf 'Unexpected Scaffold Node archive size\n' >&2
   exit 1
 fi

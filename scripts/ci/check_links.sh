@@ -58,7 +58,8 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     --silent --show-error --connect-timeout 15 --max-time 60 --max-filesize 16777216 \
     --header 'Accept: application/octet-stream' --output "$archive" \
     'https://api.github.com/repos/lycheeverse/lychee/releases/assets/409959156'
-  if (( $(wc -c < "$archive") != 7626970 )); then
+  archive_size=$(wc -c < "$archive")
+  if (( archive_size != 7626970 )); then
     printf 'Unexpected Lychee archive size\n' >&2
     exit 1
   fi
