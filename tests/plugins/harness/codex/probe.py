@@ -355,6 +355,10 @@ class ProbeFailure(Exception):
     pass
 
 
+class BoundProbeRefusal(ProbeFailure):
+    pass
+
+
 def require(condition: bool, reason: str) -> None:
     if not condition:
         raise ProbeFailure(reason)
@@ -2846,12 +2850,12 @@ async def drive(
                     deadline,
                 )
                 if bound_launch is None:
-                    return
+                    raise BoundProbeRefusal("selected_bound_environment_refused")
                 inputs = bound_launch.inputs
                 child_env = dict(inputs.app_server.environment)
                 gated_executor = bound.start_role(bound_launch, "exec", MAX_FRAME_BYTES)
                 if gated_executor is None:
-                    return
+                    raise BoundProbeRefusal("selected_bound_slot_refused")
                 exec_reader, _ = await gated_executor.prepare()
                 line = await exec_reader.readline()
                 match = EXECUTOR_LISTEN_URL.fullmatch(line)
@@ -2952,7 +2956,9 @@ async def drive(
                 assert bound is not None
                 gated_app = bound.start_role(bound_launch, "app", MAX_FRAME_BYTES)
                 if gated_app is None:
-                    return
+                    raise BoundProbeRefusal(
+                        "selected_bound_app_materialization_refused"
+                    )
                 reader, writer = await gated_app.prepare()
                 diagnostic("INFO", "probe.selected_gated_stdio_bound", fixture.case)
             elif gated_stdio:
@@ -3363,6 +3369,7 @@ async def run_selected_launch(
             if case in SELECTED_TLS_CASES or (proxy_case is not None and proxy_case.tls)
             else None
         )
+        bound_refusal: BoundProbeRefusal | None = None
         if case == "selected-tls-default":
             assert tls is not None
             unknown_ca = UnknownCaAlert(tls.context)
@@ -3371,20 +3378,25 @@ async def run_selected_launch(
             unknown_ca.verify()
             diagnostic("INFO", "probe.selected_tls_unknown_ca_verified", case)
         else:
-            await drive(
-                fixture,
-                root,
-                workspace,
-                tls=tls,
-                proxy_case=proxy_case,
-                gated_stdio=gated_stdio,
-                bound=bound,
-            )
-        if bound is not None and bound.refused:
+            try:
+                await drive(
+                    fixture,
+                    root,
+                    workspace,
+                    tls=tls,
+                    proxy_case=proxy_case,
+                    gated_stdio=gated_stdio,
+                    bound=bound,
+                )
+            except BoundProbeRefusal as error:
+                if bound is None or not bound.settled:
+                    raise
+                bound_refusal = error
+        if bound_refusal is not None:
+            assert bound is not None
             expected_roles = int(bound.case == "partial")
             require(
-                bound.settled
-                and bound.unix_sockets == expected_roles * 4
+                bound.unix_sockets == expected_roles * 4
                 and bound.cwd_opens == bound.starts == expected_roles
                 and fixture.connections == fixture.requests == 0
                 and fixture.failure is None
@@ -3394,12 +3406,9 @@ async def run_selected_launch(
                 ),
                 "selected_bound_refusal_had_effect",
             )
-            if bound.case == "partial":
-                raise ProbeFailure("selected_bound_app_materialization_refused")
-            diagnostic("INFO", "probe.selected_bound_no_acquisition", bound.case)
-            if bound.case in {"duplicate", "stopped"}:
-                raise ProbeFailure("selected_bound_slot_refused")
-            raise ProbeFailure("selected_bound_environment_refused")
+            if expected_roles == 0:
+                diagnostic("INFO", "probe.selected_bound_no_acquisition", bound.case)
+            raise bound_refusal
         if bound is not None:
             require(
                 bound.case == "ready"

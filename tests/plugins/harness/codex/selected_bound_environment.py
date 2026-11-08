@@ -81,7 +81,6 @@ class BoundEnvironmentProbe:
     unix_sockets: int = field(default=0, init=False)
     cwd_opens: int = field(default=0, init=False)
     _cwd: str | None = field(default=None, init=False)
-    refused: bool = field(default=False, init=False)
     settled: bool = field(default=False, init=False)
 
     def install_witness(self) -> None:
@@ -125,7 +124,6 @@ class BoundEnvironmentProbe:
                 raise BoundEnvironmentError(
                     "selected_bound_secret_reveal_refused"
                 ) from None
-        self.refused = True
         return None
 
     def prepare(
@@ -189,7 +187,6 @@ class BoundEnvironmentProbe:
                 or error.reason is not LaunchConfigurationFailure.ENVIRONMENT_CONFLICT
             ):
                 raise BoundEnvironmentError("selected_bound_recipe_failed") from None
-            self.refused = True
             return None
         except KoraProtocolError as error:
             if (
@@ -202,7 +199,6 @@ class BoundEnvironmentProbe:
                 or error.__context__ is not None
             ):
                 raise BoundEnvironmentError("selected_bound_ownership_failed") from None
-            self.refused = True
             return None
         write_native_configuration(inputs.app_server)
         write_native_configuration(inputs.exec_server)

@@ -13,6 +13,7 @@ from kora.plugins.runtime.local.environment import (
     bind_candidate_environments,
 )
 from kora.protocols.errors import KoraProtocolError
+from kora.protocols.secret_value import SecretRevealRefused
 from tests.plugins.runtime.local.frames_support import (
     ORIGIN_NS,
     StepClock,
@@ -131,6 +132,32 @@ def test_claim_rejects_unknown_role_and_exact_cutoff(
     assert_slot_refusal(expired.value)
 
 
+def test_slots_admit_only_roles_captured_in_the_binding(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    roles = {"inspection": CandidateRoleEnvironment({}, ())}
+    binding = bind_candidate_environments(
+        cwd=tmp_path,
+        attempt_token=kora_capture.scope.admit("synthetic-attempt"),
+        workload={},
+        secrets={},
+        harness_credentials={},
+        roles=roles,
+    )
+    roles["exec"] = roles.pop("inspection")
+    slots = BoundRoleSlots(binding, StepClock(), ORIGIN_NS + 10)
+
+    claim = slots.claim("inspection")
+    attempt_value = slots.start(
+        "inspection", claim, lambda environment: environment["KORA_ATTEMPT_TOKEN"]
+    )
+    with pytest.raises(KoraProtocolError) as refusal:
+        slots.claim("exec")
+
+    assert attempt_value == "synthetic-attempt"
+    assert_slot_refusal(refusal.value)
+
+
 @pytest.mark.parametrize("stop", [True, False], ids=("stopped", "expired"))
 def test_fenced_claim_refuses_before_revealing(
     tmp_path: Path, kora_capture: Capture, stop: bool
@@ -162,6 +189,20 @@ def test_cutoff_crossed_during_preparation_refuses_acquisition(
 
     assert_slot_refusal(refusal.value)
     assert clock.offset_ns == 3
+
+
+def test_materialization_runs_before_the_final_cutoff_check(
+    tmp_path: Path, kora_capture: Capture
+) -> None:
+    clock = TickingClock(1)
+    slots = BoundRoleSlots(binding_for(tmp_path, kora_capture), clock, ORIGIN_NS + 3)
+    claim = slots.claim("app")
+    kora_capture.scope.release()
+
+    with pytest.raises(SecretRevealRefused):
+        slots.start("app", claim, unexpected_acquisition)
+
+    assert clock.offset_ns == 2
 
 
 def test_failed_acquisition_keeps_slot_consumed_and_fences_other_roles(
