@@ -16,7 +16,10 @@ from kora.ir.structured_schema_cursors import (
     string_equal,
 )
 from kora.ir.structured_schema_evaluation_policy import refuse
-from kora.ir.structured_schema_evaluation_work import EvaluationMeter
+from kora.ir.structured_schema_evaluation_work import (
+    BoundedEvaluationMeter,
+    EvaluationMeter,
+)
 from kora.ir.structured_schema_numbers import numeric_equal
 
 MAX_EQUALITY_FRAMES = 17
@@ -38,16 +41,20 @@ class _PairFrame:
 
 
 def _push(
-    stack: list[_PairFrame], left: Cursor, right: Cursor, meter: EvaluationMeter
+    stack: list[_PairFrame],
+    left: Cursor,
+    right: Cursor,
+    meter: BoundedEvaluationMeter,
+    max_pair_frames: int,
 ) -> None:
     meter.reserve(2)
-    if len(stack) + 1 > MAX_EQUALITY_FRAMES:
+    if len(stack) + 1 > max_pair_frames:
         refuse("evaluation_exhausted")
     meter.reserve(10, entries=2)
     stack.append(_PairFrame(left, right))
 
 
-def _complete(stack: list[_PairFrame], meter: EvaluationMeter) -> None:
+def _complete(stack: list[_PairFrame], meter: BoundedEvaluationMeter) -> None:
     stack.pop()
     meter.reserve()
     if stack:
@@ -56,7 +63,7 @@ def _complete(stack: list[_PairFrame], meter: EvaluationMeter) -> None:
         parent.position += 1
 
 
-def _enter(frame: _PairFrame, meter: EvaluationMeter) -> bool | None:
+def _enter(frame: _PairFrame, meter: BoundedEvaluationMeter) -> bool | None:
     meter.reserve(2)
     left, right = frame.left, frame.right
     first = cursor_kind(left, meter)
@@ -115,7 +122,7 @@ def _enter(frame: _PairFrame, meter: EvaluationMeter) -> bool | None:
     return None
 
 
-def _keys(frame: _PairFrame, meter: EvaluationMeter) -> bool:
+def _keys(frame: _PairFrame, meter: BoundedEvaluationMeter) -> bool:
     meter.reserve(5)
     left, right, left_index, right_index, position = (
         frame.left,
@@ -139,13 +146,17 @@ def _keys(frame: _PairFrame, meter: EvaluationMeter) -> bool:
     return True
 
 
-def json_equal(
-    left: NativeCursor, right: NativeCursor | ArenaCursor, meter: EvaluationMeter
+def compare_json_cursors(
+    left: Cursor,
+    right: Cursor,
+    meter: BoundedEvaluationMeter,
+    *,
+    max_pair_frames: int,
 ) -> bool:
     meter.reserve(2, entries=1)
     stack: list[_PairFrame] = []
     try:
-        _push(stack, left, right, meter)
+        _push(stack, left, right, meter, max_pair_frames)
         while True:
             meter.reserve()
             if not stack:
@@ -189,6 +200,12 @@ def json_equal(
                 left_index, right_index = frame.left_index, frame.right_index
                 first = object_value(current_left, left_index, position, meter)
                 second = object_value(current_right, right_index, position, meter)
-            _push(stack, first, second, meter)
+            _push(stack, first, second, meter, max_pair_frames)
     finally:
         stack.clear()
+
+
+def json_equal(
+    left: NativeCursor, right: NativeCursor | ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    return compare_json_cursors(left, right, meter, max_pair_frames=MAX_EQUALITY_FRAMES)

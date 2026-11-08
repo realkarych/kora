@@ -2,6 +2,7 @@ from typing import cast
 
 from kora.ir.structured_schema_cursors import (
     ArenaCursor,
+    Cursor,
     NativeCursor,
     NativeObjectIndex,
     array_item,
@@ -11,9 +12,15 @@ from kora.ir.structured_schema_cursors import (
     object_value,
     scalar_value,
 )
-from kora.ir.structured_schema_equality import json_equal
+from kora.ir.structured_schema_equality import (
+    MAX_EQUALITY_FRAMES,
+    compare_json_cursors,
+)
 from kora.ir.structured_schema_evaluation_policy import refuse
-from kora.ir.structured_schema_evaluation_work import EvaluationMeter
+from kora.ir.structured_schema_evaluation_work import (
+    BoundedEvaluationMeter,
+    EvaluationMeter,
+)
 
 
 def _require_index(index: NativeObjectIndex, meter: EvaluationMeter) -> None:
@@ -24,6 +31,18 @@ def _require_index(index: NativeObjectIndex, meter: EvaluationMeter) -> None:
 
 def unique_items_matches(
     instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
+) -> bool:
+    return check_unique_items(
+        instance, argument, meter, max_pair_frames=MAX_EQUALITY_FRAMES
+    )
+
+
+def check_unique_items(
+    instance: Cursor,
+    argument: ArenaCursor,
+    meter: BoundedEvaluationMeter,
+    *,
+    max_pair_frames: int,
 ) -> bool:
     kind = cursor_kind(instance, meter)
     meter.reserve()
@@ -50,9 +69,11 @@ def unique_items_matches(
             meter.reserve()
             if second == count:
                 break
-            left = cast("NativeCursor", array_item(instance, first, meter))
-            right = cast("NativeCursor", array_item(instance, second, meter))
-            same = json_equal(left, right, meter)
+            left = array_item(instance, first, meter)
+            right = array_item(instance, second, meter)
+            same = compare_json_cursors(
+                left, right, meter, max_pair_frames=max_pair_frames
+            )
             meter.reserve()
             if same:
                 return False

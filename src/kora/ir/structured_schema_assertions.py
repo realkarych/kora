@@ -2,6 +2,7 @@ from typing import Literal, cast
 
 from kora.ir.structured_schema_cursors import (
     ArenaCursor,
+    Cursor,
     Kind,
     NativeCursor,
     array_item,
@@ -10,9 +11,16 @@ from kora.ir.structured_schema_cursors import (
     scalar_value,
     string_equal,
 )
-from kora.ir.structured_schema_equality import json_equal
+from kora.ir.structured_schema_equality import (
+    MAX_EQUALITY_FRAMES,
+    compare_json_cursors,
+    json_equal,
+)
 from kora.ir.structured_schema_evaluation_policy import refuse
-from kora.ir.structured_schema_evaluation_work import EvaluationMeter
+from kora.ir.structured_schema_evaluation_work import (
+    BoundedEvaluationMeter,
+    EvaluationMeter,
+)
 from kora.ir.structured_schema_numbers import (
     numeric_compare,
     numeric_is_integer,
@@ -188,6 +196,18 @@ def const_matches(
 def enum_matches(
     instance: NativeCursor, argument: ArenaCursor, meter: EvaluationMeter
 ) -> bool:
+    return check_enum_membership(
+        instance, argument, meter, max_pair_frames=MAX_EQUALITY_FRAMES
+    )
+
+
+def check_enum_membership(
+    instance: Cursor,
+    argument: ArenaCursor,
+    meter: BoundedEvaluationMeter,
+    *,
+    max_pair_frames: int,
+) -> bool:
     kind = cursor_kind(argument, meter)
     meter.reserve()
     if kind != "array":
@@ -199,8 +219,10 @@ def enum_matches(
         meter.reserve()
         if position == count:
             return False
-        child = cast("ArenaCursor", array_item(argument, position, meter))
-        same = json_equal(instance, child, meter)
+        child = array_item(argument, position, meter)
+        same = compare_json_cursors(
+            instance, child, meter, max_pair_frames=max_pair_frames
+        )
         meter.reserve()
         if same:
             return True
