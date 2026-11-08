@@ -93,3 +93,13 @@ unset `BASH_ENV` name in private launch preflight. The [dated record](codex-bash
 observes the extra script effect before an approved non-login Bash command
 in the selected Linux executor. Complete declarations and production
 environment assembly retain their existing acceptance criteria.
+
+## Subsequent selected Bash trace reservations
+
+[#1022](https://github.com/realkarych/kora/issues/1022) reserves the exact
+unset `SHELLOPTS` and `PS4` names in private launch preflight. The
+[dated record](codex-bash-trace-environment-2026-11-08.md) verifies that an
+inherited option can expose trace to the model and that an inherited
+trace prefix can produce an extra effect even when the approved command
+enables trace itself. Complete declarations and production environment
+assembly retain their existing acceptance criteria.
