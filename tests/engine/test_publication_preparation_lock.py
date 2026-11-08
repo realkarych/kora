@@ -411,6 +411,7 @@ async def test_publication_preparation_native_failure_is_content_free(
 ) -> None:
     binding, selected = await seed_original(database)
     ledger = ConnectionLedger(database)
+    statements: list[tuple[str, tuple[object, ...]]] = []
 
     async def unavailable_preparation() -> None:
         async with database.transaction() as writer:
@@ -419,9 +420,16 @@ async def test_publication_preparation_native_failure_is_content_free(
             await locks.acquire_existing_storage_addresses((), max_addresses=0)
             await writer.exec_driver_sql(
                 "ALTER TABLE graph_deployment_preparation "
-                "RENAME TO unavailable_publication_preparation"
+                "RENAME COLUMN deployment_digest "
+                "TO unavailable_publication_preparation_digest"
             )
-            await locks.acquire_publication_graph_preparation(writer, binding, selected)
+            with executed_queries(writer) as queries:
+                try:
+                    await locks.acquire_publication_graph_preparation(
+                        writer, binding, selected
+                    )
+                finally:
+                    statements.extend(queries)
 
     with pytest.raises(GraphPreparationLockFailed) as refused:
         await unavailable_preparation()
@@ -435,14 +443,24 @@ async def test_publication_preparation_native_failure_is_content_free(
 
     assert refused.value.__cause__ is refused.value.__context__ is None
     assert len(records) == 1
+    [(statement, parameters)] = [
+        (sql, args)
+        for sql, args in statements
+        if "FROM graph_deployment_preparation" in sql
+    ]
+    assert "graph_deployment_preparation.deployment_digest" in statement
+    assert binding.preparation_id in parameters
+    assert binding.deployment_digest in parameters
     for private in (
         binding.preparation_id,
         binding.namespace_id,
         binding.graph_name,
         selected,
         binding.deployment_digest,
-        "unavailable_publication_preparation",
-        "UndefinedTable",
+        "unavailable_publication_preparation_digest",
+        "graph_deployment_preparation.deployment_digest",
+        "FROM graph_deployment_preparation",
+        "UndefinedColumn",
     ):
         assert private not in rendered
         assert private not in repr(records)
