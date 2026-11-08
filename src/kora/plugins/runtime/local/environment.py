@@ -22,6 +22,10 @@ class CandidateRoleEnvironment:
 class BoundCandidateEnvironments:
     _roles: Mapping[str, EnvironmentAssignments]
 
+    @property
+    def roles(self) -> frozenset[str]:
+        return frozenset(self._roles)
+
     def materialize(self, role: str) -> dict[str, str]:
         entries = self._roles.get(role)
         if entries is None:

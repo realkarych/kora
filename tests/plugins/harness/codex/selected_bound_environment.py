@@ -1,3 +1,4 @@
+import os
 import socket
 import sys
 from collections.abc import Mapping
@@ -12,18 +13,29 @@ from kora.plugins.harness.codex.launch_configuration import (
     LaunchConfigurationError,
     LaunchConfigurationFailure,
 )
+from kora.plugins.runtime.local.bound_slots import BoundRoleSlots
 from kora.plugins.runtime.local.environment import (
     CandidateRoleEnvironment,
     bind_candidate_environments,
 )
 from kora.protocols.errors import KoraProtocolError
 from kora.protocols.secret_value import SecretRevealRefused, SecretScope, SecretValue
+from kora.protocols.time import SystemClock
+from tests.plugins.harness.codex.selected_gated_stdio import (
+    SelectedGatedApp,
+    runner_deadline,
+)
 from tests.plugins.harness.codex.selected_launch import (
     prepare_native_inputs,
     write_native_configuration,
 )
 
-BoundCase = Literal["ready", "path", "grant", "reserved"]
+BoundCase = Literal[
+    "ready", "path", "grant", "reserved", "duplicate", "stopped", "partial"
+]
+BoundRole = Literal["app", "exec"]
+SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
+ENVIRONMENT_REFUSALS = frozenset({"path", "grant", "reserved"})
 ATTEMPT_CANARY = "bound-environment-attempt-token"
 TEXT_NAME = "KORA_BOUND_AUTHORED_TEXT"
 TEXT_VALUE = "bound-environment-authored-text"
@@ -38,10 +50,26 @@ class BoundEnvironmentError(ValueError):
 @dataclass(frozen=True, repr=False)
 class BoundLaunch:
     inputs: CodexLaunchInputs
-    app: dict[str, str]
-    executor: dict[str, str]
+    slots: BoundRoleSlots
+    clock: SystemClock
+    cutoff_ns: int
     expected_app: dict[str, str]
     expected_executor: dict[str, str]
+
+    def start(self, role: BoundRole, frame_limit: int) -> SelectedGatedApp:
+        recipe = self.inputs.app_server if role == "app" else self.inputs.exec_server
+
+        def acquire(environment: dict[str, str]) -> SelectedGatedApp:
+            return SelectedGatedApp(
+                recipe.argv,
+                recipe.cwd,
+                environment,
+                self.clock,
+                self.cutoff_ns,
+                frame_limit,
+            )
+
+        return self.slots.start(role, self.slots.claim(role), acquire)
 
 
 @dataclass(repr=False)
@@ -51,6 +79,8 @@ class BoundEnvironmentProbe:
     app_scope: SecretScope
     starts: int = field(default=0, init=False)
     unix_sockets: int = field(default=0, init=False)
+    cwd_opens: int = field(default=0, init=False)
+    _cwd: str | None = field(default=None, init=False)
     refused: bool = field(default=False, init=False)
     settled: bool = field(default=False, init=False)
 
@@ -62,6 +92,41 @@ class BoundEnvironmentProbe:
             self.starts += 1
         elif event == "socket.__new__" and len(args) == 4 and args[1] == socket.AF_UNIX:
             self.unix_sockets += 1
+        elif (
+            event == "open"
+            and len(args) == 3
+            and args[0] == self._cwd
+            and isinstance(args[2], int)
+            and args[2] & os.O_DIRECTORY
+        ):
+            self.cwd_opens += 1
+
+    def start_role(
+        self, launch: BoundLaunch, role: BoundRole, frame_limit: int
+    ) -> SelectedGatedApp | None:
+        if self.case == "partial" and role == "app":
+            self.app_scope.release()
+        try:
+            return launch.start(role, frame_limit)
+        except KoraProtocolError as error:
+            if (
+                self.case not in SLOT_REFUSALS
+                or role != "exec"
+                or error.code != "launch_rejected"
+                or error.message != "the bound native role is unavailable"
+                or error.retryable
+                or error.details
+                or error.__cause__ is not None
+                or error.__context__ is not None
+            ):
+                raise BoundEnvironmentError("selected_bound_slot_failed") from None
+        except SecretRevealRefused:
+            if self.case != "partial" or role != "app":
+                raise BoundEnvironmentError(
+                    "selected_bound_secret_reveal_refused"
+                ) from None
+        self.refused = True
+        return None
 
     def prepare(
         self,
@@ -71,7 +136,11 @@ class BoundEnvironmentProbe:
         port: int,
         bearer: str,
         key: str,
+        deadline: float,
     ) -> BoundLaunch | None:
+        self._cwd = str(workspace)
+        clock = SystemClock()
+        cutoff_ns = runner_deadline(deadline, clock)
         workload: Mapping[str, str] = MappingProxyType({TEXT_NAME: TEXT_VALUE})
         secret_name = "BASH_ENV" if self.case == "reserved" else WORKLOAD_HANDLE_NAME
         authored_scope = (
@@ -82,7 +151,7 @@ class BoundEnvironmentProbe:
         )
         attempt_token = self.attempt_scope.admit(ATTEMPT_CANARY)
         grant = self.app_scope.admit(key)
-        if self.case != "ready":
+        if self.case in ENVIRONMENT_REFUSALS:
             self.app_scope.release()
         try:
             inputs = prepare_native_inputs(
@@ -112,10 +181,8 @@ class BoundEnvironmentProbe:
                     "exec": CandidateRoleEnvironment(adapter, ()),
                 },
             )
-            if self.case != "ready":
+            if self.case in ENVIRONMENT_REFUSALS:
                 raise BoundEnvironmentError("selected_bound_preflight_not_refused")
-            app = binding.materialize("app")
-            executor = binding.materialize("exec")
         except LaunchConfigurationError as error:
             if (
                 self.case != "reserved"
@@ -137,12 +204,15 @@ class BoundEnvironmentProbe:
                 raise BoundEnvironmentError("selected_bound_ownership_failed") from None
             self.refused = True
             return None
-        except SecretRevealRefused:
-            raise BoundEnvironmentError(
-                "selected_bound_secret_reveal_refused"
-            ) from None
         write_native_configuration(inputs.app_server)
         write_native_configuration(inputs.exec_server)
+        slots = BoundRoleSlots(binding, clock, cutoff_ns)
+        if self.case == "duplicate":
+            slots.claim("exec")
+        elif self.case == "stopped":
+            slots.stop()
+        if self.case in SLOT_REFUSALS:
+            self.attempt_scope.release()
         common = {
             "PATH": "/usr/bin:/bin",
             "PWD": str(workspace),
@@ -152,8 +222,9 @@ class BoundEnvironmentProbe:
         }
         return BoundLaunch(
             inputs,
-            app,
-            executor,
+            slots,
+            clock,
+            cutoff_ns,
             {**common, **inputs.app_server.environment, PROVIDER_KEY: key},
             {**common, **inputs.exec_server.environment},
         )

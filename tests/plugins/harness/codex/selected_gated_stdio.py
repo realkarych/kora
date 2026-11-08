@@ -144,17 +144,18 @@ class SelectedGatedApp:
         argv: tuple[str, ...],
         cwd: Path,
         environment: dict[str, str],
-        deadline: float,
+        clock: SystemClock,
+        cutoff_ns: int,
         frame_limit: int,
     ) -> None:
-        self._clock = SystemClock()
+        self._clock = clock
         descriptor = os.open(cwd, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             self._owner = start_gated(
                 native_launch(argv, environment),
                 new_operation_id(),
                 descriptor,
-                runner_deadline(deadline, self._clock),
+                cutoff_ns,
                 self._clock,
                 stdio_limit=frame_limit,
             )
