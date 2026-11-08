@@ -362,7 +362,7 @@ case "${1:-}" in
         ;;
     --check-selected-bound-configuration)
         prepare_locked_probe
-        run_variant selected-gated-bound --selected-bound-configuration-ready > "$reservation/accepted"
+        run_variant selected-gated-bound --selected-bound-configuration-ready > "$reservation/accepted" 2>&1
         test "$(grep -Fxc '{"level": "INFO", "event": "probe.selected_bound_workspace_removed", "detail": "configuration-ready"}' "$reservation/accepted")" = 1
         cat "$reservation/accepted"
         release_container

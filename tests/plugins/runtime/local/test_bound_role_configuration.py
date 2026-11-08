@@ -1,4 +1,5 @@
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -121,6 +122,16 @@ def test_configuration_distinguishes_bytes_identity_and_private_placements(
     assert set(os.listdir("/dev/fd")) == baseline
 
 
+@dataclass
+class DescriptorObservationClock(TickingClock):
+    observed: frozenset[str] = frozenset()
+
+    def monotonic_ns(self) -> int:
+        now = super().monotonic_ns()
+        self.observed = frozenset(os.listdir("/dev/fd"))
+        return now
+
+
 def test_configuration_checks_cutoff_after_comparison_descriptor_is_closed(
     tmp_path: Path,
 ) -> None:
@@ -128,7 +139,7 @@ def test_configuration_checks_cutoff_after_comparison_descriptor_is_closed(
     create_directories(paths)
     baseline = set(os.listdir("/dev/fd"))
     role = BoundRoleConfiguration(paths, CONTENT)
-    clock = TickingClock(1)
+    clock = DescriptorObservationClock(1)
     try:
         role.prepare(CUTOFF, StepClock())
         owned = set(os.listdir("/dev/fd"))
@@ -141,6 +152,7 @@ def test_configuration_checks_cutoff_after_comparison_descriptor_is_closed(
 
     assert expired.value.reason is RoleConfigurationFailure.DEADLINE
     assert clock.offset_ns == 8
+    assert clock.observed == owned
     assert retained == owned
     assert len(owned - baseline) == 4
     assert set(os.listdir("/dev/fd")) == baseline
