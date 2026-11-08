@@ -85,3 +85,11 @@ Linux profile and verifies that injected `update_plan` is refused. The
 [dated record](codex-selected-tool-inventory-2026-11-08.md) distinguishes
 the observed inventory and residual candidates from complete Policy
 coverage.
+
+## Subsequent selected Bash startup reservation
+
+[#1016](https://github.com/realkarych/kora/issues/1016) reserves the exact
+unset `BASH_ENV` name in private launch preflight. The [dated record](codex-bash-startup-environment-2026-11-08.md)
+observes the extra script effect before an approved non-login Bash command
+in the selected Linux executor. Complete declarations and production
+environment assembly retain their existing acceptance criteria.
