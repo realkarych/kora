@@ -202,10 +202,13 @@ async def test_migrated_sqlite_ordinal_indexes_exclude_wide_number_payloads(
             seed = Seeder(writer)
             small = await seed.graph(binding.namespace_id, "small")
             large = await seed.graph(binding.namespace_id, "large")
+            low = await seed.graph(binding.namespace_id, "low")
             empty = await seed.graph(binding.namespace_id, "empty")
             await seed.graph_version(selected, 3, ir={"wide": "x" * SMALL_BLOB})
             await seed.graph_version(small, 1)
             await seed.graph_version(large, 1)
+            await seed.graph_version(low, 1)
+            await seed.graph_version(low, -1)
             small_version = await seed.graph_version(small, 2)
             large_version = await seed.graph_version(large, 2)
             await replace_with_blob(writer, small_version, SMALL_BLOB)
@@ -214,7 +217,7 @@ async def test_migrated_sqlite_ordinal_indexes_exclude_wide_number_payloads(
         await upgrade_database(settings)
         async with database.read_transaction() as reader:
             initial, statements = await native_observations(
-                reader, (selected, small, large, empty)
+                reader, (selected, small, large, low, empty)
             )
             await assert_sqlite_index(
                 reader, ORDINAL_VALID_INDEX, ORDINAL_VALID_COLUMNS, SQLITE_ORDINAL_VALID
@@ -251,7 +254,7 @@ async def test_migrated_sqlite_ordinal_indexes_exclude_wide_number_payloads(
             )
             restored, _ = await native_observations(writer, (selected, small))
 
-        assert initial == [3, "refused", "refused", None]
+        assert initial == [3, "refused", "refused", "refused", None]
         assert matched_blob == 1
         assert promoted == [9, 5]
         assert moved == ["refused", 5]

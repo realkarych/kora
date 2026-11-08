@@ -179,15 +179,13 @@ async def assert_native_plans(
         assert rendered.count("(graph_id=?)") == 2
         assert "SCAN main.graph_version" not in rendered
         return
-    assert_postgresql_endpoint_plan(
-        list(
-            (
-                await writer.exec_driver_sql(
-                    "EXPLAIN (ANALYZE, COSTS OFF) " + statement, parameters
-                )
-            ).scalars()
-        )
-    )
+    for arguments in (parameters, (empty,)):
+        ordinary = (
+            await writer.exec_driver_sql(
+                "EXPLAIN (ANALYZE, COSTS OFF) " + statement, arguments
+            )
+        ).scalars()
+        assert_postgresql_endpoint_plan(list(ordinary))
     await writer.exec_driver_sql("SET LOCAL plan_cache_mode = force_generic_plan")
     await writer.exec_driver_sql("PREPARE kora_ordinal_probe AS " + statement)
     try:
