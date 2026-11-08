@@ -381,12 +381,16 @@ def test_stage_group_path_preserves_occurrence_and_byte_limits(limit: str) -> No
         CommandResourceContent(ROOT, f"empty-{index}", b"")
         for index in range(MAX_FILES)
     )
+    empty_tail = CommandResourceContent(ROOT, "tail", b"")
     cases = {
         "file": (
             (files[0],),
             (CommandResourceContent(ROOT, files[0].name, full_file + b"x"),),
         ),
-        "aggregate": (files, (*files, CommandResourceContent(ROOT, "tail", b"x"))),
+        "aggregate": (
+            (*files, empty_tail),
+            (*files, CommandResourceContent(ROOT, empty_tail.name, b"x")),
+        ),
         "occurrences": (
             empty_files,
             (*empty_files, CommandResourceContent(ROOT, "tail", b"")),
@@ -394,17 +398,24 @@ def test_stage_group_path_preserves_occurrence_and_byte_limits(limit: str) -> No
     }
     exact, candidate = cases[limit]
     ir_text = source_for(exact)
+    small_source = replace(LIMITS, ir_bytes=1)
 
     groups = prepare_graph_command_stage_groups(
         ir_text, exact, storage_identity=STAGE_STORE, limits=LIMITS
     )
+    with pytest.raises(GraphValueRejected) as source_refused:
+        prepare_graph_command_stage_groups(
+            ir_text, exact, storage_identity=STAGE_STORE, limits=small_source
+        )
     with pytest.raises(GraphValueRejected) as refused:
         prepare_graph_command_stage_groups(
-            ir_text, candidate, storage_identity=STAGE_STORE, limits=LIMITS
+            ir_text, candidate, storage_identity=STAGE_STORE, limits=small_source
         )
 
-    assert len(groups) == 1
-    assert groups[0].ordinals == tuple(range(len(exact)))
+    assert sorted(ordinal for group in groups for ordinal in group.ordinals) == list(
+        range(len(exact))
+    )
+    assert_content_free(source_refused.value, GraphValueFailure.BUDGET)
     assert_content_free(refused.value, GraphValueFailure.INVALID)
 
 
@@ -471,6 +482,8 @@ def test_stage_group_cumulative_budget_extends_the_existing_verification(
     assert verified == supplied
     assert len(groups) == 1
     assert group_limit > verified_limit
+    if dimension == "scratch":
+        assert group_limit > verified_limit + 4 * len(STAGE_STORE.store_id)
     assert_content_free(grouping_at_verifier_limit.value, GraphValueFailure.BUDGET)
     assert_content_free(one_below.value, GraphValueFailure.BUDGET)
 
