@@ -177,7 +177,7 @@ async def test_publication_digest_probes_only_the_exact_current_graph(
             with pytest.raises(LockError, match="precedes storage addresses"):
                 await locks.read_graph_publication_digest_match(writer, bound, selected)
         plans = [
-            str((await writer.exec_driver_sql(explain + query, values)).all())
+            (await writer.exec_driver_sql(explain + query, values)).all()
             for query, values in (*hit_queries, *miss_queries)
         ]
     with pytest.raises(WriterTransactionError, match="not current"):
@@ -190,15 +190,24 @@ async def test_publication_digest_probes_only_the_exact_current_graph(
     assert hit_queries[0][0] == miss_queries[0][0]
     assert DIGEST in hit_queries[0][1]
     assert OTHER_DIGEST in miss_queries[0][1]
-    assert all(DIGEST_INDEX in plan and "deployment_digest" in plan for plan in plans)
-    if database.dialect is Dialect.SQLITE:
-        assert all(
-            INVALID_ID_INDEX in plan and "SCAN graph_version" not in plan
-            for plan in plans
-        )
-    else:
-        assert all("Index Only Scan" in plan and "Index Cond" in plan for plan in plans)
-        assert all("Seq Scan" not in plan and "Bitmap" not in plan for plan in plans)
+    for plan in plans:
+        rendered = str(plan)
+        assert DIGEST_INDEX in rendered
+        if database.dialect is Dialect.SQLITE:
+            assert INVALID_ID_INDEX in rendered
+            assert "SCAN graph_version" not in rendered
+            assert rendered.count("(graph_id=? AND deployment_digest=?)") == 2
+        else:
+            assert "Index Only Scan" in rendered
+            assert "Seq Scan" not in rendered
+            assert "Bitmap" not in rendered
+            [condition] = [
+                str(row[0]).partition("Index Cond: ")[2]
+                for row in plan
+                if "Index Cond: " in str(row[0])
+            ]
+            assert "graph_id" in condition
+            assert "deployment_digest" in condition
     assert await lock_inventory(database) == []
     assert database.writer_is_free()
 

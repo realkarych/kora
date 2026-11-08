@@ -24,6 +24,7 @@ from kora.db.migrations.environment import alembic_config
 from kora.db.tables import graph_version
 from kora.engine.locks import SQLITE_DIGEST_MATCH
 from tests.db.cancel_cause_support import migration_lock_count
+from tests.db.closing import ConnectionLedger
 from tests.db.seed import DIGEST, Seeder
 from tests.db.test_graph_read_admission import executed_queries, sqlite_instructions
 from tests.engine.lock_support import DEADLINE
@@ -264,26 +265,49 @@ async def test_graph_digest_locator_refuses_conflict_and_recovers_native_build(
     empty_database_settings: DatabaseSettings,
 ) -> None:
     database = Database(empty_database_settings)
+    migrators: list[tuple[Database, ConnectionLedger]] = []
+
+    def open_migrator(settings: DatabaseSettings) -> Database:
+        migrator = Database(settings)
+        migrators.append((migrator, ConnectionLedger(migrator)))
+        return migrator
+
     try:
         binding, selected, version = await seed_predecessor(database)
         before = await history(database)
+        conflicting_index = (
+            INVALID_ID_INDEX if database.dialect is Dialect.SQLITE else DIGEST_INDEX
+        )
         async with database.transaction() as writer:
             await writer.exec_driver_sql(
-                f"CREATE INDEX {DIGEST_INDEX} ON graph_version (number)"
+                f"CREATE INDEX {conflicting_index} ON graph_version (number)"
             )
 
         with pytest.raises(
             (RuntimeError, DBAPIError), match="incompatible|already exists"
         ):
-            await upgrade_database(empty_database_settings)
+            await upgrade_database(empty_database_settings, open_migrator)
         async with database.transaction() as writer:
             refused_revision = await writer.run_sync(current_revision)
-            await writer.exec_driver_sql(f"DROP INDEX {DIGEST_INDEX}")
+            if database.dialect is Dialect.SQLITE:
+                locator_names = (
+                    await writer.execute(
+                        text(
+                            "SELECT name FROM sqlite_schema WHERE type = 'index' "
+                            "AND name IN (:valid, :invalid)"
+                        ),
+                        {"valid": DIGEST_INDEX, "invalid": INVALID_ID_INDEX},
+                    )
+                ).all()
+                assert locator_names == [(conflicting_index,)]
+            await writer.exec_driver_sql(f"DROP INDEX {conflicting_index}")
         invalid_oid: int | None = None
         if database.dialect is Dialect.POSTGRESQL:
             async with database.transaction() as writer:
                 await writer.exec_driver_sql("UPDATE graph_version SET status = status")
-                task = asyncio.create_task(upgrade_database(empty_database_settings))
+                task = asyncio.create_task(
+                    upgrade_database(empty_database_settings, open_migrator)
+                )
                 try:
                     invalid_oid = await wait_for_invalid_index(database)
                 finally:
@@ -299,7 +323,7 @@ async def test_graph_digest_locator_refuses_conflict_and_recovers_native_build(
                 )
             assert interrupted_revision == PREDECESSOR
             assert old_valid is False
-        report = await upgrade_database(empty_database_settings)
+        report = await upgrade_database(empty_database_settings, open_migrator)
         after = await history(database)
         found = await read_digest(database, binding, selected)
 
@@ -310,5 +334,10 @@ async def test_graph_digest_locator_refuses_conflict_and_recovers_native_build(
         assert found == version
         assert await migration_lock_count(database) == 0
         assert database.units_in_flight() == 0
+        assert len(migrators) == (2 if database.dialect is Dialect.SQLITE else 3)
+        for migrator, ledger in migrators:
+            assert migrator.units_in_flight() == ledger.outstanding == 0
+            assert ledger.checkouts > 0
+            assert ledger.opened == ledger.closed > 0
     finally:
         await database.close()

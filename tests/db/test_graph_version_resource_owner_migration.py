@@ -8,7 +8,11 @@ from kora.db.graph_version_resource_owner_v1 import REVERSE_INDEX
 from kora.db.migrations import (
     current_revision,
 )
-from kora.db.migrations.environment import alembic_config
+from kora.db.migrations.environment import (
+    MigrationReport,
+    alembic_config,
+    pending_steps,
+)
 from kora.db.tables import (
     graph_deployment_preparation_capacity,
     graph_version,
@@ -282,8 +286,14 @@ async def retained_predecessor_rows(
     return tuple(rows)
 
 
-def upgrade_owner_revision(connection: Connection) -> None:
-    command.upgrade(alembic_config(connection), REVISION)
+def upgrade_owner_revision(connection: Connection) -> MigrationReport:
+    config = alembic_config(connection)
+    predecessor = current_revision(connection)
+    steps = pending_steps(config, predecessor, REVISION)
+    if connection.dialect.name == "postgresql":
+        connection.commit()
+    command.upgrade(config, REVISION)
+    return MigrationReport(connection.dialect.name, predecessor, REVISION, steps)
 
 
 @pytest.mark.asyncio
@@ -296,17 +306,13 @@ async def test_resource_owner_upgrade_preserves_history_without_backfill(
         before = await retained_predecessor_rows(database)
 
         async with database.migration_connection() as connection:
-            predecessor = await connection.run_sync(current_revision)
-            if database.dialect is Dialect.POSTGRESQL:
-                await connection.commit()
             with executed_queries(connection) as observed:
-                await connection.run_sync(upgrade_owner_revision)
+                report = await connection.run_sync(upgrade_owner_revision)
         async with database.transaction() as connection:
             initially_empty = (await connection.execute(select(owner))).all()
             await connection.execute(owner.insert().values(**owner_values(version_id)))
         async with database.migration_connection() as connection:
-            with executed_queries(connection) as repeated:
-                await connection.run_sync(upgrade_owner_revision)
+            repeated = await connection.run_sync(upgrade_owner_revision)
         with pytest.raises(RuntimeError, match="owner history cannot be downgraded"):
             async with database.migration_connection() as connection:
                 await connection.run_sync(
@@ -319,12 +325,17 @@ async def test_resource_owner_upgrade_preserves_history_without_backfill(
     finally:
         await database.close()
 
-    assert predecessor == PREDECESSOR
-    assert revision == REVISION
-    assert not any(
-        statement.lower().startswith(f"create table {owner.name}")
-        for statement, _ in repeated
+    assert (report.from_revision, report.to_revision, report.steps) == (
+        PREDECESSOR,
+        REVISION,
+        1,
     )
+    assert (repeated.from_revision, repeated.to_revision, repeated.steps) == (
+        REVISION,
+        REVISION,
+        0,
+    )
+    assert revision == REVISION
     assert initially_empty == []
     assert all(len(rows) == 1 for rows in before)
     assert after == before
