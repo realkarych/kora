@@ -11,6 +11,7 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
     func,
+    literal_column,
     text,
 )
 from sqlalchemy.types import TypeEngine
@@ -27,6 +28,12 @@ from kora.db.graph_preparation_capacity_v1 import (
 from kora.db.graph_preparation_capacity_v1 import graph_preparation_capacity_elements_v1
 from kora.db.graph_preparation_v1 import TABLE_NAME as GRAPH_PREPARATION_TABLE
 from kora.db.graph_preparation_v1 import graph_preparation_elements_v1
+from kora.db.graph_publication_digest_v1 import (
+    DIGEST_INDEX,
+    INVALID_ID_INDEX,
+    SQLITE_INVALID,
+    SQLITE_VALID,
+)
 from kora.db.graph_version_resource_owner_v1 import (
     TABLE_NAME as GRAPH_VERSION_RESOURCE_OWNER_TABLE,
 )
@@ -187,6 +194,19 @@ GRAPH_VERSION_SCOPE_INDEX: str = "ix_graph_version_graph_id_id"
 Index(GRAPH_VERSION_SCOPE_INDEX, graph_version.c.graph_id, graph_version.c.id).ddl_if(
     dialect="sqlite"
 )
+Index(
+    DIGEST_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.deployment_digest,
+    graph_version.c.id,
+    sqlite_where=literal_column(SQLITE_VALID),
+)
+Index(
+    INVALID_ID_INDEX,
+    graph_version.c.graph_id,
+    graph_version.c.deployment_digest,
+    sqlite_where=literal_column(SQLITE_INVALID),
+).ddl_if(dialect="sqlite")
 
 graph_version_resource_owner: Table = Table(
     GRAPH_VERSION_RESOURCE_OWNER_TABLE,

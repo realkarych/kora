@@ -7,8 +7,6 @@ from kora.db.connection import Database, DatabaseSettings, Dialect
 from kora.db.graph_version_resource_owner_v1 import REVERSE_INDEX
 from kora.db.migrations import (
     current_revision,
-    upgrade_database,
-    upgrade_with_diagnostics,
 )
 from kora.db.migrations.environment import alembic_config
 from kora.db.tables import (
@@ -284,6 +282,10 @@ async def retained_predecessor_rows(
     return tuple(rows)
 
 
+def upgrade_owner_revision(connection: Connection) -> None:
+    command.upgrade(alembic_config(connection), REVISION)
+
+
 @pytest.mark.asyncio
 async def test_resource_owner_upgrade_preserves_history_without_backfill(
     empty_database_settings: DatabaseSettings,
@@ -294,12 +296,17 @@ async def test_resource_owner_upgrade_preserves_history_without_backfill(
         before = await retained_predecessor_rows(database)
 
         async with database.migration_connection() as connection:
+            predecessor = await connection.run_sync(current_revision)
+            if database.dialect is Dialect.POSTGRESQL:
+                await connection.commit()
             with executed_queries(connection) as observed:
-                report = await connection.run_sync(upgrade_with_diagnostics)
+                await connection.run_sync(upgrade_owner_revision)
         async with database.transaction() as connection:
             initially_empty = (await connection.execute(select(owner))).all()
             await connection.execute(owner.insert().values(**owner_values(version_id)))
-        repeated = await upgrade_database(empty_database_settings)
+        async with database.migration_connection() as connection:
+            with executed_queries(connection) as repeated:
+                await connection.run_sync(upgrade_owner_revision)
         with pytest.raises(RuntimeError, match="owner history cannot be downgraded"):
             async with database.migration_connection() as connection:
                 await connection.run_sync(
@@ -312,17 +319,12 @@ async def test_resource_owner_upgrade_preserves_history_without_backfill(
     finally:
         await database.close()
 
-    assert (report.from_revision, report.to_revision, report.steps) == (
-        PREDECESSOR,
-        REVISION,
-        1,
-    )
-    assert (repeated.from_revision, repeated.to_revision, repeated.steps) == (
-        REVISION,
-        REVISION,
-        0,
-    )
+    assert predecessor == PREDECESSOR
     assert revision == REVISION
+    assert not any(
+        statement.lower().startswith(f"create table {owner.name}")
+        for statement, _ in repeated
+    )
     assert initially_empty == []
     assert all(len(rows) == 1 for rows in before)
     assert after == before

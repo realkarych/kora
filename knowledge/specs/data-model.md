@@ -473,6 +473,8 @@ Under current authority, equal complete deployment retains the original eligible
 
 The [#991 target observation](https://github.com/realkarych/kora/issues/991) uses one exact namespace/name lookup on the live writer after the namespace and selected graph scopes and before the storage address phase. It returns a canonical graph ID or absence. SQLite checks native type and byte width before transferring the ID. A malformed matching row or an unavailable check refuses the observation. The publisher calls it before graph or version writes and owns the comparison, correction, wait deadline and final guards.
 
+The [#1015 deployment digest observation](https://github.com/realkarych/kora/issues/1015) follows a matching target observation for the same original binding and selected graph on that writer before the address phase. It probes only the exact graph and digest, admitting at most two native candidate rows. SQLite uses complementary compact indexes so a malformed matching version ID can refuse without transferring that field. PostgreSQL projects only a canonical version ID or a refusal marker. Multiple matches, a malformed candidate or an unavailable observation refuse. A single returned identity only identifies a candidate for subsequent complete read admission, eligibility, address and authority checks.
+
 ##### Durable graph deployment preparation
 
 The project owner accepted this format on 2026-11-07 under [#899](https://github.com/realkarych/kora/issues/899#issuecomment-6696547668). The private typed relation `graph_deployment_preparation` records the exact original request and its settlement together. Its first five fields are immutable.

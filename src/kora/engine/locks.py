@@ -2,9 +2,22 @@ import enum
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from sqlalchemy import and_, bindparam, case, func, literal, select, text
+from sqlalchemy import (
+    Boolean,
+    String,
+    and_,
+    bindparam,
+    case,
+    column,
+    func,
+    literal,
+    literal_column,
+    select,
+    text,
+    union_all,
+)
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection
 from sqlalchemy.sql.elements import ColumnElement
@@ -16,6 +29,11 @@ from kora.db.graph_preparation_reads import (
     graph_preparation_parameters,
     graph_preparation_settlement_statement,
     require_graph_preparation_binding,
+)
+from kora.db.graph_preparation_v1 import ULID_ALPHABET, ascii_predicate
+from kora.db.graph_publication_digest_v1 import (
+    SQLITE_INVALID,
+    SQLITE_VALID,
 )
 from kora.db.identifiers import IDENTIFIER_LENGTH, is_identifier
 from kora.db.tables import (
@@ -50,6 +68,30 @@ CONTENDED: EventSpec = CATALOG.register(
 RUN_CLASS: int = 1
 STORE_ID_PATTERN: re.Pattern[str] = re.compile(r"[!-~]{1,256}")
 STORAGE_DIGEST_PATTERN: re.Pattern[str] = re.compile(r"sha256:[0-9a-f]{64}")
+DIGEST_MATCH_KEY: ColumnElement[bool] = and_(
+    column("graph_id", String()) == bindparam("graph_id"),
+    column("deployment_digest", String()) == bindparam("deployment_digest"),
+)
+VERSION_ID = column("id", String())
+SQLITE_DIGEST_MATCH = union_all(
+    select(literal_column("NULL", String()))
+    .select_from(
+        text("graph_version INDEXED BY ix_graph_version_deployment_digest_invalid_id")
+    )
+    .where(DIGEST_MATCH_KEY, literal_column(SQLITE_INVALID)),
+    select(VERSION_ID)
+    .select_from(text("graph_version INDEXED BY ix_graph_version_deployment_digest"))
+    .where(DIGEST_MATCH_KEY, literal_column(SQLITE_VALID)),
+).limit(2)
+POSTGRESQL_VERSION_ID: str = ascii_predicate(
+    POSTGRESQL, "id", ULID_ALPHABET, f"= {IDENTIFIER_LENGTH}", "0-7"
+)
+POSTGRESQL_DIGEST_MATCH = (
+    select(case((literal_column(POSTGRESQL_VERSION_ID, Boolean()), VERSION_ID)))
+    .select_from(text("graph_version"))
+    .where(DIGEST_MATCH_KEY)
+    .limit(2)
+)
 
 
 class LockError(RuntimeError):
@@ -114,6 +156,16 @@ class GraphPublicationTargetUnavailable(LockError):
 class GraphPublicationTargetReadFailed(LockError):
     def __init__(self) -> None:
         super().__init__("the graph publication target read failed")
+
+
+class GraphPublicationDigestUnavailable(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph deployment digest observation is unavailable")
+
+
+class GraphPublicationDigestReadFailed(LockError):
+    def __init__(self) -> None:
+        super().__init__("the graph deployment digest observation failed")
 
 
 def _postgres_lock_contended(dialect: str, error: SQLAlchemyError) -> bool:
@@ -324,6 +376,30 @@ async def _read_graph_publication_target(
     raise_private_metadata_error(GraphPublicationTargetReadFailed())
 
 
+async def _read_graph_publication_digest_match(
+    connection: AsyncConnection, dialect: str, graph_id: str, deployment_digest: str
+) -> str | None:
+    statement = SQLITE_DIGEST_MATCH if dialect == SQLITE else POSTGRESQL_DIGEST_MATCH
+    try:
+        result = await connection.execute(
+            statement, {"graph_id": graph_id, "deployment_digest": deployment_digest}
+        )
+        try:
+            rows = result.all()
+        finally:
+            result.close()
+    except (SQLAlchemyError, UnicodeError):
+        pass
+    else:
+        if not rows:
+            return None
+        version_id: object = rows[0][0]
+        if len(rows) == 1 and type(version_id) is str and is_identifier(version_id):
+            return version_id
+        raise_private_metadata_error(GraphPublicationDigestUnavailable())
+    raise_private_metadata_error(GraphPublicationDigestReadFailed())
+
+
 class ScopeKind(enum.IntEnum):
     PREPARATION_CAPACITY = 0
     GLOBAL = 2
@@ -385,6 +461,7 @@ class TransitionLocks:
         self._scopes: frozenset[Scope] | None = None
         self._storage_addresses: frozenset[tuple[str, str]] | None = None
         self._graph_preparation: _GraphPreparationGuard | None = None
+        self._observed_graph_target: _GraphPreparationGuard | None = None
         self._usable: bool = True
         self._dialect: str = connection.dialect.name
         if self._dialect not in (POSTGRESQL, SQLITE):
@@ -510,12 +587,39 @@ class TransitionLocks:
     ) -> str | None:
         self.require_graph_publication_scope(connection, binding, selected_graph_id)
         self._usable = False
+        self._observed_graph_target = None
+        snapshot = replace(binding)
         graph_id = await _read_graph_publication_target(
-            connection, self._dialect, binding
+            connection, self._dialect, snapshot
+        )
+        self._lease.require_active()
+        if graph_id == selected_graph_id:
+            self._observed_graph_target = _GraphPreparationGuard(
+                snapshot, selected_graph_id
+            )
+        self._usable = True
+        return graph_id
+
+    async def read_graph_publication_digest_match(
+        self,
+        connection: AsyncConnection,
+        binding: GraphPreparationBinding,
+        selected_graph_id: str,
+    ) -> str | None:
+        self.require_graph_publication_scope(connection, binding, selected_graph_id)
+        if self._observed_graph_target != _GraphPreparationGuard(
+            binding, selected_graph_id
+        ):
+            raise_private_metadata_error(
+                LockError("the exact graph publication target was not observed")
+            )
+        self._usable = False
+        version_id = await _read_graph_publication_digest_match(
+            connection, self._dialect, selected_graph_id, binding.deployment_digest
         )
         self._lease.require_active()
         self._usable = True
-        return graph_id
+        return version_id
 
     async def acquire_existing_storage_address(
         self, store_id: str, payload_digest: str
