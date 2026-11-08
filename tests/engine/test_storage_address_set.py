@@ -109,8 +109,9 @@ async def acquire_set(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bound", [5, 1 << 64])
 async def test_existing_address_set_acquires_each_exact_key_once_in_byte_order(
-    database: Database,
+    database: Database, bound: int
 ) -> None:
     await seed_keys(database)
     ledger = ConnectionLedger(database)
@@ -122,12 +123,14 @@ async def test_existing_address_set_acquires_each_exact_key_once_in_byte_order(
         with executed_queries(writer) as premature:
             with pytest.raises(LockError, match="once after scopes"):
                 await locks.acquire_existing_storage_addresses(
-                    supplied, max_addresses=5
+                    supplied, max_addresses=bound
                 )
         await locks.acquire_scopes(())
         checkouts = ledger.checkouts
         with executed_queries(writer) as acquired:
-            await locks.acquire_existing_storage_addresses(supplied, max_addresses=5)
+            await locks.acquire_existing_storage_addresses(
+                supplied, max_addresses=bound
+            )
         later_checkouts = ledger.checkouts
         with executed_queries(writer) as refused:
             for address in KEYS:

@@ -140,7 +140,7 @@ def _bounded_storage_keys(
 ) -> frozenset[tuple[str, str]]:
     if (
         type(max_addresses) is not int
-        or not 0 <= max_addresses <= MAX_COUNT
+        or max_addresses < 0
         or type(addresses) is not tuple
         or len(addresses) > max_addresses
     ):
