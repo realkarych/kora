@@ -1137,6 +1137,8 @@ The project owner approved this optional provider-facing extension under [#826](
 
 [#1099](https://github.com/realkarych/kora/issues/1099) connects the private stop to the exact acquired gates. The stop latches before closing their channels and stdio. Control-channel I/O is revoked before descriptor disposal, and a failed close leaves physical settlement to the current owner. The selected fixture checks stop after gate readiness and before activation, and separately after frame handoff and before stream delivery. Both checks retain the same cutoff, resource ownership and settlement path.
 
+[#1104](https://github.com/realkarych/kora/issues/1104) verifies the installed Codex executable in the [controlled selected Linux fixture](../research/codex-protected-installation-2026-11-08.md) before slot consumption or secret disclosure. Both role recipes carry the checked path to their gates. The fixture uses a root-owned installation protected from its unprivileged identity and checks both live roles against the pinned executable and exact arguments. Production installation protection, Bash and effective configuration identity retain their own launch-boundary qualification.
+
 [Part D of #184](https://github.com/realkarych/kora/issues/184#issuecomment-6680494511) owns implementation of this launch boundary. [The harness host](https://github.com/realkarych/kora/issues/199) passes the selected context and owns the adapter and Policy handoff. The [Codex execution profile](codex-execution-profile.md#bound-native-launch) defines its two slots and native conformance. The context extension is a specification pending implementation and qualification.
 
 ## 4. VCS (FR-5.2)
