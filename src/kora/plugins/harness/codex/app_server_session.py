@@ -126,6 +126,7 @@ class AppServerTurnSession:
         before_start_write: Callable[[], None] | None = None,
     ) -> TurnCompletion:
         if self._used:
+            on_tool_completed = None
             raise SessionRefused(SessionFailure.ALREADY_USED)
         self._used = True
         source_time: datetime | None = None

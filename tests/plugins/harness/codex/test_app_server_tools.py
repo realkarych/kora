@@ -9,6 +9,8 @@ import pytest
 from kora.plugins.harness.codex.app_server_rpc import Notification, RpcError, RpcFailure
 from kora.plugins.harness.codex.app_server_session import (
     AppServerTurnSession,
+    SessionFailure,
+    SessionRefused,
     TurnObservations,
 )
 from kora.plugins.harness.codex.app_server_tools import (
@@ -537,6 +539,40 @@ async def test_ack_releases_prior_tool_completion_before_turn_ends() -> None:
         assert references[1]() is session.snapshot().latest_tool
         assert session.snapshot() is snapshot_before_duplicate
         assert failure.value.reason is ToolFailure.DUPLICATE
+        assert owned_tasks() == set()
+
+
+@pytest.mark.asyncio
+async def test_reused_session_refuses_and_drops_borrowed_tool_callback() -> None:
+    async with wire() as connection:
+        session = AppServerTurnSession(THREAD, max_messages=1, max_tools=1)
+        operation = connection.start(
+            session.run(connection.rpc, prompt=PROMPT, deadline=future_deadline())
+        )
+        await connection.peer_reader.readline()
+        await connection.send(started(), completed())
+        await operation
+        delivered: list[ToolObservation] = []
+
+        def callback(tool: ToolObservation) -> None:
+            delivered.append(tool)
+
+        reference = weakref.ref(callback)
+        reuse = session.run(
+            connection.rpc,
+            prompt=PROMPT,
+            deadline=future_deadline(),
+            on_tool_completed=callback,
+        )
+        del callback
+
+        with pytest.raises(SessionRefused) as failure:
+            await reuse
+        gc.collect()
+
+        assert failure.value.reason is SessionFailure.ALREADY_USED
+        assert delivered == []
+        assert reference() is None
         assert owned_tasks() == set()
 
 
