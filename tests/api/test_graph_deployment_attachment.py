@@ -167,9 +167,10 @@ def assert_attachment_refused(
     )
 
 
-def test_attachment_preserves_exact_pair_and_detaches_nested_reference_aliases() -> (
-    None
-):
+@pytest.fixture(scope="module")
+def nonempty_preparation() -> tuple[
+    PreparedGraphDeploymentInputs, PreparedExecutionContract
+]:
     scope = replace(SCOPE)
     ir_text, files, owners = attachment_inputs(scope)
     with borrowed() as (runner, evaluator):
@@ -187,6 +188,17 @@ def test_attachment_preserves_exact_pair_and_detaches_nested_reference_aliases()
         )
     assert isinstance(prepared, PreparedGraphDeploymentInputs)
     assert isinstance(legacy, PreparedExecutionContract)
+    return prepared, legacy
+
+
+def test_attachment_preserves_exact_pair_and_detaches_nested_reference_aliases(
+    nonempty_preparation: tuple[
+        PreparedGraphDeploymentInputs, PreparedExecutionContract
+    ],
+) -> None:
+    prepared, legacy = nonempty_preparation
+    scope = replace(SCOPE)
+    _, _, owners = attachment_inputs(scope)
     prior_scope = replace(scope)
     expected_refs = tuple(owner.reference.canonical_bytes() for owner in legacy.owners)
     expected_text = legacy.resources.text
@@ -297,9 +309,14 @@ def with_reference(
     return GraphResourceOwner(owner.scope, owner.path, owner.name, reference)
 
 
-def test_attachment_refuses_malformed_and_inconsistent_references() -> None:
-    ir_text, files, owners = attachment_inputs(SCOPE)
-    prepared = prepare_inputs(ir_text, files)
+def test_attachment_refuses_malformed_and_inconsistent_references(
+    nonempty_preparation: tuple[
+        PreparedGraphDeploymentInputs, PreparedExecutionContract
+    ],
+) -> None:
+    prepared, _ = nonempty_preparation
+    scope = replace(SCOPE)
+    _, _, owners = attachment_inputs(scope)
     first, empty, sibling = owners
     original = first.reference
     address = original.address
@@ -364,9 +381,9 @@ def test_attachment_refuses_malformed_and_inconsistent_references() -> None:
         ),
     )
     wrong_scope = GraphResourceOwner(
-        replace(SCOPE, graph_id="foreign"), first.path, first.name, original
+        replace(scope, graph_id="foreign"), first.path, first.name, original
     )
-    wrong_name = GraphResourceOwner(SCOPE, first.path, "substitute.sh", original)
+    wrong_name = GraphResourceOwner(scope, first.path, "substitute.sh", original)
     foreign = (wrong_scope, wrong_name)
     uniform = content(
         store=PRIVATE_STORE, digest=address.payload_digest, size=original.total_size
@@ -384,12 +401,12 @@ def test_attachment_refuses_malformed_and_inconsistent_references() -> None:
     ):
         with pytest.raises(GraphValueRejected) as refused:
             attach_graph_deployment_references(
-                prepared, SCOPE, candidates, limits=ATTACH_LIMITS
+                prepared, scope, candidates, limits=ATTACH_LIMITS
             )
         assert_attachment_refused(refused.value, GraphValueFailure.INVALID)
     allowed = attach_graph_deployment_references(
         prepared,
-        SCOPE,
+        scope,
         (with_reference(first, uniform), empty, with_reference(sibling, uniform)),
         limits=ATTACH_LIMITS,
     )
@@ -398,9 +415,14 @@ def test_attachment_refuses_malformed_and_inconsistent_references() -> None:
     assert allowed.owners[0].reference == allowed.owners[2].reference == uniform
 
 
-def test_attachment_requires_a_complete_single_store_address_partition() -> None:
-    ir_text, files, owners = attachment_inputs(SCOPE)
-    prepared = prepare_inputs(ir_text, files)
+def test_attachment_requires_a_complete_single_store_address_partition(
+    nonempty_preparation: tuple[
+        PreparedGraphDeploymentInputs, PreparedExecutionContract
+    ],
+) -> None:
+    prepared, _ = nonempty_preparation
+    scope = replace(SCOPE)
+    _, _, owners = attachment_inputs(scope)
     groups = {group.ordinals: group for group in prepared.groups}
     shared, empty = groups[(0, 2)], groups[(1,)]
     narrowed = PreparedCommandStageGroup(
@@ -442,7 +464,7 @@ def test_attachment_requires_a_complete_single_store_address_partition() -> None
         with pytest.raises(GraphValueRejected) as refused:
             attach_graph_deployment_references(
                 PreparedGraphDeploymentInputs(prepared.logical, ordered),
-                SCOPE,
+                scope,
                 owners,
                 limits=ATTACH_LIMITS,
             )
