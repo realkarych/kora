@@ -13,7 +13,11 @@ from kora.ir.structured_schema_assertions import (
     min_properties_matches,
     type_matches,
 )
-from kora.ir.structured_schema_collection_predicates import check_unique_items
+from kora.ir.structured_schema_collection_predicates import (
+    check_dependent_required_properties,
+    check_required_properties,
+    check_unique_items,
+)
 from kora.ir.structured_schema_cursors import ArenaCursor
 from kora.ir.structured_schema_equality import compare_json_cursors
 from kora.ir.structured_schema_evaluation_policy import EvaluationRefused
@@ -32,9 +36,11 @@ class ParameterArenaPredicate(StrEnum):
     MAX_ITEMS = "maxItems"
     MIN_PROPERTIES = "minProperties"
     MAX_PROPERTIES = "maxProperties"
+    REQUIRED = "required"
+    DEPENDENT_REQUIRED = "dependentRequired"
 
 
-_TYPE_AND_SIZE_HANDLERS: dict[
+_DIRECT_HANDLERS: dict[
     ParameterArenaPredicate,
     Callable[[ArenaCursor, ArenaCursor, BoundedEvaluationMeter], bool],
 ] = {
@@ -45,6 +51,8 @@ _TYPE_AND_SIZE_HANDLERS: dict[
     ParameterArenaPredicate.MAX_ITEMS: max_items_matches,
     ParameterArenaPredicate.MIN_PROPERTIES: min_properties_matches,
     ParameterArenaPredicate.MAX_PROPERTIES: max_properties_matches,
+    ParameterArenaPredicate.REQUIRED: check_required_properties,
+    ParameterArenaPredicate.DEPENDENT_REQUIRED: check_dependent_required_properties,
 }
 
 
@@ -101,7 +109,7 @@ def _check(
                 instance, operand, meter, max_pair_frames=max_pair_frames
             )
         case _:
-            return _TYPE_AND_SIZE_HANDLERS[predicate](instance, operand, meter)
+            return _DIRECT_HANDLERS[predicate](instance, operand, meter)
 
 
 def check_parameter_arena_predicate(

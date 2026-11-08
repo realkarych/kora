@@ -139,6 +139,54 @@ def string_equal(left: str, right: str, meter: BoundedEvaluationMeter) -> bool:
     return left == right
 
 
+@dataclass(frozen=True, slots=True, repr=False, eq=False)
+class ArenaObjectLookup:
+    cursor: ArenaCursor
+
+    def _name(self, position: int, meter: BoundedEvaluationMeter) -> str:
+        meter.reserve(2)
+        name = object_key(self.cursor, None, position, meter)
+        if type(name) is not str:
+            refuse()
+        return name
+
+    def find(self, query: str, meter: BoundedEvaluationMeter) -> int:
+        meter.reserve(2)
+        if type(query) is not str:
+            refuse()
+        count = container_count(self.cursor, meter)
+        meter.reserve()
+        low, high = 0, count
+        while True:
+            meter.reserve()
+            if low >= high:
+                break
+            meter.reserve()
+            middle = (low + high) // 2
+            candidate = self._name(middle, meter)
+            meter.reserve(1 + min(len(candidate), len(query)))
+            if candidate < query:
+                low = middle + 1
+            else:
+                high = middle
+        meter.reserve()
+        if low == count:
+            return -1
+        candidate = self._name(low, meter)
+        return low if string_equal(candidate, query, meter) else -1
+
+
+def arena_object_lookup(
+    cursor: ArenaCursor, meter: BoundedEvaluationMeter
+) -> ArenaObjectLookup | None:
+    kind = cursor_kind(cursor, meter)
+    meter.reserve()
+    if kind != "object":
+        return None
+    meter.reserve(entries=1)
+    return ArenaObjectLookup(cursor)
+
+
 @dataclass(slots=True, repr=False, eq=False)
 class NativeObjectIndex:
     _rows: list[Row]

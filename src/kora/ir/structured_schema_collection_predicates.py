@@ -1,10 +1,12 @@
-from typing import cast
+from typing import Protocol, TypeVar, cast
 
 from kora.ir.structured_schema_cursors import (
     ArenaCursor,
+    ArenaObjectLookup,
     Cursor,
     NativeCursor,
     NativeObjectIndex,
+    arena_object_lookup,
     array_item,
     container_count,
     cursor_kind,
@@ -22,10 +24,19 @@ from kora.ir.structured_schema_evaluation_work import (
     EvaluationMeter,
 )
 
+_Meter = TypeVar("_Meter", bound=BoundedEvaluationMeter)
+_MeterContra = TypeVar("_MeterContra", bound=BoundedEvaluationMeter, contravariant=True)
 
-def _require_index(index: NativeObjectIndex, meter: EvaluationMeter) -> None:
+
+class _ObjectLookup(Protocol[_MeterContra]):
+    def find(self, query: str, meter: _MeterContra) -> int: ...
+
+
+def _require_lookup(
+    index: object, meter: BoundedEvaluationMeter, lookup_type: type[object]
+) -> None:
     meter.reserve(2)
-    if type(index) is not NativeObjectIndex:
+    if type(index) is not lookup_type:
         refuse()
 
 
@@ -86,7 +97,25 @@ def check_unique_items(
 def required_names_present(
     index: NativeObjectIndex, argument: ArenaCursor, meter: EvaluationMeter
 ) -> bool:
-    _require_index(index, meter)
+    return _required_names_present(index, argument, meter, NativeObjectIndex)
+
+
+def check_required_properties(
+    instance: ArenaCursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
+) -> bool:
+    lookup = arena_object_lookup(instance, meter)
+    return lookup is None or _required_names_present(
+        lookup, argument, meter, ArenaObjectLookup
+    )
+
+
+def _required_names_present(
+    index: _ObjectLookup[_Meter],
+    argument: ArenaCursor,
+    meter: _Meter,
+    lookup_type: type[object],
+) -> bool:
+    _require_lookup(index, meter, lookup_type)
     kind = cursor_kind(argument, meter)
     meter.reserve()
     if kind != "array":
@@ -115,7 +144,25 @@ def required_names_present(
 def dependent_required_present(
     index: NativeObjectIndex, argument: ArenaCursor, meter: EvaluationMeter
 ) -> bool:
-    _require_index(index, meter)
+    return _dependent_required_present(index, argument, meter, NativeObjectIndex)
+
+
+def check_dependent_required_properties(
+    instance: ArenaCursor, argument: ArenaCursor, meter: BoundedEvaluationMeter
+) -> bool:
+    lookup = arena_object_lookup(instance, meter)
+    return lookup is None or _dependent_required_present(
+        lookup, argument, meter, ArenaObjectLookup
+    )
+
+
+def _dependent_required_present(
+    index: _ObjectLookup[_Meter],
+    argument: ArenaCursor,
+    meter: _Meter,
+    lookup_type: type[object],
+) -> bool:
+    _require_lookup(index, meter, lookup_type)
     kind = cursor_kind(argument, meter)
     meter.reserve()
     if kind != "object":
@@ -134,7 +181,7 @@ def dependent_required_present(
             required = cast(
                 "ArenaCursor", object_value(argument, None, position, meter)
             )
-            satisfied = required_names_present(index, required, meter)
+            satisfied = _required_names_present(index, required, meter, lookup_type)
             meter.reserve()
             if not satisfied:
                 return False
