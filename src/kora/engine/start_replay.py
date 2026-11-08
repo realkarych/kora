@@ -41,6 +41,15 @@ CANDIDATE_CHECKED: EventSpec = CATALOG.register(
         {"outcome": FieldKind.STRING},
     )
 )
+VERSION_RECHECKED: EventSpec = CATALOG.register(
+    EventSpec(
+        "engine.start_candidate.rechecked",
+        COMPONENT,
+        Level.DEBUG,
+        "manual start version candidate rechecked",
+        {"matches": FieldKind.BOOLEAN},
+    )
+)
 
 
 START_WRITER_MODE = text(
@@ -73,6 +82,12 @@ class StartReplay:
 class ManualStartCandidate:
     replay: StartReplay
     version_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ManualStartVersionRecheck:
+    replay: StartReplay
+    version_matches: bool
 
 
 class StartReadFailed(RuntimeError):
@@ -213,6 +228,41 @@ async def recheck_locked_manual_start_receipt(
         del connection, locks, principal, request, key, run_id, identity
 
 
+async def recheck_locked_manual_start_version(
+    connection: AsyncConnection,
+    locks: TransitionLocks,
+    principal: Principal,
+    request: PreparedManualStartRequest,
+    key: str,
+    run_id: str,
+    expected_version_id: str,
+) -> ManualStartVersionRecheck:
+    selected: str | None = None
+    try:
+        replay = await recheck_locked_manual_start_receipt(
+            connection, locks, principal, request, key, run_id
+        )
+        if replay.outcome is not ReplayOutcome.ABSENT:
+            return ManualStartVersionRecheck(replay, False)
+        if type(expected_version_id) is not str or not is_identifier(
+            expected_version_id
+        ):
+            raise_safe(StartRecordRejected())
+        locks.require_connection(connection)
+        selected = await _read_candidate_version(
+            connection, request.identity, request.graph_version_id
+        )
+        locks.require_connection(connection)
+        matches = selected == expected_version_id
+        diagnostics = current_diagnostics()
+        if diagnostics is not None:
+            diagnostics.logger(COMPONENT).emit(VERSION_RECHECKED, matches=matches)
+        return ManualStartVersionRecheck(replay, matches)
+    finally:
+        del connection, locks, principal, request, key, run_id, expected_version_id
+        del selected
+
+
 def _candidate_statement(
     connection: AsyncConnection,
     identity: ManualStartIdentity,
@@ -249,23 +299,28 @@ async def _read_candidate_version(
     version_id: str | None,
 ) -> str | None:
     statement = _candidate_statement(connection, identity, version_id)
+    result = None
+    row = None
     try:
-        result = await connection.execute(statement)
         try:
-            row = result.one_or_none()
-        finally:
-            result.close()
-    except SQLAlchemyError:
-        raise_safe(StartReadFailed())
-    except UnicodeError:
+            result = await connection.execute(statement)
+            try:
+                row = result.one_or_none()
+            finally:
+                result.close()
+        except SQLAlchemyError:
+            raise_safe(StartReadFailed())
+        except UnicodeError:
+            raise_safe(StartRecordRejected())
+        if row is None:
+            return None
+        candidate: object = row[0]
+        if type(candidate) is str and is_identifier(candidate):
+            return candidate
+        del candidate
         raise_safe(StartRecordRejected())
-    if row is None:
-        return None
-    candidate: object = row[0]
-    if type(candidate) is str and is_identifier(candidate):
-        return candidate
-    del row, candidate
-    raise_safe(StartRecordRejected())
+    finally:
+        del connection, identity, version_id, statement, result, row
 
 
 async def read_manual_start_candidate(
