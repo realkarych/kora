@@ -54,7 +54,7 @@ class ParameterReferenceBudget:
         self.scratch_entries -= entries
 
 
-def _node(
+def schema_node(
     nodes: tuple[SchemaNode, ...], index: int, budget: ParameterReferenceBudget
 ) -> SchemaNode:
     budget.reserve()
@@ -66,13 +66,13 @@ def _node(
 def _name(
     nodes: tuple[SchemaNode, ...], index: int, budget: ParameterReferenceBudget
 ) -> str:
-    value = _node(nodes, index, budget).value
+    value = schema_node(nodes, index, budget).value
     if type(value) is not str:
         raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
     return value
 
 
-def _member(
+def schema_member(
     nodes: tuple[SchemaNode, ...],
     current: SchemaNode,
     key: str,
@@ -116,13 +116,13 @@ def _array_child(node: SchemaNode, key: str, budget: ParameterReferenceBudget) -
     return node.children[index]
 
 
-def _is_schema(node: SchemaNode) -> bool:
+def is_schema_node(node: SchemaNode) -> bool:
     return node.kind == "object" or type(node.value) is bool
 
 
 def _matches_position(position: Position, node: SchemaNode) -> bool:
     if position is Position.SCHEMA:
-        return _is_schema(node)
+        return is_schema_node(node)
     if position is Position.LISTED:
         return node.kind == "array"
     return position is not Position.DATA and node.kind == "object"
@@ -136,15 +136,15 @@ def _descend(
     budget: ParameterReferenceBudget,
 ) -> ParameterSchemaPosition:
     index = root
-    current = _node(nodes, index, budget)
-    if not _is_schema(current):
+    current = schema_node(nodes, index, budget)
+    if not is_schema_node(current):
         raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
     position = Position.SCHEMA
     for offset in range(used):
         budget.reserve()
         key = pool[offset]
         if current.kind == "object":
-            child = _member(nodes, current, key, budget)
+            child = schema_member(nodes, current, key, budget)
             if child is None:
                 raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
             index = child
@@ -152,18 +152,25 @@ def _descend(
             index = _array_child(current, key, budget)
         else:
             raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
-        current = _node(nodes, index, budget)
+        current = schema_node(nodes, index, budget)
         budget.reserve(1 + len(key))
-        position = schema_child_position(position, key, _is_schema(current))
+        position = schema_child_position(position, key, is_schema_node(current))
         if not _matches_position(position, current) or (
             position is Position.SCHEMA
-            and _member(nodes, current, "$id", budget) is not None
+            and schema_member(nodes, current, "$id", budget) is not None
         ):
             raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
     budget.reserve()
-    if position is not Position.SCHEMA or not _is_schema(current):
+    if position is not Position.SCHEMA or not is_schema_node(current):
         raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
     return ParameterSchemaPosition(root, index)
+
+
+def valid_parameter_reference_budget(budget: ParameterReferenceBudget) -> bool:
+    return type(budget) is ParameterReferenceBudget and all(
+        type(limit) is int and 0 <= limit <= sys.maxsize
+        for limit in (budget.work, budget.scratch_bytes, budget.scratch_entries)
+    )
 
 
 def _resolve(
@@ -177,19 +184,15 @@ def _resolve(
         type(arena) is not FrozenSchemaArena
         or type(origin) is not ParameterSchemaPosition
         or type(keyword) is not ParameterReferenceKeyword
-        or type(budget) is not ParameterReferenceBudget
-        or any(
-            type(limit) is not int or not 0 <= limit <= sys.maxsize
-            for limit in (budget.work, budget.scratch_bytes, budget.scratch_entries)
-        )
+        or not valid_parameter_reference_budget(budget)
     ):
         raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
     nodes = arena.nodes
     root = origin.document_root
-    if not _is_schema(_node(nodes, root, budget)):
+    if not is_schema_node(schema_node(nodes, root, budget)):
         raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
-    source = _node(nodes, origin.node, budget)
-    member = _member(nodes, source, keyword.value, budget)
+    source = schema_node(nodes, origin.node, budget)
+    member = schema_member(nodes, source, keyword.value, budget)
     if member is None:
         raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
     reference = _name(nodes, member, budget)
@@ -197,8 +200,8 @@ def _resolve(
     budget.reserve(length, 20 * length, 8 * length)
     name, pool, used = decode_reference(reference, budget)
     if name is not None:
-        named = _node(nodes, type_roots, budget)
-        selected = _member(nodes, named, name, budget)
+        named = schema_node(nodes, type_roots, budget)
+        selected = schema_member(nodes, named, name, budget)
         if selected is None:
             raise ParameterReferenceRejected(ParameterReferenceFailure.INVALID)
         root = selected
