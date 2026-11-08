@@ -27,6 +27,7 @@ SelectedShellPatchCase = Literal[
 ]
 SelectedHookCase = (
     Literal[
+        "selected-bound-bash",
         "selected-command-exit-seven",
         "selected-hook-deny",
         "selected-hook-no-reason",
@@ -110,6 +111,7 @@ SELECTED_HOOK_CASES: frozenset[SelectedHookCase] = frozenset(
     {
         *SELECTED_PATCH_CASES,
         *SELECTED_SHELL_PATCH_CASES,
+        "selected-bound-bash",
         "selected-command-exit-seven",
         "selected-hook-deny",
         "selected-hook-no-reason",
@@ -218,6 +220,9 @@ SHELL_PATCH_COMMAND = (
     "KORA_PATCH"
 )
 HOOK_TIMEOUT_SOCKET = "selected-hook-timeout.sock"
+BASH_WITNESS_SOCKET = "selected-bash.sock"
+BASH_WITNESS_MODULE = "tests.plugins.harness.codex.selected_bash"
+BASH_WITNESS_ARGV = ("/usr/local/bin/python3", "-I", "-m", BASH_WITNESS_MODULE)
 SELECTED_COMMAND = (
     'test -z "${CODEX_API_KEY+x}" && '
     'test -n "${BASH_VERSION-}" && ! shopt -q login_shell && '
@@ -243,6 +248,8 @@ def selected_command(case: str) -> str:
         return SHELL_PATCH_COMMAND
     if case in SELECTED_EXPLICIT_TRACE_CASES:
         return "set -x; " + SELECTED_COMMAND
+    if case == "selected-bound-bash":
+        return " ".join(BASH_WITNESS_ARGV) + " && " + SELECTED_COMMAND
     if case == "selected-command-exit-seven":
         return SELECTED_COMMAND + " && exit 7"
     return METADATA_COMMAND if case == "selected-command-metadata" else SELECTED_COMMAND
@@ -275,6 +282,7 @@ def prepare_native_inputs(
     *,
     binary: Path,
     port: int,
+    bash: Path = Path("/bin/bash"),
     bearer: str,
     https: bool = False,
     workload_names: Collection[str] = (),
@@ -286,7 +294,7 @@ def prepare_native_inputs(
             SELECTED_MODEL, f"{scheme}://127.0.0.1:{port}/v1", "danger-full-access"
         ),
         executable=binary,
-        bash=Path("/bin/bash"),
+        bash=bash,
         workspace=workspace,
         app_homes=role_homes(root / "app"),
         exec_homes=role_homes(root / "exec"),

@@ -63,6 +63,8 @@ BoundCase = Literal[
     "executable-path",
     "checkout-before-exec",
     "checkout-before-app",
+    "bash-live",
+    "bash-pin",
 ]
 BoundRole = Literal["app", "exec"]
 SLOT_REFUSALS = frozenset({"duplicate", "stopped"})
@@ -82,6 +84,10 @@ CHECKOUT_REFUSALS: Mapping[str, BoundRole] = MappingProxyType(
 SELECTED_EXECUTABLE_PIN = ExecutablePin(
     319_346_888, "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
 )
+BOUND_BASH = Path("/usr/bin/bash")
+BOUND_BASH_PIN = ExecutablePin(
+    1_265_648, "55b89ab22bee4792a210f493a53fb066accd5d30b69837c28d98be5ff863efcf"
+)
 ATTEMPT_CANARY = "bound-environment-attempt-token"
 TEXT_NAME = "KORA_BOUND_AUTHORED_TEXT"
 TEXT_VALUE = "bound-environment-authored-text"
@@ -99,6 +105,7 @@ class BoundLaunch:
     slots: BoundRoleSlots
     fence: BoundGateFence
     executable: InstalledExecutable
+    bash: InstalledExecutable
     checkout: BoundCheckout
     clock: SystemClock
     cutoff_ns: int
@@ -209,6 +216,7 @@ class BoundEnvironmentProbe:
     unix_sockets: int = field(default=0, init=False)
     cwd_opens: int = field(default=0, init=False)
     original_checkout: Path | None = field(default=None, init=False)
+    bash_path: Path | None = field(default=None, init=False)
     _cwd: str | None = field(default=None, init=False)
     settled: bool = field(default=False, init=False)
 
@@ -304,6 +312,27 @@ class BoundEnvironmentProbe:
             raise BoundEnvironmentError("selected_bound_executable_not_refused")
         return verified
 
+    def verify_bash(
+        self, cutoff_ns: int, clock: SystemClock
+    ) -> InstalledExecutable | None:
+        wrong_pin = self.case == "bash-pin"
+        pin = (
+            ExecutablePin(BOUND_BASH_PIN.size, "0" * 64)
+            if wrong_pin
+            else BOUND_BASH_PIN
+        )
+        try:
+            bash = verify_installed_executable(BOUND_BASH, pin, cutoff_ns, clock)
+        except ExecutableVerificationError as error:
+            if wrong_pin and error.reason is ExecutableFailure.DIGEST:
+                return None
+            raise BoundEnvironmentError(
+                "selected_bound_bash_verification_failed"
+            ) from None
+        if wrong_pin:
+            raise BoundEnvironmentError("selected_bound_bash_not_refused")
+        return bash
+
     def prepare(
         self,
         root: Path,
@@ -331,19 +360,28 @@ class BoundEnvironmentProbe:
         )
         attempt_token = self.attempt_scope.admit(ATTEMPT_CANARY)
         grant = self.app_scope.admit(key)
-        if self.case in INSTALLATION_REFUSALS or self.case == "checkout-before-exec":
+        if self.case in INSTALLATION_REFUSALS or self.case in {
+            "checkout-before-exec",
+            "bash-pin",
+        }:
             self.attempt_scope.release()
         if (
             self.case in ENVIRONMENT_REFUSALS
             or self.case in INSTALLATION_REFUSALS
             or self.case in CHECKOUT_REFUSALS
+            or self.case == "bash-pin"
         ):
             self.app_scope.release()
+        bash = self.verify_bash(cutoff_ns, clock)
+        if bash is None:
+            return None
+        self.bash_path = bash.path
         try:
             inputs = prepare_native_inputs(
                 root,
                 workspace,
                 binary=binary,
+                bash=bash.path,
                 port=port,
                 bearer=bearer,
                 workload_names=workload.keys(),
@@ -425,6 +463,7 @@ class BoundEnvironmentProbe:
             slots,
             BoundGateFence(slots),
             executable,
+            bash,
             checkout,
             clock,
             cutoff_ns,

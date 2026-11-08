@@ -75,6 +75,15 @@ USER root
 RUN printf '%s\n' '4b4f524100004761746564537464696f' > /etc/machine-id && chmod 0444 /etc/machine-id
 USER 65532:65532
 
+FROM selected-gated-stdio AS selected-gated-bound
+COPY selected_bash.py /usr/local/lib/python3.11/site-packages/tests/plugins/harness/codex/
+USER root
+RUN sed -i 's|^kora-probe:x:65532:65532::/var/lib/kora-hook-probe:/bin/bash$|kora-probe:x:65532:65532::/var/lib/kora-hook-probe:/usr/bin/bash|' /etc/passwd && \
+    test "$(getent passwd 65532)" = 'kora-probe:x:65532:65532::/var/lib/kora-hook-probe:/usr/bin/bash' && \
+    test "$(grep -c '^[^:]*:[^:]*:65532:' /etc/passwd)" = 1 && \
+    test "$(stat -c '%u:%a' /etc/passwd)" = 0:644
+USER 65532:65532
+
 FROM selected-gated-stdio AS selected-gated-missing
 COPY --from=missing-managed-hook /etc/codex/requirements.toml /etc/codex/requirements.toml
 

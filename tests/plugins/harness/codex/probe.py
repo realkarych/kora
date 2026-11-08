@@ -76,6 +76,7 @@ from kora.plugins.harness.codex.selected_startup import (
 )
 from tests.plugins.harness.codex.owned_loopback import LoopbackError, OwnedLoopback
 from tests.plugins.harness.codex.selected_launch import (
+    BASH_WITNESS_SOCKET,
     HOOK_TIMEOUT_SOCKET,
     METADATA_ENV_CONTROL,
     METADATA_ENVIRONMENT,
@@ -169,6 +170,7 @@ ProbeCase = (
 
 PATCH_DENIAL = "kora managed hook probe denied the direct patch"
 SELECTED_HOOK_OUTCOMES: dict[SelectedHookCase, tuple[str, tuple[str, str] | None]] = {
+    "selected-bound-bash": ("completed", None),
     "selected-command-exit-seven": ("completed", None),
     "selected-hook-deny": ("blocked", ("feedback", SELECTED_DENIAL)),
     "selected-hook-no-reason": (
@@ -346,6 +348,7 @@ HTTP_FIELD_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 
 
 if TYPE_CHECKING:
+    from tests.plugins.harness.codex.selected_bash import BashWitness
     from tests.plugins.harness.codex.selected_bound_environment import (
         BoundEnvironmentProbe,
     )
@@ -1299,6 +1302,7 @@ class ToolProbe:
         if self.case in (
             "allow",
             "selected-command-metadata",
+            "selected-bound-bash",
             "selected-command-exit-seven",
         ):
             exit_code = 7 if self.case == "selected-command-exit-seven" else 0
@@ -1737,7 +1741,14 @@ class Stdio:
         diagnostic("INFO", "probe.selected_noise_registry_lookup_refused", case)
 
     async def observe_selected(
-        self, workspace: Path, case: ProbeCase, endpoint: str, bearer: str
+        self,
+        workspace: Path,
+        case: ProbeCase,
+        endpoint: str,
+        bearer: str,
+        *,
+        bash: Path = Path("/bin/bash"),
+        witness: "BashWitness | None" = None,
     ) -> None:
         expected_failure = (
             SelectedStartupFailure.EXECUTOR_INFO_REFUSED
@@ -1753,11 +1764,7 @@ class Stdio:
         expected = SelectedEnvironment(
             EXECUTOR_ID,
             endpoint,
-            Path(
-                EXECUTOR_BASH_OVERRIDE
-                if case == "selected-startup-bash"
-                else "/bin/bash"
-            ),
+            Path(EXECUTOR_BASH_OVERRIDE) if case == "selected-startup-bash" else bash,
             workspace,
             SELECTED_MODEL,
             selected_managed_hook(case),
@@ -1773,9 +1780,14 @@ class Stdio:
             return
         require(expected_failure is None, "selected_startup_unexpectedly_accepted")
         diagnostic("INFO", "probe.selected_startup_prepared", case)
+        if witness is not None:
+            witness.start(thread_id, CALL_ID, self.deadline)
         await self.run_turn(
             workspace, case, selected_executor=True, thread_id=thread_id
         )
+        if witness is not None:
+            await witness.verify()
+            diagnostic("INFO", "probe.selected_bound_bash_reaped", case)
         if case == "selected-command-metadata":
             verify_command_metadata(workspace, thread_id)
 
@@ -1872,6 +1884,7 @@ class Stdio:
                 "deny",
                 "decoder-refuse",
                 "selected-command-metadata",
+                "selected-bound-bash",
                 "selected-command-exit-seven",
             )
             else None
@@ -2809,6 +2822,7 @@ async def drive(
     gated_executor = None
     bound_launch = None
     bound_exec_writer: asyncio.StreamWriter | None = None
+    bash_witness: BashWitness | None = None
     natural_app_refusal = False
     gated_executor_identity: int | None = None
     executor: asyncio.subprocess.Process | None = None
@@ -2852,6 +2866,8 @@ async def drive(
                     deadline,
                 )
                 if bound_launch is None:
+                    if bound.case == "bash-pin":
+                        raise BoundProbeRefusal("selected_bound_bash_refused")
                     from tests.plugins.harness.codex.selected_bound_environment import (
                         INSTALLATION_REFUSALS,
                     )
@@ -3076,6 +3092,21 @@ async def drive(
                         "probe.selected_hook_timeout_exit_verified",
                         fixture.case,
                     )
+                elif bound_launch is not None:
+                    if fixture.case == "selected-bound-bash":
+                        from tests.plugins.harness.codex.selected_bash import (
+                            BashWitness as NativeBashWitness,
+                        )
+
+                        bash_witness = NativeBashWitness(bound_launch.bash, workspace)
+                    await stdio.observe_selected(
+                        workspace,
+                        fixture.case,
+                        executor_url,
+                        bearer,
+                        bash=bound_launch.bash.path,
+                        witness=bash_witness,
+                    )
                 else:
                     await stdio.observe_selected(
                         workspace, fixture.case, executor_url, bearer
@@ -3151,6 +3182,8 @@ async def drive(
                 fixture, server, process, executor, cleanup_deadline
             )
             selected_cleanup = [native_cleanup]
+            if bash_witness is not None:
+                selected_cleanup.append(bash_witness.close(cleanup_deadline))
             if model is not None:
                 selected_cleanup.append(model.close(cleanup_deadline))
             if proxy is not None:
@@ -3449,7 +3482,12 @@ async def run_selected_launch(
             expected_roles = (
                 2 if fenced else int(bound.case in {"partial", "checkout-before-app"})
             )
-            markers = (marker, RECEIPTS, CONTROL / "invocations")
+            markers = (
+                marker,
+                RECEIPTS,
+                CONTROL / "invocations",
+                CONTROL / BASH_WITNESS_SOCKET,
+            )
             if bound.original_checkout is not None:
                 markers += (bound.original_checkout / MARKER,)
             require(
@@ -3468,11 +3506,12 @@ async def run_selected_launch(
             raise bound_refusal
         if bound is not None:
             require(
-                bound.case == "ready"
+                bound.case in {"ready", "bash-live"}
                 and bound.settled
                 and bound.cwd_opens == 0
                 and bound.starts == 2
-                and bound.unix_sockets == 8,
+                and bound.unix_sockets == (10 if bound.case == "bash-live" else 8)
+                and not os.path.lexists(CONTROL / BASH_WITNESS_SOCKET),
                 "selected_bound_owner_witness",
             )
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
@@ -3510,7 +3549,12 @@ async def run_selected_launch(
         if case in SELECTED_FILE_CHANGE_CASES:
             verify_patch_marker(marker, writes=executes)
         elif executes:
-            bash = Path("/bin/bash").resolve(strict=True)
+            bash = (
+                Path("/bin/bash").resolve(strict=True)
+                if bound is None
+                else bound.bash_path
+            )
+            require(bash is not None, "selected_bound_bash_path_missing")
             expected = f"{bash}\n{role_homes(root / 'exec').home}\n".encode()
             require(
                 marker.is_file() and not marker.is_symlink(),
@@ -3898,6 +3942,8 @@ async def run_selected_bound(name: str) -> None:
         "executable-path",
         "checkout-before-exec",
         "checkout-before-app",
+        "bash-live",
+        "bash-pin",
     ):
         raise ProbeFailure("selected_bound_unexpected_case")
     diagnostics = configure_process(
@@ -3909,7 +3955,9 @@ async def run_selected_bound(name: str) -> None:
     bound.install_witness()
     try:
         await run_selected_launch(
-            "selected-startup-ready", gated_stdio=True, bound=bound
+            "selected-bound-bash" if name == "bash-live" else "selected-startup-ready",
+            gated_stdio=True,
+            bound=bound,
         )
     except (ChannelError, ProcessError, GatedObservationError, BoundEnvironmentError):
         raise ProbeFailure("selected_bound_native_observation_failed") from None
