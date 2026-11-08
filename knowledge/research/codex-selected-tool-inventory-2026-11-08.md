@@ -24,6 +24,8 @@ The pinned [tool serialization](https://github.com/openai/codex/blob/6ff1e1ca3b3
 
 The discovery revision `271eebc90df79459cbca7c97a042447aab80d5b3` observed the same eight identities and dispatch outcomes before the exact snapshot was added. This evidence covers the first request for the named configuration and one injected disabled tool. Other model/configuration branches, discovery results, the residual tools' own interception and complete coverage retain separate checks under [#549](https://github.com/realkarych/kora/issues/549) and [#199](https://github.com/realkarych/kora/issues/199). Production launch and domain closure remain with [#184](https://github.com/realkarych/kora/issues/184).
 
+The [matched search probe](codex-selected-tool-search-2026-11-08.md) records the native identities returned for one ranked query and the observed hook boundary.
+
 ## Reproduction
 
 Executable revision `54c1888774c05164e6779df5297d9deaa76dc92b`, provider tree `12129d3d6c6e2e426b21b351a9123034c7dfbb19`, fixture tree `c80c170294cb897f42c21fc934ce3255a56565e5`. The fixture verifies the [official 0.166.0 release](https://github.com/openai/codex/releases/tag/rust-v0.166.0) at source `6ff1e1ca3b30fc8b914720681fcf5fe62e95f856` with Linux amd64 musl archive SHA-256 `a0bf572d2f93f056c6712a6da348e96078dc84f3885fd7be67807ef389cb3978`. The Python 3.11.17 image manifest is `sha256:8fb0b110b022c70cbe09d3ff1fb313654f31f9c814abb0d48180af56d906a199`.
