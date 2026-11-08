@@ -146,7 +146,9 @@ async def test_graph_preparation_admits_one_exact_request_and_charge(
     assert queries[2][0].startswith("INSERT INTO graph_deployment_preparation ")
     assert queries[2][0].endswith("RETURNING 1")
     assert queries[3][0].startswith("UPDATE graph_deployment_preparation_capacity ")
+    assert "WHERE graph_deployment_preparation_capacity.id =" in queries[3][0]
     assert "AND graph_deployment_preparation_capacity.occupied =" in queries[3][0]
+    assert queries[3][1] == (1, 1, 0)
     assert queries[3][0].endswith("RETURNING 1")
     assert ledger.outstanding == database.units_in_flight() == 0
 
