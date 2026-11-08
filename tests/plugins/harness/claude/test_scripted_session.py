@@ -948,3 +948,73 @@ async def test_scripted_cleanup_leaves_a_process_that_only_names_the_workspace(
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=2)
+
+
+async def process_gone(pid: int, clock: Clock) -> bool:
+    deadline = clock.monotonic_ns() + NANOSECONDS_PER_SECOND
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        if clock.monotonic_ns() >= deadline:
+            return False
+        await clock.sleep_until(min(deadline, clock.monotonic_ns() + 50_000_000))
+
+
+@pytest.mark.asyncio
+async def test_scripted_cleanup_kills_an_unmarked_member_that_ignores_termination(
+    tmp_path: Path,
+) -> None:
+    clock = SystemClock()
+    launch_dir = tmp_path / "launch"
+    launch_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    ready = outside / "ready"
+    child_script = outside / "child.py"
+    child_script.write_text(
+        "import os\nimport pathlib\nimport signal\nimport sys\nimport time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()), encoding='ascii')\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    leader_script = outside / "leader.py"
+    leader_script.write_text(
+        "import subprocess\nimport sys\nimport time\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    leader = subprocess.Popen(
+        [sys.executable, str(leader_script), str(child_script), str(ready)],
+        cwd=outside,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    (launch_dir / "pids").write_text(f"{leader.pid}\n", encoding="ascii")
+    child_pid = 0
+
+    try:
+        deadline = clock.monotonic_ns() + 2 * NANOSECONDS_PER_SECOND
+        while not ready.is_file() and clock.monotonic_ns() < deadline:
+            await clock.sleep_until(min(deadline, clock.monotonic_ns() + 50_000_000))
+        if not ready.is_file():
+            raise AssertionError("the unmarked child did not start")
+        child_pid = int(ready.read_text(encoding="ascii"))
+
+        closed = await close_recorded_processes(launch_dir, sys.executable, clock)
+        assert closed is True
+        assert await process_gone(child_pid, clock)
+    finally:
+        if leader.poll() is None:
+            os.killpg(leader.pid, signal.SIGKILL)
+            leader.wait(timeout=2)
+        if child_pid > 0:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

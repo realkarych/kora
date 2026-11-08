@@ -380,6 +380,19 @@ def eligible_rows(
     return tuple(row for row in rows if eligible(row, recorded, markers, binary))
 
 
+def living_groups(groups: set[int], own: int) -> set[int] | None:
+    rows = process_rows()
+    if rows is None:
+        return None
+    living: set[int] = set()
+    for row in rows:
+        if row.pgid == own or row.pgid <= 1 or row.stat.startswith("Z"):
+            continue
+        if row.pgid in groups:
+            living.add(row.pgid)
+    return living
+
+
 def signal_groups(groups: set[int], number: int) -> None:
     for pgid in groups:
         try:
@@ -432,24 +445,26 @@ async def pause_until(
 async def close_recorded_processes(launch_dir: Path, binary: str, clock: Clock) -> bool:
     markers = (str(launch_dir),)
     own = os.getpgrp()
+    signaled: set[int] = set()
     for number in (signal.SIGTERM, signal.SIGKILL):
         rows = eligible_rows(launch_dir, markers, binary)
         if rows is None:
             return False
-        if not rows:
-            return True
         groups = {row.pgid for row in rows if row.pgid != own and row.pgid > 1}
+        groups.update(pgid for pgid in signaled if pgid != own and pgid > 1)
         if not groups:
-            return False
+            if rows:
+                return False
+            return living_groups(signaled, own) == set()
+        signaled.update(groups)
         signal_groups(groups, number)
         await pause_until(
             recorded_pids(launch_dir),
             clock,
             clock.monotonic_ns() + SIGNAL_WAIT_NS,
-            lambda: eligible_rows(launch_dir, markers, binary) == (),
+            lambda: living_groups(signaled, own) == set(),
         )
-    remaining = eligible_rows(launch_dir, markers, binary)
-    return remaining == ()
+    return living_groups(signaled, own) == set()
 
 
 def failure_for(error: KoraProtocolError) -> SessionFailure:
