@@ -82,24 +82,72 @@ def test_scaffold_node_requires_the_recorded_version(tmp_path: Path) -> None:
     assert result.stdout == b""
 
 
-def test_link_path_arguments_are_literal_and_local(tmp_path: Path) -> None:
+def test_link_path_arguments_are_literal_local_and_include_selected_hidden_files(
+    tmp_path: Path,
+) -> None:
     manifest = tmp_path / "paths"
     manifest.write_bytes(
         b"https:local.md\0--help.md\0bad[a]*?.md\0a file.md\0two\nlines.md\0"
+        b".hidden[?].md\0"
     )
-    command = 'source "$1"; link_arguments "$2"; printf "%s\\0" "${link_paths[@]}"'
+    report = tmp_path / "report.md"
+    command = 'source "$1"; link_arguments "$2" "$3"; printf "%s\\0" "${link_args[@]}"'
 
     result = subprocess.run(
-        ("/bin/bash", "-c", command, "bash", str(LINK_CHECK), str(manifest)),
+        (
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(LINK_CHECK),
+            str(manifest),
+            str(report),
+        ),
+        cwd=tmp_path,
         capture_output=True,
         check=True,
         timeout=5,
     )
 
     assert result.stdout == (
+        b"--hidden\0--mode\0task\0--format\0markdown\0--output\0"
+        + os.fsencode(report)
+        + b"\0--config\0lychee.toml\0--\0"
         b"./https:local.md\0./--help.md\0./bad[[]a[]][*][?].md\0"
-        b"./a file.md\0./two\nlines.md\0"
+        b"./a file.md\0./two\nlines.md\0./.hidden[[][?][]].md\0"
     )
+
+
+def test_link_arguments_refuse_a_selected_alias_to_a_directory(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".unselected.md").write_text("[unselected](./absent.md)\n")
+    (repository / "alias.md").symlink_to(outside, target_is_directory=True)
+    manifest = tmp_path / "paths"
+    manifest.write_bytes(b"ordinary.md\0alias.md\0")
+    command = 'source "$1"; link_arguments "$2" "$3"; printf "%s\\0" "${link_args[@]}"'
+
+    result = subprocess.run(
+        (
+            "/bin/bash",
+            "-c",
+            command,
+            "bash",
+            str(LINK_CHECK),
+            str(manifest),
+            str(tmp_path / "report.md"),
+        ),
+        cwd=repository,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 1
+    assert result.stderr == b"A selected Markdown input resolves to a directory\n"
+    assert result.stdout == b""
 
 
 @pytest.mark.parametrize(

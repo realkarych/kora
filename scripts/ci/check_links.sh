@@ -3,8 +3,12 @@ set -euo pipefail
 link_arguments() {
   local file escaped character index
   local LC_ALL=C
-  link_paths=()
+  link_args=(--hidden --mode task --format markdown --output "$2" --config lychee.toml --)
   while IFS= read -r -d '' file; do
+    if [[ -d "./$file" ]]; then
+      printf 'A selected Markdown input resolves to a directory\n' >&2
+      return 1
+    fi
     escaped=./
     for ((index = 0; index < ${#file}; index++)); do
       character=${file:index:1}
@@ -13,7 +17,7 @@ link_arguments() {
         *) escaped+="$character" ;;
       esac
     done
-    link_paths+=("$escaped")
+    link_args+=("$escaped")
   done < "$1"
 }
 
@@ -50,7 +54,8 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   trap 'exit 143' TERM
   git ls-files --cached --others --exclude-standard -z -- '*.md' > "$staging/paths"
   test -s "$staging/paths"
-  link_arguments "$staging/paths"
+  report="$staging/lychee.md"
+  link_arguments "$staging/paths" "$report"
 
   archive="$staging/lychee.tar.gz"
   binary="$staging/lychee"
@@ -70,10 +75,9 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
   actual_version=$("$binary" --version)
   test "$actual_version" = 'lychee 0.24.2'
 
-  report="$staging/lychee.md"
   checker_log="$staging/checker.log"
   checker_exit=0
-  "$binary" --mode task --format markdown --output "$report" --config lychee.toml -- "${link_paths[@]}" \
+  "$binary" "${link_args[@]}" \
     > "$checker_log" 2>&1 || checker_exit=$?
   if [[ ! -f $report ]]; then
     print_lychee_output "$checker_log"
