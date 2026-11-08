@@ -491,10 +491,23 @@ def test_adapter_views_exclude_registry_authority() -> None:
     error_type = cast(
         "type[RuntimeError]", vars(structured_schema_adapter)["_UnavailableHandler"]
     )
+    prior_holder, prior_position = admitted({"contains": True})
+    with pytest.raises(error_type) as prior:
+        decide(prior_holder, prior_position, None, EvaluationMeter())
+    baseline = [
+        value
+        for value in cast("list[object]", gc.get_objects())
+        if type(value) is engine_type or type(value) is context_type
+    ]
+    baseline_ids = {id(value) for value in baseline}
 
     with pytest.raises(error_type) as rejected:
         decide(holder, position, {"private-value-canary": []}, EvaluationMeter())
-    retained = cast("list[object]", gc.get_objects())
+    retained = [
+        value
+        for value in cast("list[object]", gc.get_objects())
+        if id(value) not in baseline_ids
+    ]
     engines = [value for value in retained if type(value) is engine_type]
     contexts = [value for value in retained if type(value) is context_type]
     schemas = [
@@ -503,6 +516,7 @@ def test_adapter_views_exclude_registry_authority() -> None:
     ]
     resolvers = [object.__getattribute__(engine, "_resolver") for engine in engines]
 
+    assert any(type(value) is engine_type for value in baseline)
     assert len(engines) == 2
     assert set(registered) == set(GUARDS) | set(PRIMITIVE_VECTORS) | {
         "type",
@@ -521,7 +535,7 @@ def test_adapter_views_exclude_registry_authority() -> None:
     assert all(
         object.__getattribute__(engine, "_ref_resolver") is None for engine in engines
     )
-    del rejected, retained, engines, contexts, schemas, resolvers
+    del prior, rejected, baseline, retained, engines, contexts, schemas, resolvers
 
 
 def test_adapter_reference_refusal_remains_distinct_from_completed_false() -> None:
