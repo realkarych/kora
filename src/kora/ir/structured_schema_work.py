@@ -2,7 +2,7 @@ import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Literal, Never, TypeVar
+from typing import Literal, Never, Protocol, TypeVar
 
 Reason = Literal["unsupported_binding", "unsupported_schema", "preparation_exhausted"]
 PARAMETERS: Mapping[str, int] = MappingProxyType(
@@ -97,40 +97,54 @@ class PreparationMeter:
         bits = value.bit_length()
         if bits > PARAMETERS["max_numeric_bits"]:
             refuse()
-        negative = value < 0
-        if negative:
-            self.reserve(1 + max(1, (bits + 29) // 30), (bits + 7) // 8)
-            value = -value
-        if not value:
-            self.result(1)
-            return "0"
-        chunks: list[str] = []
-        while value:
-            bits = value.bit_length()
-            self.reserve(1 + 2 * max(1, (bits + 29) // 30), (bits + 7) // 8 + 4)
-            value, remainder = divmod(value, 1000000000)
-            self.reserve(10, 9)
-            self.reserve(entries=1)
-            chunks.append(f"{remainder:09d}")
-        self.result(9)
-        self.reserve(1 + len(chunks))
-        chunks.reverse()
-        chunks[0] = chunks[0].lstrip("0")
-        self.result(len(chunks[0]) + 9 * (len(chunks) - 1) + int(negative))
-        if negative:
-            self.reserve(1 + len(chunks), entries=1)
-            chunks.insert(0, "-")
-        return "".join(chunks)
+        return charged_integer_text(value, bits, self)
 
     def floating(self, value: float) -> str:
         self.reserve(2)
         if not math.isfinite(value):
             refuse()
-        self.reserve(4096, 24)
-        spelling = repr(value)
-        self.result(len(spelling))
-        spelling.encode("ascii")
-        return spelling
+        return charged_finite_float_text(value, self)
+
+
+class _NumberSpellingMeter(Protocol):
+    def reserve(self, work: int = 1, byte_count: int = 0, entries: int = 0) -> None: ...
+
+    def result(self, size: int) -> None: ...
+
+
+def charged_integer_text(value: int, bits: int, meter: _NumberSpellingMeter) -> str:
+    negative = value < 0
+    if negative:
+        meter.reserve(1 + max(1, (bits + 29) // 30), (bits + 7) // 8)
+        value = -value
+    if not value:
+        meter.result(1)
+        return "0"
+    chunks: list[str] = []
+    while value:
+        bits = value.bit_length()
+        meter.reserve(1 + 2 * max(1, (bits + 29) // 30), (bits + 7) // 8 + 4)
+        value, remainder = divmod(value, 1000000000)
+        meter.reserve(10, 9)
+        meter.reserve(entries=1)
+        chunks.append(f"{remainder:09d}")
+    meter.result(9)
+    meter.reserve(1 + len(chunks))
+    chunks.reverse()
+    chunks[0] = chunks[0].lstrip("0")
+    meter.result(len(chunks[0]) + 9 * (len(chunks) - 1) + int(negative))
+    if negative:
+        meter.reserve(1 + len(chunks), entries=1)
+        chunks.insert(0, "-")
+    return "".join(chunks)
+
+
+def charged_finite_float_text(value: float, meter: _NumberSpellingMeter) -> str:
+    meter.reserve(4096, 24)
+    spelling = repr(value)
+    meter.result(len(spelling))
+    spelling.encode("ascii")
+    return spelling
 
 
 def merge_sort(rows: list[T], key: Callable[[T], K], meter: PreparationMeter) -> None:

@@ -42,20 +42,23 @@ class TextBudget:
         self.remaining -= count
 
 
+def quoted_character_width(character: str) -> int:
+    point = ord(character)
+    return (
+        2
+        if character in '"\\\b\f\n\r\t'
+        else 6
+        if point < 32 or 127 <= point <= 65535
+        else 12
+        if point > 65535
+        else 1
+    )
+
+
 def quoted(value: str, budget: TextBudget) -> str:
     budget.reserve(2)
     for character in value:
-        point = ord(character)
-        size = (
-            2
-            if character in '"\\\b\f\n\r\t'
-            else 6
-            if point < 32 or 127 <= point <= 65535
-            else 12
-            if point > 65535
-            else 1
-        )
-        budget.reserve(size)
+        budget.reserve(quoted_character_width(character))
     return encode_basestring_ascii(value)
 
 

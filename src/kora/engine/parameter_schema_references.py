@@ -167,10 +167,13 @@ def _descend(
 
 
 def valid_parameter_reference_budget(budget: ParameterReferenceBudget) -> bool:
-    return type(budget) is ParameterReferenceBudget and all(
-        type(limit) is int and 0 <= limit <= sys.maxsize
-        for limit in (budget.work, budget.scratch_bytes, budget.scratch_entries)
-    )
+    if type(budget) is not ParameterReferenceBudget:
+        return False
+    try:
+        limits = budget.work, budget.scratch_bytes, budget.scratch_entries
+    except AttributeError:
+        return False
+    return all(type(limit) is int and 0 <= limit <= sys.maxsize for limit in limits)
 
 
 def _resolve(
