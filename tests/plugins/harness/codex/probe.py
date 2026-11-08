@@ -14,7 +14,7 @@ from contextlib import ExitStack
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from kora.plugins.harness.codex.app_server_errors import (
     HTTP_ERROR_CODES,
@@ -341,6 +341,12 @@ CLEANUP_SECONDS = 5
 MAX_FRAME_BYTES = 131_072
 MAX_MESSAGES = 256
 HTTP_FIELD_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+
+if TYPE_CHECKING:
+    from tests.plugins.harness.codex.selected_bound_environment import (
+        BoundEnvironmentProbe,
+    )
 
 
 class ProbeFailure(Exception):
@@ -2756,6 +2762,7 @@ async def drive(
     unknown_ca: UnknownCaAlert | None = None,
     proxy_case: SelectedProxyCase | None = None,
     gated_stdio: bool = False,
+    bound: "BoundEnvironmentProbe | None" = None,
 ) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
     proxy: SelectedProxy | None = None
@@ -2793,6 +2800,8 @@ async def drive(
                 )
     process: asyncio.subprocess.Process | None = None
     gated_app = None
+    gated_executor = None
+    bound_launch = None
     gated_executor_identity: int | None = None
     executor: asyncio.subprocess.Process | None = None
     executor_url: str | None = None
@@ -2823,7 +2832,38 @@ async def drive(
         ):
             args.append("--strict-config")
         async with asyncio.timeout_at(deadline):
-            if fixture.case in SELECTED_LAUNCH_CASES:
+            if bound is not None:
+                from tests.plugins.harness.codex.selected_gated_stdio import (
+                    SelectedGatedApp,
+                )
+
+                bearer = secrets.token_urlsafe(32)
+                bound_launch = bound.prepare(
+                    root, workspace, Path(CODEX), port, bearer, SYNTHETIC_BEARER
+                )
+                if bound_launch is None:
+                    return
+                inputs = bound_launch.inputs
+                child_env = bound_launch.app
+                gated_executor = SelectedGatedApp(
+                    inputs.exec_server.argv,
+                    inputs.exec_server.cwd,
+                    bound_launch.executor,
+                    deadline,
+                    MAX_FRAME_BYTES,
+                )
+                exec_reader, _ = await gated_executor.prepare()
+                line = await exec_reader.readline()
+                match = EXECUTOR_LISTEN_URL.fullmatch(line)
+                require(
+                    match is not None and int(match[1]) <= 65_535,
+                    "selected_bound_executor_readiness",
+                )
+                executor_url = line[:-1].decode("ascii")
+                diagnostic("INFO", "probe.selected_bound_executor_ready", fixture.case)
+                app_argv = inputs.app_server.argv
+                app_cwd = inputs.app_server.cwd
+            elif fixture.case in SELECTED_LAUNCH_CASES:
                 bearer = secrets.token_urlsafe(32)
                 inputs = prepare_native_inputs(
                     root,
@@ -2998,7 +3038,16 @@ async def drive(
                     )
             else:
                 await stdio.observe(workspace, fixture.case, executor_url, bearer)
-            if gated_app is not None:
+            if bound_launch is not None:
+                assert gated_app is not None
+                assert gated_executor is not None
+                gated_app.verify_bound_pair(
+                    gated_executor,
+                    bound_launch.expected_app,
+                    bound_launch.expected_executor,
+                )
+                diagnostic("INFO", "probe.selected_bound_roles_verified", fixture.case)
+            elif gated_app is not None:
                 assert executor is not None
                 assert gated_executor_identity is not None
                 require(executor.returncode is None, "selected_gated_executor_exited")
@@ -3048,6 +3097,8 @@ async def drive(
                 selected_cleanup.append(proxy.close(cleanup_deadline))
             if gated_app is not None:
                 selected_cleanup.append(gated_app.close(cleanup_deadline))
+            if gated_executor is not None:
+                selected_cleanup.append(gated_executor.close(cleanup_deadline))
             outcomes = await asyncio.gather(*selected_cleanup, return_exceptions=True)
             cleanup_failed = False
             for outcome in outcomes:
@@ -3058,6 +3109,13 @@ async def drive(
                     raise outcome
             if cleanup_failed:
                 diagnostic("ERROR", "probe.selected_gated_cleanup_failed", fixture.case)
+            elif bound is not None:
+                bound.settled = True
+                if gated_app is not None and gated_executor is not None:
+                    diagnostic(
+                        "INFO", "probe.selected_bound_streams_closed", fixture.case
+                    )
+                    diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
             elif gated_app is not None and executor is not None:
                 diagnostic("INFO", "probe.selected_gated_stdio_closed", fixture.case)
                 diagnostic("INFO", "probe.selected_children_reaped", fixture.case)
@@ -3221,6 +3279,7 @@ async def run_selected_launch(
     proxy_case: SelectedProxyCase | None = None,
     *,
     gated_stdio: bool = False,
+    bound: "BoundEnvironmentProbe | None" = None,
 ) -> None:
     if case in SELECTED_AUTH_CASES or case in SELECTED_HOOK_INVENTORY_REFUSALS:
         decision = (
@@ -3277,7 +3336,23 @@ async def run_selected_launch(
                 tls=tls,
                 proxy_case=proxy_case,
                 gated_stdio=gated_stdio,
+                bound=bound,
             )
+        if bound is not None and bound.refused:
+            require(
+                bound.settled
+                and bound.starts == fixture.connections == fixture.requests == 0
+                and fixture.failure is None
+                and not any(
+                    os.path.lexists(path)
+                    for path in (marker, RECEIPTS, CONTROL / "invocations")
+                ),
+                "selected_bound_refusal_had_effect",
+            )
+            diagnostic("INFO", "probe.selected_bound_no_acquisition", bound.case)
+            raise ProbeFailure("selected_bound_environment_refused")
+        if bound is not None:
+            require(bound.settled and bound.starts == 2, "selected_bound_owner_witness")
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
         require(
             fixture.connections == fixture.requests == fixture.request_limit,
@@ -3675,6 +3750,43 @@ async def run_selected_gated(name: str) -> None:
         raise ProbeFailure(str(error)) from None
 
 
+async def run_selected_bound(name: str) -> None:
+    from kora.conformance.common import CONFORMANCE_COMPONENT, utc_now
+    from kora.observability import LoggingSettings, configure_process
+    from kora.protocols.secret_value import SecretScope
+    from kora.runner.channels import ChannelError
+    from kora.runner.processes import ProcessError
+    from tests.plugins.harness.codex.selected_bound_environment import (
+        BoundEnvironmentError,
+        BoundEnvironmentProbe,
+    )
+    from tests.plugins.harness.codex.selected_gated_stdio import GatedObservationError
+
+    if name not in ("ready", "path", "grant", "reserved"):
+        raise ProbeFailure("selected_bound_unexpected_case")
+    diagnostics = configure_process(
+        CONFORMANCE_COMPONENT, LoggingSettings(), "bound-native-environment", utc_now
+    )
+    bound = BoundEnvironmentProbe(
+        name, SecretScope(diagnostics), SecretScope(diagnostics)
+    )
+    bound.install_witness()
+    try:
+        await run_selected_launch(
+            "selected-startup-ready", gated_stdio=True, bound=bound
+        )
+    except (ChannelError, ProcessError, GatedObservationError, BoundEnvironmentError):
+        raise ProbeFailure("selected_bound_native_observation_failed") from None
+    finally:
+        if bound.settled:
+            bound.app_scope.release()
+            bound.attempt_scope.release()
+            if not diagnostics.shutdown(1.0):
+                if sys.exception() is None:
+                    raise ProbeFailure("selected_bound_diagnostics_not_closed")
+                diagnostic("ERROR", "probe.selected_bound_diagnostics_not_closed", name)
+
+
 async def run() -> None:
     require(
         sys.platform == "linux" and platform.machine() == "x86_64",
@@ -3723,6 +3835,8 @@ async def run() -> None:
         await run_hook_input_case("decoder-refuse")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
+    elif len(sys.argv) == 2 and sys.argv[1].startswith("--selected-bound-"):
+        await run_selected_bound(sys.argv[1].removeprefix("--selected-bound-"))
     elif len(sys.argv) == 2 and sys.argv[1].startswith("--selected-gated-"):
         await run_selected_gated(sys.argv[1].removeprefix("--selected-gated-"))
     elif len(sys.argv) == 2 and sys.argv[1].startswith("--selected-proxy-"):

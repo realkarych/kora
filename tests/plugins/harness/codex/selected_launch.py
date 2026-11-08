@@ -1,5 +1,6 @@
 import hashlib
 import tomllib
+from collections.abc import Collection
 from pathlib import Path
 from typing import Literal
 
@@ -276,6 +277,8 @@ def prepare_native_inputs(
     port: int,
     bearer: str,
     https: bool = False,
+    workload_names: Collection[str] = (),
+    workload_secret_names: Collection[str] = (),
 ) -> CodexLaunchInputs:
     scheme = "https" if https else "http"
     return build_launch_inputs(
@@ -288,15 +291,21 @@ def prepare_native_inputs(
         app_homes=role_homes(root / "app"),
         exec_homes=role_homes(root / "exec"),
         executor_digest=hashlib.sha256(bearer.encode("ascii")).hexdigest(),
+        workload_names=workload_names,
+        workload_secret_names=workload_secret_names,
     )
 
 
-def materialize_native_inputs(inputs: NativeProcessInputs) -> dict[str, str]:
+def write_native_configuration(inputs: NativeProcessInputs) -> None:
     for name in ("HOME", "CODEX_HOME", "TMPDIR"):
         Path(inputs.environment[name]).mkdir(mode=0o700, parents=True)
     (Path(inputs.environment["CODEX_HOME"]) / "config.toml").write_text(
         inputs.config, encoding="utf-8"
     )
+
+
+def materialize_native_inputs(inputs: NativeProcessInputs) -> dict[str, str]:
+    write_native_configuration(inputs)
     return {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "LANG": "C.UTF-8",

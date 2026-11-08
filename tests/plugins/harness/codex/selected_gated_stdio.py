@@ -208,6 +208,43 @@ class SelectedGatedApp:
             )
         verify_role(executor, executor_identity, self._peer, {}, None)
 
+    def verify_bound_pair(
+        self,
+        executor: "SelectedGatedApp",
+        expected_app: dict[str, str],
+        expected_executor: dict[str, str],
+    ) -> None:
+        assert self._peer is not None
+        assert self._child is not None
+        assert executor._peer is not None
+        assert executor._child is not None
+        if len({self._peer, self._child, executor._peer, executor._child}) != 4:
+            raise GatedObservationError("selected_bound_streams_shared")
+        self.verify_bound_role(expected_app, executor._peer, executor._child)
+        executor.verify_bound_role(expected_executor, self._peer, self._child)
+
+    def verify_bound_role(
+        self, environment: dict[str, str], other_peer: str, other_child: str
+    ) -> None:
+        assert self._pid is not None
+        assert self._peer is not None
+        assert self._child is not None
+        expected = frozenset(
+            f"{name}={value}".encode() for name, value in environment.items()
+        )
+        with live_pid(self._pid):
+            targets = descriptor_targets(self._pid)
+            if (
+                targets.get(0) != self._child
+                or targets.get(1) != self._child
+                or sum(value == self._child for value in targets.values()) != 2
+                or not {self._peer, other_peer, other_child}.isdisjoint(
+                    targets.values()
+                )
+                or native_environment(self._pid) != expected.union((b"",))
+            ):
+                raise GatedObservationError("selected_bound_role_identity")
+
     async def close(self, deadline: float) -> None:
         await close_gated(
             self._owner, runner_deadline(deadline, self._clock), self._clock
