@@ -11,7 +11,7 @@ import signal
 import socket
 import subprocess
 import sys
-from collections.abc import Generator
+from collections.abc import Coroutine, Generator
 from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -3098,7 +3098,9 @@ async def drive(
                             BashWitness as NativeBashWitness,
                         )
 
-                        bash_witness = NativeBashWitness(bound_launch.bash, workspace)
+                        bash_witness = NativeBashWitness(
+                            bound_launch.bash, bound_launch.checkout.anchor.identity
+                        )
                     await stdio.observe_selected(
                         workspace,
                         fixture.case,
@@ -3173,6 +3175,8 @@ async def drive(
     finally:
         if bound_launch is not None:
             bound_launch.fence.stop()
+        if bash_witness is not None:
+            bash_witness.stop()
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
         if gated_executor_identity is not None:
             os.close(gated_executor_identity)
@@ -3182,26 +3186,26 @@ async def drive(
                 fixture, server, process, executor, cleanup_deadline
             )
             selected_cleanup = [native_cleanup]
-            if bash_witness is not None:
-                selected_cleanup.append(bash_witness.close(cleanup_deadline))
             if model is not None:
                 selected_cleanup.append(model.close(cleanup_deadline))
             if proxy is not None:
                 selected_cleanup.append(proxy.close(cleanup_deadline))
             if gated_app is not None and bound_launch is None:
                 selected_cleanup.append(gated_app.close(cleanup_deadline))
-            outcomes: list[None | BaseException] = []
+            owned_cleanup: list[Coroutine[object, object, None]] = []
             if bound_launch is not None:
-                outcomes.extend(
-                    await asyncio.gather(
-                        bound_launch.close(
-                            cleanup_deadline,
-                            (gated_app, gated_executor),
-                            natural_app_refusal=natural_app_refusal,
-                        ),
-                        return_exceptions=True,
+                owned_cleanup.append(
+                    bound_launch.close(
+                        cleanup_deadline,
+                        (gated_app, gated_executor),
+                        natural_app_refusal=natural_app_refusal,
                     )
                 )
+            if bash_witness is not None:
+                owned_cleanup.append(bash_witness.close(cleanup_deadline))
+            outcomes: list[None | BaseException] = list(
+                await asyncio.gather(*owned_cleanup, return_exceptions=True)
+            )
             outcomes.extend(
                 await asyncio.gather(*selected_cleanup, return_exceptions=True)
             )
@@ -3510,7 +3514,7 @@ async def run_selected_launch(
                 and bound.settled
                 and bound.cwd_opens == 0
                 and bound.starts == 2
-                and bound.unix_sockets == (10 if bound.case == "bash-live" else 8)
+                and bound.unix_sockets == (12 if bound.case == "bash-live" else 8)
                 and not os.path.lexists(CONTROL / BASH_WITNESS_SOCKET),
                 "selected_bound_owner_witness",
             )
