@@ -113,6 +113,14 @@ from tests.plugins.harness.codex.selected_launch import (
     selected_managed_hook,
     workspace_remains_untrusted,
 )
+from tests.plugins.harness.codex.selected_proxy import (
+    PROXY_NAMES,
+    SELECTED_PROXY_CASES,
+    ProxyRequest,
+    SelectedProxy,
+    SelectedProxyCase,
+    SelectedProxyError,
+)
 from tests.plugins.harness.codex.selected_tls import (
     SelectedTls,
     SelectedTlsError,
@@ -783,6 +791,7 @@ class ResponsesFixture:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         deadline: float,
+        proxy_request: ProxyRequest | None = None,
     ) -> None:
         self.connections += 1
         if len(self.clients) >= self.request_limit:
@@ -790,7 +799,12 @@ class ResponsesFixture:
             writer.close()
             return
         self.clients.append(
-            (writer, asyncio.create_task(self.handle(reader, writer, deadline)))
+            (
+                writer,
+                asyncio.create_task(
+                    self.handle(reader, writer, deadline, proxy_request)
+                ),
+            )
         )
 
     async def handle(
@@ -798,15 +812,21 @@ class ResponsesFixture:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         deadline: float,
+        proxy_request: ProxyRequest | None,
     ) -> None:
         try:
             async with asyncio.timeout_at(deadline):
-                raw_headers = await reader.readuntil(b"\r\n\r\n")
-                request_line, *headers = raw_headers[:-4].split(b"\r\n")
                 registry = self.case == "selected-noise-registry-override"
-                expected_route = (
-                    NOISE_REGISTRY_ROUTE if registry else b"POST /v1/responses HTTP/1.1"
-                )
+                if proxy_request is None:
+                    raw_headers = await reader.readuntil(b"\r\n\r\n")
+                    expected_route = (
+                        NOISE_REGISTRY_ROUTE
+                        if registry
+                        else b"POST /v1/responses HTTP/1.1"
+                    )
+                else:
+                    expected_route, raw_headers = proxy_request
+                request_line, *headers = raw_headers[:-4].split(b"\r\n")
                 require(
                     request_line == expected_route,
                     "unexpected_registry_route"
@@ -2734,11 +2754,22 @@ async def drive(
     *,
     tls: SelectedTls | None = None,
     unknown_ca: UnknownCaAlert | None = None,
+    proxy_case: SelectedProxyCase | None = None,
 ) -> None:
     deadline = asyncio.get_running_loop().time() + TURN_SECONDS
+    proxy: SelectedProxy | None = None
 
     def accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if proxy is not None:
+            proxy.observe_origin(writer)
         fixture.accept(reader, writer, deadline)
+
+    def accept_proxied(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        request: ProxyRequest,
+    ) -> None:
+        fixture.accept(reader, writer, deadline, proxy_request=request)
 
     async with asyncio.timeout_at(deadline):
         if tls is None:
@@ -2753,6 +2784,11 @@ async def drive(
     bearer = SYNTHETIC_EXECUTOR_BEARER
     try:
         port = int(server.sockets[0].getsockname()[1])
+        if proxy_case is not None:
+            proxy = SelectedProxy(
+                proxy_case, port, deadline, SYNTHETIC_BEARER.encode(), accept_proxied
+            )
+            await proxy.start()
         args = ["app-server", "--listen", "stdio://"]
         if (
             fixture.case in PROVIDER_CASES
@@ -2779,6 +2815,13 @@ async def drive(
                 )
                 child_env = materialize_native_inputs(inputs.app_server)
                 exec_env = materialize_native_inputs(inputs.exec_server)
+                if proxy is not None and proxy_case is not None:
+                    require(
+                        PROXY_NAMES.isdisjoint(child_env)
+                        and PROXY_NAMES.isdisjoint(exec_env),
+                        "selected_proxy_inherited_override",
+                    )
+                    child_env.update(proxy_case.environment(proxy.port))
                 if tls is not None:
                     names = SELECTED_TLS_OVERRIDES.values()
                     require(
@@ -2787,7 +2830,11 @@ async def drive(
                         ),
                         "selected_tls_inherited_override",
                     )
-                    tls_name = SELECTED_TLS_OVERRIDES.get(fixture.case)
+                    tls_name = (
+                        "SSL_CERT_FILE"
+                        if proxy_case is not None
+                        else SELECTED_TLS_OVERRIDES.get(fixture.case)
+                    )
                     if tls_name is not None:
                         child_env[tls_name] = str(
                             tls.roots if tls_name == "SSL_CERT_DIR" else tls.bundle
@@ -2939,9 +2986,20 @@ async def drive(
     finally:
         cleanup_deadline = asyncio.get_running_loop().time() + CLEANUP_SECONDS
         if fixture.case in SELECTED_LAUNCH_CASES:
-            await close_selected_launch(
+            native_cleanup = close_selected_launch(
                 fixture, server, process, executor, cleanup_deadline
             )
+            if proxy is None:
+                await native_cleanup
+            else:
+                outcomes = await asyncio.gather(
+                    native_cleanup,
+                    proxy.close(cleanup_deadline),
+                    return_exceptions=True,
+                )
+                for outcome in outcomes:
+                    if isinstance(outcome, BaseException):
+                        raise outcome
         elif process is not None and (
             fixture.case in PROVIDER_CASES or fixture.case in STARTUP_REFUSALS
         ):
@@ -2961,6 +3019,11 @@ async def drive(
                 for outcome in outcomes:
                     if isinstance(outcome, BaseException):
                         raise outcome
+    if proxy is not None:
+        proxy.verify(fixture.request_limit)
+        diagnostic(
+            "INFO", "probe.selected_proxy_refused_connects", str(proxy.refused_connects)
+        )
 
 
 async def close_selected_launch(
@@ -3089,7 +3152,9 @@ def verify_shell_patch_policy(case: SelectedLaunchCase) -> None:
     diagnostic("INFO", "probe.shell_patch_policy_verified", expected.decode().strip())
 
 
-async def run_selected_launch(case: SelectedLaunchCase) -> None:
+async def run_selected_launch(
+    case: SelectedLaunchCase, proxy_case: SelectedProxyCase | None = None
+) -> None:
     if case in SELECTED_AUTH_CASES or case in SELECTED_HOOK_INVENTORY_REFUSALS:
         decision = (
             "selected-allow"
@@ -3127,7 +3192,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
         fixture = ResponsesFixture(case, one_shot=True)
         tls = (
             create_selected_tls(root / "model-tls")
-            if case in SELECTED_TLS_CASES
+            if case in SELECTED_TLS_CASES or (proxy_case is not None and proxy_case.tls)
             else None
         )
         if case == "selected-tls-default":
@@ -3138,7 +3203,7 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
             unknown_ca.verify()
             diagnostic("INFO", "probe.selected_tls_unknown_ca_verified", case)
         else:
-            await drive(fixture, root, workspace, tls=tls)
+            await drive(fixture, root, workspace, tls=tls, proxy_case=proxy_case)
         require(fixture.failure is None, fixture.failure or "unexpected_fixture_state")
         require(
             fixture.connections == fixture.requests == fixture.request_limit,
@@ -3539,6 +3604,17 @@ async def run() -> None:
         await run_hook_input_case("decoder-refuse")
     elif len(sys.argv) == 2 and sys.argv[1] in SHELL_FLAGS:
         await run_shell_case(SHELL_FLAGS[sys.argv[1]])
+    elif len(sys.argv) == 2 and sys.argv[1].startswith("--selected-proxy-"):
+        name = sys.argv[1].removeprefix("--selected-proxy-")
+        proxy_case = SELECTED_PROXY_CASES.get(name)
+        if proxy_case is None:
+            raise ProbeFailure("selected_proxy_unexpected_case")
+        await run_selected_launch("selected-startup-ready", proxy_case)
+        diagnostic(
+            "INFO",
+            "probe.selected_proxy_case_verified",
+            f"{name}:{proxy_case.route.value}",
+        )
     elif len(sys.argv) == 2 and sys.argv[1].removeprefix("--") in SELECTED_LAUNCH_CASES:
         await run_selected_launch(
             cast("SelectedLaunchCase", sys.argv[1].removeprefix("--"))
@@ -3565,7 +3641,7 @@ def report_connection_failure(
 def main() -> int:
     try:
         asyncio.run(run())
-    except (ProbeFailure, SelectedTlsError) as error:
+    except (ProbeFailure, SelectedProxyError, SelectedTlsError) as error:
         diagnostic("ERROR", "probe.case_failed", str(error))
         return 1
     except (

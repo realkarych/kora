@@ -27,6 +27,18 @@ EXEC_METADATA_ENV_NAMES = frozenset({"CODEX_THREAD_ID", "CODEX_TOOL_CALL_ID"})
 MODEL_TLS_ENV_NAMES = frozenset(
     {"CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 )
+MODEL_PROXY_ENV_NAMES = frozenset(
+    {
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    }
+)
 BASH_CONTROL_ENV_NAMES = frozenset({"BASH_ENV", "SHELLOPTS", "PS4"})
 MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 PROVIDER_URL = re.compile(
@@ -215,6 +227,7 @@ def build_launch_inputs(
         | {PROVIDER_KEY, "CODEX_SQLITE_HOME"}
         | BASH_CONTROL_ENV_NAMES
         | MODEL_TLS_ENV_NAMES
+        | MODEL_PROXY_ENV_NAMES
         | EXEC_METADATA_ENV_NAMES
         | NOISE_REGISTRY_ENV_NAMES
     )
