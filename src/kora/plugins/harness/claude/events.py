@@ -264,16 +264,19 @@ def apply_final_usage(call: OpenUsage | None, model_usage: object) -> None:
     if known != FINAL_FIELDS:
         refused()
     output = counts["output_tokens"]
-    if "reasoning_tokens" in call.known and call.reasoning_tokens > output:
-        refused()
+    keep_reasoning = (
+        "reasoning_tokens" in call.known and call.reasoning_tokens <= output
+    )
     call.model = model
     call.input_tokens = counts["input_tokens"]
     call.cached_input_tokens = counts["cached_input_tokens"]
     call.cache_creation_tokens = counts["cache_creation_tokens"]
     call.output_tokens = output
-    if "reasoning_tokens" not in call.known:
+    if not keep_reasoning:
         call.reasoning_tokens = 0
-    call.known = FINAL_FIELDS | (call.known & frozenset(("reasoning_tokens",)))
+    call.known = FINAL_FIELDS | (
+        frozenset(("reasoning_tokens",)) if keep_reasoning else frozenset()
+    )
     call.complete = True
 
 

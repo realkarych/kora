@@ -499,6 +499,91 @@ def test_claude_event_projection_refuses_a_non_integer_token_count() -> None:
     assert [event.kind for event in sink.events] == ["session_started"]
 
 
+def test_claude_event_projection_forgets_reasoning_above_the_final_output() -> None:
+    sink, events = projector()
+    events.observe_init(init_fields())
+    events.usage_start(
+        "msg-1",
+        "claude-sonnet-4-5",
+        None,
+        {
+            "input_tokens": 25,
+            "cache_read_input_tokens": 4,
+            "cache_creation_input_tokens": 0,
+        },
+    )
+    events.usage_delta({"output_tokens": 12, "reasoning_tokens": 9})
+
+    events.observe_result(
+        "success",
+        False,
+        "completed",
+        {
+            "claude-sonnet-4-5": {
+                "inputTokens": 30,
+                "outputTokens": 7,
+                "cacheReadInputTokens": 1,
+                "cacheCreationInputTokens": 2,
+            }
+        },
+    )
+    events.finish()
+
+    usage = sink.events[1]
+    ended = sink.events[2]
+    assert isinstance(usage, UsageEvent)
+    assert isinstance(ended, ResultEvent)
+    assert [event.kind for event in sink.events] == [
+        "session_started",
+        "usage",
+        "result",
+    ]
+    assert usage.data.output_tokens == 7
+    assert usage.data.reasoning_tokens == 0
+    assert "reasoning_tokens" not in usage.data.known_token_fields
+    assert usage.data.coverage.completeness == "complete"
+    assert ended.data.subtype == "success"
+    assert ended.data.terminal_reason == "completed"
+
+
+def test_claude_event_projection_keeps_reasoning_inside_the_final_output() -> None:
+    sink, events = projector()
+    events.observe_init(init_fields())
+    events.usage_start(
+        "msg-1",
+        "claude-sonnet-4-5",
+        None,
+        {
+            "input_tokens": 25,
+            "cache_read_input_tokens": 4,
+            "cache_creation_input_tokens": 0,
+        },
+    )
+    events.usage_delta({"output_tokens": 12, "reasoning_tokens": 4})
+
+    events.observe_result(
+        "success",
+        False,
+        None,
+        {
+            "claude-sonnet-4-5": {
+                "inputTokens": 30,
+                "outputTokens": 7,
+                "cacheReadInputTokens": 1,
+                "cacheCreationInputTokens": 2,
+            }
+        },
+    )
+    events.finish()
+
+    usage = sink.events[1]
+    assert isinstance(usage, UsageEvent)
+    assert usage.data.output_tokens == 7
+    assert usage.data.reasoning_tokens == 4
+    assert "reasoning_tokens" in usage.data.known_token_fields
+    assert usage.data.coverage.completeness == "complete"
+
+
 def test_claude_event_projection_refuses_a_non_integer_final_token_count() -> None:
     sink, events = projector()
     events.observe_init(init_fields())
