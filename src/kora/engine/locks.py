@@ -249,10 +249,13 @@ async def _lock_existing_address(
 
 async def _lock_open_preparation(
     connection: AsyncConnection, dialect: str, binding: GraphPreparationBinding
-) -> None:
+) -> GraphPreparationBinding:
     failure: LockError
     try:
-        parameters = graph_preparation_parameters(binding)
+        if type(binding) is not GraphPreparationBinding:
+            raise GraphPreparationRejected()
+        snapshot = replace(binding)
+        parameters = graph_preparation_parameters(snapshot)
         statement = graph_preparation_settlement_statement(dialect)
         if dialect == POSTGRESQL:
             table_lock = await connection.execute(
@@ -264,7 +267,7 @@ async def _lock_open_preparation(
             connection, statement, parameters
         )
         if settlement is not None and settlement.state == "open":
-            return
+            return snapshot
         failure = GraphPreparationLockRejected()
     except GraphPreparationRejected:
         failure = GraphPreparationLockRejected()
@@ -678,9 +681,9 @@ class TransitionLocks:
         if self._graph_preparation is not None:
             raise LockError("the graph preparation is acquired once")
         self._usable = False
-        await _lock_open_preparation(connection, self._dialect, binding)
+        snapshot = await _lock_open_preparation(connection, self._dialect, binding)
         self._lease.require_active()
-        self._graph_preparation = _GraphPreparationGuard(binding, selected_graph_id)
+        self._graph_preparation = _GraphPreparationGuard(snapshot, selected_graph_id)
         self._usable = True
 
     def _require_publication_preparation_scope(

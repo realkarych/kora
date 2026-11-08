@@ -28,6 +28,7 @@ from kora.engine.locks import (
     TransitionLocks,
 )
 from tests.db.closing import ConnectionLedger
+from tests.db.seed import Seeder
 from tests.db.test_graph_credential_guard import postgres_pid, wait_for_blocked_writer
 from tests.db.test_graph_preparation_reads import seed_preparation
 from tests.db.test_graph_read_admission import executed_queries
@@ -90,6 +91,90 @@ async def terminal_update(
         .where(graph_deployment_preparation.c.id == binding.preparation_id)
         .values(state="closed_without_publication")
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publication", [False, True], ids=["staging", "publication"])
+@pytest.mark.parametrize("during_query", [False, True], ids=["after", "during"])
+async def test_open_preparation_guard_retains_the_exact_observed_binding(
+    database: Database, publication: bool, during_query: bool
+) -> None:
+    binding, selected = await seed_original(database)
+    original = replace(binding)
+    await seed_keys(database)
+    async with database.transaction() as writer:
+        alternate_id = Seeder(writer).new_id()
+        await writer.execute(
+            graph_deployment_preparation.insert().values(
+                id=alternate_id,
+                namespace_id=original.namespace_id,
+                graph_name=original.graph_name,
+                initial_graph_id=original.initial_graph_id,
+                deployment_digest=original.deployment_digest,
+                state="open",
+            )
+        )
+    ledger = ConnectionLedger(database)
+    observed: list[tuple[object, ...]] = []
+
+    def change_binding() -> None:
+        binding.__init__(
+            alternate_id,
+            original.namespace_id,
+            original.graph_name,
+            original.initial_graph_id,
+            original.deployment_digest,
+        )
+
+    def observe(
+        connection: object,
+        cursor: object,
+        statement: str,
+        parameters: tuple[object, ...],
+        *arguments: object,
+    ) -> None:
+        if "FROM graph_deployment_preparation" in statement:
+            observed.append(parameters)
+            if during_query:
+                change_binding()
+
+    async with database.transaction() as writer:
+        locks = TransitionLocks(writer)
+        await locks.acquire_scopes(publication_scopes(original, selected))
+        await locks.acquire_existing_storage_addresses(ADDRESSES, max_addresses=2)
+        address = ADDRESSES[0]
+        event.listen(writer.sync_connection, "before_cursor_execute", observe)
+        try:
+            if publication:
+                await locks.acquire_publication_graph_preparation(
+                    writer, binding, selected
+                )
+            else:
+                await locks.acquire_open_graph_preparation(writer, *address, binding)
+        finally:
+            event.remove(writer.sync_connection, "before_cursor_execute", observe)
+        if not during_query:
+            change_binding()
+
+        assert binding.preparation_id == alternate_id != original.preparation_id
+        assert len(observed) == 1
+        assert original.preparation_id in observed[0]
+        assert alternate_id not in observed[0]
+        if publication:
+            with pytest.raises(
+                LockError, match="publication preparation lock is not held"
+            ):
+                locks.require_publication_graph_preparation(writer, binding, selected)
+            locks.require_publication_graph_preparation(writer, original, selected)
+        else:
+            with pytest.raises(
+                LockError, match="open graph preparation lock is not held"
+            ):
+                locks.require_open_graph_preparation(writer, *address, binding)
+            locks.require_open_graph_preparation(writer, *address, original)
+
+    assert ledger.outstanding == database.units_in_flight() == 0
+    assert database.writer_is_free()
 
 
 @pytest.mark.asyncio
