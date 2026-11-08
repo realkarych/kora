@@ -38,6 +38,7 @@ FIXTURE_PAGE_LIMIT = 2_048
 def test_sqlite_graph_record_counts_fixed_fields_and_overflow_threshold() -> None:
     at_threshold = replace(SMALL_WIDTHS, ir_bytes=3_211)
     above_threshold = replace(at_threshold, ir_bytes=3_212)
+    distinct_widths = SQLiteGraphVersionWidths(2, 4, 8, 16, 32)
 
     utf8 = bound_sqlite_graph_version_record(
         SMALL_WIDTHS, encoding="utf-8", page_size=4096
@@ -54,6 +55,9 @@ def test_sqlite_graph_record_counts_fixed_fields_and_overflow_threshold() -> Non
     overflow = bound_sqlite_graph_version_record(
         above_threshold, encoding="utf-8", page_size=4096
     )
+    distinct = bound_sqlite_graph_version_record(
+        distinct_widths, encoding="utf-8", page_size=4096
+    )
     ordered = tuple(
         bound_sqlite_graph_version_record(
             replace(SMALL_WIDTHS, ir_bytes=width), encoding="utf-8", page_size=4096
@@ -65,6 +69,7 @@ def test_sqlite_graph_record_counts_fixed_fields_and_overflow_threshold() -> Non
     assert utf16 == (SQLiteGraphVersionFootprint(1_008, 2_048),) * 2
     assert inline == SQLiteGraphVersionFootprint(3_806, 4_096)
     assert overflow == SQLiteGraphVersionFootprint(3_807, 8_192)
+    assert distinct == SQLiteGraphVersionFootprint(651, 4_096)
     assert all(
         prior.record_payload_bytes < following.record_payload_bytes
         for prior, following in zip(ordered[:-1], ordered[1:], strict=True)
