@@ -111,6 +111,11 @@ def main() -> int:
         if nested_input
         else {"command": call.command}
     )
+    receipt_identity = (
+        {"session_id": call.session_id, "turn_id": call.turn_id}
+        if decision in SELECTED_HOOK_CASES
+        else {}
+    )
     with (CONTROL / "receipts.jsonl").open("a", encoding="utf-8") as receipts:
         receipts.write(
             json.dumps(
@@ -119,6 +124,7 @@ def main() -> int:
                     "tool": call.tool,
                     "call": call.tool_use_id,
                     **receipt_input,
+                    **receipt_identity,
                     "pid": os.getpid(),
                 }
             )

@@ -1438,7 +1438,8 @@ class HookCompletionProbe:
         run = as_object(params.get("run"))
         status, entry = SELECTED_HOOK_OUTCOMES[self.case]
         require(
-            run.get("eventName") == "preToolUse"
+            run.get("id") == f"pre-tool-use:0:/opt/kora-probe:{CALL_ID}"
+            and run.get("eventName") == "preToolUse"
             and run.get("handlerType") == "command"
             and run.get("executionMode") == "sync"
             and run.get("scope") == "turn"
@@ -1454,6 +1455,12 @@ class HookCompletionProbe:
 
     def verify(self, turn_id: str) -> None:
         require(self.turn_id == turn_id, "selected_hook_completion_turn")
+        receipt = read_hook_receipt()
+        require(
+            receipt.get("session_id") == self.thread_id
+            and receipt.get("turn_id") == turn_id,
+            "selected_hook_input_identity",
+        )
         status, _ = SELECTED_HOOK_OUTCOMES[self.case]
         diagnostic("INFO", "probe.selected_hook_completion", f"{self.case}:{status}")
 
@@ -2231,16 +2238,30 @@ async def read_executor_url(process: asyncio.subprocess.Process) -> str:
     return line[:-1].decode("ascii")
 
 
-def hook_pid(
-    command: str = COMMAND, *, nested_input: bool = False, tool: str = "Bash"
-) -> int:
+def read_hook_receipt() -> dict[str, object]:
     require(RECEIPTS.is_file(), "hook_receipt_missing")
     with RECEIPTS.open("rb") as file:
         raw = file.read(4097)
     require(len(raw) <= 4096, "hook_receipt_size_limit")
     lines = raw.splitlines()
     require(len(lines) == 1, "hook_receipt_count")
-    receipt = parse_object(lines[0])
+    return parse_object(lines[0])
+
+
+def hook_pid(
+    command: str = COMMAND,
+    *,
+    nested_input: bool = False,
+    tool: str = "Bash",
+    selected_binding: bool = False,
+) -> int:
+    receipt = read_hook_receipt()
+    if selected_binding:
+        require(
+            isinstance(receipt.pop("session_id", None), str)
+            and isinstance(receipt.pop("turn_id", None), str),
+            "selected_hook_input_identity",
+        )
     pid = receipt.pop("pid", None)
     expected_input = (
         {"tool_input": {"command": command}} if nested_input else {"command": command}
@@ -2579,9 +2600,9 @@ async def observe_hook_timeout(
                 await loop.sock_recv(peer, 1) == b"1", "selected_hook_timeout_ready"
             )
             pid = (
-                verify_patch_hook()
+                verify_patch_hook(selected_binding=True)
                 if case in SELECTED_PATCH_CASES
-                else verify_shell_hook(SELECTED_COMMAND)
+                else verify_shell_hook(SELECTED_COMMAND, selected_binding=True)
             )
             credentials = peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
             require(
@@ -2904,9 +2925,11 @@ async def run_selected_launch(case: SelectedLaunchCase) -> None:
                 "refused_selected_startup_reached_hook",
             )
         elif case in SELECTED_PATCH_CASES:
-            verify_patch_hook()
+            verify_patch_hook(selected_binding=True)
         else:
-            verify_shell_hook(selected_command(case))
+            verify_shell_hook(
+                selected_command(case), selected_binding=case in SELECTED_HOOK_CASES
+            )
         executes = case in SELECTED_AUTH_CASES and case not in {
             "selected-tool-inventory-disabled",
             "selected-tool-search",
@@ -3103,9 +3126,9 @@ def verify_hook_invocation() -> None:
         require(invocations.read(2) == b"1", "unexpected_hook_input_invocation_count")
 
 
-def verify_patch_hook() -> int:
+def verify_patch_hook(*, selected_binding: bool = False) -> int:
     verify_hook_invocation()
-    return hook_pid(PATCH, tool="apply_patch")
+    return hook_pid(PATCH, tool="apply_patch", selected_binding=selected_binding)
 
 
 def verify_patch_marker(marker: Path, *, writes: bool) -> None:
@@ -3162,10 +3185,10 @@ async def run_startup_refusal(case: StartupCase) -> None:
     diagnostic("INFO", "probe.case_verified", case)
 
 
-def verify_shell_hook(command: str) -> int:
+def verify_shell_hook(command: str, *, selected_binding: bool = False) -> int:
     with (CONTROL / "invocations").open("rb") as invocations:
         require(invocations.read(2) == b"1", "shell_hook_invocation_count")
-    return hook_pid(command, nested_input=True)
+    return hook_pid(command, nested_input=True, selected_binding=selected_binding)
 
 
 async def run_shell_case(case: ShellCase | ExecutorCase) -> None:
